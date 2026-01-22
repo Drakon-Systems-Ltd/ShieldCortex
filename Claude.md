@@ -15,9 +15,14 @@ npm run build
 # Run API server for dashboard
 npm run dev:api
 
-# Run dashboard (separate terminal)
+# Run dashboard (separate terminal) - runs on port 3030
 cd dashboard && npm run dev
 ```
+
+## Dashboard
+- URL: http://localhost:3030 (dashboard) + http://localhost:3001 (API)
+- The dashboard is optional - core memory works without it
+- Shows 3D brain visualization of memories
 
 ## Key Files
 
