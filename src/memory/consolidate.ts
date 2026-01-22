@@ -1,0 +1,438 @@
+/**
+ * Memory Consolidation System
+ *
+ * Like sleep consolidation in human brains, this system:
+ * - Moves worthy short-term memories to long-term storage
+ * - Strengthens frequently accessed memories
+ * - Cleans up decayed/irrelevant memories
+ * - Merges similar memories to reduce redundancy
+ */
+
+import { getDatabase } from '../database/init.js';
+import {
+  Memory,
+  MemoryConfig,
+  DEFAULT_CONFIG,
+  ConsolidationResult,
+  ContextSummary,
+} from './types.js';
+import {
+  getMemoriesByType,
+  getRecentMemories,
+  getHighPriorityMemories,
+  promoteMemory,
+  deleteMemory,
+  searchMemories,
+  getMemoryStats,
+} from './store.js';
+import {
+  calculateDecayedScore,
+  shouldPromoteToLongTerm,
+  shouldDelete,
+  processDecay,
+} from './decay.js';
+
+/**
+ * Run full consolidation process
+ * This is like the brain's sleep consolidation - should be run periodically
+ */
+export function consolidate(
+  config: MemoryConfig = DEFAULT_CONFIG
+): ConsolidationResult {
+  const db = getDatabase();
+  let consolidated = 0;
+  let decayed = 0;
+  let deleted = 0;
+
+  // Get all short-term memories
+  const shortTermMemories = getMemoriesByType('short_term', config.maxShortTermMemories * 2);
+
+  // Process decay for all memories
+  const { toDelete, toPromote, updated } = processDecay(shortTermMemories, config);
+
+  // Promote worthy memories
+  for (const id of toPromote) {
+    promoteMemory(id);
+    consolidated++;
+  }
+
+  // Delete decayed memories (excluding those just promoted)
+  for (const id of toDelete) {
+    if (!toPromote.includes(id)) {
+      deleteMemory(id);
+      deleted++;
+    }
+  }
+
+  // Update decayed scores in database
+  const updateStmt = db.prepare('UPDATE memories SET salience = ? WHERE id = ?');
+  for (const [id, score] of updated) {
+    if (!toDelete.includes(id)) {
+      updateStmt.run(score, id);
+      decayed++;
+    }
+  }
+
+  // Enforce memory limits
+  deleted += enforceMemoryLimits(config);
+
+  return { consolidated, decayed, deleted };
+}
+
+/**
+ * Enforce maximum memory limits
+ * Removes lowest-priority memories when limits are exceeded
+ */
+export function enforceMemoryLimits(config: MemoryConfig = DEFAULT_CONFIG): number {
+  const db = getDatabase();
+  let deleted = 0;
+
+  // Check short-term memory limit
+  const shortTermCount = (db.prepare(
+    "SELECT COUNT(*) as count FROM memories WHERE type = 'short_term'"
+  ).get() as { count: number }).count;
+
+  if (shortTermCount > config.maxShortTermMemories) {
+    const toRemove = shortTermCount - config.maxShortTermMemories;
+    const lowPriority = db.prepare(`
+      SELECT id FROM memories
+      WHERE type = 'short_term'
+      ORDER BY salience ASC, last_accessed ASC
+      LIMIT ?
+    `).all(toRemove) as { id: number }[];
+
+    for (const { id } of lowPriority) {
+      deleteMemory(id);
+      deleted++;
+    }
+  }
+
+  // Check long-term memory limit (more lenient)
+  const longTermCount = (db.prepare(
+    "SELECT COUNT(*) as count FROM memories WHERE type = 'long_term'"
+  ).get() as { count: number }).count;
+
+  if (longTermCount > config.maxLongTermMemories) {
+    const toRemove = longTermCount - config.maxLongTermMemories;
+    const lowPriority = db.prepare(`
+      SELECT id FROM memories
+      WHERE type = 'long_term'
+      ORDER BY salience ASC, access_count ASC, last_accessed ASC
+      LIMIT ?
+    `).all(toRemove) as { id: number }[];
+
+    for (const { id } of lowPriority) {
+      deleteMemory(id);
+      deleted++;
+    }
+  }
+
+  return deleted;
+}
+
+/**
+ * Find and merge similar memories
+ * Reduces redundancy while preserving important information
+ */
+export function mergeSimilarMemories(
+  project?: string,
+  similarityThreshold: number = 0.8
+): number {
+  const db = getDatabase();
+  let merged = 0;
+
+  // Get all memories (optionally filtered by project)
+  let sql = 'SELECT * FROM memories';
+  const params: unknown[] = [];
+  if (project) {
+    sql += ' WHERE project = ?';
+    params.push(project);
+  }
+  sql += ' ORDER BY created_at ASC';
+
+  const memories = db.prepare(sql).all(...params) as Record<string, unknown>[];
+
+  // Simple similarity check based on title and first 100 chars of content
+  const seen = new Map<string, number>(); // key -> id of primary memory
+
+  for (const row of memories) {
+    const key = `${(row.title as string).toLowerCase().trim()}|${(row.content as string).slice(0, 100).toLowerCase()}`;
+
+    if (seen.has(key)) {
+      // This is a duplicate, merge into the primary
+      const primaryId = seen.get(key)!;
+
+      // Boost the primary memory's salience
+      db.prepare(`
+        UPDATE memories
+        SET salience = MIN(1.0, salience + 0.1),
+            access_count = access_count + 1
+        WHERE id = ?
+      `).run(primaryId);
+
+      // Delete the duplicate
+      deleteMemory(row.id as number);
+      merged++;
+    } else {
+      seen.set(key, row.id as number);
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Generate a context summary for session start
+ * Provides a high-level view of relevant memories
+ */
+export function generateContextSummary(
+  project?: string,
+  config: MemoryConfig = DEFAULT_CONFIG
+): ContextSummary {
+  // Get recent memories
+  const recentMemories = getRecentMemories(10, project);
+
+  // Get key architecture decisions
+  const keyDecisions = searchMemories({
+    query: '',
+    project,
+    category: 'architecture',
+    minSalience: 0.6,
+    limit: 5,
+  }, config).map(r => r.memory);
+
+  // Get active patterns
+  const activePatterns = searchMemories({
+    query: '',
+    project,
+    category: 'pattern',
+    minSalience: 0.5,
+    limit: 5,
+  }, config).map(r => r.memory);
+
+  // Get pending items
+  const pendingItems = searchMemories({
+    query: '',
+    project,
+    category: 'todo',
+    limit: 10,
+  }, config).map(r => r.memory);
+
+  return {
+    project,
+    recentMemories,
+    keyDecisions,
+    activePatterns,
+    pendingItems,
+  };
+}
+
+/**
+ * Format context summary as a readable string
+ */
+export function formatContextSummary(summary: ContextSummary): string {
+  const lines: string[] = [];
+
+  if (summary.project) {
+    lines.push(`## Project: ${summary.project}\n`);
+  }
+
+  if (summary.keyDecisions.length > 0) {
+    lines.push('### Key Decisions');
+    for (const memory of summary.keyDecisions) {
+      lines.push(`- **${memory.title}**: ${memory.content.slice(0, 100)}${memory.content.length > 100 ? '...' : ''}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.activePatterns.length > 0) {
+    lines.push('### Active Patterns');
+    for (const memory of summary.activePatterns) {
+      lines.push(`- **${memory.title}**: ${memory.content.slice(0, 100)}${memory.content.length > 100 ? '...' : ''}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.pendingItems.length > 0) {
+    lines.push('### Pending Items');
+    for (const memory of summary.pendingItems) {
+      lines.push(`- [ ] ${memory.title}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.recentMemories.length > 0) {
+    lines.push('### Recent Context');
+    for (const memory of summary.recentMemories.slice(0, 5)) {
+      lines.push(`- ${memory.title} (${memory.category})`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Start a new session
+ * Creates a session record and returns relevant context
+ */
+export function startSession(project?: string): {
+  sessionId: number;
+  context: ContextSummary;
+} {
+  const db = getDatabase();
+
+  // Create session record
+  const result = db.prepare(`
+    INSERT INTO sessions (project) VALUES (?)
+  `).run(project || null);
+
+  const sessionId = result.lastInsertRowid as number;
+
+  // Generate context summary
+  const context = generateContextSummary(project);
+
+  return { sessionId, context };
+}
+
+/**
+ * End a session
+ * Updates session record with summary
+ */
+export function endSession(
+  sessionId: number,
+  summary?: string
+): void {
+  const db = getDatabase();
+
+  // Get counts from this session
+  const stats = db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM memories WHERE created_at >= s.started_at) as created,
+      (SELECT COUNT(*) FROM memories WHERE last_accessed >= s.started_at) as accessed
+    FROM sessions s WHERE s.id = ?
+  `).get(sessionId) as { created: number; accessed: number } | undefined;
+
+  db.prepare(`
+    UPDATE sessions
+    SET ended_at = CURRENT_TIMESTAMP,
+        summary = ?,
+        memories_created = ?,
+        memories_accessed = ?
+    WHERE id = ?
+  `).run(
+    summary || null,
+    stats?.created || 0,
+    stats?.accessed || 0,
+    sessionId
+  );
+}
+
+/**
+ * Get suggested context for the current query
+ * Returns memories that might be relevant to what the user is working on
+ */
+export function getSuggestedContext(
+  currentContext: string,
+  project?: string,
+  limit: number = 5
+): Memory[] {
+  // Search for relevant memories based on current context
+  const results = searchMemories({
+    query: currentContext,
+    project,
+    minSalience: 0.4,
+    limit,
+    includeDecayed: false,
+  });
+
+  return results.map(r => r.memory);
+}
+
+/**
+ * Export memories as JSON (for backup/transfer)
+ */
+export function exportMemories(project?: string): string {
+  const db = getDatabase();
+
+  let sql = 'SELECT * FROM memories';
+  const params: unknown[] = [];
+  if (project) {
+    sql += ' WHERE project = ?';
+    params.push(project);
+  }
+  sql += ' ORDER BY created_at ASC';
+
+  const rows = db.prepare(sql).all(...params);
+  return JSON.stringify(rows, null, 2);
+}
+
+/**
+ * Import memories from JSON
+ */
+export function importMemories(json: string): number {
+  const db = getDatabase();
+  const memories = JSON.parse(json) as Record<string, unknown>[];
+
+  const stmt = db.prepare(`
+    INSERT INTO memories (type, category, title, content, project, tags, salience, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  let imported = 0;
+  for (const memory of memories) {
+    try {
+      stmt.run(
+        memory.type,
+        memory.category,
+        memory.title,
+        memory.content,
+        memory.project || null,
+        memory.tags || '[]',
+        memory.salience || 0.5,
+        memory.metadata || '{}'
+      );
+      imported++;
+    } catch {
+      // Skip duplicates or invalid entries
+    }
+  }
+
+  return imported;
+}
+
+/**
+ * Vacuum database to reclaim space after deletions
+ * Run periodically or after major cleanup operations
+ */
+export function vacuumDatabase(): { success: boolean; message: string } {
+  try {
+    const db = getDatabase();
+    db.exec('VACUUM');
+    return { success: true, message: 'Database vacuumed successfully' };
+  } catch (error) {
+    return { success: false, message: `Vacuum failed: ${error}` };
+  }
+}
+
+/**
+ * Full cleanup: consolidate + vacuum
+ * Best run periodically to keep database healthy
+ */
+export function fullCleanup(
+  config: MemoryConfig = DEFAULT_CONFIG
+): { consolidation: ConsolidationResult; vacuumed: boolean; merged: number } {
+  // Run consolidation
+  const consolidation = consolidate(config);
+
+  // Merge similar memories
+  const merged = mergeSimilarMemories();
+
+  // Vacuum if we deleted anything
+  let vacuumed = false;
+  if (consolidation.deleted > 0 || merged > 0) {
+    const vacResult = vacuumDatabase();
+    vacuumed = vacResult.success;
+  }
+
+  return { consolidation, vacuumed, merged };
+}

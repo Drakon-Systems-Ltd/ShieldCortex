@@ -1,0 +1,47 @@
+{
+  "name": "claude-memory",
+  "version": "1.0.0",
+  "description": "Brain-like memory system for Claude Code - solves context compaction and memory persistence",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:api": "node dist/index.js --mode api",
+    "dev": "tsx src/index.ts",
+    "dev:api": "tsx src/index.ts --mode api",
+    "watch": "tsc --watch"
+  },
+  "keywords": [
+    "claude",
+    "mcp",
+    "memory",
+    "ai",
+    "context"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "bin": {
+    "claude-memory": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ]
+}

@@ -1,0 +1,443 @@
+/**
+ * Claude Memory MCP Server
+ *
+ * Brain-like memory system for Claude Code.
+ * Solves context compaction and memory persistence issues.
+ */
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { initDatabase } from './database/init.js';
+import { DEFAULT_CONFIG } from './memory/types.js';
+
+// Import tools
+import { rememberSchema, executeRemember, formatRememberResult } from './tools/remember.js';
+import { recallSchema, executeRecall, formatRecallResult, getMemorySchema, executeGetMemory, formatMemory } from './tools/recall.js';
+import { forgetSchema, executeForget, formatForgetResult } from './tools/forget.js';
+import {
+  getContextSchema, executeGetContext,
+  startSessionSchema, executeStartSession,
+  endSessionSchema, executeEndSession,
+  consolidateSchema, executeConsolidate,
+  statsSchema, executeStats, formatStats,
+  exportSchema, executeExport,
+  importSchema, executeImport,
+} from './tools/context.js';
+import { generateContextSummary, formatContextSummary, consolidate, fullCleanup } from './memory/consolidate.js';
+import { getHighPriorityMemories, getRecentMemories } from './memory/store.js';
+import { checkDatabaseSize } from './database/init.js';
+
+/**
+ * Create and configure the MCP server
+ */
+export function createServer(dbPath?: string): McpServer {
+  // Initialize database
+  const config = { ...DEFAULT_CONFIG };
+  if (dbPath) {
+    config.dbPath = dbPath;
+  }
+  initDatabase(config.dbPath);
+
+  // Create MCP server
+  const server = new McpServer({
+    name: 'claude-memory',
+    version: '1.0.0',
+  });
+
+  // ============================================
+  // TOOLS
+  // ============================================
+
+  // Remember - Store a memory
+  server.tool(
+    'remember',
+    `Store information in memory for later recall. Use this to remember:
+- Architecture decisions ("We're using PostgreSQL for the database")
+- Code patterns ("The auth flow uses JWT tokens")
+- User preferences ("Always use TypeScript strict mode")
+- Error resolutions ("Fixed by updating the dependency")
+- Project context ("This is a React + Node.js project")
+- Important notes ("Remember to test the edge cases")
+
+The system automatically detects importance, categorizes, and manages storage.`,
+    {
+      title: z.string().describe('Short title for the memory'),
+      content: z.string().describe('Detailed content'),
+      category: z.enum([
+        'architecture', 'pattern', 'preference', 'error',
+        'context', 'learning', 'todo', 'note', 'relationship', 'custom'
+      ]).optional().describe('Category (auto-detected if not provided)'),
+      type: z.enum(['short_term', 'long_term', 'episodic']).optional()
+        .describe('Memory type (auto-determined if not provided)'),
+      project: z.string().optional().describe('Project this belongs to'),
+      tags: z.array(z.string()).optional().describe('Tags for categorization'),
+      importance: z.enum(['low', 'normal', 'high', 'critical']).optional()
+        .describe('Override automatic salience'),
+    },
+    async (args) => {
+      const result = executeRemember(args);
+      return {
+        content: [{ type: 'text', text: formatRememberResult(result) }],
+      };
+    }
+  );
+
+  // Recall - Search and retrieve memories
+  server.tool(
+    'recall',
+    `Search and retrieve memories. Use this to:
+- Find relevant context ("What do I know about auth?")
+- Get recent activity ("What did we work on?")
+- Find decisions ("What architecture decisions were made?")
+
+Modes: search (query-based), recent (by time), important (by salience)`,
+    {
+      query: z.string().optional().describe('Search query'),
+      category: z.enum([
+        'architecture', 'pattern', 'preference', 'error',
+        'context', 'learning', 'todo', 'note', 'relationship', 'custom'
+      ]).optional().describe('Filter by category'),
+      type: z.enum(['short_term', 'long_term', 'episodic']).optional()
+        .describe('Filter by type'),
+      project: z.string().optional().describe('Filter by project'),
+      tags: z.array(z.string()).optional().describe('Filter by tags'),
+      limit: z.number().min(1).max(50).optional().default(10)
+        .describe('Max results'),
+      includeDecayed: z.boolean().optional().default(false)
+        .describe('Include decayed memories'),
+      mode: z.enum(['search', 'recent', 'important']).optional().default('search')
+        .describe('Recall mode'),
+    },
+    async (args) => {
+      const result = executeRecall(args);
+      return {
+        content: [{ type: 'text', text: formatRecallResult(result, true) }],
+      };
+    }
+  );
+
+  // Forget - Delete memories
+  server.tool(
+    'forget',
+    `Delete memories. Use dryRun: true to preview, confirm: true for bulk.`,
+    {
+      id: z.number().optional().describe('Memory ID to delete'),
+      query: z.string().optional().describe('Delete matching query'),
+      category: z.enum([
+        'architecture', 'pattern', 'preference', 'error',
+        'context', 'learning', 'todo', 'note', 'relationship', 'custom'
+      ]).optional().describe('Delete category'),
+      project: z.string().optional().describe('Delete project memories'),
+      olderThan: z.number().optional().describe('Delete older than N days'),
+      belowSalience: z.number().min(0).max(1).optional()
+        .describe('Delete below salience'),
+      dryRun: z.boolean().optional().default(false)
+        .describe('Preview only'),
+      confirm: z.boolean().optional().default(false)
+        .describe('Confirm bulk delete'),
+    },
+    async (args) => {
+      const result = executeForget(args);
+      return {
+        content: [{ type: 'text', text: formatForgetResult(result) }],
+      };
+    }
+  );
+
+  // Get Context - THE KEY TOOL
+  server.tool(
+    'get_context',
+    `Get relevant context from memory. THE KEY TOOL for maintaining context.
+
+Use at session start, after compaction, when switching tasks, or to recall project info.
+Returns: architecture decisions, patterns, pending items, recent activity.`,
+    {
+      project: z.string().optional().describe('Project to get context for'),
+      query: z.string().optional().describe('Current task for relevant context'),
+      format: z.enum(['summary', 'detailed', 'raw']).optional().default('summary')
+        .describe('Output format'),
+    },
+    async (args) => {
+      const result = executeGetContext(args);
+      return {
+        content: [{
+          type: 'text',
+          text: result.success ? result.context! : `Error: ${result.error}`
+        }],
+      };
+    }
+  );
+
+  // Start Session
+  server.tool(
+    'start_session',
+    'Start a new coding session. Returns relevant context.',
+    {
+      project: z.string().optional().describe('Project for session'),
+    },
+    async (args) => {
+      const result = executeStartSession(args);
+      return {
+        content: [{
+          type: 'text',
+          text: result.success
+            ? `Session ${result.sessionId} started.\n\n${result.context}`
+            : `Error: ${result.error}`
+        }],
+      };
+    }
+  );
+
+  // End Session
+  server.tool(
+    'end_session',
+    'End session and trigger consolidation.',
+    {
+      sessionId: z.number().describe('Session ID'),
+      summary: z.string().optional().describe('Session summary'),
+    },
+    async (args) => {
+      const result = executeEndSession(args);
+      if (!result.success) {
+        return { content: [{ type: 'text', text: `Error: ${result.error}` }] };
+      }
+      const r = result.consolidationResult!;
+      return {
+        content: [{
+          type: 'text',
+          text: `Session ended. Consolidation: ${r.consolidated} promoted, ${r.decayed} decayed, ${r.deleted} deleted.`
+        }],
+      };
+    }
+  );
+
+  // Consolidate
+  server.tool(
+    'consolidate',
+    'Run memory consolidation (like brain sleep). Promotes STM to LTM, decays old memories.',
+    {
+      force: z.boolean().optional().default(false).describe('Force consolidation'),
+    },
+    async (args) => {
+      const result = executeConsolidate(args);
+      if (!result.success) {
+        return { content: [{ type: 'text', text: `Error: ${result.error}` }] };
+      }
+      const r = result.result!;
+      return {
+        content: [{
+          type: 'text',
+          text: `Consolidation: ${r.consolidated} promoted, ${r.decayed} updated, ${r.deleted} deleted.`
+        }],
+      };
+    }
+  );
+
+  // Stats
+  server.tool(
+    'memory_stats',
+    'Get memory statistics.',
+    {
+      project: z.string().optional().describe('Project filter'),
+    },
+    async (args) => {
+      const result = executeStats(args);
+      return {
+        content: [{
+          type: 'text',
+          text: result.success ? formatStats(result.stats!) : `Error: ${result.error}`
+        }],
+      };
+    }
+  );
+
+  // Get Memory by ID
+  server.tool(
+    'get_memory',
+    'Get a specific memory by ID.',
+    {
+      id: z.number().describe('Memory ID'),
+    },
+    async (args) => {
+      const result = executeGetMemory(args);
+      return {
+        content: [{
+          type: 'text',
+          text: result.success ? formatMemory(result.memory!, true) : `Error: ${result.error}`
+        }],
+      };
+    }
+  );
+
+  // Export memories
+  server.tool(
+    'export_memories',
+    'Export memories as JSON for backup.',
+    {
+      project: z.string().optional().describe('Export project only'),
+    },
+    async (args) => {
+      const result = executeExport(args);
+      return {
+        content: [{
+          type: 'text',
+          text: result.success
+            ? `Exported ${result.count} memories:\n\n${result.data}`
+            : `Error: ${result.error}`
+        }],
+      };
+    }
+  );
+
+  // Import memories
+  server.tool(
+    'import_memories',
+    'Import memories from JSON.',
+    {
+      data: z.string().describe('JSON data'),
+    },
+    async (args) => {
+      const result = executeImport(args);
+      return {
+        content: [{
+          type: 'text',
+          text: result.success
+            ? `Imported ${result.imported} memories.`
+            : `Error: ${result.error}`
+        }],
+      };
+    }
+  );
+
+  // ============================================
+  // RESOURCES
+  // ============================================
+
+  // Project context resource
+  server.resource(
+    'memory://context',
+    'memory://context',
+    async () => {
+      const summary = generateContextSummary();
+      return {
+        contents: [{
+          uri: 'memory://context',
+          mimeType: 'text/markdown',
+          text: formatContextSummary(summary),
+        }],
+      };
+    }
+  );
+
+  // Important memories resource
+  server.resource(
+    'memory://important',
+    'memory://important',
+    async () => {
+      const memories = getHighPriorityMemories(20);
+      const text = memories.map(m =>
+        `## ${m.title}\n${m.content}\n*${m.category} | ${(m.salience * 100).toFixed(0)}% salience*\n`
+      ).join('\n');
+
+      return {
+        contents: [{
+          uri: 'memory://important',
+          mimeType: 'text/markdown',
+          text: text || 'No high-priority memories stored yet.',
+        }],
+      };
+    }
+  );
+
+  // Recent memories resource
+  server.resource(
+    'memory://recent',
+    'memory://recent',
+    async () => {
+      const memories = getRecentMemories(15);
+      const text = memories.map(m =>
+        `- **${m.title}** (${m.category}): ${m.content.slice(0, 100)}...`
+      ).join('\n');
+
+      return {
+        contents: [{
+          uri: 'memory://recent',
+          mimeType: 'text/markdown',
+          text: text || 'No recent memories.',
+        }],
+      };
+    }
+  );
+
+  // ============================================
+  // PROMPTS
+  // ============================================
+
+  // Context restoration prompt
+  server.prompt(
+    'restore_context',
+    'Restore context after compaction or at session start',
+    async () => {
+      const summary = generateContextSummary();
+      const context = formatContextSummary(summary);
+
+      return {
+        messages: [{
+          role: 'user',
+          content: {
+            type: 'text',
+            text: `Please review this context from memory and use it:\n\n${context}`,
+          },
+        }],
+      };
+    }
+  );
+
+  // Memory search prompt
+  server.prompt(
+    'search_memory',
+    'Search memories for information',
+    async () => {
+      return {
+        messages: [{
+          role: 'user',
+          content: {
+            type: 'text',
+            text: `Search my memories for relevant information.`,
+          },
+        }],
+      };
+    }
+  );
+
+  // ============================================
+  // AUTO-CONSOLIDATION (Anti-bloat)
+  // ============================================
+
+  // Run initial consolidation on startup
+  try {
+    const startupResult = consolidate();
+    console.error(`[claude-memory] Startup consolidation: ${startupResult.consolidated} promoted, ${startupResult.deleted} deleted`);
+  } catch (e) {
+    console.error('[claude-memory] Startup consolidation failed:', e);
+  }
+
+  // Check database size on startup
+  const sizeInfo = checkDatabaseSize();
+  if (sizeInfo.warning || sizeInfo.blocked) {
+    console.error(`[claude-memory] ${sizeInfo.message}`);
+  }
+
+  // Schedule periodic consolidation every 4 hours
+  const CONSOLIDATION_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours
+  setInterval(() => {
+    try {
+      const result = fullCleanup();
+      console.error(`[claude-memory] Scheduled cleanup: ${result.consolidation.consolidated} promoted, ${result.consolidation.deleted} deleted, ${result.merged} merged, vacuumed: ${result.vacuumed}`);
+    } catch (e) {
+      console.error('[claude-memory] Scheduled cleanup failed:', e);
+    }
+  }, CONSOLIDATION_INTERVAL);
+
+  return server;
+}
