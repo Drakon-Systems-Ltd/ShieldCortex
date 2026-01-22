@@ -5,9 +5,10 @@
  */
 
 import { z } from 'zod';
-import { addMemory, searchMemories } from '../memory/store.js';
+import { addMemory, searchMemories, detectRelationships, createMemoryLink, getLastTruncationInfo } from '../memory/store.js';
 import { calculateSalience, analyzeSalienceFactors, explainSalience } from '../memory/salience.js';
 import { MemoryCategory, MemoryType } from '../memory/types.js';
+import { formatErrorForMcp } from '../errors.js';
 
 // Input schema for the remember tool
 export const rememberSchema = z.object({
@@ -39,6 +40,12 @@ export function executeRemember(input: RememberInput): {
     type: MemoryType;
     category: MemoryCategory;
     reason: string;
+    linksCreated?: number;
+    truncated?: {
+      wasTruncated: boolean;
+      originalLength: number;
+      truncatedLength: number;
+    };
   };
   error?: string;
 } {
@@ -89,9 +96,24 @@ export function executeRemember(input: RememberInput): {
       salience: salienceOverride,
     });
 
+    // Auto-detect and create relationships with existing memories
+    let linksCreated = 0;
+    try {
+      const potentialLinks = detectRelationships(memory, 3);
+      for (const link of potentialLinks) {
+        const created = createMemoryLink(memory.id, link.targetId, link.relationship, link.strength);
+        if (created) linksCreated++;
+      }
+    } catch {
+      // Silently ignore relationship detection errors
+    }
+
     // Explain why this was remembered
     const factors = analyzeSalienceFactors({ title: input.title, content: input.content });
     const reason = explainSalience(factors);
+
+    // Check if content was truncated
+    const truncationInfo = getLastTruncationInfo();
 
     return {
       success: true,
@@ -102,12 +124,14 @@ export function executeRemember(input: RememberInput): {
         type: memory.type,
         category: memory.category,
         reason,
+        linksCreated,
+        truncated: truncationInfo?.wasTruncated ? truncationInfo : undefined,
       },
     };
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: formatErrorForMcp(error),
     };
   }
 }
@@ -121,12 +145,22 @@ export function formatRememberResult(result: ReturnType<typeof executeRemember>)
   }
 
   const m = result.memory!;
-  return [
+  const lines = [
     `✓ Remembered: "${m.title}"`,
     `  ID: ${m.id}`,
     `  Type: ${m.type}`,
     `  Category: ${m.category}`,
     `  Salience: ${(m.salience * 100).toFixed(0)}%`,
     `  Reason: ${m.reason}`,
-  ].join('\n');
+  ];
+  if (m.linksCreated && m.linksCreated > 0) {
+    lines.push(`  Links: ${m.linksCreated} related memories connected`);
+  }
+  if (m.truncated && m.truncated.wasTruncated) {
+    const originalKB = (m.truncated.originalLength / 1024).toFixed(1);
+    const truncatedKB = (m.truncated.truncatedLength / 1024).toFixed(1);
+    lines.push(`  ⚠️  WARNING: Content truncated from ${originalKB}KB to ${truncatedKB}KB (10KB limit)`);
+    lines.push(`  Consider splitting large memories into smaller, focused pieces.`);
+  }
+  return lines.join('\n');
 }

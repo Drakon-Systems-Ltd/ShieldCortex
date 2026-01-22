@@ -20,6 +20,7 @@ import {
   addMemory,
   deleteMemory,
   accessMemory,
+  updateDecayScores,
 } from '../memory/store.js';
 import {
   consolidate,
@@ -57,16 +58,20 @@ export function startVisualizationServer(dbPath?: string): void {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Get all memories with filters
+  // Get all memories with filters and pagination
   app.get('/api/memories', (req: Request, res: Response) => {
     try {
       // Extract query params as strings
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
       const type = typeof req.query.type === 'string' ? req.query.type : undefined;
       const category = typeof req.query.category === 'string' ? req.query.category : undefined;
-      const limitStr = typeof req.query.limit === 'string' ? req.query.limit : '100';
+      const limitStr = typeof req.query.limit === 'string' ? req.query.limit : '50';
+      const offsetStr = typeof req.query.offset === 'string' ? req.query.offset : '0';
       const mode = typeof req.query.mode === 'string' ? req.query.mode : 'recent';
       const query = typeof req.query.query === 'string' ? req.query.query : undefined;
+
+      const limit = Math.min(parseInt(limitStr), 200); // Cap at 200
+      const offset = parseInt(offsetStr);
 
       let memories: Memory[];
 
@@ -76,13 +81,13 @@ export function startVisualizationServer(dbPath?: string): void {
           project,
           type: type as Memory['type'] | undefined,
           category: category as Memory['category'] | undefined,
-          limit: parseInt(limitStr),
+          limit: limit + offset + 1, // Fetch extra to check hasMore
         });
         memories = results.map(r => r.memory);
       } else if (mode === 'important') {
-        memories = getHighPriorityMemories(parseInt(limitStr), project);
+        memories = getHighPriorityMemories(limit + offset + 1, project);
       } else {
-        memories = getRecentMemories(parseInt(limitStr), project);
+        memories = getRecentMemories(limit + offset + 1, project);
       }
 
       // Filter by type and category if provided
@@ -93,13 +98,29 @@ export function startVisualizationServer(dbPath?: string): void {
         memories = memories.filter(m => m.category === category);
       }
 
+      // Get total count for pagination
+      const stats = getMemoryStats(project);
+      const total = stats.total;
+
+      // Apply pagination
+      const hasMore = memories.length > offset + limit;
+      const paginatedMemories = memories.slice(offset, offset + limit);
+
       // Add computed decayed score to each memory
-      const memoriesWithDecay = memories.map(m => ({
+      const memoriesWithDecay = paginatedMemories.map(m => ({
         ...m,
         decayedScore: calculateDecayedScore(m),
       }));
 
-      res.json(memoriesWithDecay);
+      res.json({
+        memories: memoriesWithDecay,
+        pagination: {
+          offset,
+          limit,
+          total,
+          hasMore,
+        },
+      });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -270,6 +291,73 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // Get search suggestions (for autocomplete)
+  app.get('/api/suggestions', (req: Request, res: Response) => {
+    try {
+      const query = typeof req.query.q === 'string' ? req.query.q : '';
+      const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit) : 10;
+
+      if (!query || query.length < 2) {
+        return res.json({ suggestions: [] });
+      }
+
+      const db = getDatabase();
+
+      // Get suggestions from memory titles, categories, tags, and projects
+      const suggestions: Array<{ text: string; type: string; count: number }> = [];
+
+      // Search titles that contain the query
+      const titleMatches = db.prepare(`
+        SELECT DISTINCT title, COUNT(*) as count
+        FROM memories
+        WHERE title LIKE ?
+        GROUP BY title
+        ORDER BY count DESC, last_accessed DESC
+        LIMIT ?
+      `).all(`%${query}%`, limit) as { title: string; count: number }[];
+
+      for (const match of titleMatches) {
+        suggestions.push({ text: match.title, type: 'title', count: match.count });
+      }
+
+      // Get matching categories
+      const categoryMatches = db.prepare(`
+        SELECT DISTINCT category, COUNT(*) as count
+        FROM memories
+        WHERE category LIKE ?
+        GROUP BY category
+        ORDER BY count DESC
+        LIMIT 5
+      `).all(`%${query}%`) as { category: string; count: number }[];
+
+      for (const match of categoryMatches) {
+        suggestions.push({ text: match.category, type: 'category', count: match.count });
+      }
+
+      // Get matching projects
+      const projectMatches = db.prepare(`
+        SELECT DISTINCT project, COUNT(*) as count
+        FROM memories
+        WHERE project IS NOT NULL AND project LIKE ?
+        GROUP BY project
+        ORDER BY count DESC
+        LIMIT 5
+      `).all(`%${query}%`) as { project: string; count: number }[];
+
+      for (const match of projectMatches) {
+        suggestions.push({ text: match.project, type: 'project', count: match.count });
+      }
+
+      // Sort by count and limit total results
+      suggestions.sort((a, b) => b.count - a.count);
+      const limitedSuggestions = suggestions.slice(0, limit);
+
+      res.json({ suggestions: limitedSuggestions });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // ============================================
   // WEBSOCKET SERVER
   // ============================================
@@ -324,6 +412,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Decay tick - update clients with decay changes every 30 seconds
+  let decayTickCount = 0;
   setInterval(() => {
     const db = getDatabase();
     const memories = db.prepare(
@@ -346,6 +435,17 @@ export function startVisualizationServer(dbPath?: string): void {
 
     if (updates.length > 0) {
       emitDecayTick(updates);
+    }
+
+    // Persist decay scores to database every 5 minutes (10 ticks)
+    decayTickCount++;
+    if (decayTickCount >= 10) {
+      decayTickCount = 0;
+      try {
+        updateDecayScores();
+      } catch (error) {
+        console.error('[Decay] Failed to persist decay scores:', error);
+      }
     }
   }, 30000);
 
@@ -372,6 +472,7 @@ export function startVisualizationServer(dbPath?: string): void {
 ║    GET  /api/links          - Memory relationships           ║
 ║    POST /api/consolidate    - Trigger consolidation          ║
 ║    GET  /api/context        - Context summary                ║
+║    GET  /api/suggestions    - Search autocomplete            ║
 ╚══════════════════════════════════════════════════════════════╝
     `);
   });

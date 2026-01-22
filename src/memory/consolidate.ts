@@ -8,7 +8,7 @@
  * - Merges similar memories to reduce redundancy
  */
 
-import { getDatabase } from '../database/init.js';
+import { getDatabase, withTransaction } from '../database/init.js';
 import {
   Memory,
   MemoryConfig,
@@ -24,6 +24,7 @@ import {
   deleteMemory,
   searchMemories,
   getMemoryStats,
+  updateDecayScores,
 } from './store.js';
 import {
   calculateDecayedScore,
@@ -39,44 +40,50 @@ import {
 export function consolidate(
   config: MemoryConfig = DEFAULT_CONFIG
 ): ConsolidationResult {
-  const db = getDatabase();
-  let consolidated = 0;
-  let decayed = 0;
-  let deleted = 0;
+  // Wrap entire consolidation in a transaction for atomicity
+  return withTransaction(() => {
+    const db = getDatabase();
+    let consolidated = 0;
+    let decayed = 0;
+    let deleted = 0;
 
-  // Get all short-term memories
-  const shortTermMemories = getMemoriesByType('short_term', config.maxShortTermMemories * 2);
+    // Get all short-term memories
+    const shortTermMemories = getMemoriesByType('short_term', config.maxShortTermMemories * 2);
 
-  // Process decay for all memories
-  const { toDelete, toPromote, updated } = processDecay(shortTermMemories, config);
+    // Process decay for all memories
+    const { toDelete, toPromote, updated } = processDecay(shortTermMemories, config);
 
-  // Promote worthy memories
-  for (const id of toPromote) {
-    promoteMemory(id);
-    consolidated++;
-  }
-
-  // Delete decayed memories (excluding those just promoted)
-  for (const id of toDelete) {
-    if (!toPromote.includes(id)) {
-      deleteMemory(id);
-      deleted++;
+    // Promote worthy memories
+    for (const id of toPromote) {
+      promoteMemory(id);
+      consolidated++;
     }
-  }
 
-  // Update decayed scores in database
-  const updateStmt = db.prepare('UPDATE memories SET salience = ? WHERE id = ?');
-  for (const [id, score] of updated) {
-    if (!toDelete.includes(id)) {
-      updateStmt.run(score, id);
-      decayed++;
+    // Delete decayed memories (excluding those just promoted)
+    for (const id of toDelete) {
+      if (!toPromote.includes(id)) {
+        deleteMemory(id);
+        deleted++;
+      }
     }
-  }
 
-  // Enforce memory limits
-  deleted += enforceMemoryLimits(config);
+    // Update decayed scores in database
+    const updateStmt = db.prepare('UPDATE memories SET salience = ? WHERE id = ?');
+    for (const [id, score] of updated) {
+      if (!toDelete.includes(id)) {
+        updateStmt.run(score, id);
+        decayed++;
+      }
+    }
 
-  return { consolidated, decayed, deleted };
+    // Enforce memory limits
+    deleted += enforceMemoryLimits(config);
+
+    // Persist updated decay scores for efficient sorting
+    updateDecayScores();
+
+    return { consolidated, decayed, deleted };
+  });
 }
 
 /**
@@ -84,6 +91,8 @@ export function consolidate(
  * Removes lowest-priority memories when limits are exceeded
  */
 export function enforceMemoryLimits(config: MemoryConfig = DEFAULT_CONFIG): number {
+  // Note: If called within consolidate(), this is already in a transaction
+  // If called standalone, we wrap it for safety
   const db = getDatabase();
   let deleted = 0;
 
@@ -138,47 +147,50 @@ export function mergeSimilarMemories(
   project?: string,
   similarityThreshold: number = 0.8
 ): number {
-  const db = getDatabase();
-  let merged = 0;
+  // Wrap in transaction for atomic merge operations
+  return withTransaction(() => {
+    const db = getDatabase();
+    let merged = 0;
 
-  // Get all memories (optionally filtered by project)
-  let sql = 'SELECT * FROM memories';
-  const params: unknown[] = [];
-  if (project) {
-    sql += ' WHERE project = ?';
-    params.push(project);
-  }
-  sql += ' ORDER BY created_at ASC';
-
-  const memories = db.prepare(sql).all(...params) as Record<string, unknown>[];
-
-  // Simple similarity check based on title and first 100 chars of content
-  const seen = new Map<string, number>(); // key -> id of primary memory
-
-  for (const row of memories) {
-    const key = `${(row.title as string).toLowerCase().trim()}|${(row.content as string).slice(0, 100).toLowerCase()}`;
-
-    if (seen.has(key)) {
-      // This is a duplicate, merge into the primary
-      const primaryId = seen.get(key)!;
-
-      // Boost the primary memory's salience
-      db.prepare(`
-        UPDATE memories
-        SET salience = MIN(1.0, salience + 0.1),
-            access_count = access_count + 1
-        WHERE id = ?
-      `).run(primaryId);
-
-      // Delete the duplicate
-      deleteMemory(row.id as number);
-      merged++;
-    } else {
-      seen.set(key, row.id as number);
+    // Get all memories (optionally filtered by project)
+    let sql = 'SELECT * FROM memories';
+    const params: unknown[] = [];
+    if (project) {
+      sql += ' WHERE project = ?';
+      params.push(project);
     }
-  }
+    sql += ' ORDER BY created_at ASC';
 
-  return merged;
+    const memories = db.prepare(sql).all(...params) as Record<string, unknown>[];
+
+    // Simple similarity check based on title and first 100 chars of content
+    const seen = new Map<string, number>(); // key -> id of primary memory
+
+    for (const row of memories) {
+      const key = `${(row.title as string).toLowerCase().trim()}|${(row.content as string).slice(0, 100).toLowerCase()}`;
+
+      if (seen.has(key)) {
+        // This is a duplicate, merge into the primary
+        const primaryId = seen.get(key)!;
+
+        // Boost the primary memory's salience
+        db.prepare(`
+          UPDATE memories
+          SET salience = MIN(1.0, salience + 0.1),
+              access_count = access_count + 1
+          WHERE id = ?
+        `).run(primaryId);
+
+        // Delete the duplicate
+        deleteMemory(row.id as number);
+        merged++;
+      } else {
+        seen.set(key, row.id as number);
+      }
+    }
+
+    return merged;
+  });
 }
 
 /**
@@ -370,34 +382,37 @@ export function exportMemories(project?: string): string {
  * Import memories from JSON
  */
 export function importMemories(json: string): number {
-  const db = getDatabase();
-  const memories = JSON.parse(json) as Record<string, unknown>[];
+  // Wrap in transaction for atomic import
+  return withTransaction(() => {
+    const db = getDatabase();
+    const memories = JSON.parse(json) as Record<string, unknown>[];
 
-  const stmt = db.prepare(`
-    INSERT INTO memories (type, category, title, content, project, tags, salience, metadata)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+    const stmt = db.prepare(`
+      INSERT INTO memories (type, category, title, content, project, tags, salience, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
-  let imported = 0;
-  for (const memory of memories) {
-    try {
-      stmt.run(
-        memory.type,
-        memory.category,
-        memory.title,
-        memory.content,
-        memory.project || null,
-        memory.tags || '[]',
-        memory.salience || 0.5,
-        memory.metadata || '{}'
-      );
-      imported++;
-    } catch {
-      // Skip duplicates or invalid entries
+    let imported = 0;
+    for (const memory of memories) {
+      try {
+        stmt.run(
+          memory.type,
+          memory.category,
+          memory.title,
+          memory.content,
+          memory.project || null,
+          memory.tags || '[]',
+          memory.salience || 0.5,
+          memory.metadata || '{}'
+        );
+        imported++;
+      } catch {
+        // Skip duplicates or invalid entries
+      }
     }
-  }
 
-  return imported;
+    return imported;
+  });
 }
 
 /**

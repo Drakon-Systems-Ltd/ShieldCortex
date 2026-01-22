@@ -3,10 +3,16 @@
 /**
  * Memory Node
  * Individual memory rendered as a glowing neuron in 3D space
+ *
+ * Performance optimizations:
+ * - Reduced polygon counts on spheres (8 segments for glow, 12 for main)
+ * - Memoized geometries and materials to prevent recreation
+ * - Lazy-loaded HTML tooltips (only on hover)
+ * - Selection ring uses fewer segments
  */
 
-import { useRef, useState, useMemo } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useRef, useState, useMemo, memo } from 'react';
+import { useFrame, useThree } from '@react-three/fiber';
 import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { Memory } from '@/types/memory';
@@ -20,7 +26,12 @@ interface MemoryNodeProps {
   isSelected: boolean;
 }
 
-export function MemoryNode({
+// Shared geometries (created once, reused by all nodes)
+const GLOW_GEOMETRY = new THREE.SphereGeometry(1, 8, 8);
+const NODE_GEOMETRY = new THREE.SphereGeometry(1, 12, 12);
+const RING_GEOMETRY = new THREE.RingGeometry(1, 1.15, 24);
+
+function MemoryNodeInner({
   memory,
   position,
   onSelect,
@@ -29,51 +40,86 @@ export function MemoryNode({
   const meshRef = useRef<THREE.Mesh>(null);
   const glowRef = useRef<THREE.Mesh>(null);
   const [hovered, setHovered] = useState(false);
+  const { camera } = useThree();
 
-  // Calculate visual properties
+  // Calculate visual properties (memoized)
   const decayFactor = useMemo(() => calculateDecayFactor(memory), [memory]);
   const baseColor = useMemo(() => getCategoryColor(memory.category), [memory.category]);
 
   // Node size based on salience (0.15 to 0.4)
-  const size = 0.15 + memory.salience * 0.25;
+  const size = useMemo(() => 0.15 + memory.salience * 0.25, [memory.salience]);
 
   // Glow intensity based on decay
-  const glowIntensity = memory.salience * decayFactor;
+  const glowIntensity = useMemo(
+    () => memory.salience * decayFactor,
+    [memory.salience, decayFactor]
+  );
 
-  // Animation
+  // Memoized materials to prevent recreation
+  const glowMaterial = useMemo(
+    () =>
+      new THREE.MeshBasicMaterial({
+        color: baseColor,
+        transparent: true,
+        opacity: glowIntensity * 0.2,
+        depthWrite: false,
+      }),
+    [baseColor, glowIntensity]
+  );
+
+  const nodeMaterial = useMemo(
+    () =>
+      new THREE.MeshStandardMaterial({
+        color: baseColor,
+        emissive: baseColor,
+        emissiveIntensity: glowIntensity,
+        metalness: 0.3,
+        roughness: 0.4,
+        transparent: true,
+        opacity: 0.7 + decayFactor * 0.3,
+      }),
+    [baseColor, glowIntensity, decayFactor]
+  );
+
+  // Animation with frustum culling check
   useFrame((state) => {
-    if (meshRef.current) {
-      // Breathing animation - faster for higher salience
-      const pulseSpeed = 0.5 + memory.salience * 1.5;
-      const pulse = Math.sin(state.clock.elapsedTime * pulseSpeed) * 0.08;
-      meshRef.current.scale.setScalar(1 + pulse * glowIntensity);
-    }
+    if (!meshRef.current) return;
+
+    // Simple frustum culling - skip animation if far from camera
+    const distanceToCamera = meshRef.current.position.distanceTo(camera.position);
+    if (distanceToCamera > 30) return;
+
+    // Breathing animation - faster for higher salience
+    const pulseSpeed = 0.5 + memory.salience * 1.5;
+    const pulse = Math.sin(state.clock.elapsedTime * pulseSpeed) * 0.08;
+    meshRef.current.scale.setScalar(size * (1 + pulse * glowIntensity));
 
     if (glowRef.current) {
       // Glow pulsing
       const glowPulse = Math.sin(state.clock.elapsedTime * 0.8) * 0.3 + 0.7;
-      glowRef.current.scale.setScalar(1.8 + glowPulse * 0.3);
+      glowRef.current.scale.setScalar(size * 1.8 * (1 + glowPulse * 0.15));
       (glowRef.current.material as THREE.MeshBasicMaterial).opacity =
         glowIntensity * 0.3 * glowPulse;
+    }
+
+    // Update emissive intensity on hover
+    if (hovered) {
+      (meshRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity =
+        glowIntensity * 1.5;
     }
   });
 
   return (
     <group position={position}>
-      {/* Outer glow */}
-      <mesh ref={glowRef}>
-        <sphereGeometry args={[size * 1.8, 16, 16]} />
-        <meshBasicMaterial
-          color={baseColor}
-          transparent
-          opacity={glowIntensity * 0.2}
-          depthWrite={false}
-        />
-      </mesh>
+      {/* Outer glow - using shared geometry, scaled */}
+      <mesh ref={glowRef} geometry={GLOW_GEOMETRY} material={glowMaterial} scale={size * 1.8} />
 
-      {/* Main node */}
+      {/* Main node - using shared geometry, scaled */}
       <mesh
         ref={meshRef}
+        geometry={NODE_GEOMETRY}
+        material={nodeMaterial}
+        scale={size}
         onClick={(e) => {
           e.stopPropagation();
           onSelect(memory);
@@ -87,33 +133,16 @@ export function MemoryNode({
           setHovered(false);
           document.body.style.cursor = 'default';
         }}
-      >
-        <sphereGeometry args={[size, 24, 24]} />
-        <meshStandardMaterial
-          color={baseColor}
-          emissive={baseColor}
-          emissiveIntensity={glowIntensity * (hovered ? 1.5 : 1)}
-          metalness={0.3}
-          roughness={0.4}
-          transparent
-          opacity={0.7 + decayFactor * 0.3}
-        />
-      </mesh>
+      />
 
-      {/* Selection ring */}
+      {/* Selection ring - only rendered when selected */}
       {isSelected && (
-        <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[size + 0.15, size + 0.22, 32]} />
-          <meshBasicMaterial
-            color="#ffffff"
-            transparent
-            opacity={0.9}
-            side={THREE.DoubleSide}
-          />
+        <mesh geometry={RING_GEOMETRY} rotation={[Math.PI / 2, 0, 0]} scale={size + 0.15}>
+          <meshBasicMaterial color="#ffffff" transparent opacity={0.9} side={THREE.DoubleSide} />
         </mesh>
       )}
 
-      {/* Hover tooltip */}
+      {/* Hover tooltip - lazy loaded only on hover */}
       {hovered && !isSelected && (
         <Html
           distanceFactor={8}
@@ -141,3 +170,16 @@ export function MemoryNode({
     </group>
   );
 }
+
+// Memoize the component to prevent re-renders when other nodes change
+export const MemoryNode = memo(MemoryNodeInner, (prev, next) => {
+  return (
+    prev.memory.id === next.memory.id &&
+    prev.memory.salience === next.memory.salience &&
+    prev.memory.category === next.memory.category &&
+    prev.isSelected === next.isSelected &&
+    prev.position[0] === next.position[0] &&
+    prev.position[1] === next.position[1] &&
+    prev.position[2] === next.position[2]
+  );
+});

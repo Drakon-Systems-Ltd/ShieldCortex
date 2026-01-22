@@ -37,29 +37,54 @@ import {
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
 
+// Track truncation info globally for the last addMemory call
+let lastTruncationInfo: { wasTruncated: boolean; originalLength: number; truncatedLength: number } | null = null;
+
 /**
  * Truncate content if it exceeds max size
+ * Returns both the content and truncation info
  */
-function truncateContent(content: string): string {
-  if (content.length > MAX_CONTENT_SIZE) {
-    return content.slice(0, MAX_CONTENT_SIZE) + '\n\n[Content truncated - exceeded 10KB limit]';
+function truncateContent(content: string): { content: string; wasTruncated: boolean; originalLength: number } {
+  const originalLength = content.length;
+  if (originalLength > MAX_CONTENT_SIZE) {
+    return {
+      content: content.slice(0, MAX_CONTENT_SIZE) + '\n\n[Content truncated - exceeded 10KB limit]',
+      wasTruncated: true,
+      originalLength,
+    };
   }
-  return content;
+  return { content, wasTruncated: false, originalLength };
+}
+
+/**
+ * Get truncation info from the last addMemory call
+ */
+export function getLastTruncationInfo() {
+  return lastTruncationInfo;
 }
 
 /**
  * Escape FTS5 query to prevent syntax errors
- * FTS5 interprets "word-word" as "column:value" syntax
+ * FTS5 interprets:
+ * - "word-word" as "column:value" syntax
+ * - AND, OR, NOT as boolean operators
+ * - &, | as boolean operators
  * We quote individual terms to search them literally
  */
 function escapeFts5Query(query: string): string {
-  // Split on whitespace, quote each term, rejoin
-  // This handles hyphenated words and special characters
+  // Split on whitespace, process each term, filter empty, rejoin
   return query
     .split(/\s+/)
+    .filter(term => term.length > 0)
     .map(term => {
+      // FTS5 boolean operators - quote them to search literally
+      const upperTerm = term.toUpperCase();
+      if (upperTerm === 'AND' || upperTerm === 'OR' || upperTerm === 'NOT') {
+        return `"${term}"`;
+      }
       // If term contains special FTS5 characters, quote it
-      if (/[-:*^()]/.test(term) || term.includes('"')) {
+      // Including: - : * ^ ( ) & | and quotes
+      if (/[-:*^()&|]/.test(term) || term.includes('"')) {
         // Escape existing quotes and wrap in quotes
         return `"${term.replace(/"/g, '""')}"`;
       }
@@ -116,13 +141,20 @@ export function addMemory(
   `);
 
   // Anti-bloat: Truncate content if too large
-  const content = truncateContent(input.content);
+  const truncationResult = truncateContent(input.content);
+
+  // Store truncation info for the remember tool to access
+  lastTruncationInfo = {
+    wasTruncated: truncationResult.wasTruncated,
+    originalLength: truncationResult.originalLength,
+    truncatedLength: truncationResult.content.length,
+  };
 
   const result = stmt.run(
     type,
     category,
     input.title,
-    content,
+    truncationResult.content,
     input.project || null,
     JSON.stringify(tags),
     salience,
@@ -133,6 +165,27 @@ export function addMemory(
 
   // Emit event for real-time dashboard
   emitMemoryCreated(memory);
+
+  // Anti-bloat: Check if limits exceeded and trigger async cleanup
+  // We use setImmediate to not block the insert response
+  setImmediate(() => {
+    try {
+      const stats = getMemoryStats();
+      if (
+        stats.shortTerm > config.maxShortTermMemories ||
+        stats.longTerm > config.maxLongTermMemories
+      ) {
+        // Import dynamically to avoid circular dependency
+        import('./consolidate.js').then(({ enforceMemoryLimits }) => {
+          enforceMemoryLimits(config);
+        }).catch(() => {
+          // Silently ignore - consolidation will happen on next scheduled run
+        });
+      }
+    } catch {
+      // Silently ignore errors in async cleanup
+    }
+  });
 
   return memory;
 }
@@ -257,6 +310,35 @@ export function accessMemory(
 }
 
 /**
+ * Update persisted decay scores for all memories
+ * Called during consolidation and periodically by the API server
+ * Returns the number of memories updated
+ */
+export function updateDecayScores(): number {
+  const db = getDatabase();
+
+  // Get all memories
+  const memories = db.prepare('SELECT * FROM memories').all() as Record<string, unknown>[];
+
+  let updated = 0;
+  const updateStmt = db.prepare('UPDATE memories SET decayed_score = ? WHERE id = ?');
+
+  for (const row of memories) {
+    const memory = rowToMemory(row);
+    const decayedScore = calculateDecayedScore(memory);
+
+    // Only update if score has changed significantly (saves writes)
+    const currentScore = row.decayed_score as number | null;
+    if (currentScore === null || Math.abs(currentScore - decayedScore) > 0.01) {
+      updateStmt.run(decayedScore, memory.id);
+      updated++;
+    }
+  }
+
+  return updated;
+}
+
+/**
  * Search memories using full-text search and filters
  */
 export function searchMemories(
@@ -303,10 +385,14 @@ export function searchMemories(
     params.push(options.minSalience);
   }
   if (options.tags && options.tags.length > 0) {
-    // Check if any tag matches
-    const tagConditions = options.tags.map(() => "m.tags LIKE ?").join(' OR ');
-    sql += ` AND (${tagConditions})`;
-    options.tags.forEach(tag => params.push(`%"${tag}"%`));
+    // Use json_each() for proper JSON array parsing
+    // This avoids false positives from LIKE matching (e.g., "api" matching "api-gateway")
+    const tagPlaceholders = options.tags.map(() => '?').join(',');
+    sql += ` AND EXISTS (
+      SELECT 1 FROM json_each(m.tags)
+      WHERE json_each.value IN (${tagPlaceholders})
+    )`;
+    params.push(...options.tags);
   }
 
   sql += ' ORDER BY m.salience DESC, m.last_accessed DESC LIMIT ?';
@@ -517,4 +603,211 @@ export function getMemoryStats(project?: string): {
     byCategory,
     averageSalience,
   };
+}
+
+// ============================================================================
+// MEMORY RELATIONSHIPS (LINKS)
+// ============================================================================
+
+export type RelationshipType = 'references' | 'extends' | 'contradicts' | 'related';
+
+export interface MemoryLink {
+  id: number;
+  sourceId: number;
+  targetId: number;
+  relationship: RelationshipType;
+  strength: number;
+  createdAt: Date;
+}
+
+/**
+ * Create a link between two memories
+ */
+export function createMemoryLink(
+  sourceId: number,
+  targetId: number,
+  relationship: RelationshipType,
+  strength: number = 0.5
+): MemoryLink | null {
+  const db = getDatabase();
+
+  // Verify both memories exist
+  const source = getMemoryById(sourceId);
+  const target = getMemoryById(targetId);
+  if (!source || !target) return null;
+
+  // Prevent self-links
+  if (sourceId === targetId) return null;
+
+  try {
+    const result = db.prepare(`
+      INSERT INTO memory_links (source_id, target_id, relationship, strength)
+      VALUES (?, ?, ?, ?)
+    `).run(sourceId, targetId, relationship, strength);
+
+    return {
+      id: result.lastInsertRowid as number,
+      sourceId,
+      targetId,
+      relationship,
+      strength,
+      createdAt: new Date(),
+    };
+  } catch {
+    // Link already exists (UNIQUE constraint)
+    return null;
+  }
+}
+
+/**
+ * Get all memories related to a given memory
+ */
+export function getRelatedMemories(memoryId: number): {
+  memory: Memory;
+  relationship: RelationshipType;
+  strength: number;
+  direction: 'outgoing' | 'incoming';
+}[] {
+  const db = getDatabase();
+
+  // Get outgoing links (this memory references others)
+  const outgoing = db.prepare(`
+    SELECT m.*, ml.relationship, ml.strength
+    FROM memory_links ml
+    JOIN memories m ON m.id = ml.target_id
+    WHERE ml.source_id = ?
+  `).all(memoryId) as (Record<string, unknown> & { relationship: string; strength: number })[];
+
+  // Get incoming links (other memories reference this one)
+  const incoming = db.prepare(`
+    SELECT m.*, ml.relationship, ml.strength
+    FROM memory_links ml
+    JOIN memories m ON m.id = ml.source_id
+    WHERE ml.target_id = ?
+  `).all(memoryId) as (Record<string, unknown> & { relationship: string; strength: number })[];
+
+  const results: {
+    memory: Memory;
+    relationship: RelationshipType;
+    strength: number;
+    direction: 'outgoing' | 'incoming';
+  }[] = [];
+
+  for (const row of outgoing) {
+    results.push({
+      memory: rowToMemory(row),
+      relationship: row.relationship as RelationshipType,
+      strength: row.strength,
+      direction: 'outgoing',
+    });
+  }
+
+  for (const row of incoming) {
+    results.push({
+      memory: rowToMemory(row),
+      relationship: row.relationship as RelationshipType,
+      strength: row.strength,
+      direction: 'incoming',
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Delete a memory link
+ */
+export function deleteMemoryLink(sourceId: number, targetId: number): boolean {
+  const db = getDatabase();
+  const result = db.prepare(`
+    DELETE FROM memory_links WHERE source_id = ? AND target_id = ?
+  `).run(sourceId, targetId);
+  return result.changes > 0;
+}
+
+/**
+ * Get all memory links
+ */
+export function getAllMemoryLinks(): MemoryLink[] {
+  const db = getDatabase();
+  const rows = db.prepare(`SELECT * FROM memory_links ORDER BY created_at DESC`).all() as Record<string, unknown>[];
+
+  return rows.map(row => ({
+    id: row.id as number,
+    sourceId: row.source_id as number,
+    targetId: row.target_id as number,
+    relationship: row.relationship as RelationshipType,
+    strength: row.strength as number,
+    createdAt: new Date(row.created_at as string),
+  }));
+}
+
+/**
+ * Detect potential relationships for a new memory
+ * Returns memories that might be related based on:
+ * - Shared tags
+ * - Similar project
+ * - Content similarity (keywords)
+ */
+export function detectRelationships(
+  memory: Memory,
+  maxResults: number = 5
+): { targetId: number; relationship: RelationshipType; strength: number }[] {
+  const db = getDatabase();
+  const results: { targetId: number; relationship: RelationshipType; strength: number }[] = [];
+
+  // Find memories with shared tags
+  if (memory.tags.length > 0) {
+    const tagPlaceholders = memory.tags.map(() => '?').join(',');
+    const tagMatches = db.prepare(`
+      SELECT DISTINCT m.id, m.tags
+      FROM memories m, json_each(m.tags)
+      WHERE json_each.value IN (${tagPlaceholders})
+        AND m.id != ?
+      LIMIT ?
+    `).all(...memory.tags, memory.id, maxResults) as { id: number; tags: string }[];
+
+    for (const match of tagMatches) {
+      const matchTags = JSON.parse(match.tags) as string[];
+      const sharedCount = memory.tags.filter(t => matchTags.includes(t)).length;
+      const strength = Math.min(0.9, 0.3 + (sharedCount * 0.2));
+      results.push({ targetId: match.id, relationship: 'related', strength });
+    }
+  }
+
+  // Find memories in the same project
+  if (memory.project) {
+    const projectMatches = db.prepare(`
+      SELECT id FROM memories
+      WHERE project = ? AND id != ?
+      ORDER BY last_accessed DESC
+      LIMIT ?
+    `).all(memory.project, memory.id, maxResults) as { id: number }[];
+
+    for (const match of projectMatches) {
+      // Only add if not already in results
+      if (!results.find(r => r.targetId === match.id)) {
+        results.push({ targetId: match.id, relationship: 'related', strength: 0.4 });
+      }
+    }
+  }
+
+  // Find memories with similar category
+  const categoryMatches = db.prepare(`
+    SELECT id FROM memories
+    WHERE category = ? AND id != ?
+    ORDER BY salience DESC, last_accessed DESC
+    LIMIT ?
+  `).all(memory.category, memory.id, 3) as { id: number }[];
+
+  for (const match of categoryMatches) {
+    if (!results.find(r => r.targetId === match.id)) {
+      results.push({ targetId: match.id, relationship: 'related', strength: 0.3 });
+    }
+  }
+
+  // Sort by strength and limit
+  return results
+    .sort((a, b) => b.strength - a.strength)
+    .slice(0, maxResults);
 }

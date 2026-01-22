@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS memories (
   project TEXT,
   tags TEXT DEFAULT '[]',  -- JSON array
   salience REAL DEFAULT 0.5 CHECK(salience >= 0 AND salience <= 1),
+  decayed_score REAL,  -- Cached decay calculation for efficient sorting
   access_count INTEGER DEFAULT 0,
   last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -56,6 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memories_salience ON memories(salience DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_decayed_score ON memories(decayed_score DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 

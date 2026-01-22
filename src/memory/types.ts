@@ -90,7 +90,7 @@ export interface MemoryConfig {
   dbPath: string;
   decayRate: number;           // Per-hour decay factor (default 0.995)
   reinforcementFactor: number; // Access boost (default 1.2)
-  salienceThreshold: number;   // Min score to keep (default 0.3)
+  salienceThreshold: number;   // Min score to keep (default 0.2)
   consolidationThreshold: number; // Min score for STM→LTM (default 0.6)
   maxShortTermMemories: number;
   maxLongTermMemories: number;
@@ -101,7 +101,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
   dbPath: '~/.claude-memory/memories.db',
   decayRate: 0.995,
   reinforcementFactor: 1.2,
-  salienceThreshold: 0.3,
+  salienceThreshold: 0.2, // Lowered from 0.3 to match reduced base salience (0.25)
   consolidationThreshold: 0.6,
   maxShortTermMemories: 100,
   maxLongTermMemories: 1000,

@@ -3,27 +3,46 @@
 /**
  * Memory Data Hooks
  * TanStack Query hooks for fetching memory data
+ *
+ * Uses WebSocket for real-time updates with polling as fallback.
  */
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Memory, MemoryStats, MemoryLink } from '@/types/memory';
+import { useMemoryWebSocket } from '@/lib/websocket';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
-// Fetch all memories
+// Pagination metadata from API
+export interface PaginationInfo {
+  offset: number;
+  limit: number;
+  total: number;
+  hasMore: boolean;
+}
+
+// Paginated response from API
+interface PaginatedMemoriesResponse {
+  memories: Memory[];
+  pagination: PaginationInfo;
+}
+
+// Fetch memories with pagination support
 async function fetchMemories(options?: {
   project?: string;
   type?: string;
   category?: string;
   limit?: number;
+  offset?: number;
   mode?: 'recent' | 'important' | 'search';
   query?: string;
-}): Promise<Memory[]> {
+}): Promise<PaginatedMemoriesResponse> {
   const params = new URLSearchParams();
   if (options?.project) params.set('project', options.project);
   if (options?.type) params.set('type', options.type);
   if (options?.category) params.set('category', options.category);
   if (options?.limit) params.set('limit', options.limit.toString());
+  if (options?.offset) params.set('offset', options.offset.toString());
   if (options?.mode) params.set('mode', options.mode);
   if (options?.query) params.set('query', options.query);
 
@@ -70,20 +89,29 @@ async function triggerConsolidation(): Promise<{
   return response.json();
 }
 
-// Hook: Get all memories
+// Hook: Get all memories with pagination
+// Polling is reduced because WebSocket handles real-time updates
 export function useMemories(options?: {
   project?: string;
   type?: string;
   category?: string;
   limit?: number;
+  offset?: number;
   mode?: 'recent' | 'important' | 'search';
   query?: string;
 }) {
-  return useQuery({
+  const query = useQuery({
     queryKey: ['memories', options],
     queryFn: () => fetchMemories(options),
-    refetchInterval: 5000, // Poll every 5 seconds
+    refetchInterval: 30000, // Fallback poll every 30 seconds (WebSocket handles real-time)
   });
+
+  // Extract memories array and pagination from response
+  return {
+    ...query,
+    data: query.data?.memories,
+    pagination: query.data?.pagination,
+  };
 }
 
 // Hook: Get memory stats
@@ -91,7 +119,7 @@ export function useStats(project?: string) {
   return useQuery({
     queryKey: ['stats', project],
     queryFn: () => fetchStats(project),
-    refetchInterval: 10000, // Poll every 10 seconds
+    refetchInterval: 30000, // Fallback poll every 30 seconds
   });
 }
 
@@ -100,8 +128,31 @@ export function useMemoryLinks() {
   return useQuery({
     queryKey: ['links'],
     queryFn: fetchLinks,
-    refetchInterval: 30000, // Less frequent
+    refetchInterval: 60000, // Fallback poll every 60 seconds
   });
+}
+
+// Hook: Combined memories with WebSocket real-time updates
+export function useMemoriesWithRealtime(options?: {
+  project?: string;
+  type?: string;
+  category?: string;
+  limit?: number;
+  offset?: number;
+  mode?: 'recent' | 'important' | 'search';
+  query?: string;
+}) {
+  // Connect to WebSocket for real-time updates
+  const ws = useMemoryWebSocket();
+
+  // Fetch memories with reduced polling (WebSocket handles most updates)
+  const memories = useMemories(options);
+
+  return {
+    ...memories,
+    isConnected: ws.isConnected,
+    lastEvent: ws.lastEvent,
+  };
 }
 
 // Hook: Access/reinforce a memory

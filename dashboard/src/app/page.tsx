@@ -5,10 +5,12 @@
  * Brain-like visualization of the Claude Memory system
  */
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import { useMemories, useStats, useAccessMemory, useConsolidate } from '@/hooks/useMemories';
+import { useMemoriesWithRealtime, useStats, useAccessMemory, useConsolidate } from '@/hooks/useMemories';
 import { useDashboardStore } from '@/lib/store';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { useSuggestions } from '@/hooks/useSuggestions';
 import { StatsPanel } from '@/components/dashboard/StatsPanel';
 import { MemoryDetail } from '@/components/memory/MemoryDetail';
 import { Button } from '@/components/ui/button';
@@ -30,15 +32,51 @@ const BrainScene = dynamic(
 
 export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState('');
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const suggestionsRef = useRef<HTMLDivElement>(null);
+
+  // Debounce search to avoid API calls on every keystroke
+  const debouncedSearch = useDebouncedValue(searchQuery, 300);
 
   // Zustand store
   const { selectedMemory, setSelectedMemory } = useDashboardStore();
 
-  // Data fetching
-  const { data: memories = [], isLoading: memoriesLoading } = useMemories({
+  // Search suggestions
+  const { data: suggestions = [] } = useSuggestions(searchQuery);
+
+  // Close suggestions when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        suggestionsRef.current &&
+        !suggestionsRef.current.contains(event.target as Node) &&
+        searchInputRef.current &&
+        !searchInputRef.current.contains(event.target as Node)
+      ) {
+        setShowSuggestions(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleSelectSuggestion = (text: string) => {
+    setSearchQuery(text);
+    setShowSuggestions(false);
+    searchInputRef.current?.focus();
+  };
+
+  // Data fetching with real-time WebSocket updates
+  const {
+    data: memories = [],
+    isLoading: memoriesLoading,
+    isConnected,
+  } = useMemoriesWithRealtime({
     limit: 200,
-    query: searchQuery || undefined,
-    mode: searchQuery ? 'search' : 'recent',
+    query: debouncedSearch || undefined,
+    mode: debouncedSearch ? 'search' : 'recent',
   });
   const { data: stats, isLoading: statsLoading } = useStats();
 
@@ -68,12 +106,44 @@ export default function DashboardPage() {
           </h1>
           <div className="relative">
             <Input
+              ref={searchInputRef}
               type="text"
               placeholder="Search memories..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setShowSuggestions(true);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setShowSuggestions(false);
+                }
+              }}
               className="w-64 bg-slate-800 border-slate-700 text-white placeholder:text-slate-400 focus:ring-blue-500"
             />
+            {/* Suggestions dropdown */}
+            {showSuggestions && suggestions.length > 0 && (
+              <div
+                ref={suggestionsRef}
+                className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl overflow-hidden z-50"
+              >
+                {suggestions.map((suggestion, index) => (
+                  <button
+                    key={`${suggestion.type}-${suggestion.text}-${index}`}
+                    onClick={() => handleSelectSuggestion(suggestion.text)}
+                    className="w-full px-3 py-2 text-left hover:bg-slate-700 transition-colors flex items-center gap-2"
+                  >
+                    <span className="text-white text-sm truncate flex-1">
+                      {suggestion.text}
+                    </span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-slate-600 text-slate-300">
+                      {suggestion.type}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -86,7 +156,11 @@ export default function DashboardPage() {
           >
             {consolidateMutation.isPending ? 'Processing...' : 'Consolidate'}
           </Button>
-          <div className="text-xs text-slate-400 px-2">
+          <div className="flex items-center gap-2 text-xs text-slate-400 px-2">
+            <span
+              className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500'}`}
+              title={isConnected ? 'Real-time connected' : 'Polling mode'}
+            />
             {memories.length} memories
           </div>
         </div>

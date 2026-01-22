@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { searchMemories, accessMemory, getRecentMemories, getHighPriorityMemories } from '../memory/store.js';
 import { formatTimeSinceAccess } from '../memory/decay.js';
 import { Memory, SearchResult } from '../memory/types.js';
+import { MemoryNotFoundError, formatErrorForMcp } from '../errors.js';
 
 // Input schema for the recall tool
 export const recallSchema = z.object({
@@ -77,7 +78,7 @@ export function executeRecall(input: RecallInput): {
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: formatErrorForMcp(error),
     };
   }
 }
@@ -144,16 +145,17 @@ export function executeGetMemory(input: { id: number }): {
   try {
     const memory = accessMemory(input.id);
     if (!memory) {
+      const error = new MemoryNotFoundError(input.id);
       return {
         success: false,
-        error: `Memory with ID ${input.id} not found`,
+        error: error.toUserMessage(),
       };
     }
     return { success: true, memory };
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: formatErrorForMcp(error),
     };
   }
 }

@@ -54,8 +54,14 @@ export function initDatabase(dbPath: string = '~/.claude-memory/memories.db'): D
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
+  // Race condition mitigation: wait up to 5 seconds for locks
+  db.pragma('busy_timeout = 5000');
 
-  // Run schema
+  // Run migrations FIRST for existing databases
+  // This ensures columns exist before schema tries to create indexes on them
+  runMigrations(db);
+
+  // Run schema (uses IF NOT EXISTS, safe for existing tables and indexes)
   const schemaPath = join(__dirname, 'schema.sql');
   if (existsSync(schemaPath)) {
     const schema = readFileSync(schemaPath, 'utf-8');
@@ -66,6 +72,30 @@ export function initDatabase(dbPath: string = '~/.claude-memory/memories.db'): D
   }
 
   return db;
+}
+
+/**
+ * Run database migrations for existing databases
+ */
+function runMigrations(database: Database.Database): void {
+  // Check if memories table exists (skip migrations on fresh database)
+  const tableExists = database.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='memories'"
+  ).get();
+
+  if (!tableExists) {
+    // Fresh database - schema will create everything
+    return;
+  }
+
+  // Check if decayed_score column exists
+  const tableInfo = database.prepare("PRAGMA table_info(memories)").all() as { name: string }[];
+  const hasDecayedScore = tableInfo.some(col => col.name === 'decayed_score');
+
+  if (!hasDecayedScore) {
+    database.exec('ALTER TABLE memories ADD COLUMN decayed_score REAL');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_decayed_score ON memories(decayed_score DESC)');
+  }
 }
 
 /**
@@ -157,6 +187,7 @@ function getInlineSchema(): string {
       project TEXT,
       tags TEXT DEFAULT '[]',
       salience REAL DEFAULT 0.5 CHECK(salience >= 0 AND salience <= 1),
+      decayed_score REAL,
       access_count INTEGER DEFAULT 0,
       last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -193,6 +224,7 @@ function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
     CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
     CREATE INDEX IF NOT EXISTS idx_memories_salience ON memories(salience DESC);
+    CREATE INDEX IF NOT EXISTS idx_memories_decayed_score ON memories(decayed_score DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed DESC);
 
     CREATE TABLE IF NOT EXISTS sessions (
@@ -217,4 +249,30 @@ function getInlineSchema(): string {
       UNIQUE(source_id, target_id)
     );
   `;
+}
+
+/**
+ * Execute a function within a transaction (auto-commits on success, rollback on error)
+ * Use this for batch operations that need atomicity
+ */
+export function withTransaction<T>(fn: () => T): T {
+  const database = getDatabase();
+  return database.transaction(fn)();
+}
+
+/**
+ * Execute a function within an IMMEDIATE transaction (acquires write lock immediately)
+ * Use this for critical operations that must not conflict with concurrent writes
+ */
+export function withImmediateTransaction<T>(fn: () => T): T {
+  const database = getDatabase();
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const result = fn();
+    database.exec('COMMIT');
+    return result;
+  } catch (e) {
+    database.exec('ROLLBACK');
+    throw e;
+  }
 }

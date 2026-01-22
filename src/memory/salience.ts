@@ -75,7 +75,7 @@ export function analyzeSalienceFactors(input: MemoryInput): SalienceFactors {
  * Compute final salience score from factors
  */
 export function computeSalienceScore(factors: SalienceFactors): number {
-  let score = 0.4; // Base score
+  let score = 0.25; // Base score (lowered from 0.4 so trivial notes don't appear important)
 
   // Weight each factor
   if (factors.explicitRequest) score += 0.5;        // Highest weight

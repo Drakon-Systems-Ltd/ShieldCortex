@@ -55,6 +55,30 @@ Create `~/.claude/.mcp.json` with the same content.
 
 After adding the config, restart Claude Code and approve the MCP server when prompted.
 
+### 3. Configure PreCompact Hook (Recommended)
+
+Add to `~/.claude/settings.json` for automatic memory extraction before compaction:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /path/to/claude-compact/scripts/pre-compact-hook.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This ensures important context is auto-saved before any compaction event.
+
 ### 3. Use It
 
 The memory system integrates seamlessly with Claude Code. Here are the key tools:
@@ -139,8 +163,30 @@ score = base_salience × (0.995 ^ hours_since_access)
 
 When Claude Code compacts context:
 
-1. **Before compaction** - Important context is already in memory
+1. **Before compaction** - The PreCompact hook **automatically extracts** important content
 2. **After compaction** - Use `get_context` to restore what's relevant
+
+### Automatic Memory Extraction (PreCompact Hook)
+
+The system includes a hook that runs before every context compaction:
+
+```
+🧠 AUTO-MEMORY: 3 important items were automatically saved before compaction.
+After compaction, use 'get_context' to retrieve your memories.
+```
+
+**What gets auto-extracted:**
+- Decisions: "decided to...", "going with...", "chose..."
+- Error fixes: "fixed by...", "the solution was...", "root cause..."
+- Learnings: "learned that...", "discovered...", "turns out..."
+- Architecture: "the architecture uses...", "design pattern..."
+- Preferences: "always...", "never...", "prefer to..."
+- Important notes: "important:", "remember:", "key point..."
+
+Auto-extracted memories are:
+- Tagged with `auto-extracted` for easy filtering
+- Scored using salience detection (only high-scoring items saved)
+- Limited to 5 per compaction to avoid noise
 
 ### Example Workflow
 

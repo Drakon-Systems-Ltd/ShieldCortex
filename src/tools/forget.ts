@@ -6,7 +6,12 @@
 
 import { z } from 'zod';
 import { deleteMemory, searchMemories, getMemoryById } from '../memory/store.js';
-import { getDatabase } from '../database/init.js';
+import { getDatabase, withTransaction } from '../database/init.js';
+import {
+  MemoryNotFoundError,
+  BulkDeleteSafetyError,
+  formatErrorForMcp,
+} from '../errors.js';
 
 // Input schema for the forget tool
 export const forgetSchema = z.object({
@@ -45,9 +50,10 @@ export function executeForget(input: ForgetInput): {
     if (input.id !== undefined) {
       const memory = getMemoryById(input.id);
       if (!memory) {
+        const error = new MemoryNotFoundError(input.id);
         return {
           success: false,
-          error: `Memory with ID ${input.id} not found`,
+          error: error.toUserMessage(),
         };
       }
 
@@ -135,16 +141,19 @@ export function executeForget(input: ForgetInput): {
 
     // Require confirmation for bulk deletes
     if (affected.length > 1 && !input.confirm) {
+      const error = new BulkDeleteSafetyError(affected.length);
       return {
         success: false,
         wouldDelete: affected.length,
         memories: affected.slice(0, 10),
-        error: `This would delete ${affected.length} memories. Set confirm: true to proceed.`,
+        error: error.toUserMessage(),
       };
     }
 
-    // Execute deletion
-    db.prepare(`DELETE FROM memories WHERE ${whereClause}`).run(...params);
+    // Execute deletion within a transaction for atomicity
+    withTransaction(() => {
+      db.prepare(`DELETE FROM memories WHERE ${whereClause}`).run(...params);
+    });
 
     return {
       success: true,
@@ -154,7 +163,7 @@ export function executeForget(input: ForgetInput): {
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: formatErrorForMcp(error),
     };
   }
 }

@@ -24,7 +24,7 @@ import {
   importSchema, executeImport,
 } from './tools/context.js';
 import { generateContextSummary, formatContextSummary, consolidate, fullCleanup } from './memory/consolidate.js';
-import { getHighPriorityMemories, getRecentMemories } from './memory/store.js';
+import { getHighPriorityMemories, getRecentMemories, getRelatedMemories, createMemoryLink, RelationshipType } from './memory/store.js';
 import { checkDatabaseSize } from './database/init.js';
 
 /**
@@ -306,6 +306,54 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
             : `Error: ${result.error}`
         }],
       };
+    }
+  );
+
+  // Get Related Memories
+  server.tool(
+    'get_related',
+    'Get memories related to a specific memory. Shows connections and relationships.',
+    {
+      id: z.number().describe('Memory ID to find relationships for'),
+    },
+    async (args) => {
+      const related = getRelatedMemories(args.id);
+      if (related.length === 0) {
+        return { content: [{ type: 'text', text: 'No related memories found.' }] };
+      }
+      const lines = [`## Related Memories for ID ${args.id}\n`];
+      for (const r of related) {
+        const arrow = r.direction === 'outgoing' ? '→' : '←';
+        lines.push(`${arrow} **${r.memory.title}** (${r.relationship}, ${(r.strength * 100).toFixed(0)}% strength)`);
+        lines.push(`  ID: ${r.memory.id} | ${r.memory.category} | ${(r.memory.salience * 100).toFixed(0)}% salience`);
+      }
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    }
+  );
+
+  // Link Memories
+  server.tool(
+    'link_memories',
+    'Create a relationship link between two memories.',
+    {
+      sourceId: z.number().describe('Source memory ID'),
+      targetId: z.number().describe('Target memory ID'),
+      relationship: z.enum(['references', 'extends', 'contradicts', 'related'])
+        .describe('Type of relationship'),
+      strength: z.number().min(0).max(1).optional().default(0.5)
+        .describe('Relationship strength (0-1)'),
+    },
+    async (args) => {
+      const link = createMemoryLink(
+        args.sourceId,
+        args.targetId,
+        args.relationship as RelationshipType,
+        args.strength
+      );
+      if (!link) {
+        return { content: [{ type: 'text', text: 'Failed to create link. Memories may not exist or link already exists.' }] };
+      }
+      return { content: [{ type: 'text', text: `✓ Linked memory ${args.sourceId} → ${args.targetId} (${args.relationship})` }] };
     }
   );
 
