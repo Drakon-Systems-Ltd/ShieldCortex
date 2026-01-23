@@ -3,7 +3,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
@@ -13,6 +13,7 @@ const __dirname = dirname(__filename);
 
 let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
+let lockFilePath: string | null = null;
 
 // Anti-bloat: Database size limits
 const MAX_DB_SIZE = 100 * 1024 * 1024; // 100MB hard limit
@@ -54,8 +55,22 @@ export function initDatabase(dbPath: string = '~/.claude-memory/memories.db'): D
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
-  // Race condition mitigation: wait up to 5 seconds for locks
-  db.pragma('busy_timeout = 5000');
+  // Race condition mitigation: wait up to 10 seconds for locks
+  db.pragma('busy_timeout = 10000');
+  // Auto-checkpoint every 100 pages (~400KB) to prevent WAL bloat
+  db.pragma('wal_autocheckpoint = 100');
+
+  // Create lock file to help detect concurrent instances
+  lockFilePath = expandedPath + '.lock';
+  const pid = process.pid;
+  try {
+    writeFileSync(lockFilePath, `${pid}\n${new Date().toISOString()}`);
+  } catch {
+    // Non-fatal - lock file is advisory
+  }
+
+  // Register cleanup handlers for graceful shutdown
+  registerShutdownHandlers();
 
   // Run migrations FIRST for existing databases
   // This ensures columns exist before schema tries to create indexes on them
@@ -109,14 +124,65 @@ export function getDatabase(): Database.Database {
 }
 
 /**
- * Close the database connection
+ * Close the database connection with proper cleanup
  */
 export function closeDatabase(): void {
   if (db) {
+    try {
+      // Checkpoint WAL before closing to flush all changes
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // Ignore checkpoint errors on close
+    }
     db.close();
     db = null;
     currentDbPath = null;
+
+    // Remove lock file
+    if (lockFilePath && existsSync(lockFilePath)) {
+      try {
+        unlinkSync(lockFilePath);
+      } catch {
+        // Non-fatal
+      }
+      lockFilePath = null;
+    }
   }
+}
+
+/**
+ * Register handlers for graceful shutdown
+ */
+let shutdownRegistered = false;
+function registerShutdownHandlers(): void {
+  if (shutdownRegistered) return;
+  shutdownRegistered = true;
+
+  const cleanup = () => {
+    closeDatabase();
+  };
+
+  // Handle various termination signals
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+    cleanup();
+    process.exit(1);
+  });
+}
+
+/**
+ * Manually checkpoint the WAL file (call periodically for long-running processes)
+ */
+export function checkpointWal(): { walPages: number; checkpointed: number } {
+  const database = getDatabase();
+  const result = database.pragma('wal_checkpoint(PASSIVE)') as { busy: number; log: number; checkpointed: number }[];
+  return {
+    walPages: result[0]?.log || 0,
+    checkpointed: result[0]?.checkpointed || 0,
+  };
 }
 
 /**

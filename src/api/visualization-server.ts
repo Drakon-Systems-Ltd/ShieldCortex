@@ -9,7 +9,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { getDatabase, initDatabase } from '../database/init.js';
+import { getDatabase, initDatabase, checkpointWal } from '../database/init.js';
 import { Memory, MemoryConfig, DEFAULT_CONFIG } from '../memory/types.js';
 import {
   searchMemories,
@@ -437,14 +437,19 @@ export function startVisualizationServer(dbPath?: string): void {
       emitDecayTick(updates);
     }
 
-    // Persist decay scores to database every 5 minutes (10 ticks)
+    // Persist decay scores and checkpoint WAL every 5 minutes (10 ticks)
     decayTickCount++;
     if (decayTickCount >= 10) {
       decayTickCount = 0;
       try {
         updateDecayScores();
+        // Checkpoint WAL to prevent file bloat and reduce contention
+        const checkpoint = checkpointWal();
+        if (checkpoint.walPages > 0) {
+          console.log(`[WAL] Checkpointed ${checkpoint.checkpointed}/${checkpoint.walPages} pages`);
+        }
       } catch (error) {
-        console.error('[Decay] Failed to persist decay scores:', error);
+        console.error('[Maintenance] Failed to persist decay scores or checkpoint:', error);
       }
     }
   }, 30000);
