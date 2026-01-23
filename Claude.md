@@ -115,3 +115,11 @@ WS   /ws/events          - Real-time updates
 ## Known Issues
 - MCP server process caches - restart Claude Code after code changes
 - FTS5 queries with special characters need escaping (handled automatically)
+
+## Database Contention (Fixed)
+Multiple processes accessing the same SQLite database can cause crashes. Mitigations:
+- **Auto-checkpoint**: WAL auto-checkpoints every 100 pages (~400KB)
+- **Graceful shutdown**: Checkpoints WAL and removes lock file on exit
+- **Lock file**: Creates `.lock` file to help detect concurrent instances
+- **Increased timeout**: busy_timeout raised to 10 seconds
+- **Periodic maintenance**: API server checkpoints WAL every 5 minutes

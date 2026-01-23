@@ -60,9 +60,24 @@ async function fetchStats(project?: string): Promise<MemoryStats> {
 }
 
 // Fetch memory links
-async function fetchLinks(): Promise<MemoryLink[]> {
-  const response = await fetch(`${API_BASE}/api/links`);
+async function fetchLinks(project?: string): Promise<MemoryLink[]> {
+  const params = project ? `?project=${project}` : '';
+  const response = await fetch(`${API_BASE}/api/links${params}`);
   if (!response.ok) throw new Error('Failed to fetch links');
+  return response.json();
+}
+
+// Project info from API
+export interface ProjectInfo {
+  project: string | null;
+  memory_count: number;
+  label: string;
+}
+
+// Fetch list of projects
+async function fetchProjects(): Promise<{ projects: ProjectInfo[] }> {
+  const response = await fetch(`${API_BASE}/api/projects`);
+  if (!response.ok) throw new Error('Failed to fetch projects');
   return response.json();
 }
 
@@ -124,11 +139,20 @@ export function useStats(project?: string) {
 }
 
 // Hook: Get memory links
-export function useMemoryLinks() {
+export function useMemoryLinks(project?: string) {
   return useQuery({
-    queryKey: ['links'],
-    queryFn: fetchLinks,
+    queryKey: ['links', project],
+    queryFn: () => fetchLinks(project),
     refetchInterval: 60000, // Fallback poll every 60 seconds
+  });
+}
+
+// Hook: Get list of projects
+export function useProjects() {
+  return useQuery({
+    queryKey: ['projects'],
+    queryFn: fetchProjects,
+    refetchInterval: 60000, // Refresh project list every minute
   });
 }
 

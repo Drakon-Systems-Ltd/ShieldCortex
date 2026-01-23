@@ -236,25 +236,74 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // Get list of all projects
+  app.get('/api/projects', (_req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const projects = db.prepare(`
+        SELECT DISTINCT project, COUNT(*) as memory_count
+        FROM memories
+        WHERE project IS NOT NULL AND project != ''
+        GROUP BY project
+        ORDER BY memory_count DESC
+      `).all() as { project: string; memory_count: number }[];
+
+      // Add "All Projects" option with total count
+      const totalCount = db.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number };
+
+      res.json({
+        projects: [
+          { project: null, memory_count: totalCount.count, label: 'All Projects' },
+          ...projects.map(p => ({ ...p, label: p.project })),
+        ],
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Get memory links/relationships
   app.get('/api/links', (req: Request, res: Response) => {
     try {
+      const project = typeof req.query.project === 'string' ? req.query.project : undefined;
       const db = getDatabase();
-      const links = db.prepare(`
-        SELECT
-          ml.*,
-          m1.title as source_title,
-          m1.category as source_category,
-          m1.type as source_type,
-          m2.title as target_title,
-          m2.category as target_category,
-          m2.type as target_type
-        FROM memory_links ml
-        JOIN memories m1 ON ml.source_id = m1.id
-        JOIN memories m2 ON ml.target_id = m2.id
-        ORDER BY ml.created_at DESC
-        LIMIT 500
-      `).all();
+
+      const query = project
+        ? `
+          SELECT
+            ml.*,
+            m1.title as source_title,
+            m1.category as source_category,
+            m1.type as source_type,
+            m2.title as target_title,
+            m2.category as target_category,
+            m2.type as target_type
+          FROM memory_links ml
+          JOIN memories m1 ON ml.source_id = m1.id
+          JOIN memories m2 ON ml.target_id = m2.id
+          WHERE m1.project = ? OR m2.project = ?
+          ORDER BY ml.created_at DESC
+          LIMIT 500
+        `
+        : `
+          SELECT
+            ml.*,
+            m1.title as source_title,
+            m1.category as source_category,
+            m1.type as source_type,
+            m2.title as target_title,
+            m2.category as target_category,
+            m2.type as target_type
+          FROM memory_links ml
+          JOIN memories m1 ON ml.source_id = m1.id
+          JOIN memories m2 ON ml.target_id = m2.id
+          ORDER BY ml.created_at DESC
+          LIMIT 500
+        `;
+
+      const links = project
+        ? db.prepare(query).all(project, project)
+        : db.prepare(query).all();
 
       res.json(links);
     } catch (error) {

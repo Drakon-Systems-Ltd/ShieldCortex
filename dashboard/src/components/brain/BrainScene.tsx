@@ -9,20 +9,23 @@ import { Suspense, useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Environment, Stars } from '@react-three/drei';
 import { EffectComposer, Bloom } from '@react-three/postprocessing';
-import { Memory } from '@/types/memory';
+import { Memory, MemoryLink } from '@/types/memory';
 import { MemoryNode } from './MemoryNode';
+import { MemoryLinks } from './MemoryLinks';
 import { DataFlowParticles } from './DataFlowParticles';
 import { BrainRegions } from './BrainRegions';
 import { calculateMemoryPosition } from '@/lib/position-algorithm';
 
 interface BrainSceneProps {
   memories: Memory[];
+  links?: MemoryLink[];
   selectedMemory: Memory | null;
   onSelectMemory: (memory: Memory | null) => void;
 }
 
 function BrainContent({
   memories,
+  links = [],
   selectedMemory,
   onSelectMemory,
 }: BrainSceneProps) {
@@ -33,6 +36,15 @@ function BrainContent({
       position: calculateMemoryPosition(memory),
     }));
   }, [memories]);
+
+  // Create a map for quick position lookup by memory ID
+  const positionMap = useMemo(() => {
+    const map = new Map<number, { x: number; y: number; z: number }>();
+    memoryPositions.forEach(({ memory, position }) => {
+      map.set(memory.id, position);
+    });
+    return map;
+  }, [memoryPositions]);
 
   return (
     <>
@@ -46,6 +58,15 @@ function BrainContent({
 
       {/* Data flow particles */}
       <DataFlowParticles count={200} speed={0.4} />
+
+      {/* Memory links (connections between related memories) */}
+      {links.length > 0 && (
+        <MemoryLinks
+          memories={memories}
+          links={links}
+          memoryPositions={positionMap}
+        />
+      )}
 
       {/* Memory nodes */}
       {memoryPositions.map(({ memory, position }) => (
@@ -95,6 +116,7 @@ function BrainContent({
 
 export function BrainScene({
   memories,
+  links = [],
   selectedMemory,
   onSelectMemory,
 }: BrainSceneProps) {
@@ -108,6 +130,7 @@ export function BrainScene({
         <Suspense fallback={null}>
           <BrainContent
             memories={memories}
+            links={links}
             selectedMemory={selectedMemory}
             onSelectMemory={onSelectMemory}
           />

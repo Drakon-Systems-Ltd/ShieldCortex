@@ -7,7 +7,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import { useMemoriesWithRealtime, useStats, useAccessMemory, useConsolidate } from '@/hooks/useMemories';
+import { useMemoriesWithRealtime, useStats, useAccessMemory, useConsolidate, useProjects, useMemoryLinks } from '@/hooks/useMemories';
 import { useDashboardStore } from '@/lib/store';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useSuggestions } from '@/hooks/useSuggestions';
@@ -33,6 +33,10 @@ const BrainScene = dynamic(
 export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selectedProject, setSelectedProject] = useState<string | undefined>(undefined);
+  const [showFilters, setShowFilters] = useState(false);
+  const [typeFilter, setTypeFilter] = useState<string | undefined>(undefined);
+  const [categoryFilter, setCategoryFilter] = useState<string | undefined>(undefined);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
 
@@ -44,6 +48,9 @@ export default function DashboardPage() {
 
   // Search suggestions
   const { data: suggestions = [] } = useSuggestions(searchQuery);
+
+  // Fetch projects for dropdown
+  const { data: projectsData } = useProjects();
 
   // Close suggestions when clicking outside
   useEffect(() => {
@@ -77,8 +84,12 @@ export default function DashboardPage() {
     limit: 200,
     query: debouncedSearch || undefined,
     mode: debouncedSearch ? 'search' : 'recent',
+    project: selectedProject,
+    type: typeFilter,
+    category: categoryFilter,
   });
-  const { data: stats, isLoading: statsLoading } = useStats();
+  const { data: stats, isLoading: statsLoading } = useStats(selectedProject);
+  const { data: links = [] } = useMemoryLinks(selectedProject);
 
   // Mutations
   const accessMutation = useAccessMemory();
@@ -104,6 +115,21 @@ export default function DashboardPage() {
           <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent">
             Claude Memory Brain
           </h1>
+
+          {/* Project Selector */}
+          <select
+            value={selectedProject || ''}
+            onChange={(e) => setSelectedProject(e.target.value || undefined)}
+            className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500"
+          >
+            {projectsData?.projects.map((p) => (
+              <option key={p.project || 'all'} value={p.project || ''}>
+                {p.label} ({p.memory_count})
+              </option>
+            ))}
+          </select>
+
+          {/* Search Input */}
           <div className="relative">
             <Input
               ref={searchInputRef}
@@ -145,6 +171,16 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
+
+          {/* Filter Toggle */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowFilters(!showFilters)}
+            className={`border-slate-600 text-slate-300 hover:text-white hover:bg-slate-700 ${showFilters ? 'bg-slate-700' : ''}`}
+          >
+            Filters {(typeFilter || categoryFilter) && '•'}
+          </Button>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -166,6 +202,65 @@ export default function DashboardPage() {
         </div>
       </header>
 
+      {/* Filter Bar (collapsible) */}
+      {showFilters && (
+        <div className="h-12 border-b border-slate-800 flex items-center gap-4 px-4 bg-slate-900/30">
+          {/* Type filters */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400">Type:</span>
+            {['short_term', 'long_term', 'episodic'].map((type) => (
+              <button
+                key={type}
+                onClick={() => setTypeFilter(typeFilter === type ? undefined : type)}
+                className={`px-2 py-1 text-xs rounded-full transition-colors ${
+                  typeFilter === type
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                }`}
+              >
+                {type.replace('_', '-')}
+              </button>
+            ))}
+          </div>
+
+          <div className="w-px h-6 bg-slate-700" />
+
+          {/* Category filters */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400">Category:</span>
+            {['architecture', 'pattern', 'error', 'learning', 'preference', 'context'].map((cat) => (
+              <button
+                key={cat}
+                onClick={() => setCategoryFilter(categoryFilter === cat ? undefined : cat)}
+                className={`px-2 py-1 text-xs rounded-full transition-colors ${
+                  categoryFilter === cat
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          {/* Clear filters */}
+          {(typeFilter || categoryFilter) && (
+            <>
+              <div className="w-px h-6 bg-slate-700" />
+              <button
+                onClick={() => {
+                  setTypeFilter(undefined);
+                  setCategoryFilter(undefined);
+                }}
+                className="px-2 py-1 text-xs text-red-400 hover:text-red-300"
+              >
+                Clear all
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Sidebar - Stats */}
@@ -182,6 +277,7 @@ export default function DashboardPage() {
           ) : (
             <BrainScene
               memories={memories}
+              links={links}
               selectedMemory={selectedMemory}
               onSelectMemory={handleSelectMemory}
             />
