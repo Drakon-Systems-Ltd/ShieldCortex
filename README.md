@@ -25,7 +25,20 @@ Claude Memory works like a human brain:
 
 ### 1. Install
 
+**Option A: Install via npm (Recommended)**
+
 ```bash
+npm install -g claude-cortex
+```
+
+**Option B: Use with npx (no install)**
+
+Configure directly in `.mcp.json` (see step 2).
+
+**Option C: From source**
+
+```bash
+git clone https://github.com/mkdelta221/claude-cortex.git
 cd claude-cortex
 npm install
 npm run build
@@ -42,8 +55,8 @@ Create `.mcp.json` in your project directory:
   "mcpServers": {
     "memory": {
       "type": "stdio",
-      "command": "node",
-      "args": ["/path/to/claude-cortex/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "claude-cortex"]
     }
   }
 }
@@ -68,7 +81,7 @@ Add to `~/.claude/settings.json` for automatic memory extraction before compacti
         "hooks": [
           {
             "type": "command",
-            "command": "node /path/to/claude-cortex/scripts/pre-compact-hook.mjs"
+            "command": "npx -y claude-cortex-hook pre-compact"
           }
         ]
       }
