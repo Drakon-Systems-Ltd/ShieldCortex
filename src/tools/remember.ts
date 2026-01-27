@@ -25,6 +25,10 @@ export const rememberSchema = z.object({
   tags: z.array(z.string()).optional().describe('Tags for categorization'),
   importance: z.enum(['low', 'normal', 'high', 'critical']).optional()
     .describe('Override automatic salience detection'),
+  scope: z.enum(['project', 'global']).optional()
+    .describe('Memory scope: project (default) or global (cross-project)'),
+  transferable: z.boolean().optional()
+    .describe('Whether this memory can be transferred to other projects'),
 });
 
 export type RememberInput = z.infer<typeof rememberSchema>;
@@ -98,6 +102,8 @@ export async function executeRemember(input: RememberInput): Promise<{
       project: resolvedProject ?? undefined,
       tags: input.tags,
       salience: salienceOverride,
+      scope: input.scope,
+      transferable: input.transferable,
     });
 
     // Auto-detect and create relationships with existing memories

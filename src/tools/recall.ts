@@ -26,6 +26,8 @@ export const recallSchema = z.object({
     .describe('Maximum number of results'),
   includeDecayed: z.boolean().optional().default(false)
     .describe('Include memories that have decayed below threshold'),
+  includeGlobal: z.boolean().optional().default(true)
+    .describe('Include global memories in search results (default: true)'),
   mode: z.enum(['search', 'recent', 'important']).optional().default('search')
     .describe('Recall mode: search (query-based), recent (by time), important (by salience)'),
 });
@@ -67,6 +69,7 @@ export async function executeRecall(input: RecallInput): Promise<{
           tags: input.tags,
           limit: input.limit,
           includeDecayed: input.includeDecayed,
+          includeGlobal: input.includeGlobal,
         });
         memories = results.map(r => r.memory);
         break;

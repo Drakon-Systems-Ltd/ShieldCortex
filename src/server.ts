@@ -90,6 +90,10 @@ The system automatically detects importance, categorizes, and manages storage.`,
       tags: z.array(z.string()).optional().describe('Tags for categorization'),
       importance: z.enum(['low', 'normal', 'high', 'critical']).optional()
         .describe('Override automatic salience'),
+      scope: z.enum(['project', 'global']).optional()
+        .describe('Memory scope: project (default) or global (cross-project)'),
+      transferable: z.boolean().optional()
+        .describe('Whether this memory can be transferred to other projects'),
     },
     async (args) => {
       const result = await executeRemember(args);
@@ -122,6 +126,8 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Max results'),
       includeDecayed: z.boolean().optional().default(false)
         .describe('Include decayed memories'),
+      includeGlobal: z.boolean().optional().default(true)
+        .describe('Include global memories in search results (default: true)'),
       mode: z.enum(['search', 'recent', 'important']).optional().default('search')
         .describe('Recall mode'),
     },
