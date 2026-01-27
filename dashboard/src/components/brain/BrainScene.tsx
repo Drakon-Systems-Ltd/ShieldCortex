@@ -112,10 +112,10 @@ function BrainContent({
       <SynapseNetwork />
 
       {/* Electron flow particles */}
-      <ElectronFlow count={120} speed={0.6} size={0.035} />
+      <ElectronFlow count={250} speed={0.6} size={0.035} />
 
       {/* Decorative spiral flow */}
-      <SpiralFlow count={40} radius={4.5} speed={0.2} color="#4466ff" />
+      <SpiralFlow count={60} radius={4.5} speed={0.2} color="#FFB347" />
 
       {/* Memory links (connections between related memories) */}
       <MemoryLinks

@@ -22,9 +22,9 @@ interface ElectronFlowProps {
  * Particles flow from front (STM) to back (LTM) with some randomness
  */
 export function ElectronFlow({
-  count = 150,
+  count = 250,
   speed = 0.5,
-  color = '#00ffff',
+  color = '#FFD700',
   size = 0.04,
 }: ElectronFlowProps) {
   const pointsRef = useRef<THREE.Points>(null);
@@ -54,23 +54,23 @@ export function ElectronFlow({
       // Random phase for varied animation
       phases[i] = Math.random() * Math.PI * 2;
 
-      // Color gradient based on Z position (front=orange, middle=purple, back=blue)
+      // Color gradient based on Z position (front=bright gold, middle=warm gold, back=deep orange)
       const normalizedZ = (positions[i * 3 + 2] + 3) / 6;
       if (normalizedZ > 0.6) {
-        // Front - orange
+        // Front - bright gold (#FFD700)
         colors[i * 3] = 1.0;
-        colors[i * 3 + 1] = 0.5;
-        colors[i * 3 + 2] = 0.2;
+        colors[i * 3 + 1] = 0.843;
+        colors[i * 3 + 2] = 0.0;
       } else if (normalizedZ > 0.4) {
-        // Middle - purple
-        colors[i * 3] = 0.7;
-        colors[i * 3 + 1] = 0.3;
-        colors[i * 3 + 2] = 1.0;
+        // Middle - warm gold (#FFB347)
+        colors[i * 3] = 1.0;
+        colors[i * 3 + 1] = 0.702;
+        colors[i * 3 + 2] = 0.278;
       } else {
-        // Back - cyan/blue
-        colors[i * 3] = 0.2;
-        colors[i * 3 + 1] = 0.8;
-        colors[i * 3 + 2] = 1.0;
+        // Back - deep orange (#FF8C00)
+        colors[i * 3] = 1.0;
+        colors[i * 3 + 1] = 0.549;
+        colors[i * 3 + 2] = 0.0;
       }
     }
 
@@ -109,20 +109,23 @@ export function ElectronFlow({
         positions[i * 3 + 1] = (Math.random() - 0.5) * 2;
       }
 
-      // Update color based on new Z position
+      // Update color based on new Z position (golden gradient)
       const normalizedZ = (positions[i * 3 + 2] + 3.5) / 7;
       if (normalizedZ > 0.6) {
+        // Front - bright gold (#FFD700)
         colors[i * 3] = 1.0;
-        colors[i * 3 + 1] = 0.5 + normalizedZ * 0.3;
-        colors[i * 3 + 2] = 0.2;
+        colors[i * 3 + 1] = 0.843;
+        colors[i * 3 + 2] = 0.0;
       } else if (normalizedZ > 0.35) {
-        colors[i * 3] = 0.6 + normalizedZ * 0.2;
-        colors[i * 3 + 1] = 0.3;
-        colors[i * 3 + 2] = 0.8 + normalizedZ * 0.2;
+        // Middle - warm gold (#FFB347)
+        colors[i * 3] = 1.0;
+        colors[i * 3 + 1] = 0.702;
+        colors[i * 3 + 2] = 0.278;
       } else {
-        colors[i * 3] = 0.2;
-        colors[i * 3 + 1] = 0.6 + (1 - normalizedZ) * 0.3;
-        colors[i * 3 + 2] = 1.0;
+        // Back - deep orange (#FF8C00)
+        colors[i * 3] = 1.0;
+        colors[i * 3 + 1] = 0.549;
+        colors[i * 3 + 2] = 0.0;
       }
     }
 
@@ -250,10 +253,10 @@ export function ElectronBurst({
  * Spiral flow around the brain (decorative)
  */
 export function SpiralFlow({
-  count = 50,
+  count = 60,
   radius = 4,
   speed = 0.3,
-  color = '#4488ff',
+  color = '#FFB347',
 }: {
   count?: number;
   radius?: number;
