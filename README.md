@@ -43,7 +43,7 @@ Create `.mcp.json` in your project directory:
     "memory": {
       "type": "stdio",
       "command": "node",
-      "args": ["/path/to/claude-compact/dist/index.js"]
+      "args": ["/path/to/claude-cortex/dist/index.js"]
     }
   }
 }
@@ -68,7 +68,7 @@ Add to `~/.claude/settings.json` for automatic memory extraction before compacti
         "hooks": [
           {
             "type": "command",
-            "command": "node /path/to/claude-compact/scripts/pre-compact-hook.mjs"
+            "command": "node /path/to/claude-cortex/scripts/pre-compact-hook.mjs"
           }
         ]
       }
