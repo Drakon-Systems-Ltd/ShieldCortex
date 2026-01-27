@@ -205,3 +205,72 @@ export function useConsolidate() {
     },
   });
 }
+
+// ============================================
+// CONTROL API
+// ============================================
+
+// Control status response
+export interface ControlStatus {
+  paused: boolean;
+  uptime: number;
+  uptimeFormatted: string;
+}
+
+// Fetch control status
+async function fetchControlStatus(): Promise<ControlStatus> {
+  const response = await fetch(`${API_BASE}/api/control/status`);
+  if (!response.ok) throw new Error('Failed to fetch control status');
+  return response.json();
+}
+
+// Pause memory creation
+async function pauseMemoryCreation(): Promise<{ paused: boolean }> {
+  const response = await fetch(`${API_BASE}/api/control/pause`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to pause');
+  return response.json();
+}
+
+// Resume memory creation
+async function resumeMemoryCreation(): Promise<{ paused: boolean }> {
+  const response = await fetch(`${API_BASE}/api/control/resume`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to resume');
+  return response.json();
+}
+
+// Hook: Get control status
+export function useControlStatus() {
+  return useQuery({
+    queryKey: ['control-status'],
+    queryFn: fetchControlStatus,
+    refetchInterval: 10000, // Poll every 10 seconds for uptime updates
+  });
+}
+
+// Hook: Pause memory creation
+export function usePauseMemory() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: pauseMemoryCreation,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['control-status'] });
+    },
+  });
+}
+
+// Hook: Resume memory creation
+export function useResumeMemory() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: resumeMemoryCreation,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['control-status'] });
+    },
+  });
+}

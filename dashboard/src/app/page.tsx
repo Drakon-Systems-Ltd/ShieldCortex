@@ -2,17 +2,19 @@
 
 /**
  * Main Dashboard Page
- * Brain-like visualization of the Claude Memory system
+ * Brain-like visualization of the Claude Cortex memory system
  */
 
 import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import { useMemoriesWithRealtime, useStats, useAccessMemory, useConsolidate, useProjects, useMemoryLinks } from '@/hooks/useMemories';
+import { useMemoriesWithRealtime, useStats, useAccessMemory, useConsolidate, useProjects, useMemoryLinks, useControlStatus, usePauseMemory, useResumeMemory } from '@/hooks/useMemories';
 import { useDashboardStore } from '@/lib/store';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useSuggestions } from '@/hooks/useSuggestions';
 import { StatsPanel } from '@/components/dashboard/StatsPanel';
 import { MemoryDetail } from '@/components/memory/MemoryDetail';
+import { ControlPanel } from '@/components/controls/ControlPanel';
+import { DebugPanel } from '@/components/debug/DebugPanel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Memory } from '@/types/memory';
@@ -95,6 +97,12 @@ export default function DashboardPage() {
   const accessMutation = useAccessMemory();
   const consolidateMutation = useConsolidate();
 
+  // Control status
+  const { data: controlStatus } = useControlStatus();
+  const pauseMutation = usePauseMemory();
+  const resumeMutation = useResumeMemory();
+  const isPaused = controlStatus?.paused ?? false;
+
   const handleSelectMemory = (memory: Memory | null) => {
     setSelectedMemory(memory);
   };
@@ -114,13 +122,15 @@ export default function DashboardPage() {
     consolidateMutation.mutate();
   };
 
+  const [showDebugPanel, setShowDebugPanel] = useState(true);
+
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
       {/* Top Bar */}
       <header className="h-14 border-b border-slate-800 flex items-center justify-between px-4 bg-slate-900/50 backdrop-blur-sm shrink-0">
         <div className="flex items-center gap-4">
           <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent">
-            Claude Memory Brain
+            🧠 Claude Cortex
           </h1>
 
           {/* Project Selector */}
@@ -190,6 +200,20 @@ export default function DashboardPage() {
           </Button>
         </div>
         <div className="flex items-center gap-2">
+          {/* Quick Pause/Resume Toggle */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => isPaused ? resumeMutation.mutate() : pauseMutation.mutate()}
+            disabled={pauseMutation.isPending || resumeMutation.isPending}
+            className={`${
+              isPaused
+                ? 'border-orange-600 bg-orange-600/20 text-orange-300 hover:bg-orange-600/30'
+                : 'border-slate-600 text-slate-300 hover:text-white hover:bg-slate-700'
+            }`}
+          >
+            {isPaused ? '▶ Resume' : '⏸ Pause'}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -197,12 +221,12 @@ export default function DashboardPage() {
             disabled={consolidateMutation.isPending}
             className="border-slate-600 text-slate-300 hover:text-white hover:bg-slate-700"
           >
-            {consolidateMutation.isPending ? 'Processing...' : 'Consolidate'}
+            {consolidateMutation.isPending ? '...' : '🔄'}
           </Button>
           <div className="flex items-center gap-2 text-xs text-slate-400 px-2">
             <span
-              className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500'}`}
-              title={isConnected ? 'Real-time connected' : 'Polling mode'}
+              className={`w-2 h-2 rounded-full ${isPaused ? 'bg-orange-500 animate-pulse' : (isConnected ? 'bg-green-500' : 'bg-yellow-500')}`}
+              title={isPaused ? 'Memory creation paused' : (isConnected ? 'Real-time connected' : 'Polling mode')}
             />
             {memories.length} memories
           </div>
@@ -270,9 +294,10 @@ export default function DashboardPage() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Stats */}
-        <div className="w-64 border-r border-slate-800 overflow-y-auto p-4 bg-slate-900/30 shrink-0">
+        {/* Left Sidebar - Stats & Controls */}
+        <div className="w-64 border-r border-slate-800 overflow-y-auto p-4 bg-slate-900/30 shrink-0 space-y-4">
           <StatsPanel stats={stats} isLoading={statsLoading} />
+          <ControlPanel />
         </div>
 
         {/* Center - Brain Visualization */}
@@ -305,6 +330,9 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Debug Panel (bottom) */}
+      {showDebugPanel && <DebugPanel />}
     </div>
   );
 }

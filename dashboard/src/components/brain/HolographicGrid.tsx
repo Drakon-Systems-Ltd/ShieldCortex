@@ -43,8 +43,8 @@ function createGridShaderMaterial(color: THREE.Color, baseOpacity: number) {
       uBaseOpacity: { value: baseOpacity },
       uPulseOpacity: { value: 0 },
       uScanLineY: { value: 0 },
-      uScanLineWidth: { value: 0.5 },
-      uScanLineIntensity: { value: 0.3 },
+      uScanLineWidth: { value: 0.3 },
+      uScanLineIntensity: { value: 0.15 },
       uTime: { value: 0 },
     },
     vertexShader: `
@@ -93,7 +93,7 @@ function createGridShaderMaterial(color: THREE.Color, baseOpacity: number) {
 export function HolographicGrid({
   radius = 6,
   color = '#FFB347',
-  opacity = 0.08,
+  opacity = 0.04,
   enablePulse = true,
   enableScanLine = true,
   scanLineSpeed = 1,
@@ -179,7 +179,7 @@ export function HolographicGrid({
 export function HolographicGridSimple({
   radius = 6,
   color = '#FFB347',
-  opacity = 0.08,
+  opacity = 0.04,
   enablePulse = true,
   visible = true,
 }: Omit<HolographicGridProps, 'enableScanLine' | 'scanLineSpeed'>) {

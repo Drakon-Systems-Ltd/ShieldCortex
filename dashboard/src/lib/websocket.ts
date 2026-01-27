@@ -13,6 +13,7 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws/events'
 export type WebSocketEventType =
   | 'initial_state'
   | 'memory_created'
+  | 'memory_accessed'
   | 'memory_updated'
   | 'memory_deleted'
   | 'consolidation_complete'
@@ -22,6 +23,9 @@ export type WebSocketEventType =
   | 'worker_medium_tick'
   | 'link_discovered'
   | 'predictive_consolidation';
+
+// Alias for backwards compatibility
+export type MemoryEventType = WebSocketEventType;
 
 interface WebSocketMessage {
   type: WebSocketEventType;
@@ -49,7 +53,11 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
   const reconnectAttemptsRef = useRef(0);
   const reconnectDelayRef = useRef(INITIAL_RECONNECT_DELAY);
   const [isConnected, setIsConnected] = useState(false);
-  const [lastEvent, setLastEvent] = useState<WebSocketEventType | null>(null);
+  const [lastEvent, setLastEvent] = useState<{
+    type: WebSocketEventType;
+    data?: unknown;
+    timestamp: string;
+  } | null>(null);
 
   const connect = useCallback(() => {
     if (!enabled || wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -74,8 +82,12 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
 
       ws.onmessage = (event) => {
         try {
-          const message = JSON.parse(event.data) as WebSocketMessage;
-          setLastEvent(message.type);
+          const message = JSON.parse(event.data) as WebSocketMessage & { timestamp?: string };
+          setLastEvent({
+            type: message.type,
+            data: message.data,
+            timestamp: message.timestamp || new Date().toISOString(),
+          });
 
           // Notify external handler
           onMessage?.(message);
@@ -134,8 +146,10 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
         }
       };
 
-      ws.onerror = (error) => {
-        console.error('[WebSocket] Error:', error);
+      ws.onerror = () => {
+        // Use warn instead of error to avoid Next.js error overlay in dev mode
+        // WebSocket connection failures are expected when API server isn't running
+        console.warn('[WebSocket] Connection failed - is the API server running?');
       };
 
       ws.onclose = () => {

@@ -10,6 +10,11 @@ import { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 
+// Jarvis-style golden/orange color palette
+const JARVIS_GOLD = '#FFD700';
+const JARVIS_ORANGE = '#FF8C00';
+const JARVIS_AMBER = '#FFB347';
+
 // Shared geometries to prevent memory leaks (created once, reused by all nodes)
 const SYNAPSE_OUTER_GEOMETRY = new THREE.SphereGeometry(1, 8, 8);
 const SYNAPSE_INNER_GEOMETRY = new THREE.SphereGeometry(1, 12, 12);
@@ -37,12 +42,12 @@ export function SynapseNode({
   const glowRef = useRef<THREE.Mesh>(null);
   const outerGlowRef = useRef<THREE.Mesh>(null);
 
-  // Determine color based on activity if not specified
+  // Determine color based on activity if not specified - Jarvis golden theme
   const synapseColor = useMemo(() => {
     if (color) return color;
-    if (activity > 0.7) return '#ff4400'; // High activity - red/orange
-    if (activity > 0.4) return '#ffaa00'; // Medium activity - yellow
-    return '#00aaff'; // Low activity - cyan
+    if (activity > 0.7) return JARVIS_GOLD; // High activity - bright gold
+    if (activity > 0.4) return JARVIS_AMBER; // Medium activity - warm gold
+    return JARVIS_ORANGE; // Low activity - deep orange
   }, [color, activity]);
 
   useFrame((state) => {
@@ -143,7 +148,7 @@ interface ActionPotentialProps {
 export function ActionPotential({
   position,
   onComplete,
-  color = '#ffffff',
+  color = JARVIS_GOLD, // Changed from white to Jarvis gold
 }: ActionPotentialProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const progressRef = useRef(0);
@@ -190,7 +195,7 @@ export function ActionPotential({
 export function SynapticSpark({
   position,
   direction,
-  color = '#00ffff',
+  color = JARVIS_AMBER, // Changed from cyan to Jarvis amber
 }: {
   position: [number, number, number];
   direction: [number, number, number];

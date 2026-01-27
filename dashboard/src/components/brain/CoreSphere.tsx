@@ -57,7 +57,7 @@ export function CoreSphere({
       new THREE.MeshBasicMaterial({
         color: '#FFA500',
         transparent: true,
-        opacity: 0.6,
+        opacity: 0.15,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -70,7 +70,7 @@ export function CoreSphere({
       new THREE.MeshBasicMaterial({
         color: '#FFB700',
         transparent: true,
-        opacity: 0.35,
+        opacity: 0.08,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -83,7 +83,7 @@ export function CoreSphere({
       new THREE.MeshBasicMaterial({
         color: '#FFC500',
         transparent: true,
-        opacity: 0.18,
+        opacity: 0.04,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -96,7 +96,7 @@ export function CoreSphere({
       new THREE.MeshBasicMaterial({
         color: '#FFD700',
         transparent: true,
-        opacity: 0.08,
+        opacity: 0.02,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -139,33 +139,33 @@ export function CoreSphere({
 
     // Glow layer 1 - larger, synced with core
     if (glow1Ref.current) {
-      const glow1Scale = radius * 1.6 * (1 + combinedPulse * 0.2);
+      const glow1Scale = radius * 1.6 * (1 + combinedPulse * 0.1);
       glow1Ref.current.scale.setScalar(glow1Scale);
-      glow1Material.opacity = (0.4 + combinedPulse * 0.25) * (0.6 + activity * 0.4);
+      glow1Material.opacity = (0.1 + combinedPulse * 0.06) * (0.6 + activity * 0.4);
     }
 
     // Glow layer 2 - slightly phase-shifted for depth
     if (glow2Ref.current) {
       const phase2 = Math.sin(time * pulseSpeed - 0.3) * 0.5 + 0.5;
-      const glow2Scale = radius * 2.4 * (1 + phase2 * 0.18);
+      const glow2Scale = radius * 2.0 * (1 + phase2 * 0.08);
       glow2Ref.current.scale.setScalar(glow2Scale);
-      glow2Material.opacity = (0.25 + phase2 * 0.15) * (0.5 + activity * 0.5);
+      glow2Material.opacity = (0.05 + phase2 * 0.04) * (0.5 + activity * 0.5);
     }
 
     // Glow layer 3 - more phase shift, slower feel
     if (glow3Ref.current) {
       const phase3 = Math.sin(time * pulseSpeed * 0.7 - 0.6) * 0.5 + 0.5;
-      const glow3Scale = radius * 3.5 * (1 + phase3 * 0.15);
+      const glow3Scale = radius * 2.4 * (1 + phase3 * 0.06);
       glow3Ref.current.scale.setScalar(glow3Scale);
-      glow3Material.opacity = (0.12 + phase3 * 0.1) * (0.4 + activity * 0.6);
+      glow3Material.opacity = (0.025 + phase3 * 0.02) * (0.4 + activity * 0.6);
     }
 
     // Glow layer 4 - outermost, slowest, most ethereal
     if (glow4Ref.current) {
       const phase4 = Math.sin(time * pulseSpeed * 0.5 - 0.9) * 0.5 + 0.5;
-      const glow4Scale = radius * 5.0 * (1 + phase4 * 0.12);
+      const glow4Scale = radius * 3.0 * (1 + phase4 * 0.05);
       glow4Ref.current.scale.setScalar(glow4Scale);
-      glow4Material.opacity = (0.05 + phase4 * 0.06) * (0.3 + activity * 0.7);
+      glow4Material.opacity = (0.01 + phase4 * 0.015) * (0.3 + activity * 0.7);
     }
   });
 
@@ -176,7 +176,7 @@ export function CoreSphere({
         ref={glow4Ref}
         geometry={GLOW_GEOMETRY}
         material={glow4Material}
-        scale={radius * 5.0}
+        scale={radius * 3.0}
       />
 
       {/* Glow layer 3 - lighter gold */}
@@ -184,7 +184,7 @@ export function CoreSphere({
         ref={glow3Ref}
         geometry={GLOW_GEOMETRY}
         material={glow3Material}
-        scale={radius * 3.5}
+        scale={radius * 2.4}
       />
 
       {/* Glow layer 2 - transitioning gold */}
@@ -192,7 +192,7 @@ export function CoreSphere({
         ref={glow2Ref}
         geometry={GLOW_GEOMETRY}
         material={glow2Material}
-        scale={radius * 2.4}
+        scale={radius * 2.0}
       />
 
       {/* Inner glow layer 1 - orange-gold */}

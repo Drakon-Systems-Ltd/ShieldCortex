@@ -22,11 +22,11 @@ interface RingConfig {
 
 // Ring configurations with different radii and tilts for visual variety
 const RING_CONFIGS: RingConfig[] = [
-  { radius: 4.0, tiltX: 0.3, tiltZ: 0.1, particleCount: 40, speed: 0.8, colorIndex: 0 },
-  { radius: 4.5, tiltX: -0.2, tiltZ: 0.4, particleCount: 45, speed: 0.6, colorIndex: 1 },
-  { radius: 5.0, tiltX: 0.5, tiltZ: -0.2, particleCount: 50, speed: 0.7, colorIndex: 2 },
-  { radius: 5.5, tiltX: -0.4, tiltZ: -0.3, particleCount: 35, speed: 0.9, colorIndex: 0 },
-  { radius: 6.0, tiltX: 0.1, tiltZ: 0.5, particleCount: 30, speed: 0.5, colorIndex: 1 },
+  { radius: 4.0, tiltX: 0.3, tiltZ: 0.1, particleCount: 16, speed: 0.8, colorIndex: 0 },
+  { radius: 4.5, tiltX: -0.2, tiltZ: 0.4, particleCount: 18, speed: 0.6, colorIndex: 1 },
+  { radius: 5.0, tiltX: 0.5, tiltZ: -0.2, particleCount: 20, speed: 0.7, colorIndex: 2 },
+  { radius: 5.5, tiltX: -0.4, tiltZ: -0.3, particleCount: 14, speed: 0.9, colorIndex: 0 },
+  { radius: 6.0, tiltX: 0.1, tiltZ: 0.5, particleCount: 12, speed: 0.5, colorIndex: 1 },
 ];
 
 // Golden color palette matching the Jarvis aesthetic
@@ -126,10 +126,10 @@ function DataStreamRing({ config }: DataStreamRingProps) {
           />
         </bufferGeometry>
         <pointsMaterial
-          size={0.06}
+          size={0.04}
           vertexColors
           transparent
-          opacity={0.7}
+          opacity={0.4}
           blending={THREE.AdditiveBlending}
           depthWrite={false}
           sizeAttenuation

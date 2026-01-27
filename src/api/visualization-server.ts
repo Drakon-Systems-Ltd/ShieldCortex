@@ -34,6 +34,7 @@ import { detectContradictions, getContradictionsFor } from '../memory/contradict
 import { enrichMemory } from '../memory/store.js';
 import { memoryEvents, MemoryEvent, emitDecayTick } from './events.js';
 import { BrainWorker } from '../worker/brain-worker.js';
+import { isPaused, pause, resume, getControlStatus } from './control.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -169,6 +170,14 @@ export function startVisualizationServer(dbPath?: string): void {
 
       res.status(201).json(memory);
     } catch (error) {
+      // Handle paused state gracefully
+      if ((error as Error).name === 'MemoryPausedError') {
+        return res.status(503).json({
+          error: 'Memory creation is paused',
+          paused: true,
+          message: 'Use the dashboard control panel to resume memory creation.',
+        });
+      }
       res.status(500).json({ error: (error as Error).message });
     }
   });
@@ -379,6 +388,40 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // ============================================
+  // CONTROL ENDPOINTS
+  // ============================================
+
+  // Get control status
+  app.get('/api/control/status', (_req: Request, res: Response) => {
+    try {
+      const status = getControlStatus();
+      res.json(status);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Pause memory creation
+  app.post('/api/control/pause', (_req: Request, res: Response) => {
+    try {
+      pause();
+      res.json({ paused: true, message: 'Memory creation paused' });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Resume memory creation
+  app.post('/api/control/resume', (_req: Request, res: Response) => {
+    try {
+      resume();
+      res.json({ paused: false, message: 'Memory creation resumed' });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Get memory links/relationships
   app.get('/api/links', (req: Request, res: Response) => {
     try {
@@ -423,6 +466,78 @@ export function startVisualizationServer(dbPath?: string): void {
         : db.prepare(query).all();
 
       res.json(links);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // SQL CONSOLE ENDPOINT
+  // ============================================
+
+  // Execute SQL query (with safety restrictions)
+  app.post('/api/sql', (req: Request, res: Response) => {
+    try {
+      const { query, allowWrite } = req.body;
+
+      if (!query || typeof query !== 'string') {
+        return res.status(400).json({ error: 'Query string required' });
+      }
+
+      const upperQuery = query.toUpperCase().trim();
+
+      // Always block DROP and TRUNCATE
+      if (upperQuery.includes('DROP') || upperQuery.includes('TRUNCATE')) {
+        return res.status(403).json({
+          error: 'DROP and TRUNCATE operations are blocked for safety',
+        });
+      }
+
+      // Block writes unless explicitly allowed
+      const isWriteOperation =
+        upperQuery.startsWith('INSERT') ||
+        upperQuery.startsWith('UPDATE') ||
+        upperQuery.startsWith('DELETE') ||
+        upperQuery.startsWith('ALTER') ||
+        upperQuery.startsWith('CREATE');
+
+      if (isWriteOperation && !allowWrite) {
+        return res.status(403).json({
+          error: 'Write operations are disabled. Enable allowWrite to execute.',
+        });
+      }
+
+      const db = getDatabase();
+      const startTime = Date.now();
+
+      // Execute query
+      const isSelect = upperQuery.startsWith('SELECT') || upperQuery.startsWith('PRAGMA');
+
+      if (isSelect) {
+        const rows = db.prepare(query).all() as Record<string, unknown>[];
+        const executionTime = Date.now() - startTime;
+
+        // Get column names from first row or empty
+        const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+
+        res.json({
+          columns,
+          rows,
+          rowCount: rows.length,
+          executionTime,
+        });
+      } else {
+        // Write operation
+        const result = db.prepare(query).run();
+        const executionTime = Date.now() - startTime;
+
+        res.json({
+          columns: ['changes', 'lastInsertRowid'],
+          rows: [{ changes: result.changes, lastInsertRowid: result.lastInsertRowid }],
+          rowCount: 1,
+          executionTime,
+        });
+      }
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -716,7 +831,7 @@ export function startVisualizationServer(dbPath?: string): void {
   server.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║           Claude Memory Visualization Server                  ║
+║             🧠 Claude Cortex API Server                       ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  REST API:    http://localhost:${PORT}/api                        ║
 ║  WebSocket:   ws://localhost:${PORT}/ws/events                    ║
@@ -734,7 +849,12 @@ export function startVisualizationServer(dbPath?: string): void {
 ║    GET  /api/context        - Context summary                ║
 ║    GET  /api/suggestions    - Search autocomplete            ║
 ║                                                              ║
-║  Brain Worker (Phase 4):                                     ║
+║  Control:                                                    ║
+║    GET  /api/control/status - Get pause state & uptime       ║
+║    POST /api/control/pause  - Pause memory creation          ║
+║    POST /api/control/resume - Resume memory creation         ║
+║                                                              ║
+║  Brain Worker:                                               ║
 ║    GET  /api/worker/status       - Worker status             ║
 ║    POST /api/worker/trigger-light  - Trigger light tick      ║
 ║    POST /api/worker/trigger-medium - Trigger medium tick     ║

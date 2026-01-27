@@ -39,6 +39,7 @@ import {
   emitMemoryUpdated,
 } from '../api/events.js';
 import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
+import { isPaused } from '../api/control.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -140,12 +141,27 @@ function detectGlobalPattern(content: string, category: MemoryCategory, tags: st
 }
 
 /**
+ * Error thrown when memory creation is paused
+ */
+export class MemoryPausedError extends Error {
+  constructor() {
+    super('Memory creation is currently paused. Use the dashboard to resume.');
+    this.name = 'MemoryPausedError';
+  }
+}
+
+/**
  * Add a new memory
  */
 export function addMemory(
   input: MemoryInput,
   config: MemoryConfig = DEFAULT_CONFIG
 ): Memory {
+  // Check if memory creation is paused
+  if (isPaused()) {
+    throw new MemoryPausedError();
+  }
+
   const db = getDatabase();
 
   // Calculate salience if not provided

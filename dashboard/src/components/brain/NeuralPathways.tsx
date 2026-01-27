@@ -13,20 +13,27 @@ import { useFrame } from '@react-three/fiber';
 import { Line } from '@react-three/drei';
 import * as THREE from 'three';
 
-// Major pathway definitions
+// Jarvis-style golden/orange color palette
+const JARVIS_GOLD = '#FFD700';
+const JARVIS_ORANGE = '#FF8C00';
+const JARVIS_AMBER = '#FFB347';
+const JARVIS_LIGHT_AMBER = '#FFCC66';
+const JARVIS_CYAN = '#00D4FF'; // Accent color for contrast
+
+// Major pathway definitions - Jarvis golden theme
 const MAJOR_PATHWAYS = [
   // Central axis: STM → Episodic → LTM
   {
     id: 'central-forward',
     points: [[0, 0, 3.5], [0, 0.5, 1.5], [0, 0.3, 0]],
-    color: '#ff8800',
+    color: JARVIS_GOLD,
     intensity: 1.0,
     label: 'STM → Episodic',
   },
   {
     id: 'central-back',
     points: [[0, 0.3, 0], [0, 0.5, -1.5], [0, 0, -3.5]],
-    color: '#8844ff',
+    color: JARVIS_ORANGE,
     intensity: 0.9,
     label: 'Episodic → LTM',
   },
@@ -34,7 +41,7 @@ const MAJOR_PATHWAYS = [
   {
     id: 'left-tract',
     points: [[-2, 0, 2.5], [-2.5, 0.3, 0], [-2, 0, -2.5]],
-    color: '#00ff88',
+    color: JARVIS_AMBER,
     intensity: 0.7,
     label: 'Left Hemisphere',
   },
@@ -42,15 +49,15 @@ const MAJOR_PATHWAYS = [
   {
     id: 'right-tract',
     points: [[2, 0, 2.5], [2.5, 0.3, 0], [2, 0, -2.5]],
-    color: '#00ff88',
+    color: JARVIS_AMBER,
     intensity: 0.7,
     label: 'Right Hemisphere',
   },
-  // Corpus callosum (cross-hemisphere)
+  // Corpus callosum (cross-hemisphere) - cyan accent for visual interest
   {
     id: 'corpus-callosum',
     points: [[-2.5, 0.2, 0], [0, 0.8, 0], [2.5, 0.2, 0]],
-    color: '#ff00ff',
+    color: JARVIS_CYAN,
     intensity: 0.8,
     label: 'Cross-Hemisphere',
   },
@@ -58,28 +65,28 @@ const MAJOR_PATHWAYS = [
   {
     id: 'left-frontal',
     points: [[-1.5, 0.5, 2.5], [-2, 0.3, 0.5]],
-    color: '#ffaa00',
+    color: JARVIS_LIGHT_AMBER,
     intensity: 0.5,
     label: 'Left Frontal',
   },
   {
     id: 'right-frontal',
     points: [[1.5, 0.5, 2.5], [2, 0.3, 0.5]],
-    color: '#ffaa00',
+    color: JARVIS_LIGHT_AMBER,
     intensity: 0.5,
     label: 'Right Frontal',
   },
   {
     id: 'left-occipital',
     points: [[-1.5, 0.3, -2.5], [-2, 0.2, -0.5]],
-    color: '#4488ff',
+    color: JARVIS_ORANGE,
     intensity: 0.5,
     label: 'Left Occipital',
   },
   {
     id: 'right-occipital',
     points: [[1.5, 0.3, -2.5], [2, 0.2, -0.5]],
-    color: '#4488ff',
+    color: JARVIS_ORANGE,
     intensity: 0.5,
     label: 'Right Occipital',
   },
@@ -248,13 +255,13 @@ function DendriteNetwork({ count = 60 }: { count?: number }) {
         phi + (Math.random() - 0.5) * 0.3
       );
 
-      // Color based on position (depth)
+      // Color based on position (depth) - Jarvis golden variants
       const normalizedZ = (start[2] + 3.5) / 7;
       const color = normalizedZ > 0.6
-        ? '#ff8844' // Front - orange
+        ? JARVIS_GOLD // Front - bright gold
         : normalizedZ > 0.4
-        ? '#aa66ff' // Middle - purple
-        : '#4488ff'; // Back - blue
+        ? JARVIS_AMBER // Middle - warm gold
+        : JARVIS_ORANGE; // Back - deep orange
 
       return { start, end, color, opacity: 0.15 + Math.random() * 0.15 };
     });
@@ -322,14 +329,14 @@ function PathwayJunction({
   );
 }
 
-// Junction positions where pathways meet
+// Junction positions where pathways meet - Jarvis golden theme
 const JUNCTIONS = [
-  { position: [0, 0.5, 1.5] as [number, number, number], color: '#ff8800' },
-  { position: [0, 0.3, 0] as [number, number, number], color: '#aa44ff' },
-  { position: [0, 0.5, -1.5] as [number, number, number], color: '#4488ff' },
-  { position: [-2.5, 0.3, 0] as [number, number, number], color: '#00ff88' },
-  { position: [2.5, 0.3, 0] as [number, number, number], color: '#00ff88' },
-  { position: [0, 0.8, 0] as [number, number, number], color: '#ff00ff' },
+  { position: [0, 0.5, 1.5] as [number, number, number], color: JARVIS_GOLD },
+  { position: [0, 0.3, 0] as [number, number, number], color: JARVIS_AMBER },
+  { position: [0, 0.5, -1.5] as [number, number, number], color: JARVIS_ORANGE },
+  { position: [-2.5, 0.3, 0] as [number, number, number], color: JARVIS_AMBER },
+  { position: [2.5, 0.3, 0] as [number, number, number], color: JARVIS_AMBER },
+  { position: [0, 0.8, 0] as [number, number, number], color: JARVIS_CYAN },
 ];
 
 /**
@@ -379,11 +386,12 @@ export function MemoryConnection({
   strength: number;
   relationship: string;
 }) {
+  // Jarvis-style golden theme with cyan accent
   const COLORS: Record<string, string> = {
-    references: '#00d4ff',
-    extends: '#00ff88',
-    contradicts: '#ff6b6b',
-    related: '#b388ff',
+    references: JARVIS_CYAN, // Cyan accent for contrast
+    extends: JARVIS_GOLD,
+    contradicts: '#FF6B6B', // Keep error red
+    related: JARVIS_AMBER,
   };
 
   const color = COLORS[relationship] || COLORS.related;
