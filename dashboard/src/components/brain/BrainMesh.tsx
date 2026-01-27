@@ -107,12 +107,12 @@ export function BrainMesh({
   const brainMaterial = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
-        color: '#1a1a3a',
+        color: '#1A0A00',
         transparent: true,
         opacity: opacity,
         metalness: 0.3,
         roughness: 0.7,
-        emissive: '#0044aa',
+        emissive: '#FF8C00',
         emissiveIntensity: 0.1,
         side: THREE.DoubleSide,
         vertexColors: true,
@@ -123,10 +123,10 @@ export function BrainMesh({
   const wireframeMaterial = useMemo(
     () =>
       new THREE.MeshBasicMaterial({
-        color: '#00aaff',
+        color: '#FFB347',
         wireframe: true,
         transparent: true,
-        opacity: 0.06,
+        opacity: 0.12,
       }),
     []
   );
@@ -134,7 +134,7 @@ export function BrainMesh({
   const coreMaterial = useMemo(
     () =>
       new THREE.MeshBasicMaterial({
-        color: '#4466ff',
+        color: '#FF8C00',
         transparent: true,
         opacity: 0.08,
         depthWrite: false,
@@ -159,12 +159,17 @@ export function BrainMesh({
 
     const time = state.clock.elapsedTime;
 
+    // Subtle holographic flicker (occasional micro-glitches)
+    const flicker = Math.random() > 0.98 ? 0.03 : 0;
+
     // Gentle breathing
     const breathe = Math.sin(time * 0.5) * 0.015 * pulseIntensity + 1;
     meshRef.current.scale.setScalar(breathe);
 
     if (wireframeRef.current) {
       wireframeRef.current.scale.setScalar(breathe * 1.002);
+      // Apply flicker to wireframe for holographic effect
+      (wireframeRef.current.material as THREE.MeshBasicMaterial).opacity = 0.12 + flicker;
     }
 
     // Core pulsing
@@ -172,12 +177,12 @@ export function BrainMesh({
       const corePulse = Math.sin(time * 1.5) * 0.1 + 0.9;
       coreRef.current.scale.setScalar(corePulse);
       (coreRef.current.material as THREE.MeshBasicMaterial).opacity =
-        0.05 + Math.sin(time * 2) * 0.03;
+        0.05 + Math.sin(time * 2) * 0.03 + flicker;
     }
 
-    // Emissive intensity pulsing
+    // Emissive intensity pulsing with flicker
     (meshRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity =
-      0.08 + Math.sin(time * 0.8) * 0.04;
+      0.08 + Math.sin(time * 0.8) * 0.04 + flicker;
   });
 
   return (
