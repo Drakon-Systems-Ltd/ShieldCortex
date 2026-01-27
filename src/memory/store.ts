@@ -38,7 +38,7 @@ import {
   emitMemoryDeleted,
   emitMemoryUpdated,
 } from '../api/events.js';
-import { generateEmbedding } from '../embeddings/index.js';
+import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -660,6 +660,53 @@ function extractQueryTags(query: string): string[] {
     /^[a-z][a-z0-9-]*$/.test(w) &&
     !['the', 'and', 'for', 'with', 'how', 'what', 'when', 'where', 'why'].includes(w)
   );
+}
+
+/**
+ * Search memories by vector similarity
+ * Returns memories sorted by cosine similarity to the query embedding
+ */
+function vectorSearch(
+  queryEmbedding: Float32Array,
+  limit: number,
+  project?: string,
+  includeGlobal: boolean = true
+): Array<{ memory: Memory; similarity: number }> {
+  const db = getDatabase();
+
+  // Get memories with embeddings
+  let query = `
+    SELECT * FROM memories
+    WHERE embedding IS NOT NULL
+  `;
+  const params: unknown[] = [];
+
+  if (project && includeGlobal) {
+    query += ` AND (project = ? OR scope = 'global')`;
+    params.push(project);
+  } else if (project) {
+    query += ` AND project = ?`;
+    params.push(project);
+  }
+
+  const rows = db.prepare(query).all(...params) as Record<string, unknown>[];
+
+  // Calculate similarities
+  const results = rows
+    .map(row => {
+      const embeddingBuffer = row.embedding as Buffer;
+      const embedding = new Float32Array(embeddingBuffer.buffer, embeddingBuffer.byteOffset, embeddingBuffer.length / 4);
+      const similarity = cosineSimilarity(queryEmbedding, embedding);
+      return {
+        memory: rowToMemory(row),
+        similarity,
+      };
+    })
+    .filter(r => r.similarity > 0.3) // Threshold for relevance
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit);
+
+  return results;
 }
 
 /**
