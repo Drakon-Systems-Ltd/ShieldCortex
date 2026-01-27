@@ -1,10 +1,13 @@
 /**
  * Category Colors
  * Visual color mappings for memory categories
+ *
+ * Includes both classic (cool blue/purple) and Jarvis (warm gold/orange) palettes
  */
 
 import { MemoryCategory, MemoryType } from '@/types/memory';
 
+// Classic color palette (cool blues and purples)
 export const CATEGORY_COLORS: Record<MemoryCategory, string> = {
   architecture: '#3B82F6',  // Blue
   pattern: '#8B5CF6',       // Purple
@@ -24,11 +27,48 @@ export const TYPE_COLORS: Record<MemoryType, string> = {
   episodic: '#8B5CF6',      // Purple
 };
 
+// Jarvis color palette (warm gold/orange holographic style)
+export const JARVIS_CATEGORY_COLORS: Record<MemoryCategory, string> = {
+  architecture: '#FFD700',  // Bright gold
+  pattern: '#FFB347',       // Warm gold
+  preference: '#FFA500',    // Pure orange
+  error: '#FF6B6B',         // Keep red-ish for errors
+  context: '#FFC080',       // Soft peach
+  learning: '#FFE4B5',      // Moccasin
+  todo: '#FF8C00',          // Deep orange
+  note: '#FFCC66',          // Light amber
+  relationship: '#00D4FF',  // Cyan accent
+  custom: '#FFB347',        // Warm gold
+};
+
+export const JARVIS_TYPE_COLORS: Record<MemoryType, string> = {
+  short_term: '#FFD700',    // Bright gold (front)
+  episodic: '#FFB347',      // Warm gold (middle)
+  long_term: '#FF8C00',     // Deep orange (back)
+};
+
+// Color mode toggle - defaults to Jarvis mode
+let useJarvisColors = true;
+
+export function setUseJarvisColors(value: boolean): void {
+  useJarvisColors = value;
+}
+
+export function getUseJarvisColors(): boolean {
+  return useJarvisColors;
+}
+
 export function getCategoryColor(category: MemoryCategory): string {
+  if (useJarvisColors) {
+    return JARVIS_CATEGORY_COLORS[category] || JARVIS_CATEGORY_COLORS.custom;
+  }
   return CATEGORY_COLORS[category] || CATEGORY_COLORS.custom;
 }
 
 export function getTypeColor(type: MemoryType): string {
+  if (useJarvisColors) {
+    return JARVIS_TYPE_COLORS[type] || JARVIS_TYPE_COLORS.short_term;
+  }
   return TYPE_COLORS[type] || TYPE_COLORS.short_term;
 }
 
