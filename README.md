@@ -286,6 +286,12 @@ npm run watch
 | Semantic search | ✅ FTS5 full-text | Varies |
 | Episodic memory | ✅ Event/pattern storage | ❌ Usually missing |
 
+## Support
+
+If you find this project useful, consider supporting its development:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/cyborgninja)
+
 ## License
 
 MIT
