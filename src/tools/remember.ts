@@ -32,7 +32,7 @@ export type RememberInput = z.infer<typeof rememberSchema>;
 /**
  * Execute the remember tool
  */
-export function executeRemember(input: RememberInput): {
+export async function executeRemember(input: RememberInput): Promise<{
   success: boolean;
   memory?: {
     id: number;
@@ -49,7 +49,7 @@ export function executeRemember(input: RememberInput): {
     };
   };
   error?: string;
-} {
+}> {
   try {
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
@@ -67,7 +67,7 @@ export function executeRemember(input: RememberInput): {
     }
 
     // Check for duplicates
-    const existing = searchMemories({
+    const existing = await searchMemories({
       query: input.title,
       project: resolvedProject ?? undefined,
       limit: 3,
@@ -143,7 +143,7 @@ export function executeRemember(input: RememberInput): {
 /**
  * Format the remember result for MCP response
  */
-export function formatRememberResult(result: ReturnType<typeof executeRemember>): string {
+export function formatRememberResult(result: Awaited<ReturnType<typeof executeRemember>>): string {
   if (!result.success) {
     return `Failed to remember: ${result.error}`;
   }

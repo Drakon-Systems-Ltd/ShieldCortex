@@ -37,13 +37,13 @@ export type ForgetInput = z.infer<typeof forgetSchema>;
 /**
  * Execute the forget tool
  */
-export function executeForget(input: ForgetInput): {
+export async function executeForget(input: ForgetInput): Promise<{
   success: boolean;
   deleted?: number;
   wouldDelete?: number;
   memories?: { id: number; title: string }[];
   error?: string;
-} {
+}> {
   try {
     const db = getDatabase();
 
@@ -83,7 +83,7 @@ export function executeForget(input: ForgetInput): {
 
     if (input.query) {
       // Get IDs from FTS search
-      const results = searchMemories({
+      const results = await searchMemories({
         query: input.query,
         limit: 100,
         includeDecayed: true,
@@ -175,7 +175,7 @@ export function executeForget(input: ForgetInput): {
 /**
  * Format the forget result for MCP response
  */
-export function formatForgetResult(result: ReturnType<typeof executeForget>): string {
+export function formatForgetResult(result: Awaited<ReturnType<typeof executeForget>>): string {
   if (!result.success) {
     if (result.wouldDelete !== undefined) {
       const preview = result.memories?.map(m => `  - [${m.id}] ${m.title}`).join('\n') || '';

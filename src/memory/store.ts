@@ -710,18 +710,36 @@ function vectorSearch(
 }
 
 /**
- * Search memories using full-text search and filters
+ * Search memories using full-text search, vector similarity, and filters
+ * Now uses hybrid search combining FTS5 keywords with semantic vector matching
  */
-export function searchMemories(
+export async function searchMemories(
   options: SearchOptions,
   config: MemoryConfig = DEFAULT_CONFIG
-): SearchResult[] {
+): Promise<SearchResult[]> {
   const db = getDatabase();
   const limit = options.limit || 20;
+  const includeGlobal = options.includeGlobal ?? true;
 
   // Detect query category for boosting
   const detectedCategory = options.query ? detectQueryCategory(options.query) : null;
   const queryTags = options.query ? extractQueryTags(options.query) : [];
+
+  // SEMANTIC SEARCH: Generate query embedding (may fail on first call while model loads)
+  let queryEmbedding: Float32Array | null = null;
+  let vectorResults: Map<number, number> = new Map(); // memoryId -> similarity
+  if (options.query && options.query.trim()) {
+    try {
+      queryEmbedding = await generateEmbedding(options.query);
+      const vectorHits = vectorSearch(queryEmbedding, limit * 2, options.project, includeGlobal);
+      for (const hit of vectorHits) {
+        vectorResults.set(hit.memory.id, hit.similarity);
+      }
+    } catch (e) {
+      // Vector search unavailable - fall back to FTS only
+      console.log('[claude-memory] Vector search unavailable, using FTS only');
+    }
+  }
 
   let sql: string;
   const params: unknown[] = [];
@@ -742,9 +760,13 @@ export function searchMemories(
     sql = `SELECT *, 0 as rank FROM memories m WHERE 1=1`;
   }
 
-  // Add filters
+  // Add filters - include global memories if enabled
   if (options.project) {
-    sql += ' AND m.project = ?';
+    if (includeGlobal) {
+      sql += ` AND (m.project = ? OR m.scope = 'global')`;
+    } else {
+      sql += ' AND m.project = ?';
+    }
     params.push(options.project);
   }
   if (options.category) {
@@ -803,11 +825,17 @@ export function searchMemories(
     // Recently accessed memories and their linked neighbors get a boost
     const activationBoost = getActivationBoost(memory.id);
 
-    // Combined relevance score
+    // SEMANTIC SEARCH: Vector similarity boost (Phase 5)
+    // If memory was found by vector search, add similarity as a boost
+    const vectorSimilarity = vectorResults.get(memory.id) || 0;
+    const vectorBoost = vectorSimilarity * 0.3; // 30% weight for vector similarity
+
+    // Combined relevance score (adjusted weights to accommodate vector)
     const relevanceScore = (
-      ftsScore * 0.35 +
-      decayedScore * 0.35 +
-      calculatePriority(memory) * 0.15 +
+      ftsScore * 0.3 +           // Reduced from 0.35
+      vectorBoost +              // New: 0-0.3 from vector similarity
+      decayedScore * 0.25 +      // Reduced from 0.35
+      calculatePriority(memory) * 0.1 +  // Reduced from 0.15
       recencyBoost + categoryBoost + linkBoost + tagBoost + activationBoost
     );
 

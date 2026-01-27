@@ -215,38 +215,38 @@ export function mergeSimilarMemories(
  * Generate a context summary for session start
  * Provides a high-level view of relevant memories
  */
-export function generateContextSummary(
+export async function generateContextSummary(
   project?: string,
   config: MemoryConfig = DEFAULT_CONFIG
-): ContextSummary {
+): Promise<ContextSummary> {
   // Get recent memories
   const recentMemories = getRecentMemories(10, project);
 
   // Get key architecture decisions
-  const keyDecisions = searchMemories({
+  const keyDecisions = (await searchMemories({
     query: '',
     project,
     category: 'architecture',
     minSalience: 0.6,
     limit: 5,
-  }, config).map(r => r.memory);
+  }, config)).map(r => r.memory);
 
   // Get active patterns
-  const activePatterns = searchMemories({
+  const activePatterns = (await searchMemories({
     query: '',
     project,
     category: 'pattern',
     minSalience: 0.5,
     limit: 5,
-  }, config).map(r => r.memory);
+  }, config)).map(r => r.memory);
 
   // Get pending items
-  const pendingItems = searchMemories({
+  const pendingItems = (await searchMemories({
     query: '',
     project,
     category: 'todo',
     limit: 10,
-  }, config).map(r => r.memory);
+  }, config)).map(r => r.memory);
 
   return {
     project,
@@ -305,10 +305,10 @@ export function formatContextSummary(summary: ContextSummary): string {
  * Start a new session
  * Creates a session record and returns relevant context
  */
-export function startSession(project?: string): {
+export async function startSession(project?: string): Promise<{
   sessionId: number;
   context: ContextSummary;
-} {
+}> {
   const db = getDatabase();
 
   // Create session record
@@ -319,7 +319,7 @@ export function startSession(project?: string): {
   const sessionId = result.lastInsertRowid as number;
 
   // Generate context summary
-  const context = generateContextSummary(project);
+  const context = await generateContextSummary(project);
 
   return { sessionId, context };
 }
@@ -361,13 +361,13 @@ export function endSession(
  * Get suggested context for the current query
  * Returns memories that might be relevant to what the user is working on
  */
-export function getSuggestedContext(
+export async function getSuggestedContext(
   currentContext: string,
   project?: string,
   limit: number = 5
-): Memory[] {
+): Promise<Memory[]> {
   // Search for relevant memories based on current context
-  const results = searchMemories({
+  const results = await searchMemories({
     query: currentContext,
     project,
     minSalience: 0.4,

@@ -35,12 +35,12 @@ export type RecallInput = z.infer<typeof recallSchema>;
 /**
  * Execute the recall tool
  */
-export function executeRecall(input: RecallInput): {
+export async function executeRecall(input: RecallInput): Promise<{
   success: boolean;
   memories?: Memory[];
   count?: number;
   error?: string;
-} {
+}> {
   try {
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
@@ -59,7 +59,7 @@ export function executeRecall(input: RecallInput): {
 
       case 'search':
       default:
-        const results = searchMemories({
+        const results = await searchMemories({
           query: input.query || '',
           category: input.category,
           type: input.type,
@@ -118,7 +118,7 @@ export function formatMemory(memory: Memory, verbose: boolean = false): string {
  * Format the recall result for MCP response
  */
 export function formatRecallResult(
-  result: ReturnType<typeof executeRecall>,
+  result: Awaited<ReturnType<typeof executeRecall>>,
   verbose: boolean = false
 ): string {
   if (!result.success) {

@@ -34,25 +34,25 @@ export type GetContextInput = z.infer<typeof getContextSchema>;
 /**
  * Execute the get_context tool
  */
-export function executeGetContext(input: GetContextInput): {
+export async function executeGetContext(input: GetContextInput): Promise<{
   success: boolean;
   context?: string;
   summary?: ContextSummary;
   relevantMemories?: Memory[];
   error?: string;
-} {
+}> {
   try {
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
     const projectFilter = resolvedProject ?? undefined;
 
     // Generate context summary
-    const summary = generateContextSummary(projectFilter);
+    const summary = await generateContextSummary(projectFilter);
 
     // If there's a query, also get specifically relevant memories
     let relevantMemories: Memory[] = [];
     if (input.query) {
-      relevantMemories = getSuggestedContext(input.query, projectFilter, 5);
+      relevantMemories = await getSuggestedContext(input.query, projectFilter, 5);
     }
 
     // Format based on requested format
@@ -157,18 +157,18 @@ export const startSessionSchema = z.object({
   project: z.string().optional().describe('Project for this session'),
 });
 
-export function executeStartSession(input: { project?: string }): {
+export async function executeStartSession(input: { project?: string }): Promise<{
   success: boolean;
   sessionId?: number;
   context?: string;
   error?: string;
-} {
+}> {
   try {
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
     const projectFilter = resolvedProject ?? undefined;
 
-    const { sessionId, context } = startSession(projectFilter);
+    const { sessionId, context } = await startSession(projectFilter);
     const formattedContext = formatContextSummary(context);
 
     return {

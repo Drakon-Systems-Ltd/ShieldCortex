@@ -64,7 +64,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get all memories with filters and pagination
-  app.get('/api/memories', (req: Request, res: Response) => {
+  app.get('/api/memories', async (req: Request, res: Response) => {
     try {
       // Extract query params as strings
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
@@ -81,7 +81,7 @@ export function startVisualizationServer(dbPath?: string): void {
       let memories: Memory[];
 
       if (mode === 'search' && query) {
-        const results = searchMemories({
+        const results = await searchMemories({
           query,
           project,
           type: type as Memory['type'] | undefined,
@@ -442,10 +442,10 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get context summary
-  app.get('/api/context', (req: Request, res: Response) => {
+  app.get('/api/context', async (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
-      const summary = generateContextSummary(project);
+      const summary = await generateContextSummary(project);
       const formatted = formatContextSummary(summary);
 
       res.json({

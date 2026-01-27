@@ -92,7 +92,7 @@ The system automatically detects importance, categorizes, and manages storage.`,
         .describe('Override automatic salience'),
     },
     async (args) => {
-      const result = executeRemember(args);
+      const result = await executeRemember(args);
       return {
         content: [{ type: 'text', text: formatRememberResult(result) }],
       };
@@ -126,7 +126,7 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Recall mode'),
     },
     async (args) => {
-      const result = executeRecall(args);
+      const result = await executeRecall(args);
       return {
         content: [{ type: 'text', text: formatRecallResult(result, true) }],
       };
@@ -154,7 +154,7 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Confirm bulk delete'),
     },
     async (args) => {
-      const result = executeForget(args);
+      const result = await executeForget(args);
       return {
         content: [{ type: 'text', text: formatForgetResult(result) }],
       };
@@ -175,7 +175,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
         .describe('Output format'),
     },
     async (args) => {
-      const result = executeGetContext(args);
+      const result = await executeGetContext(args);
       return {
         content: [{
           type: 'text',
@@ -193,7 +193,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for global.'),
     },
     async (args) => {
-      const result = executeStartSession(args);
+      const result = await executeStartSession(args);
       return {
         content: [{
           type: 'text',
@@ -498,7 +498,7 @@ but you can use this tool to check for new contradictions at any time.`,
     'memory://context',
     'memory://context',
     async () => {
-      const summary = generateContextSummary();
+      const summary = await generateContextSummary();
       return {
         contents: [{
           uri: 'memory://context',
@@ -558,7 +558,7 @@ but you can use this tool to check for new contradictions at any time.`,
     'restore_context',
     'Restore context after compaction or at session start',
     async () => {
-      const summary = generateContextSummary();
+      const summary = await generateContextSummary();
       const context = formatContextSummary(summary);
 
       return {
