@@ -15,7 +15,7 @@
 import { Suspense, useMemo, useState, useCallback } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Stars } from '@react-three/drei';
-import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
+import { EffectComposer, Bloom, Vignette, ChromaticAberration, Noise } from '@react-three/postprocessing';
 import { Memory, MemoryLink, MemoryCategory } from '@/types/memory';
 import { MemoryNode } from './MemoryNode';
 import { MemoryLinks } from './MemoryLinks';
@@ -169,14 +169,16 @@ function BrainContent({
       {/* Post-processing effects */}
       <EffectComposer>
         <Bloom
-          luminanceThreshold={0.15}
-          luminanceSmoothing={0.9}
-          intensity={1.0}
-          radius={0.9}
+          luminanceThreshold={0.08}
+          luminanceSmoothing={0.6}
+          intensity={2.5}
+          radius={1.4}
         />
+        <ChromaticAberration offset={[0.0008, 0.0008]} />
+        <Noise opacity={0.03} />
         <Vignette
-          darkness={0.4}
-          offset={0.3}
+          darkness={0.55}
+          offset={0.2}
         />
       </EffectComposer>
     </>
