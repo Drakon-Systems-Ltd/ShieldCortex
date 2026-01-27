@@ -4,13 +4,19 @@
  * Brain Scene
  * Main 3D visualization of the memory brain
  * Composes all brain visualization components into a cohesive scene
+ *
+ * Features:
+ * - Real-time activity pulses on memory events
+ * - Category region labels
+ * - Color modes: category, health (decay), age
+ * - Timeline filtering
  */
 
-import { Suspense, useMemo } from 'react';
+import { Suspense, useMemo, useState, useCallback } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Stars } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
-import { Memory, MemoryLink } from '@/types/memory';
+import { Memory, MemoryLink, MemoryCategory } from '@/types/memory';
 import { MemoryNode } from './MemoryNode';
 import { MemoryLinks } from './MemoryLinks';
 import { BrainMesh } from './BrainMesh';
@@ -18,7 +24,13 @@ import { BrainRegions } from './BrainRegions';
 import { NeuralPathways } from './NeuralPathways';
 import { SynapseNetwork } from './SynapseNodes';
 import { ElectronFlow, SpiralFlow } from './ElectronFlow';
+import { ActivityPulseSystem, Pulse } from './ActivityPulseSystem';
+import { CategoryLabels } from './CategoryLabels';
+import { TimelineControls } from './TimelineControls';
 import { calculateMemoryPosition } from '@/lib/position-algorithm';
+import { useMemoryWebSocket } from '@/lib/websocket';
+
+type ColorMode = 'category' | 'health' | 'age';
 
 interface BrainSceneProps {
   memories: Memory[];
@@ -27,12 +39,23 @@ interface BrainSceneProps {
   onSelectMemory: (memory: Memory | null) => void;
 }
 
+interface BrainContentProps extends BrainSceneProps {
+  colorMode: ColorMode;
+  pulses: Pulse[];
+  onPulseComplete: (id: number) => void;
+  memoryCategoryCounts: Record<string, number>;
+}
+
 function BrainContent({
   memories = [],
   links = [],
   selectedMemory,
   onSelectMemory,
-}: BrainSceneProps) {
+  colorMode,
+  pulses,
+  onPulseComplete,
+  memoryCategoryCounts,
+}: BrainContentProps) {
   // Calculate positions for all memories (guard against null/undefined)
   const memoryPositions = useMemo(() => {
     if (!memories || memories.length === 0) return [];
@@ -64,11 +87,12 @@ function BrainContent({
 
   return (
     <>
-      {/* Ambient lighting */}
-      <ambientLight intensity={0.15} />
-      <pointLight position={[10, 10, 10]} intensity={0.4} color="#ffffff" />
-      <pointLight position={[-10, -10, -10]} intensity={0.25} color="#4488ff" />
-      <pointLight position={[0, 5, 0]} intensity={0.2} color="#aa66ff" />
+      {/* Ambient lighting - warm golden Jarvis-inspired */}
+      <ambientLight intensity={0.08} color="#FFB347" />
+      <pointLight position={[10, 10, 10]} intensity={0.6} color="#FFB347" />
+      <pointLight position={[-10, -10, -10]} intensity={0.4} color="#FF8C00" />
+      <pointLight position={[0, 8, 0]} intensity={0.3} color="#FFD700" />
+      <pointLight position={[0, -5, 0]} intensity={0.2} color="#FF6600" />
 
       {/* Procedural brain mesh with cortex */}
       <BrainMesh opacity={0.2} showWireframe={true} pulseIntensity={0.4} />
@@ -108,8 +132,15 @@ function BrainContent({
           position={[position.x, position.y, position.z]}
           onSelect={onSelectMemory}
           isSelected={selectedMemory?.id === memory.id}
+          colorMode={colorMode}
         />
       ))}
+
+      {/* Category region labels */}
+      <CategoryLabels memoryCounts={memoryCategoryCounts} radius={5.5} showCounts={true} />
+
+      {/* Activity pulses for real-time events */}
+      <ActivityPulseSystem pulses={pulses} onPulseComplete={onPulseComplete} />
 
       {/* Camera controls */}
       <OrbitControls
@@ -158,6 +189,93 @@ export function BrainScene({
   selectedMemory,
   onSelectMemory,
 }: BrainSceneProps) {
+  const [colorMode, setColorMode] = useState<ColorMode>('category');
+  const [pulses, setPulses] = useState<Pulse[]>([]);
+  const [timeRange, setTimeRange] = useState<{ start: Date | null; end: Date | null }>({
+    start: null,
+    end: null,
+  });
+  const pulseIdRef = { current: 0 };
+
+  // Calculate memory counts by category
+  const memoryCategoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    memories.forEach((m) => {
+      counts[m.category] = (counts[m.category] || 0) + 1;
+    });
+    return counts;
+  }, [memories]);
+
+  // Filter memories by time range
+  const filteredMemories = useMemo(() => {
+    if (!timeRange.start && !timeRange.end) return memories;
+
+    return memories.filter((m) => {
+      const createdAt = new Date(m.createdAt).getTime();
+      if (timeRange.start && createdAt < timeRange.start.getTime()) return false;
+      if (timeRange.end && createdAt > timeRange.end.getTime()) return false;
+      return true;
+    });
+  }, [memories, timeRange]);
+
+  // Create position map for pulse positioning
+  const positionMap = useMemo(() => {
+    const map = new Map<number, { x: number; y: number; z: number }>();
+    memories.forEach((memory) => {
+      map.set(memory.id, calculateMemoryPosition(memory));
+    });
+    return map;
+  }, [memories]);
+
+  // Create a pulse for memory events
+  const createPulse = useCallback(
+    (type: Pulse['type'], memoryId: number, targetMemoryId?: number) => {
+      const position = positionMap.get(memoryId);
+      if (!position) return;
+
+      const targetPosition = targetMemoryId ? positionMap.get(targetMemoryId) : undefined;
+
+      const pulse: Pulse = {
+        id: pulseIdRef.current++,
+        type,
+        position: [position.x, position.y, position.z],
+        targetPosition: targetPosition
+          ? [targetPosition.x, targetPosition.y, targetPosition.z]
+          : undefined,
+        startTime: Date.now(),
+        duration: type === 'created' ? 2000 : type === 'accessed' ? 1000 : 1500,
+        color: type === 'created' ? '#22c55e' : type === 'accessed' ? '#3b82f6' : '#a855f7',
+      };
+
+      setPulses((prev) => [...prev, pulse]);
+    },
+    [positionMap]
+  );
+
+  // Handle pulse completion
+  const handlePulseComplete = useCallback((id: number) => {
+    setPulses((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
+  // Listen for WebSocket events to trigger pulses
+  useMemoryWebSocket({
+    onMessage: (event) => {
+      const data = event.data as Record<string, unknown> | undefined;
+      switch (event.type) {
+        case 'memory_created':
+          if (data?.memoryId) createPulse('created', data.memoryId as number);
+          break;
+        case 'memory_accessed':
+          if (data?.memoryId) createPulse('accessed', data.memoryId as number);
+          break;
+        case 'link_discovered':
+          if (data?.sourceId && data?.targetId)
+            createPulse('linked', data.sourceId as number, data.targetId as number);
+          break;
+      }
+    },
+  });
+
   return (
     <div className="w-full h-full bg-slate-950">
       <Canvas
@@ -167,10 +285,14 @@ export function BrainScene({
       >
         <Suspense fallback={null}>
           <BrainContent
-            memories={memories}
+            memories={filteredMemories}
             links={links}
             selectedMemory={selectedMemory}
             onSelectMemory={onSelectMemory}
+            colorMode={colorMode}
+            pulses={pulses}
+            onPulseComplete={handlePulseComplete}
+            memoryCategoryCounts={memoryCategoryCounts}
           />
         </Suspense>
       </Canvas>
@@ -194,15 +316,57 @@ export function BrainScene({
         </div>
         <div className="mt-3 pt-2 border-t border-slate-700">
           <p className="text-slate-400">
-            {memories.length} memories • Click to select
+            {filteredMemories.length} memories • Click to select
           </p>
         </div>
+
+        {/* Color mode legend */}
+        {colorMode === 'health' && (
+          <div className="mt-2 pt-2 border-t border-slate-700">
+            <div className="text-slate-400 mb-1">Health:</div>
+            <div className="flex items-center gap-1 text-[10px]">
+              <div className="w-2 h-2 rounded-full bg-green-500" />
+              <span className="text-slate-400">Healthy</span>
+              <div className="w-2 h-2 rounded-full bg-yellow-500 ml-1" />
+              <span className="text-slate-400">Moderate</span>
+              <div className="w-2 h-2 rounded-full bg-red-500 ml-1" />
+              <span className="text-slate-400">At Risk</span>
+            </div>
+          </div>
+        )}
+        {colorMode === 'age' && (
+          <div className="mt-2 pt-2 border-t border-slate-700">
+            <div className="text-slate-400 mb-1">Age:</div>
+            <div className="flex items-center gap-1 text-[10px]">
+              <div className="w-2 h-2 rounded-full bg-cyan-400" />
+              <span className="text-slate-400">New</span>
+              <div className="w-2 h-2 rounded-full bg-green-500 ml-1" />
+              <span className="text-slate-400">Recent</span>
+              <div className="w-2 h-2 rounded-full bg-amber-500 ml-1" />
+              <span className="text-slate-400">Old</span>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Timeline and color controls */}
+      <TimelineControls
+        memories={memories}
+        onTimeRangeChange={setTimeRange}
+        colorMode={colorMode}
+        onColorModeChange={setColorMode}
+      />
 
       {/* Neural activity indicator */}
       <div className="absolute top-4 right-4 flex items-center gap-2 bg-slate-900/80 border border-slate-700 rounded-full px-3 py-1.5 backdrop-blur-sm">
-        <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-        <span className="text-xs text-cyan-400 font-medium">Neural Activity</span>
+        <div
+          className={`w-2 h-2 rounded-full ${
+            pulses.length > 0 ? 'bg-green-400 animate-ping' : 'bg-cyan-400 animate-pulse'
+          }`}
+        />
+        <span className="text-xs text-cyan-400 font-medium">
+          {pulses.length > 0 ? 'Active' : 'Neural Activity'}
+        </span>
       </div>
     </div>
   );
