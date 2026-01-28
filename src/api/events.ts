@@ -21,7 +21,12 @@ export type MemoryEventType =
   | 'worker_light_tick'
   | 'worker_medium_tick'
   | 'link_discovered'
-  | 'predictive_consolidation';
+  | 'predictive_consolidation'
+  // Version/Update events
+  | 'update_started'
+  | 'update_complete'
+  | 'update_failed'
+  | 'server_restarting';
 
 export interface MemoryEvent {
   type: MemoryEventType;

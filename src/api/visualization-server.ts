@@ -35,6 +35,7 @@ import { enrichMemory } from '../memory/store.js';
 import { memoryEvents, MemoryEvent, emitDecayTick } from './events.js';
 import { BrainWorker } from '../worker/brain-worker.js';
 import { isPaused, pause, resume, getControlStatus } from './control.js';
+import { getCurrentVersion, checkForUpdates, performUpdate, scheduleRestart } from './version.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -417,6 +418,86 @@ export function startVisualizationServer(dbPath?: string): void {
     try {
       resume();
       res.json({ paused: false, message: 'Memory creation resumed' });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // VERSION ENDPOINTS
+  // ============================================
+
+  // Get current version
+  app.get('/api/version', (_req: Request, res: Response) => {
+    try {
+      const version = getCurrentVersion();
+      res.json({ version });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Check for updates
+  app.get('/api/version/check', async (req: Request, res: Response) => {
+    try {
+      const forceRefresh = req.query.force === 'true';
+      const versionInfo = await checkForUpdates(forceRefresh);
+      res.json(versionInfo);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Perform update
+  app.post('/api/version/update', async (_req: Request, res: Response) => {
+    try {
+      // Notify clients that update is starting
+      broadcast({
+        type: 'update_started',
+        timestamp: new Date().toISOString(),
+        data: { message: 'Update in progress...' },
+      } as MemoryEvent);
+
+      const result = await performUpdate();
+
+      // Notify clients of result
+      broadcast({
+        type: result.success ? 'update_complete' : 'update_failed',
+        timestamp: new Date().toISOString(),
+        data: result,
+      } as MemoryEvent);
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Restart server
+  app.post('/api/version/restart', (_req: Request, res: Response) => {
+    try {
+      // Notify all WebSocket clients
+      broadcast({
+        type: 'server_restarting',
+        timestamp: new Date().toISOString(),
+        data: { message: 'Server restarting in 3 seconds...' },
+      } as MemoryEvent);
+
+      // Close WebSocket connections gracefully
+      for (const client of clients) {
+        client.send(
+          JSON.stringify({
+            type: 'server_restarting',
+            timestamp: new Date().toISOString(),
+            data: { reconnectIn: 5000 },
+          })
+        );
+      }
+
+      // Schedule restart after response is sent
+      res.json({ success: true, message: 'Server will restart in 3 seconds' });
+
+      scheduleRestart(3000);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

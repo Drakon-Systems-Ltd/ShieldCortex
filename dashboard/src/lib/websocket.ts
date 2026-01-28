@@ -22,7 +22,12 @@ export type WebSocketEventType =
   | 'worker_light_tick'
   | 'worker_medium_tick'
   | 'link_discovered'
-  | 'predictive_consolidation';
+  | 'predictive_consolidation'
+  // Version/Update events
+  | 'update_started'
+  | 'update_complete'
+  | 'update_failed'
+  | 'server_restarting';
 
 // Alias for backwards compatibility
 export type MemoryEventType = WebSocketEventType;
@@ -146,6 +151,23 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
             case 'worker_medium_tick':
               // Worker ticks don't require cache invalidation
               // Dashboard can track via onMessage callback if needed
+              break;
+
+            // Version/Update events
+            case 'update_started':
+            case 'update_complete':
+            case 'update_failed':
+              // Let VersionPanel handle via onMessage callback
+              // Invalidate version queries on completion
+              if (message.type === 'update_complete') {
+                queryClient.invalidateQueries({ queryKey: ['version'] });
+                queryClient.invalidateQueries({ queryKey: ['version-check'] });
+              }
+              break;
+
+            case 'server_restarting':
+              // Server is restarting - let onMessage callback handle UI
+              console.log('[WebSocket] Server restarting, will reconnect shortly...');
               break;
           }
         } catch (err) {

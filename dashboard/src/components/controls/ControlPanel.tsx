@@ -9,6 +9,7 @@
 
 import { useControlStatus, usePauseMemory, useResumeMemory, useConsolidate } from '@/hooks/useMemories';
 import { Button } from '@/components/ui/button';
+import { VersionPanel } from './VersionPanel';
 
 export function ControlPanel() {
   const { data: status, isLoading } = useControlStatus();
@@ -95,6 +96,9 @@ export function ControlPanel() {
           </Button>
         </div>
       </div>
+
+      {/* Version Panel */}
+      <VersionPanel />
     </div>
   );
 }

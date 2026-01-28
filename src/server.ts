@@ -9,6 +9,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { initDatabase } from './database/init.js';
 import { DEFAULT_CONFIG } from './memory/types.js';
+import { getCurrentVersion } from './api/version.js';
 import {
   initProjectContext,
   getActiveProject,
@@ -58,7 +59,7 @@ export function createServer(dbPath?: string): McpServer {
   // Create MCP server
   const server = new McpServer({
     name: 'claude-cortex',
-    version: '1.0.0',
+    version: getCurrentVersion(),
   });
 
   // ============================================

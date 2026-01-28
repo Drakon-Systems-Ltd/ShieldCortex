@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-01-28
+
+### Added
+- **Version management in dashboard** - Display current version, check for updates, update, and restart server
+- New API endpoints: `/api/version`, `/api/version/check`, `/api/version/update`, `/api/version/restart`
+- VersionPanel component in dashboard sidebar
+- WebSocket events for update progress: `update_started`, `update_complete`, `update_failed`, `server_restarting`
+- Dashboard documentation section in README with features list and color legend
+
+### Fixed
+- MCP server now reports actual version from package.json instead of hardcoded "1.0.0"
+
 ## [1.3.2] - 2026-01-28
 
 ### Fixed

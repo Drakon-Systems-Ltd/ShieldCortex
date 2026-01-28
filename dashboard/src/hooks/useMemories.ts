@@ -274,3 +274,112 @@ export function useResumeMemory() {
     },
   });
 }
+
+// ============================================
+// VERSION API
+// ============================================
+
+// Version info from API
+export interface VersionInfo {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  checkedAt: string;
+  cacheHit: boolean;
+}
+
+// Update result from API
+export interface UpdateResult {
+  success: boolean;
+  previousVersion: string;
+  newVersion: string | null;
+  error?: string;
+  requiresRestart: boolean;
+}
+
+// Fetch current version
+async function fetchVersion(): Promise<{ version: string }> {
+  const response = await fetch(`${API_BASE}/api/version`);
+  if (!response.ok) throw new Error('Failed to fetch version');
+  return response.json();
+}
+
+// Check for updates
+async function checkForUpdates(force = false): Promise<VersionInfo> {
+  const params = force ? '?force=true' : '';
+  const response = await fetch(`${API_BASE}/api/version/check${params}`);
+  if (!response.ok) throw new Error('Failed to check for updates');
+  return response.json();
+}
+
+// Perform update
+async function performUpdate(): Promise<UpdateResult> {
+  const response = await fetch(`${API_BASE}/api/version/update`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to perform update');
+  return response.json();
+}
+
+// Restart server
+async function restartServer(): Promise<{ success: boolean; message: string }> {
+  const response = await fetch(`${API_BASE}/api/version/restart`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to restart server');
+  return response.json();
+}
+
+// Hook: Get current version
+export function useVersion() {
+  return useQuery({
+    queryKey: ['version'],
+    queryFn: fetchVersion,
+    staleTime: Infinity, // Version doesn't change during session
+  });
+}
+
+// Hook: Check for updates (enabled on demand)
+export function useCheckForUpdates(enabled = false) {
+  return useQuery({
+    queryKey: ['version-check'],
+    queryFn: () => checkForUpdates(false),
+    enabled,
+    staleTime: 5 * 60 * 1000, // Match server cache TTL (5 minutes)
+  });
+}
+
+// Hook: Force check for updates
+export function useForceCheckForUpdates() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () => checkForUpdates(true),
+    onSuccess: data => {
+      queryClient.setQueryData(['version-check'], data);
+    },
+  });
+}
+
+// Hook: Perform update
+export function usePerformUpdate() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: performUpdate,
+    onSuccess: result => {
+      if (result.success) {
+        // Invalidate version queries to pick up new version
+        queryClient.invalidateQueries({ queryKey: ['version'] });
+        queryClient.invalidateQueries({ queryKey: ['version-check'] });
+      }
+    },
+  });
+}
+
+// Hook: Restart server
+export function useRestartServer() {
+  return useMutation({
+    mutationFn: restartServer,
+  });
+}

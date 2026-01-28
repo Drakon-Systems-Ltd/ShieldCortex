@@ -275,6 +275,43 @@ npm run build
 npm run watch
 ```
 
+## Dashboard (Optional)
+
+The dashboard provides a 3D brain visualization of your memories with real-time updates.
+
+### Running the Dashboard
+
+```bash
+# Terminal 1: Start API server
+npm run dev:api
+
+# Terminal 2: Start dashboard
+cd dashboard && npm run dev
+```
+
+- **Dashboard**: http://localhost:3030
+- **API Server**: http://localhost:3001
+
+### Features
+
+- **3D Brain Visualization** - Memories displayed as nodes in a neural network
+- **Search** - Full-text search with autocomplete suggestions
+- **Filters** - Filter by memory type (STM/LTM/Episodic) and category
+- **Statistics** - System health, memory counts, category distribution
+- **Controls** - Pause/resume memory creation, trigger consolidation
+- **Version Management** - Check for updates, update, and restart server
+
+### Memory Visualization Colors
+
+| Color | Category |
+|-------|----------|
+| Blue | Architecture |
+| Purple | Pattern |
+| Green | Preference |
+| Red | Error |
+| Yellow | Learning |
+| Cyan | Context |
+
 ## How This Differs from Other Solutions
 
 | Feature | Claude Cortex | Other MCP Memory Tools |

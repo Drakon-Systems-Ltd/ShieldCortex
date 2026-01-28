@@ -30,6 +30,10 @@ const EVENT_COLORS: Record<MemoryEventType, string> = {
   worker_medium_tick: 'text-slate-500',
   link_discovered: 'text-cyan-400',
   predictive_consolidation: 'text-purple-400',
+  update_started: 'text-blue-400',
+  update_complete: 'text-green-400',
+  update_failed: 'text-red-400',
+  server_restarting: 'text-orange-400',
 };
 
 const EVENT_ICONS: Record<MemoryEventType, string> = {
@@ -44,6 +48,10 @@ const EVENT_ICONS: Record<MemoryEventType, string> = {
   worker_medium_tick: '🔋',
   link_discovered: '🔗',
   predictive_consolidation: '🔮',
+  update_started: '⬆',
+  update_complete: '✓',
+  update_failed: '✗',
+  server_restarting: '🔄',
 };
 
 export function ActivityLog() {
@@ -61,6 +69,10 @@ export function ActivityLog() {
     worker_medium_tick: false,
     link_discovered: true,
     predictive_consolidation: true,
+    update_started: true,
+    update_complete: true,
+    update_failed: true,
+    server_restarting: true,
   });
 
   const logContainerRef = useRef<HTMLDivElement>(null);
