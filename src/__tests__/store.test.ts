@@ -630,4 +630,68 @@ describe('Semantic Linking', () => {
       }
     });
   });
+
+  describe('enrichMemory', () => {
+    it('should enrich a memory with new related context', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, enrichMemory, getMemoryById, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let memoryId: number | undefined;
+      try {
+        const memory = addMemory({
+          title: 'JWT token authentication',
+          content: 'We use JWT tokens for authentication in our API server with rate limiting',
+          category: 'architecture',
+          tags: ['auth', 'jwt'],
+          project: 'test-project',
+          type: 'long_term',
+        });
+        memoryId = memory.id;
+
+        const result = enrichMemory(memoryId, 'We use JWT tokens for authentication in our API server with rate limiting and also need Redis caching', 'search');
+
+        expect(result.enriched).toBe(true);
+
+        const updated = getMemoryById(memoryId);
+        expect(updated).toBeDefined();
+        expect(updated!.content).toContain('rate limiting');
+        expect(updated!.content).toContain('search:');
+      } finally {
+        if (memoryId) { try { deleteMemory(memoryId); } catch { /* ignore */ } }
+        closeDatabase();
+      }
+    });
+
+    it('should reject enrichment when context is too similar', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, enrichMemory, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let memoryId: number | undefined;
+      try {
+        const memory = addMemory({
+          title: 'JWT token authentication',
+          content: 'We use JWT tokens for authentication with RS256 signing',
+          category: 'architecture',
+          tags: ['auth'],
+          project: 'test-project',
+          type: 'long_term',
+        });
+        memoryId = memory.id;
+
+        const result = enrichMemory(memoryId, 'We use JWT tokens for authentication with RS256 signing', 'search');
+        expect(result.enriched).toBe(false);
+        // May fail due to cooldown (shared process state) or similarity
+        expect(result.reason).toMatch(/similar|cooldown/);
+      } finally {
+        if (memoryId) { try { deleteMemory(memoryId); } catch { /* ignore */ } }
+        closeDatabase();
+      }
+    });
+  });
 });

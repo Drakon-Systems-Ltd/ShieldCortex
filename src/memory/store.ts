@@ -920,6 +920,23 @@ export async function searchMemories(
     }
   }
 
+  // ORGANIC FEATURE: Enrich top result with search context
+  // When a search query contains significant new information not already in the
+  // top result, append it as enrichment context so memories accumulate knowledge
+  if (sortedResults.length > 0 && options.query && options.query.length > 30) {
+    const topResult = sortedResults[0];
+    const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+    const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
+    const newWords = [...queryWords].filter(w => !contentWords.has(w));
+
+    // Only enrich if query has significant new content (>30% new words)
+    if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
+      try {
+        enrichMemory(topResult.memory.id, options.query, 'search');
+      } catch { /* enrichment is best-effort */ }
+    }
+  }
+
   // Look up contradictions for top results
   const finalResults = sortedResults.slice(0, limit);
   for (const result of finalResults) {
