@@ -920,7 +920,26 @@ export async function searchMemories(
     }
   }
 
-  return sortedResults;
+  // Look up contradictions for top results
+  const finalResults = sortedResults.slice(0, limit);
+  for (const result of finalResults) {
+    const contradictions = db.prepare(`
+      SELECT ml.strength,
+        CASE WHEN ml.source_id = ? THEN ml.target_id ELSE ml.source_id END as other_id
+      FROM memory_links ml
+      WHERE ml.relationship = 'contradicts'
+        AND (ml.source_id = ? OR ml.target_id = ?)
+    `).all(result.memory.id, result.memory.id, result.memory.id) as any[];
+
+    if (contradictions.length > 0) {
+      result.contradictions = contradictions.map(c => {
+        const other = db.prepare('SELECT title FROM memories WHERE id = ?').get(c.other_id) as any;
+        return { memoryId: c.other_id, title: other?.title || 'Unknown', score: c.strength };
+      });
+    }
+  }
+
+  return finalResults;
 }
 
 /**

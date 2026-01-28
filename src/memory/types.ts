@@ -63,6 +63,7 @@ export interface SearchOptions {
 export interface SearchResult {
   memory: Memory;
   relevanceScore: number;   // Combined search + salience + recency
+  contradictions?: { memoryId: number; title: string; score: number }[];
 }
 
 export interface ConsolidationResult {

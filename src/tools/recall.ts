@@ -40,6 +40,7 @@ export type RecallInput = z.infer<typeof recallSchema>;
 export async function executeRecall(input: RecallInput): Promise<{
   success: boolean;
   memories?: Memory[];
+  contradictions?: Map<number, { memoryId: number; title: string; score: number }[]>;
   count?: number;
   error?: string;
 }> {
@@ -49,6 +50,7 @@ export async function executeRecall(input: RecallInput): Promise<{
     const projectFilter = resolvedProject ?? undefined;
 
     let memories: Memory[] = [];
+    let contradictions: Map<number, { memoryId: number; title: string; score: number }[]> | undefined;
 
     switch (input.mode) {
       case 'recent':
@@ -72,6 +74,13 @@ export async function executeRecall(input: RecallInput): Promise<{
           includeGlobal: input.includeGlobal,
         });
         memories = results.map(r => r.memory);
+        // Extract contradictions from search results
+        const contradictionEntries = results
+          .filter(r => r.contradictions && r.contradictions.length > 0)
+          .map(r => [r.memory.id, r.contradictions!] as const);
+        if (contradictionEntries.length > 0) {
+          contradictions = new Map(contradictionEntries);
+        }
         break;
     }
 
@@ -81,6 +90,7 @@ export async function executeRecall(input: RecallInput): Promise<{
     return {
       success: true,
       memories,
+      contradictions,
       count: memories.length,
     };
   } catch (error) {
@@ -133,7 +143,14 @@ export function formatRecallResult(
   }
 
   const header = `Found ${result.count} ${result.count === 1 ? 'memory' : 'memories'}:\n`;
-  const formattedMemories = result.memories.map(m => formatMemory(m, verbose)).join('\n\n');
+  const formattedMemories = result.memories.map(m => {
+    let output = formatMemory(m, verbose);
+    const contradictions = result.contradictions?.get(m.id);
+    if (contradictions && contradictions.length > 0) {
+      output += `\n  ⚠️ CONTRADICTS: ${contradictions.map(c => `"${c.title}" (ID ${c.memoryId})`).join(', ')}`;
+    }
+    return output;
+  }).join('\n\n');
 
   return header + formattedMemories;
 }
