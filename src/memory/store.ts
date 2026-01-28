@@ -432,15 +432,27 @@ export function accessMemory(
 }
 
 /**
- * Soft access - updates last_accessed without boosting salience
- * Used for search results to close the reinforcement loop
- * ORGANIC FEATURE: This allows searched memories to stay fresh without
- * artificially inflating their salience scores
+ * Reinforce a memory that appeared in search results
+ * Gives a small salience boost with diminishing returns based on access count.
+ * ORGANIC FEATURE: Searched memories get reinforced, closing the feedback loop
+ * so frequently-found memories grow stronger over time.
  */
-export function softAccessMemory(id: number): void {
+export function reinforceFromSearch(memoryId: number): void {
   const db = getDatabase();
-  db.prepare('UPDATE memories SET last_accessed = ? WHERE id = ?')
-    .run(new Date().toISOString(), id);
+  const memory = db.prepare('SELECT salience, access_count FROM memories WHERE id = ?').get(memoryId) as any;
+  if (!memory) return;
+
+  // Small salience boost per search appearance (diminishing returns)
+  const boost = Math.max(0.005, 0.02 / (1 + memory.access_count * 0.1));
+  const newSalience = Math.min(1.0, memory.salience + boost);
+
+  db.prepare(`
+    UPDATE memories
+    SET last_accessed = CURRENT_TIMESTAMP,
+        access_count = access_count + 1,
+        salience = ?
+    WHERE id = ?
+  `).run(newSalience, memoryId);
 }
 
 // ============================================
@@ -872,11 +884,40 @@ export async function searchMemories(
     .filter(r => options.includeDecayed || r.memory.decayedScore >= config.salienceThreshold)
     .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-  // ORGANIC FEATURE: Soft-access top results to reinforce useful memories
-  // This closes the reinforcement loop - memories that appear in searches stay fresh
-  // We only soft-access (update last_accessed, no salience boost) to avoid inflation
-  for (const result of sortedResults.slice(0, 5)) {
-    softAccessMemory(result.memory.id);
+  // ORGANIC FEATURE: Reinforce top search results
+  // This closes the feedback loop - memories that appear in searches get a small
+  // salience boost with diminishing returns, so useful memories grow stronger
+  const topResults = sortedResults.slice(0, 5);
+  for (const result of topResults) {
+    reinforceFromSearch(result.memory.id);
+  }
+
+  // ORGANIC FEATURE: Link co-returned search results (top 5 only)
+  // Memories that frequently appear together in searches become linked,
+  // building the knowledge graph from usage patterns
+  if (topResults.length >= 2) {
+    for (let i = 0; i < topResults.length; i++) {
+      for (let j = i + 1; j < topResults.length; j++) {
+        const idA = topResults[i].memory.id;
+        const idB = topResults[j].memory.id;
+        const existing = db.prepare(
+          'SELECT strength FROM memory_links WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
+        ).get(idA, idB, idB, idA) as any;
+
+        if (existing) {
+          const newStrength = Math.min(1.0, existing.strength + 0.03);
+          db.prepare(
+            'UPDATE memory_links SET strength = ? WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
+          ).run(newStrength, idA, idB, idB, idA);
+        } else {
+          try {
+            db.prepare(
+              'INSERT INTO memory_links (source_id, target_id, relationship, strength) VALUES (?, ?, ?, ?)'
+            ).run(idA, idB, 'related', 0.2);
+          } catch { /* ignore duplicate */ }
+        }
+      }
+    }
   }
 
   return sortedResults;

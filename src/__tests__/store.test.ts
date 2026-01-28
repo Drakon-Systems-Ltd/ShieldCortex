@@ -481,6 +481,87 @@ describe('Semantic Linking', () => {
     });
   });
 
+  describe('Search Reinforcement and Co-Search Linking', () => {
+    it('should increase salience after repeated searches', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, searchMemories, getMemoryById, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let memoryId: number | undefined;
+
+      try {
+        const memory = addMemory({
+          title: 'Unique Reinforcement Test Target',
+          content: 'This memory is about reinforcement testing with a unique keyword xyzzyplugh',
+          tags: ['reinforcement-test'],
+          project: 'test-project',
+        });
+        memoryId = memory.id;
+
+        const initialSalience = memory.salience;
+
+        // Search 3 times for this memory
+        for (let i = 0; i < 3; i++) {
+          await searchMemories({ query: 'xyzzyplugh', project: 'test-project' });
+        }
+
+        const updated = getMemoryById(memoryId);
+        expect(updated).not.toBeNull();
+        expect(updated!.salience).toBeGreaterThan(initialSalience);
+      } finally {
+        if (memoryId) { try { deleteMemory(memoryId); } catch { /* ignore */ } }
+        closeDatabase();
+      }
+    });
+
+    it('should link memories that co-appear in search results', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, searchMemories, getRelatedMemories, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let idA: number | undefined;
+      let idB: number | undefined;
+
+      try {
+        const memA = addMemory({
+          title: 'Co-search Link Memory Alpha',
+          content: 'Shared topic cosearchunique for linking test alpha variant',
+          tags: ['cosearch-test'],
+          project: 'test-project',
+        });
+        idA = memA.id;
+
+        const memB = addMemory({
+          title: 'Co-search Link Memory Beta',
+          content: 'Shared topic cosearchunique for linking test beta variant',
+          tags: ['cosearch-test'],
+          project: 'test-project',
+        });
+        idB = memB.id;
+
+        // Search for a term that matches both
+        await searchMemories({ query: 'cosearchunique', project: 'test-project' });
+
+        // Verify they got linked
+        const relatedToA = getRelatedMemories(idA);
+        const linkToB = relatedToA.find(r => r.memory.id === idB);
+        expect(linkToB).toBeDefined();
+        if (linkToB) {
+          expect(linkToB.relationship).toBe('related');
+          expect(linkToB.strength).toBeGreaterThan(0);
+        }
+      } finally {
+        if (idA) { try { deleteMemory(idA); } catch { /* ignore */ } }
+        if (idB) { try { deleteMemory(idB); } catch { /* ignore */ } }
+        closeDatabase();
+      }
+    });
+  });
+
   describe('Integration: detectRelationships via addMemory', () => {
     it('should auto-link related memories with different tags', async () => {
       const { initDatabase, closeDatabase } = await import('../database/init.js');
