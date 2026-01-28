@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1] - 2026-01-28
+
+### Improved
+- **Dashboard auto-starts API server** - No more manual `npm run dev:api` required when running dashboard directly
+- Running `cd dashboard && npm run dev` now automatically detects and starts the API if not running
+
 ## [1.5.0] - 2026-01-28
 
 ### Added

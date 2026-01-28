@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/ensure-api.mjs",
     "dev": "next dev -p 3030",
     "build": "next build",
     "start": "next start",
