@@ -279,7 +279,17 @@ npm run watch
 
 The dashboard provides a 3D brain visualization of your memories with real-time updates.
 
-### Running the Dashboard
+### Auto-Start on Login (Recommended)
+
+```bash
+npx claude-cortex service install    # Enable auto-start
+npx claude-cortex service uninstall  # Remove auto-start
+npx claude-cortex service status     # Check status
+```
+
+Works on **macOS** (launchd), **Linux** (systemd), and **Windows** (Startup folder). The dashboard and API server will start automatically on login.
+
+### Manual Start
 
 ```bash
 # Terminal 1: Start API server
