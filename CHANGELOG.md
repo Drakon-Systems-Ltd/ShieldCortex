@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-01-28
+
+### Fixed
+- React duplicate key error in MemoryDetail when memory has bidirectional relationships
+
 ## [1.4.0] - 2026-01-28
 
 ### Added

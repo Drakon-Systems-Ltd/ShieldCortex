@@ -246,7 +246,7 @@ export function MemoryDetail({
 
                 return (
                   <button
-                    key={related.id}
+                    key={`${related.id}-${direction}`}
                     onClick={() => onSelectMemory?.(related.id)}
                     className="w-full text-left p-2 bg-slate-800 hover:bg-slate-750 rounded-lg transition-colors group"
                   >
