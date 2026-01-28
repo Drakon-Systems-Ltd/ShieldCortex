@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.2] - 2026-01-28
+
+### Fixed
+- FTS5 query escaping: periods in search terms now properly quoted (fixes "syntax error near ." when remembering content with version numbers like v1.3.1)
+
 ## [1.3.1] - 2026-01-28
 
 ### Fixed

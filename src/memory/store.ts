@@ -90,8 +90,8 @@ function escapeFts5Query(query: string): string {
         return `"${term}"`;
       }
       // If term contains special FTS5 characters, quote it
-      // Including: - : * ^ ( ) & | and quotes
-      if (/[-:*^()&|]/.test(term) || term.includes('"')) {
+      // Including: - : * ^ ( ) & | . and quotes
+      if (/[-:*^()&|.]/.test(term) || term.includes('"')) {
         // Escape existing quotes and wrap in quotes
         return `"${term.replace(/"/g, '""')}"`;
       }
