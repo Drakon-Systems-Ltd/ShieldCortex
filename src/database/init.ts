@@ -352,6 +352,17 @@ function getInlineSchema(): string {
       FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE,
       UNIQUE(source_id, target_id)
     );
+
+    -- Events table for cross-process IPC (MCP → Dashboard)
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      data TEXT,
+      timestamp TEXT NOT NULL,
+      processed INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_events_processed ON events(processed, id);
   `;
 }
 

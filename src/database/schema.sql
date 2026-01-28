@@ -87,3 +87,14 @@ CREATE TABLE IF NOT EXISTS memory_links (
 
 CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
 CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
+
+-- Events table for cross-process IPC (MCP → Dashboard)
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  data TEXT,  -- JSON stringified event payload
+  timestamp TEXT NOT NULL,
+  processed INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_processed ON events(processed, id);
