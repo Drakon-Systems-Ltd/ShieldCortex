@@ -1,31 +1,21 @@
-import { pipeline, env } from '@xenova/transformers';
+import { pipeline, env } from '@huggingface/transformers';
+import type { FeatureExtractionPipeline } from '@huggingface/transformers';
 
-// Configure for local-only operation
+// Configure for operation
 env.allowRemoteModels = true;
 env.allowLocalModels = true;
 
-/**
- * Type for the embedding pipeline function returned by transformers.js
- * The pipeline extracts feature embeddings from text
- */
-interface EmbeddingOutput {
-  data: ArrayLike<number>;
-}
-
-type EmbeddingPipeline = (
-  text: string,
-  options: { pooling: string; normalize: boolean }
-) => Promise<EmbeddingOutput>;
-
-let embeddingPipeline: EmbeddingPipeline | null = null;
+let embeddingPipeline: FeatureExtractionPipeline | null = null;
 let isLoading = false;
-let loadPromise: Promise<EmbeddingPipeline> | null = null;
+let loadPromise: Promise<FeatureExtractionPipeline> | null = null;
 
 /**
  * Lazy-load the embedding model
  * Model: all-MiniLM-L6-v2 (22MB, 384 dimensions)
+ * Uses @huggingface/transformers (successor to @xenova/transformers)
+ * with better ARM64 Linux support
  */
-async function getEmbeddingPipeline(): Promise<EmbeddingPipeline> {
+async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
   if (embeddingPipeline) return embeddingPipeline;
 
   if (isLoading && loadPromise) {
@@ -33,8 +23,7 @@ async function getEmbeddingPipeline(): Promise<EmbeddingPipeline> {
   }
 
   isLoading = true;
-  // Cast the pipeline to our typed interface
-  loadPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2') as Promise<EmbeddingPipeline>;
+  loadPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2') as unknown as Promise<FeatureExtractionPipeline>;
 
   try {
     embeddingPipeline = await loadPromise;
@@ -61,7 +50,11 @@ export async function generateEmbedding(text: string): Promise<Float32Array> {
     normalize: true,
   });
 
-  return new Float32Array(output.data);
+  // Handle both Tensor objects (new @huggingface/transformers) and plain objects
+  const data = typeof output.tolist === 'function'
+    ? new Float32Array(output.tolist().flat(Infinity) as number[])
+    : new Float32Array(output.data as ArrayLike<number>);
+  return data;
 }
 
 /**
