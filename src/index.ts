@@ -13,6 +13,9 @@
  *   npx claude-cortex --mode both             # Start both servers
  *   npx claude-cortex --dashboard             # Start API + Dashboard (admin panel)
  *   npx claude-cortex --db /path/to.db        # Custom database path
+ *   npx claude-cortex service install         # Auto-start dashboard on login
+ *   npx claude-cortex service uninstall       # Remove auto-start
+ *   npx claude-cortex service status          # Check service status
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -21,6 +24,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { createServer } from './server.js';
 import { startVisualizationServer } from './api/visualization-server.js';
+import { handleServiceCommand } from './service/install.js';
 
 type ServerMode = 'mcp' | 'api' | 'both' | 'dashboard';
 
@@ -139,6 +143,12 @@ function startDashboard(): ChildProcess {
  * Main entry point
  */
 async function main() {
+  // Handle "service" subcommand before normal mode parsing
+  if (process.argv[2] === 'service') {
+    await handleServiceCommand(process.argv[3] || '');
+    return;
+  }
+
   const { dbPath, mode } = parseArgs();
 
   let dashboardProcess: ChildProcess | null = null;

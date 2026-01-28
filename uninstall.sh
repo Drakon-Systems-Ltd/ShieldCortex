@@ -9,6 +9,12 @@ echo "  Claude Memory Server Uninstaller"
 echo "============================================"
 echo ""
 
+# Remove auto-start service if installed
+echo "Removing auto-start service (if installed)..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+node "$SCRIPT_DIR/dist/index.js" service uninstall 2>/dev/null || true
+echo ""
+
 # Restore original settings
 if [ -f ~/.claude/settings.json.backup-pre-memory ]; then
     cp ~/.claude/settings.json.backup-pre-memory ~/.claude/settings.json

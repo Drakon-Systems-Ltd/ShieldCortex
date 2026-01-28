@@ -40,6 +40,8 @@ cd dashboard && npm run dev
 | `src/api/visualization-server.ts` | REST API + WebSocket for dashboard |
 | `scripts/session-start-hook.mjs` | Auto-recall context on session start |
 | `scripts/pre-compact-hook.mjs` | Auto-extract memories before compaction |
+| `src/service/install.ts` | Cross-platform service installer |
+| `src/service/templates.ts` | Launchd/systemd/Windows service templates |
 | `dashboard/` | 3D brain visualization (Next.js) |
 
 ## Database Location
@@ -161,6 +163,18 @@ GET  /api/context        - Context summary
 GET  /api/suggestions    - Search autocomplete
 WS   /ws/events          - Real-time updates
 ```
+
+## Auto-Start Service
+The dashboard can auto-start on login after reboot:
+```bash
+npx claude-cortex service install    # Enable auto-start
+npx claude-cortex service uninstall  # Disable auto-start
+npx claude-cortex service status     # Check status
+```
+- **macOS**: LaunchAgent plist (`~/Library/LaunchAgents/com.claude-cortex.dashboard.plist`)
+- **Linux**: systemd user service (`~/.config/systemd/user/claude-cortex-dashboard.service`)
+- **Windows**: VBS script in Startup folder
+- Logs: `~/.claude-cortex/logs/`
 
 ## Known Issues
 - MCP server process caches - restart Claude Code after code changes
