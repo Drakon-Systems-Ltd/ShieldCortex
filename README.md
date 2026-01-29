@@ -68,9 +68,9 @@ Create `~/.claude/.mcp.json` with the same content.
 
 After adding the config, restart Claude Code and approve the MCP server when prompted.
 
-### 3. Configure PreCompact Hook (Recommended)
+### 3. Configure Hooks (Recommended)
 
-Add to `~/.claude/settings.json` for automatic memory extraction before compaction:
+Add to `~/.claude/settings.json` for automatic memory extraction and context loading:
 
 ```json
 {
@@ -81,7 +81,20 @@ Add to `~/.claude/settings.json` for automatic memory extraction before compacti
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y claude-cortex-hook pre-compact"
+            "command": "npx -y claude-cortex hook pre-compact",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y claude-cortex hook session-start",
+            "timeout": 5
           }
         ]
       }
@@ -90,7 +103,8 @@ Add to `~/.claude/settings.json` for automatic memory extraction before compacti
 }
 ```
 
-This ensures important context is auto-saved before any compaction event.
+- **PreCompact**: Auto-saves important context before compaction events
+- **SessionStart**: Auto-loads project context at the start of each session
 
 ### 4. Enable Proactive Memory (Recommended)
 
@@ -291,6 +305,8 @@ The dashboard provides a 3D brain visualization of your memories with real-time 
 
 ```bash
 npx claude-cortex setup              # Configure Claude for proactive memory use
+npx claude-cortex hook pre-compact   # Run pre-compact hook (for settings.json)
+npx claude-cortex hook session-start # Run session-start hook (for settings.json)
 npx claude-cortex service install    # Enable auto-start
 npx claude-cortex service uninstall  # Remove auto-start
 npx claude-cortex service status     # Check status

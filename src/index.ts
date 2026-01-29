@@ -14,6 +14,8 @@
  *   npx claude-cortex --dashboard             # Start API + Dashboard (admin panel)
  *   npx claude-cortex --db /path/to.db        # Custom database path
  *   npx claude-cortex setup                    # Configure Claude for proactive memory use
+ *   npx claude-cortex hook pre-compact         # Run pre-compact hook (for settings.json)
+ *   npx claude-cortex hook session-start       # Run session-start hook (for settings.json)
  *   npx claude-cortex service install         # Auto-start dashboard on login
  *   npx claude-cortex service uninstall       # Remove auto-start
  *   npx claude-cortex service status          # Check service status
@@ -27,6 +29,7 @@ import { createServer } from './server.js';
 import { startVisualizationServer } from './api/visualization-server.js';
 import { handleServiceCommand } from './service/install.js';
 import { setupClaudeMd } from './setup/claude-md.js';
+import { handleHookCommand } from './setup/hooks.js';
 
 type ServerMode = 'mcp' | 'api' | 'both' | 'dashboard';
 
@@ -148,6 +151,12 @@ async function main() {
   // Handle "setup" subcommand
   if (process.argv[2] === 'setup') {
     await setupClaudeMd();
+    return;
+  }
+
+  // Handle "hook" subcommand
+  if (process.argv[2] === 'hook') {
+    await handleHookCommand(process.argv[3] || '');
     return;
   }
 
