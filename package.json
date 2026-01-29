@@ -1,6 +1,6 @@
 {
   "name": "claude-cortex",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "description": "Brain-like memory system for Claude Code - solves context compaction and memory persistence",
   "main": "dist/index.js",
   "type": "module",
@@ -65,6 +65,8 @@
   },
   "files": [
     "dist",
-    "dashboard"
+    "dashboard",
+    "hooks",
+    "scripts"
   ]
 }

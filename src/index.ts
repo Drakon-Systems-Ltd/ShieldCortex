@@ -19,6 +19,9 @@
  *   npx claude-cortex service install         # Auto-start dashboard on login
  *   npx claude-cortex service uninstall       # Remove auto-start
  *   npx claude-cortex service status          # Check service status
+ *   npx claude-cortex clawdbot install        # Install Clawdbot/Moltbot hook
+ *   npx claude-cortex clawdbot uninstall      # Remove Clawdbot/Moltbot hook
+ *   npx claude-cortex clawdbot status         # Check Clawdbot hook status
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -30,6 +33,7 @@ import { startVisualizationServer } from './api/visualization-server.js';
 import { handleServiceCommand } from './service/install.js';
 import { setupClaudeMd } from './setup/claude-md.js';
 import { handleHookCommand } from './setup/hooks.js';
+import { handleClawdbotCommand } from './setup/clawdbot.js';
 
 type ServerMode = 'mcp' | 'api' | 'both' | 'dashboard';
 
@@ -157,6 +161,12 @@ async function main() {
   // Handle "hook" subcommand
   if (process.argv[2] === 'hook') {
     await handleHookCommand(process.argv[3] || '');
+    return;
+  }
+
+  // Handle "clawdbot" subcommand
+  if (process.argv[2] === 'clawdbot') {
+    await handleClawdbotCommand(process.argv[3] || '');
     return;
   }
 
