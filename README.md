@@ -106,13 +106,17 @@ Add to `~/.claude/settings.json` for automatic memory extraction and context loa
 - **PreCompact**: Auto-saves important context before compaction events
 - **SessionStart**: Auto-loads project context at the start of each session
 
-### 4. Enable Proactive Memory (Recommended)
+### 4. Run Setup (Recommended)
 
 ```bash
 npx claude-cortex setup
 ```
 
-This adds instructions to `~/.claude/CLAUDE.md` so Claude proactively uses memory tools in all projects. Safe to run multiple times (idempotent).
+This configures everything automatically:
+- **Claude Code**: Adds proactive memory instructions to `~/.claude/CLAUDE.md`
+- **Clawdbot/Moltbot**: Installs `cortex-memory` hook if Clawdbot or Moltbot is detected
+
+Safe to run multiple times (idempotent). If Clawdbot isn't installed, it's skipped silently.
 
 ### 5. Use It
 
@@ -301,15 +305,18 @@ npm run watch
 
 The dashboard provides a 3D brain visualization of your memories with real-time updates.
 
-### Auto-Start on Login (Recommended)
+### CLI Commands
 
 ```bash
-npx claude-cortex setup              # Configure Claude for proactive memory use
+npx claude-cortex setup              # Configure Claude Code + Clawdbot (if detected)
 npx claude-cortex hook pre-compact   # Run pre-compact hook (for settings.json)
 npx claude-cortex hook session-start # Run session-start hook (for settings.json)
-npx claude-cortex service install    # Enable auto-start
+npx claude-cortex service install    # Enable auto-start on login
 npx claude-cortex service uninstall  # Remove auto-start
-npx claude-cortex service status     # Check status
+npx claude-cortex service status     # Check service status
+npx claude-cortex clawdbot install   # Install Clawdbot/Moltbot hook manually
+npx claude-cortex clawdbot uninstall # Remove Clawdbot/Moltbot hook
+npx claude-cortex clawdbot status    # Check Clawdbot hook status
 ```
 
 Works on **macOS** (launchd), **Linux** (systemd), and **Windows** (Startup folder). The dashboard and API server will start automatically on login.
@@ -349,7 +356,24 @@ cd dashboard && npm run dev
 
 ## Moltbot / ClawdBot Integration
 
-Claude Cortex works with [Moltbot](https://github.com/moltbot/moltbot) (formerly ClawdBot) via [mcporter](https://mcpmarket.com/tools/skills/mcporter). Since Claude Cortex is a standard MCP server, Moltbot can call its tools on-demand:
+Claude Cortex works with [Moltbot](https://github.com/moltbot/moltbot) (formerly ClawdBot) via [mcporter](https://mcpmarket.com/tools/skills/mcporter).
+
+### Automatic Hook (Recommended)
+
+```bash
+npx claude-cortex clawdbot install
+```
+
+Or run `npx claude-cortex setup` — it installs the hook automatically if Clawdbot/Moltbot is detected.
+
+The **cortex-memory** hook provides:
+- **Auto-save on `/new`** — Extracts decisions, fixes, learnings from ending sessions
+- **Context injection on bootstrap** — Agent starts with past session knowledge
+- **Keyword triggers** — Say "remember this" or "don't forget" to save with critical importance
+
+### Manual mcporter Commands
+
+Since Claude Cortex is a standard MCP server, Moltbot can also call its tools directly:
 
 ```bash
 # Remember something via Moltbot
