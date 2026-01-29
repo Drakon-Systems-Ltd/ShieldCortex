@@ -576,7 +576,7 @@ export function startVisualizationServer(dbPath?: string): void {
       const upperQuery = query.toUpperCase().trim();
 
       // Always block DROP and TRUNCATE
-      if (upperQuery.includes('DROP') || upperQuery.includes('TRUNCATE')) {
+      if (/\bDROP\b/.test(upperQuery) || /\bTRUNCATE\b/.test(upperQuery)) {
         return res.status(403).json({
           error: 'DROP and TRUNCATE operations are blocked for safety',
         });

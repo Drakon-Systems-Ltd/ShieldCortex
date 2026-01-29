@@ -12,7 +12,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -532,10 +532,6 @@ process.stdin.on('end', () => {
   try {
     const hookData = JSON.parse(input || '{}');
 
-    // Debug logging - what does Claude Code actually send?
-    console.error('[hook-debug] Received fields:', Object.keys(hookData).join(', '));
-    console.error('[hook-debug] Data preview:', JSON.stringify(hookData, null, 2).slice(0, 1000));
-
     const trigger = hookData.trigger || 'unknown';
     const project = extractProjectFromPath(hookData.cwd);
 
@@ -606,7 +602,71 @@ process.stdin.on('end', () => {
 });
 
 /**
- * Extract conversation text from various hook data formats
+ * Read conversation text from the current session's JSONL file.
+ * Claude Code stores sessions in ~/.claude/projects/<project-slug>/<session-id>.jsonl
+ */
+function readSessionConversation(cwd) {
+  if (!cwd) return '';
+
+  try {
+    // Claude Code uses the absolute path with slashes replaced by dashes as the project folder name
+    const projectSlug = cwd.replace(/^\//, '').replace(/\//g, '-');
+    const projectDir = join(homedir(), '.claude', 'projects', `-${projectSlug}`);
+
+    if (!existsSync(projectDir)) {
+      console.error(`[auto-extract] Session dir not found: ${projectDir}`);
+      return '';
+    }
+
+    // Find the most recently modified .jsonl file (= current session)
+    const files = readdirSync(projectDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => ({ name: f, mtime: statSync(join(projectDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+
+    if (files.length === 0) {
+      console.error('[auto-extract] No session JSONL files found');
+      return '';
+    }
+
+    const sessionFile = join(projectDir, files[0].name);
+    const content = readFileSync(sessionFile, 'utf-8');
+    const lines = content.trim().split('\n');
+
+    // Read last 50 lines to get recent conversation
+    const recentLines = lines.slice(-50);
+    const messages = [];
+
+    for (const line of recentLines) {
+      try {
+        const entry = JSON.parse(line);
+        // Claude Code JSONL: entry.type is "user"|"assistant", entry.message has API content
+        const role = entry.type || entry.message?.role;
+        const content = entry.message?.content;
+        if ((role === 'user' || role === 'assistant') && content) {
+          const text = Array.isArray(content)
+            ? content.filter(c => c.type === 'text').map(c => c.text).join('\n')
+            : content;
+          if (text && !text.startsWith('/')) {
+            messages.push(text);
+          }
+        }
+      } catch {
+        // Skip invalid lines
+      }
+    }
+
+    const result = messages.join('\n\n');
+    console.error(`[auto-extract] Read ${messages.length} messages from session JSONL (${result.length} chars)`);
+    return result;
+  } catch (err) {
+    console.error(`[auto-extract] Failed to read session: ${err.message}`);
+    return '';
+  }
+}
+
+/**
+ * Extract conversation text from hook data, falling back to session JSONL
  */
 function extractConversationText(hookData) {
   // Try different possible locations for conversation content
@@ -624,7 +684,6 @@ function extractConversationText(hookData) {
       return source;
     }
     if (Array.isArray(source)) {
-      // If it's an array of messages, concatenate them
       return source
         .map(msg => {
           if (typeof msg === 'string') return msg;
@@ -636,36 +695,39 @@ function extractConversationText(hookData) {
     }
   }
 
-  // If no specific field, try to stringify the whole object
-  // (but exclude large binary/irrelevant fields)
-  const { stdin, stdout, stderr, ...relevantData } = hookData;
-  const fullText = JSON.stringify(relevantData);
-
-  // Only return if it looks like it has useful content
-  if (fullText.length > 200) {
-    return fullText;
-  }
-
-  return '';
+  // Fallback: read the session JSONL file directly
+  return readSessionConversation(hookData.cwd);
 }
 
 /**
- * Output reminder message to stdout
+ * Output reminder message to stdout.
+ * Context retrieval is handled by the SessionStart compact hook, so we only
+ * need to report auto-extraction results and proactive memory instructions.
  */
 function outputReminder(autoExtractedCount, dynamicThreshold) {
   if (autoExtractedCount > 0) {
-    console.log(`
-🧠 AUTO-MEMORY: ${autoExtractedCount} important items were automatically saved before compaction.
-IMPORTANT: You MUST call the 'get_context' MCP tool NOW to restore your project knowledge.
-`);
+    console.log(`\n🧠 AUTO-MEMORY: ${autoExtractedCount} important items were automatically saved before compaction.`);
   } else {
     const thresholdNote = dynamicThreshold > 0.5
       ? ' (Memory near capacity - being selective)'
       : '';
-    console.log(`
-🧠 PRE-COMPACT: No auto-extractable content found with high enough salience${thresholdNote}.
-If there's something important, use 'remember' to save it explicitly.
-IMPORTANT: You MUST call the 'get_context' MCP tool NOW to restore your project knowledge.
-`);
+    console.log(`\n🧠 PRE-COMPACT: No auto-extractable content found with high enough salience${thresholdNote}.
+If there's something important, use 'remember' to save it explicitly.`);
   }
+
+  // Proactive memory instructions
+  console.log(`
+## IMPORTANT: Proactive Memory Use
+
+You have access to a persistent memory system. Use it proactively:
+
+**ALWAYS use \`remember\` immediately when:**
+- Making architecture/design decisions
+- Fixing bugs (capture the root cause and solution)
+- Learning something new about the codebase
+- User states a preference
+- Completing significant features
+
+**Don't wait** - call \`remember\` right after the event, not at the end of the session.
+`);
 }

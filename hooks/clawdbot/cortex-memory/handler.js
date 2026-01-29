@@ -25,15 +25,14 @@ function callCortex(tool, args = {}) {
       tool,
     ];
     for (const [key, value] of Object.entries(args)) {
-      // Escape single quotes in values to avoid FTS5 issues
-      const safe = String(value).replace(/'/g, "");
+      // Escape single quotes by doubling them (FTS5-safe)
+      const safe = String(value).replace(/'/g, "''");
       cmdArgs.push(`${key}:${safe}`);
     }
 
     execFile("npx", cmdArgs, {
       timeout: 15000,
       maxBuffer: 1024 * 256,
-      shell: true,
     }, (err, stdout) => {
       if (err) {
         console.error(`[cortex-memory] mcporter error (${tool}):`, err.message);

@@ -81,14 +81,16 @@ function getProjectContext(db, project) {
 
   // If we don't have enough, get recent memories too
   if (memories.length < 5) {
+    const excludeIds = memories.map(m => m.id);
+    const placeholders = excludeIds.length > 0 ? excludeIds.map(() => '?').join(',') : '0';
     const recent = db.prepare(`
       SELECT id, title, content, category, type, salience, tags, created_at
       FROM memories
       WHERE (project = ? OR project IS NULL)
-        AND id NOT IN (${memories.map(m => m.id).join(',') || '0'})
+        AND id NOT IN (${placeholders})
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(project, 5 - memories.length);
+    `).all(project, ...excludeIds, 5 - memories.length);
 
     memories.push(...recent);
   }
