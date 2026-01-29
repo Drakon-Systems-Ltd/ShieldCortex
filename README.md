@@ -347,6 +347,23 @@ cd dashboard && npm run dev
 | Yellow | Learning |
 | Cyan | Context |
 
+## Moltbot / ClawdBot Integration
+
+Claude Cortex works with [Moltbot](https://github.com/moltbot/moltbot) (formerly ClawdBot) via [mcporter](https://mcpmarket.com/tools/skills/mcporter). Since Claude Cortex is a standard MCP server, Moltbot can call its tools on-demand:
+
+```bash
+# Remember something via Moltbot
+npx mcporter call --stdio "npx -y claude-cortex" memory.remember title:"API uses JWT" content:"The auth system uses JWT tokens with 15-min expiry"
+
+# Recall memories
+npx mcporter call --stdio "npx -y claude-cortex" memory.recall query:"authentication"
+
+# Get project context
+npx mcporter call --stdio "npx -y claude-cortex" memory.get_context
+```
+
+**Shared memory**: Memories created via Moltbot are instantly available in Claude Code sessions and vice versa — both use the same SQLite database at `~/.claude-cortex/memories.db`.
+
 ## How This Differs from Other Solutions
 
 | Feature | Claude Cortex | Other MCP Memory Tools |
