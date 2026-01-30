@@ -23,6 +23,7 @@
     "next": "16.1.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "react-force-graph-2d": "^1.29.0",
     "react-resizable-panels": "^4.4.1",
     "recharts": "^3.7.0",
     "tailwind-merge": "^3.4.0",
