@@ -23,10 +23,11 @@ const DAY_LABELS = ['', 'Mon', '', 'Wed', '', 'Fri', ''];
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function getColor(count: number, max: number): string {
-  if (count === 0) return '#1e293b'; // slate-800
+  if (count === 0) return '#0f172a'; // slate-900 (darker empty)
   const ratio = count / Math.max(max, 1);
-  if (ratio < 0.33) return '#164e63'; // cyan-900
-  if (ratio < 0.66) return '#0891b2'; // cyan-600
+  if (ratio < 0.25) return '#155e75'; // cyan-800
+  if (ratio < 0.50) return '#0891b2'; // cyan-600
+  if (ratio < 0.75) return '#06b6d4'; // cyan-500
   return '#22d3ee'; // cyan-400
 }
 

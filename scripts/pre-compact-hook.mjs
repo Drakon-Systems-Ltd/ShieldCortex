@@ -501,20 +501,6 @@ function saveMemory(db, memory, project) {
   );
 }
 
-function createSessionMarker(db, trigger, project, autoExtractedCount) {
-  const timestamp = new Date().toISOString();
-  const title = `Session compaction (${trigger})`;
-  const content = autoExtractedCount > 0
-    ? `Context compaction at ${timestamp}. Auto-extracted ${autoExtractedCount} memories. Type: ${trigger}.`
-    : `Context compaction at ${timestamp}. Type: ${trigger}. No auto-extractable content found.`;
-
-  const stmt = db.prepare(`
-    INSERT INTO memories (title, content, type, category, salience, tags, project, created_at, last_accessed)
-    VALUES (?, ?, 'episodic', 'context', 0.3, ?, ?, ?, ?)
-  `);
-
-  stmt.run(title, content, JSON.stringify(['session', 'compaction', 'auto-extracted']), project || null, timestamp, timestamp);
-}
 
 // ==================== MAIN HOOK LOGIC ====================
 
@@ -584,9 +570,6 @@ process.stdin.on('end', () => {
         }
       }
     }
-
-    // Create session marker
-    createSessionMarker(db, trigger, project, autoExtractedCount);
 
     console.error(`[claude-cortex] Pre-compact complete: ${autoExtractedCount} memories auto-extracted`);
 

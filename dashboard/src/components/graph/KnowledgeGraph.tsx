@@ -43,6 +43,8 @@ export default function KnowledgeGraph({
   onSelectMemory,
 }: KnowledgeGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const graphRef = useRef<any>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
   useEffect(() => {
@@ -160,6 +162,31 @@ export default function KnowledgeGraph({
     [],
   );
 
+  const lastZoomRef = useRef(1);
+  const handleZoom = useCallback(
+    ({ k }: { k: number }) => {
+      const fg = graphRef.current;
+      if (!fg) return;
+      const prev = lastZoomRef.current;
+      if (Math.abs(k - prev) < 0.2) return;
+      lastZoomRef.current = k;
+
+      const charge = fg.d3Force('charge');
+      if (!charge) return;
+
+      if (k > 1.5) {
+        // Zoomed in past label threshold — spread nodes for readability
+        charge.strength(-50 * k);
+        fg.d3ReheatSimulation();
+      } else {
+        // Zoomed out — restore default compact layout
+        charge.strength(-30);
+        fg.d3ReheatSimulation();
+      }
+    },
+    [],
+  );
+
   const handleNodeClick = useCallback(
     (node: GraphNode) => {
       const memory = memories.find((m) => m.id === node.id) ?? null;
@@ -178,6 +205,7 @@ export default function KnowledgeGraph({
     <div ref={containerRef} style={{ width: '100%', height: '100%' }}>
       {dimensions.width > 0 && (
         <ForceGraph2D
+          ref={graphRef as never}
           graphData={graphData}
           width={dimensions.width}
           height={dimensions.height}
@@ -185,7 +213,12 @@ export default function KnowledgeGraph({
           nodeCanvasObject={nodeCanvasObject as never}
           nodeLabel={nodeLabel as never}
           onNodeClick={handleNodeClick as never}
+          onZoom={handleZoom as never}
           linkCanvasObject={linkCanvasObject as never}
+          linkDirectionalParticles={2}
+          linkDirectionalParticleWidth={2}
+          linkDirectionalParticleSpeed={0.005}
+          linkDirectionalParticleColor={() => '#22d3ee'}
           d3AlphaDecay={0.02}
           d3VelocityDecay={0.3}
           warmupTicks={100}
