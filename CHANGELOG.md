@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.0] - 2026-01-30
+
+### Added
+- **`setup` auto-configures hooks** — `npx claude-cortex setup` now installs PreCompact, SessionStart, and SessionEnd hooks into `~/.claude/settings.json` using portable `npx claude-cortex hook <name>` commands.
+- **Stop hook (opt-in)** — `npx claude-cortex setup --with-stop-hook` installs a Stop hook that checks the last assistant message for notable content (decisions, fixes, learnings) and prompts Claude to use `remember`. Loop prevention is programmatic (`stop_hook_active` boolean check), not LLM-dependent.
+- `npx claude-cortex hook stop` CLI command for manual invocation.
+
 ## [1.9.1] - 2026-01-30
 
 ### Added

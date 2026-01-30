@@ -17,6 +17,7 @@ const HOOKS: Record<string, string> = {
   'pre-compact': 'pre-compact-hook.mjs',
   'session-start': 'session-start-hook.mjs',
   'session-end': 'session-end-hook.mjs',
+  'stop': 'stop-hook.mjs',
 };
 
 export async function handleHookCommand(hookName: string): Promise<void> {
@@ -24,7 +25,7 @@ export async function handleHookCommand(hookName: string): Promise<void> {
   if (!scriptFile) {
     console.error(`Unknown hook: ${hookName}`);
     console.log(`Available hooks: ${Object.keys(HOOKS).join(', ')}`);
-    console.log('Usage: claude-cortex hook <pre-compact|session-start|session-end>');
+    console.log('Usage: claude-cortex hook <pre-compact|session-start|session-end|stop>');
     process.exit(1);
   }
 

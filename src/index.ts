@@ -172,7 +172,8 @@ async function main() {
 
   // Handle "setup" subcommand
   if (process.argv[2] === 'setup') {
-    await setupClaudeMd();
+    const stopHook = process.argv.includes('--with-stop-hook');
+    await setupClaudeMd({ stopHook });
     return;
   }
 

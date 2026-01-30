@@ -124,9 +124,16 @@ npx claude-cortex setup
 
 This configures everything automatically:
 - **Claude Code**: Adds proactive memory instructions to `~/.claude/CLAUDE.md`
+- **Hooks**: Installs PreCompact, SessionStart, and SessionEnd hooks into `~/.claude/settings.json`
 - **Clawdbot/Moltbot**: Installs `cortex-memory` hook if Clawdbot or Moltbot is detected
 
-Safe to run multiple times (idempotent). If Clawdbot isn't installed, it's skipped silently.
+Safe to run multiple times (idempotent).
+
+**Optional: Stop hook** — Checks the last response for notable content and prompts Claude to `remember`:
+```bash
+npx claude-cortex setup --with-stop-hook
+```
+The Stop hook uses local pattern matching (no API cost). Loop prevention is programmatic.
 
 ### 5. Use It
 

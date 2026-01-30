@@ -41,6 +41,8 @@ cd dashboard && npm run dev
 | `scripts/session-start-hook.mjs` | Auto-recall context on session start |
 | `scripts/pre-compact-hook.mjs` | Auto-extract memories before compaction |
 | `scripts/session-end-hook.mjs` | Auto-extract memories on session exit |
+| `scripts/stop-hook.mjs` | Check last response for notable content (opt-in) |
+| `src/setup/settings-hooks.ts` | Auto-configure hooks in settings.json |
 | `src/service/install.ts` | Cross-platform service installer |
 | `src/service/templates.ts` | Launchd/systemd/Windows service templates |
 | `dashboard/` | 3D brain visualization (Next.js) |

@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { installClawdbotHook, findClawdbotHooksDir } from './clawdbot.js';
+import { setupHooks } from './settings-hooks.js';
 
 const MARKER = '# Claude Cortex — Memory System';
 
@@ -49,13 +50,16 @@ function setupClaudeCode(): void {
   }
 }
 
-export async function setupClaudeMd(): Promise<void> {
+export async function setupClaudeMd(options?: { stopHook?: boolean }): Promise<void> {
   console.log('Setting up Claude Cortex...\n');
 
-  // 1. Claude Code — always
+  // 1. Claude Code CLAUDE.md — always
   setupClaudeCode();
 
-  // 2. Clawdbot/Moltbot — if detected
+  // 2. Hooks in settings.json
+  setupHooks(options);
+
+  // 3. Clawdbot/Moltbot — if detected
   const hooksDir = findClawdbotHooksDir();
   if (hooksDir) {
     const hookExists = fs.existsSync(path.join(hooksDir, 'cortex-memory'));
