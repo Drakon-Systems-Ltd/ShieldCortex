@@ -35,6 +35,10 @@ import { handleServiceCommand } from './service/install.js';
 import { setupClaudeMd } from './setup/claude-md.js';
 import { handleHookCommand } from './setup/hooks.js';
 import { handleClawdbotCommand } from './setup/clawdbot.js';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json');
 
 type ServerMode = 'mcp' | 'api' | 'both' | 'dashboard';
 
@@ -153,6 +157,12 @@ function startDashboard(): ChildProcess {
  * Main entry point
  */
 async function main() {
+  // Handle --version / -v
+  if (process.argv[2] === '--version' || process.argv[2] === '-v') {
+    console.log(pkg.version);
+    return;
+  }
+
   // Handle "setup" subcommand
   if (process.argv[2] === 'setup') {
     await setupClaudeMd();
