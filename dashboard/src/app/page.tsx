@@ -2,7 +2,7 @@
 
 /**
  * Main Dashboard Page
- * Brain-like visualization of the Claude Cortex memory system
+ * Multi-view dashboard for the Claude Cortex memory system
  */
 
 import { useState, useRef, useEffect } from 'react';
@@ -11,10 +11,8 @@ import { useMemoriesWithRealtime, useStats, useAccessMemory, useConsolidate, use
 import { useDashboardStore } from '@/lib/store';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useSuggestions } from '@/hooks/useSuggestions';
-import { StatsPanel } from '@/components/dashboard/StatsPanel';
 import { MemoryDetail } from '@/components/memory/MemoryDetail';
-import { ControlPanel } from '@/components/controls/ControlPanel';
-import { DebugPanel } from '@/components/debug/DebugPanel';
+import { NavRail } from '@/components/nav/NavRail';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Memory } from '@/types/memory';
@@ -46,7 +44,7 @@ export default function DashboardPage() {
   const debouncedSearch = useDebouncedValue(searchQuery, 300);
 
   // Zustand store
-  const { selectedMemory, setSelectedMemory } = useDashboardStore();
+  const { viewMode, selectedMemory, setSelectedMemory } = useDashboardStore();
 
   // Search suggestions
   const { data: suggestions = [] } = useSuggestions(searchQuery);
@@ -121,8 +119,6 @@ export default function DashboardPage() {
   const handleConsolidate = () => {
     consolidateMutation.mutate();
   };
-
-  const [showDebugPanel, setShowDebugPanel] = useState(true);
 
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
@@ -272,29 +268,36 @@ export default function DashboardPage() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Stats & Controls */}
-        <div className="w-64 border-r border-slate-800 overflow-y-auto p-4 bg-slate-900/30 shrink-0 space-y-4">
-          <StatsPanel stats={stats} isLoading={statsLoading} />
-          <ControlPanel />
-        </div>
+        <NavRail />
 
-        {/* Center - Brain Visualization */}
-        <div className="flex-1 relative">
-          {memoriesLoading ? (
-            <div className="w-full h-full flex items-center justify-center">
-              <div className="text-slate-400 animate-pulse">Loading memories...</div>
-            </div>
-          ) : (
-            <BrainScene
-              memories={memories}
-              links={links}
-              selectedMemory={selectedMemory}
-              onSelectMemory={handleSelectMemory}
-            />
+        {/* Active View */}
+        <div className="flex-1 relative overflow-hidden">
+          {viewMode === 'brain' && (
+            memoriesLoading ? (
+              <div className="w-full h-full flex items-center justify-center">
+                <div className="text-slate-400 animate-pulse">Loading memories...</div>
+              </div>
+            ) : (
+              <BrainScene
+                memories={memories}
+                links={links}
+                selectedMemory={selectedMemory}
+                onSelectMemory={handleSelectMemory}
+              />
+            )
+          )}
+          {viewMode === 'graph' && (
+            <div className="flex items-center justify-center h-full text-slate-400">Graph view — coming soon</div>
+          )}
+          {viewMode === 'memories' && (
+            <div className="flex items-center justify-center h-full text-slate-400">Memories view — coming soon</div>
+          )}
+          {viewMode === 'insights' && (
+            <div className="flex items-center justify-center h-full text-slate-400">Insights view — coming soon</div>
           )}
         </div>
 
-        {/* Right Sidebar - Details (conditional) */}
+        {/* Right Detail Panel */}
         {selectedMemory && (
           <div className="w-80 border-l border-slate-800 overflow-y-auto shrink-0">
             <MemoryDetail
@@ -308,9 +311,6 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
-
-      {/* Debug Panel (bottom) */}
-      {showDebugPanel && <DebugPanel />}
     </div>
   );
 }
