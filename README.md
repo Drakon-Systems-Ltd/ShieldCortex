@@ -302,6 +302,13 @@ Or in Claude config:
 }
 ```
 
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3001` | API server port |
+| `CORTEX_CORS_ORIGINS` | `http://localhost:3030,http://localhost:3000` | Comma-separated allowed CORS origins. Set to `*` is not supported — add specific origins. |
+
 ### Tuning Parameters
 
 In `src/memory/types.ts`:

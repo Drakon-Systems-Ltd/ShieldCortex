@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.12.0] - 2026-01-30
+
+### Added
+- **GitHub Actions CI** — Automated build + test on push/PR (Node 20 + 22 matrix)
+- **Auto-publish to npm** — GitHub release triggers `npm publish` with pre-built dashboard (`.next/` ships in package, zero install-time cost)
+
+### Security
+- **CORS restricted to localhost** — API server now only accepts requests from `localhost:3030`, `localhost:3000`, and `127.0.0.1` equivalents. Configurable via `CORTEX_CORS_ORIGINS` environment variable (comma-separated origins).
+
 ## [1.11.0] - 2026-01-30
 
 ### Added

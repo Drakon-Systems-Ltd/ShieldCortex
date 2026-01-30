@@ -60,8 +60,21 @@ export function startVisualizationServer(dbPath?: string): void {
   const app = express();
   const server = createServer(app);
 
-  // Middleware
-  app.use(cors());
+  // Middleware — CORS restricted to localhost by default
+  const allowedOrigins = process.env.CORTEX_CORS_ORIGINS
+    ? process.env.CORTEX_CORS_ORIGINS.split(',').map(s => s.trim())
+    : ['http://localhost:3030', 'http://localhost:3000', 'http://127.0.0.1:3030', 'http://127.0.0.1:3000'];
+
+  app.use(cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (curl, server-to-server, same-origin)
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`Origin ${origin} not allowed by CORS`));
+      }
+    },
+  }));
   app.use(express.json());
 
   // ============================================
