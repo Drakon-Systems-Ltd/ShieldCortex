@@ -16,6 +16,7 @@ import { MemoriesView } from '@/components/memories/MemoriesView';
 import { NavRail } from '@/components/nav/NavRail';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { InsightsView } from '@/components/insights/InsightsView';
 import { Memory } from '@/types/memory';
 
 // Dynamic imports (avoid SSR issues with canvas/WebGL)
@@ -315,7 +316,7 @@ export default function DashboardPage() {
             />
           )}
           {viewMode === 'insights' && (
-            <div className="flex items-center justify-center h-full text-slate-400">Insights view — coming soon</div>
+            <InsightsView selectedProject={selectedProject} stats={stats} />
           )}
         </div>
 
