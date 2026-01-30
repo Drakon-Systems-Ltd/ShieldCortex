@@ -114,7 +114,7 @@ export default function KnowledgeGraph({
       ctx.setLineDash([]);
 
       // Label when zoomed in enough
-      if (globalScale > 1.5) {
+      if (globalScale > 3) {
         const maxChars = 40;
         const label = node.name.length > maxChars ? node.name.slice(0, maxChars) + '…' : node.name;
         const fontSize = Math.max(10, 12 / globalScale);
@@ -174,7 +174,7 @@ export default function KnowledgeGraph({
       const charge = fg.d3Force('charge');
       if (!charge) return;
 
-      if (k > 1.5) {
+      if (k > 3) {
         // Zoomed in past label threshold — spread nodes for readability
         charge.strength(-50 * k);
         fg.d3ReheatSimulation();
