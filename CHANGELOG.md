@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.0] - 2026-01-30
+
+### Added
+- **Dashboard redesign**: Multi-view layout with slim nav rail replacing the left sidebar
+- **2D Knowledge Graph**: Interactive force-directed graph as default view (`react-force-graph-2d`) — nodes colored by category, sized by salience, linked by relationships
+- **Memories card grid**: Browseable card view with sort (salience/date/decay), grid/list toggle, and bulk select + delete
+- **Insights view**: Activity heatmap (GitHub-style), knowledge coverage bar charts, memory quality analysis (never-accessed, stale, duplicates, contradictions)
+- **API endpoints**: `GET /api/memories/activity` and `GET /api/memories/quality` for insights data
+- **View transitions**: Smooth fade animations between views (Framer Motion)
+- 3D Brain visualization preserved as optional "Brain" tab
+
 ## [1.10.0] - 2026-01-30
 
 ### Added
