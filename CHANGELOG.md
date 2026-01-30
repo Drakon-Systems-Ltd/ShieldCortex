@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.1] - 2026-01-30
+
+### Added
+- **`doctor` command** — `npx claude-cortex doctor` checks installation health: Node version, database, CLAUDE.md setup, hooks, MCP config.
+- **`--version` / `-v` flag** — `npx claude-cortex --version` prints the current version.
+
 ## [1.9.0] - 2026-01-30
 
 ### Added

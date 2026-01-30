@@ -163,6 +163,13 @@ async function main() {
     return;
   }
 
+  // Handle "doctor" subcommand
+  if (process.argv[2] === 'doctor') {
+    const { handleDoctorCommand } = await import('./setup/doctor.js');
+    await handleDoctorCommand();
+    return;
+  }
+
   // Handle "setup" subcommand
   if (process.argv[2] === 'setup') {
     await setupClaudeMd();

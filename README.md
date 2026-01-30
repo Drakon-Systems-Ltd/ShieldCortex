@@ -343,6 +343,8 @@ npx claude-cortex service status     # Check service status
 npx claude-cortex clawdbot install   # Install Clawdbot/Moltbot hook manually
 npx claude-cortex clawdbot uninstall # Remove Clawdbot/Moltbot hook
 npx claude-cortex clawdbot status    # Check Clawdbot hook status
+npx claude-cortex doctor             # Check installation health
+npx claude-cortex --version          # Show version
 ```
 
 Works on **macOS** (launchd), **Linux** (systemd), and **Windows** (Startup folder). The dashboard and API server will start automatically on login.
