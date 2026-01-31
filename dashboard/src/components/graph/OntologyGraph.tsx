@@ -276,9 +276,9 @@ export default function OntologyGraph() {
   }
 
   return (
-    <div className="w-full h-full flex overflow-hidden">
+    <div style={{ width: '100%', height: '100%', display: 'flex', overflow: 'hidden' }}>
       {/* Graph area */}
-      <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {/* Controls bar */}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-slate-800 bg-slate-900/50">
           {/* Search */}
@@ -317,7 +317,7 @@ export default function OntologyGraph() {
         </div>
 
         {/* Force graph */}
-        <div ref={containerRef} className="flex-1 min-h-0">
+        <div ref={containerRef} style={{ flex: 1, minHeight: 0, position: 'relative' }}>
           {dimensions.width > 0 && (
             <ForceGraph2D
               ref={graphRef as never}
