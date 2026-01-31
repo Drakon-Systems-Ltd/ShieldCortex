@@ -895,6 +895,30 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // Get memories linked to a specific entity
+  app.get('/api/graph/entities/:id/memories', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const id = parseInt(req.params.id as string);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid entity ID' });
+      }
+
+      const rows = db.prepare(`
+        SELECT m.id, m.title, m.type, m.category, m.salience, m.created_at
+        FROM memories m
+        JOIN memory_entities me ON me.memory_id = m.id
+        WHERE me.entity_id = ?
+        ORDER BY m.salience DESC, m.created_at DESC
+        LIMIT 50
+      `).all(id) as Record<string, unknown>[];
+
+      res.json({ memories: rows });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // List triples with optional predicate filter and pagination
   app.get('/api/graph/triples', (req: Request, res: Response) => {
     try {
