@@ -819,6 +819,248 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // ============================================
+  // GRAPH / ONTOLOGY ENDPOINTS
+  // ============================================
+
+  // List entities with optional filters and pagination
+  app.get('/api/graph/entities', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const type = typeof req.query.type === 'string' ? req.query.type : undefined;
+      const minMentions = typeof req.query.minMentions === 'string' ? parseInt(req.query.minMentions) : 0;
+      const limit = typeof req.query.limit === 'string' ? Math.min(parseInt(req.query.limit), 500) : 100;
+      const offset = typeof req.query.offset === 'string' ? parseInt(req.query.offset) : 0;
+
+      let whereClause = 'WHERE 1=1';
+      const params: unknown[] = [];
+
+      if (type) {
+        whereClause += ' AND type = ?';
+        params.push(type);
+      }
+      if (minMentions > 0) {
+        whereClause += ' AND memory_count >= ?';
+        params.push(minMentions);
+      }
+
+      const totalRow = db.prepare(`SELECT COUNT(*) as count FROM entities ${whereClause}`).get(...params) as { count: number };
+      const total = totalRow.count;
+
+      const rows = db.prepare(
+        `SELECT * FROM entities ${whereClause} ORDER BY memory_count DESC LIMIT ? OFFSET ?`
+      ).all(...params, limit, offset) as Record<string, unknown>[];
+
+      const entities = rows.map((r: any) => {
+        let aliases: string[] = [];
+        try { aliases = JSON.parse(r.aliases || '[]'); } catch { aliases = []; }
+        return {
+          id: r.id,
+          name: r.name,
+          type: r.type,
+          memoryCount: r.memory_count ?? 0,
+          aliases,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        };
+      });
+
+      res.json({ entities, total, offset, limit, hasMore: offset + limit < total });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Get triples for a specific entity
+  app.get('/api/graph/entities/:id/triples', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const id = parseInt(req.params.id as string);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid entity ID' });
+      }
+
+      const rows = db.prepare(`
+        SELECT t.*, s.name as subject_name, s.type as subject_type,
+               o.name as object_name, o.type as object_type
+        FROM triples t
+        JOIN entities s ON s.id = t.subject_id
+        JOIN entities o ON o.id = t.object_id
+        WHERE t.subject_id = ? OR t.object_id = ?
+        ORDER BY t.created_at DESC
+      `).all(id, id) as Record<string, unknown>[];
+
+      res.json({ triples: rows });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // List triples with optional predicate filter and pagination
+  app.get('/api/graph/triples', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const predicate = typeof req.query.predicate === 'string' ? req.query.predicate : undefined;
+      const limit = typeof req.query.limit === 'string' ? Math.min(parseInt(req.query.limit), 500) : 100;
+      const offset = typeof req.query.offset === 'string' ? parseInt(req.query.offset) : 0;
+
+      let whereClause = '';
+      const params: unknown[] = [];
+
+      if (predicate) {
+        whereClause = 'WHERE t.predicate = ?';
+        params.push(predicate);
+      }
+
+      const totalRow = db.prepare(
+        `SELECT COUNT(*) as count FROM triples t ${whereClause}`
+      ).get(...params) as { count: number };
+      const total = totalRow.count;
+
+      const rows = db.prepare(`
+        SELECT t.*, s.name as subject_name, s.type as subject_type,
+               o.name as object_name, o.type as object_type
+        FROM triples t
+        JOIN entities s ON s.id = t.subject_id
+        JOIN entities o ON o.id = t.object_id
+        ${whereClause}
+        ORDER BY t.created_at DESC
+        LIMIT ? OFFSET ?
+      `).all(...params, limit, offset) as Record<string, unknown>[];
+
+      res.json({ triples: rows, total, offset, limit, hasMore: offset + limit < total });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Search entities by name
+  app.get('/api/graph/search', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+
+      if (!q) {
+        return res.status(400).json({ error: 'Query parameter "q" is required' });
+      }
+
+      const rows = db.prepare(
+        `SELECT * FROM entities WHERE LOWER(name) LIKE ? ORDER BY memory_count DESC LIMIT 20`
+      ).all(`%${q.toLowerCase()}%`) as Record<string, unknown>[];
+
+      const entities = rows.map((r: any) => {
+        let aliases: string[] = [];
+        try { aliases = JSON.parse(r.aliases || '[]'); } catch { aliases = []; }
+        return {
+          id: r.id,
+          name: r.name,
+          type: r.type,
+          memoryCount: r.memory_count ?? 0,
+          aliases,
+        };
+      });
+
+      res.json({ entities });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Find path between two entities using BFS
+  app.get('/api/graph/paths', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const fromName = typeof req.query.from === 'string' ? req.query.from : '';
+      const toName = typeof req.query.to === 'string' ? req.query.to : '';
+
+      if (!fromName || !toName) {
+        return res.status(400).json({ error: 'Both "from" and "to" query parameters are required' });
+      }
+
+      const fromRow = db.prepare(
+        'SELECT * FROM entities WHERE LOWER(name) = LOWER(?)'
+      ).get(fromName) as any;
+      if (!fromRow) {
+        return res.status(404).json({ error: `Entity "${fromName}" not found` });
+      }
+
+      const toRow = db.prepare(
+        'SELECT * FROM entities WHERE LOWER(name) = LOWER(?)'
+      ).get(toName) as any;
+      if (!toRow) {
+        return res.status(404).json({ error: `Entity "${toName}" not found` });
+      }
+
+      if (fromRow.id === toRow.id) {
+        return res.json({ path: [{ entity: fromRow.name, predicate: '(self)' }], sourceMemories: [] });
+      }
+
+      // BFS
+      const maxDepth = 4;
+      interface BFSNode { id: number; name: string; parentId: number | null; predicate: string; sourceMemoryId: number | null; }
+      const visited = new Map<number, BFSNode>();
+      visited.set(fromRow.id, { id: fromRow.id, name: fromRow.name, parentId: null, predicate: '', sourceMemoryId: null });
+
+      let frontier: number[] = [fromRow.id];
+      let found = false;
+
+      for (let d = 0; d < maxDepth && !found; d++) {
+        const nextFrontier: number[] = [];
+        for (const nodeId of frontier) {
+          const outgoing = db.prepare(
+            'SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?'
+          ).all(nodeId) as any[];
+          for (const row of outgoing) {
+            if (!visited.has(row.next_id)) {
+              visited.set(row.next_id, { id: row.next_id, name: row.name, parentId: nodeId, predicate: row.predicate, sourceMemoryId: row.source_memory_id });
+              nextFrontier.push(row.next_id);
+              if (row.next_id === toRow.id) { found = true; break; }
+            }
+          }
+          if (found) break;
+
+          const incoming = db.prepare(
+            'SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?'
+          ).all(nodeId) as any[];
+          for (const row of incoming) {
+            if (!visited.has(row.next_id)) {
+              visited.set(row.next_id, { id: row.next_id, name: row.name, parentId: nodeId, predicate: `~${row.predicate}`, sourceMemoryId: row.source_memory_id });
+              nextFrontier.push(row.next_id);
+              if (row.next_id === toRow.id) { found = true; break; }
+            }
+          }
+          if (found) break;
+        }
+        frontier = nextFrontier;
+        if (frontier.length === 0) break;
+      }
+
+      if (!found) {
+        return res.json({ path: [], sourceMemories: [], message: 'No path found' });
+      }
+
+      // Reconstruct path
+      const path: Array<{ entity: string; predicate: string }> = [];
+      const sourceMemoryIds: number[] = [];
+      let current: BFSNode | undefined = visited.get(toRow.id);
+
+      while (current) {
+        path.unshift({ entity: current.name, predicate: current.predicate });
+        if (current.sourceMemoryId) sourceMemoryIds.push(current.sourceMemoryId);
+        current = current.parentId !== null ? visited.get(current.parentId) : undefined;
+      }
+
+      // Fetch source memories
+      const sourceMemories = sourceMemoryIds.length > 0
+        ? db.prepare(`SELECT id, title FROM memories WHERE id IN (${sourceMemoryIds.map(() => '?').join(',')})`).all(...sourceMemoryIds)
+        : [];
+
+      res.json({ path, sourceMemories });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
   // BRAIN WORKER (Phase 4)
   // ============================================
 
