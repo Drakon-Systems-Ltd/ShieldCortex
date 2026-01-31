@@ -34,6 +34,7 @@ import {
 import { generateContextSummary, formatContextSummary, consolidate, fullCleanup } from './memory/consolidate.js';
 import { getHighPriorityMemories, getRecentMemories, getRelatedMemories, createMemoryLink, RelationshipType, enrichMemory } from './memory/store.js';
 import { detectContradictions, getContradictionsFor } from './memory/contradiction.js';
+import { handleGraphQuery, handleGraphEntities, handleGraphExplain } from './tools/graph.js';
 import { checkDatabaseSize } from './database/init.js';
 
 /**
@@ -494,6 +495,46 @@ but you can use this tool to check for new contradictions at any time.`,
 
       return { content: [{ type: 'text', text: lines.join('\n') }] };
     }
+  );
+
+  // ============================================
+  // KNOWLEDGE GRAPH TOOLS
+  // ============================================
+
+  // Graph Query - Traverse from an entity
+  server.tool(
+    'graph_query',
+    'Traverse the knowledge graph from an entity. Returns connected entities and relationships up to N hops away.',
+    {
+      entity: z.string().describe('Entity name to start from'),
+      depth: z.number().optional().describe('Max traversal depth (default 2)'),
+      predicates: z.array(z.string()).optional().describe('Filter by predicate types'),
+    },
+    async (args) => handleGraphQuery(args)
+  );
+
+  // Graph Entities - List known entities
+  server.tool(
+    'graph_entities',
+    'List known entities in the knowledge graph, optionally filtered by type.',
+    {
+      type: z.string().optional().describe('Filter by entity type (person, tool, concept, file, language, service, pattern)'),
+      minMentions: z.number().optional().describe('Minimum memory references (default 1)'),
+      limit: z.number().optional().describe('Max results (default 50)'),
+    },
+    async (args) => handleGraphEntities(args)
+  );
+
+  // Graph Explain - Find paths between entities
+  server.tool(
+    'graph_explain',
+    'Explain the relationship between two entities by finding paths connecting them in the knowledge graph.',
+    {
+      from: z.string().describe('Source entity name'),
+      to: z.string().describe('Target entity name'),
+      maxDepth: z.number().optional().describe('Max path length (default 4)'),
+    },
+    async (args) => handleGraphExplain(args)
   );
 
   // ============================================
