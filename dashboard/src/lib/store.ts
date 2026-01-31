@@ -14,8 +14,8 @@ interface DashboardState {
   setSelectedMemory: (memory: Memory | null) => void;
 
   // View mode
-  viewMode: 'graph' | 'memories' | 'insights' | 'brain';
-  setViewMode: (mode: 'graph' | 'memories' | 'insights' | 'brain') => void;
+  viewMode: 'graph' | 'memories' | 'insights' | 'brain' | 'ontology';
+  setViewMode: (mode: 'graph' | 'memories' | 'insights' | 'brain' | 'ontology') => void;
 
   // Filters
   typeFilter: string | null;

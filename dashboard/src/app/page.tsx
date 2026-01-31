@@ -33,6 +33,18 @@ const KnowledgeGraph = dynamic(
   }
 );
 
+const OntologyGraph = dynamic(
+  () => import('@/components/graph/OntologyGraph'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-full flex items-center justify-center bg-slate-950">
+        <div className="text-slate-400 animate-pulse">Loading Ontology...</div>
+      </div>
+    ),
+  }
+);
+
 const BrainScene = dynamic(
   () => import('@/components/brain/BrainScene').then((mod) => mod.BrainScene),
   {
@@ -326,6 +338,9 @@ export default function DashboardPage() {
             )}
             {viewMode === 'insights' && (
               <InsightsView selectedProject={selectedProject} stats={stats} />
+            )}
+            {viewMode === 'ontology' && (
+              <OntologyGraph />
             )}
           </motion.div>
         </AnimatePresence>

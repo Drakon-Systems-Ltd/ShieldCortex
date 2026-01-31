@@ -2,13 +2,14 @@
 
 import { useDashboardStore } from '@/lib/store';
 import { useStats } from '@/hooks/useMemories';
-import { Network, LayoutGrid, BarChart3, Brain } from 'lucide-react';
+import { Network, LayoutGrid, BarChart3, Brain, Share2 } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'graph' as const, label: 'Graph', icon: Network },
   { id: 'memories' as const, label: 'Memories', icon: LayoutGrid },
   { id: 'insights' as const, label: 'Insights', icon: BarChart3 },
   { id: 'brain' as const, label: 'Brain', icon: Brain },
+  { id: 'ontology' as const, label: 'Ontology', icon: Share2 },
 ];
 
 export function NavRail() {
