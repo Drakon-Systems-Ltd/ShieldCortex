@@ -195,6 +195,26 @@ async function main() {
     return;
   }
 
+  // Handle "graph" subcommand
+  if (process.argv[2] === 'graph') {
+    const action = process.argv[3];
+    if (action === 'backfill') {
+      const { initDatabase } = await import('./database/init.js');
+      const os = await import('os');
+      const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.claude-cortex', 'memories.db');
+      initDatabase(dbPath);
+
+      const { backfillGraph } = await import('./graph/backfill.js');
+      console.log('Backfilling knowledge graph from existing memories...');
+      const result = backfillGraph();
+      console.log(`Done! Extracted ${result.entities} new entities, ${result.triples} new triples from ${result.memoriesProcessed} memories.`);
+    } else {
+      console.error('Unknown graph command. Available: backfill');
+      process.exit(1);
+    }
+    return;
+  }
+
   const { dbPath, mode } = parseArgs();
 
   let dashboardProcess: ChildProcess | null = null;
