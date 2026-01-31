@@ -17,6 +17,7 @@ import {
   MediumTickResult,
   WorkerStatus,
 } from './types.js';
+import { getDatabase } from '../database/init.js';
 import { pruneActivationCache } from '../memory/activation.js';
 import { getMemoryStats } from '../memory/store.js';
 import { consolidate } from '../memory/consolidate.js';
@@ -239,6 +240,29 @@ export class BrainWorker {
 
     } catch (e) {
       console.error('[BrainWorker] Medium tick failed:', e);
+    }
+
+    // ONTOLOGY: Graph maintenance — prune orphan entities
+    try {
+      const db = getDatabase();
+      const orphans = db.prepare(`
+        SELECT e.id FROM entities e
+        WHERE e.memory_count = 0
+        AND NOT EXISTS (SELECT 1 FROM triples WHERE subject_id = e.id OR object_id = e.id)
+      `).all() as Array<{ id: number }>;
+
+      if (orphans.length > 0) {
+        const deleteStmt = db.prepare('DELETE FROM entities WHERE id = ?');
+        for (const orphan of orphans) {
+          deleteStmt.run(orphan.id);
+        }
+      }
+
+      const entityCount = (db.prepare('SELECT COUNT(*) as c FROM entities').get() as { c: number }).c;
+      const tripleCount = (db.prepare('SELECT COUNT(*) as c FROM triples').get() as { c: number }).c;
+      console.log(`[brain-worker] Graph: ${entityCount} entities, ${tripleCount} triples${orphans.length > 0 ? `, pruned ${orphans.length} orphans` : ''}`);
+    } catch (e) {
+      console.error('[brain-worker] Graph maintenance failed:', e);
     }
 
     return result;
