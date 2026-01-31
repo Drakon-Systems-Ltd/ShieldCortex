@@ -42,6 +42,8 @@ import {
 } from '../api/events.js';
 import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 import { isPaused } from '../api/control.js';
+import { extractFromMemory } from '../graph/extract.js';
+import { processExtractionResult } from '../graph/resolve.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -228,6 +230,16 @@ export function addMemory(
   } catch (e) {
     // Don't fail memory creation if linking fails
     console.error('[claude-cortex] Auto-link failed:', e);
+  }
+
+  // ONTOLOGY: Extract entities and triples from this memory
+  try {
+    const extraction = extractFromMemory(input.title, truncationResult.content, category);
+    if (extraction.entities.length > 0) {
+      processExtractionResult(extraction, memory.id);
+    }
+  } catch (e) {
+    console.error('[claude-cortex] Entity extraction failed:', e);
   }
 
   // SEMANTIC SEARCH: Generate embedding asynchronously (don't block INSERT)
