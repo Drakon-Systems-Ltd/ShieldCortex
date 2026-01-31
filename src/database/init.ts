@@ -146,6 +146,51 @@ function runMigrations(database: Database.Database): void {
   if (!columnNames.has('transferable')) {
     database.exec('ALTER TABLE memories ADD COLUMN transferable INTEGER DEFAULT 0');
   }
+
+  // Migration: Ontology tables (entities, triples, memory_entities)
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS entities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        aliases TEXT DEFAULT '[]',
+        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        memory_count INTEGER DEFAULT 0,
+        UNIQUE(name, type)
+      );
+      CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+      CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+
+      CREATE TABLE IF NOT EXISTS triples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_id INTEGER NOT NULL,
+        predicate TEXT NOT NULL,
+        object_id INTEGER NOT NULL,
+        source_memory_id INTEGER,
+        confidence REAL DEFAULT 0.8,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (subject_id) REFERENCES entities(id) ON DELETE CASCADE,
+        FOREIGN KEY (object_id) REFERENCES entities(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE SET NULL,
+        UNIQUE(subject_id, predicate, object_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject_id);
+      CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object_id);
+      CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
+
+      CREATE TABLE IF NOT EXISTS memory_entities (
+        memory_id INTEGER NOT NULL,
+        entity_id INTEGER NOT NULL,
+        role TEXT DEFAULT 'mention',
+        FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+        FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
+        PRIMARY KEY (memory_id, entity_id)
+      );
+    `);
+  } catch {
+    // Tables may already exist - safe to ignore
+  }
 }
 
 /**
@@ -363,6 +408,46 @@ function getInlineSchema(): string {
     );
 
     CREATE INDEX IF NOT EXISTS idx_events_processed ON events(processed, id);
+
+    CREATE TABLE IF NOT EXISTS entities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      aliases TEXT DEFAULT '[]',
+      first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      memory_count INTEGER DEFAULT 0,
+      UNIQUE(name, type)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+    CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+
+    CREATE TABLE IF NOT EXISTS triples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      subject_id INTEGER NOT NULL,
+      predicate TEXT NOT NULL,
+      object_id INTEGER NOT NULL,
+      source_memory_id INTEGER,
+      confidence REAL DEFAULT 0.8,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (subject_id) REFERENCES entities(id) ON DELETE CASCADE,
+      FOREIGN KEY (object_id) REFERENCES entities(id) ON DELETE CASCADE,
+      FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE SET NULL,
+      UNIQUE(subject_id, predicate, object_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject_id);
+    CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object_id);
+    CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
+
+    CREATE TABLE IF NOT EXISTS memory_entities (
+      memory_id INTEGER NOT NULL,
+      entity_id INTEGER NOT NULL,
+      role TEXT DEFAULT 'mention',
+      FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+      FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
+      PRIMARY KEY (memory_id, entity_id)
+    );
   `;
 }
 
