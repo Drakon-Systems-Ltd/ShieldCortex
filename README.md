@@ -6,7 +6,7 @@
 
 **The security layer for any AI agent's memory.** Like Cloudflare, but for everything your AI remembers — regardless of platform.
 
-Palo Alto Networks [warned about persistent memory attacks](https://unit42.paloaltonetworks.com/) on AI agents. Attackers can poison what your agent remembers — injecting instructions, stealing credentials, or assembling attacks across days of fragmented memories. **ShieldCortex stops that.**
+Researchers have [demonstrated persistent memory attacks](https://embracethered.com/blog/posts/2024/chatgpt-hacking-memories/) on AI agents. Attackers can poison what your agent remembers — injecting instructions, stealing credentials, or assembling attacks across days of fragmented memories. **ShieldCortex stops that.**
 
 ### Supported Agents
 
