@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "ShieldCortex",
-  description: "AI Brain Visualization for ShieldCortex Memory System",
+  description: "AI Memory Security Dashboard — Defence pipeline, audit logs, quarantine review",
 };
 
 export default function RootLayout({

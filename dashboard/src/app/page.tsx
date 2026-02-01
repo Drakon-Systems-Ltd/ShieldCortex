@@ -2,7 +2,7 @@
 
 /**
  * Main Dashboard Page
- * Multi-view dashboard for the ShieldCortex memory system
+ * Security-first dashboard for ShieldCortex
  */
 
 import { useState, useRef, useEffect } from 'react';
@@ -15,10 +15,13 @@ import { useSuggestions } from '@/hooks/useSuggestions';
 import { MemoryDetail } from '@/components/memory/MemoryDetail';
 import { MemoriesView } from '@/components/memories/MemoriesView';
 import { NavRail } from '@/components/nav/NavRail';
+import { ShieldOverview } from '@/components/shield/ShieldOverview';
+import { AuditLogView } from '@/components/audit/AuditLogView';
+import { QuarantineView } from '@/components/quarantine/QuarantineView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { InsightsView } from '@/components/insights/InsightsView';
 import { Memory } from '@/types/memory';
+import { Shield } from 'lucide-react';
 
 // Dynamic imports (avoid SSR issues with canvas/WebGL)
 const KnowledgeGraph = dynamic(
@@ -28,18 +31,6 @@ const KnowledgeGraph = dynamic(
     loading: () => (
       <div className="w-full h-full flex items-center justify-center bg-slate-950">
         <div className="text-slate-400 animate-pulse">Loading Graph...</div>
-      </div>
-    ),
-  }
-);
-
-const OntologyGraph = dynamic(
-  () => import('@/components/graph/OntologyGraph'),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="w-full h-full flex items-center justify-center bg-slate-950">
-        <div className="text-slate-400 animate-pulse">Loading Ontology...</div>
       </div>
     ),
   }
@@ -147,20 +138,26 @@ export default function DashboardPage() {
     consolidateMutation.mutate();
   };
 
+  // Views that need memory data vs standalone views
+  const isSecurityView = viewMode === 'shield' || viewMode === 'audit' || viewMode === 'quarantine';
+
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
       {/* Top Bar */}
       <header className="h-14 border-b border-slate-800 flex items-center justify-between px-4 bg-slate-900/50 backdrop-blur-sm shrink-0">
         <div className="flex items-center gap-4">
-          <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent">
-            🧠 ShieldCortex
-          </h1>
+          <div className="flex items-center gap-2">
+            <Shield size={20} className="text-cyan-400" />
+            <h1 className="text-xl font-bold bg-gradient-to-r from-cyan-400 via-blue-400 to-emerald-400 bg-clip-text text-transparent">
+              ShieldCortex
+            </h1>
+          </div>
 
           {/* Project Selector */}
           <select
             value={selectedProject || ''}
             onChange={(e) => setSelectedProject(e.target.value || undefined)}
-            className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500"
+            className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-cyan-500 focus:border-cyan-500"
           >
             {projectsData?.projects.map((p) => (
               <option key={p.project || 'all'} value={p.project || ''}>
@@ -186,7 +183,7 @@ export default function DashboardPage() {
                   setShowSuggestions(false);
                 }
               }}
-              className="w-64 bg-slate-800 border-slate-700 text-white placeholder:text-slate-400 focus:ring-blue-500"
+              className="w-64 bg-slate-800 border-slate-700 text-white placeholder:text-slate-400 focus:ring-cyan-500"
             />
             {/* Suggestions dropdown */}
             {showSuggestions && suggestions.length > 0 && (
@@ -307,6 +304,9 @@ export default function DashboardPage() {
             transition={{ duration: 0.15 }}
             className="flex-1 relative overflow-hidden"
           >
+            {viewMode === 'shield' && <ShieldOverview />}
+            {viewMode === 'audit' && <AuditLogView />}
+            {viewMode === 'quarantine' && <QuarantineView />}
             {viewMode === 'brain' && (
               memoriesLoading ? (
                 <div className="w-full h-full flex items-center justify-center">
@@ -336,17 +336,11 @@ export default function DashboardPage() {
                 onSelectMemory={handleSelectMemory}
               />
             )}
-            {viewMode === 'insights' && (
-              <InsightsView selectedProject={selectedProject} stats={stats} />
-            )}
-            {viewMode === 'ontology' && (
-              <OntologyGraph />
-            )}
           </motion.div>
         </AnimatePresence>
 
         {/* Right Detail Panel */}
-        {selectedMemory && (
+        {selectedMemory && !isSecurityView && (
           <div className="w-80 border-l border-slate-800 overflow-y-auto shrink-0">
             <MemoryDetail
               memory={selectedMemory}

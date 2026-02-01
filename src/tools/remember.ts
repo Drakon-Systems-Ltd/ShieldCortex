@@ -108,7 +108,7 @@ export async function executeRemember(input: RememberInput): Promise<{
       salience: salienceOverride,
       scope: input.scope,
       transferable: input.transferable,
-    }, undefined, input.source ? { type: input.source.type, identifier: input.source.identifier } : undefined);
+    }, undefined, input.source ? { type: input.source.type, identifier: input.source.identifier } : { type: 'cli', identifier: 'mcp' });
 
     // Auto-detect and create relationships with existing memories
     let linksCreated = 0;
