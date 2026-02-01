@@ -15,7 +15,7 @@ export interface EncodingDetectionResult {
 const BASE64_PATTERN = /(?:[A-Za-z0-9+/]{4}){5,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?/g;
 
 // Hex sequences
-const HEX_PATTERN = /(?:0x[0-9a-fA-F]{2}\s*){4,}|(?:\\x[0-9a-fA-F]{2}){4,}/g;
+const HEX_PATTERN = /(?:0x[0-9a-fA-F]{2}\s*){4,}|(?:\\x[0-9a-fA-F]{2}){4,}|\b[0-9a-fA-F]{20,}\b/g;
 
 // Suspicious URL encoding (4+ encoded chars in sequence)
 const URL_ENCODING_PATTERN = /(?:%[0-9A-Fa-f]{2}){4,}/g;

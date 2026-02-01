@@ -60,12 +60,18 @@ export function runDefencePipeline(
     if (firewall.result === 'BLOCK') {
       allowed = false;
       reason = firewall.reason;
+    } else if (firewall.result === 'QUARANTINE') {
+      allowed = false;
+      reason = `Quarantined: ${firewall.reason}`;
     } else if (
       fragmentation !== null &&
       fragmentation.score > cfg.autoQuarantineThreshold
     ) {
       allowed = false;
       reason = `Quarantined: fragmentation score ${fragmentation.score} exceeds threshold ${cfg.autoQuarantineThreshold}`;
+    } else if (sensitivity.level === 'RESTRICTED') {
+      allowed = false;
+      reason = `Blocked: content classified as RESTRICTED (${sensitivity.detectedPatterns.join(', ')})`;
     } else {
       allowed = true;
       reason = firewall.reason;
