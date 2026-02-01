@@ -1,66 +1,34 @@
-# ShieldCortex - Brain-Like Memory System for Claude Code
+# ShieldCortex — Architecture
 
-## The Problem
+## Overview
 
-Claude Code has two major limitations:
-1. **Context Window Exhaustion**: Long sessions hit token limits
-2. **Compaction Loss**: When context is summarized, important details are lost
-3. **No Persistence**: Knowledge doesn't survive across sessions
-
-## The Solution: Brain-Like Memory
-
-This MCP plugin mimics how human memory works:
+ShieldCortex is a security layer and brain-like memory system for AI agents. It combines persistent memory (STM/LTM/episodic) with a 5-layer defence pipeline that scans every memory write for threats.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    CLAUDE CODE SESSION                       │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │              Working Memory (Context)                │    │
-│  │         Current conversation, active files          │    │
-│  └──────────────────────┬──────────────────────────────┘    │
-└─────────────────────────┼───────────────────────────────────┘
-                          │
-                    ┌─────▼─────┐
-                    │  CLAUDE   │
-                    │  MEMORY   │
-                    │   (MCP)   │
-                    └─────┬─────┘
-                          │
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-   ┌────▼────┐      ┌─────▼─────┐     ┌─────▼─────┐
-   │ SHORT   │      │   LONG    │     │  EPISODIC │
-   │  TERM   │ ──── │   TERM    │     │  MEMORY   │
-   │ MEMORY  │      │  MEMORY   │     │ (Events)  │
-   └─────────┘      └───────────┘     └───────────┘
-   Session-level    Cross-session     Success/failure
-   High detail      Consolidated      patterns
-   Decays fast      Persists          Learnings
+Agent → ShieldCortex → Memory Store (SQLite)
+         ↓
+    Trust → Firewall → Sensitivity → Fragmentation → Audit
 ```
 
-## Memory Tiers
+## Memory Model
 
-### 1. Short-Term Memory (STM)
+### Short-Term Memory (STM)
 - **Scope**: Current coding session
-- **Content**: Recent decisions, current file context, active debugging
 - **Decay**: Fast (hours)
-- **Storage**: In-memory + SQLite
+- **Limit**: 100 memories max
 
-### 2. Long-Term Memory (LTM)
+### Long-Term Memory (LTM)
 - **Scope**: Cross-session, persistent
 - **Content**: Architecture decisions, code patterns, user preferences
 - **Decay**: Slow (weeks/months), reinforced by access
-- **Storage**: SQLite with FTS5
+- **Limit**: 1,000 memories max
 
-### 3. Episodic Memory
+### Episodic Memory
 - **Scope**: Specific events/outcomes
 - **Content**: "When I tried X, Y happened", successful solutions
-- **Decay**: Based on utility (successful patterns persist)
-- **Storage**: SQLite with context links
+- **Decay**: Based on utility
 
 ## Salience Detection
-
-Not everything is worth remembering. The system scores information on:
 
 | Factor | Weight | Description |
 |--------|--------|-------------|
@@ -73,33 +41,73 @@ Not everything is worth remembering. The system scores information on:
 | File location | 0.5 | Where important code lives |
 | Temporary context | 0.2 | Current debugging state |
 
-Only memories above threshold (0.5) are stored long-term.
+Base salience: 0.25. Deletion threshold: 0.2.
 
 ## Temporal Decay & Reinforcement
 
-Like human memory:
 - **Decay**: `score = base_score * (0.995 ^ hours_since_access)`
 - **Reinforcement**: Each access boosts score by 1.2x
-- **Consolidation**: High-access STM → LTM (like sleep consolidation)
+- **Consolidation**: High-access STM → LTM (runs every 4 hours)
 
-## MCP Tools
+## Defence Pipeline
 
-### Core Operations
-- `remember` - Store a memory with auto-salience scoring
-- `recall` - Search memories (semantic + full-text)
-- `forget` - Remove a memory
-- `reinforce` - Boost a memory's importance
+Every `addMemory()` call runs through 5 layers:
 
-### Automatic Operations
-- `capture_context` - Auto-extract important info from conversation
-- `consolidate` - Move worthy STM to LTM
-- `cleanup` - Remove decayed memories
+### 1. Trust Scorer (`src/defence/trust/`)
+Scores the source of the memory write:
 
-### Context Injection
-- `get_relevant_context` - Auto-inject relevant memories into prompts
-- `get_project_context` - Get all memories for current project
+| Source | Trust Score |
+|--------|------------|
+| user | 1.0 |
+| cli | 0.9 |
+| hook | 0.8 |
+| api | 0.7 |
+| agent | 0.5 |
+| web | 0.3 |
+| unknown | 0.1 |
+
+Low trust (< 0.5) escalates detections to BLOCK in balanced mode.
+
+### 2. Memory Firewall (`src/defence/firewall/`)
+
+Four detection modules run in parallel:
+
+- **Instruction Detector** — prompt injection, fake system prompts, hidden instructions, social engineering, delimiter attacks, frontmatter injection
+- **Privilege Detector** — credential references, system commands, destructive filesystem ops, network exfiltration, external URLs
+- **Encoding Detector** — base64, hex (including plain continuous hex), URL encoding, zero-width chars, RTL override, Unicode homoglyphs
+- **Anomaly Scorer** — entropy analysis, length anomalies, repetition patterns
+
+**Modes:**
+- `strict` — any detection → BLOCK
+- `balanced` — context-aware: instruction injection → QUARANTINE (low trust → BLOCK), encoding decoded and re-scanned, zero-width/RTL always quarantined
+- `permissive` — allow all, populate indicators only
+
+### 3. Sensitivity Classifier (`src/defence/sensitivity/`)
+
+Classifies content as PUBLIC / INTERNAL / CONFIDENTIAL / RESTRICTED. Detects passwords, API keys, PII, credentials. RESTRICTED content is blocked. CONFIDENTIAL is redacted on recall.
+
+### 4. Fragmentation Detector (`src/defence/fragmentation/`)
+
+Cross-references new memories with recent ones to catch multi-step assembly attacks:
+- Entity extraction from content
+- Temporal analysis of related memories
+- Assembly pattern detection (fragments that combine into exploits)
+
+### 5. Audit Logger (`src/defence/audit/`)
+
+Full forensic trail of every memory operation: source, trust score, firewall result, sensitivity level, anomaly score, threat indicators, blocked patterns, duration.
+
+## Knowledge Graph (`src/graph/`)
+
+Entities and relationships automatically extracted from memories:
+- Pattern-based entity extraction (files, tools, languages, concepts, people, services)
+- Entity resolution with fuzzy matching
+- Subject-predicate-object triples
+- Graph traversal and path finding
 
 ## Database Schema
+
+SQLite with FTS5 full-text search. Location: `~/.shieldcortex/memories.db`
 
 ```sql
 CREATE TABLE memories (
@@ -108,14 +116,17 @@ CREATE TABLE memories (
   category TEXT,                -- 'architecture', 'pattern', 'preference', etc.
   title TEXT NOT NULL,
   content TEXT NOT NULL,
-  project TEXT,                 -- Project scope
+  project TEXT,
   tags TEXT,                    -- JSON array
   salience REAL DEFAULT 0.5,
   access_count INTEGER DEFAULT 0,
   last_accessed TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  decayed_score REAL,           -- Computed on access
-  metadata TEXT                 -- JSON for flexible data
+  decayed_score REAL,
+  metadata TEXT,                -- JSON
+  trust_score REAL,
+  sensitivity_level TEXT,
+  source TEXT                   -- JSON { type, identifier }
 );
 
 CREATE VIRTUAL TABLE memories_fts USING fts5(
@@ -125,72 +136,95 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(
 );
 ```
 
-## Integration with Claude Code
-
-### On Session Start
-1. Load relevant project context from LTM
-2. Initialize STM for session
-3. Inject context via MCP resources
-
-### During Session
-1. Auto-capture decisions and patterns (via tool calls)
-2. Respond to explicit "remember" requests
-3. Provide relevant context on request
-
-### On Session End / Compact
-1. Capture summary of session work
-2. Consolidate worthy STM → LTM
-3. Run decay on all memories
-4. Clean up low-value memories
-
-### On Compact Event
-1. Before compact: Store critical context as memories
-2. After compact: Inject relevant memories back
-
-## Usage Examples
-
-```
-User: "Remember that we're using PostgreSQL for the database"
-→ Stores as architecture decision with high salience
-
-User: "What database are we using?"
-→ Recalls "PostgreSQL" from memory
-
-[Auto-capture]: After fixing a bug
-→ Stores episodic memory of the fix pattern
-
-[On session start]:
-→ "I recall this project uses PostgreSQL, React, and has
-    a modular architecture. Last session we were working
-    on the auth system."
-```
-
-## Files Structure
+## File Structure
 
 ```
 shieldcortex/
 ├── src/
-│   ├── index.ts           # MCP server entry point
-│   ├── server.ts          # MCP server setup
+│   ├── index.ts                    # MCP server entry point
+│   ├── server.ts                   # MCP server setup, tool definitions
 │   ├── database/
-│   │   ├── init.ts        # SQLite setup
-│   │   ├── schema.sql     # Database schema
-│   │   └── queries.ts     # Query functions
+│   │   └── init.ts                 # SQLite setup, schema, transactions
 │   ├── memory/
-│   │   ├── types.ts       # Memory type definitions
-│   │   ├── store.ts       # Memory CRUD operations
-│   │   ├── salience.ts    # Salience scoring
-│   │   ├── decay.ts       # Temporal decay logic
-│   │   └── consolidate.ts # STM → LTM consolidation
+│   │   ├── types.ts                # Memory type definitions
+│   │   ├── store.ts                # Core CRUD operations, links
+│   │   ├── salience.ts             # Salience scoring
+│   │   ├── decay.ts                # Temporal decay logic
+│   │   ├── consolidate.ts          # STM → LTM consolidation
+│   │   ├── similarity.ts           # Semantic similarity
+│   │   ├── activation.ts           # Spreading activation
+│   │   └── contradiction.ts        # Contradiction detection
+│   ├── defence/
+│   │   ├── pipeline.ts             # Orchestrates all 5 layers
+│   │   ├── types.ts                # Defence type definitions
+│   │   ├── firewall/
+│   │   │   ├── index.ts            # Firewall orchestrator
+│   │   │   ├── instruction-detector.ts
+│   │   │   ├── privilege-detector.ts
+│   │   │   ├── encoding-detector.ts
+│   │   │   └── anomaly-scorer.ts
+│   │   ├── trust/
+│   │   │   ├── source-scorer.ts    # Trust hierarchy
+│   │   │   └── recall-filter.ts    # Filter by trust on recall
+│   │   ├── sensitivity/
+│   │   │   ├── classifier.ts       # PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED
+│   │   │   ├── patterns.ts         # Detection patterns
+│   │   │   └── redaction.ts        # Auto-redact secrets
+│   │   ├── fragmentation/
+│   │   │   ├── entity-extractor.ts
+│   │   │   ├── temporal-analyzer.ts
+│   │   │   └── assembly-detector.ts
+│   │   ├── audit/
+│   │   │   ├── logger.ts           # Write audit entries
+│   │   │   └── queries.ts          # Query audit trail
+│   │   └── scanner/
+│   │       └── scan-existing.ts    # Retroactive memory scanner
+│   ├── integrations/
+│   │   ├── langchain.ts            # ShieldCortexMemory + ShieldCortexGuard
+│   │   └── index.ts
+│   ├── graph/
+│   │   ├── extract.ts              # Entity/triple extraction
+│   │   ├── resolve.ts              # Entity resolution
+│   │   └── backfill.ts             # Backfill existing memories
+│   ├── api/
+│   │   └── visualization-server.ts # REST API + WebSocket + defence endpoints
 │   ├── tools/
-│   │   ├── remember.ts    # Store memories
-│   │   ├── recall.ts      # Search memories
-│   │   ├── forget.ts      # Delete memories
-│   │   └── context.ts     # Context injection
-│   └── utils/
-│       ├── embeddings.ts  # Text embeddings (optional)
-│       └── extraction.ts  # Auto-extraction logic
+│   │   ├── remember.ts
+│   │   ├── recall.ts
+│   │   ├── forget.ts
+│   │   ├── context.ts
+│   │   └── graph.ts
+│   ├── context/
+│   │   └── project-context.ts      # Project auto-detection
+│   ├── service/
+│   │   ├── install.ts              # Cross-platform service installer
+│   │   └── templates.ts            # launchd/systemd/Windows templates
+│   ├── setup/
+│   │   ├── migrate.ts              # Claude Cortex → ShieldCortex migration
+│   │   ├── settings-hooks.ts       # Auto-configure hooks
+│   │   └── doctor.ts               # Installation health check
+│   ├── worker/
+│   │   └── brain-worker.ts         # Background processing
+│   └── embeddings/
+│       └── generator.ts            # Text embeddings
+├── scripts/
+│   ├── session-start-hook.mjs      # Auto-recall context
+│   ├── pre-compact-hook.mjs        # Auto-extract before compaction
+│   ├── session-end-hook.mjs        # Auto-extract on exit
+│   └── stop-hook.mjs               # Check last response (opt-in)
+├── hooks/
+│   └── clawdbot/cortex-memory/     # OpenClaw/Clawdbot hook
+├── dashboard/                      # Next.js 3D brain visualization
 ├── package.json
 ├── tsconfig.json
 └── README.md
 ```
+
+## Anti-Bloat Safeguards
+
+- Max 100 STM, 1,000 LTM memories
+- 10KB content limit per memory
+- 100MB database hard limit
+- Auto-consolidation every 4 hours
+- Auto-vacuum after deletions
+- Decay scores persisted every 5 minutes
