@@ -44,6 +44,10 @@ import {
 import { BrainWorker } from '../worker/brain-worker.js';
 import { isPaused, pause, resume, getControlStatus } from './control.js';
 import { getCurrentVersion, checkForUpdates, performUpdate, scheduleRestart } from './version.js';
+import { runDefencePipeline } from '../defence/pipeline.js';
+import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
+import type { DefenceSource, DefenceConfig } from '../defence/types.js';
+import { queryAuditLogs, getAuditStats } from '../defence/audit/queries.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -1088,6 +1092,156 @@ export function startVisualizationServer(dbPath?: string): void {
   // BRAIN WORKER (Phase 4)
   // ============================================
 
+  // ── Defence API v1 ──────────────────────────────────────────
+
+  // Scan content through the defence pipeline
+  app.post('/api/v1/scan', (req: Request, res: Response) => {
+    try {
+      const { content, title, source, config } = req.body;
+      if (!content || typeof content !== 'string') {
+        return res.status(400).json({ error: 'content (string) is required' });
+      }
+
+      const defenceSource: DefenceSource = {
+        type: source?.type ?? 'api',
+        identifier: source?.identifier ?? 'rest-api',
+      };
+
+      const defenceConfig: DefenceConfig = config
+        ? { ...DEFAULT_DEFENCE_CONFIG, ...config }
+        : DEFAULT_DEFENCE_CONFIG;
+
+      const result = runDefencePipeline(
+        content,
+        title ?? 'Untitled',
+        defenceSource,
+        defenceConfig,
+      );
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Batch scan multiple items
+  app.post('/api/v1/scan/batch', (req: Request, res: Response) => {
+    try {
+      const { items, source, config } = req.body;
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: 'items (array) is required' });
+      }
+      if (items.length > 100) {
+        return res.status(400).json({ error: 'Maximum 100 items per batch' });
+      }
+
+      const defenceSource: DefenceSource = {
+        type: source?.type ?? 'api',
+        identifier: source?.identifier ?? 'rest-api',
+      };
+
+      const defenceConfig: DefenceConfig = config
+        ? { ...DEFAULT_DEFENCE_CONFIG, ...config }
+        : DEFAULT_DEFENCE_CONFIG;
+
+      const results = items.map((item: { content: string; title?: string }) => {
+        if (!item.content || typeof item.content !== 'string') {
+          return { error: 'content (string) is required', allowed: false };
+        }
+        return runDefencePipeline(
+          item.content,
+          item.title ?? 'Untitled',
+          defenceSource,
+          defenceConfig,
+        );
+      });
+
+      res.json({ results, total: results.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Query audit logs
+  app.get('/api/v1/audit', (req: Request, res: Response) => {
+    try {
+      const options: Record<string, unknown> = {};
+      if (req.query.startTime) options.startTime = req.query.startTime;
+      if (req.query.endTime) options.endTime = req.query.endTime;
+      if (req.query.source) options.source = req.query.source;
+      if (req.query.firewallResult) options.firewallResult = req.query.firewallResult;
+      if (req.query.limit) options.limit = parseInt(req.query.limit as string, 10);
+
+      const logs = queryAuditLogs(options);
+      res.json({ logs, total: logs.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Audit statistics
+  app.get('/api/v1/audit/stats', (req: Request, res: Response) => {
+    try {
+      const timeRange = (req.query.timeRange as '24h' | '7d' | '30d') ?? '24h';
+      const stats = getAuditStats(timeRange);
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // List quarantined items
+  app.get('/api/v1/quarantine', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const status = req.query.status ?? 'pending';
+      const limit = parseInt(req.query.limit as string, 10) || 50;
+      const rows = db.prepare(
+        'SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT ?'
+      ).all(status, limit);
+      res.json({ items: rows, total: rows.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Approve quarantined item
+  app.post('/api/v1/quarantine/:id/approve', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const id = parseInt(req.params.id as string, 10);
+      const reviewedBy = req.body?.reviewedBy ?? 'api';
+      const result = db.prepare(
+        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?'
+      ).run('approved', new Date().toISOString(), reviewedBy, id, 'pending');
+      if (result.changes === 0) {
+        return res.status(404).json({ error: 'Quarantine entry not found or already reviewed' });
+      }
+      res.json({ success: true, id, status: 'approved' });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Reject quarantined item
+  app.post('/api/v1/quarantine/:id/reject', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const id = parseInt(req.params.id as string, 10);
+      const reviewedBy = req.body?.reviewedBy ?? 'api';
+      const notes = req.body?.notes ?? null;
+      const result = db.prepare(
+        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?'
+      ).run('rejected', new Date().toISOString(), reviewedBy, id, 'pending');
+      if (result.changes === 0) {
+        return res.status(404).json({ error: 'Quarantine entry not found or already reviewed' });
+      }
+      res.json({ success: true, id, status: 'rejected' });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Create and start the background brain worker
   const brainWorker = new BrainWorker();
 
@@ -1336,6 +1490,15 @@ export function startVisualizationServer(dbPath?: string): void {
 ║    GET  /api/control/status - Get pause state & uptime       ║
 ║    POST /api/control/pause  - Pause memory creation          ║
 ║    POST /api/control/resume - Resume memory creation         ║
+║                                                              ║
+║  Defence API:                                                ║
+║    POST /api/v1/scan             - Scan content              ║
+║    POST /api/v1/scan/batch       - Batch scan                ║
+║    GET  /api/v1/audit            - Query audit logs          ║
+║    GET  /api/v1/audit/stats      - Audit statistics          ║
+║    GET  /api/v1/quarantine       - List quarantined items    ║
+║    POST /api/v1/quarantine/:id/approve - Approve item        ║
+║    POST /api/v1/quarantine/:id/reject  - Reject item         ║
 ║                                                              ║
 ║  Brain Worker:                                               ║
 ║    GET  /api/worker/status       - Worker status             ║
