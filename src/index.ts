@@ -23,6 +23,7 @@
  *   npx shieldcortex clawdbot install        # Install OpenClaw/Clawdbot hook
  *   npx shieldcortex clawdbot uninstall      # Remove OpenClaw/Clawdbot hook
  *   npx shieldcortex clawdbot status         # Check OpenClaw hook status
+ *   npx shieldcortex migrate                  # Migrate from Claude Cortex
  *   npx shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block
  *   npx shieldcortex uninstall               # Full uninstall (service, hooks, CLAUDE.md)
  *   npx shieldcortex uninstall --keep-logs   # Full uninstall but keep log files
@@ -182,6 +183,13 @@ async function main() {
     }
     const stopHook = process.argv.includes('--with-stop-hook');
     await setupClaudeMd({ stopHook });
+    return;
+  }
+
+  // Handle "migrate" subcommand
+  if (process.argv[2] === 'migrate') {
+    const { handleMigrateCommand } = await import('./setup/migrate.js');
+    await handleMigrateCommand();
     return;
   }
 
