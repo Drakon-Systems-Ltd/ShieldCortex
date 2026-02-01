@@ -75,8 +75,9 @@ Drop while Palo Alto's warning is still fresh:
 - [ ] Hacker News "Show HN" post
 - [ ] Reddit posts (r/artificial, r/MachineLearning, r/cybersecurity)
 
-### Week 3: Community
+### Week 3: Community + Moltbook Tracker
 - [ ] Moltbook plugin/integration
+- [ ] **External Agent Monitoring** — dashboard tab showing agent activity on Moltbook
 - [ ] Discord community for AI agent security
 - [ ] Respond to every GitHub issue personally
 - [ ] Reach out to AI agent framework maintainers (LangChain, CrewAI, AutoGPT)

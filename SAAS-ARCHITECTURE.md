@@ -470,6 +470,37 @@ Fly.io App: shieldcortex-web
 - Hacker News Show HN
 - Tweet thread
 
+### Phase 3.5: External Agent Monitoring — Moltbook Tracker (Month 2-3)
+**Goal:** Give agent owners full visibility into what their AI does on Moltbook.
+
+30,000+ agents on Moltbook with zero owner visibility. Agents are posting, absorbing "skills" from other agents, and even trading memecoins — owners have no idea what's happening.
+
+**Dashboard tab: "External Activity"**
+- **Activity feed** — what your agent posted, replied, and shared on Moltbook
+- **Skill absorption log** — what "knowledge" your agent picked up from other agents
+- **Interaction map** — which agents yours is talking to (trust graph)
+- **Flagged interactions** — suspicious skill transfers, injection attempts from other agents
+- **Memory correlation** — memory writes that originated from Moltbook content, tagged with trust scores
+
+**API Endpoints:**
+```
+GET  /v1/monitor/activity      — Agent's external activity feed
+GET  /v1/monitor/interactions  — Interaction map & trust scores  
+GET  /v1/monitor/flags         — Flagged suspicious interactions
+POST /v1/monitor/connect       — Link a Moltbook agent to ShieldCortex
+```
+
+**Why this matters:**
+- Moltbook is ground zero for cross-agent memory contamination
+- This is the "external firewall" — ShieldCortex scans what goes INTO memory, the tracker monitors what your agent DOES externally
+- Makes ShieldCortex stickier — not just memory security, full agent security observability
+- Nobody else is building this
+
+**Integration with defence pipeline:**
+- Content absorbed from Moltbook agents gets `source: { type: 'agent', identifier: 'moltbook:agent_id' }` 
+- Default trust score: 0.1 (lowest tier — cross-agent content)
+- Fragmentation detector correlates Moltbook-sourced memories for assembly attacks
+
 ### Phase 4: Enterprise (Month 3+)
 **Goal:** Big contracts.
 
