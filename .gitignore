@@ -28,7 +28,12 @@ npm-debug.log*
 # Test coverage
 coverage/
 
-# Internal strategy docs
+# Local config
+.mcp.json
+.claude/
+
+# Internal docs
+docs/plans/
 COMPETITIVE-ANALYSIS.md
 GO-TO-MARKET.md
 SAAS-ARCHITECTURE.md
