@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.4] - 2026-02-01
+
+### Security
+- **Uninstall protection** — `uninstall` and `uninstall-setup` now require interactive TTY confirmation (type "yes") or explicit `--confirm` flag. Prevents bot-initiated or piped uninstalls.
+
 ## [2.1.3] - 2026-02-01
 
 ### Security
