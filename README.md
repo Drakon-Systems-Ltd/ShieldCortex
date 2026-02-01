@@ -12,14 +12,12 @@ Palo Alto Networks [warned about persistent memory attacks](https://unit42.paloa
 
 ShieldCortex is agent-agnostic middleware. It works with:
 
-- **[OpenClaw](https://openclaw.dev)** — Native hook support (`npx shieldcortex clawdbot install`)
-- **[Moltbot](https://moltbot.dev)** — Plugin integration (`npx shieldcortex moltbot install`)
-- **[Claude Code](https://claude.ai)** — Hooks + MCP server (`npx shieldcortex setup`)
-- **[LangChain](https://langchain.com)** — Memory wrapper via npm API
-- **[AutoGPT](https://autogpt.net)** — Memory backend plugin
-- **[CrewAI](https://crewai.com)** — Agent memory layer
-- **Any MCP-compatible agent** — Standard MCP server protocol
-- **Any agent with a memory backend** — npm API or REST API
+- **[Claude Code](https://claude.ai)** — Native MCP server + hooks (`npx shieldcortex setup`)
+- **[OpenClaw / Moltbook](https://openclaw.dev)** — Native hook support (`npx shieldcortex clawdbot install`)
+- **[LangChain JS](https://js.langchain.com)** — `ShieldCortexMemory` adapter (`import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'`)
+- **Python frameworks (CrewAI, AutoGPT, etc.)** — Via REST API (`POST /api/v1/scan`)
+- **Any MCP-compatible agent** — Via `@langchain/mcp-adapters` or direct MCP protocol
+- **Any agent with a memory backend** — REST API for scanning, quarantine, and audit
 
 If your agent stores memories, ShieldCortex can protect them.
 
@@ -284,29 +282,52 @@ npx shieldcortex --db /path/to/custom.db
 
 ---
 
-## Generic Agent Integration (npm API)
-
-For LangChain, AutoGPT, CrewAI, or any custom agent, use the programmatic API:
+## LangChain Integration
 
 ```javascript
-import { ShieldCortex } from 'shieldcortex';
+import { ShieldCortexMemory, ShieldCortexGuard } from 'shieldcortex/integrations/langchain';
 
-const shield = new ShieldCortex({ db: '~/.shieldcortex/memories.db' });
+// As a LangChain memory backend (scans before storing)
+const memory = new ShieldCortexMemory({ mode: 'balanced' });
+const vars = await memory.loadMemoryVariables({ input: 'deployment config' });
+await memory.saveContext({ input: 'hello' }, { output: 'hi' });
 
-// Protected memory write
-const result = await shield.addMemory({
-  content: 'deployment uses Docker on port 8080',
-  source: 'agent',        // 'user' | 'agent' | 'tool' | 'external'
-  project: 'my-project',
-  category: 'architecture'
-});
-
-if (result.blocked) {
-  console.warn('Memory blocked:', result.reason);
+// As standalone middleware (scan without storing)
+const guard = new ShieldCortexGuard();
+const result = guard.scan('some content to check');
+if (!result.allowed) {
+  console.warn('Blocked:', result.firewall.reason);
 }
+```
 
-// Secure recall with trust filtering
-const memories = await shield.recall({ query: 'deployment', limit: 10 });
+## REST API (Any Agent)
+
+Start the API server, then scan content from any language or framework:
+
+```bash
+npm run dev:api   # Starts on http://localhost:3001
+```
+
+```bash
+# Scan content
+curl -X POST http://localhost:3001/api/v1/scan \
+  -H 'Content-Type: application/json' \
+  -d '{"content": "memory to scan", "title": "test"}'
+
+# Batch scan
+curl -X POST http://localhost:3001/api/v1/scan/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"items": [{"content": "item 1"}, {"content": "item 2"}]}'
+
+# Query audit logs
+curl http://localhost:3001/api/v1/audit?firewallResult=BLOCK
+
+# List quarantined items
+curl http://localhost:3001/api/v1/quarantine
+
+# Approve/reject quarantined items
+curl -X POST http://localhost:3001/api/v1/quarantine/1/approve
+curl -X POST http://localhost:3001/api/v1/quarantine/1/reject
 ```
 
 All defence layers run automatically — firewall, trust scoring, sensitivity classification, and audit logging.
