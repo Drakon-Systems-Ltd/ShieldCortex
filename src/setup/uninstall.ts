@@ -2,13 +2,52 @@
  * Uninstall utilities for ShieldCortex.
  *
  * Removes hooks from settings.json, CLAUDE.md block, service, and Clawdbot hook.
+ *
+ * SECURITY: Requires --confirm flag or interactive TTY confirmation.
+ * This prevents automated/bot-initiated uninstalls.
  */
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import readline from 'readline';
 import { uninstallService } from '../service/install.js';
 import { uninstallClawdbotHook } from './clawdbot.js';
+
+/**
+ * Require explicit confirmation before uninstall.
+ * Returns true if confirmed, false otherwise.
+ */
+export async function requireConfirmation(action: string): Promise<boolean> {
+  // Allow --confirm flag to skip interactive prompt
+  if (process.argv.includes('--confirm')) {
+    return true;
+  }
+
+  // Non-interactive (piped, no TTY) → reject
+  if (!process.stdin.isTTY) {
+    console.error(`\nUninstall blocked: no interactive terminal detected.`);
+    console.error(`Use --confirm flag for non-interactive uninstall:`);
+    console.error(`  npx shieldcortex ${action} --confirm\n`);
+    return false;
+  }
+
+  // Interactive TTY prompt
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise<boolean>((resolve) => {
+    rl.question(
+      `\nAre you sure you want to ${action}? Type "yes" to confirm: `,
+      (answer) => {
+        rl.close();
+        resolve(answer.trim().toLowerCase() === 'yes');
+      },
+    );
+  });
+}
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 const CLAUDE_MD_PATH = path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -95,6 +134,12 @@ export function removeClaudeMdBlock(): void {
 }
 
 export async function uninstallSetup(): Promise<void> {
+  const confirmed = await requireConfirmation('remove ShieldCortex setup');
+  if (!confirmed) {
+    console.log('Uninstall cancelled.');
+    return;
+  }
+
   console.log('Removing ShieldCortex setup...\n');
 
   try {
@@ -113,6 +158,12 @@ export async function uninstallSetup(): Promise<void> {
 }
 
 export async function uninstallAll(options?: { keepLogs?: boolean }): Promise<void> {
+  const confirmed = await requireConfirmation('fully uninstall ShieldCortex');
+  if (!confirmed) {
+    console.log('Uninstall cancelled.');
+    return;
+  }
+
   console.log('Uninstalling ShieldCortex completely...\n');
 
   // 1. Uninstall service

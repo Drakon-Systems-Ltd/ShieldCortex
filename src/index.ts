@@ -24,8 +24,9 @@
  *   npx shieldcortex clawdbot uninstall      # Remove OpenClaw/Clawdbot hook
  *   npx shieldcortex clawdbot status         # Check OpenClaw hook status
  *   npx shieldcortex migrate                  # Migrate from Claude Cortex
- *   npx shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block
- *   npx shieldcortex uninstall               # Full uninstall (service, hooks, CLAUDE.md)
+ *   npx shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block (requires confirmation)
+ *   npx shieldcortex uninstall               # Full uninstall (requires confirmation)
+ *   npx shieldcortex uninstall --confirm     # Full uninstall (non-interactive)
  *   npx shieldcortex uninstall --keep-logs   # Full uninstall but keep log files
  */
 
