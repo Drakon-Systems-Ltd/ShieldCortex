@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-02-01
+
+### Added
+- **Defence Pipeline** — universal security middleware for AI agent memory (backend-agnostic)
+  - **Memory Firewall** — detects prompt injection, hidden instructions, encoding tricks, privilege escalation
+  - **Fragmentation Detector** — entity extraction + temporal cross-referencing to catch multi-step assembly attacks
+  - **Sensitivity Classifier** — classifies content as PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED, auto-redacts secrets
+  - **Trust Scorer** — source-based trust hierarchy (user=1.0, agent=0.1), filters low-trust memories on recall
+  - **Audit Logger** — full forensic trail of every memory operation with querying
+- **Retroactive Scanner** — `scan_memories` MCP tool scans existing memories for poisoning
+- **4 new MCP tools** — `audit_query`, `quarantine_review`, `defence_stats`, `scan_memories`
+- **`npx shieldcortex migrate`** — non-destructive migration from Claude Cortex (copies DB, swaps settings)
+
+### Changed
+- **Rebranded** from Claude Cortex → ShieldCortex across all files
+- Defence pipeline runs on every `addMemory()` call — quarantines blocked content automatically
+- `searchMemories()` now filters by trust score and redacts RESTRICTED content
+
+### Removed
+- `uninstall.sh` (replaced by `npx shieldcortex uninstall`)
+- `scripts/pre-compact-hook.sh` (superseded by `.mjs` version)
+
 ## [1.13.0] - 2026-01-31
 
 ### Added
