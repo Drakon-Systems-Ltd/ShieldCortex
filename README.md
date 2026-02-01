@@ -1,5 +1,9 @@
 # ShieldCortex
 
+[![npm version](https://img.shields.io/npm/v/shieldcortex.svg)](https://www.npmjs.com/package/shieldcortex)
+[![npm downloads](https://img.shields.io/npm/dm/shieldcortex.svg)](https://www.npmjs.com/package/shieldcortex)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
 **The security layer for AI agent memory.** Like Cloudflare, but for everything your AI remembers.
 
 Palo Alto Networks [warned about persistent memory attacks](https://unit42.paloaltonetworks.com/) on AI agents. Attackers can poison what your agent remembers — injecting instructions, stealing credentials, or assembling attacks across days of fragmented memories. **ShieldCortex stops that.**
