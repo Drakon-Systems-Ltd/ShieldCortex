@@ -96,37 +96,81 @@ export function migrateSettings(): { mcpSwapped: number; hooksSwapped: number } 
   return { mcpSwapped, hooksSwapped };
 }
 
-export function migrateDatabase(): { copied: boolean; source?: string } {
+export function migrateDatabase(): { copied: boolean; merged: boolean; mergedCount?: number; source?: string } {
   const targetDir = NEW_DB_DIR;
   const targetPath = path.join(targetDir, 'memories.db');
 
-  if (fs.existsSync(targetPath)) {
-    console.log(`  Database: ${targetPath} already exists — skipping.`);
-    return { copied: false };
-  }
-
+  // Find the best legacy source
+  let legacyPath: string | null = null;
   for (const legacyDir of LEGACY_DIRS) {
-    const legacyPath = path.join(legacyDir, 'memories.db');
-    if (fs.existsSync(legacyPath)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-      fs.copyFileSync(legacyPath, targetPath);
-      console.log(`  Database: copied ${legacyPath} → ${targetPath}`);
-      console.log(`  (Original preserved at ${legacyPath} for rollback)`);
-
-      // Also copy WAL/SHM if they exist
-      for (const suffix of ['-wal', '-shm']) {
-        const src = legacyPath + suffix;
-        if (fs.existsSync(src)) {
-          fs.copyFileSync(src, targetPath + suffix);
-        }
-      }
-
-      return { copied: true, source: legacyPath };
+    const candidate = path.join(legacyDir, 'memories.db');
+    if (fs.existsSync(candidate)) {
+      legacyPath = candidate;
+      break;
     }
   }
 
-  console.log('  Database: no legacy database found — nothing to migrate.');
-  return { copied: false };
+  if (!legacyPath) {
+    console.log('  Database: no legacy database found — nothing to migrate.');
+    return { copied: false, merged: false };
+  }
+
+  // Fresh install — just copy
+  if (!fs.existsSync(targetPath)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.copyFileSync(legacyPath, targetPath);
+    console.log(`  Database: copied ${legacyPath} → ${targetPath}`);
+    console.log(`  (Original preserved at ${legacyPath} for rollback)`);
+
+    for (const suffix of ['-wal', '-shm']) {
+      const src = legacyPath + suffix;
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, targetPath + suffix);
+      }
+    }
+
+    return { copied: true, merged: false, source: legacyPath };
+  }
+
+  // Target exists — merge memories that don't already exist
+  try {
+    const Database = require('better-sqlite3');
+    const db = new Database(targetPath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
+
+    const countBefore = db.prepare('SELECT COUNT(*) as c FROM memories').get().c;
+
+    db.exec(`ATTACH DATABASE '${legacyPath.replace(/'/g, "''")}' AS old`);
+
+    // Get columns that exist in both tables
+    const newCols = db.prepare("PRAGMA table_info(memories)").all().map((r: any) => r.name);
+    const oldCols = db.prepare("PRAGMA old.table_info(memories)").all().map((r: any) => r.name);
+    const sharedCols = newCols.filter((c: string) => c !== 'id' && oldCols.includes(c));
+
+    const colList = sharedCols.join(', ');
+    db.exec(`INSERT OR IGNORE INTO memories (${colList}) SELECT ${colList} FROM old.memories`);
+
+    db.exec('DETACH old');
+
+    const countAfter = db.prepare('SELECT COUNT(*) as c FROM memories').get().c;
+    const imported = countAfter - countBefore;
+
+    db.close();
+
+    if (imported > 0) {
+      console.log(`  Database: merged ${imported} memories from ${legacyPath}`);
+      console.log(`  (Original preserved at ${legacyPath} for rollback)`);
+    } else {
+      console.log(`  Database: all memories already present — nothing new to import.`);
+    }
+
+    return { copied: false, merged: imported > 0, mergedCount: imported, source: legacyPath };
+  } catch (err: any) {
+    console.error(`  Database merge failed: ${err.message}`);
+    console.log(`  You can manually copy ${legacyPath} → ${targetPath} if needed.`);
+    return { copied: false, merged: false };
+  }
 }
 
 export function migrateClaudeMd(): boolean {
@@ -162,7 +206,7 @@ export async function handleMigrateCommand(): Promise<void> {
   const { mcpSwapped, hooksSwapped } = migrateSettings();
 
   console.log('\n[2/3] Database');
-  const { copied, source } = migrateDatabase();
+  const { copied, merged, mergedCount, source } = migrateDatabase();
 
   console.log('\n[3/3] CLAUDE.md');
   const mdChanged = migrateClaudeMd();
@@ -170,13 +214,14 @@ export async function handleMigrateCommand(): Promise<void> {
   console.log('\n─────────────────────────────────');
   console.log('Migration complete.');
 
-  if (mcpSwapped === 0 && hooksSwapped === 0 && !copied && !mdChanged) {
+  if (mcpSwapped === 0 && hooksSwapped === 0 && !copied && !merged && !mdChanged) {
     console.log('Nothing to migrate — you\'re already on ShieldCortex.');
   } else {
     console.log('\nWhat changed:');
     if (mcpSwapped > 0) console.log(`  ✓ MCP server entry swapped`);
     if (hooksSwapped > 0) console.log(`  ✓ ${hooksSwapped} hook command(s) updated`);
     if (copied) console.log(`  ✓ Database copied (original preserved at ${source})`);
+    if (merged) console.log(`  ✓ ${mergedCount} memories merged from ${source}`);
     if (mdChanged) console.log(`  ✓ CLAUDE.md markers updated`);
     console.log('\nRestart Claude Code to use the new configuration.');
   }
