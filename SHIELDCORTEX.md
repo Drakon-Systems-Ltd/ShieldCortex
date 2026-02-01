@@ -1,4 +1,4 @@
-# OpenDefence — AI Agent Memory Security
+# ShieldCortex — AI Agent Memory Security
 
 ## The Problem (In Plain English)
 
@@ -54,7 +54,7 @@ Agents that absorb this "skill" into memory now have a backdoor.
 
 ---
 
-## How OpenDefence Solves Each One
+## How ShieldCortex Solves Each One
 
 ### Defence Layer 1: Memory Firewall
 
@@ -182,12 +182,12 @@ Enables:
                      │
                      ▼
 ┌──────────────────────────────────────────────────┐
-│              OPENDEFENCE SDK                      │
+│              SHIELDCORTEX SDK                      │
 │                                                   │
-│  opendefence.remember(content, source, context)   │
-│  opendefence.recall(query, context)               │
-│  opendefence.audit(timeRange)                     │
-│  opendefence.health()                             │
+│  shieldcortex.remember(content, source, context)   │
+│  shieldcortex.recall(query, context)               │
+│  shieldcortex.audit(timeRange)                     │
+│  shieldcortex.health()                             │
 │                                                   │
 │  ┌─────────────────────────────────────────────┐  │
 │  │           DEFENCE PIPELINE                  │  │
@@ -206,9 +206,9 @@ Enables:
 Drop-in replacement for any memory system. Two lines to integrate:
 
 ```typescript
-import { OpenDefence } from '@drakon/opendefence';
+import { ShieldCortex } from '@drakon/shieldcortex';
 
-const memory = new OpenDefence({ 
+const memory = new ShieldCortex({ 
   policy: 'strict',  // strict | balanced | permissive
   audit: true 
 });
@@ -230,11 +230,11 @@ const results = await memory.recall("what database?", {
 
 ## Rebrand Plan
 
-### Name: OpenDefence
+### Name: ShieldCortex
 - "Open" — open-source roots, transparency
 - "Defence" — security-first, protection
 - British spelling — aligns with Drakon Systems UK identity
-- Domain: opendefence.ai (check availability)
+- Domain: shieldcortex.ai (check availability)
 
 ### Tagline Options
 1. "Every AI agent has a brain. We make sure nobody poisons it."
@@ -248,7 +248,7 @@ const results = await memory.recall("what database?", {
 
 ### Repo Structure (renamed from claude-cortex)
 ```
-OpenDefence/
+ShieldCortex/
 ├── src/
 │   ├── core/              # Brain-like memory (from Claude Cortex)
 │   │   ├── memory/        # STM, LTM, Episodic tiers

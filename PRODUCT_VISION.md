@@ -1,4 +1,4 @@
-# Drakon AI Memory Shield — Product Vision
+# ShieldCortex — Product Vision
 
 ## The Market Opportunity
 
@@ -19,7 +19,7 @@ AI agents have memory. That memory is vulnerable:
 4. **Memory Exfiltration** — Agent memory dumped to external services
 5. **Fragmented Payload Assembly** — Palo Alto's "4th risk" — benign fragments in memory assemble into attacks
 
-## The Solution: Drakon Memory Shield
+## The Solution: ShieldCortex
 
 Built on Claude Cortex (our open-source brain-like memory system), hardened for enterprise:
 
@@ -137,7 +137,7 @@ Enterprise ($499+/mo):
 ## Technical Roadmap
 
 ### Phase 1: Foundation (Feb 2026)
-- [ ] Fork and rebrand Claude Cortex → Drakon Memory Shield
+- [ ] Fork and rebrand Claude Cortex → ShieldCortex
 - [ ] Add Memory Firewall (content sanitisation + injection detection)
 - [ ] Add source tagging (trusted/untrusted)
 - [ ] Build landing page on drakonsystems.com
