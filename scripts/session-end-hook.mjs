@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Session-end hook for Claude Cortex - Automatic Memory Extraction on Exit
+ * Session-end hook for ShieldCortex - Automatic Memory Extraction on Exit
  *
  * This script runs when a Claude Code session ends and:
  * 1. Reads the session transcript from the JSONL file
@@ -27,8 +27,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 // Database paths (with legacy fallback)
-const NEW_DB_DIR = join(homedir(), '.claude-cortex');
-const LEGACY_DB_DIR = join(homedir(), '.claude-memory');
+const NEW_DB_DIR = join(homedir(), '.shieldcortex');
+const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
 
 function getDbPath() {
   const newPath = join(NEW_DB_DIR, 'memories.db');

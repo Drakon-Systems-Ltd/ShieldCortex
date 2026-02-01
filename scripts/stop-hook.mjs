@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Claude Cortex — Stop Hook
+ * ShieldCortex — Stop Hook
  *
  * Fires after each Claude response. Checks the last assistant message for
  * high-salience content (decisions, fixes, learnings) that should be saved

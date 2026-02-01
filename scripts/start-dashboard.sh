@@ -1,10 +1,10 @@
 #!/bin/bash
-# Claude Memory Dashboard Startup Script
+# ShieldCortex Dashboard Startup Script
 # Starts both the API server and Next.js dashboard
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-LOG_DIR="$HOME/.claude-memory/logs"
+LOG_DIR="$HOME/.shieldcortex/logs"
 
 # Create log directory
 mkdir -p "$LOG_DIR"
@@ -35,7 +35,7 @@ echo "Dashboard started (PID: $DASHBOARD_PID)"
 echo "$API_PID" > "$LOG_DIR/api-server.pid"
 echo "$DASHBOARD_PID" > "$LOG_DIR/dashboard.pid"
 
-echo "Claude Memory Dashboard running:"
+echo "ShieldCortex Dashboard running:"
 echo "  - API: http://localhost:3001"
 echo "  - Dashboard: http://localhost:3030"
 echo "  - Logs: $LOG_DIR"

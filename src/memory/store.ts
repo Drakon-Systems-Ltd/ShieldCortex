@@ -44,6 +44,8 @@ import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult } from '../graph/resolve.js';
+import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
+import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -155,15 +157,50 @@ export class MemoryPausedError extends Error {
 }
 
 /**
+ * Error thrown when memory is blocked by the defence firewall
+ */
+export class MemoryBlockedError extends Error {
+  constructor(reason: string) {
+    super(`Memory blocked by defence firewall: ${reason}`);
+    this.name = 'MemoryBlockedError';
+  }
+}
+
+/**
+ * Store a blocked memory in quarantine for later review
+ */
+function quarantineMemory(input: MemoryInput, source: DefenceSource, result: DefencePipelineResult): void {
+  try {
+    const db = getDatabase();
+    db.prepare(`INSERT INTO quarantine (title, content, source, trust_score, sensitivity_level, block_reason, threat_indicators, fragmentation_score, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
+      .run(input.title, input.content, `${source.type}:${source.identifier}`, result.trust.score, result.sensitivity.level, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.fragmentation?.score ?? null, result.auditId);
+  } catch (e) {
+    console.error('[shieldcortex] Failed to quarantine memory:', e);
+  }
+}
+
+/**
  * Add a new memory
  */
 export function addMemory(
   input: MemoryInput,
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = DEFAULT_CONFIG,
+  source?: DefenceSource
 ): Memory {
   // Check if memory creation is paused
   if (isPaused()) {
     throw new MemoryPausedError();
+  }
+
+  // DEFENCE PIPELINE: Scan content before storage
+  let defenceResult: DefencePipelineResult | null = null;
+  if (source) {
+    defenceResult = runDefencePipeline(input.content, input.title, source);
+    if (!defenceResult.allowed) {
+      // Store in quarantine instead of memory
+      quarantineMemory(input, source, defenceResult);
+      throw new MemoryBlockedError(defenceResult.firewall.reason);
+    }
   }
 
   const db = getDatabase();
@@ -213,6 +250,11 @@ export function addMemory(
     transferable
   );
 
+  if (defenceResult) {
+    db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ? WHERE id = ?`)
+      .run(defenceResult.trust.score, defenceResult.sensitivity.level, `${source!.type}:${source!.identifier}`, result.lastInsertRowid);
+  }
+
   const memory = getMemoryById(result.lastInsertRowid as number)!;
 
   // Emit event for real-time dashboard (in-process)
@@ -229,7 +271,7 @@ export function addMemory(
     }
   } catch (e) {
     // Don't fail memory creation if linking fails
-    console.error('[claude-cortex] Auto-link failed:', e);
+    console.error('[shieldcortex] Auto-link failed:', e);
   }
 
   // ONTOLOGY: Extract entities and triples from this memory
@@ -239,7 +281,12 @@ export function addMemory(
       processExtractionResult(extraction, memory.id);
     }
   } catch (e) {
-    console.error('[claude-cortex] Entity extraction failed:', e);
+    console.error('[shieldcortex] Entity extraction failed:', e);
+  }
+
+  // DEFENCE: Store fragmentation data for cross-memory payload detection
+  if (source) {
+    try { storeFragmentationData(memory.id, truncationResult.content); } catch {}
   }
 
   // SEMANTIC SEARCH: Generate embedding asynchronously (don't block INSERT)
@@ -250,11 +297,11 @@ export function addMemory(
         db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
           .run(Buffer.from(embedding.buffer), memoryId);
       } catch (e) {
-        console.error('[claude-cortex] Failed to store embedding:', e);
+        console.error('[shieldcortex] Failed to store embedding:', e);
       }
     })
     .catch(e => {
-      console.error('[claude-cortex] Failed to generate embedding:', e);
+      console.error('[shieldcortex] Failed to generate embedding:', e);
     });
 
   // Anti-bloat: Check if limits exceeded and trigger async cleanup
@@ -433,7 +480,7 @@ export function accessMemory(
     }
   } catch (e) {
     // Don't fail memory access if link strengthening fails
-    console.error('[claude-cortex] Link strengthening failed:', e);
+    console.error('[shieldcortex] Link strengthening failed:', e);
   }
 
   // ORGANIC FEATURE: Spreading Activation (Phase 2)
@@ -792,7 +839,7 @@ export async function searchMemories(
       }
     } catch (e) {
       // Vector search unavailable - fall back to FTS only
-      console.log('[claude-cortex] Vector search unavailable, using FTS only');
+      console.log('[shieldcortex] Vector search unavailable, using FTS only');
     }
   }
 

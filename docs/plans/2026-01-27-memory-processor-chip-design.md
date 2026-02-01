@@ -4,7 +4,7 @@
 
 ## Overview
 
-Redesign of the Claude Cortex dashboard from an organic brain visualization to a clean CPU/motherboard-inspired Memory Processor Chip.
+Redesign of the ShieldCortex dashboard from an organic brain visualization to a clean CPU/motherboard-inspired Memory Processor Chip.
 
 ## Design Decisions
 

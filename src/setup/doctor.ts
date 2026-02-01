@@ -1,5 +1,5 @@
 /**
- * `npx claude-cortex doctor` — diagnostic checks for Cortex installation health.
+ * `npx shieldcortex doctor` — diagnostic checks for Cortex installation health.
  */
 
 import fs from 'fs';
@@ -24,7 +24,7 @@ function add(status: Status, message: string): void {
 }
 
 function getDbPath(): { path: string; isLegacy: boolean } | null {
-  const newPath = path.join(os.homedir(), '.claude-cortex', 'memories.db');
+  const newPath = path.join(os.homedir(), '.shieldcortex', 'memories.db');
   const legacyPath = path.join(os.homedir(), '.claude-memory', 'memories.db');
 
   if (fs.existsSync(newPath)) return { path: newPath, isLegacy: false };
@@ -50,11 +50,11 @@ function checkNode(): void {
 function checkDatabase(): void {
   const db = getDbPath();
   if (!db) {
-    add('FAIL', 'Database not found at ~/.claude-cortex/memories.db');
+    add('FAIL', 'Database not found at ~/.shieldcortex/memories.db');
     return;
   }
 
-  const label = db.isLegacy ? '~/.claude-memory/memories.db (legacy)' : '~/.claude-cortex/memories.db';
+  const label = db.isLegacy ? '~/.claude-memory/memories.db (legacy)' : '~/.shieldcortex/memories.db';
 
   try {
     const stat = fs.statSync(db.path);
@@ -71,14 +71,14 @@ function checkDatabase(): void {
 function checkClaudeMd(): void {
   const claudeMdPath = path.join(os.homedir(), '.claude', 'CLAUDE.md');
   if (!fs.existsSync(claudeMdPath)) {
-    add('WARN', 'CLAUDE.md not found — run `npx claude-cortex setup`');
+    add('WARN', 'CLAUDE.md not found — run `npx shieldcortex setup`');
     return;
   }
   const content = fs.readFileSync(claudeMdPath, 'utf-8');
-  if (content.includes('# Claude Cortex')) {
+  if (content.includes('# ShieldCortex')) {
     add('PASS', 'CLAUDE.md: Cortex instructions present');
   } else {
-    add('WARN', 'CLAUDE.md: Cortex instructions not found — run `npx claude-cortex setup`');
+    add('WARN', 'CLAUDE.md: Cortex instructions not found — run `npx shieldcortex setup`');
   }
 }
 
@@ -104,7 +104,7 @@ function checkHooks(): void {
     const entries = hooks[name];
     const hasCortex = Array.isArray(entries) && entries.some((e: any) =>
       Array.isArray(e?.hooks) && e.hooks.some((h: any) =>
-        typeof h?.command === 'string' && h.command.includes('claude-cortex')
+        typeof h?.command === 'string' && h.command.includes('shieldcortex')
       )
     );
     if (hasCortex) {
@@ -125,7 +125,7 @@ function checkMcp(): void {
     if (fs.existsSync(p)) {
       try {
         const content = fs.readFileSync(p, 'utf-8');
-        if (content.includes('claude-cortex')) {
+        if (content.includes('shieldcortex')) {
           add('PASS', `MCP: cortex configured in ${path.basename(p)}`);
           return;
         }
@@ -140,7 +140,7 @@ export async function handleDoctorCommand(): Promise<void> {
   const __dirname = path.dirname(__filename);
   const pkg = require(path.resolve(__dirname, '..', '..', 'package.json'));
 
-  console.log(`\nClaude Cortex Doctor v${pkg.version}\n`);
+  console.log(`\nShieldCortex Doctor v${pkg.version}\n`);
 
   checkNode();
   checkDatabase();

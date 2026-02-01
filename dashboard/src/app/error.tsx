@@ -10,7 +10,7 @@ export default function Error({
   reset: () => void;
 }) {
   useEffect(() => {
-    console.error('[claude-cortex] Dashboard error:', error);
+    console.error('[shieldcortex] Dashboard error:', error);
   }, [error]);
 
   return (

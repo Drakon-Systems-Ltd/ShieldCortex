@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
 - `graph_explain` MCP tool — find paths between two entities with source memories
 - REST API endpoints for graph data (`/api/graph/entities`, `/api/graph/triples`, `/api/graph/search`, `/api/graph/paths`)
 - Dashboard **Ontology** view with force-graph visualization, entity type filtering, and detail sidebar
-- `npx claude-cortex graph backfill` command to extract entities from existing memories
+- `npx shieldcortex graph backfill` command to extract entities from existing memories
 - Brain worker graph maintenance — automatic orphan entity pruning every 30 minutes
 
 ## [1.12.0] - 2026-01-30
@@ -39,22 +39,22 @@ All notable changes to this project will be documented in this file.
 ## [1.10.0] - 2026-01-30
 
 ### Added
-- **`setup` auto-configures hooks** — `npx claude-cortex setup` now installs PreCompact, SessionStart, and SessionEnd hooks into `~/.claude/settings.json` using portable `npx claude-cortex hook <name>` commands.
-- **Stop hook (opt-in)** — `npx claude-cortex setup --with-stop-hook` installs a Stop hook that checks the last assistant message for notable content (decisions, fixes, learnings) and prompts Claude to use `remember`. Loop prevention is programmatic (`stop_hook_active` boolean check), not LLM-dependent.
-- `npx claude-cortex hook stop` CLI command for manual invocation.
+- **`setup` auto-configures hooks** — `npx shieldcortex setup` now installs PreCompact, SessionStart, and SessionEnd hooks into `~/.claude/settings.json` using portable `npx shieldcortex hook <name>` commands.
+- **Stop hook (opt-in)** — `npx shieldcortex setup --with-stop-hook` installs a Stop hook that checks the last assistant message for notable content (decisions, fixes, learnings) and prompts Claude to use `remember`. Loop prevention is programmatic (`stop_hook_active` boolean check), not LLM-dependent.
+- `npx shieldcortex hook stop` CLI command for manual invocation.
 
 ## [1.9.1] - 2026-01-30
 
 ### Added
-- **`doctor` command** — `npx claude-cortex doctor` checks installation health: Node version, database, CLAUDE.md setup, hooks, MCP config.
-- **`--version` / `-v` flag** — `npx claude-cortex --version` prints the current version.
+- **`doctor` command** — `npx shieldcortex doctor` checks installation health: Node version, database, CLAUDE.md setup, hooks, MCP config.
+- **`--version` / `-v` flag** — `npx shieldcortex --version` prints the current version.
 
 ## [1.9.0] - 2026-01-30
 
 ### Added
 - **SessionEnd hook** — Auto-extracts important context when a Claude Code session exits. Reads the session transcript and saves high-salience memories (decisions, fixes, learnings) to the database.
 - Hook coverage matrix in README documenting when each hook fires and its reliability.
-- `npx claude-cortex hook session-end` CLI command for manual invocation.
+- `npx shieldcortex hook session-end` CLI command for manual invocation.
 
 ### Changed
 - SessionEnd hook skips extraction on `/clear` (intentional session wipe).
@@ -82,12 +82,12 @@ All notable changes to this project will be documented in this file.
 ## [1.8.1] - 2026-01-29
 
 ### Changed
-- **Unified setup command** — `npx claude-cortex setup` now configures both Claude Code (CLAUDE.md) and Clawdbot/Moltbot hook in one step.
+- **Unified setup command** — `npx shieldcortex setup` now configures both Claude Code (CLAUDE.md) and Clawdbot/Moltbot hook in one step.
 
 ## [1.8.0] - 2026-01-29
 
 ### Added
-- **Clawdbot/Moltbot hook installer** — `npx claude-cortex clawdbot install|uninstall|status`
+- **Clawdbot/Moltbot hook installer** — `npx shieldcortex clawdbot install|uninstall|status`
 - Bundled `cortex-memory` hook that integrates via mcporter for persistent memory in Clawdbot sessions.
 - Auto-saves session context on `/new`, injects past memories on bootstrap, keyword triggers ("remember this").
 
@@ -104,7 +104,7 @@ All notable changes to this project will be documented in this file.
 ## [1.7.0] - 2026-01-28
 
 ### Added
-- **`setup` command** — `npx claude-cortex setup` injects proactive memory instructions into `~/.claude/CLAUDE.md`.
+- **`setup` command** — `npx shieldcortex setup` injects proactive memory instructions into `~/.claude/CLAUDE.md`.
 
 ## [1.6.1] - 2026-01-28
 
@@ -126,9 +126,9 @@ All notable changes to this project will be documented in this file.
 ## [1.5.2] - 2026-01-28
 
 ### Added
-- **Cross-platform auto-start service** — `npx claude-cortex service install|uninstall|status`
+- **Cross-platform auto-start service** — `npx shieldcortex service install|uninstall|status`
 - Supports macOS (launchd), Linux (systemd), Windows (Startup folder VBS script).
-- Logs to `~/.claude-cortex/logs/`.
+- Logs to `~/.shieldcortex/logs/`.
 
 ## [1.5.1] - 2026-01-28
 
@@ -176,7 +176,7 @@ All notable changes to this project will be documented in this file.
 ## [1.3.1] - 2026-01-28
 
 ### Fixed
-- README branding: changed "Claude Memory" references to "Claude Cortex"
+- README branding: changed "Claude Memory" references to "ShieldCortex"
 
 ## [1.3.0] - 2026-01-27
 

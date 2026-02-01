@@ -21,7 +21,7 @@ AI agents have memory. That memory is vulnerable:
 
 ## The Solution: ShieldCortex
 
-Built on Claude Cortex (our open-source brain-like memory system), hardened for enterprise:
+Built on ShieldCortex (our open-source brain-like memory system), hardened for enterprise:
 
 ### Core Product
 
@@ -66,7 +66,7 @@ Built on Claude Cortex (our open-source brain-like memory system), hardened for 
 - Time-based access windows
 - Emergency memory lockdown
 
-#### 4. Brain-Like Memory (from Claude Cortex)
+#### 4. Brain-Like Memory (from ShieldCortex)
 - Short-term, long-term, and episodic memory tiers
 - Natural decay and reinforcement
 - Salience scoring — not everything is worth remembering
@@ -137,7 +137,7 @@ Enterprise ($499+/mo):
 ## Technical Roadmap
 
 ### Phase 1: Foundation (Feb 2026)
-- [ ] Fork and rebrand Claude Cortex → ShieldCortex
+- [ ] Fork and rebrand ShieldCortex → ShieldCortex
 - [ ] Add Memory Firewall (content sanitisation + injection detection)
 - [ ] Add source tagging (trusted/untrusted)
 - [ ] Build landing page on drakonsystems.com

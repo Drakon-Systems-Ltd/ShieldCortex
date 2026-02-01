@@ -1,4 +1,4 @@
-# Claude Memory - Brain-Like Memory System for Claude Code
+# ShieldCortex - Brain-Like Memory System for Claude Code
 
 ## The Problem
 
@@ -168,7 +168,7 @@ User: "What database are we using?"
 ## Files Structure
 
 ```
-claude-cortex/
+shieldcortex/
 ├── src/
 │   ├── index.ts           # MCP server entry point
 │   ├── server.ts          # MCP server setup

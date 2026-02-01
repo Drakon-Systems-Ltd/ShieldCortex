@@ -1,5 +1,5 @@
 /**
- * Core type definitions for the Claude Memory system
+ * Core type definitions for the ShieldCortex memory system
  */
 
 export type MemoryType = 'short_term' | 'long_term' | 'episodic';
@@ -108,7 +108,7 @@ export interface MemoryConfig {
 }
 
 export const DEFAULT_CONFIG: MemoryConfig = {
-  dbPath: '~/.claude-cortex/memories.db', // Note: actual path auto-detected with legacy fallback
+  dbPath: '~/.shieldcortex/memories.db', // Note: actual path auto-detected with legacy fallback
   decayRate: 0.995,
   reinforcementFactor: 1.2,
   salienceThreshold: 0.2, // Lowered from 0.3 to match reduced base salience (0.25)

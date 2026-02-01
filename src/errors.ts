@@ -6,7 +6,7 @@
  */
 
 /**
- * Base class for Claude Memory errors
+ * Base class for ShieldCortex errors
  */
 export class MemoryError extends Error {
   public readonly code: string;

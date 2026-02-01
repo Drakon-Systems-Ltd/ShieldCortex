@@ -25,7 +25,7 @@ export async function handleHookCommand(hookName: string): Promise<void> {
   if (!scriptFile) {
     console.error(`Unknown hook: ${hookName}`);
     console.log(`Available hooks: ${Object.keys(HOOKS).join(', ')}`);
-    console.log('Usage: claude-cortex hook <pre-compact|session-start|session-end|stop>');
+    console.log('Usage: shieldcortex hook <pre-compact|session-start|session-end|stop>');
     process.exit(1);
   }
 

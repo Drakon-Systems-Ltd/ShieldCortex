@@ -1,28 +1,31 @@
 #!/usr/bin/env node
 
 /**
- * Claude Cortex - Brain-like Memory System for Claude Code
+ * ShieldCortex - Brain-like Memory System for Claude Code
  *
  * This server provides persistent, intelligent memory for Claude Code,
  * solving the context compaction and session persistence problems.
  *
  * Usage:
- *   npx claude-cortex                         # Start MCP server (default)
- *   npx claude-cortex --mode mcp              # Start MCP server
- *   npx claude-cortex --mode api              # Start visualization API server
- *   npx claude-cortex --mode both             # Start both servers
- *   npx claude-cortex --dashboard             # Start API + Dashboard (admin panel)
- *   npx claude-cortex --db /path/to.db        # Custom database path
- *   npx claude-cortex setup                    # Configure Claude for proactive memory use
- *   npx claude-cortex hook pre-compact         # Run pre-compact hook (for settings.json)
- *   npx claude-cortex hook session-start       # Run session-start hook (for settings.json)
- *   npx claude-cortex hook session-end         # Run session-end hook (for settings.json)
- *   npx claude-cortex service install         # Auto-start dashboard on login
- *   npx claude-cortex service uninstall       # Remove auto-start
- *   npx claude-cortex service status          # Check service status
- *   npx claude-cortex clawdbot install        # Install Clawdbot/Moltbot hook
- *   npx claude-cortex clawdbot uninstall      # Remove Clawdbot/Moltbot hook
- *   npx claude-cortex clawdbot status         # Check Clawdbot hook status
+ *   npx shieldcortex                         # Start MCP server (default)
+ *   npx shieldcortex --mode mcp              # Start MCP server
+ *   npx shieldcortex --mode api              # Start visualization API server
+ *   npx shieldcortex --mode both             # Start both servers
+ *   npx shieldcortex --dashboard             # Start API + Dashboard (admin panel)
+ *   npx shieldcortex --db /path/to.db        # Custom database path
+ *   npx shieldcortex setup                    # Configure Claude for proactive memory use
+ *   npx shieldcortex hook pre-compact         # Run pre-compact hook (for settings.json)
+ *   npx shieldcortex hook session-start       # Run session-start hook (for settings.json)
+ *   npx shieldcortex hook session-end         # Run session-end hook (for settings.json)
+ *   npx shieldcortex service install         # Auto-start dashboard on login
+ *   npx shieldcortex service uninstall       # Remove auto-start
+ *   npx shieldcortex service status          # Check service status
+ *   npx shieldcortex clawdbot install        # Install OpenClaw/Clawdbot hook
+ *   npx shieldcortex clawdbot uninstall      # Remove OpenClaw/Clawdbot hook
+ *   npx shieldcortex clawdbot status         # Check OpenClaw hook status
+ *   npx shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block
+ *   npx shieldcortex uninstall               # Full uninstall (service, hooks, CLAUDE.md)
+ *   npx shieldcortex uninstall --keep-logs   # Full uninstall but keep log files
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -107,7 +110,7 @@ function startDashboard(): ChildProcess {
 
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║             🧠 Claude Cortex Dashboard                        ║
+║             🧠 ShieldCortex Dashboard                        ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Starting Next.js dashboard...                               ║
 ║  Dashboard: http://localhost:3030                            ║
@@ -172,8 +175,20 @@ async function main() {
 
   // Handle "setup" subcommand
   if (process.argv[2] === 'setup') {
+    if (process.argv[3] === 'uninstall') {
+      const { uninstallSetup } = await import('./setup/uninstall.js');
+      await uninstallSetup();
+      return;
+    }
     const stopHook = process.argv.includes('--with-stop-hook');
     await setupClaudeMd({ stopHook });
+    return;
+  }
+
+  // Handle "uninstall" subcommand
+  if (process.argv[2] === 'uninstall') {
+    const { uninstallAll } = await import('./setup/uninstall.js');
+    await uninstallAll({ keepLogs: process.argv.includes('--keep-logs') });
     return;
   }
 
@@ -201,7 +216,7 @@ async function main() {
     if (action === 'backfill') {
       const { initDatabase } = await import('./database/init.js');
       const os = await import('os');
-      const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.claude-cortex', 'memories.db');
+      const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.shieldcortex', 'memories.db');
       initDatabase(dbPath);
 
       const { backfillGraph } = await import('./graph/backfill.js');
@@ -221,11 +236,11 @@ async function main() {
 
   if (mode === 'api') {
     // API mode only - for dashboard visualization
-    console.log('Starting Claude Cortex in API mode...');
+    console.log('Starting ShieldCortex in API mode...');
     startVisualizationServer(dbPath);
   } else if (mode === 'dashboard') {
     // Dashboard mode - API + Next.js dashboard
-    console.log('Starting Claude Cortex with Dashboard...');
+    console.log('Starting ShieldCortex with Dashboard...');
     startVisualizationServer(dbPath);
     dashboardProcess = startDashboard();
 
@@ -242,7 +257,7 @@ async function main() {
     process.on('SIGTERM', () => shutdown('SIGTERM'));
   } else if (mode === 'both') {
     // Both modes - API in background, MCP in foreground
-    console.log('Starting Claude Cortex in both modes...');
+    console.log('Starting ShieldCortex in both modes...');
     startVisualizationServer(dbPath);
     await startMcpServer(dbPath);
   } else {
@@ -254,6 +269,6 @@ async function main() {
 // Run
 main().catch((error) => {
   // Log to stderr to avoid corrupting MCP protocol
-  console.error('Failed to start claude-cortex server:', error);
+  console.error('Failed to start shieldcortex server:', error);
   process.exit(1);
 });

@@ -2,7 +2,7 @@
 
 /**
  * Main Dashboard Page
- * Multi-view dashboard for the Claude Cortex memory system
+ * Multi-view dashboard for the ShieldCortex memory system
  */
 
 import { useState, useRef, useEffect } from 'react';
@@ -115,7 +115,7 @@ export default function DashboardPage() {
     type: typeFilter,
     category: categoryFilter,
   });
-  const { data: stats, isLoading: statsLoading } = useStats(selectedProject);
+  const { data: stats, isLoading: _statsLoading } = useStats(selectedProject);
   const { data: links = [] } = useMemoryLinks(selectedProject);
 
   // Mutations
@@ -124,8 +124,8 @@ export default function DashboardPage() {
 
   // Control status
   const { data: controlStatus } = useControlStatus();
-  const pauseMutation = usePauseMemory();
-  const resumeMutation = useResumeMemory();
+  const _pauseMutation = usePauseMemory();
+  const _resumeMutation = useResumeMemory();
   const isPaused = controlStatus?.paused ?? false;
 
   const handleSelectMemory = (memory: Memory | null) => {
@@ -143,7 +143,7 @@ export default function DashboardPage() {
     accessMutation.mutate(id);
   };
 
-  const handleConsolidate = () => {
+  const _handleConsolidate = () => {
     consolidateMutation.mutate();
   };
 
@@ -153,7 +153,7 @@ export default function DashboardPage() {
       <header className="h-14 border-b border-slate-800 flex items-center justify-between px-4 bg-slate-900/50 backdrop-blur-sm shrink-0">
         <div className="flex items-center gap-4">
           <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent">
-            🧠 Claude Cortex
+            🧠 ShieldCortex
           </h1>
 
           {/* Project Selector */}

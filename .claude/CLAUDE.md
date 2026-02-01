@@ -1,4 +1,4 @@
-# Claude Cortex - Project Instructions
+# ShieldCortex - Project Instructions
 
 ## What This Is
 An MCP server that gives Claude Code brain-like memory. This project IS the memory system, so be careful not to break it while working on it.
@@ -48,7 +48,7 @@ cd dashboard && npm run dev
 | `dashboard/` | 3D brain visualization (Next.js) |
 
 ## Database Location
-`~/.claude-cortex/memories.db` (SQLite with FTS5, with fallback to legacy `~/.claude-memory/`)
+`~/.shieldcortex/memories.db` (SQLite with FTS5, with fallback to legacy `~/.claude-cortex/` or `~/.claude-memory/`)
 
 ## Recent Improvements
 
@@ -179,14 +179,14 @@ WS   /ws/events          - Real-time updates
 ## Auto-Start Service
 The dashboard can auto-start on login after reboot:
 ```bash
-npx claude-cortex service install    # Enable auto-start
-npx claude-cortex service uninstall  # Disable auto-start
-npx claude-cortex service status     # Check status
+npx shieldcortex service install    # Enable auto-start
+npx shieldcortex service uninstall  # Disable auto-start
+npx shieldcortex service status     # Check status
 ```
-- **macOS**: LaunchAgent plist (`~/Library/LaunchAgents/com.claude-cortex.dashboard.plist`)
-- **Linux**: systemd user service (`~/.config/systemd/user/claude-cortex-dashboard.service`)
+- **macOS**: LaunchAgent plist (`~/Library/LaunchAgents/com.shieldcortex.dashboard.plist`)
+- **Linux**: systemd user service (`~/.config/systemd/user/shieldcortex-dashboard.service`)
 - **Windows**: VBS script in Startup folder
-- Logs: `~/.claude-cortex/logs/`
+- Logs: `~/.shieldcortex/logs/`
 
 ## Known Issues
 - MCP server process caches - restart Claude Code after code changes

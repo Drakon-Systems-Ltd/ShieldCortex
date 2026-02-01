@@ -19,17 +19,17 @@
 
 **Step 1: Install dependency**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npm install react-force-graph-2d`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npm install react-force-graph-2d`
 
 **Step 2: Verify installation**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && node -e "require('react-force-graph-2d')"`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && node -e "require('react-force-graph-2d')"`
 Expected: No error
 
 **Step 3: Commit**
 
 ```bash
-cd /Users/michael/Development/claude-cortex
+cd /Users/michael/Development/shieldcortex
 git add dashboard/package.json dashboard/package-lock.json
 git commit -m "chore: add react-force-graph-2d dependency"
 ```
@@ -58,7 +58,7 @@ viewMode: 'graph',
 
 **Step 2: Verify build**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npx next build 2>&1 | tail -20`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npx next build 2>&1 | tail -20`
 
 Note: Build may show errors from page.tsx still referencing old types — that's expected, we fix it in Task 3.
 
@@ -196,7 +196,7 @@ Key structure:
 
 **Step 2: Verify build**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npx next build 2>&1 | tail -20`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npx next build 2>&1 | tail -20`
 Expected: Build succeeds. Nav rail renders, Brain tab works, other tabs show placeholders.
 
 **Step 3: Commit**
@@ -237,7 +237,7 @@ Use `useCallback` for paint functions to avoid rerenders. Use `useMemo` to build
 
 **Step 2: Verify build**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npx next build 2>&1 | tail -20`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npx next build 2>&1 | tail -20`
 Expected: Build succeeds.
 
 **Step 3: Commit**
@@ -261,7 +261,7 @@ git commit -m "feat(dashboard): add 2D knowledge graph component"
 
 **Step 2: Verify build + manual test**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npx next build 2>&1 | tail -20`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npx next build 2>&1 | tail -20`
 Expected: Build succeeds. Graph tab shows force-directed nodes when API server is running.
 
 **Step 3: Commit**
@@ -333,7 +333,7 @@ Replace the memories placeholder with `<MemoriesView memories={memories} selecte
 
 **Step 3: Verify build**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npx next build 2>&1 | tail -20`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npx next build 2>&1 | tail -20`
 Expected: Build succeeds.
 
 **Step 4: Commit**
@@ -436,7 +436,7 @@ app.get('/api/memories/quality', (req: Request, res: Response) => {
 
 **Step 3: Build backend**
 
-Run: `cd /Users/michael/Development/claude-cortex && npm run build`
+Run: `cd /Users/michael/Development/shieldcortex && npm run build`
 Expected: Build succeeds.
 
 **Step 4: Commit**
@@ -633,7 +633,7 @@ Replace insights placeholder with `<InsightsView selectedProject={selectedProjec
 
 **Step 3: Verify build**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npx next build 2>&1 | tail -20`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npx next build 2>&1 | tail -20`
 Expected: Build succeeds.
 
 **Step 4: Commit**
@@ -683,7 +683,7 @@ In `page.tsx`, wrap the view content area with Framer Motion `AnimatePresence` a
 
 **Step 3: Verify build + manual test**
 
-Run: `cd /Users/michael/Development/claude-cortex/dashboard && npx next build 2>&1 | tail -20`
+Run: `cd /Users/michael/Development/shieldcortex/dashboard && npx next build 2>&1 | tail -20`
 Expected: Build succeeds. All four views render correctly.
 
 **Step 4: Commit**
@@ -723,7 +723,7 @@ Add entry:
 
 **Step 3: Build backend**
 
-Run: `cd /Users/michael/Development/claude-cortex && npm run build`
+Run: `cd /Users/michael/Development/shieldcortex && npm run build`
 
 **Step 4: Commit, tag, publish**
 

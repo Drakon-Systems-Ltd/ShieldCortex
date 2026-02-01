@@ -29,6 +29,10 @@ export const rememberSchema = z.object({
     .describe('Memory scope: project (default) or global (cross-project)'),
   transferable: z.boolean().optional()
     .describe('Whether this memory can be transferred to other projects'),
+  source: z.object({
+    type: z.enum(['user', 'email', 'web', 'agent', 'file', 'api']),
+    identifier: z.string(),
+  }).optional().describe('Source of this memory for trust scoring'),
 });
 
 export type RememberInput = z.infer<typeof rememberSchema>;
@@ -104,7 +108,7 @@ export async function executeRemember(input: RememberInput): Promise<{
       salience: salienceOverride,
       scope: input.scope,
       transferable: input.transferable,
-    });
+    }, undefined, input.source ? { type: input.source.type, identifier: input.source.identifier } : undefined);
 
     // Auto-detect and create relationships with existing memories
     let linksCreated = 0;
