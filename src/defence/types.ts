@@ -22,7 +22,7 @@ export type ThreatIndicator =
 // ── Core Interfaces ──
 
 export interface DefenceSource {
-  type: 'user' | 'email' | 'web' | 'agent' | 'file' | 'api';
+  type: 'user' | 'cli' | 'hook' | 'email' | 'web' | 'agent' | 'file' | 'api';
   identifier: string;
 }
 

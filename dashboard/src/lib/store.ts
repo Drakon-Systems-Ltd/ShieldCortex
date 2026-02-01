@@ -14,8 +14,8 @@ interface DashboardState {
   setSelectedMemory: (memory: Memory | null) => void;
 
   // View mode
-  viewMode: 'graph' | 'memories' | 'insights' | 'brain' | 'ontology';
-  setViewMode: (mode: 'graph' | 'memories' | 'insights' | 'brain' | 'ontology') => void;
+  viewMode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph';
+  setViewMode: (mode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph') => void;
 
   // Filters
   typeFilter: string | null;
@@ -51,7 +51,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   setSelectedMemory: (memory) => set({ selectedMemory: memory }),
 
   // View mode
-  viewMode: 'graph',
+  viewMode: 'shield',
   setViewMode: (mode) => set({ viewMode: mode }),
 
   // Filters

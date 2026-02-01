@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-02-01
+
+### Dashboard
+- **Security-first redesign** — new default Shield view with defence pipeline status, quarantine queue, threat timeline, and stats summary
+- **Audit Log view** — filterable table of all defence pipeline events (time range, source, result)
+- **Quarantine Review view** — approve/reject quarantined memories with "Type YES" human confirmation
+- **New navigation** — Shield | Audit | Queue | Memories | Brain | Graph (Shield is default)
+- **Branding update** — shield icon with cyan/blue/emerald gradient, security-focused metadata
+- **Alert badge** — blocked count badge on Shield nav item
+
+### Fixed
+- **Defence pipeline was skipped for MCP `remember` calls** — source defaulted to undefined, bypassing the pipeline entirely. Now defaults to `{type: 'cli', identifier: 'mcp'}`
+- **DefenceSource type missing `cli` and `hook`** — added to type union and trust scorer (cli=0.9, hook=0.8)
+- **Trust scores aligned with ARCHITECTURE.md** — user=1.0, cli=0.9, hook=0.8, api=0.7, agent=0.5, web=0.3
+
 ## [2.1.4] - 2026-02-01
 
 ### Security
