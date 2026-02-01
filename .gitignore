@@ -27,3 +27,10 @@ npm-debug.log*
 
 # Test coverage
 coverage/
+
+# Internal strategy docs
+COMPETITIVE-ANALYSIS.md
+GO-TO-MARKET.md
+SAAS-ARCHITECTURE.md
+PRODUCT_VISION.md
+SHIELDCORTEX.md
