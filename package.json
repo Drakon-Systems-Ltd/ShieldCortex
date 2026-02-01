@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Security layer for AI agent memory — firewall, trust scoring, sensitivity classification, and audit for any memory backend",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -40,21 +40,26 @@
     "prepublishOnly": "npm run build"
   },
   "keywords": [
-    "claude",
+    "security",
+    "firewall",
+    "ai-agent",
+    "memory-protection",
+    "threat-detection",
     "mcp",
-    "memory",
-    "ai",
-    "context"
+    "langchain",
+    "claude",
+    "prompt-injection",
+    "audit"
   ],
   "author": "Michael Kyriacou",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mkdelta221/shieldcortex.git"
+    "url": "git+https://github.com/Drakon-Systems-Ltd/ShieldCortex.git"
   },
-  "homepage": "https://github.com/mkdelta221/shieldcortex#readme",
+  "homepage": "https://github.com/Drakon-Systems-Ltd/ShieldCortex#readme",
   "bugs": {
-    "url": "https://github.com/mkdelta221/shieldcortex/issues"
+    "url": "https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -85,7 +90,6 @@
   },
   "files": [
     "dist",
-    "dashboard",
     "hooks",
     "scripts"
   ]

@@ -1,7 +1,7 @@
 ---
 name: cortex-memory
 description: "Persistent brain-like memory via ShieldCortex — auto-saves session context and recalls past knowledge"
-homepage: https://github.com/mkdelta221/shieldcortex
+homepage: https://github.com/Drakon-Systems-Ltd/ShieldCortex
 metadata:
   {
     "clawdbot":
@@ -16,7 +16,7 @@ metadata:
 
 # Cortex Memory Hook
 
-Integrates [ShieldCortex](https://github.com/mkdelta221/shieldcortex) persistent memory. Automatically saves important session context and recalls past knowledge at session start.
+Integrates [ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) persistent memory. Automatically saves important session context and recalls past knowledge at session start.
 
 ## What It Does
 
