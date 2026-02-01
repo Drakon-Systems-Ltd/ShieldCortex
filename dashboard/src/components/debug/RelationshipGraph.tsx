@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useMemoryLinks, useMemories } from '@/hooks/useMemories';
-import { Memory, MemoryLink } from '@/types/memory';
+// Memory and MemoryLink types used implicitly via hooks
 
 interface Node {
   id: number;

@@ -31,11 +31,11 @@ function expandPath(path: string): string {
 
 /**
  * Get the database path with legacy fallback
- * - New installs use ~/.claude-cortex/
+ * - New installs use ~/.shieldcortex/
  * - Existing users with ~/.claude-memory/ continue to work
  */
 function getDefaultDbPath(): string {
-  const newPath = join(homedir(), '.claude-cortex', 'memories.db');
+  const newPath = join(homedir(), '.shieldcortex', 'memories.db');
   const legacyPath = join(homedir(), '.claude-memory', 'memories.db');
 
   // Prefer new path if it exists, or if neither exists (new install)
@@ -145,6 +145,80 @@ function runMigrations(database: Database.Database): void {
   // Migration: transferable column for cross-project sharing
   if (!columnNames.has('transferable')) {
     database.exec('ALTER TABLE memories ADD COLUMN transferable INTEGER DEFAULT 0');
+  }
+
+  // Migration: Defence columns on memories table
+  if (!columnNames.has('trust_score')) {
+    database.exec("ALTER TABLE memories ADD COLUMN trust_score REAL DEFAULT 1.0");
+  }
+  if (!columnNames.has('sensitivity_level')) {
+    database.exec("ALTER TABLE memories ADD COLUMN sensitivity_level TEXT DEFAULT 'INTERNAL'");
+  }
+  if (!columnNames.has('source')) {
+    database.exec("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'user:direct'");
+  }
+
+  // Migration: Defence tables (defence_audit, quarantine, fragmentation_entities)
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS defence_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_id INTEGER,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        source_type TEXT NOT NULL,
+        source_identifier TEXT NOT NULL,
+        trust_score REAL NOT NULL,
+        sensitivity_level TEXT NOT NULL DEFAULT 'INTERNAL',
+        firewall_result TEXT NOT NULL CHECK(firewall_result IN ('ALLOW', 'BLOCK', 'QUARANTINE')),
+        anomaly_score REAL DEFAULT 0.0,
+        threat_indicators TEXT DEFAULT '[]',
+        blocked_patterns TEXT DEFAULT '[]',
+        reason TEXT,
+        fragmentation_score REAL,
+        pipeline_duration_ms INTEGER,
+        FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_memory ON defence_audit(memory_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON defence_audit(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
+      CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
+
+      CREATE TABLE IF NOT EXISTS quarantine (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        original_content TEXT NOT NULL,
+        original_title TEXT,
+        source_type TEXT NOT NULL,
+        source_identifier TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        threat_indicators TEXT DEFAULT '[]',
+        anomaly_score REAL DEFAULT 0.0,
+        firewall_result TEXT NOT NULL CHECK(firewall_result IN ('BLOCK', 'QUARANTINE')),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'expired')),
+        reviewed_at TIMESTAMP,
+        reviewed_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP,
+        audit_id INTEGER,
+        FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_quarantine_status ON quarantine(status);
+      CREATE INDEX IF NOT EXISTS idx_quarantine_created ON quarantine(created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS fragmentation_entities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_id INTEGER NOT NULL,
+        entity_value TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        context_snippet TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_frag_entities_memory ON fragmentation_entities(memory_id);
+      CREATE INDEX IF NOT EXISTS idx_frag_entities_text ON fragmentation_entities(entity_value);
+      CREATE INDEX IF NOT EXISTS idx_frag_entities_type ON fragmentation_entities(entity_type);
+    `);
+  } catch {
+    // Tables may already exist - safe to ignore
   }
 
   // Migration: Ontology tables (entities, triples, memory_entities)
@@ -340,7 +414,10 @@ function getInlineSchema(): string {
       metadata TEXT DEFAULT '{}',
       embedding BLOB,
       scope TEXT DEFAULT 'project',
-      transferable INTEGER DEFAULT 0
+      transferable INTEGER DEFAULT 0,
+      trust_score REAL DEFAULT 1.0,
+      sensitivity_level TEXT DEFAULT 'INTERNAL',
+      source TEXT DEFAULT 'user:direct'
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -448,6 +525,65 @@ function getInlineSchema(): string {
       FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
       PRIMARY KEY (memory_id, entity_id)
     );
+
+    CREATE TABLE IF NOT EXISTS defence_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER,
+      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      source_type TEXT NOT NULL,
+      source_identifier TEXT NOT NULL,
+      trust_score REAL NOT NULL,
+      sensitivity_level TEXT NOT NULL DEFAULT 'INTERNAL',
+      firewall_result TEXT NOT NULL CHECK(firewall_result IN ('ALLOW', 'BLOCK', 'QUARANTINE')),
+      anomaly_score REAL DEFAULT 0.0,
+      threat_indicators TEXT DEFAULT '[]',
+      blocked_patterns TEXT DEFAULT '[]',
+      reason TEXT,
+      fragmentation_score REAL,
+      pipeline_duration_ms INTEGER,
+      FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_memory ON defence_audit(memory_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON defence_audit(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
+    CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
+
+    CREATE TABLE IF NOT EXISTS quarantine (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      original_content TEXT NOT NULL,
+      original_title TEXT,
+      source_type TEXT NOT NULL,
+      source_identifier TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      threat_indicators TEXT DEFAULT '[]',
+      anomaly_score REAL DEFAULT 0.0,
+      firewall_result TEXT NOT NULL CHECK(firewall_result IN ('BLOCK', 'QUARANTINE')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'expired')),
+      reviewed_at TIMESTAMP,
+      reviewed_by TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      expires_at TIMESTAMP,
+      audit_id INTEGER,
+      FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_quarantine_status ON quarantine(status);
+    CREATE INDEX IF NOT EXISTS idx_quarantine_created ON quarantine(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS fragmentation_entities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER NOT NULL,
+      entity_value TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      context_snippet TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_frag_entities_memory ON fragmentation_entities(memory_id);
+    CREATE INDEX IF NOT EXISTS idx_frag_entities_text ON fragmentation_entities(entity_value);
+    CREATE INDEX IF NOT EXISTS idx_frag_entities_type ON fragmentation_entities(entity_type);
   `;
 }
 

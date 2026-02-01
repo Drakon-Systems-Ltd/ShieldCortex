@@ -1314,7 +1314,7 @@ export function startVisualizationServer(dbPath?: string): void {
   server.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║             🧠 Claude Cortex API Server                       ║
+║             🧠 ShieldCortex API Server                       ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  REST API:    http://localhost:${PORT}/api                        ║
 ║  WebSocket:   ws://localhost:${PORT}/ws/events                    ║

@@ -15,23 +15,23 @@ interface HookEntry {
 
 const CORTEX_HOOKS: Record<string, HookEntry> = {
   PreCompact: {
-    hooks: [{ type: 'command', command: 'npx claude-cortex hook pre-compact', timeout: 10 }],
+    hooks: [{ type: 'command', command: 'npx shieldcortex hook pre-compact', timeout: 10 }],
   },
   SessionStart: {
-    hooks: [{ type: 'command', command: 'npx claude-cortex hook session-start', timeout: 5 }],
+    hooks: [{ type: 'command', command: 'npx shieldcortex hook session-start', timeout: 5 }],
   },
   SessionEnd: {
-    hooks: [{ type: 'command', command: 'npx claude-cortex hook session-end', timeout: 10 }],
+    hooks: [{ type: 'command', command: 'npx shieldcortex hook session-end', timeout: 10 }],
   },
 };
 
 const STOP_HOOK: HookEntry = {
-  hooks: [{ type: 'command', command: 'npx claude-cortex hook stop', timeout: 10 }],
+  hooks: [{ type: 'command', command: 'npx shieldcortex hook stop', timeout: 10 }],
 };
 
 function hasCortexHook(entries: HookEntry[]): boolean {
   return entries.some((e) =>
-    e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('claude-cortex'))
+    e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('shieldcortex'))
   );
 }
 

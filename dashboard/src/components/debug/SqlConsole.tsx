@@ -7,7 +7,7 @@
  * Read-only by default with optional write mode.
  */
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -59,21 +59,9 @@ export function SqlConsole() {
   const [allowWrite, setAllowWrite] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const executeQueryRef = useRef<() => void>(() => {});
 
-  // Keyboard shortcut: Ctrl+Enter to execute
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        e.preventDefault();
-        executeQuery();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [query, allowWrite]);
-
-  const executeQuery = async () => {
+  const executeQuery = useCallback(async () => {
     if (!query.trim()) return;
 
     // Safety check for destructive operations
@@ -151,7 +139,25 @@ export function SqlConsole() {
     } finally {
       setIsExecuting(false);
     }
-  };
+  }, [query, allowWrite]);
+
+  // Keep ref in sync
+  useEffect(() => {
+    executeQueryRef.current = executeQuery;
+  }, [executeQuery]);
+
+  // Keyboard shortcut: Ctrl+Enter to execute
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        executeQueryRef.current();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const loadTemplate = (templateQuery: string) => {
     setQuery(templateQuery);

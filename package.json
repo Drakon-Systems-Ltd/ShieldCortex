@@ -1,5 +1,5 @@
 {
-  "name": "claude-cortex",
+  "name": "shieldcortex",
   "version": "1.14.0",
   "description": "Brain-like memory system for Claude Code - solves context compaction and memory persistence",
   "main": "dist/index.js",
@@ -31,11 +31,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mkdelta221/claude-cortex.git"
+    "url": "git+https://github.com/mkdelta221/shieldcortex.git"
   },
-  "homepage": "https://github.com/mkdelta221/claude-cortex#readme",
+  "homepage": "https://github.com/mkdelta221/shieldcortex#readme",
   "bugs": {
-    "url": "https://github.com/mkdelta221/claude-cortex/issues"
+    "url": "https://github.com/mkdelta221/shieldcortex/issues"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -62,7 +62,7 @@
     "typescript": "^5.6.0"
   },
   "bin": {
-    "claude-cortex": "dist/index.js"
+    "shieldcortex": "dist/index.js"
   },
   "files": [
     "dist",

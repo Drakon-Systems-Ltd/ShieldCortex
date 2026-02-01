@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS memories (
   embedding BLOB,  -- Vector embedding for semantic search
   scope TEXT DEFAULT 'project',  -- Scope: project or global
   transferable INTEGER DEFAULT 0,  -- Cross-project sharing flag
+  trust_score REAL DEFAULT 1.0,
+  sensitivity_level TEXT DEFAULT 'INTERNAL',
+  source TEXT DEFAULT 'user:direct',
 
   -- Index for common queries
   CONSTRAINT valid_category CHECK(category IN (
@@ -144,3 +147,65 @@ CREATE TABLE IF NOT EXISTS memory_entities (
   FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
   PRIMARY KEY (memory_id, entity_id)
 );
+
+-- Defence: Full audit trail for all memory operations
+CREATE TABLE IF NOT EXISTS defence_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id INTEGER,
+  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  source_type TEXT NOT NULL,
+  source_identifier TEXT NOT NULL,
+  trust_score REAL NOT NULL,
+  sensitivity_level TEXT NOT NULL DEFAULT 'INTERNAL',
+  firewall_result TEXT NOT NULL CHECK(firewall_result IN ('ALLOW', 'BLOCK', 'QUARANTINE')),
+  anomaly_score REAL DEFAULT 0.0,
+  threat_indicators TEXT DEFAULT '[]',  -- JSON array of ThreatIndicator strings
+  blocked_patterns TEXT DEFAULT '[]',   -- JSON array of matched patterns
+  reason TEXT,
+  fragmentation_score REAL,
+  pipeline_duration_ms INTEGER,
+  FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_memory ON defence_audit(memory_id);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON defence_audit(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
+CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
+
+-- Defence: Quarantine for blocked/suspicious memories pending review
+CREATE TABLE IF NOT EXISTS quarantine (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  original_content TEXT NOT NULL,
+  original_title TEXT,
+  source_type TEXT NOT NULL,
+  source_identifier TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  threat_indicators TEXT DEFAULT '[]',  -- JSON array
+  anomaly_score REAL DEFAULT 0.0,
+  firewall_result TEXT NOT NULL CHECK(firewall_result IN ('BLOCK', 'QUARANTINE')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'expired')),
+  reviewed_at TIMESTAMP,
+  reviewed_by TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  expires_at TIMESTAMP,
+  audit_id INTEGER,
+  FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_quarantine_status ON quarantine(status);
+CREATE INDEX IF NOT EXISTS idx_quarantine_created ON quarantine(created_at DESC);
+
+-- Defence: Extracted entities for cross-reference fragmentation analysis
+CREATE TABLE IF NOT EXISTS fragmentation_entities (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id INTEGER NOT NULL,
+  entity_value TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  context_snippet TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_frag_entities_memory ON fragmentation_entities(memory_id);
+CREATE INDEX IF NOT EXISTS idx_frag_entities_text ON fragmentation_entities(entity_value);
+CREATE INDEX IF NOT EXISTS idx_frag_entities_type ON fragmentation_entities(entity_type);

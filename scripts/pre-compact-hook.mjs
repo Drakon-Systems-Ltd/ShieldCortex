@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Pre-compact hook for Claude Memory - Automatic Memory Extraction
+ * Pre-compact hook for ShieldCortex - Automatic Memory Extraction
  *
  * This script runs before context compaction and:
  * 1. Analyzes conversation content for important information
@@ -17,8 +17,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 // Database paths (with legacy fallback)
-const NEW_DB_DIR = join(homedir(), '.claude-cortex');
-const LEGACY_DB_DIR = join(homedir(), '.claude-memory');
+const NEW_DB_DIR = join(homedir(), '.shieldcortex');
+const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
 
 // Auto-detect: use new path if it exists, or if legacy doesn't exist (new install)
 function getDbPath() {
@@ -571,7 +571,7 @@ process.stdin.on('end', () => {
       }
     }
 
-    console.error(`[claude-cortex] Pre-compact complete: ${autoExtractedCount} memories auto-extracted`);
+    console.error(`[shieldcortex] Pre-compact complete: ${autoExtractedCount} memories auto-extracted`);
 
     outputReminder(autoExtractedCount, dynamicThreshold);
 

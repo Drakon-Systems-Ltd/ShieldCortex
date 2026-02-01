@@ -1,5 +1,5 @@
 /**
- * Platform-specific service file templates for auto-starting Claude Cortex dashboard.
+ * Platform-specific service file templates for auto-starting ShieldCortex dashboard.
  */
 
 export interface ServiceConfig {
@@ -15,7 +15,7 @@ export function launchdPlist(config: ServiceConfig): string {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.claude-cortex.dashboard</string>
+  <string>com.shieldcortex.dashboard</string>
   <key>ProgramArguments</key>
   <array>
     <string>${config.nodePath}</string>
@@ -42,7 +42,7 @@ export function launchdPlist(config: ServiceConfig): string {
 
 export function systemdUnit(config: ServiceConfig): string {
   return `[Unit]
-Description=Claude Cortex Dashboard
+Description=ShieldCortex Dashboard
 After=network.target
 
 [Service]

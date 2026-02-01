@@ -1,5 +1,5 @@
 /**
- * Cross-platform service installer for Claude Cortex dashboard auto-start.
+ * Cross-platform service installer for ShieldCortex dashboard auto-start.
  *
  * Supports:
  *  - macOS: LaunchAgent plist
@@ -28,7 +28,7 @@ function detectPlatform(): Platform {
 }
 
 function getServiceConfig(): ServiceConfig {
-  const logsDir = path.join(os.homedir(), '.claude-cortex', 'logs');
+  const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
   return {
@@ -42,12 +42,12 @@ function getServiceConfig(): ServiceConfig {
 function getServicePath(platform: Platform): string {
   switch (platform) {
     case 'macos':
-      return path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.claude-cortex.dashboard.plist');
+      return path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.shieldcortex.dashboard.plist');
     case 'linux':
-      return path.join(os.homedir(), '.config', 'systemd', 'user', 'claude-cortex-dashboard.service');
+      return path.join(os.homedir(), '.config', 'systemd', 'user', 'shieldcortex-dashboard.service');
     case 'windows': {
       const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-      return path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'claude-cortex-dashboard.vbs');
+      return path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'shieldcortex-dashboard.vbs');
     }
   }
 }
@@ -86,7 +86,7 @@ export async function installService(): Promise<void> {
         break;
       case 'linux':
         execSync('systemctl --user daemon-reload', { stdio: 'inherit' });
-        execSync('systemctl --user enable --now claude-cortex-dashboard.service', { stdio: 'inherit' });
+        execSync('systemctl --user enable --now shieldcortex-dashboard.service', { stdio: 'inherit' });
         console.log('Service enabled via systemd.');
         break;
       case 'windows':
@@ -100,12 +100,20 @@ export async function installService(): Promise<void> {
     return;
   }
 
-  console.log('\nClaude Cortex dashboard will now auto-start on login.');
+  console.log('\nShieldCortex dashboard will now auto-start on login.');
   console.log(`  API:       http://localhost:3001`);
   console.log(`  Dashboard: http://localhost:3030`);
 }
 
-export async function uninstallService(): Promise<void> {
+function cleanLogsDirectory(): void {
+  const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
+  if (fs.existsSync(logsDir)) {
+    fs.rmSync(logsDir, { recursive: true, force: true });
+    console.log(`Logs cleaned: ${logsDir}`);
+  }
+}
+
+export async function uninstallService(options?: { cleanLogs?: boolean }): Promise<void> {
   const platform = detectPlatform();
   const servicePath = getServicePath(platform);
 
@@ -120,7 +128,7 @@ export async function uninstallService(): Promise<void> {
         execSync(`launchctl unload -w "${servicePath}"`, { stdio: 'inherit' });
         break;
       case 'linux':
-        execSync('systemctl --user disable --now claude-cortex-dashboard.service', { stdio: 'inherit' });
+        execSync('systemctl --user disable --now shieldcortex-dashboard.service', { stdio: 'inherit' });
         break;
       case 'windows':
         // Just delete the file — no daemon to stop
@@ -132,6 +140,10 @@ export async function uninstallService(): Promise<void> {
 
   fs.unlinkSync(servicePath);
   console.log(`Service removed: ${servicePath}`);
+
+  if (options?.cleanLogs) {
+    cleanLogsDirectory();
+  }
 }
 
 export async function serviceStatus(): Promise<void> {
@@ -149,13 +161,13 @@ export async function serviceStatus(): Promise<void> {
   try {
     switch (platform) {
       case 'macos': {
-        const out = execSync('launchctl list com.claude-cortex.dashboard 2>&1', { encoding: 'utf-8' });
+        const out = execSync('launchctl list com.shieldcortex.dashboard 2>&1', { encoding: 'utf-8' });
         const pidMatch = out.match(/"PID"\s*=\s*(\d+)/);
         console.log(`Running:   ${pidMatch ? `yes (PID ${pidMatch[1]})` : 'no'}`);
         break;
       }
       case 'linux': {
-        const out = execSync('systemctl --user is-active claude-cortex-dashboard.service 2>&1', { encoding: 'utf-8' }).trim();
+        const out = execSync('systemctl --user is-active shieldcortex-dashboard.service 2>&1', { encoding: 'utf-8' }).trim();
         console.log(`Running:   ${out === 'active' ? 'yes' : 'no'}`);
         break;
       }
@@ -174,13 +186,13 @@ export async function handleServiceCommand(subcommand: string): Promise<void> {
       await installService();
       break;
     case 'uninstall':
-      await uninstallService();
+      await uninstallService({ cleanLogs: process.argv.includes('--clean-logs') });
       break;
     case 'status':
       await serviceStatus();
       break;
     default:
-      console.log('Usage: claude-cortex service <install|uninstall|status>');
+      console.log('Usage: shieldcortex service <install|uninstall|status>');
       process.exit(1);
   }
 }

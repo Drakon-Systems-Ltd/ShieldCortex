@@ -116,25 +116,27 @@ export default function OntologyGraph() {
   // Fetch data
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
 
-    Promise.all([
-      fetch(`${API_BASE}/api/graph/entities?limit=500`).then(r => r.json()),
-      fetch(`${API_BASE}/api/graph/triples?limit=500`).then(r => r.json()),
-    ])
-      .then(([entRes, triRes]) => {
+    async function fetchData() {
+      setLoading(true);
+      setError(null);
+      try {
+        const [entRes, triRes] = await Promise.all([
+          fetch(`${API_BASE}/api/graph/entities?limit=500`).then(r => r.json()),
+          fetch(`${API_BASE}/api/graph/triples?limit=500`).then(r => r.json()),
+        ]);
         if (cancelled) return;
         setEntities(entRes.entities || []);
         setTriples(triRes.triples || []);
         setLoading(false);
-      })
-      .catch(err => {
+      } catch (err) {
         if (cancelled) return;
-        setError(err.message);
+        setError((err as Error).message);
         setLoading(false);
-      });
+      }
+    }
 
+    fetchData();
     return () => { cancelled = true; };
   }, []);
 

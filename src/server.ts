@@ -1,5 +1,5 @@
 /**
- * Claude Memory MCP Server
+ * ShieldCortex MCP Server
  *
  * Brain-like memory system for Claude Code.
  * Solves context compaction and memory persistence issues.
@@ -36,6 +36,9 @@ import { getHighPriorityMemories, getRecentMemories, getRelatedMemories, createM
 import { detectContradictions, getContradictionsFor } from './memory/contradiction.js';
 import { handleGraphQuery, handleGraphEntities, handleGraphExplain } from './tools/graph.js';
 import { checkDatabaseSize } from './database/init.js';
+import { queryAuditLogs, getAuditStats } from './defence/audit/index.js';
+import { scanExistingMemories } from './defence/scanner/index.js';
+import type { FirewallResult as FwResult } from './defence/types.js';
 
 /**
  * Create and configure the MCP server
@@ -52,14 +55,14 @@ export function createServer(dbPath?: string): McpServer {
   initProjectContext();
   const projectInfo = getProjectContextInfo();
   if (projectInfo.project) {
-    console.error(`[claude-cortex] Project: "${projectInfo.project}" (from ${projectInfo.source})`);
+    console.error(`[shieldcortex] Project: "${projectInfo.project}" (from ${projectInfo.source})`);
   } else {
-    console.error('[claude-cortex] Project: global scope');
+    console.error('[shieldcortex] Project: global scope');
   }
 
   // Create MCP server
   const server = new McpServer({
-    name: 'claude-cortex',
+    name: 'shieldcortex',
     version: getCurrentVersion(),
   });
 
@@ -538,6 +541,86 @@ but you can use this tool to check for new contradictions at any time.`,
   );
 
   // ============================================
+  // DEFENCE TOOLS
+  // ============================================
+
+  // Audit Query
+  server.tool('audit_query', 'Query defence audit logs for forensic analysis', {
+    startTime: z.string().optional().describe('ISO timestamp start'),
+    endTime: z.string().optional().describe('ISO timestamp end'),
+    operation: z.enum(['write', 'read', 'delete', 'update']).optional(),
+    source: z.string().optional().describe('Filter by source'),
+    firewallResult: z.enum(['ALLOW', 'BLOCK', 'QUARANTINE']).optional(),
+    limit: z.number().default(50),
+  }, async (args) => {
+    const logs = queryAuditLogs(args);
+    const text = logs.length === 0 ? 'No audit logs found.' : logs.map(l => `[${l.timestamp}] ${l.firewall_result} | source:${l.source_type}:${l.source_identifier} | trust:${l.trust_score}`).join('\n');
+    return { content: [{ type: 'text', text }] };
+  });
+
+  // Quarantine Review
+  server.tool('quarantine_review', 'Review and manage quarantined memories', {
+    action: z.enum(['list', 'approve', 'reject']),
+    quarantineId: z.number().optional().describe('ID for approve/reject'),
+    notes: z.string().optional(),
+  }, async (args) => {
+    const db = (await import('./database/init.js')).getDatabase();
+    if (args.action === 'list') {
+      const items = db.prepare('SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT 50').all('pending');
+      const text = items.length === 0 ? 'No items in quarantine.' : (items as any[]).map((q: any) => `[${q.id}] ${q.title} | reason: ${q.block_reason} | trust: ${q.trust_score}`).join('\n');
+      return { content: [{ type: 'text', text }] };
+    } else if (args.action === 'approve' && args.quarantineId) {
+      db.prepare('UPDATE quarantine SET status = ?, reviewer_notes = ? WHERE id = ?').run('approved', args.notes || null, args.quarantineId);
+      // Optionally promote to memory
+      const q = db.prepare('SELECT * FROM quarantine WHERE id = ?').get(args.quarantineId) as any;
+      if (q) {
+        const { addMemory: add } = await import('./memory/store.js');
+        add({ title: q.title, content: q.content });
+      }
+      return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} approved.` }] };
+    } else if (args.action === 'reject' && args.quarantineId) {
+      db.prepare('UPDATE quarantine SET status = ?, reviewer_notes = ? WHERE id = ?').run('rejected', args.notes || null, args.quarantineId);
+      return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} rejected.` }] };
+    }
+    return { content: [{ type: 'text', text: 'Invalid action or missing quarantineId.' }] };
+  });
+
+  // Defence Stats
+  server.tool('defence_stats', 'Get defence system statistics', {
+    timeRange: z.enum(['24h', '7d', '30d']).default('24h'),
+  }, async (args) => {
+    const stats = getAuditStats(args.timeRange);
+    const lines = [
+      `Defence Stats (${args.timeRange}):`,
+      `  Total operations: ${stats.totalOperations}`,
+      `  Allowed: ${stats.allowedCount}`,
+      `  Blocked: ${stats.blockedCount}`,
+      `  Quarantined: ${stats.quarantinedCount}`,
+      `  Top sources: ${stats.topSources.map(s => `${s.source}(${s.count})`).join(', ') || 'none'}`,
+    ];
+    if (Object.keys(stats.threatBreakdown).length > 0) {
+      lines.push(`  Threats: ${Object.entries(stats.threatBreakdown).map(([k,v]) => `${k}:${v}`).join(', ')}`);
+    }
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
+  });
+
+  // Scan Memories
+  server.tool('scan_memories', 'Scan existing memories for signs of poisoning', {
+    project: z.string().optional().describe('Scan specific project'),
+    limit: z.number().default(1000).describe('Max memories to scan'),
+  }, async (args) => {
+    const report = scanExistingMemories({ project: args.project, limit: args.limit });
+    let text = report.summary + '\n';
+    if (report.threatsFound.length > 0) {
+      text += '\nThreats:\n';
+      for (const t of report.threatsFound) {
+        text += `  [${t.severity}] Memory #${t.memoryId}: "${t.title}" — ${t.details}\n`;
+      }
+    }
+    return { content: [{ type: 'text', text }] };
+  });
+
+  // ============================================
   // RESOURCES
   // ============================================
 
@@ -645,15 +728,15 @@ but you can use this tool to check for new contradictions at any time.`,
   // Run initial consolidation on startup
   try {
     const startupResult = consolidate();
-    console.error(`[claude-cortex] Startup consolidation: ${startupResult.consolidated} promoted, ${startupResult.deleted} deleted`);
+    console.error(`[shieldcortex] Startup consolidation: ${startupResult.consolidated} promoted, ${startupResult.deleted} deleted`);
   } catch (e) {
-    console.error('[claude-cortex] Startup consolidation failed:', e);
+    console.error('[shieldcortex] Startup consolidation failed:', e);
   }
 
   // Check database size on startup
   const sizeInfo = checkDatabaseSize();
   if (sizeInfo.warning || sizeInfo.blocked) {
-    console.error(`[claude-cortex] ${sizeInfo.message}`);
+    console.error(`[shieldcortex] ${sizeInfo.message}`);
   }
 
   // Schedule periodic consolidation every 4 hours
@@ -661,9 +744,9 @@ but you can use this tool to check for new contradictions at any time.`,
   setInterval(() => {
     try {
       const result = fullCleanup();
-      console.error(`[claude-cortex] Scheduled cleanup: ${result.consolidation.consolidated} promoted, ${result.consolidation.deleted} deleted, ${result.merged} merged, vacuumed: ${result.vacuumed}`);
+      console.error(`[shieldcortex] Scheduled cleanup: ${result.consolidation.consolidated} promoted, ${result.consolidation.deleted} deleted, ${result.merged} merged, vacuumed: ${result.vacuumed}`);
     } catch (e) {
-      console.error('[claude-cortex] Scheduled cleanup failed:', e);
+      console.error('[shieldcortex] Scheduled cleanup failed:', e);
     }
   }, CONSOLIDATION_INTERVAL);
 

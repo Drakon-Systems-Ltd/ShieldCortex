@@ -1,7 +1,7 @@
 /**
  * Cortex Memory Hook — Persistent brain-like memory for Clawdbot/Moltbot
  *
- * Integrates Claude Cortex MCP server via mcporter to provide:
+ * Integrates ShieldCortex MCP server via mcporter to provide:
  * - Auto-extraction of important session content on /new
  * - Context injection on agent bootstrap
  * - Keyword-triggered memory saves
@@ -12,7 +12,7 @@ import fs from "node:fs/promises";
 // ==================== CORTEX MCP HELPER ====================
 
 /**
- * Call a Claude Cortex MCP tool via mcporter
+ * Call a ShieldCortex MCP tool via mcporter
  * @param {string} tool - Tool name (e.g., "remember", "recall", "get_context")
  * @param {Record<string, string>} args - Tool arguments as key:value pairs
  * @returns {Promise<string|null>} Raw stdout or null on error
@@ -21,7 +21,7 @@ function callCortex(tool, args = {}) {
   return new Promise((resolve) => {
     const cmdArgs = [
       "mcporter", "call", "--stdio",
-      "npx -y claude-cortex",
+      "npx -y shieldcortex",
       tool,
     ];
     for (const [key, value] of Object.entries(args)) {
@@ -206,7 +206,7 @@ async function onBootstrap(event) {
 
   context.bootstrapFiles.push({
     name: "CORTEX_MEMORY.md",
-    content: `# Past Session Context (from Claude Cortex)\n\n${result}`,
+    content: `# Past Session Context (from ShieldCortex)\n\n${result}`,
   });
 
   console.log("[cortex-memory] Injected past context into bootstrap");

@@ -94,7 +94,7 @@ export function consolidate(
     try {
       salienceEvolved = evolveSalience(db);
     } catch (e) {
-      console.error('[claude-cortex] Salience evolution failed:', e);
+      console.error('[shieldcortex] Salience evolution failed:', e);
     }
 
     // ORGANIC FEATURE: Contradiction Detection (Phase 3)
@@ -107,7 +107,7 @@ export function consolidate(
       contradictionsFound = contradictions.length;
       contradictionsLinked = linkContradictions(contradictions);
     } catch (e) {
-      console.error('[claude-cortex] Contradiction detection failed:', e);
+      console.error('[shieldcortex] Contradiction detection failed:', e);
     }
 
     // Prune activation cache to prevent unbounded growth

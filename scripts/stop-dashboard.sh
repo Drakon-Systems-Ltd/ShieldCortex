@@ -1,7 +1,7 @@
 #!/bin/bash
-# Stop Claude Memory Dashboard
+# Stop ShieldCortex Dashboard
 
-LOG_DIR="$HOME/.claude-memory/logs"
+LOG_DIR="$HOME/.shieldcortex/logs"
 
 # Kill by PID files if they exist
 if [ -f "$LOG_DIR/api-server.pid" ]; then
@@ -18,4 +18,4 @@ fi
 pkill -f "node.*visualization-server" 2>/dev/null
 pkill -f "next-server.*3030" 2>/dev/null
 
-echo "Claude Memory Dashboard stopped"
+echo "ShieldCortex Dashboard stopped"

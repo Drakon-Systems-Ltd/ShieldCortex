@@ -48,7 +48,7 @@ The AI agent memory market is exploding. Agents need persistent memory to be use
 
 ---
 
-### 2. Claude Cortex (github.com/mkdelta221/claude-cortex)
+### 2. ShieldCortex (github.com/mkdelta221/shieldcortex)
 **What:** Open-source brain-like memory system for Claude Code
 **Founded by:** Michael Kyriacou (Drakon Systems) — **this is our foundation**
 **Traction:** Open-source, growing community
@@ -99,9 +99,9 @@ The AI agent memory market is exploding. Agents need persistent memory to be use
 
 ---
 
-## Head-to-Head: Supermemory vs Claude Cortex
+## Head-to-Head: Supermemory vs ShieldCortex
 
-| Dimension | Supermemory | Claude Cortex |
+| Dimension | Supermemory | ShieldCortex |
 |-----------|-------------|---------------|
 | **Privacy** | ❌ Cloud (data on their servers) | ✅ 100% local |
 | **Security** | ❌ None | ❌ None (until ShieldCortex) |
@@ -182,4 +182,4 @@ The window is NOW. Every week that passes, someone else could build this.
 2. **Open-source core** — Community adoption creates lock-in through familiarity
 3. **Universal compatibility** — Works with any memory backend, not tied to one ecosystem
 4. **Research credibility** — Built by people who identified and documented the attack vectors
-5. **Claude Cortex foundation** — Battle-tested memory engine underneath the security layer
+5. **ShieldCortex foundation** — Battle-tested memory engine underneath the security layer

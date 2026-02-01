@@ -1,7 +1,7 @@
 /**
  * Control State Module
  *
- * Manages global control state for the Claude Cortex system.
+ * Manages global control state for the ShieldCortex system.
  * Currently handles pause/resume functionality for memory creation.
  */
 
@@ -23,7 +23,7 @@ export function isPaused(): boolean {
  */
 export function pause(): void {
   paused = true;
-  console.log('[claude-cortex] Memory creation PAUSED');
+  console.log('[shieldcortex] Memory creation PAUSED');
 }
 
 /**
@@ -31,7 +31,7 @@ export function pause(): void {
  */
 export function resume(): void {
   paused = false;
-  console.log('[claude-cortex] Memory creation RESUMED');
+  console.log('[shieldcortex] Memory creation RESUMED');
 }
 
 /**

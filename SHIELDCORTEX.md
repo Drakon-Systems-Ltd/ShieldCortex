@@ -246,11 +246,11 @@ const results = await memory.recall("what database?", {
 - Logo: Shield with neural network / brain pattern
 - Tone: Professional but accessible. Not fear-mongering — empowering.
 
-### Repo Structure (renamed from claude-cortex)
+### Repo Structure (renamed from shieldcortex)
 ```
 ShieldCortex/
 ├── src/
-│   ├── core/              # Brain-like memory (from Claude Cortex)
+│   ├── core/              # Brain-like memory (from ShieldCortex)
 │   │   ├── memory/        # STM, LTM, Episodic tiers
 │   │   ├── salience/      # Importance scoring
 │   │   └── decay/         # Natural memory decay

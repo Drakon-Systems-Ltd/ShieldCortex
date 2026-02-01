@@ -16,7 +16,7 @@ describe('Salience Evolution', () => {
 
   beforeAll(() => {
     // Create a temp database for testing
-    dbPath = path.join(os.tmpdir(), `claude-cortex-test-${Date.now()}.db`);
+    dbPath = path.join(os.tmpdir(), `shieldcortex-test-${Date.now()}.db`);
     db = new Database(dbPath);
 
     // Create minimal schema

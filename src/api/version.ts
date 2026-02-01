@@ -86,7 +86,7 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
 
   // Query npm registry
   try {
-    const result = execSync('npm view claude-cortex version', {
+    const result = execSync('npm view shieldcortex version', {
       encoding: 'utf-8',
       timeout: 10000, // 10 second timeout
     }).trim();
@@ -123,7 +123,7 @@ export function performUpdate(): Promise<UpdateResult> {
 
   return new Promise(resolve => {
     exec(
-      'npm update -g claude-cortex',
+      'npm update -g shieldcortex',
       {
         timeout: 120000, // 2 minute timeout
       },
@@ -135,7 +135,7 @@ export function performUpdate(): Promise<UpdateResult> {
 
           if (errorMessage.includes('EACCES') || errorMessage.includes('permission denied')) {
             userFriendlyError =
-              'Permission denied. Try running with sudo: sudo npm update -g claude-cortex';
+              'Permission denied. Try running with sudo: sudo npm update -g shieldcortex';
           } else if (errorMessage.includes('ENOENT')) {
             userFriendlyError = 'npm not found. Make sure Node.js is installed.';
           } else if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('network')) {
@@ -173,10 +173,10 @@ export function performUpdate(): Promise<UpdateResult> {
  * Schedule server restart (with delay for client notification)
  */
 export function scheduleRestart(delayMs = 3000): void {
-  console.log(`[claude-cortex] Server restart scheduled in ${delayMs}ms`);
+  console.log(`[shieldcortex] Server restart scheduled in ${delayMs}ms`);
 
   setTimeout(() => {
-    console.log('[claude-cortex] Restarting server...');
+    console.log('[shieldcortex] Restarting server...');
     process.exit(0); // Clean exit - systemd/pm2/nodemon will restart
   }, delayMs);
 }

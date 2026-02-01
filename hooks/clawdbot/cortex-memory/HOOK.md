@@ -1,7 +1,7 @@
 ---
 name: cortex-memory
-description: "Persistent brain-like memory via Claude Cortex — auto-saves session context and recalls past knowledge"
-homepage: https://github.com/mkdelta221/claude-cortex
+description: "Persistent brain-like memory via ShieldCortex — auto-saves session context and recalls past knowledge"
+homepage: https://github.com/mkdelta221/shieldcortex
 metadata:
   {
     "clawdbot":
@@ -9,21 +9,21 @@ metadata:
         "emoji": "🧠",
         "events": ["command:new", "agent:bootstrap", "command"],
         "requires": { "anyBins": ["npx"] },
-        "install": [{ "id": "community", "kind": "community", "label": "Claude Cortex" }],
+        "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }],
       },
   }
 ---
 
 # Cortex Memory Hook
 
-Integrates [Claude Cortex](https://github.com/mkdelta221/claude-cortex) persistent memory. Automatically saves important session context and recalls past knowledge at session start.
+Integrates [ShieldCortex](https://github.com/mkdelta221/shieldcortex) persistent memory. Automatically saves important session context and recalls past knowledge at session start.
 
 ## What It Does
 
 ### On `/new` (Session End)
 1. Reads the ending session transcript
 2. Pattern-matches for decisions, bug fixes, learnings, architecture changes, and preferences
-3. Saves up to 5 high-salience memories to Claude Cortex via mcporter
+3. Saves up to 5 high-salience memories to ShieldCortex via mcporter
 
 ### On Session Start (Agent Bootstrap)
 1. Calls Cortex `get_context` to retrieve relevant memories
@@ -37,23 +37,23 @@ Integrates [Claude Cortex](https://github.com/mkdelta221/claude-cortex) persiste
 ## Requirements
 
 - **npx** must be available (Node.js installed)
-- Claude Cortex installs automatically on first use via `npx -y claude-cortex`
+- ShieldCortex installs automatically on first use via `npx -y shieldcortex`
 - mcporter must be available for MCP tool calls
 
 ## Database
 
-Memories stored in `~/.claude-cortex/memories.db` (SQLite). Shared with Claude Code sessions — memories created here are available everywhere.
+Memories stored in `~/.shieldcortex/memories.db` (SQLite). Shared with Claude Code sessions — memories created here are available everywhere.
 
 ## Install
 
 ```bash
-npx claude-cortex clawdbot install
+npx shieldcortex clawdbot install
 ```
 
 ## Uninstall
 
 ```bash
-npx claude-cortex clawdbot uninstall
+npx shieldcortex clawdbot uninstall
 ```
 
 Or disable without removing:

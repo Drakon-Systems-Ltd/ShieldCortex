@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Claude Cortex",
-  description: "AI Brain Visualization for Claude Cortex Memory System",
+  title: "ShieldCortex",
+  description: "AI Brain Visualization for ShieldCortex Memory System",
 };
 
 export default function RootLayout({

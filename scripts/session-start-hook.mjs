@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Session Start Hook for Claude Memory - Auto-Recall Context
+ * Session Start Hook for ShieldCortex - Auto-Recall Context
  *
  * This script runs when Claude Code starts a new session and:
  * 1. Detects the current project from the working directory
@@ -16,8 +16,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 // Database paths (with legacy fallback)
-const NEW_DB_DIR = join(homedir(), '.claude-cortex');
-const LEGACY_DB_DIR = join(homedir(), '.claude-memory');
+const NEW_DB_DIR = join(homedir(), '.shieldcortex');
+const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
 
 // Auto-detect: use new path if it exists, or if legacy doesn't exist (new install)
 function getDbPath() {
@@ -197,20 +197,20 @@ You have access to a persistent memory system. Use it proactively:
     if (context) {
       // Output context to stdout - this will be shown to Claude
       console.log(`
-🧠 CLAUDE CORTEX - Project "${project}"
+🧠 SHIELDCORTEX - Project "${project}"
 
 ${context}
 ${proactiveInstructions}
 `);
-      console.error(`[claude-cortex] Session start: loaded ${memories.length} memories for "${project}"`);
+      console.error(`[shieldcortex] Session start: loaded ${memories.length} memories for "${project}"`);
     } else {
       console.log(`
-🧠 CLAUDE CORTEX - New project "${project}"
+🧠 SHIELDCORTEX - New project "${project}"
 
 No stored memories yet for this project.
 ${proactiveInstructions}
 `);
-      console.error(`[claude-cortex] Session start: no memories found for "${project}"`);
+      console.error(`[shieldcortex] Session start: no memories found for "${project}"`);
     }
 
     process.exit(0);

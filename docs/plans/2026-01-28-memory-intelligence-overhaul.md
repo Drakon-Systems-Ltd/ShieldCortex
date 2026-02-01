@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Transform Claude Cortex from CRUD-with-decay into a system where subsystems feed back into each other — searches improve links, links improve search, access patterns update salience, contradictions get surfaced, and consolidation actually merges related memories.
+**Goal:** Transform ShieldCortex from CRUD-with-decay into a system where subsystems feed back into each other — searches improve links, links improve search, access patterns update salience, contradictions get surfaced, and consolidation actually merges related memories.
 
 **Architecture:** Seven focused tasks, each connecting a currently-isolated subsystem into a unified feedback loop. No new tables or breaking schema changes. All changes are backward-compatible. Each task has clear before/after behavior.
 
