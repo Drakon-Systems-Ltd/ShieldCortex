@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.3] - 2026-02-01
+
+### Security
+- **Fixed 6 defence pipeline bypass vulnerabilities**
+  - Pipeline: QUARANTINE now correctly blocks content (was allowing through)
+  - Pipeline: RESTRICTED sensitivity classification now blocks content
+  - Instruction detector: added fake system prompt markers (`SYSTEM:`, `ASSISTANT:`, `</system>`)
+  - Instruction detector: added YAML frontmatter injection detection (`role: system`)
+  - Instruction detector: added social engineering patterns (authority claims, urgency manipulation)
+  - Encoding detector: added plain continuous hex string detection (20+ hex chars)
+  - Firewall balanced mode: encoded content is now decoded and re-scanned for hidden instructions
+  - Firewall balanced mode: zero-width chars, RTL overrides, and Unicode homoglyphs always quarantined
+
+### Test Results
+- Strict mode: 16/16 attack vectors blocked
+- Balanced mode: 15/16 attack vectors blocked
+
+## [2.1.2] - 2026-02-01
+
+### Fixed
+- Removed dashboard source from npm package (390KB → 232KB)
+- Fixed broken Palo Alto research link → embracethered.com
+- Fixed repo URLs (`mkdelta221` → `Drakon-Systems-Ltd`)
+- Added security-focused npm keywords
+
+## [2.1.1] - 2026-02-01
+
+### Fixed
+- Added `exports` map to package.json for subpath imports (`shieldcortex/integrations/langchain`)
+
+## [2.1.0] - 2026-02-01
+
+### Added
+- **REST API endpoints** for defence pipeline — `POST /api/v1/scan`, `/scan/batch`, `GET /audit`, quarantine management
+- **LangChain JS integration** — `ShieldCortexMemory` (BaseMemory-compatible) and `ShieldCortexGuard` (standalone scanner)
+- **OpenClaw/Clawdbot hook** — `cortex-memory` hook for persistent memory in Clawdbot sessions
+
+### Changed
+- README: Supported Agents section now accurately reflects implemented integrations
+
 ## [2.0.0] - 2026-02-01
 
 ### Added
