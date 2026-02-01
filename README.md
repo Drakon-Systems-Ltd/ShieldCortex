@@ -204,7 +204,8 @@ npx shieldcortex --version          # Show version
 npx shieldcortex service install    # Auto-start on login
 npx shieldcortex graph backfill     # Extract entities from existing memories
 npx shieldcortex clawdbot install   # Install OpenClaw hook
-npx shieldcortex uninstall          # Full uninstall
+npx shieldcortex uninstall          # Full uninstall (requires confirmation)
+npx shieldcortex uninstall --confirm # Non-interactive uninstall
 ```
 
 ---
@@ -341,6 +342,12 @@ npx shieldcortex clawdbot install
 ```
 
 The **cortex-memory** hook provides auto-save on `/new`, context injection on bootstrap, and keyword triggers ("remember this").
+
+---
+
+## Architecture
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical design — memory model, defence pipeline internals, database schema, and file structure.
 
 ---
 
