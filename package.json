@@ -1,8 +1,27 @@
 {
   "name": "shieldcortex",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Security layer for AI agent memory — firewall, trust scoring, sensitivity classification, and audit for any memory backend",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./integrations/langchain": {
+      "import": "./dist/integrations/langchain.js",
+      "types": "./dist/integrations/langchain.d.ts"
+    },
+    "./integrations": {
+      "import": "./dist/integrations/index.js",
+      "types": "./dist/integrations/index.d.ts"
+    },
+    "./defence": {
+      "import": "./dist/defence/index.js",
+      "types": "./dist/defence/index.d.ts"
+    }
+  },
   "type": "module",
   "scripts": {
     "build": "tsc",
