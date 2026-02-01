@@ -4,9 +4,24 @@
 [![npm downloads](https://img.shields.io/npm/dm/shieldcortex.svg)](https://www.npmjs.com/package/shieldcortex)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**The security layer for AI agent memory.** Like Cloudflare, but for everything your AI remembers.
+**The security layer for any AI agent's memory.** Like Cloudflare, but for everything your AI remembers — regardless of platform.
 
 Palo Alto Networks [warned about persistent memory attacks](https://unit42.paloaltonetworks.com/) on AI agents. Attackers can poison what your agent remembers — injecting instructions, stealing credentials, or assembling attacks across days of fragmented memories. **ShieldCortex stops that.**
+
+### Supported Agents
+
+ShieldCortex is agent-agnostic middleware. It works with:
+
+- **[OpenClaw](https://openclaw.dev)** — Native hook support (`npx shieldcortex clawdbot install`)
+- **[Moltbot](https://moltbot.dev)** — Plugin integration (`npx shieldcortex moltbot install`)
+- **[Claude Code](https://claude.ai)** — Hooks + MCP server (`npx shieldcortex setup`)
+- **[LangChain](https://langchain.com)** — Memory wrapper via npm API
+- **[AutoGPT](https://autogpt.net)** — Memory backend plugin
+- **[CrewAI](https://crewai.com)** — Agent memory layer
+- **Any MCP-compatible agent** — Standard MCP server protocol
+- **Any agent with a memory backend** — npm API or REST API
+
+If your agent stores memories, ShieldCortex can protect them.
 
 ---
 
@@ -18,7 +33,7 @@ Find out in 30 seconds:
 npx shieldcortex setup
 ```
 
-Then ask Claude: **"Scan my memories for threats"**
+Then ask your AI agent: **"Scan my memories for threats"**
 
 ShieldCortex will scan every stored memory and report:
 - Hidden instructions disguised as normal content
@@ -71,10 +86,10 @@ Every memory write is scanned. Every memory read is filtered. Everything is logg
 # Install
 npm install -g shieldcortex
 
-# Configure Claude Code (hooks + MCP server)
+# Auto-detect your agent and configure (works with Claude Code, OpenClaw, and more)
 npx shieldcortex setup
 
-# Restart Claude Code and approve the MCP server
+# Restart your agent and approve the MCP server
 ```
 
 ### Migrating from Claude Cortex
@@ -83,7 +98,7 @@ npx shieldcortex setup
 # Non-destructive — copies your database, updates settings
 npx shieldcortex migrate
 
-# Restart Claude Code
+# Restart your agent
 ```
 
 Your existing memories are preserved. The original database stays intact at `~/.claude-cortex/` for rollback.
@@ -183,7 +198,7 @@ Works on macOS (launchd), Linux (systemd), and Windows.
 ## CLI Reference
 
 ```bash
-npx shieldcortex setup              # Configure Claude Code + hooks
+npx shieldcortex setup              # Auto-detect agent + configure hooks
 npx shieldcortex migrate            # Migrate from Claude Cortex
 npx shieldcortex doctor             # Check installation health
 npx shieldcortex --dashboard        # Start dashboard + API
@@ -266,6 +281,35 @@ npx shieldcortex --db /path/to/custom.db
 | `CORTEX_CORS_ORIGINS` | `localhost:3030,localhost:3000` | Allowed CORS origins |
 
 </details>
+
+---
+
+## Generic Agent Integration (npm API)
+
+For LangChain, AutoGPT, CrewAI, or any custom agent, use the programmatic API:
+
+```javascript
+import { ShieldCortex } from 'shieldcortex';
+
+const shield = new ShieldCortex({ db: '~/.shieldcortex/memories.db' });
+
+// Protected memory write
+const result = await shield.addMemory({
+  content: 'deployment uses Docker on port 8080',
+  source: 'agent',        // 'user' | 'agent' | 'tool' | 'external'
+  project: 'my-project',
+  category: 'architecture'
+});
+
+if (result.blocked) {
+  console.warn('Memory blocked:', result.reason);
+}
+
+// Secure recall with trust filtering
+const memories = await shield.recall({ query: 'deployment', limit: 10 });
+```
+
+All defence layers run automatically — firewall, trust scoring, sensitivity classification, and audit logging.
 
 ---
 
