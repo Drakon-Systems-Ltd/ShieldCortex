@@ -28,6 +28,13 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /<\|im_start\|>/i,
       /<\|system\|>/i,
       /<\|endoftext\|>/i,
+      // Fake system prompt prefixes
+      /^SYSTEM\s*:/im,
+      /^ASSISTANT\s*:/im,
+      /^USER\s*:/im,
+      /^\[system\]/im,
+      /^<system>/im,
+      /<\/system>/i,
     ],
   },
   {
@@ -79,6 +86,25 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /<!--\s*(instruction|command|system|ignore|inject|override).*?-->/is,
       /\r?\n-{5,}\r?\n/,
       /\r?\n={5,}\r?\n/,
+      // YAML/markdown frontmatter injection
+      /^---\s*\n[\s\S]*?\brole\s*:\s*(system|admin|root)/im,
+      /<\/?(system|admin|root)\s*>/i,
+    ],
+  },
+  {
+    name: 'social_engineering',
+    weight: 0.7,
+    patterns: [
+      // Authority claims
+      /\b(as|i\s+am)\s+(the\s+)?(system\s+)?admin(istrator)?\b/i,
+      /\bi\s+am\s+(a\s+)?(root|superuser|admin|moderator|developer)\b/i,
+      /\bauthori[sz]ed\s+(to|by|user|admin)/i,
+      /\bsecurity\s+override\b/i,
+      /\boverrid(e|ing)\s+(the\s+)?security\s+polic/i,
+      // Urgency manipulation
+      /\burgent\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
+      /\bemergency\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
+      /\b(disable|remove|bypass|turn\s+off)\s+(all\s+)?(filter|security|protection|safet)/i,
     ],
   },
 ];

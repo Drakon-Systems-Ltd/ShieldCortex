@@ -163,6 +163,32 @@ function determineResult(
     };
   }
 
+  // Encoding-only: check if decoded content contains threats
+  if (encoding.detected && encoding.decodedSnippets.length > 0) {
+    for (const snippet of encoding.decodedSnippets) {
+      const decodedCheck = detectInstructions(snippet);
+      if (decodedCheck.detected) {
+        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
+        return {
+          result,
+          reason: `Encoded content contains instruction injection (${encoding.encodingTypes.join(', ')})`,
+        };
+      }
+    }
+  }
+
+  // Zero-width chars / RTL override are always suspicious → quarantine
+  if (encoding.detected && (
+    encoding.encodingTypes.includes('zero_width_chars') ||
+    encoding.encodingTypes.includes('rtl_override') ||
+    encoding.encodingTypes.includes('unicode_homoglyph')
+  )) {
+    return {
+      result: 'QUARANTINE',
+      reason: `Suspicious encoding: ${encoding.encodingTypes.join(', ')}`,
+    };
+  }
+
   // Low trust bumps medium-severity detections to quarantine
   if (lowTrust && detectionCount > 0) {
     return {
