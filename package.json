@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Security layer for AI agent memory — firewall, trust scoring, sensitivity classification, and audit for any memory backend",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
