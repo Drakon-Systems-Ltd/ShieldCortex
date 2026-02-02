@@ -46,6 +46,9 @@ import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
+import { checkAccess } from '../defence/trust/access-control.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
+import { logAudit } from '../defence/audit/logger.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -146,6 +149,79 @@ function detectGlobalPattern(content: string, category: MemoryCategory, tags: st
   return false;
 }
 
+// ── Rate Limiter ──
+// Tracks write attempts per source to prevent audit log flooding
+
+const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
+const RATE_LIMIT_MAX = 20; // max writes per window per source
+
+const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
+
+function checkRateLimit(source: DefenceSource): boolean {
+  const key = `${source.type}:${source.identifier}`;
+  const now = Date.now();
+  const entry = rateLimitMap.get(key);
+
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    rateLimitMap.set(key, { count: 1, windowStart: now });
+    return true;
+  }
+
+  entry.count++;
+  if (entry.count > RATE_LIMIT_MAX) {
+    return false; // rate limited
+  }
+  return true;
+}
+
+// ── Read-Time Access Control ──
+
+function logAccessDenial(memoryId: number, source: DefenceSource, reason: string): void {
+  const trust = scoreSource(source).score;
+  logAudit({
+    memory_id: memoryId,
+    project: null,
+    timestamp: new Date().toISOString(),
+    source_type: source.type,
+    source_identifier: source.identifier,
+    trust_score: trust,
+    sensitivity_level: 'INTERNAL',
+    firewall_result: 'BLOCK',
+    anomaly_score: 0,
+    threat_indicators: '[]',
+    blocked_patterns: '[]',
+    reason: `Access denied: ${reason}`,
+    fragmentation_score: null,
+    pipeline_duration_ms: 0,
+  });
+}
+
+/**
+ * Filter raw DB rows by access control before converting to Memory objects.
+ * Returns only rows the source is allowed to read.
+ */
+function filterRowsByAccess(
+  rows: Record<string, unknown>[],
+  source: DefenceSource,
+): Record<string, unknown>[] {
+  return rows.filter(row => {
+    const policy = checkAccess(
+      {
+        id: row.id as number,
+        source: row.source as string | null,
+        sensitivity_level: row.sensitivity_level as string | null,
+      },
+      source,
+      'read',
+    );
+    if (!policy.canRead) {
+      logAccessDenial(row.id as number, source, policy.reason);
+      return false;
+    }
+    return true;
+  });
+}
+
 /**
  * Error thrown when memory creation is paused
  */
@@ -172,8 +248,8 @@ export class MemoryBlockedError extends Error {
 function quarantineMemory(input: MemoryInput, source: DefenceSource, result: DefencePipelineResult): void {
   try {
     const db = getDatabase();
-    db.prepare(`INSERT INTO quarantine (title, content, source, trust_score, sensitivity_level, block_reason, threat_indicators, fragmentation_score, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
-      .run(input.title, input.content, `${source.type}:${source.identifier}`, result.trust.score, result.sensitivity.level, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.fragmentation?.score ?? null, result.auditId);
+    db.prepare(`INSERT INTO quarantine (original_title, original_content, project, source_type, source_identifier, reason, threat_indicators, anomaly_score, firewall_result, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
+      .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, result.firewall.result, result.auditId);
   } catch (e) {
     console.error('[shieldcortex] Failed to quarantine memory:', e);
   }
@@ -192,10 +268,40 @@ export function addMemory(
     throw new MemoryPausedError();
   }
 
+  // RATE LIMITING: Block sources that exceed write rate
+  if (source && !checkRateLimit(source)) {
+    logAudit({
+      memory_id: null,
+      project: input.project ?? null,
+      timestamp: new Date().toISOString(),
+      source_type: source.type,
+      source_identifier: source.identifier,
+      trust_score: scoreSource(source).score,
+      sensitivity_level: 'INTERNAL',
+      firewall_result: 'BLOCK',
+      anomaly_score: 1.0,
+      threat_indicators: JSON.stringify(['rate_limit_exceeded']),
+      blocked_patterns: '[]',
+      reason: `Rate limited: exceeded ${RATE_LIMIT_MAX} writes/minute`,
+      fragmentation_score: null,
+      pipeline_duration_ms: 0,
+    });
+    throw new MemoryBlockedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
+  }
+
   // DEFENCE PIPELINE: Scan content before storage
   let defenceResult: DefencePipelineResult | null = null;
   if (source) {
-    defenceResult = runDefencePipeline(input.content, input.title, source);
+    defenceResult = runDefencePipeline(input.content, input.title, source, undefined, input.project);
+
+    // Auto-quarantine sub-agent writes (trust 0.5–0.7)
+    const trust = defenceResult.trust.score;
+    if (defenceResult.allowed && trust >= 0.5 && trust < 0.7) {
+      defenceResult.allowed = false;
+      defenceResult.firewall.result = 'QUARANTINE';
+      defenceResult.firewall.reason = `Sub-agent write (trust=${trust.toFixed(3)}) requires parent approval`;
+    }
+
     if (!defenceResult.allowed) {
       // Store in quarantine instead of memory
       quarantineMemory(input, source, defenceResult);
@@ -331,10 +437,24 @@ export function addMemory(
 /**
  * Get a memory by ID
  */
-export function getMemoryById(id: number): Memory | null {
+export function getMemoryById(id: number, source?: DefenceSource): Memory | null {
   const db = getDatabase();
   const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
   if (!row) return null;
+
+  // ACCESS CONTROL: Check read permission
+  if (source) {
+    const policy = checkAccess(
+      { id: row.id as number, source: row.source as string | null, sensitivity_level: row.sensitivity_level as string | null },
+      source,
+      'read',
+    );
+    if (!policy.canRead) {
+      logAccessDenial(id, source, policy.reason);
+      return null;
+    }
+  }
+
   return rowToMemory(row);
 }
 
@@ -403,8 +523,24 @@ export function updateMemory(
 /**
  * Delete a memory
  */
-export function deleteMemory(id: number): boolean {
+export function deleteMemory(id: number, source?: DefenceSource): boolean {
   const db = getDatabase();
+
+  // ACCESS CONTROL: Check delete permission
+  if (source) {
+    const row = db.prepare('SELECT id, source, sensitivity_level FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (row) {
+      const policy = checkAccess(
+        { id: row.id as number, source: row.source as string | null, sensitivity_level: row.sensitivity_level as string | null },
+        source,
+        'delete',
+      );
+      if (!policy.canDelete) {
+        logAccessDenial(id, source, policy.reason);
+        return false;
+      }
+    }
+  }
 
   // Get memory before deletion for event
   const memory = getMemoryById(id);
@@ -426,10 +562,11 @@ export function deleteMemory(id: number): boolean {
  */
 export function accessMemory(
   id: number,
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = DEFAULT_CONFIG,
+  source?: DefenceSource,
 ): Memory | null {
   const db = getDatabase();
-  const memory = getMemoryById(id);
+  const memory = getMemoryById(id, source);
   if (!memory) return null;
 
   // Calculate new salience with reinforcement
@@ -814,7 +951,8 @@ let searchCount = 0;
 
 export async function searchMemories(
   options: SearchOptions,
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = DEFAULT_CONFIG,
+  source?: DefenceSource,
 ): Promise<SearchResult[]> {
   if (++searchCount % 100 === 0) {
     pruneActivationCache();
@@ -1021,6 +1159,24 @@ export async function searchMemories(
     }
   }
 
+  // ACCESS CONTROL: Filter results by source trust level
+  if (source) {
+    const db2 = getDatabase();
+    return finalResults.filter(result => {
+      const row = db2.prepare('SELECT source, sensitivity_level FROM memories WHERE id = ?').get(result.memory.id) as Record<string, unknown> | undefined;
+      const policy = checkAccess(
+        { id: result.memory.id, source: row?.source as string | null, sensitivity_level: row?.sensitivity_level as string | null },
+        source,
+        'read',
+      );
+      if (!policy.canRead) {
+        logAccessDenial(result.memory.id, source, policy.reason);
+        return false;
+      }
+      return true;
+    });
+  }
+
   return finalResults;
 }
 
@@ -1050,7 +1206,8 @@ export function getProjectMemories(
  */
 export function getRecentMemories(
   limit: number = 10,
-  project?: string
+  project?: string,
+  source?: DefenceSource,
 ): Memory[] {
   const db = getDatabase();
   let sql = 'SELECT * FROM memories';
@@ -1062,10 +1219,11 @@ export function getRecentMemories(
   }
 
   sql += ' ORDER BY last_accessed DESC LIMIT ?';
-  params.push(limit);
+  params.push(source ? limit * 2 : limit); // over-fetch when filtering
 
-  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-  return rows.map(rowToMemory);
+  let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+  if (source) rows = filterRowsByAccess(rows, source);
+  return rows.slice(0, limit).map(rowToMemory);
 }
 
 /**
@@ -1091,7 +1249,8 @@ export function getMemoriesByType(
  */
 export function getHighPriorityMemories(
   limit: number = 10,
-  project?: string
+  project?: string,
+  source?: DefenceSource,
 ): Memory[] {
   const db = getDatabase();
   let sql = `
@@ -1106,10 +1265,11 @@ export function getHighPriorityMemories(
   }
 
   sql += ' ORDER BY salience DESC, last_accessed DESC LIMIT ?';
-  params.push(limit);
+  params.push(source ? limit * 2 : limit);
 
-  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-  return rows.map(rowToMemory);
+  let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+  if (source) rows = filterRowsByAccess(rows, source);
+  return rows.slice(0, limit).map(rowToMemory);
 }
 
 /**

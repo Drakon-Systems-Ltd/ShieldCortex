@@ -72,6 +72,8 @@ export interface DefenceConfig {
   trustThresholdForActions: number;
   autoQuarantineThreshold: number;
   flagThreshold: number;
+  /** When true, unknown/undetected sources get trust 0.3 instead of 0.5, and all writes are auto-quarantined */
+  strictSourceMode: boolean;
 }
 
 export const DEFAULT_DEFENCE_CONFIG: DefenceConfig = {
@@ -81,6 +83,7 @@ export const DEFAULT_DEFENCE_CONFIG: DefenceConfig = {
   trustThresholdForActions: 0.7,
   autoQuarantineThreshold: 0.3,
   flagThreshold: 0.5,
+  strictSourceMode: false,
 };
 
 // ── Database Row Interfaces ──
@@ -106,6 +109,7 @@ export interface QuarantineEntry {
 export interface AuditEntry {
   id: number;
   memory_id: number | null;
+  project: string | null;
   timestamp: string;
   source_type: string;
   source_identifier: string;

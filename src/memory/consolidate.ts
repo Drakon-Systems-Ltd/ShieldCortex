@@ -671,12 +671,19 @@ export function shouldTriggerConsolidation(
  */
 export function fullCleanup(
   config: MemoryConfig = DEFAULT_CONFIG
-): { consolidation: ConsolidationResult; vacuumed: boolean; merged: number } {
+): { consolidation: ConsolidationResult; vacuumed: boolean; merged: number; quarantineExpired: number } {
   // Run consolidation
   const consolidation = consolidate(config);
 
   // Merge similar memories
   const merged = mergeSimilarMemories();
+
+  // Expire old quarantine items
+  let quarantineExpired = 0;
+  try {
+    const { expireQuarantineItems } = require('../defence/quarantine/auto-expire.js');
+    quarantineExpired = expireQuarantineItems();
+  } catch { /* defence module may not be available */ }
 
   // Vacuum if we deleted anything
   let vacuumed = false;
@@ -685,5 +692,5 @@ export function fullCleanup(
     vacuumed = vacResult.success;
   }
 
-  return { consolidation, vacuumed, merged };
+  return { consolidation, vacuumed, merged, quarantineExpired };
 }

@@ -15,6 +15,33 @@ import { uninstallService } from '../service/install.js';
 import { uninstallClawdbotHook } from './clawdbot.js';
 
 /**
+ * Check if the current process is running in an agent context.
+ * Agents (sub-agents) should not be able to uninstall ShieldCortex.
+ */
+function isAgentContext(): boolean {
+  // Common agent environment indicators
+  return !!(
+    process.env.CLAUDE_AGENT_CONTEXT ||
+    process.env.SHIELDCORTEX_AGENT_SOURCE ||
+    (process.env.CLAUDE_CODE_ENTRYPOINT === 'subagent')
+  );
+}
+
+/**
+ * Block uninstall attempts from agent contexts.
+ * Returns true if blocked (caller should abort).
+ */
+function blockAgentUninstall(): boolean {
+  if (isAgentContext()) {
+    console.error('\n[ShieldCortex] BLOCKED: Uninstall attempted from agent context.');
+    console.error('Sub-agents cannot uninstall ShieldCortex.');
+    console.error('Only human operators can uninstall via interactive TTY.\n');
+    return true;
+  }
+  return false;
+}
+
+/**
  * Require explicit confirmation before uninstall.
  * Returns true if confirmed, false otherwise.
  */
@@ -134,6 +161,8 @@ export function removeClaudeMdBlock(): void {
 }
 
 export async function uninstallSetup(): Promise<void> {
+  if (blockAgentUninstall()) return;
+
   const confirmed = await requireConfirmation('remove ShieldCortex setup');
   if (!confirmed) {
     console.log('Uninstall cancelled.');
@@ -158,6 +187,8 @@ export async function uninstallSetup(): Promise<void> {
 }
 
 export async function uninstallAll(options?: { keepLogs?: boolean }): Promise<void> {
+  if (blockAgentUninstall()) return;
+
   const confirmed = await requireConfirmation('fully uninstall ShieldCortex');
   if (!confirmed) {
     console.log('Uninstall cancelled.');

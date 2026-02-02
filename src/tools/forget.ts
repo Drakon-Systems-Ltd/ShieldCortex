@@ -13,6 +13,7 @@ import {
   formatErrorForMcp,
 } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
+import type { DefenceSource } from '../defence/types.js';
 
 // Input schema for the forget tool
 export const forgetSchema = z.object({
@@ -30,6 +31,10 @@ export const forgetSchema = z.object({
     .describe('Preview what would be deleted without actually deleting'),
   confirm: z.boolean().optional().default(false)
     .describe('Confirm bulk deletion (required for operations affecting multiple memories)'),
+  source: z.object({
+    type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
+    identifier: z.string(),
+  }).optional().describe('Caller identity for access control'),
 });
 
 export type ForgetInput = z.infer<typeof forgetSchema>;
@@ -50,6 +55,8 @@ export async function executeForget(input: ForgetInput): Promise<{
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
 
+    const source = input.source as DefenceSource | undefined;
+
     // Single ID deletion
     if (input.id !== undefined) {
       const memory = getMemoryById(input.id);
@@ -69,7 +76,13 @@ export async function executeForget(input: ForgetInput): Promise<{
         };
       }
 
-      deleteMemory(input.id);
+      const deleted = deleteMemory(input.id, source);
+      if (!deleted && source) {
+        return {
+          success: false,
+          error: `Access denied: insufficient permissions to delete memory ${input.id}`,
+        };
+      }
       return {
         success: true,
         deleted: 1,

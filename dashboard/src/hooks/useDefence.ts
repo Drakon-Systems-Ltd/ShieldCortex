@@ -9,6 +9,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 export interface AuditEntry {
   id: number;
   memory_id: number | null;
+  project: string | null;
   timestamp: string;
   source_type: string;
   source_identifier: string;
@@ -54,6 +55,7 @@ async function fetchAuditLogs(options?: {
   endTime?: string;
   source?: string;
   firewallResult?: string;
+  project?: string;
   limit?: number;
 }): Promise<{ logs: AuditEntry[]; total: number }> {
   const params = new URLSearchParams();
@@ -61,6 +63,7 @@ async function fetchAuditLogs(options?: {
   if (options?.endTime) params.set('endTime', options.endTime);
   if (options?.source) params.set('source', options.source);
   if (options?.firewallResult) params.set('firewallResult', options.firewallResult);
+  if (options?.project) params.set('project', options.project);
   if (options?.limit) params.set('limit', options.limit.toString());
 
   const response = await fetch(`${API_BASE}/api/v1/audit?${params}`);
@@ -68,14 +71,18 @@ async function fetchAuditLogs(options?: {
   return response.json();
 }
 
-async function fetchAuditStats(timeRange: '24h' | '7d' | '30d'): Promise<AuditStats> {
-  const response = await fetch(`${API_BASE}/api/v1/audit/stats?timeRange=${timeRange}`);
+async function fetchAuditStats(timeRange: '24h' | '7d' | '30d', project?: string): Promise<AuditStats> {
+  const params = new URLSearchParams({ timeRange });
+  if (project) params.set('project', project);
+  const response = await fetch(`${API_BASE}/api/v1/audit/stats?${params}`);
   if (!response.ok) throw new Error('Failed to fetch audit stats');
   return response.json();
 }
 
-async function fetchQuarantine(status: string = 'pending', limit: number = 50): Promise<{ items: QuarantineItem[]; total: number }> {
-  const response = await fetch(`${API_BASE}/api/v1/quarantine?status=${status}&limit=${limit}`);
+async function fetchQuarantine(status: string = 'pending', limit: number = 50, project?: string): Promise<{ items: QuarantineItem[]; total: number }> {
+  const params = new URLSearchParams({ status, limit: limit.toString() });
+  if (project) params.set('project', project);
+  const response = await fetch(`${API_BASE}/api/v1/quarantine?${params}`);
   if (!response.ok) throw new Error('Failed to fetch quarantine');
   return response.json();
 }
@@ -107,28 +114,32 @@ export function useAuditLogs(options?: {
   endTime?: string;
   source?: string;
   firewallResult?: string;
+  project?: string;
   limit?: number;
 }) {
   return useQuery({
     queryKey: ['audit-logs', options],
     queryFn: () => fetchAuditLogs(options),
     refetchInterval: 30000,
+    retry: 2,
   });
 }
 
-export function useAuditStats(timeRange: '24h' | '7d' | '30d' = '24h') {
+export function useAuditStats(timeRange: '24h' | '7d' | '30d' = '24h', project?: string) {
   return useQuery({
-    queryKey: ['audit-stats', timeRange],
-    queryFn: () => fetchAuditStats(timeRange),
+    queryKey: ['audit-stats', timeRange, project],
+    queryFn: () => fetchAuditStats(timeRange, project),
     refetchInterval: 30000,
+    retry: 2,
   });
 }
 
-export function useQuarantine(status: string = 'pending', limit: number = 50) {
+export function useQuarantine(status: string = 'pending', limit: number = 50, project?: string) {
   return useQuery({
-    queryKey: ['quarantine', status, limit],
-    queryFn: () => fetchQuarantine(status, limit),
+    queryKey: ['quarantine', status, limit, project],
+    queryFn: () => fetchQuarantine(status, limit, project),
     refetchInterval: 30000,
+    retry: 2,
   });
 }
 
@@ -146,7 +157,7 @@ export function useApproveQuarantine() {
 export function useRejectQuarantine() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => rejectQuarantine(id),
+    mutationFn: ({ id, notes }: { id: number; notes?: string }) => rejectQuarantine(id, notes),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quarantine'] });
       queryClient.invalidateQueries({ queryKey: ['audit-stats'] });

@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS memory_entities (
 CREATE TABLE IF NOT EXISTS defence_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   memory_id INTEGER,
+  project TEXT,
   timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   source_type TEXT NOT NULL,
   source_identifier TEXT NOT NULL,
@@ -171,12 +172,14 @@ CREATE INDEX IF NOT EXISTS idx_audit_memory ON defence_audit(memory_id);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON defence_audit(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
 CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
+CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
 
 -- Defence: Quarantine for blocked/suspicious memories pending review
 CREATE TABLE IF NOT EXISTS quarantine (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   original_content TEXT NOT NULL,
   original_title TEXT,
+  project TEXT,
   source_type TEXT NOT NULL,
   source_identifier TEXT NOT NULL,
   reason TEXT NOT NULL,

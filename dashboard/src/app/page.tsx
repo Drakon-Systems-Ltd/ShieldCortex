@@ -51,7 +51,6 @@ const BrainScene = dynamic(
 export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [selectedProject, setSelectedProject] = useState<string | undefined>(undefined);
   const [showFilters, setShowFilters] = useState(false);
   const [typeFilter, setTypeFilter] = useState<string | undefined>(undefined);
   const [categoryFilter, setCategoryFilter] = useState<string | undefined>(undefined);
@@ -62,7 +61,7 @@ export default function DashboardPage() {
   const debouncedSearch = useDebouncedValue(searchQuery, 300);
 
   // Zustand store
-  const { viewMode, selectedMemory, setSelectedMemory } = useDashboardStore();
+  const { viewMode, selectedMemory, setSelectedMemory, projectFilter, setProjectFilter } = useDashboardStore();
 
   // Search suggestions
   const { data: suggestions = [] } = useSuggestions(searchQuery);
@@ -102,12 +101,12 @@ export default function DashboardPage() {
     limit: 200,
     query: debouncedSearch || undefined,
     mode: debouncedSearch ? 'search' : 'recent',
-    project: selectedProject,
+    project: projectFilter || undefined,
     type: typeFilter,
     category: categoryFilter,
   });
-  const { data: stats, isLoading: _statsLoading } = useStats(selectedProject);
-  const { data: links = [] } = useMemoryLinks(selectedProject);
+  const { data: stats, isLoading: _statsLoading } = useStats(projectFilter || undefined);
+  const { data: links = [] } = useMemoryLinks(projectFilter || undefined);
 
   // Mutations
   const accessMutation = useAccessMemory();
@@ -155,8 +154,8 @@ export default function DashboardPage() {
 
           {/* Project Selector */}
           <select
-            value={selectedProject || ''}
-            onChange={(e) => setSelectedProject(e.target.value || undefined)}
+            value={projectFilter || ''}
+            onChange={(e) => setProjectFilter(e.target.value || null)}
             className="bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-cyan-500 focus:border-cyan-500"
           >
             {projectsData?.projects.map((p) => (
@@ -226,7 +225,7 @@ export default function DashboardPage() {
               className={`w-2 h-2 rounded-full ${isPaused ? 'bg-orange-500 animate-pulse' : (isConnected ? 'bg-green-500' : 'bg-yellow-500')}`}
               title={isPaused ? 'Memory creation paused' : (isConnected ? 'Real-time connected' : 'Polling mode')}
             />
-            {memories.length} memories
+            {stats?.total ?? memories.length} memories
           </div>
         </div>
       </header>
