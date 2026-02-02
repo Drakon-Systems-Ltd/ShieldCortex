@@ -1,7 +1,7 @@
 /**
- * OpenClaw/Clawdbot hook installer.
+ * OpenClaw hook installer.
  *
- * Copies the cortex-memory hook into Clawdbot's bundled hooks directory.
+ * Copies the cortex-memory hook into OpenClaw's bundled hooks directory.
  * Only works if OpenClaw is installed on the system.
  */
 
@@ -15,14 +15,14 @@ const __dirname = path.dirname(__filename);
 
 const HOOK_NAME = 'cortex-memory';
 
-// Hook source is in hooks/clawdbot/cortex-memory/ relative to project root
+// Hook source is in hooks/openclaw/cortex-memory/ relative to project root
 // From dist/setup/, go up two levels to project root
-const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'clawdbot', HOOK_NAME);
+const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOOK_NAME);
 
 /**
- * Find Clawdbot's bundled hooks directory by locating the binary
+ * Find OpenClaw's bundled hooks directory by locating the binary
  */
-export function findClawdbotHooksDir(): string | null {
+export function findOpenClawHooksDir(): string | null {
   try {
     const binPath = execSync('which openclaw 2>/dev/null || which clawdbot 2>/dev/null || which moltbot 2>/dev/null', {
       encoding: 'utf-8',
@@ -30,7 +30,7 @@ export function findClawdbotHooksDir(): string | null {
 
     if (!binPath) return null;
 
-    // Resolve symlink — lands in e.g. <prefix>/lib/node_modules/clawdbot/dist/entry.js
+    // Resolve symlink — lands in e.g. <prefix>/lib/node_modules/openclaw/dist/entry.js
     const realBin = fs.realpathSync(binPath);
 
     // Walk up from resolved path to find dist/hooks/bundled/
@@ -54,11 +54,11 @@ export function findClawdbotHooksDir(): string | null {
   }
 }
 
-export async function installClawdbotHook(): Promise<void> {
-  const hooksDir = findClawdbotHooksDir();
+export async function installOpenClawHook(): Promise<void> {
+  const hooksDir = findOpenClawHooksDir();
 
   if (!hooksDir) {
-    console.error('OpenClaw/Clawdbot is not installed on this system.');
+    console.error('OpenClaw is not installed on this system.');
     console.log('Install it first: npm install -g openclaw');
     process.exit(1);
   }
@@ -88,11 +88,11 @@ export async function installClawdbotHook(): Promise<void> {
   console.log('  • "remember this: ..." keyword trigger');
 }
 
-export async function uninstallClawdbotHook(): Promise<void> {
-  const hooksDir = findClawdbotHooksDir();
+export async function uninstallOpenClawHook(): Promise<void> {
+  const hooksDir = findOpenClawHooksDir();
 
   if (!hooksDir) {
-    console.log('OpenClaw/Clawdbot is not installed on this system.');
+    console.log('OpenClaw is not installed on this system.');
     return;
   }
 
@@ -107,35 +107,35 @@ export async function uninstallClawdbotHook(): Promise<void> {
   console.log(`✓ Removed cortex-memory hook from ${destDir}`);
 }
 
-export async function clawdbotHookStatus(): Promise<void> {
-  const hooksDir = findClawdbotHooksDir();
+export async function openClawHookStatus(): Promise<void> {
+  const hooksDir = findOpenClawHooksDir();
 
   if (!hooksDir) {
-    console.log('OpenClaw/Clawdbot: not installed');
+    console.log('OpenClaw: not installed');
     return;
   }
 
   const destDir = path.join(hooksDir, HOOK_NAME);
   const installed = fs.existsSync(destDir);
 
-  console.log(`OpenClaw/Clawdbot: installed`);
+  console.log(`OpenClaw: installed`);
   console.log(`Hooks directory:  ${hooksDir}`);
   console.log(`cortex-memory:    ${installed ? 'installed' : 'not installed'}`);
 }
 
-export async function handleClawdbotCommand(subcommand: string): Promise<void> {
+export async function handleOpenClawCommand(subcommand: string): Promise<void> {
   switch (subcommand) {
     case 'install':
-      await installClawdbotHook();
+      await installOpenClawHook();
       break;
     case 'uninstall':
-      await uninstallClawdbotHook();
+      await uninstallOpenClawHook();
       break;
     case 'status':
-      await clawdbotHookStatus();
+      await openClawHookStatus();
       break;
     default:
-      console.log('Usage: shieldcortex clawdbot <install|uninstall|status>');
+      console.log('Usage: shieldcortex openclaw <install|uninstall|status>');
       process.exit(1);
   }
 }

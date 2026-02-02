@@ -20,9 +20,9 @@
  *   npx shieldcortex service install         # Auto-start dashboard on login
  *   npx shieldcortex service uninstall       # Remove auto-start
  *   npx shieldcortex service status          # Check service status
- *   npx shieldcortex clawdbot install        # Install OpenClaw/Clawdbot hook
- *   npx shieldcortex clawdbot uninstall      # Remove OpenClaw/Clawdbot hook
- *   npx shieldcortex clawdbot status         # Check OpenClaw hook status
+ *   npx shieldcortex openclaw install        # Install OpenClaw hook
+ *   npx shieldcortex openclaw uninstall      # Remove OpenClaw hook
+ *   npx shieldcortex openclaw status         # Check OpenClaw hook status
  *   npx shieldcortex migrate                  # Migrate from Claude Cortex
  *   npx shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block (requires confirmation)
  *   npx shieldcortex uninstall               # Full uninstall (requires confirmation)
@@ -39,7 +39,7 @@ import { startVisualizationServer } from './api/visualization-server.js';
 import { handleServiceCommand } from './service/install.js';
 import { setupClaudeMd } from './setup/claude-md.js';
 import { handleHookCommand } from './setup/hooks.js';
-import { handleClawdbotCommand } from './setup/clawdbot.js';
+import { handleOpenClawCommand } from './setup/openclaw.js';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -207,9 +207,9 @@ async function main() {
     return;
   }
 
-  // Handle "clawdbot" subcommand
-  if (process.argv[2] === 'clawdbot') {
-    await handleClawdbotCommand(process.argv[3] || '');
+  // Handle "openclaw" subcommand (backward compat: "clawdbot" also accepted)
+  if (process.argv[2] === 'openclaw' || process.argv[2] === 'clawdbot') {
+    await handleOpenClawCommand(process.argv[3] || '');
     return;
   }
 

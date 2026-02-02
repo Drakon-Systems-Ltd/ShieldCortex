@@ -1,7 +1,7 @@
 /**
  * Uninstall utilities for ShieldCortex.
  *
- * Removes hooks from settings.json, CLAUDE.md block, service, and Clawdbot hook.
+ * Removes hooks from settings.json, CLAUDE.md block, service, and OpenClaw hook.
  *
  * SECURITY: Requires --confirm flag or interactive TTY confirmation.
  * This prevents automated/bot-initiated uninstalls.
@@ -12,7 +12,7 @@ import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { uninstallService } from '../service/install.js';
-import { uninstallClawdbotHook } from './clawdbot.js';
+import { uninstallOpenClawHook } from './openclaw.js';
 
 /**
  * Check if the current process is running in an agent context.
@@ -204,11 +204,11 @@ export async function uninstallAll(options?: { keepLogs?: boolean }): Promise<vo
     console.error(`Failed to uninstall service: ${err.message}`);
   }
 
-  // 2. Uninstall Clawdbot hook
+  // 2. Uninstall OpenClaw hook
   try {
-    await uninstallClawdbotHook();
+    await uninstallOpenClawHook();
   } catch (err: any) {
-    console.error(`Failed to uninstall Clawdbot hook: ${err.message}`);
+    console.error(`Failed to uninstall OpenClaw hook: ${err.message}`);
   }
 
   // 3. Remove hooks from settings.json

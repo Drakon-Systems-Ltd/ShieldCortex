@@ -1,5 +1,5 @@
 /**
- * Cortex Memory Hook — Persistent brain-like memory for Clawdbot/Moltbot
+ * Cortex Memory Hook — Persistent brain-like memory for OpenClaw
  *
  * Integrates ShieldCortex MCP server via mcporter to provide:
  * - Auto-extraction of important session content on /new
@@ -176,10 +176,10 @@ async function onSessionEnd(event) {
       title: mem.title,
       content: mem.content,
       category: mem.category,
-      project: "clawdbot",
+      project: "openclaw",
       scope: "global",
       importance: "high",
-      tags: "auto-extracted,clawdbot-hook",
+      tags: "auto-extracted,openclaw-hook",
     });
     if (result) saved++;
   }
@@ -195,7 +195,7 @@ async function onBootstrap(event) {
   if (!Array.isArray(context.bootstrapFiles)) return;
 
   const result = await callCortex("get_context", {
-    query: "clawdbot session context",
+    query: "openclaw session context",
     format: "summary",
   });
 
@@ -245,10 +245,10 @@ async function onKeywordTrigger(event) {
     title,
     content: content.slice(0, 500),
     category: "note",
-    project: "clawdbot",
+    project: "openclaw",
     scope: "global",
     importance: "critical",
-    tags: "keyword-trigger,clawdbot-hook",
+    tags: "keyword-trigger,openclaw-hook",
   });
 
   if (result) {

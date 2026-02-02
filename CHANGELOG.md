@@ -57,7 +57,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **REST API endpoints** for defence pipeline — `POST /api/v1/scan`, `/scan/batch`, `GET /audit`, quarantine management
 - **LangChain JS integration** — `ShieldCortexMemory` (BaseMemory-compatible) and `ShieldCortexGuard` (standalone scanner)
-- **OpenClaw/Clawdbot hook** — `cortex-memory` hook for persistent memory in Clawdbot sessions
+- **OpenClaw hook** — `cortex-memory` hook for persistent memory in OpenClaw sessions
 
 ### Changed
 - README: Supported Agents section now accurately reflects implemented integrations
@@ -145,12 +145,12 @@ All notable changes to this project will be documented in this file.
 ## [1.8.3] - 2026-01-29
 
 ### Security
-- **CRITICAL: Removed `shell: true` from Clawdbot hook** — `execFile` with `shell: true` allowed command injection via memory content. Now uses safe direct execution.
+- **CRITICAL: Removed `shell: true` from OpenClaw hook** — `execFile` with `shell: true` allowed command injection via memory content. Now uses safe direct execution.
 - **Parameterized SQL in session-start hook** — Replaced string interpolation in `NOT IN` clause with proper `?` placeholders.
 - **Word-boundary regex for SQL endpoint** — DROP/TRUNCATE blocking now uses `\bDROP\b` to avoid false positives on column names.
 
 ### Fixed
-- **Quote escaping in Clawdbot hook** — Single quotes in memory content are now escaped (`''`) instead of stripped, preserving data integrity.
+- **Quote escaping in OpenClaw hook** — Single quotes in memory content are now escaped (`''`) instead of stripped, preserving data integrity.
 
 ### Added
 - **`prepublishOnly` script** — Automatically runs `npm run build` before `npm publish` to prevent stale dist.
@@ -164,19 +164,19 @@ All notable changes to this project will be documented in this file.
 ## [1.8.1] - 2026-01-29
 
 ### Changed
-- **Unified setup command** — `npx shieldcortex setup` now configures both Claude Code (CLAUDE.md) and Clawdbot/Moltbot hook in one step.
+- **Unified setup command** — `npx shieldcortex setup` now configures both Claude Code (CLAUDE.md) and OpenClaw hook in one step.
 
 ## [1.8.0] - 2026-01-29
 
 ### Added
-- **Clawdbot/Moltbot hook installer** — `npx shieldcortex clawdbot install|uninstall|status`
-- Bundled `cortex-memory` hook that integrates via mcporter for persistent memory in Clawdbot sessions.
+- **OpenClaw hook installer** — `npx shieldcortex openclaw install|uninstall|status`
+- Bundled `cortex-memory` hook that integrates via mcporter for persistent memory in OpenClaw sessions.
 - Auto-saves session context on `/new`, injects past memories on bootstrap, keyword triggers ("remember this").
 
 ## [1.7.2] - 2026-01-28
 
 ### Added
-- Moltbot/ClawdBot integration section in README with mcporter usage examples.
+- OpenClaw integration section in README with mcporter usage examples.
 
 ## [1.7.1] - 2026-01-28
 

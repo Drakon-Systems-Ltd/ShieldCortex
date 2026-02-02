@@ -4,7 +4,7 @@
  * 1. Injects proactive memory instructions into ~/.claude/CLAUDE.md (Claude Code)
  * 2. Creates global MCP server config at ~/.claude.json (user scope)
  * 3. Installs hooks into ~/.claude/settings.json
- * 4. Installs cortex-memory hook into OpenClaw/Clawdbot if detected
+ * 4. Installs cortex-memory hook into OpenClaw if detected
  *
  * Both steps are idempotent.
  */
@@ -12,7 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { installClawdbotHook, findClawdbotHooksDir } from './clawdbot.js';
+import { installOpenClawHook, findOpenClawHooksDir } from './openclaw.js';
 import { setupHooks } from './settings-hooks.js';
 
 const MARKER = '# ShieldCortex — Memory System';
@@ -106,17 +106,17 @@ export async function setupClaudeMd(options?: { stopHook?: boolean }): Promise<v
   // 3. Hooks in settings.json
   setupHooks(options);
 
-  // 4. OpenClaw/Clawdbot — if detected
-  const hooksDir = findClawdbotHooksDir();
+  // 4. OpenClaw — if detected
+  const hooksDir = findOpenClawHooksDir();
   if (hooksDir) {
     const hookExists = fs.existsSync(path.join(hooksDir, 'cortex-memory'));
     if (hookExists) {
       console.log('✓ OpenClaw: cortex-memory hook already installed');
     } else {
-      await installClawdbotHook();
+      await installOpenClawHook();
     }
   } else {
-    console.log('- OpenClaw/Clawdbot: not detected (skipped)');
+    console.log('- OpenClaw: not detected (skipped)');
   }
 
   console.log('\nSetup complete.');

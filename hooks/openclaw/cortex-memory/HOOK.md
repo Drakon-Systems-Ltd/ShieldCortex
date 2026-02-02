@@ -4,7 +4,7 @@ description: "Persistent brain-like memory via ShieldCortex — auto-saves sessi
 homepage: https://github.com/Drakon-Systems-Ltd/ShieldCortex
 metadata:
   {
-    "clawdbot":
+    "openclaw":
       {
         "emoji": "🧠",
         "events": ["command:new", "agent:bootstrap", "command"],
@@ -47,13 +47,13 @@ Memories stored in `~/.shieldcortex/memories.db` (SQLite). Shared with Claude Co
 ## Install
 
 ```bash
-npx shieldcortex clawdbot install
+npx shieldcortex openclaw install
 ```
 
 ## Uninstall
 
 ```bash
-npx shieldcortex clawdbot uninstall
+npx shieldcortex openclaw uninstall
 ```
 
 Or disable without removing:

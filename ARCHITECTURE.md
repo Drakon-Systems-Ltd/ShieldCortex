@@ -213,7 +213,7 @@ shieldcortex/
 │   ├── session-end-hook.mjs        # Auto-extract on exit
 │   └── stop-hook.mjs               # Check last response (opt-in)
 ├── hooks/
-│   └── clawdbot/cortex-memory/     # OpenClaw/Clawdbot hook
+│   └── openclaw/cortex-memory/     # OpenClaw hook
 ├── dashboard/                      # Next.js 3D brain visualization
 ├── package.json
 ├── tsconfig.json
