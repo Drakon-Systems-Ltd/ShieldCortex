@@ -62,7 +62,8 @@ Every memory write is scanned. Every memory read is filtered. Everything is logg
 |-------|----------------|------|
 | **Memory Firewall** | Prompt injection, hidden instructions, encoding tricks, command injection | Free |
 | **Audit Logger** | Full forensic trail of every memory operation | Free |
-| **Trust Scorer** | Filters memories by source reliability (user=1.0, web=0.3, agent=0.1) | Free |
+| **Trust Scorer** | Filters memories by source reliability — agent hierarchy with 0.7× decay per level | Free |
+| **Sub-Agent Security** | Access control, rate limiting, auto-quarantine for untrusted agents | Free |
 | **Sensitivity Classifier** | Detects passwords, API keys, PII — auto-redacts on recall | Pro |
 | **Fragmentation Detector** | Catches multi-step assembly attacks spread across days | Pro |
 
@@ -140,14 +141,28 @@ ShieldCortex doesn't just store text — it thinks like a brain:
 
 Every `addMemory()` call runs through the defence pipeline:
 
-1. **Trust scoring** — source gets a trust score (user=1.0 down to agent=0.1)
+1. **Trust scoring** — source gets a trust score (user=1.0, CLI=0.9, agents=hierarchy-based with 0.7× decay)
 2. **Firewall scan** — content checked for injection, encoding, privilege escalation
 3. **Sensitivity classification** — detects secrets, PII, credentials
 4. **Fragmentation analysis** — cross-references with recent memories for assembly patterns
-5. **Audit logging** — full record regardless of outcome
-6. **Decision** — ALLOW, QUARANTINE, or BLOCK
+5. **Access control** — sub-agents auto-quarantined, rate-limited (20 writes/min), credential access blocked below trust 0.7
+6. **Audit logging** — full record regardless of outcome
+7. **Decision** — ALLOW, QUARANTINE, or BLOCK
 
 On recall, memories are filtered by trust score and sensitivity level. RESTRICTED content is redacted.
+
+### Sub-Agent Security
+
+AI agents spawn sub-agents that inherit full system access. ShieldCortex isolates them:
+
+- **Agent hierarchy trust** — `user-spawned>task-1>subtask` scores decay 0.7× per level (max depth 5)
+- **Read ACLs** — trust ≥0.7: all memories; 0.5–0.7: own + shared; <0.5: own only
+- **Write restrictions** — untrusted agents auto-quarantined, parent approves
+- **Rate limiting** — 20 writes/min per source, hard block on exceed
+- **Credential isolation** — RESTRICTED memories blocked below trust 0.7
+- **Quarantine auto-expiry** — unreviewed items auto-rejected after 7 days
+- **Environment-based inference** — auto-detects Claude Code agents from env vars (not forgeable via MCP)
+- **Uninstall protection** — blocks agents from removing ShieldCortex
 
 ---
 
@@ -179,7 +194,7 @@ npx shieldcortex --dashboard
 - **Dashboard**: http://localhost:3030
 - **API**: http://localhost:3001
 
-Views: Knowledge Graph, Memory Browser, Insights, 3D Brain Visualization.
+Views: Shield (defence overview), Audit Log, Quarantine, Memories, 3D Brain, Knowledge Graph.
 
 ### Auto-start on login
 
