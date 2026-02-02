@@ -23,6 +23,8 @@ export type WebSocketEventType =
   | 'worker_medium_tick'
   | 'link_discovered'
   | 'predictive_consolidation'
+  // Defence events
+  | 'defence_event'
   // Version/Update events
   | 'update_started'
   | 'update_complete'
@@ -146,6 +148,14 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
               queryClient.invalidateQueries({ queryKey: ['links'] });
+              break;
+
+            case 'defence_event':
+              // Defence pipeline triggered (BLOCK/QUARANTINE) — refresh agent data
+              queryClient.invalidateQueries({ queryKey: ['agents'] });
+              queryClient.invalidateQueries({ queryKey: ['agent-timeline'] });
+              queryClient.invalidateQueries({ queryKey: ['audit-logs'] });
+              queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
               break;
 
             case 'worker_light_tick':

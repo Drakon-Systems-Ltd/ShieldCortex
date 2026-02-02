@@ -18,6 +18,7 @@ import { NavRail } from '@/components/nav/NavRail';
 import { ShieldOverview } from '@/components/shield/ShieldOverview';
 import { AuditLogView } from '@/components/audit/AuditLogView';
 import { QuarantineView } from '@/components/quarantine/QuarantineView';
+import { AgentsView } from '@/components/agents/AgentsView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Memory } from '@/types/memory';
@@ -138,7 +139,7 @@ export default function DashboardPage() {
   };
 
   // Views that need memory data vs standalone views
-  const isSecurityView = viewMode === 'shield' || viewMode === 'audit' || viewMode === 'quarantine';
+  const isSecurityView = viewMode === 'shield' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents';
 
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
@@ -328,6 +329,7 @@ export default function DashboardPage() {
                 onSelectMemory={handleSelectMemory}
               />
             )}
+            {viewMode === 'agents' && <AgentsView />}
             {viewMode === 'memories' && (
               <MemoriesView
                 memories={memories}

@@ -47,7 +47,7 @@ import { getCurrentVersion, checkForUpdates, performUpdate, scheduleRestart } fr
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
-import { queryAuditLogs, getAuditStats } from '../defence/audit/queries.js';
+import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -1187,6 +1187,49 @@ export function startVisualizationServer(dbPath?: string): void {
       const project = req.query.project as string | undefined;
       const stats = getAuditStats(timeRange, project);
       res.json(stats);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Agent registry — distinct agents aggregated from audit logs
+  app.get('/api/v1/agents', (req: Request, res: Response) => {
+    try {
+      const timeRange = (req.query.timeRange as '24h' | '7d' | '30d') ?? '24h';
+      const project = req.query.project as string | undefined;
+      const agents = queryAgentRegistry(timeRange, project);
+      res.json({ agents });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Agent trust score timeline
+  app.get('/api/v1/agents/:identifier/timeline', (req: Request, res: Response) => {
+    try {
+      const identifier = decodeURIComponent(req.params.identifier as string);
+      const timeRange = (req.query.timeRange as '24h' | '7d' | '30d') ?? '24h';
+      const project = req.query.project as string | undefined;
+      const points = queryAgentTimeline(identifier, timeRange, project);
+      res.json({ points });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Agent operations — paginated audit entries for one agent
+  app.get('/api/v1/agents/:identifier/operations', (req: Request, res: Response) => {
+    try {
+      const identifier = decodeURIComponent(req.params.identifier as string);
+      const limit = parseInt(req.query.limit as string, 10) || 50;
+      const offset = parseInt(req.query.offset as string, 10) || 0;
+      const firewallResult = req.query.firewallResult as string | undefined;
+      const project = req.query.project as string | undefined;
+      const entries = queryAgentOperations(identifier, {
+        limit, offset, project,
+        firewallResult: firewallResult as 'ALLOW' | 'BLOCK' | 'QUARANTINE' | undefined,
+      });
+      res.json({ entries, limit, offset });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

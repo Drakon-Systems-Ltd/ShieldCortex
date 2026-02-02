@@ -21,6 +21,7 @@ import { analyzeFirewall } from './firewall/index.js';
 import { classifySensitivity } from './sensitivity/index.js';
 import { analyzeFragmentation } from './fragmentation/index.js';
 import { logAudit, createContentHash } from './audit/index.js';
+import { persistEvent } from '../api/events.js';
 
 export function runDefencePipeline(
   content: string,
@@ -98,6 +99,24 @@ export function runDefencePipeline(
       fragmentation_score: fragmentation?.score ?? null,
       pipeline_duration_ms: durationMs,
     });
+
+    // 7. Emit defence event for real-time dashboard alerts (BLOCK/QUARANTINE only)
+    if (firewall.result !== 'ALLOW') {
+      try {
+        persistEvent('defence_event', {
+          source_type: source.type,
+          source_identifier: source.identifier,
+          firewall_result: firewall.result,
+          trust_score: trust.score,
+          anomaly_score: firewall.anomalyScore,
+          reason,
+          threat_indicators: JSON.stringify(firewall.threatIndicators),
+          timestamp: new Date().toISOString(),
+        });
+      } catch {
+        // Event persistence is best-effort
+      }
+    }
 
     return {
       allowed,

@@ -5,6 +5,26 @@
 import { getDatabase } from '../../database/init.js';
 import type { AuditEntry, FirewallResult } from '../types.js';
 
+// ── Agent Interfaces ──
+
+export interface AgentInfo {
+  source_type: string;
+  source_identifier: string;
+  operation_count: number;
+  last_seen: string;
+  avg_trust_score: number;
+  min_trust_score: number;
+  max_trust_score: number;
+  flagged_count: number;
+}
+
+export interface AgentTimelinePoint {
+  timestamp: string;
+  trust_score: number;
+  firewall_result: string;
+  anomaly_score: number;
+}
+
 // ── Interfaces ──
 
 export interface AuditQueryOptions {
@@ -142,4 +162,88 @@ export function getAuditStats(timeRange: '24h' | '7d' | '30d', project?: string)
     topSources,
     threatBreakdown,
   };
+}
+
+// ── Agent Query Functions ──
+
+/**
+ * Get distinct agents aggregated from audit logs.
+ */
+export function queryAgentRegistry(timeRange: '24h' | '7d' | '30d' = '24h', project?: string): AgentInfo[] {
+  const db = getDatabase();
+  const hoursMap = { '24h': 24, '7d': 168, '30d': 720 };
+  const since = new Date(Date.now() - hoursMap[timeRange] * 3600_000).toISOString();
+
+  const projectCond = project ? 'AND project = ?' : '';
+  const params = project ? [since, project] : [since];
+
+  return db.prepare(`
+    SELECT source_type, source_identifier,
+      COUNT(*) as operation_count,
+      MAX(timestamp) as last_seen,
+      AVG(trust_score) as avg_trust_score,
+      MIN(trust_score) as min_trust_score,
+      MAX(trust_score) as max_trust_score,
+      SUM(CASE WHEN firewall_result != 'ALLOW' THEN 1 ELSE 0 END) as flagged_count
+    FROM defence_audit
+    WHERE timestamp >= ? ${projectCond}
+    GROUP BY source_type, source_identifier
+    ORDER BY operation_count DESC
+  `).all(...params) as AgentInfo[];
+}
+
+/**
+ * Get trust score timeline for a specific agent.
+ */
+export function queryAgentTimeline(
+  identifier: string,
+  timeRange: '24h' | '7d' | '30d' = '24h',
+  project?: string,
+): AgentTimelinePoint[] {
+  const db = getDatabase();
+  const hoursMap = { '24h': 24, '7d': 168, '30d': 720 };
+  const since = new Date(Date.now() - hoursMap[timeRange] * 3600_000).toISOString();
+
+  const projectCond = project ? 'AND project = ?' : '';
+  const params = project ? [identifier, since, project] : [identifier, since];
+
+  return db.prepare(`
+    SELECT timestamp, trust_score, firewall_result, anomaly_score
+    FROM defence_audit
+    WHERE source_identifier = ? AND timestamp >= ? ${projectCond}
+    ORDER BY timestamp ASC
+  `).all(...params) as AgentTimelinePoint[];
+}
+
+/**
+ * Get paginated audit entries for a specific agent.
+ */
+export function queryAgentOperations(
+  identifier: string,
+  options: { limit?: number; offset?: number; firewallResult?: FirewallResult; project?: string } = {},
+): AuditEntry[] {
+  const db = getDatabase();
+  const conditions: string[] = ['source_identifier = @identifier'];
+  const params: Record<string, unknown> = { identifier };
+
+  if (options.firewallResult) {
+    conditions.push('firewall_result = @firewallResult');
+    params.firewallResult = options.firewallResult;
+  }
+  if (options.project) {
+    conditions.push('project = @project');
+    params.project = options.project;
+  }
+
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  params.limit = limit;
+  params.offset = offset;
+
+  return db.prepare(`
+    SELECT * FROM defence_audit
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY timestamp DESC
+    LIMIT @limit OFFSET @offset
+  `).all(params) as AuditEntry[];
 }

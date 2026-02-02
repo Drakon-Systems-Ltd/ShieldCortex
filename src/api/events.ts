@@ -23,6 +23,8 @@ export type MemoryEventType =
   | 'worker_medium_tick'
   | 'link_discovered'
   | 'predictive_consolidation'
+  // Defence events
+  | 'defence_event'
   // Version/Update events
   | 'update_started'
   | 'update_complete'
@@ -219,6 +221,19 @@ export function emitLinkDiscovered(data: {
   strength: number;
 }): void {
   memoryEvents.emit('link_discovered', data);
+}
+
+export function emitDefenceEvent(data: {
+  source_type: string;
+  source_identifier: string;
+  firewall_result: string;
+  trust_score: number;
+  anomaly_score: number;
+  reason: string | null;
+  threat_indicators: string;
+  timestamp: string;
+}): void {
+  memoryEvents.emit('defence_event', data);
 }
 
 export function emitPredictiveConsolidation(data: {

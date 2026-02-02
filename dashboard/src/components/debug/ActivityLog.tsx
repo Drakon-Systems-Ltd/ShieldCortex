@@ -34,6 +34,7 @@ const EVENT_COLORS: Record<MemoryEventType, string> = {
   update_complete: 'text-green-400',
   update_failed: 'text-red-400',
   server_restarting: 'text-orange-400',
+  defence_event: 'text-red-400',
 };
 
 const EVENT_ICONS: Record<MemoryEventType, string> = {
@@ -52,6 +53,7 @@ const EVENT_ICONS: Record<MemoryEventType, string> = {
   update_complete: '✓',
   update_failed: '✗',
   server_restarting: '🔄',
+  defence_event: '🛡',
 };
 
 export function ActivityLog() {
@@ -73,6 +75,7 @@ export function ActivityLog() {
     update_complete: true,
     update_failed: true,
     server_restarting: true,
+    defence_event: true,
   });
 
   const logContainerRef = useRef<HTMLDivElement>(null);

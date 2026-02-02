@@ -14,8 +14,8 @@ interface DashboardState {
   setSelectedMemory: (memory: Memory | null) => void;
 
   // View mode
-  viewMode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph';
-  setViewMode: (mode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph') => void;
+  viewMode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents';
+  setViewMode: (mode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents') => void;
 
   // Filters
   typeFilter: string | null;
