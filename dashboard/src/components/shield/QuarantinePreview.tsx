@@ -5,8 +5,8 @@ import { useDashboardStore } from '@/lib/store';
 import { AlertTriangle } from 'lucide-react';
 
 export function QuarantinePreview() {
-  const { data, isLoading } = useQuarantine('pending', 3);
-  const { setViewMode } = useDashboardStore();
+  const { setViewMode, projectFilter } = useDashboardStore();
+  const { data, isLoading, isError } = useQuarantine('pending', 3, projectFilter || undefined);
 
   const pendingCount = data?.total ?? 0;
   const items = data?.items ?? [];
@@ -24,6 +24,8 @@ export function QuarantinePreview() {
 
       {isLoading ? (
         <div className="text-xs text-slate-500 animate-pulse">Loading...</div>
+      ) : isError ? (
+        <div className="text-xs text-red-400">Failed to load quarantine</div>
       ) : items.length === 0 ? (
         <div className="flex flex-col items-center py-6 text-slate-500">
           <AlertTriangle size={24} className="mb-2 text-slate-600" />

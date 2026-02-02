@@ -164,6 +164,7 @@ function runMigrations(database: Database.Database): void {
       CREATE TABLE IF NOT EXISTS defence_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         memory_id INTEGER,
+        project TEXT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         source_type TEXT NOT NULL,
         source_identifier TEXT NOT NULL,
@@ -182,11 +183,13 @@ function runMigrations(database: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON defence_audit(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
       CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
+      CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
 
       CREATE TABLE IF NOT EXISTS quarantine (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         original_content TEXT NOT NULL,
         original_title TEXT,
+        project TEXT,
         source_type TEXT NOT NULL,
         source_identifier TEXT NOT NULL,
         reason TEXT NOT NULL,
@@ -219,6 +222,48 @@ function runMigrations(database: Database.Database): void {
     `);
   } catch {
     // Tables may already exist - safe to ignore
+  }
+
+  // Migration: project column on defence_audit and quarantine tables
+  try {
+    const auditCols = database.prepare("PRAGMA table_info(defence_audit)").all() as { name: string }[];
+    if (auditCols.length > 0 && !auditCols.some(c => c.name === 'project')) {
+      database.exec('ALTER TABLE defence_audit ADD COLUMN project TEXT');
+      database.exec('CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project)');
+    }
+    const quarantineCols = database.prepare("PRAGMA table_info(quarantine)").all() as { name: string }[];
+    if (quarantineCols.length > 0 && !quarantineCols.some(c => c.name === 'project')) {
+      database.exec('ALTER TABLE quarantine ADD COLUMN project TEXT');
+    }
+  } catch {
+    // Safe to ignore if tables don't exist yet
+  }
+
+  // Backfill: set project on defence_audit/quarantine entries that have NULL project
+  try {
+    const nullCount = (database.prepare(
+      "SELECT COUNT(*) as cnt FROM defence_audit WHERE project IS NULL"
+    ).get() as { cnt: number })?.cnt ?? 0;
+    if (nullCount > 0) {
+      // From linked memories
+      database.exec(`UPDATE defence_audit SET project = (
+        SELECT m.project FROM memories m WHERE m.id = defence_audit.memory_id
+      ) WHERE memory_id IS NOT NULL AND project IS NULL`);
+      // Remaining: use most common project
+      database.exec(`UPDATE defence_audit SET project = (
+        SELECT project FROM memories WHERE project IS NOT NULL GROUP BY project ORDER BY COUNT(*) DESC LIMIT 1
+      ) WHERE project IS NULL`);
+    }
+    const qNullCount = (database.prepare(
+      "SELECT COUNT(*) as cnt FROM quarantine WHERE project IS NULL"
+    ).get() as { cnt: number })?.cnt ?? 0;
+    if (qNullCount > 0) {
+      database.exec(`UPDATE quarantine SET project = (
+        SELECT project FROM memories WHERE project IS NOT NULL GROUP BY project ORDER BY COUNT(*) DESC LIMIT 1
+      ) WHERE project IS NULL`);
+    }
+  } catch {
+    // Safe to ignore
   }
 
   // Migration: Ontology tables (entities, triples, memory_entities)
@@ -529,6 +574,7 @@ function getInlineSchema(): string {
     CREATE TABLE IF NOT EXISTS defence_audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       memory_id INTEGER,
+      project TEXT,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       source_type TEXT NOT NULL,
       source_identifier TEXT NOT NULL,
@@ -548,11 +594,13 @@ function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON defence_audit(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
     CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
+    CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
 
     CREATE TABLE IF NOT EXISTS quarantine (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       original_content TEXT NOT NULL,
       original_title TEXT,
+      project TEXT,
       source_type TEXT NOT NULL,
       source_identifier TEXT NOT NULL,
       reason TEXT NOT NULL,

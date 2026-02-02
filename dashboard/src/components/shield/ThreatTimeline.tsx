@@ -1,6 +1,7 @@
 'use client';
 
 import { useAuditLogs } from '@/hooks/useDefence';
+import { useDashboardStore } from '@/lib/store';
 import { useMemo } from 'react';
 
 interface Props {
@@ -8,10 +9,16 @@ interface Props {
 }
 
 export function ThreatTimeline({ timeRange }: Props) {
+  const { projectFilter } = useDashboardStore();
   const hoursMap = { '24h': 24, '7d': 168, '30d': 720 };
-  const since = new Date(Date.now() - hoursMap[timeRange] * 3600_000).toISOString();
+  // Round to nearest minute so the query key stays stable across re-renders
+  const since = useMemo(() => {
+    const ms = Date.now() - hoursMap[timeRange] * 3600_000;
+    const rounded = Math.floor(ms / 60_000) * 60_000;
+    return new Date(rounded).toISOString();
+  }, [timeRange]);
 
-  const { data, isLoading } = useAuditLogs({ startTime: since, limit: 500 });
+  const { data, isLoading, isError } = useAuditLogs({ startTime: since, project: projectFilter || undefined, limit: 500 });
 
   // Group logs by time bucket
   const buckets = useMemo(() => {
@@ -30,8 +37,9 @@ export function ThreatTimeline({ timeRange }: Props) {
 
     for (const log of data.logs) {
       const t = new Date(log.timestamp).getTime();
-      const idx = Math.floor((t - (now - bucketCount * bucketSize)) / bucketSize);
-      if (idx >= 0 && idx < bucketCount) {
+      const rawIdx = Math.floor((t - (now - bucketCount * bucketSize)) / bucketSize);
+      const idx = Math.min(Math.max(rawIdx, 0), bucketCount - 1);
+      if (rawIdx >= 0 && rawIdx <= bucketCount) {
         if (log.firewall_result === 'ALLOW') result[idx].allowed++;
         else if (log.firewall_result === 'BLOCK') result[idx].blocked++;
         else if (log.firewall_result === 'QUARANTINE') result[idx].quarantined++;
@@ -51,6 +59,10 @@ export function ThreatTimeline({ timeRange }: Props) {
         <div className="h-32 flex items-center justify-center">
           <div className="text-xs text-slate-500 animate-pulse">Loading timeline...</div>
         </div>
+      ) : isError ? (
+        <div className="h-32 flex items-center justify-center">
+          <div className="text-xs text-red-400">Failed to load timeline</div>
+        </div>
       ) : buckets.length === 0 ? (
         <div className="h-32 flex items-center justify-center">
           <div className="text-xs text-slate-500">No audit data</div>
@@ -58,7 +70,7 @@ export function ThreatTimeline({ timeRange }: Props) {
       ) : (
         <>
           {/* Bar chart */}
-          <div className="flex items-end gap-px h-32">
+          <div className="flex gap-px h-32">
             {buckets.map((bucket, i) => {
               const total = bucket.allowed + bucket.blocked + bucket.quarantined;
               const height = (total / maxValue) * 100;

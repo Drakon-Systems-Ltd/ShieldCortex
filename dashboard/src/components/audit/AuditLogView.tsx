@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useAuditLogs } from '@/hooks/useDefence';
+import { useDashboardStore } from '@/lib/store';
 
 const RESULT_COLORS: Record<string, string> = {
   ALLOW: 'bg-green-500/10 text-green-400',
@@ -10,17 +11,22 @@ const RESULT_COLORS: Record<string, string> = {
 };
 
 export function AuditLogView() {
+  const { projectFilter } = useDashboardStore();
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
   const [sourceFilter, setSourceFilter] = useState<string | undefined>(undefined);
   const [resultFilter, setResultFilter] = useState<string | undefined>(undefined);
 
   const hoursMap = { '24h': 24, '7d': 168, '30d': 720 };
-  const since = new Date(Date.now() - hoursMap[timeRange] * 3600_000).toISOString();
+  const since = useMemo(() => {
+    const ms = Date.now() - hoursMap[timeRange] * 3600_000;
+    return new Date(Math.floor(ms / 60_000) * 60_000).toISOString();
+  }, [timeRange]);
 
   const { data, isLoading } = useAuditLogs({
     startTime: since,
     source: sourceFilter,
     firewallResult: resultFilter,
+    project: projectFilter || undefined,
     limit: 200,
   });
 

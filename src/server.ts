@@ -38,7 +38,46 @@ import { handleGraphQuery, handleGraphEntities, handleGraphExplain } from './too
 import { checkDatabaseSize } from './database/init.js';
 import { queryAuditLogs, getAuditStats } from './defence/audit/index.js';
 import { scanExistingMemories } from './defence/scanner/index.js';
-import type { FirewallResult as FwResult } from './defence/types.js';
+import type { FirewallResult as FwResult, DefenceSource } from './defence/types.js';
+import { resolveSource } from './defence/trust/env-detector.js';
+import { logAudit } from './defence/audit/logger.js';
+
+// Shared source schema for access control on MCP tools
+const sourceParam = z.object({
+  type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
+  identifier: z.string(),
+}).optional().describe('Caller identity for access control (agents should pass this)');
+
+/**
+ * Resolve source for an MCP tool call, inferring from environment if not declared.
+ * Logs an audit warning when source is missing (gives operators visibility).
+ */
+function resolveToolSource(declaredSource: DefenceSource | undefined, toolName: string): DefenceSource {
+  const { source, inferred, detection } = resolveSource(declaredSource);
+  if (inferred) {
+    try {
+      logAudit({
+        memory_id: null,
+        project: getActiveProject(),
+        timestamp: new Date().toISOString(),
+        source_type: source.type,
+        source_identifier: source.identifier,
+        trust_score: 0,
+        sensitivity_level: 'PUBLIC',
+        firewall_result: 'ALLOW',
+        anomaly_score: 0,
+        threat_indicators: '[]',
+        blocked_patterns: '[]',
+        reason: `SOURCE_MISSING: tool=${toolName}, inferred=${source.type}:${source.identifier} via ${detection?.method ?? 'default'} (confidence: ${detection?.confidence ?? 'low'})`,
+        fragmentation_score: null,
+        pipeline_duration_ms: null,
+      });
+    } catch {
+      // Audit logging should never break tool execution
+    }
+  }
+  return source;
+}
 
 /**
  * Create and configure the MCP server
@@ -135,9 +174,11 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Include global memories in search results (default: true)'),
       mode: z.enum(['search', 'recent', 'important']).optional().default('search')
         .describe('Recall mode'),
+      source: sourceParam,
     },
     async (args) => {
-      const result = await executeRecall(args);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'recall');
+      const result = await executeRecall({ ...args, source });
       return {
         content: [{ type: 'text', text: formatRecallResult(result, true) }],
       };
@@ -163,9 +204,11 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Preview only'),
       confirm: z.boolean().optional().default(false)
         .describe('Confirm bulk delete'),
+      source: sourceParam,
     },
     async (args) => {
-      const result = await executeForget(args);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'forget');
+      const result = await executeForget({ ...args, source });
       return {
         content: [{ type: 'text', text: formatForgetResult(result) }],
       };
@@ -184,9 +227,11 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       query: z.string().optional().describe('Current task for relevant context'),
       format: z.enum(['summary', 'detailed', 'raw']).optional().default('summary')
         .describe('Output format'),
+      source: sourceParam,
     },
     async (args) => {
-      const result = await executeGetContext(args);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_context');
+      const result = await executeGetContext({ ...args, source });
       return {
         content: [{
           type: 'text',
@@ -308,9 +353,11 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     'Get a specific memory by ID.',
     {
       id: z.number().describe('Memory ID'),
+      source: sourceParam,
     },
     async (args) => {
-      const result = executeGetMemory(args);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_memory');
+      const result = executeGetMemory({ ...args, source });
       return {
         content: [{
           type: 'text',
@@ -560,29 +607,46 @@ but you can use this tool to check for new contradictions at any time.`,
 
   // Quarantine Review
   server.tool('quarantine_review', 'Review and manage quarantined memories', {
-    action: z.enum(['list', 'approve', 'reject']),
+    action: z.enum(['list', 'approve', 'reject', 'approve_by_source']),
     quarantineId: z.number().optional().describe('ID for approve/reject'),
+    sourceIdentifier: z.string().optional().describe('Source identifier for batch approve (e.g. "user-spawned>task-1")'),
     notes: z.string().optional(),
   }, async (args) => {
     const db = (await import('./database/init.js')).getDatabase();
     if (args.action === 'list') {
       const items = db.prepare('SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT 50').all('pending');
-      const text = items.length === 0 ? 'No items in quarantine.' : (items as any[]).map((q: any) => `[${q.id}] ${q.title} | reason: ${q.block_reason} | trust: ${q.trust_score}`).join('\n');
+      const text = items.length === 0 ? 'No items in quarantine.' : (items as any[]).map((q: any) => `[${q.id}] ${q.original_title || 'Untitled'} | source: ${q.source_type}:${q.source_identifier} | reason: ${q.reason}`).join('\n');
       return { content: [{ type: 'text', text }] };
     } else if (args.action === 'approve' && args.quarantineId) {
-      db.prepare('UPDATE quarantine SET status = ?, reviewer_notes = ? WHERE id = ?').run('approved', args.notes || null, args.quarantineId);
-      // Optionally promote to memory
+      db.prepare('UPDATE quarantine SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('approved', args.notes || 'mcp', args.quarantineId);
       const q = db.prepare('SELECT * FROM quarantine WHERE id = ?').get(args.quarantineId) as any;
       if (q) {
         const { addMemory: add } = await import('./memory/store.js');
-        add({ title: q.title, content: q.content });
+        try { add({ title: q.original_title, content: q.original_content, project: q.project }); } catch { /* may fail defence */ }
       }
       return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} approved.` }] };
     } else if (args.action === 'reject' && args.quarantineId) {
-      db.prepare('UPDATE quarantine SET status = ?, reviewer_notes = ? WHERE id = ?').run('rejected', args.notes || null, args.quarantineId);
+      db.prepare('UPDATE quarantine SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('rejected', args.notes || 'mcp', args.quarantineId);
       return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} rejected.` }] };
+    } else if (args.action === 'approve_by_source' && args.sourceIdentifier) {
+      const items = db.prepare('SELECT id FROM quarantine WHERE status = ? AND source_identifier = ?').all('pending', args.sourceIdentifier) as { id: number }[];
+      if (items.length === 0) {
+        return { content: [{ type: 'text', text: `No pending quarantine items from source "${args.sourceIdentifier}".` }] };
+      }
+      db.prepare('UPDATE quarantine SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE status = ? AND source_identifier = ?')
+        .run('approved', args.notes || 'batch-approve', 'pending', args.sourceIdentifier);
+      // Promote each to memory
+      const { addMemory: add } = await import('./memory/store.js');
+      let promoted = 0;
+      for (const item of items) {
+        const q = db.prepare('SELECT * FROM quarantine WHERE id = ?').get(item.id) as any;
+        if (q) {
+          try { add({ title: q.original_title, content: q.original_content, project: q.project }); promoted++; } catch { /* may fail defence */ }
+        }
+      }
+      return { content: [{ type: 'text', text: `Batch approved ${items.length} items from "${args.sourceIdentifier}" (${promoted} promoted to memory).` }] };
     }
-    return { content: [{ type: 'text', text: 'Invalid action or missing quarantineId.' }] };
+    return { content: [{ type: 'text', text: 'Invalid action or missing required parameters.' }] };
   });
 
   // Defence Stats

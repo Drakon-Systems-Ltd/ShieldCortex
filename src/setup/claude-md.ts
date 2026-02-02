@@ -2,7 +2,9 @@
  * Full setup for ShieldCortex.
  *
  * 1. Injects proactive memory instructions into ~/.claude/CLAUDE.md (Claude Code)
- * 2. Installs cortex-memory hook into OpenClaw/Clawdbot if detected
+ * 2. Creates global MCP server config at ~/.claude.json (user scope)
+ * 3. Installs hooks into ~/.claude/settings.json
+ * 4. Installs cortex-memory hook into OpenClaw/Clawdbot if detected
  *
  * Both steps are idempotent.
  */
@@ -50,16 +52,61 @@ function setupClaudeCode(): void {
   }
 }
 
+function setupGlobalMcp(): void {
+  // Claude Code reads user-scope MCP servers from ~/.claude.json
+  const mcpPath = path.join(os.homedir(), '.claude.json');
+
+  // Check if already configured
+  if (fs.existsSync(mcpPath)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+      const servers = existing.mcpServers || {};
+      if (servers.memory?.command?.includes?.('shieldcortex') ||
+          servers.memory?.args?.some?.((a: string) => a.includes('shieldcortex'))) {
+        console.log('✓ MCP: global server already configured in ~/.claude.json');
+        return;
+      }
+      // File exists but no shieldcortex entry — merge it in
+      existing.mcpServers = servers;
+      existing.mcpServers.memory = {
+        type: 'stdio',
+        command: 'npx',
+        args: ['-y', 'shieldcortex'],
+      };
+      fs.writeFileSync(mcpPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
+      console.log('✓ MCP: added shieldcortex server to ~/.claude.json');
+      return;
+    } catch {
+      // Parse error — create fresh
+    }
+  }
+
+  const config = {
+    mcpServers: {
+      memory: {
+        type: 'stdio',
+        command: 'npx',
+        args: ['-y', 'shieldcortex'],
+      },
+    },
+  };
+  fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  console.log('✓ MCP: created global server config at ~/.claude.json');
+}
+
 export async function setupClaudeMd(options?: { stopHook?: boolean }): Promise<void> {
   console.log('Setting up ShieldCortex...\n');
 
   // 1. Claude Code CLAUDE.md — always
   setupClaudeCode();
 
-  // 2. Hooks in settings.json
+  // 2. Global MCP server config
+  setupGlobalMcp();
+
+  // 3. Hooks in settings.json
   setupHooks(options);
 
-  // 3. OpenClaw/Clawdbot — if detected
+  // 4. OpenClaw/Clawdbot — if detected
   const hooksDir = findClawdbotHooksDir();
   if (hooksDir) {
     const hookExists = fs.existsSync(path.join(hooksDir, 'cortex-memory'));

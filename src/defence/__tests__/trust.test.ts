@@ -25,10 +25,11 @@ describe('Trust Source Scorer', () => {
     expect(result.score).toBe(0.3);
   });
 
-  it('should score agent source as 0.1', async () => {
+  it('should score agent source using hierarchy scorer', async () => {
     const { scoreSource } = await import('../trust/source-scorer.js');
+    // Unknown origin defaults to 0.3 base
     const result = scoreSource({ type: 'agent', identifier: 'assistant' });
-    expect(result.score).toBe(0.1);
+    expect(result.score).toBe(0.3);
   });
 
   it('should score user:approved as 0.9', async () => {

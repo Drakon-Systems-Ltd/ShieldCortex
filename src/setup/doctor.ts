@@ -25,10 +25,12 @@ function add(status: Status, message: string): void {
 
 function getDbPath(): { path: string; isLegacy: boolean } | null {
   const newPath = path.join(os.homedir(), '.shieldcortex', 'memories.db');
-  const legacyPath = path.join(os.homedir(), '.claude-memory', 'memories.db');
+  const memoryLegacy = path.join(os.homedir(), '.claude-memory', 'memories.db');
+  const cortexLegacy = path.join(os.homedir(), '.claude-cortex', 'memories.db');
 
   if (fs.existsSync(newPath)) return { path: newPath, isLegacy: false };
-  if (fs.existsSync(legacyPath)) return { path: legacyPath, isLegacy: true };
+  if (fs.existsSync(memoryLegacy)) return { path: memoryLegacy, isLegacy: true };
+  if (fs.existsSync(cortexLegacy)) return { path: cortexLegacy, isLegacy: true };
   return null;
 }
 
@@ -118,7 +120,7 @@ function checkHooks(): void {
 function checkMcp(): void {
   // Check project-level .mcp.json
   const projectMcp = path.join(process.cwd(), '.mcp.json');
-  // Check user-level config
+  // Check user-scope config (where `claude mcp add --scope user` writes)
   const userMcp = path.join(os.homedir(), '.claude.json');
 
   for (const p of [projectMcp, userMcp]) {

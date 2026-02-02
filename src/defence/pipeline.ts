@@ -27,6 +27,7 @@ export function runDefencePipeline(
   title: string,
   source: DefenceSource,
   config?: DefenceConfig,
+  project?: string,
 ): DefencePipelineResult {
   const cfg = config ?? DEFAULT_DEFENCE_CONFIG;
   const startTime = performance.now();
@@ -83,6 +84,7 @@ export function runDefencePipeline(
     const _contentHash = createContentHash(content);
     const auditId = logAudit({
       memory_id: null,
+      project: project ?? null,
       timestamp: new Date().toISOString(),
       source_type: source.type,
       source_identifier: source.identifier,
@@ -112,6 +114,7 @@ export function runDefencePipeline(
 
     const auditId = logAudit({
       memory_id: null,
+      project: project ?? null,
       timestamp: new Date().toISOString(),
       source_type: source.type,
       source_identifier: source.identifier,

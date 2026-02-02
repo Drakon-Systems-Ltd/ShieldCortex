@@ -15,12 +15,12 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
     const db = getDatabase();
     const stmt = db.prepare(`
       INSERT INTO defence_audit (
-        memory_id, timestamp, source_type, source_identifier,
+        memory_id, project, timestamp, source_type, source_identifier,
         trust_score, sensitivity_level, firewall_result,
         anomaly_score, threat_indicators, blocked_patterns,
         reason, fragmentation_score, pipeline_duration_ms
       ) VALUES (
-        @memory_id, @timestamp, @source_type, @source_identifier,
+        @memory_id, @project, @timestamp, @source_type, @source_identifier,
         @trust_score, @sensitivity_level, @firewall_result,
         @anomaly_score, @threat_indicators, @blocked_patterns,
         @reason, @fragmentation_score, @pipeline_duration_ms
@@ -29,6 +29,7 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
 
     const result = stmt.run({
       memory_id: entry.memory_id ?? null,
+      project: entry.project ?? null,
       timestamp: entry.timestamp ?? new Date().toISOString(),
       source_type: entry.source_type,
       source_identifier: entry.source_identifier,

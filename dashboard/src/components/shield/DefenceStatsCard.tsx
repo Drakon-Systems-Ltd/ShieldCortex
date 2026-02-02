@@ -1,19 +1,30 @@
 'use client';
 
 import { useAuditStats } from '@/hooks/useDefence';
+import { useDashboardStore } from '@/lib/store';
 
 interface Props {
   timeRange: '24h' | '7d' | '30d';
 }
 
 export function DefenceStatsCard({ timeRange }: Props) {
-  const { data: stats, isLoading } = useAuditStats(timeRange);
+  const { projectFilter } = useDashboardStore();
+  const { data: stats, isLoading, isError } = useAuditStats(timeRange, projectFilter || undefined);
 
   if (isLoading) {
     return (
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
         <h3 className="text-sm font-medium text-slate-300 mb-4">Stats Summary</h3>
         <div className="text-xs text-slate-500 animate-pulse">Loading...</div>
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <h3 className="text-sm font-medium text-slate-300 mb-4">Stats Summary</h3>
+        <div className="text-xs text-red-400">Failed to load stats</div>
       </div>
     );
   }

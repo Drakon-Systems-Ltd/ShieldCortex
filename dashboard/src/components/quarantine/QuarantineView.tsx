@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useQuarantine, useApproveQuarantine, useRejectQuarantine, QuarantineItem } from '@/hooks/useDefence';
+import { useDashboardStore } from '@/lib/store';
 import { AlertTriangle, Check, X } from 'lucide-react';
 
 function ConfirmationDialog({
@@ -77,8 +78,9 @@ function ConfirmationDialog({
 }
 
 export function QuarantineView() {
+  const { projectFilter } = useDashboardStore();
   const [statusFilter, setStatusFilter] = useState<string>('pending');
-  const { data, isLoading } = useQuarantine(statusFilter, 100);
+  const { data, isLoading } = useQuarantine(statusFilter, 100, projectFilter || undefined);
   const approveMutation = useApproveQuarantine();
   const rejectMutation = useRejectQuarantine();
 
@@ -94,7 +96,7 @@ export function QuarantineView() {
     if (confirmAction.action === 'approve') {
       approveMutation.mutate(confirmAction.item.id);
     } else {
-      rejectMutation.mutate(confirmAction.item.id);
+      rejectMutation.mutate({ id: confirmAction.item.id });
     }
     setConfirmAction(null);
   };

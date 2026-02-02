@@ -10,6 +10,12 @@ import { formatTimeSinceAccess } from '../memory/decay.js';
 import { Memory, SearchResult } from '../memory/types.js';
 import { MemoryNotFoundError, formatErrorForMcp } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
+import type { DefenceSource } from '../defence/types.js';
+
+const sourceSchema = z.object({
+  type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
+  identifier: z.string(),
+}).optional().describe('Caller identity for access control');
 
 // Input schema for the recall tool
 export const recallSchema = z.object({
@@ -30,6 +36,7 @@ export const recallSchema = z.object({
     .describe('Include global memories in search results (default: true)'),
   mode: z.enum(['search', 'recent', 'important']).optional().default('search')
     .describe('Recall mode: search (query-based), recent (by time), important (by salience)'),
+  source: sourceSchema,
 });
 
 export type RecallInput = z.infer<typeof recallSchema>;
@@ -49,16 +56,17 @@ export async function executeRecall(input: RecallInput): Promise<{
     const resolvedProject = resolveProject(input.project);
     const projectFilter = resolvedProject ?? undefined;
 
+    const source = input.source as DefenceSource | undefined;
     let memories: Memory[] = [];
     let contradictions: Map<number, { memoryId: number; title: string; score: number }[]> | undefined;
 
     switch (input.mode) {
       case 'recent':
-        memories = getRecentMemories(input.limit, projectFilter);
+        memories = getRecentMemories(input.limit, projectFilter, source);
         break;
 
       case 'important':
-        memories = getHighPriorityMemories(input.limit, projectFilter);
+        memories = getHighPriorityMemories(input.limit, projectFilter, source);
         break;
 
       case 'search':
@@ -72,7 +80,7 @@ export async function executeRecall(input: RecallInput): Promise<{
           limit: input.limit,
           includeDecayed: input.includeDecayed,
           includeGlobal: input.includeGlobal,
-        });
+        }, undefined, source);
         memories = results.map(r => r.memory);
         // Extract contradictions from search results
         const contradictionEntries = results
@@ -85,7 +93,7 @@ export async function executeRecall(input: RecallInput): Promise<{
     }
 
     // Access each memory to reinforce it
-    memories = memories.map(m => accessMemory(m.id) || m);
+    memories = memories.map(m => accessMemory(m.id, undefined, source) || m);
 
     return {
       success: true,
@@ -160,15 +168,16 @@ export function formatRecallResult(
  */
 export const getMemorySchema = z.object({
   id: z.number().describe('Memory ID to retrieve'),
+  source: sourceSchema,
 });
 
-export function executeGetMemory(input: { id: number }): {
+export function executeGetMemory(input: { id: number; source?: DefenceSource }): {
   success: boolean;
   memory?: Memory;
   error?: string;
 } {
   try {
-    const memory = accessMemory(input.id);
+    const memory = accessMemory(input.id, undefined, input.source);
     if (!memory) {
       const error = new MemoryNotFoundError(input.id);
       return {

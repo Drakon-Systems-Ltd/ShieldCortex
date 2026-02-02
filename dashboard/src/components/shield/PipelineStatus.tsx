@@ -1,6 +1,7 @@
 'use client';
 
 import { useAuditStats } from '@/hooks/useDefence';
+import { useDashboardStore } from '@/lib/store';
 import { Shield, Flame, Eye, Puzzle, FileText } from 'lucide-react';
 
 const PIPELINE_LAYERS = [
@@ -16,7 +17,8 @@ interface Props {
 }
 
 export function PipelineStatus({ timeRange }: Props) {
-  const { data: stats, isLoading } = useAuditStats(timeRange);
+  const { projectFilter } = useDashboardStore();
+  const { data: stats, isLoading, isError } = useAuditStats(timeRange, projectFilter || undefined);
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
@@ -40,6 +42,8 @@ export function PipelineStatus({ timeRange }: Props) {
       {/* Stats row */}
       {isLoading ? (
         <div className="text-xs text-slate-500 animate-pulse">Loading stats...</div>
+      ) : isError ? (
+        <div className="text-xs text-red-400">Failed to load stats</div>
       ) : stats ? (
         <div className="grid grid-cols-3 gap-3">
           <div className="text-center">

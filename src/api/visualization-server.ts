@@ -1171,6 +1171,7 @@ export function startVisualizationServer(dbPath?: string): void {
       if (req.query.source) options.source = req.query.source;
       if (req.query.firewallResult) options.firewallResult = req.query.firewallResult;
       if (req.query.limit) options.limit = parseInt(req.query.limit as string, 10);
+      if (req.query.project) options.project = req.query.project as string;
 
       const logs = queryAuditLogs(options);
       res.json({ logs, total: logs.length });
@@ -1183,7 +1184,8 @@ export function startVisualizationServer(dbPath?: string): void {
   app.get('/api/v1/audit/stats', (req: Request, res: Response) => {
     try {
       const timeRange = (req.query.timeRange as '24h' | '7d' | '30d') ?? '24h';
-      const stats = getAuditStats(timeRange);
+      const project = req.query.project as string | undefined;
+      const stats = getAuditStats(timeRange, project);
       res.json(stats);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -1196,10 +1198,18 @@ export function startVisualizationServer(dbPath?: string): void {
       const db = getDatabase();
       const status = req.query.status ?? 'pending';
       const limit = parseInt(req.query.limit as string, 10) || 50;
-      const rows = db.prepare(
-        'SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT ?'
-      ).all(status, limit);
-      res.json({ items: rows, total: rows.length });
+      const project = req.query.project as string | undefined;
+      const sql = project
+        ? 'SELECT * FROM quarantine WHERE status = ? AND project = ? ORDER BY created_at DESC LIMIT ?'
+        : 'SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT ?';
+      const params = project ? [status, project, limit] : [status, limit];
+      const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+      const items = rows.map((r) => ({
+        ...r,
+        title: r.original_title,
+        content: r.original_content,
+      }));
+      res.json({ items, total: items.length });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
