@@ -4,26 +4,97 @@
 [![npm downloads](https://img.shields.io/npm/dm/shieldcortex.svg)](https://www.npmjs.com/package/shieldcortex)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**The security layer for any AI agent's memory.** Like Cloudflare, but for everything your AI remembers — regardless of platform.
+## 🧠 + 🛡️ Complete Memory & Security for AI Agents
 
-Researchers have [demonstrated persistent memory attacks](https://embracethered.com/blog/posts/2024/chatgpt-hacking-memories/) on AI agents. Attackers can poison what your agent remembers — injecting instructions, stealing credentials, or assembling attacks across days of fragmented memories. **ShieldCortex stops that.**
+**ShieldCortex gives your AI agent persistent memory AND protects it from attack. One package. Full solution.**
 
-### Supported Agents
+Most AI agents are stateless — they forget everything between sessions. ShieldCortex fixes that with production-grade persistent memory. But memory creates risk: researchers have [demonstrated memory poisoning attacks](https://embracethered.com/blog/posts/2024/chatgpt-hacking-memories/) that hijack AI behaviour. **ShieldCortex is the only solution that solves both problems.**
 
-ShieldCortex is agent-agnostic middleware. It works with:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      ShieldCortex                           │
+├─────────────────────────────┬───────────────────────────────┤
+│     🧠 MEMORY SYSTEM        │     🛡️ SECURITY LAYER        │
+├─────────────────────────────┼───────────────────────────────┤
+│ • Persistent storage        │ • Memory firewall             │
+│ • Semantic search           │ • Prompt injection detection  │
+│ • Project scoping           │ • Credential protection       │
+│ • Importance ranking        │ • Sub-agent access control    │
+│ • Auto-cleanup & decay      │ • Full audit trail            │
+│ • Category organisation     │ • Threat quarantine           │
+└─────────────────────────────┴───────────────────────────────┘
+```
 
-- **[Claude Code](https://claude.ai)** — Native MCP server + hooks (`npx shieldcortex setup`)
-- **[OpenClaw / Moltbook](https://openclaw.dev)** — Native hook support (`npx shieldcortex clawdbot install`)
-- **[LangChain JS](https://js.langchain.com)** — `ShieldCortexMemory` adapter (`import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'`)
-- **Python frameworks (CrewAI, AutoGPT, etc.)** — Via REST API (`POST /api/v1/scan`)
-- **Any MCP-compatible agent** — Via `@langchain/mcp-adapters` or direct MCP protocol
-- **Any agent with a memory backend** — REST API for scanning, quarantine, and audit
-
-If your agent stores memories, ShieldCortex can protect them.
+**Stop choosing between memory and security. Get both.**
 
 ---
 
-## Is Your AI Agent Compromised?
+## What You Get
+
+### 🧠 Memory System (Production-Ready)
+- **Persistent storage** — SQLite-backed, survives restarts
+- **Semantic search** — Find memories by meaning, not just keywords
+- **Project scoping** — Isolate memories per project/context
+- **Importance levels** — Critical, high, normal, low with auto-decay
+- **Categories** — Architecture, decisions, preferences, context, learnings
+- **Auto-cleanup** — Configurable retention, importance-based expiry
+- **Full MCP support** — Works with any MCP-compatible agent
+
+### 🛡️ Security Layer (5 Defence Layers)
+| Layer | What It Does | Tier |
+|-------|-------------|------|
+| **Memory Firewall** | Blocks prompt injection, encoding tricks, hidden instructions | Free |
+| **Audit Logger** | Full forensic trail of every memory operation | Free |
+| **Trust Scorer** | Scores memories by source reliability | Free |
+| **Sub-Agent Security** | Access control, rate limiting, auto-quarantine | Free |
+| **Sensitivity Classifier** | Detects & redacts passwords, API keys, PII | Pro |
+| **Fragmentation Detector** | Catches slow-burn assembly attacks | Pro |
+
+### 🎯 Attack Vectors Blocked
+- **Direct injection** — `[SYSTEM: ignore previous]` hidden in content
+- **Credential harvesting** — Attempts to exfiltrate secrets
+- **Encoding tricks** — Base64/hex/unicode payloads
+- **Slow-burn assembly** — Attack fragments planted over days
+- **Privilege escalation** — System command references
+
+---
+
+## Quick Start (30 Seconds)
+
+```bash
+# Install globally
+npm install -g shieldcortex
+
+# Auto-configure for your agent (Claude Code, OpenClaw, LangChain, etc.)
+npx shieldcortex setup
+
+# That's it. Your agent now has persistent memory + security.
+```
+
+**Already using Claude Cortex?** Migrate in one command:
+```bash
+npx shieldcortex migrate
+```
+
+---
+
+## Supported Agents
+
+ShieldCortex is agent-agnostic middleware:
+
+| Agent | Integration |
+|-------|-------------|
+| **[Claude Code](https://claude.ai)** | `npx shieldcortex setup` — Native MCP server |
+| **[OpenClaw](https://openclaw.ai)** | `npx shieldcortex clawdbot install` — Native hooks |
+| **[LangChain JS](https://js.langchain.com)** | `import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'` |
+| **Python (CrewAI, AutoGPT)** | REST API — `POST /api/v1/scan` |
+| **Any MCP agent** | Via MCP protocol or `@langchain/mcp-adapters` |
+
+If your agent stores memories, ShieldCortex can power and protect them.
+
+---
+
+## Is Your AI Agent Already Compromised?
 
 Find out in 30 seconds:
 
@@ -31,343 +102,152 @@ Find out in 30 seconds:
 npx shieldcortex setup
 ```
 
-Then ask your AI agent: **"Scan my memories for threats"**
+Then ask your agent: **"Scan my memories for threats"**
 
 ShieldCortex will scan every stored memory and report:
 - Hidden instructions disguised as normal content
 - Credential harvesting attempts
-- Encoded payloads (base64, unicode tricks, hex)
-- Fragmented attack patterns spread across multiple memories
+- Encoded payloads (base64, unicode, hex)
+- Fragmented attack patterns spread across memories
 - Privilege escalation attempts
 
-**No threats found?** Great — now you're protected going forward too.
-
----
-
-## What It Does
-
-ShieldCortex is a defence pipeline that sits between AI agents and their memory:
-
-```
-Agent → ShieldCortex → Any Memory Backend
-         ↓
-    Scan → Score → Classify → Audit
-```
-
-Every memory write is scanned. Every memory read is filtered. Everything is logged.
-
-### Defence Layers
-
-| Layer | What It Catches | Tier |
-|-------|----------------|------|
-| **Memory Firewall** | Prompt injection, hidden instructions, encoding tricks, command injection | Free |
-| **Audit Logger** | Full forensic trail of every memory operation | Free |
-| **Trust Scorer** | Filters memories by source reliability — agent hierarchy with 0.7× decay per level | Free |
-| **Sub-Agent Security** | Access control, rate limiting, auto-quarantine for untrusted agents | Free |
-| **Sensitivity Classifier** | Detects passwords, API keys, PII — auto-redacts on recall | Pro |
-| **Fragmentation Detector** | Catches multi-step assembly attacks spread across days | Pro |
-
-### Attack Vectors Blocked
-
-1. **Direct injection** — `[SYSTEM: ignore previous instructions]` hidden in memory content
-2. **Credential harvesting** — Memories that try to exfiltrate API keys or passwords
-3. **Encoding tricks** — Base64/hex/unicode payloads that bypass text filters
-4. **Slow-burn assembly** — Attack fragments planted over days that combine into a full exploit
-5. **Privilege escalation** — Memories referencing system commands, file paths, or admin URLs
-
----
-
-## Quick Start
-
-### Fresh Install
-
-```bash
-# Install
-npm install -g shieldcortex
-
-# Auto-detect your agent and configure (works with Claude Code, OpenClaw, and more)
-npx shieldcortex setup
-
-# Restart your agent and approve the MCP server
-```
-
-### Migrating from Claude Cortex
-
-```bash
-# Non-destructive — copies your database, updates settings
-npx shieldcortex migrate
-
-# Restart your agent
-```
-
-Your existing memories are preserved. The original database stays intact at `~/.claude-cortex/` for rollback.
-
-### Verify Installation
-
-```bash
-npx shieldcortex doctor
-```
+**No threats found?** Great — now you're protected going forward.
 
 ---
 
 ## How It Works
 
-### Automatic Memory (via Hooks)
-
-When you run `npx shieldcortex setup`, three hooks are installed:
-
-| Hook | Fires When | What It Does |
-|------|-----------|--------------|
-| **SessionStart** | Session begins | Loads project context from memory |
-| **PreCompact** | Before context compaction | Extracts important content before it's lost |
-| **SessionEnd** | Session exits | Saves decisions, fixes, and learnings |
-
-**What gets auto-extracted:**
-- Decisions: "decided to...", "going with...", "chose..."
-- Error fixes: "fixed by...", "the solution was...", "root cause..."
-- Learnings: "learned that...", "discovered...", "turns out..."
-- Architecture: "the architecture uses...", "design pattern..."
-
-### Brain-Like Memory Model
-
-ShieldCortex doesn't just store text — it thinks like a brain:
-
-- **Short-term → Long-term** promotion based on access frequency
-- **Salience detection** — auto-scores what's worth keeping
-- **Temporal decay** — unused memories fade, accessed memories strengthen
-- **Knowledge graph** — entities and relationships extracted automatically
-
-### Defence Pipeline
-
-Every `addMemory()` call runs through the defence pipeline:
-
-1. **Trust scoring** — source gets a trust score (user=1.0, CLI=0.9, agents=hierarchy-based with 0.7× decay)
-2. **Firewall scan** — content checked for injection, encoding, privilege escalation
-3. **Sensitivity classification** — detects secrets, PII, credentials
-4. **Fragmentation analysis** — cross-references with recent memories for assembly patterns
-5. **Access control** — sub-agents auto-quarantined, rate-limited (20 writes/min), credential access blocked below trust 0.7
-6. **Audit logging** — full record regardless of outcome
-7. **Decision** — ALLOW, QUARANTINE, or BLOCK
-
-On recall, memories are filtered by trust score and sensitivity level. RESTRICTED content is redacted.
-
-### Sub-Agent Security
-
-AI agents spawn sub-agents that inherit full system access. ShieldCortex isolates them:
-
-- **Agent hierarchy trust** — `user-spawned>task-1>subtask` scores decay 0.7× per level (max depth 5)
-- **Read ACLs** — trust ≥0.7: all memories; 0.5–0.7: own + shared; <0.5: own only
-- **Write restrictions** — untrusted agents auto-quarantined, parent approves
-- **Rate limiting** — 20 writes/min per source, hard block on exceed
-- **Credential isolation** — RESTRICTED memories blocked below trust 0.7
-- **Quarantine auto-expiry** — unreviewed items auto-rejected after 7 days
-- **Environment-based inference** — auto-detects Claude Code agents from env vars (not forgeable via MCP)
-- **Uninstall protection** — blocks agents from removing ShieldCortex
+```
+┌──────────┐     ┌──────────────────────────────────┐     ┌─────────────┐
+│          │     │          ShieldCortex            │     │             │
+│  Agent   │────▶│  Scan → Score → Store → Index   │────▶│  SQLite DB  │
+│          │     │  Filter → Audit → Protect        │     │             │
+└──────────┘     └──────────────────────────────────┘     └─────────────┘
+     │                          │
+     │    ┌─────────────────────┴─────────────────────┐
+     │    │              On Every Write:              │
+     │    │  ✓ Scan for injection patterns           │
+     │    │  ✓ Detect credential exposure            │
+     │    │  ✓ Check encoding tricks                 │
+     │    │  ✓ Score trust level                     │
+     │    │  ✓ Log to audit trail                    │
+     │    └───────────────────────────────────────────┘
+     │
+     │    ┌─────────────────────────────────────────────┐
+     └───▶│              On Every Read:                │
+          │  ✓ Filter by trust threshold              │
+          │  ✓ Semantic search & ranking              │
+          │  ✓ Redact sensitive content               │
+          │  ✓ Log access to audit trail              │
+          └─────────────────────────────────────────────┘
+```
 
 ---
 
-## MCP Tools
+## Configuration
 
-| Tool | Description |
-|------|-------------|
-| `remember` | Store a memory (optional — hooks do this automatically) |
-| `recall` | Search memories by query, category, or tags |
-| `forget` | Delete memories |
-| `get_context` | Get relevant project context |
-| `memory_stats` | View memory statistics |
-| `scan_memories` | Scan existing memories for threats |
-| `audit_query` | Query the defence audit trail |
-| `quarantine_review` | Review quarantined memories |
-| `defence_stats` | Threat counts, trust distribution |
-| `graph_query` | Traverse the knowledge graph |
-| `graph_entities` | List known entities |
-| `graph_explain` | Find paths between entities |
+```json
+{
+  "memory": {
+    "database": "~/.shieldcortex/memory.db",
+    "maxMemories": 10000,
+    "defaultImportance": "normal",
+    "decayEnabled": true,
+    "decayHalfLifeDays": 30
+  },
+  "security": {
+    "enableFirewall": true,
+    "enableAudit": true,
+    "trustThreshold": 0.5,
+    "quarantineOnThreat": true
+  },
+  "search": {
+    "semanticEnabled": true,
+    "maxResults": 20
+  }
+}
+```
 
 ---
 
-## Dashboard
+## CLI Commands
 
 ```bash
-npx shieldcortex --dashboard
+# Setup & Migration
+shieldcortex setup              # Auto-configure for your agent
+shieldcortex migrate            # Migrate from Claude Cortex
+
+# Memory Operations
+shieldcortex remember "fact"    # Store a memory
+shieldcortex recall "query"     # Search memories
+shieldcortex forget <id>        # Delete a memory
+shieldcortex list               # List recent memories
+
+# Security Operations
+shieldcortex scan               # Scan all memories for threats
+shieldcortex audit              # View audit log
+shieldcortex quarantine list    # View quarantined memories
+shieldcortex trust <id> <score> # Manually set trust score
+
+# Dashboard
+shieldcortex dashboard          # Open web dashboard (Pro)
 ```
-
-- **Dashboard**: http://localhost:3030
-- **API**: http://localhost:3001
-
-Views: Shield (defence overview), Audit Log, Quarantine, Memories, 3D Brain, Knowledge Graph.
-
-### Auto-start on login
-
-```bash
-npx shieldcortex service install    # Enable
-npx shieldcortex service uninstall  # Disable
-npx shieldcortex service status     # Check
-```
-
-Works on macOS (launchd), Linux (systemd), and Windows.
 
 ---
 
-## CLI Reference
+## Why ShieldCortex?
 
-```bash
-npx shieldcortex setup              # Auto-detect agent + configure hooks
-npx shieldcortex migrate            # Migrate from Claude Cortex
-npx shieldcortex doctor             # Check installation health
-npx shieldcortex --dashboard        # Start dashboard + API
-npx shieldcortex --version          # Show version
-npx shieldcortex service install    # Auto-start on login
-npx shieldcortex graph backfill     # Extract entities from existing memories
-npx shieldcortex clawdbot install   # Install OpenClaw hook
-npx shieldcortex uninstall          # Full uninstall (requires confirmation)
-npx shieldcortex uninstall --confirm # Non-interactive uninstall
-```
+| Feature | Claude Cortex | Mem0 | Zep | **ShieldCortex** |
+|---------|---------------|------|-----|------------------|
+| Persistent Memory | ✅ | ✅ | ✅ | ✅ |
+| Semantic Search | ✅ | ✅ | ✅ | ✅ |
+| Prompt Injection Detection | ❌ | ❌ | ❌ | ✅ |
+| Memory Firewall | ❌ | ❌ | ❌ | ✅ |
+| Sub-Agent Access Control | ❌ | ❌ | ❌ | ✅ |
+| Audit Trail | ❌ | ❌ | ⚠️ | ✅ |
+| Credential Protection | ❌ | ❌ | ❌ | ✅ |
+| MCP Native | ✅ | ❌ | ❌ | ✅ |
+| Self-Hosted | ✅ | ❌ | ⚠️ | ✅ |
+| Open Source | ✅ | ⚠️ | ⚠️ | ✅ |
+
+**ShieldCortex is the only memory system built for adversarial conditions.**
 
 ---
 
 ## Pricing
 
-| | Free (npm) | Pro (coming soon) |
-|---|---|---|
-| Memory Firewall | Yes | Yes |
-| Audit Logger | Yes | Yes |
-| Trust Scorer | Yes | Yes |
-| Retroactive Scanner | Yes | Yes |
-| Sensitivity Classifier | — | Yes |
-| Fragmentation Detector | — | Yes |
-| Cloud API | — | Yes |
-| Dashboard & Alerts | — | Yes |
-| Compliance Exports | — | Yes |
+| Tier | What You Get | Price |
+|------|--------------|-------|
+| **Free** | Full memory system + core security (firewall, audit, trust scoring) | £0 |
+| **Pro** | + Sensitivity classifier, fragmentation detector, web dashboard | £29/mo |
+| **Team** | + Multi-agent coordination, shared memory pools, team audit | £99/mo |
+| **Enterprise** | + SSO, SLA, dedicated support, custom integrations | Contact us |
 
-Free tier is fully functional for individual developers. Pro adds enterprise defence layers and a hosted cloud API.
+[Get Started Free](https://shieldcortex.ai) • [View Pricing](https://shieldcortex.ai/pricing)
 
 ---
 
-## Advanced Configuration
+## Links
 
-<details>
-<summary>Alternative install methods</summary>
-
-### Use with npx (no global install)
-
-Create `.mcp.json` in your project directory:
-
-```json
-{
-  "mcpServers": {
-    "memory": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "shieldcortex"]
-    }
-  }
-}
-```
-
-### Install from source
-
-```bash
-git clone https://github.com/Drakon-Systems-Ltd/ShieldCortex.git
-cd ShieldCortex
-npm install
-npm run build
-```
-
-</details>
-
-<details>
-<summary>Custom database location</summary>
-
-Default: `~/.shieldcortex/memories.db`
-
-```bash
-npx shieldcortex --db /path/to/custom.db
-```
-
-</details>
-
-<details>
-<summary>Environment variables</summary>
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3001` | API server port |
-| `CORTEX_CORS_ORIGINS` | `localhost:3030,localhost:3000` | Allowed CORS origins |
-
-</details>
+- 🌐 **Website:** [shieldcortex.ai](https://shieldcortex.ai)
+- 📦 **npm:** [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex)
+- 🐙 **GitHub:** [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex)
+- 📖 **Docs:** [docs.shieldcortex.ai](https://docs.shieldcortex.ai)
+- 🏢 **By:** [Drakon Systems](https://drakonsystems.com)
 
 ---
 
-## LangChain Integration
+## Contributing
 
-```javascript
-import { ShieldCortexMemory, ShieldCortexGuard } from 'shieldcortex/integrations/langchain';
-
-// As a LangChain memory backend (scans before storing)
-const memory = new ShieldCortexMemory({ mode: 'balanced' });
-const vars = await memory.loadMemoryVariables({ input: 'deployment config' });
-await memory.saveContext({ input: 'hello' }, { output: 'hi' });
-
-// As standalone middleware (scan without storing)
-const guard = new ShieldCortexGuard();
-const result = guard.scan('some content to check');
-if (!result.allowed) {
-  console.warn('Blocked:', result.firewall.reason);
-}
-```
-
-## REST API (Any Agent)
-
-Start the API server, then scan content from any language or framework:
-
-```bash
-npm run dev:api   # Starts on http://localhost:3001
-```
-
-```bash
-# Scan content
-curl -X POST http://localhost:3001/api/v1/scan \
-  -H 'Content-Type: application/json' \
-  -d '{"content": "memory to scan", "title": "test"}'
-
-# Batch scan
-curl -X POST http://localhost:3001/api/v1/scan/batch \
-  -H 'Content-Type: application/json' \
-  -d '{"items": [{"content": "item 1"}, {"content": "item 2"}]}'
-
-# Query audit logs
-curl http://localhost:3001/api/v1/audit?firewallResult=BLOCK
-
-# List quarantined items
-curl http://localhost:3001/api/v1/quarantine
-
-# Approve/reject quarantined items
-curl -X POST http://localhost:3001/api/v1/quarantine/1/approve
-curl -X POST http://localhost:3001/api/v1/quarantine/1/reject
-```
-
-All defence layers run automatically — firewall, trust scoring, sensitivity classification, and audit logging.
-
----
-
-## OpenClaw / Clawdbot Integration
-
-```bash
-npx shieldcortex clawdbot install
-```
-
-The **cortex-memory** hook provides auto-save on `/new`, context injection on bootstrap, and keyword triggers ("remember this").
-
----
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical design — memory model, defence pipeline internals, database schema, and file structure.
-
----
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-MIT
+MIT © [Drakon Systems Ltd](https://drakonsystems.com)
 
-**Built by [Drakon Systems](https://github.com/Drakon-Systems-Ltd)**
+---
+
+<p align="center">
+  <strong>Give your AI agent a brain that fights back.</strong><br>
+  <a href="https://shieldcortex.ai">shieldcortex.ai</a>
+</p>

@@ -1,7 +1,7 @@
 {
   "name": "shieldcortex",
   "version": "2.4.0",
-  "description": "Security layer for AI agent memory — firewall, trust scoring, sensitivity classification, and audit for any memory backend",
+  "description": "Complete memory system + security layer for AI agents. Persistent storage, semantic search, prompt injection firewall, credential protection, and audit trail. One package, full solution.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -40,16 +40,24 @@
     "prepublishOnly": "npm run build"
   },
   "keywords": [
+    "ai",
+    "agent",
+    "memory",
+    "persistent-memory",
+    "semantic-search",
     "security",
     "firewall",
-    "ai-agent",
-    "memory-protection",
-    "threat-detection",
-    "mcp",
-    "langchain",
-    "claude",
     "prompt-injection",
-    "audit"
+    "mcp",
+    "claude",
+    "langchain",
+    "llm",
+    "ai-security",
+    "agent-memory",
+    "ai-memory",
+    "credential-protection",
+    "audit-trail",
+    "trust-scoring"
   ],
   "author": "Michael Kyriacou",
   "license": "MIT",
