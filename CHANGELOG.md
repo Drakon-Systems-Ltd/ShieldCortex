@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.2] - 2026-02-03
+
+### Changed
+- **Renamed `clawdbot` command to `openclaw`** — CLI command is now `npx shieldcortex openclaw install|uninstall|status`. The old `clawdbot` command still works as a backward-compat alias.
+- **README restructured** — merged marketing content with technical documentation, added platform badges and comparison table.
+
 ## [2.2.0] - 2026-02-01
 
 ### Dashboard
