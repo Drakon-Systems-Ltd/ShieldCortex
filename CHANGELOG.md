@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.4] - 2026-02-03
+
+### Fixed
+- **MCP server startup hang** — removed synchronous `consolidate()` call that blocked server initialization on large databases. The 4-hour periodic cleanup handles consolidation instead.
+
+## [2.4.3] - 2026-02-03
+
+### Added
+- **`npx shieldcortex status` command** — shows database size, memory counts, projects, and defence stats
+- **Auto-create GitHub release on tag push** — CI workflow creates release automatically
+- **Multi-Agent Security docs** — added trust hierarchy details to README
+
 ## [2.4.2] - 2026-02-03
 
 ### Changed

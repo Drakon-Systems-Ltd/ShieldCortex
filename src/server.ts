@@ -789,13 +789,8 @@ but you can use this tool to check for new contradictions at any time.`,
   // AUTO-CONSOLIDATION (Anti-bloat)
   // ============================================
 
-  // Run initial consolidation on startup
-  try {
-    const startupResult = consolidate();
-    console.error(`[shieldcortex] Startup consolidation: ${startupResult.consolidated} promoted, ${startupResult.deleted} deleted`);
-  } catch (e) {
-    console.error('[shieldcortex] Startup consolidation failed:', e);
-  }
+  // NOTE: Removed synchronous startup consolidation - it was blocking server init
+  // on large databases. The 4-hour periodic cleanup handles consolidation instead.
 
   // Check database size on startup
   const sizeInfo = checkDatabaseSize();
