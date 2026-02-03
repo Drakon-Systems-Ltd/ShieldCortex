@@ -3,6 +3,8 @@
 [![npm version](https://img.shields.io/npm/v/shieldcortex.svg)](https://www.npmjs.com/package/shieldcortex)
 [![npm downloads](https://img.shields.io/npm/dm/shieldcortex.svg)](https://www.npmjs.com/package/shieldcortex)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)](https://github.com/Drakon-Systems-Ltd/ShieldCortex)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 
 ## 🧠 + 🛡️ Complete Memory & Security for AI Agents
 
@@ -91,6 +93,18 @@ ShieldCortex is agent-agnostic middleware:
 | **Any MCP agent** | Via MCP protocol or `@langchain/mcp-adapters` |
 
 If your agent stores memories, ShieldCortex can power and protect them.
+
+---
+
+## Requirements
+
+| Requirement | Version |
+|-------------|---------|
+| **Node.js** | ≥ 18.0.0 |
+| **Platform** | macOS, Linux, or Windows |
+| **Storage** | ~50MB for SQLite database |
+
+ShieldCortex runs anywhere Node.js runs. No external dependencies. No Docker required. Just `npm install` and go.
 
 ---
 
