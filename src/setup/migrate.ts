@@ -2,11 +2,13 @@
  * Migration from Claude Cortex / Claude Memory to ShieldCortex.
  *
  * Non-destructive: copies database (doesn't move), replaces settings entries.
+ * Also cleans up old LaunchAgents and npm packages to prevent conflicts.
  */
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 const CLAUDE_MD_PATH = path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -21,6 +23,118 @@ const OLD_MARKERS = ['# Claude Cortex', '# Claude Memory'];
 const NEW_MARKER = '# ShieldCortex';
 
 const OLD_PATTERNS = ['claude-cortex', 'claude-memory'];
+
+// Old LaunchAgent/service names to clean up
+const OLD_LAUNCH_AGENTS = [
+  'com.claude-cortex.dashboard.plist',
+  'com.claude-memory.dashboard.plist',
+];
+
+const OLD_SYSTEMD_SERVICES = [
+  'claude-cortex-dashboard.service',
+  'claude-memory-dashboard.service',
+];
+
+/**
+ * Clean up old npm packages that might conflict or auto-start old dashboards.
+ */
+export function cleanupOldNpmPackages(): { uninstalled: string[] } {
+  const uninstalled: string[] = [];
+
+  for (const pkg of OLD_PATTERNS) {
+    try {
+      // Check if package is installed globally
+      const result = execSync(`npm list -g ${pkg} 2>/dev/null`, { encoding: 'utf-8' });
+      if (result.includes(pkg)) {
+        console.log(`  Uninstalling old package: ${pkg}...`);
+        execSync(`npm uninstall -g ${pkg}`, { stdio: 'pipe' });
+        uninstalled.push(pkg);
+        console.log(`  ✓ Uninstalled ${pkg}`);
+      }
+    } catch {
+      // Package not installed or uninstall failed — ignore
+    }
+  }
+
+  if (uninstalled.length === 0) {
+    console.log('  No old npm packages found to remove.');
+  }
+
+  return { uninstalled };
+}
+
+/**
+ * Clean up old LaunchAgents (macOS) or systemd services (Linux) that would auto-start
+ * the deprecated dashboard on reboot.
+ */
+export function cleanupOldServices(): { removed: string[] } {
+  const removed: string[] = [];
+  const platform = process.platform;
+
+  if (platform === 'darwin') {
+    // macOS: Clean up LaunchAgents
+    const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
+
+    for (const agent of OLD_LAUNCH_AGENTS) {
+      const agentPath = path.join(launchAgentsDir, agent);
+      if (fs.existsSync(agentPath)) {
+        try {
+          // Unload first (ignore errors if not loaded)
+          try {
+            execSync(`launchctl unload "${agentPath}" 2>/dev/null`, { stdio: 'pipe' });
+          } catch {
+            // May not be loaded — that's fine
+          }
+
+          fs.unlinkSync(agentPath);
+          removed.push(agent);
+          console.log(`  ✓ Removed old LaunchAgent: ${agent}`);
+        } catch (err: any) {
+          console.error(`  Failed to remove ${agent}: ${err.message}`);
+        }
+      }
+    }
+  } else if (platform === 'linux') {
+    // Linux: Clean up systemd user services
+    const systemdDir = path.join(os.homedir(), '.config', 'systemd', 'user');
+
+    for (const service of OLD_SYSTEMD_SERVICES) {
+      const servicePath = path.join(systemdDir, service);
+      if (fs.existsSync(servicePath)) {
+        try {
+          // Disable and stop first
+          const serviceName = service.replace('.service', '');
+          try {
+            execSync(`systemctl --user disable --now ${serviceName} 2>/dev/null`, { stdio: 'pipe' });
+          } catch {
+            // May not be enabled — that's fine
+          }
+
+          fs.unlinkSync(servicePath);
+          removed.push(service);
+          console.log(`  ✓ Removed old systemd service: ${service}`);
+        } catch (err: any) {
+          console.error(`  Failed to remove ${service}: ${err.message}`);
+        }
+      }
+    }
+
+    // Reload systemd if we removed anything
+    if (removed.length > 0) {
+      try {
+        execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
+      } catch {
+        // Ignore reload errors
+      }
+    }
+  }
+
+  if (removed.length === 0) {
+    console.log('  No old services found to remove.');
+  }
+
+  return { removed };
+}
 
 export function migrateSettings(): { mcpSwapped: number; hooksSwapped: number } {
   let mcpSwapped = 0;
@@ -202,19 +316,27 @@ export function migrateClaudeMd(): boolean {
 export async function handleMigrateCommand(): Promise<void> {
   console.log('Migrating from Claude Cortex → ShieldCortex...\n');
 
-  console.log('[1/3] Settings (MCP server + hooks)');
+  console.log('[1/5] Settings (MCP server + hooks)');
   const { mcpSwapped, hooksSwapped } = migrateSettings();
 
-  console.log('\n[2/3] Database');
+  console.log('\n[2/5] Database');
   const { copied, merged, mergedCount, source } = migrateDatabase();
 
-  console.log('\n[3/3] CLAUDE.md');
+  console.log('\n[3/5] CLAUDE.md');
   const mdChanged = migrateClaudeMd();
+
+  console.log('\n[4/5] Cleanup old npm packages');
+  const { uninstalled } = cleanupOldNpmPackages();
+
+  console.log('\n[5/5] Cleanup old services (LaunchAgents/systemd)');
+  const { removed } = cleanupOldServices();
 
   console.log('\n─────────────────────────────────');
   console.log('Migration complete.');
 
-  if (mcpSwapped === 0 && hooksSwapped === 0 && !copied && !merged && !mdChanged) {
+  const noChanges = mcpSwapped === 0 && hooksSwapped === 0 && !copied && !merged && !mdChanged && uninstalled.length === 0 && removed.length === 0;
+
+  if (noChanges) {
     console.log('Nothing to migrate — you\'re already on ShieldCortex.');
   } else {
     console.log('\nWhat changed:');
@@ -223,6 +345,8 @@ export async function handleMigrateCommand(): Promise<void> {
     if (copied) console.log(`  ✓ Database copied (original preserved at ${source})`);
     if (merged) console.log(`  ✓ ${mergedCount} memories merged from ${source}`);
     if (mdChanged) console.log(`  ✓ CLAUDE.md markers updated`);
+    if (uninstalled.length > 0) console.log(`  ✓ Uninstalled old npm packages: ${uninstalled.join(', ')}`);
+    if (removed.length > 0) console.log(`  ✓ Removed old services: ${removed.join(', ')}`);
     console.log('\nRestart Claude Code to use the new configuration.');
   }
 }
