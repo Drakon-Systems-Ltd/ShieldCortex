@@ -59,6 +59,27 @@ Most AI agents are stateless — they forget everything between sessions. Shield
 - **Slow-burn assembly** — Attack fragments planted over days
 - **Privilege escalation** — System command references
 
+### 🤖 Multi-Agent Security
+
+Running multiple agents or sub-agents? ShieldCortex prevents rogue agents from accessing sensitive data:
+
+| Feature | What It Does |
+|---------|--------------|
+| **Hierarchical Trust Decay** | Sub-agents get lower trust: `user-spawned` (0.9) → `>task-1` (0.63) → `>subtask-2` (0.44) |
+| **Origin-Based Scoring** | Different trust by source: user (0.9), cron (0.5), agent-spawned (0.3), web (0.2) |
+| **Credential Isolation** | RESTRICTED memories blocked below trust 0.7 — sub-agents can't access secrets |
+| **Depth Circuit Breaker** | Agents beyond depth 5 get trust = 0 (blocked entirely) |
+| **Auto-Quarantine** | Low-trust writes go to quarantine for human review |
+| **Environment Detection** | Auto-detects sub-agents from `CLAUDE_CODE_ENTRYPOINT` — zero config |
+
+```
+Trust ≥0.7  → Read all, write direct, delete own
+Trust 0.5–0.7 → Read own + non-restricted, quarantine writes
+Trust <0.5  → Read own only, quarantine only, no delete
+```
+
+**Result:** A sub-agent spawning another sub-agent that tries to read your API keys? **Blocked.**
+
 ---
 
 ## Quick Start
