@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "Complete memory system + security layer for AI agents. Persistent storage, semantic search, prompt injection firewall, credential protection, and audit trail. One package, full solution.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

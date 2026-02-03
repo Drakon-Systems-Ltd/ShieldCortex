@@ -1,0 +1,144 @@
+/**
+ * Status command - Display ShieldCortex database and system status
+ */
+
+import path from 'path';
+import os from 'os';
+import fs from 'fs';
+import { initDatabase, getDatabase } from '../database/init.js';
+
+interface StatusInfo {
+  dbPath: string;
+  dbSize: string;
+  memoriesTotal: number;
+  memoriesLongTerm: number;
+  memoriesShortTerm: number;
+  memoriesEpisodic: number;
+  projects: string[];
+  lastActivity: string | null;
+  quarantined: number;
+  threatsBlocked: number;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatRelativeTime(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins} minute${diffMins === 1 ? '' : 's'} ago`;
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
+  if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
+  return date.toLocaleDateString();
+}
+
+function getStatusInfo(dbPath: string): StatusInfo {
+  // Initialize database
+  initDatabase(dbPath);
+  const db = getDatabase();
+
+  // Get database file size
+  let dbSize = '0 B';
+  try {
+    const stats = fs.statSync(dbPath);
+    dbSize = formatBytes(stats.size);
+  } catch {
+    dbSize = 'unknown';
+  }
+
+  // Count memories by type
+  const totalRow = db.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number };
+  const longTermRow = db.prepare("SELECT COUNT(*) as count FROM memories WHERE type = 'long_term'").get() as { count: number };
+  const shortTermRow = db.prepare("SELECT COUNT(*) as count FROM memories WHERE type = 'short_term'").get() as { count: number };
+  const episodicRow = db.prepare("SELECT COUNT(*) as count FROM memories WHERE type = 'episodic'").get() as { count: number };
+
+  // Get unique projects
+  const projectRows = db.prepare("SELECT DISTINCT project FROM memories WHERE project IS NOT NULL AND project != ''").all() as { project: string }[];
+  const projects = projectRows.map(r => r.project);
+
+  // Get last activity
+  const lastRow = db.prepare('SELECT last_accessed FROM memories ORDER BY last_accessed DESC LIMIT 1').get() as { last_accessed: string } | undefined;
+  const lastActivity = lastRow ? formatRelativeTime(lastRow.last_accessed) : null;
+
+  // Get defence stats (quarantine table might not exist in older DBs)
+  let quarantined = 0;
+  let threatsBlocked = 0;
+  try {
+    const quarantineRow = db.prepare("SELECT COUNT(*) as count FROM quarantine WHERE status = 'pending'").get() as { count: number };
+    quarantined = quarantineRow.count;
+    const blockedRow = db.prepare("SELECT COUNT(*) as count FROM quarantine WHERE status = 'rejected'").get() as { count: number };
+    threatsBlocked = blockedRow.count;
+  } catch {
+    // Quarantine table doesn't exist - that's fine
+  }
+
+  return {
+    dbPath,
+    dbSize,
+    memoriesTotal: totalRow.count,
+    memoriesLongTerm: longTermRow.count,
+    memoriesShortTerm: shortTermRow.count,
+    memoriesEpisodic: episodicRow.count,
+    projects,
+    lastActivity,
+    quarantined,
+    threatsBlocked,
+  };
+}
+
+export async function handleStatusCommand(): Promise<void> {
+  // Determine database path
+  const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.shieldcortex', 'memories.db');
+
+  // Check if database exists
+  if (!fs.existsSync(dbPath)) {
+    console.log(`
+🧠 ShieldCortex Status
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ⚠️  No database found at: ${dbPath}
+
+  Run 'npx shieldcortex setup' to get started.
+`);
+    return;
+  }
+
+  try {
+    const info = getStatusInfo(dbPath);
+
+    const projectList = info.projects.length > 0 
+      ? info.projects.slice(0, 5).join(', ') + (info.projects.length > 5 ? ` (+${info.projects.length - 5} more)` : '')
+      : 'none';
+
+    console.log(`
+🧠 ShieldCortex Status
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Database:      ${info.dbPath}
+  Size:          ${info.dbSize}
+
+  Memories:      ${info.memoriesTotal} total
+                 ├─ ${info.memoriesLongTerm} long-term
+                 ├─ ${info.memoriesShortTerm} short-term
+                 └─ ${info.memoriesEpisodic} episodic
+  Projects:      ${info.projects.length} (${projectList})
+  Last activity: ${info.lastActivity || 'never'}
+
+  Defence:       ${info.quarantined} quarantined, ${info.threatsBlocked} threats blocked
+`);
+  } catch (error) {
+    console.error('Failed to get status:', error);
+    process.exit(1);
+  }
+}

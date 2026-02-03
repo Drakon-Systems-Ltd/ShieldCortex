@@ -13,6 +13,7 @@
  *   npx shieldcortex --mode both             # Start both servers
  *   npx shieldcortex --dashboard             # Start API + Dashboard (admin panel)
  *   npx shieldcortex --db /path/to.db        # Custom database path
+ *   npx shieldcortex status                   # Show database and system status
  *   npx shieldcortex setup                    # Configure Claude for proactive memory use
  *   npx shieldcortex hook pre-compact         # Run pre-compact hook (for settings.json)
  *   npx shieldcortex hook session-start       # Run session-start hook (for settings.json)
@@ -216,6 +217,13 @@ async function main() {
   // Handle "service" subcommand before normal mode parsing
   if (process.argv[2] === 'service') {
     await handleServiceCommand(process.argv[3] || '');
+    return;
+  }
+
+  // Handle "status" subcommand
+  if (process.argv[2] === 'status') {
+    const { handleStatusCommand } = await import('./setup/status.js');
+    await handleStatusCommand();
     return;
   }
 
