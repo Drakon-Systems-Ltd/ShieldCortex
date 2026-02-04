@@ -209,14 +209,47 @@ curl -X POST http://localhost:3001/api/v1/quarantine/1/reject
 
 ## OpenClaw Integration
 
+**One command. Persistent memory for every OpenClaw session.**
+
 ```bash
-npx shieldcortex openclaw install
+sudo npx shieldcortex openclaw install
 ```
 
-The **cortex-memory** hook provides:
-- Auto-save on `/new` command
-- Context injection on bootstrap
-- Keyword triggers ("remember this...")
+This installs the **cortex-memory** hook directly into OpenClaw's bundled hooks directory. No configuration needed.
+
+### What It Does
+
+```
+Session Start                During Session              Session End (/new)
+     │                            │                            │
+     ▼                            ▼                            ▼
+┌─────────────┐           ┌─────────────┐           ┌─────────────┐
+│ Inject past │           │ "remember   │           │ Auto-extract│
+│ context     │           │  this: ..." │           │ decisions,  │
+│ into agent  │           │  → save     │           │ fixes, etc. │
+└─────────────┘           └─────────────┘           └─────────────┘
+```
+
+| Feature | What Happens |
+|---------|--------------|
+| **Context Injection** | On session start, relevant past memories are injected into the agent's bootstrap context |
+| **Keyword Triggers** | Say "remember this:" or "don't forget:" followed by content to save it with critical importance |
+| **Auto-Extraction** | On `/new`, the hook extracts architecture decisions, bug fixes, and learnings from the ending session |
+| **Security** | All content passes through the 5-layer defence pipeline before storage |
+
+### Shared Memory
+
+The database (`~/.shieldcortex/memories.db`) is shared with Claude Code. Memories created in OpenClaw appear instantly in Claude Code sessions, and vice versa.
+
+### Commands
+
+```bash
+sudo npx shieldcortex openclaw install    # Install hook
+sudo npx shieldcortex openclaw uninstall  # Remove hook
+npx shieldcortex openclaw status          # Check status
+```
+
+[Full documentation](docs/openclaw-integration.md)
 
 ---
 

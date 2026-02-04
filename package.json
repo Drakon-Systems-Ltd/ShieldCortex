@@ -1,7 +1,7 @@
 {
   "name": "shieldcortex",
   "version": "2.4.5",
-  "description": "Complete memory system + security layer for AI agents. Persistent storage, semantic search, prompt injection firewall, credential protection, and audit trail. One package, full solution.",
+  "description": "Complete memory system + security layer for AI agents. Native OpenClaw integration. Persistent storage, semantic search, prompt injection firewall, credential protection, and audit trail. One package, full solution.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -57,7 +57,11 @@
     "ai-memory",
     "credential-protection",
     "audit-trail",
-    "trust-scoring"
+    "trust-scoring",
+    "openclaw",
+    "moltbot",
+    "clawdbot",
+    "coding-assistant"
   ],
   "author": "Michael Kyriacou",
   "license": "MIT",
