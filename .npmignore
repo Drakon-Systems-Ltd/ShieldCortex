@@ -29,3 +29,23 @@ tsconfig.json
 # Temporary files
 *.log
 .DS_Store
+
+# Dashboard - exclude everything except standalone build
+dashboard/src/
+dashboard/app/
+dashboard/components/
+dashboard/lib/
+dashboard/hooks/
+dashboard/node_modules/
+dashboard/.next/cache/
+dashboard/.next/dev/
+dashboard/.next/diagnostics/
+dashboard/.next/build/
+dashboard/.next/*.json
+dashboard/tsconfig.json
+dashboard/tailwind.config.*
+dashboard/postcss.config.*
+dashboard/eslint.config.*
+dashboard/components.json
+dashboard/package-lock.json
+# Keep standalone build (included via files array)
