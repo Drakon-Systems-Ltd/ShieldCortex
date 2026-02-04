@@ -15,6 +15,7 @@
  *   npx shieldcortex --db /path/to.db        # Custom database path
  *   npx shieldcortex status                   # Show database and system status
  *   npx shieldcortex setup                    # Configure Claude for proactive memory use
+ *   npx shieldcortex install                  # Alias for setup
  *   npx shieldcortex hook pre-compact         # Run pre-compact hook (for settings.json)
  *   npx shieldcortex hook session-start       # Run session-start hook (for settings.json)
  *   npx shieldcortex hook session-end         # Run session-end hook (for settings.json)
@@ -195,8 +196,8 @@ async function main() {
     return;
   }
 
-  // Handle "setup" subcommand
-  if (process.argv[2] === 'setup') {
+  // Handle "setup" subcommand (alias: "install")
+  if (process.argv[2] === 'setup' || process.argv[2] === 'install') {
     if (process.argv[3] === 'uninstall') {
       const { uninstallSetup } = await import('./setup/uninstall.js');
       await uninstallSetup();

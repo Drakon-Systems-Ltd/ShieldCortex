@@ -6,7 +6,7 @@
  * including related memories and decay visualization
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { Memory, MemoryLink } from '@/types/memory';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,8 @@ interface MemoryDetailProps {
   onClose: () => void;
   onReinforce?: (id: number) => void;
   onSelectMemory?: (id: number) => void;
+  isReinforcing?: boolean;
+  reinforceSuccess?: boolean;
 }
 
 // Relationship styling
@@ -48,7 +50,26 @@ export function MemoryDetail({
   onClose,
   onReinforce,
   onSelectMemory,
+  isReinforcing = false,
+  reinforceSuccess = false,
 }: MemoryDetailProps) {
+  const [showSuccessFlash, setShowSuccessFlash] = useState(false);
+  const [lastReinforcedId, setLastReinforcedId] = useState<number | null>(null);
+
+  // Show success flash when reinforcement completes
+  useEffect(() => {
+    if (reinforceSuccess && lastReinforcedId === memory.id) {
+      setShowSuccessFlash(true);
+      const timer = setTimeout(() => setShowSuccessFlash(false), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [reinforceSuccess, lastReinforcedId, memory.id]);
+
+  const handleReinforce = () => {
+    setLastReinforcedId(memory.id);
+    onReinforce?.(memory.id);
+  };
+
   const decayFactor = calculateDecayFactor(memory);
   const categoryColor = getCategoryColor(memory.category);
   const typeColor = getTypeColor(memory.type);
@@ -109,7 +130,7 @@ export function MemoryDetail({
   };
 
   return (
-    <Card className="bg-slate-900 border-slate-700 h-full overflow-auto">
+    <Card className={`bg-slate-900 border-slate-700 h-full overflow-auto transition-all duration-300 ${showSuccessFlash ? 'ring-2 ring-green-500 ring-opacity-75' : ''}`}>
       <CardHeader className="border-b border-slate-700 pb-3">
         <div className="flex items-start justify-between gap-2">
           <CardTitle className="text-lg font-semibold text-white leading-tight">
@@ -211,17 +232,17 @@ export function MemoryDetail({
         </div>
 
         {/* Access info */}
-        <div className="bg-slate-800 rounded-lg p-3 space-y-2">
+        <div className={`bg-slate-800 rounded-lg p-3 space-y-2 transition-all duration-300 ${showSuccessFlash ? 'ring-1 ring-green-500/50' : ''}`}>
           <div className="flex justify-between items-center">
             <span className="text-xs text-slate-400">Access Count</span>
-            <span className="text-sm font-medium text-white">
+            <span className={`text-sm font-medium transition-all duration-300 ${showSuccessFlash ? 'text-green-400 scale-110' : 'text-white'}`}>
               {memory.accessCount} times
             </span>
           </div>
           <div className="flex justify-between items-center">
             <span className="text-xs text-slate-400">Last Accessed</span>
-            <span className="text-sm text-white">
-              {timeSince(memory.lastAccessed)}
+            <span className={`text-sm transition-all duration-300 ${showSuccessFlash ? 'text-green-400' : 'text-white'}`}>
+              {showSuccessFlash ? 'Just now' : timeSince(memory.lastAccessed)}
             </span>
           </div>
           <div className="flex justify-between items-center">
@@ -312,10 +333,24 @@ export function MemoryDetail({
             <Button
               variant="default"
               size="sm"
-              onClick={() => onReinforce(memory.id)}
-              className="flex-1 bg-blue-600 hover:bg-blue-700"
+              onClick={handleReinforce}
+              disabled={isReinforcing}
+              className={`flex-1 transition-all duration-300 ${
+                showSuccessFlash
+                  ? 'bg-green-600 hover:bg-green-600'
+                  : 'bg-blue-600 hover:bg-blue-700'
+              }`}
             >
-              ⚡ Reinforce Memory
+              {isReinforcing ? (
+                <>
+                  <span className="animate-spin mr-2">⟳</span>
+                  Reinforcing...
+                </>
+              ) : showSuccessFlash ? (
+                <>✓ Reinforced!</>
+              ) : (
+                <>⚡ Reinforce Memory</>
+              )}
             </Button>
           )}
         </div>

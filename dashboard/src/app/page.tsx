@@ -350,6 +350,8 @@ export default function DashboardPage() {
               onClose={() => setSelectedMemory(null)}
               onReinforce={handleReinforce}
               onSelectMemory={handleSelectMemoryById}
+              isReinforcing={accessMutation.isPending}
+              reinforceSuccess={accessMutation.isSuccess}
             />
           </div>
         )}

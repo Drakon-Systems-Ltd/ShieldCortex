@@ -280,6 +280,7 @@ Works on macOS (launchd), Linux (systemd), and Windows.
 
 ```bash
 npx shieldcortex setup              # Auto-detect agent + configure hooks
+npx shieldcortex install            # Alias for setup
 npx shieldcortex migrate            # Migrate from Claude Cortex
 npx shieldcortex doctor             # Check installation health
 npx shieldcortex --dashboard        # Start dashboard + API
