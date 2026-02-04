@@ -188,6 +188,49 @@ async function onSessionEnd(event) {
 }
 
 /**
+ * Handle command:stop — extract memories before session ends
+ * This fires when user explicitly calls /stop
+ */
+async function onSessionStop(event) {
+  const context = event.context || {};
+  const sessionEntry = context.sessionEntry || {};
+  const sessionFile = sessionEntry.sessionFile;
+
+  if (!sessionFile) {
+    console.log("[cortex-memory] No session file found for stop, skipping extraction");
+    return;
+  }
+
+  const messages = await getRecentMessages(sessionFile);
+  if (messages.length === 0) {
+    console.log("[cortex-memory] No messages to extract on stop");
+    return;
+  }
+
+  const memories = extractMemories(messages);
+  if (memories.length === 0) {
+    console.log("[cortex-memory] No high-salience content found on stop");
+    return;
+  }
+
+  let saved = 0;
+  for (const mem of memories) {
+    const result = await callCortex("remember", {
+      title: mem.title,
+      content: mem.content,
+      category: mem.category,
+      project: "openclaw",
+      scope: "global",
+      importance: "high",
+      tags: "auto-extracted,openclaw-hook,session-stop",
+    });
+    if (result) saved++;
+  }
+
+  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories on session stop`);
+}
+
+/**
  * Handle agent:bootstrap — inject past context into agent
  */
 async function onBootstrap(event) {
@@ -216,7 +259,7 @@ async function onBootstrap(event) {
  * Handle command events — check for keyword triggers
  */
 async function onKeywordTrigger(event) {
-  if (event.action === "new" || event.action === "stop") return;
+  if (event.action === "new" || event.action === "stop" || event.action === "clear" || event.action === "exit") return;
 
   const context = event.context || {};
   const sessionEntry = context.sessionEntry || {};
@@ -263,6 +306,11 @@ const cortexMemoryHandler = async (event) => {
   try {
     if (event.type === "command" && event.action === "new") {
       await onSessionEnd(event);
+    } else if (event.type === "command" && event.action === "stop") {
+      await onSessionStop(event);
+    } else if (event.type === "command" && (event.action === "clear" || event.action === "exit")) {
+      // Also save on clear/exit - these also end the session context
+      await onSessionStop(event);
     } else if (event.type === "agent" && event.action === "bootstrap") {
       await onBootstrap(event);
     } else if (event.type === "command") {

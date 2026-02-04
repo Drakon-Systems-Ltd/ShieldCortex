@@ -7,7 +7,7 @@ metadata:
     "openclaw":
       {
         "emoji": "🧠",
-        "events": ["command:new", "agent:bootstrap", "command"],
+        "events": ["command:new", "command:stop", "agent:bootstrap", "command"],
         "requires": { "anyBins": ["npx"] },
         "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }],
       },
@@ -24,6 +24,12 @@ Integrates [ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) pe
 1. Reads the ending session transcript
 2. Pattern-matches for decisions, bug fixes, learnings, architecture changes, and preferences
 3. Saves up to 5 high-salience memories to ShieldCortex via mcporter
+
+### On `/stop`, `/clear`, `/exit` (Session End)
+1. Captures the current session transcript before it ends
+2. Pattern-matches for important content (same patterns as `/new`)
+3. Saves memories with a `session-stop` tag for tracking
+4. **Ensures work is saved** even when explicitly ending a session
 
 ### On Session Start (Agent Bootstrap)
 1. Calls Cortex `get_context` to retrieve relevant memories
