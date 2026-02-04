@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "2.4.7",
+  "version": "2.4.8",
   "description": "Complete memory system + security layer for AI agents. Native OpenClaw integration. Persistent storage, semantic search, prompt injection firewall, credential protection, and audit trail. One package, full solution.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,7 +25,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "build:all": "tsc && cd dashboard && npm run build",
+    "build:dashboard": "cd dashboard && npm run build && cp -r .next/static .next/standalone/dashboard/.next/ && cp -r public .next/standalone/dashboard/",
+    "build:all": "npm run build && npm run build:dashboard",
     "start": "node dist/index.js",
     "start:api": "node dist/index.js --mode api",
     "start:dashboard": "node dist/index.js --dashboard",
@@ -37,7 +38,7 @@
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "audit:security": "npm audit --audit-level=moderate",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build:all"
   },
   "keywords": [
     "ai",
@@ -103,6 +104,7 @@
   "files": [
     "dist",
     "hooks",
-    "scripts"
+    "scripts",
+    "dashboard/.next/standalone"
   ]
 }

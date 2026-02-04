@@ -107,9 +107,14 @@ async function startMcpServer(dbPath?: string): Promise<void> {
  * Start the Next.js dashboard as a child process
  */
 function startDashboard(): ChildProcess {
-  // Dashboard is in the dashboard/ subdirectory relative to project root
-  // Since we're in dist/, go up one level to find dashboard/
+  // Dashboard paths - check standalone first (npm package), then fall back to dev
+  // Note: Next.js standalone output puts files in a subdirectory named after the project
+  const standaloneServer = path.resolve(__dirname, '..', 'dashboard', '.next', 'standalone', 'dashboard', 'server.js');
   const dashboardDir = path.resolve(__dirname, '..', 'dashboard');
+
+  // Check if standalone server exists (bundled in npm package)
+  const fs = require('fs');
+  const useStandalone = fs.existsSync(standaloneServer);
 
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
@@ -121,12 +126,24 @@ function startDashboard(): ChildProcess {
 ╚══════════════════════════════════════════════════════════════╝
   `);
 
-  // Start Next.js in production mode if built, otherwise dev mode
-  const dashboard = spawn('npm', ['run', 'start'], {
-    cwd: dashboardDir,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: true,
-  });
+  let dashboard: ChildProcess;
+
+  if (useStandalone) {
+    // Use standalone server (npm package distribution)
+    const standaloneCwd = path.resolve(__dirname, '..', 'dashboard', '.next', 'standalone', 'dashboard');
+    dashboard = spawn(process.execPath, ['server.js'], {
+      cwd: standaloneCwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PORT: '3030', HOSTNAME: '0.0.0.0' },
+    });
+  } else {
+    // Fall back to npm run start (local development)
+    dashboard = spawn('npm', ['run', 'start'], {
+      cwd: dashboardDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: true,
+    });
+  }
 
   // Pipe dashboard output with prefix
   dashboard.stdout?.on('data', (data) => {
@@ -145,7 +162,9 @@ function startDashboard(): ChildProcess {
 
   dashboard.on('error', (error) => {
     console.error('[dashboard] Failed to start:', error.message);
-    console.error('[dashboard] Make sure to run "npm run build" in the dashboard directory first.');
+    if (!useStandalone) {
+      console.error('[dashboard] Make sure to run "npm run build" in the dashboard directory first.');
+    }
   });
 
   dashboard.on('exit', (code, signal) => {
