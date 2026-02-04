@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.10] - 2026-02-04
+
+### Added
+- **Dashboard reinforce button feedback** — visual confirmation when reinforcing memories (loading state, success flash, green ring animation)
+- **Bundled dashboard in npm package** — `npx shieldcortex --dashboard` now works globally without separate install
+- **Next.js standalone output** — dashboard builds as self-contained server for portable distribution
+
+### Fixed
+- **CI auto-release on tag push** — workflow now properly creates GitHub releases when version tags are pushed
+- **Dashboard static file paths** — fixed 404 errors for JS chunks after rebuilds
+
+### Changed
+- **Improved onboarding UX** — clearer setup instructions and feedback messages
+
+## [2.4.6] - 2026-02-04
+
+### Added
+- **Comprehensive OpenClaw integration docs** — full documentation in `/docs` folder
+- **Dev.to article** — "How to Give Your AI Agent Persistent Memory in 60 Seconds"
+- **Stop/clear/exit session save handlers** — auto-saves context when sessions end
+
+## [2.4.5] - 2026-02-03
+
+### Fixed
+- **Migrate command cleanup** — now removes old LaunchAgents and npm packages from previous installations
+
 ## [2.4.4] - 2026-02-03
 
 ### Fixed
