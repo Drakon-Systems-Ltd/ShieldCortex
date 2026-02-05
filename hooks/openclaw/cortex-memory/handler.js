@@ -256,31 +256,29 @@ async function onBootstrap(event) {
 }
 
 /**
- * Handle command events — check for keyword triggers
+ * Check message text for keyword triggers and save to memory
+ * @param {string} messageText - The user's message text
+ * @param {object} event - The event object for pushing response messages
+ * @returns {Promise<boolean>} Whether a memory was saved
  */
-async function onKeywordTrigger(event) {
-  if (event.action === "new" || event.action === "stop" || event.action === "clear" || event.action === "exit") return;
+async function checkAndSaveKeywordTrigger(messageText, event) {
+  if (!messageText || typeof messageText !== "string") return false;
 
-  const context = event.context || {};
-  const sessionEntry = context.sessionEntry || {};
-  const lastMessage = context.lastUserMessage || sessionEntry.lastUserMessage;
-  if (!lastMessage || typeof lastMessage !== "string") return;
-
-  const lower = lastMessage.toLowerCase();
+  const lower = messageText.toLowerCase();
   const triggers = ["remember this", "don't forget", "dont forget"];
   const triggered = triggers.some((t) => lower.includes(t));
-  if (!triggered) return;
+  if (!triggered) return false;
 
-  let content = lastMessage;
+  let content = messageText;
   for (const t of triggers) {
     const idx = lower.indexOf(t);
     if (idx !== -1) {
-      content = lastMessage.slice(idx + t.length).replace(/^[:\s]+/, "").trim();
+      content = messageText.slice(idx + t.length).replace(/^[:\s]+/, "").trim();
       break;
     }
   }
 
-  if (content.length < 5) return;
+  if (content.length < 5) return false;
 
   const title = content.slice(0, 80).replace(/["\n]/g, " ").trim();
 
@@ -295,9 +293,44 @@ async function onKeywordTrigger(event) {
   });
 
   if (result) {
-    event.messages.push(`Saved to Cortex memory: "${title}"`);
+    if (event.messages) {
+      event.messages.push(`✅ Saved to Cortex memory: "${title}"`);
+    }
     console.log(`[cortex-memory] Keyword trigger saved: ${title}`);
+    return true;
   }
+  return false;
+}
+
+/**
+ * Handle message events — check for keyword triggers in user messages
+ * This is the FIX: keyword triggers must work on message events, not just commands
+ */
+async function onMessageKeywordTrigger(event) {
+  // Only process user messages
+  if (event.role !== "user") return;
+
+  // Get message content - handle both string and array formats
+  let messageText = event.content;
+  if (Array.isArray(messageText)) {
+    const textBlock = messageText.find((c) => c.type === "text");
+    messageText = textBlock?.text || "";
+  }
+
+  await checkAndSaveKeywordTrigger(messageText, event);
+}
+
+/**
+ * Handle command events — check for keyword triggers (legacy/fallback)
+ */
+async function onKeywordTrigger(event) {
+  if (event.action === "new" || event.action === "stop" || event.action === "clear" || event.action === "exit") return;
+
+  const context = event.context || {};
+  const sessionEntry = context.sessionEntry || {};
+  const lastMessage = context.lastUserMessage || sessionEntry.lastUserMessage;
+  
+  await checkAndSaveKeywordTrigger(lastMessage, event);
 }
 
 // ==================== MAIN HANDLER ====================
@@ -313,7 +346,11 @@ const cortexMemoryHandler = async (event) => {
       await onSessionStop(event);
     } else if (event.type === "agent" && event.action === "bootstrap") {
       await onBootstrap(event);
+    } else if (event.type === "message") {
+      // FIX: Check for keyword triggers on message events (not just commands)
+      await onMessageKeywordTrigger(event);
     } else if (event.type === "command") {
+      // Fallback: also check commands for keyword triggers (legacy support)
       await onKeywordTrigger(event);
     }
   } catch (err) {
