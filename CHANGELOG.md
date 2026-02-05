@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.13] - 2026-02-05
+
+### Security
+
+- **CRITICAL: Fail-closed on pipeline exception** — Defence pipeline now returns `BLOCK` on any exception instead of `ALLOW`. Prevents attackers from bypassing security by triggering errors.
+- **CRITICAL: Fixed ReDOS vulnerability** — Instruction detector patterns now length-capped (50KB max) with bounded repetition to prevent catastrophic backtracking attacks.
+- **HIGH: Decoded content full scan** — Base64/hex decoded content now runs through complete firewall pipeline (privilege escalation + anomaly scoring), not just instruction detection.
+- **HIGH: Unknown sources now untrusted** — Environment detector defaults to `type: 'agent'` (trust ~0.3) instead of `type: 'cli'` (trust 0.9) for unrecognised callers.
+- **HIGH: Anomaly scorer encoding detection** — Added base64 ratio analysis and Shannon entropy calculation to detect encoded payloads masquerading as normal content.
+
+### Fixed
+
+- **Schema mismatch in fragmentation detector** — Changed `detected_at` to `created_at` to match actual database schema. Added query limit to prevent unbounded queries.
+- **Remember tool source tracking** — Added `source` parameter to MCP schema for proper audit trail on memory writes.
+- **Dashboard path resolution** — Multi-candidate path finder for dashboard server.js works correctly when installed as npm package.
+- **Empty string validation** — Remember tool now validates and trims title/content, rejecting empty strings.
+- **NaN in API limit parsing** — Visualization server now provides fallback for invalid limit parameters.
+- **LangChain clear() contract** — Now throws meaningful error by default with `allowClear` config option, matching BaseMemory contract.
+- **OpenClaw hook timeout handling** — Added retry logic and structured error responses for timeout scenarios.
+
+### Changed
+
+- **Trust hierarchy clarified** — Unknown environment sources treated as untrusted agents, not CLI users.
+- **Added `pipeline_error` threat indicator** — New indicator type for defence pipeline exceptions.
+
 ## [2.4.12] - 2026-02-05
 
 ### Added

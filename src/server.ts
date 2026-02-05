@@ -120,7 +120,8 @@ export function createServer(dbPath?: string): McpServer {
 - Project context ("This is a React + Node.js project")
 - Important notes ("Remember to test the edge cases")
 
-The system automatically detects importance, categorizes, and manages storage.`,
+The system automatically detects importance, categorizes, and manages storage.
+Content is scanned through the defence pipeline before storage. Suspicious content may be quarantined.`,
     {
       title: z.string().describe('Short title for the memory'),
       content: z.string().describe('Detailed content'),
@@ -138,9 +139,11 @@ The system automatically detects importance, categorizes, and manages storage.`,
         .describe('Memory scope: project (default) or global (cross-project)'),
       transferable: z.boolean().optional()
         .describe('Whether this memory can be transferred to other projects'),
+      source: sourceParam,
     },
     async (args) => {
-      const result = await executeRemember(args);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'remember');
+      const result = await executeRemember({ ...args, source });
       return {
         content: [{ type: 'text', text: formatRememberResult(result) }],
       };

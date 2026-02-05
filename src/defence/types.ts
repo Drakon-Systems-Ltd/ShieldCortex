@@ -17,7 +17,8 @@ export type ThreatIndicator =
   | 'encoding_obfuscation'
   | 'credential_leak'
   | 'external_url'
-  | 'fragmented_payload';
+  | 'fragmented_payload'
+  | 'pipeline_error';
 
 // ── Core Interfaces ──
 

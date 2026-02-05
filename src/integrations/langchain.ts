@@ -50,6 +50,8 @@ export interface ShieldCortexMemoryConfig {
   memoryKey?: string;
   /** Project scope for memories. Default: auto-detected */
   project?: string;
+  /** Allow clear() to delete memories. Default: false (throws error for safety) */
+  allowClear?: boolean;
 }
 
 // ── ShieldCortexMemory ──
@@ -70,6 +72,7 @@ export class ShieldCortexMemory {
   private maxResults: number;
   private _memoryKey: string;
   private project?: string;
+  private allowClear: boolean;
 
   /** Keys this memory populates (LangChain interface) */
   get memoryVariables(): string[] {
@@ -88,6 +91,7 @@ export class ShieldCortexMemory {
     this.maxResults = options.maxResults ?? 10;
     this._memoryKey = options.memoryKey ?? 'history';
     this.project = options.project;
+    this.allowClear = options.allowClear ?? false;
   }
 
   /**
@@ -142,9 +146,9 @@ export class ShieldCortexMemory {
     // addMemory runs defence pipeline internally when source is provided
     try {
       addMemory(memoryInput, undefined, this.source);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // MemoryBlockedError means it was quarantined — that's expected
-      if (err.name === 'MemoryBlockedError') {
+      if (err instanceof Error && err.name === 'MemoryBlockedError') {
         return;
       }
       throw err;
@@ -152,11 +156,21 @@ export class ShieldCortexMemory {
   }
 
   /**
-   * Clear all memories (not implemented — too destructive for a security tool).
-   * Use the MCP forget tool or REST API for targeted deletion.
+   * Clear memories. Disabled by default for safety.
+   * Pass { allowClear: true } to constructor to enable.
+   * For targeted deletion, use the MCP forget tool or REST API instead.
    */
   async clear(): Promise<void> {
-    // Intentionally not implemented
+    if (!this.allowClear) {
+      throw new Error(
+        'ShieldCortexMemory.clear() is disabled by default for safety. ' +
+        'Use the MCP "forget" tool or REST API for targeted deletion, ' +
+        'or pass { allowClear: true } to the constructor to enable this method.'
+      );
+    }
+    // If explicitly enabled, this is a no-op for now since we don't have
+    // a way to clear only memories created by this instance.
+    // Callers who need this should use the forget tool directly.
   }
 }
 

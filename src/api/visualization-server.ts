@@ -102,8 +102,8 @@ export function startVisualizationServer(dbPath?: string): void {
       const mode = typeof req.query.mode === 'string' ? req.query.mode : 'recent';
       const query = typeof req.query.query === 'string' ? req.query.query : undefined;
 
-      const limit = Math.min(parseInt(limitStr), 200); // Cap at 200
-      const offset = parseInt(offsetStr);
+      const limit = Math.min(parseInt(limitStr, 10) || 50, 200); // Cap at 200, default 50
+      const offset = parseInt(offsetStr, 10) || 0; // Default 0
 
       let memories: Memory[];
 
@@ -380,8 +380,8 @@ export function startVisualizationServer(dbPath?: string): void {
       const minScoreStr = typeof req.query.minScore === 'string' ? req.query.minScore : '0.4';
       const limitStr = typeof req.query.limit === 'string' ? req.query.limit : '20';
 
-      const minScore = parseFloat(minScoreStr);
-      const limit = parseInt(limitStr);
+      const minScore = parseFloat(minScoreStr) || 0.4; // Default 0.4
+      const limit = parseInt(limitStr, 10) || 20; // Default 20
 
       const contradictions = detectContradictions({
         project,

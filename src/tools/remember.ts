@@ -30,9 +30,9 @@ export const rememberSchema = z.object({
   transferable: z.boolean().optional()
     .describe('Whether this memory can be transferred to other projects'),
   source: z.object({
-    type: z.enum(['user', 'email', 'web', 'agent', 'file', 'api']),
+    type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
     identifier: z.string(),
-  }).optional().describe('Source of this memory for trust scoring'),
+  }).optional().describe('Source of this memory for trust scoring (agents should pass this)'),
 });
 
 export type RememberInput = z.infer<typeof rememberSchema>;
@@ -59,6 +59,24 @@ export async function executeRemember(input: RememberInput): Promise<{
   error?: string;
 }> {
   try {
+    // Validate non-empty title and content
+    const title = input.title?.trim();
+    const content = input.content?.trim();
+
+    if (!title || title.length === 0) {
+      return {
+        success: false,
+        error: 'Title cannot be empty. Provide a meaningful short title for the memory.',
+      };
+    }
+
+    if (!content || content.length === 0) {
+      return {
+        success: false,
+        error: 'Content cannot be empty. Provide detailed content for the memory.',
+      };
+    }
+
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
 
@@ -74,9 +92,9 @@ export async function executeRemember(input: RememberInput): Promise<{
       salienceOverride = importanceMap[input.importance];
     }
 
-    // Check for duplicates
+    // Check for duplicates (use trimmed title)
     const existing = await searchMemories({
-      query: input.title,
+      query: title,
       project: resolvedProject ?? undefined,
       limit: 3,
     });
@@ -97,10 +115,10 @@ export async function executeRemember(input: RememberInput): Promise<{
       };
     }
 
-    // Create the memory
+    // Create the memory (use trimmed title and content)
     const memory = addMemory({
-      title: input.title,
-      content: input.content,
+      title,
+      content,
       category: input.category,
       type: input.type,
       project: resolvedProject ?? undefined,
@@ -108,7 +126,7 @@ export async function executeRemember(input: RememberInput): Promise<{
       salience: salienceOverride,
       scope: input.scope,
       transferable: input.transferable,
-    }, undefined, input.source ? { type: input.source.type, identifier: input.source.identifier } : { type: 'cli', identifier: 'mcp' });
+    }, undefined, input.source ?? { type: 'cli', identifier: 'mcp' });
 
     // Auto-detect and create relationships with existing memories
     let linksCreated = 0;
@@ -122,8 +140,8 @@ export async function executeRemember(input: RememberInput): Promise<{
       // Silently ignore relationship detection errors
     }
 
-    // Explain why this was remembered
-    const factors = analyzeSalienceFactors({ title: input.title, content: input.content });
+    // Explain why this was remembered (use trimmed values)
+    const factors = analyzeSalienceFactors({ title, content });
     const reason = explainSalience(factors);
 
     // Check if content was truncated

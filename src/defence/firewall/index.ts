@@ -163,15 +163,35 @@ function determineResult(
     };
   }
 
-  // Encoding-only: check if decoded content contains threats
+  // Encoding-only: run FULL pipeline on decoded content (not just instruction detection)
   if (encoding.detected && encoding.decodedSnippets.length > 0) {
     for (const snippet of encoding.decodedSnippets) {
-      const decodedCheck = detectInstructions(snippet);
-      if (decodedCheck.detected) {
+      // Check for instruction injection in decoded content
+      const decodedInstructions = detectInstructions(snippet);
+      if (decodedInstructions.detected) {
         const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
         return {
           result,
           reason: `Encoded content contains instruction injection (${encoding.encodingTypes.join(', ')})`,
+        };
+      }
+
+      // Check for privilege escalation in decoded content
+      const decodedPrivilege = detectPrivilegeEscalation(snippet);
+      if (decodedPrivilege.detected && decodedPrivilege.severity === 'high') {
+        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
+        return {
+          result,
+          reason: `Encoded content contains privilege escalation: ${decodedPrivilege.indicators.join(', ')} (${encoding.encodingTypes.join(', ')})`,
+        };
+      }
+
+      // Check anomaly score of decoded content
+      const decodedAnomaly = scoreAnomaly(snippet, '');
+      if (decodedAnomaly > 0.6) {
+        return {
+          result: 'QUARANTINE',
+          reason: `Encoded content has high anomaly score (${decodedAnomaly.toFixed(2)})`,
         };
       }
     }

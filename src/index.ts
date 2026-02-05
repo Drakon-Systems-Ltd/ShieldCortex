@@ -105,17 +105,54 @@ async function startMcpServer(dbPath?: string): Promise<void> {
 }
 
 /**
+ * Find the dashboard standalone server path
+ * Tries multiple locations to support npm package, global install, and local dev
+ */
+function findDashboardPath(): { serverPath: string; cwd: string } | null {
+  const fs = require('fs');
+
+  // Candidate locations to check (in order of priority)
+  const candidates = [
+    // Standard npm package structure (dist/ is in package root)
+    {
+      serverPath: path.resolve(__dirname, '..', 'dashboard', '.next', 'standalone', 'dashboard', 'server.js'),
+      cwd: path.resolve(__dirname, '..', 'dashboard', '.next', 'standalone', 'dashboard'),
+    },
+    // Global npm install (some platforms put dist/ differently)
+    {
+      serverPath: path.resolve(__dirname, '..', '..', 'dashboard', '.next', 'standalone', 'dashboard', 'server.js'),
+      cwd: path.resolve(__dirname, '..', '..', 'dashboard', '.next', 'standalone', 'dashboard'),
+    },
+    // Try finding via package.json location
+    {
+      serverPath: path.resolve(path.dirname(require.resolve('shieldcortex/package.json')), 'dashboard', '.next', 'standalone', 'dashboard', 'server.js'),
+      cwd: path.resolve(path.dirname(require.resolve('shieldcortex/package.json')), 'dashboard', '.next', 'standalone', 'dashboard'),
+    },
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate.serverPath)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore errors (e.g., require.resolve may fail)
+    }
+  }
+
+  return null;
+}
+
+/**
  * Start the Next.js dashboard as a child process
  */
 function startDashboard(): ChildProcess {
-  // Dashboard paths - check standalone first (npm package), then fall back to dev
-  // Note: Next.js standalone output puts files in a subdirectory named after the project
-  const standaloneServer = path.resolve(__dirname, '..', 'dashboard', '.next', 'standalone', 'dashboard', 'server.js');
-  const dashboardDir = path.resolve(__dirname, '..', 'dashboard');
-
-  // Check if standalone server exists (bundled in npm package)
   const fs = require('fs');
-  const useStandalone = fs.existsSync(standaloneServer);
+
+  // Find dashboard server path
+  const dashboardPath = findDashboardPath();
+  const dashboardDir = path.resolve(__dirname, '..', 'dashboard');
+  const useStandalone = dashboardPath !== null;
 
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
@@ -129,11 +166,10 @@ function startDashboard(): ChildProcess {
 
   let dashboard: ChildProcess;
 
-  if (useStandalone) {
+  if (useStandalone && dashboardPath) {
     // Use standalone server (npm package distribution)
-    const standaloneCwd = path.resolve(__dirname, '..', 'dashboard', '.next', 'standalone', 'dashboard');
     dashboard = spawn(process.execPath, ['server.js'], {
-      cwd: standaloneCwd,
+      cwd: dashboardPath.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PORT: '3030', HOSTNAME: '0.0.0.0' },
     });

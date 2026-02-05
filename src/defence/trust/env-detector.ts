@@ -25,7 +25,7 @@ export interface EnvDetectionResult {
  * 2. CLAUDE_CODE_ENTRYPOINT=subagent — Claude Code sub-agent
  * 3. CLAUDE_AGENT_CONTEXT — generic agent context marker
  * 4. CLAUDE_CODE_ENTRYPOINT present (any value) — direct Claude Code CLI
- * 5. No recognised env vars → unknown:default (trust 0.5, or 0.3 in strict mode)
+ * 5. No recognised env vars → agent:unknown (trust ~0.3, treated as untrusted agent)
  */
 export function inferSourceFromEnvironment(): EnvDetectionResult {
   // 1. Explicit ShieldCortex source override (for integrators)
@@ -73,9 +73,9 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
     };
   }
 
-  // 5. No recognised env vars — unknown caller
+  // 5. No recognised env vars — unknown caller (use 'agent' type for lower trust)
   return {
-    source: { type: 'cli', identifier: 'unknown' },
+    source: { type: 'agent', identifier: 'unknown' },
     method: 'default',
     confidence: 'low',
   };

@@ -2,7 +2,7 @@
  * Defence Pipeline Orchestrator
  *
  * Runs all 5 defence layers in sequence and returns a unified result.
- * Fail-open: if any layer throws, the pipeline defaults to ALLOW with a warning.
+ * Fail-closed: if any layer throws, the pipeline defaults to BLOCK for security.
  */
 
 import type {
@@ -127,9 +127,9 @@ export function runDefencePipeline(
       auditId,
     };
   } catch (err) {
-    // Fail-open: log warning and allow
+    // FAIL-CLOSED: on error, default to BLOCK for security
     const durationMs = Math.round(performance.now() - startTime);
-    console.error('[defence] Pipeline error, failing open:', err);
+    console.error('[defence] Pipeline error, failing closed:', err);
 
     const auditId = logAudit({
       memory_id: null,
@@ -138,31 +138,31 @@ export function runDefencePipeline(
       source_type: source.type,
       source_identifier: source.identifier,
       trust_score: 0,
-      sensitivity_level: 'PUBLIC',
-      firewall_result: 'ALLOW',
-      anomaly_score: 0,
-      threat_indicators: '[]',
+      sensitivity_level: 'RESTRICTED',
+      firewall_result: 'BLOCK',
+      anomaly_score: 1.0,
+      threat_indicators: '["pipeline_error"]',
       blocked_patterns: '[]',
-      reason: `Pipeline error (fail-open): ${err instanceof Error ? err.message : String(err)}`,
+      reason: `Pipeline error (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
       fragmentation_score: null,
       pipeline_duration_ms: durationMs,
     });
 
     return {
-      allowed: true,
+      allowed: false,
       firewall: {
-        result: 'ALLOW',
-        reason: 'Pipeline error — fail-open default',
-        threatIndicators: [],
-        anomalyScore: 0,
+        result: 'BLOCK',
+        reason: 'Pipeline error — fail-closed for security',
+        threatIndicators: ['pipeline_error'],
+        anomalyScore: 1.0,
         blockedPatterns: [],
       },
       fragmentation: null,
       sensitivity: {
-        level: 'PUBLIC',
+        level: 'RESTRICTED',
         confidence: 0,
         detectedPatterns: [],
-        redactionRequired: false,
+        redactionRequired: true,
       },
       trust: {
         score: 0,

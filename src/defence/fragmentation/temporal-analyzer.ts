@@ -19,7 +19,7 @@ export interface RecentEntity {
   entity_type: string;
   entity_value: string;
   memory_id: number;
-  detected_at: string;
+  created_at: string;
 }
 
 /**
@@ -28,10 +28,11 @@ export interface RecentEntity {
 export function getRecentEntities(windowHours: number): RecentEntity[] {
   const db = getDatabase();
   const rows = db.prepare(
-    `SELECT entity_type, entity_value, memory_id, detected_at
+    `SELECT entity_type, entity_value, memory_id, created_at
      FROM fragmentation_entities
-     WHERE detected_at >= datetime('now', ? || ' hours')
-     ORDER BY detected_at DESC`
+     WHERE created_at >= datetime('now', ? || ' hours')
+     ORDER BY created_at DESC
+     LIMIT 10000`
   ).all(-windowHours) as RecentEntity[];
 
   return rows;

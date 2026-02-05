@@ -15,9 +15,10 @@ import fs from "node:fs/promises";
  * Call a ShieldCortex MCP tool via mcporter
  * @param {string} tool - Tool name (e.g., "remember", "recall", "get_context")
  * @param {Record<string, string>} args - Tool arguments as key:value pairs
+ * @param {object} options - Options { retries: number, timeout: number }
  * @returns {Promise<string|null>} Raw stdout or null on error
  */
-function callCortex(tool, args = {}) {
+function callCortex(tool, args = {}, options = { retries: 1, timeout: 15000 }) {
   return new Promise((resolve) => {
     const cmdArgs = [
       "mcporter", "call", "--stdio",
@@ -30,17 +31,36 @@ function callCortex(tool, args = {}) {
       cmdArgs.push(`${key}:${safe}`);
     }
 
-    execFile("npx", cmdArgs, {
-      timeout: 15000,
-      maxBuffer: 1024 * 256,
-    }, (err, stdout) => {
-      if (err) {
-        console.error(`[cortex-memory] mcporter error (${tool}):`, err.message);
-        resolve(null);
-        return;
-      }
-      resolve(stdout?.trim() || null);
-    });
+    let attempts = 0;
+    const maxAttempts = (options.retries || 0) + 1;
+
+    function attempt() {
+      attempts++;
+      execFile("npx", cmdArgs, {
+        timeout: options.timeout || 15000,
+        maxBuffer: 1024 * 256,
+      }, (err, stdout) => {
+        if (err) {
+          // Distinguish timeout from other errors
+          const isTimeout = err.killed || err.code === "ETIMEDOUT" || err.signal === "SIGTERM";
+          const errorType = isTimeout ? "TIMEOUT" : "ERROR";
+
+          if (attempts < maxAttempts) {
+            console.warn(`[cortex-memory] ${errorType} on ${tool} (attempt ${attempts}/${maxAttempts}), retrying...`);
+            setTimeout(attempt, 1000); // 1s delay before retry
+            return;
+          }
+
+          console.error(`[cortex-memory] ${errorType} on ${tool} after ${attempts} attempt(s):`, err.message);
+          if (err.code) console.error(`[cortex-memory] Error code: ${err.code}`);
+          resolve(null);
+          return;
+        }
+        resolve(stdout?.trim() || null);
+      });
+    }
+
+    attempt();
   });
 }
 

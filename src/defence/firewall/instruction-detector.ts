@@ -82,12 +82,14 @@ const PATTERN_GROUPS: PatternGroup[] = [
     name: 'delimiter_attack',
     weight: 0.75,
     patterns: [
-      /\n{5,}.*\b(instruction|command|system|ignore)\b/is,
-      /<!--\s*(instruction|command|system|ignore|inject|override).*?-->/is,
+      // Length-capped to prevent ReDOS (max 500 chars between newlines and keyword)
+      /\n{5,}[\s\S]{0,500}\b(instruction|command|system|ignore)\b/i,
+      // HTML comment with length cap to prevent backtracking
+      /<!--[\s\S]{0,200}?(instruction|command|system|ignore|inject|override)[\s\S]{0,200}?-->/i,
       /\r?\n-{5,}\r?\n/,
       /\r?\n={5,}\r?\n/,
-      // YAML/markdown frontmatter injection
-      /^---\s*\n[\s\S]*?\brole\s*:\s*(system|admin|root)/im,
+      // YAML/markdown frontmatter injection (already safe with .*?)
+      /^---\s*\n[\s\S]{0,1000}?\brole\s*:\s*(system|admin|root)/im,
       /<\/?(system|admin|root)\s*>/i,
     ],
   },
@@ -109,6 +111,18 @@ const PATTERN_GROUPS: PatternGroup[] = [
   },
 ];
 
+// Maximum content length to scan (prevents ReDOS on very long inputs)
+const MAX_SCAN_LENGTH = 50000;
+
+/**
+ * Safely test a regex against content with length limit
+ */
+function safeRegexTest(pattern: RegExp, text: string): boolean {
+  // Truncate to prevent potential ReDOS on extremely long inputs
+  const truncated = text.length > MAX_SCAN_LENGTH ? text.slice(0, MAX_SCAN_LENGTH) : text;
+  return pattern.test(truncated);
+}
+
 export function detectInstructions(content: string): InstructionDetectionResult {
   const matchedPatterns: string[] = [];
   let totalWeight = 0;
@@ -116,7 +130,7 @@ export function detectInstructions(content: string): InstructionDetectionResult 
 
   for (const group of PATTERN_GROUPS) {
     for (const pattern of group.patterns) {
-      if (pattern.test(content)) {
+      if (safeRegexTest(pattern, content)) {
         matchedPatterns.push(group.name);
         totalWeight += group.weight;
         if (group.weight > maxWeight) {

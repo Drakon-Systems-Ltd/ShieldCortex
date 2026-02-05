@@ -74,7 +74,8 @@ describe('Environment-Based Source Inference', () => {
 
     it('should return unknown:default with low confidence when no env vars set', () => {
       const result = inferSourceFromEnvironment();
-      expect(result.source).toEqual({ type: 'cli', identifier: 'unknown' });
+      // Unknown sources default to 'agent' type for lower trust (security fix)
+      expect(result.source).toEqual({ type: 'agent', identifier: 'unknown' });
       expect(result.method).toBe('default');
       expect(result.confidence).toBe('low');
     });

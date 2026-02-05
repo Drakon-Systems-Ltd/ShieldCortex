@@ -10,6 +10,27 @@ const SPECIAL_CHAR_PATTERN = /[^a-zA-Z0-9\s.,!?;:'"()\-]/g;
 const ALL_CAPS_SECTION = /\b[A-Z]{5,}\b/g;
 const EXCESSIVE_PUNCTUATION = /[!?]{3,}/g;
 const CODE_INDICATORS = /[{}()\[\];=<>|&$`\\]/g;
+// Base64-like pattern: runs of alphanumeric + padding chars
+const BASE64_PATTERN = /(?:[A-Za-z0-9+/]{4}){5,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?/g;
+
+/**
+ * Calculate Shannon entropy of a string (bits per character)
+ * Higher entropy indicates more random/encoded content
+ */
+function calculateEntropy(str: string): number {
+  if (str.length === 0) return 0;
+  const freq: Record<string, number> = {};
+  for (const char of str) {
+    freq[char] = (freq[char] || 0) + 1;
+  }
+  const len = str.length;
+  let entropy = 0;
+  for (const count of Object.values(freq)) {
+    const p = count / len;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
 
 export function scoreAnomaly(content: string, title: string): number {
   const signals: number[] = [];
@@ -58,6 +79,21 @@ export function scoreAnomaly(content: string, title: string): number {
     signals.push(0.1);
   } else if (title.length === 0) {
     signals.push(0.05);
+  }
+
+  // High ratio of base64-looking content (may hide encoded payloads)
+  const base64Matches = content.match(BASE64_PATTERN) || [];
+  const base64Length = base64Matches.reduce((sum, m) => sum + m.length, 0);
+  const base64Ratio = base64Length / Math.max(content.length, 1);
+  if (base64Ratio > 0.3) {
+    signals.push(Math.min(base64Ratio, 1.0) * 0.3);
+  }
+
+  // High entropy indicates encoded/encrypted content
+  const entropy = calculateEntropy(content);
+  // Normal English text has entropy ~4.0-4.5, random/encoded ~5.5+
+  if (entropy > 5.0 && content.length > 100) {
+    signals.push(Math.min((entropy - 5.0) / 2, 1.0) * 0.25);
   }
 
   // Sum all signals, cap at 1.0
