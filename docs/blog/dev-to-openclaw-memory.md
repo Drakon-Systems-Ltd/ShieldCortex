@@ -66,22 +66,22 @@ Same with "don't forget:" — natural language memory saving.
 
 ## Show Me It Working
 
-Here's a real example from my setup:
+Here's an example:
 
 **Session 1 (Monday):**
 ```
-Me: Let's set up the email monitoring for the school inboxes.
+Me: Let's set up the email monitoring for the company inboxes.
 Agent: [sets up OAuth, creates scripts, configures cron jobs]
 Me: /new
 ```
 
-The hook extracts: "Set up email monitoring for vitaetpax.co.uk shared mailboxes using Microsoft Graph API with OAuth tokens stored in 1Password."
+The hook extracts: "Set up email monitoring for acme-corp.com shared mailboxes using Microsoft Graph API with OAuth tokens stored in 1Password."
 
 **Session 2 (Tuesday):**
 ```
-Me: Can you check if any new admissions emails came in?
-Agent: [already knows about the school mailboxes, the scripts, the setup]
-       Checking admissions@vitaetpax.co.uk... 47 unread, 3 are new enquiries.
+Me: Can you check if any new support emails came in?
+Agent: [already knows about the mailboxes, the scripts, the setup]
+       Checking support@acme-corp.com... 47 unread, 3 are new tickets.
 ```
 
 No re-explanation needed. The context was there.
