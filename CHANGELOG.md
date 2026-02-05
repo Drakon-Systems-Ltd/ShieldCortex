@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.18] - 2026-02-05
+
+### Fixed
+
+- **Dashboard crash on startup (ERR_PACKAGE_PATH_NOT_EXPORTED)** — Added `./package.json` to package exports map. Wrapped `require.resolve` call in try-catch so dashboard path resolution can't crash during array construction.
+
 ## [2.4.17] - 2026-02-05
 
 ### Fixed
