@@ -579,13 +579,19 @@ export function startVisualizationServer(dbPath?: string): void {
 
       // Close WebSocket connections gracefully
       for (const client of clients) {
-        client.send(
-          JSON.stringify({
-            type: 'server_restarting',
-            timestamp: new Date().toISOString(),
-            data: { reconnectIn: 5000 },
-          })
-        );
+        try {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(
+              JSON.stringify({
+                type: 'server_restarting',
+                timestamp: new Date().toISOString(),
+                data: { reconnectIn: 5000 },
+              })
+            );
+          }
+        } catch (e) {
+          console.error('[shieldcortex] WebSocket send failed during restart:', e);
+        }
       }
 
       // Schedule restart after response is sent
@@ -1353,14 +1359,18 @@ export function startVisualizationServer(dbPath?: string): void {
       decayedScore: calculateDecayedScore(m),
     }));
 
-    ws.send(JSON.stringify({
-      type: 'initial_state',
-      timestamp: new Date().toISOString(),
-      data: {
-        stats,
-        memories: memoriesWithDecay,
-      },
-    }));
+    try {
+      ws.send(JSON.stringify({
+        type: 'initial_state',
+        timestamp: new Date().toISOString(),
+        data: {
+          stats,
+          memories: memoriesWithDecay,
+        },
+      }));
+    } catch (e) {
+      console.error('[shieldcortex] Failed to send initial state:', e);
+    }
 
     ws.on('close', () => {
       clients.delete(ws);
@@ -1377,8 +1387,12 @@ export function startVisualizationServer(dbPath?: string): void {
   function broadcast(event: MemoryEvent): void {
     const message = JSON.stringify(event);
     for (const client of clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
+      try {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(message);
+        }
+      } catch (e) {
+        console.error('[shieldcortex] Broadcast failed for client:', e);
       }
     }
   }

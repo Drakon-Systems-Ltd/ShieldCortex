@@ -57,19 +57,33 @@ const MAX_CONTENT_SIZE = 10 * 1024;
 let lastTruncationInfo: { wasTruncated: boolean; originalLength: number; truncatedLength: number } | null = null;
 
 /**
- * Truncate content if it exceeds max size
+ * Truncate content if it exceeds max size (in bytes, not characters)
+ * Uses byte length to handle multi-byte Unicode correctly (emoji, CJK, etc.)
  * Returns both the content and truncation info
  */
 function truncateContent(content: string): { content: string; wasTruncated: boolean; originalLength: number } {
-  const originalLength = content.length;
-  if (originalLength > MAX_CONTENT_SIZE) {
+  const byteLength = Buffer.byteLength(content, 'utf-8');
+  if (byteLength > MAX_CONTENT_SIZE) {
+    // Binary search to find the right truncation point in bytes
+    // Reserve 50 bytes for the truncation message
+    const targetBytes = MAX_CONTENT_SIZE - 50;
+    let low = 0;
+    let high = content.length;
+    while (low < high) {
+      const mid = Math.floor((low + high + 1) / 2);
+      if (Buffer.byteLength(content.slice(0, mid), 'utf-8') <= targetBytes) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
     return {
-      content: content.slice(0, MAX_CONTENT_SIZE) + '\n\n[Content truncated - exceeded 10KB limit]',
+      content: content.slice(0, low) + '\n\n[Content truncated - exceeded 10KB limit]',
       wasTruncated: true,
-      originalLength,
+      originalLength: byteLength,
     };
   }
-  return { content, wasTruncated: false, originalLength };
+  return { content, wasTruncated: false, originalLength: byteLength };
 }
 
 /**
@@ -400,8 +414,13 @@ export function addMemory(
   generateEmbedding(input.title + ' ' + truncationResult.content)
     .then(embedding => {
       try {
-        db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
-          .run(Buffer.from(embedding.buffer), memoryId);
+        // Validate embedding exists and has expected structure
+        if (embedding && embedding.buffer) {
+          db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
+            .run(Buffer.from(embedding.buffer), memoryId);
+        } else {
+          console.warn('[shieldcortex] Embedding generation returned invalid result for memory', memoryId);
+        }
       } catch (e) {
         console.error('[shieldcortex] Failed to store embedding:', e);
       }
@@ -421,13 +440,17 @@ export function addMemory(
       ) {
         // Import dynamically to avoid circular dependency
         import('./consolidate.js').then(({ enforceMemoryLimits }) => {
-          enforceMemoryLimits(config);
-        }).catch(() => {
-          // Silently ignore - consolidation will happen on next scheduled run
+          if (typeof enforceMemoryLimits === 'function') {
+            enforceMemoryLimits(config);
+          }
+        }).catch((e) => {
+          // Log but don't fail - consolidation will happen on next scheduled run
+          console.warn('[shieldcortex] Async cleanup import failed:', e instanceof Error ? e.message : e);
         });
       }
-    } catch {
-      // Silently ignore errors in async cleanup
+    } catch (e) {
+      // Log unexpected errors in async cleanup
+      console.warn('[shieldcortex] Async cleanup check failed:', e instanceof Error ? e.message : e);
     }
   });
 
@@ -1117,7 +1140,12 @@ export async function searchMemories(
             db.prepare(
               'INSERT INTO memory_links (source_id, target_id, relationship, strength) VALUES (?, ?, ?, ?)'
             ).run(idA, idB, 'related', 0.2);
-          } catch { /* ignore duplicate */ }
+          } catch (e) {
+            // Only ignore UNIQUE constraint violations (expected for existing links)
+            if (!(e instanceof Error && e.message.includes('UNIQUE constraint'))) {
+              console.warn('[shieldcortex] Unexpected error linking co-returned memories:', e);
+            }
+          }
         }
       }
     }

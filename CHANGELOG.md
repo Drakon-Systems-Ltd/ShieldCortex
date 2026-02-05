@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.14] - 2026-02-05
+
+### Fixed
+
+- **WebSocket crash on disconnected clients** — Added readyState check and try-catch to all WebSocket.send() calls in visualization server. Prevents server crash when broadcasting to clients that disconnected mid-operation.
+- **Unicode truncation using wrong length metric** — Content truncation now uses `Buffer.byteLength()` instead of `string.length` to correctly handle multi-byte characters (emoji, CJK). A 10KB limit now enforces actual bytes, not UTF-16 code units.
+- **Embedding buffer null dereference** — Added validation that embedding exists and has `.buffer` property before storing. Prevents crash when embedding generation returns invalid result.
+- **Silent catch-all hiding errors** — Memory link creation now only ignores UNIQUE constraint violations (expected duplicates). Other errors are logged for debugging.
+- **Silent dynamic import failure** — Async cleanup import errors are now logged with message instead of silently swallowed.
+
 ## [2.4.13] - 2026-02-05
 
 ### Security
