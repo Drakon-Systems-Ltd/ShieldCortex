@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.12] - 2026-02-05
+
+### Added
+- **Expanded keyword triggers** — 24 trigger phrases across 5 categories for automatic memory saves:
+  - Note: "remember this", "don't forget", "this is important", "make a note", "for the record", "note to self", "important:", "crucial:", "key point:"
+  - Learning: "lesson learned", "i learned", "TIL:", "today i learned"
+  - Error: "never again", "root cause was", "the fix was"
+  - Preference: "always do", "never do", "i prefer", "we should always"
+  - Architecture: "we decided", "decision made", "going with"
+
+### Fixed
+- **CI dashboard dependencies** — workflow now installs dashboard deps before publish
+
+## [2.4.11] - 2026-02-05
+
+### Fixed
+- **Keyword trigger on message events** — "remember this:" and other triggers now work on message events, not just command events
+
 ## [2.4.10] - 2026-02-04
 
 ### Added
