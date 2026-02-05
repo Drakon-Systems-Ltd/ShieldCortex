@@ -36,7 +36,7 @@ export function checkAccess(
   operation: 'read' | 'write' | 'delete',
 ): AccessPolicy {
   const trust = scoreSource(source).score;
-  const memorySource = memory.source || 'user:direct';
+  const memorySource = memory.source || '__system:unattributed';
   const callerKey = `${source.type}:${source.identifier}`;
   const isOwner = memorySource === callerKey;
   const isRestricted = memory.sensitivity_level === 'RESTRICTED';

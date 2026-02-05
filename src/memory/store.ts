@@ -124,6 +124,15 @@ function escapeFts5Query(query: string): string {
 }
 
 /**
+ * Safely parse JSON with fallback — prevents corrupted DB values from crashing queries
+ */
+function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try { return JSON.parse(value); }
+  catch { return fallback; }
+}
+
+/**
  * Convert database row to Memory object
  */
 export function rowToMemory(row: Record<string, unknown>): Memory {
@@ -134,13 +143,13 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
     title: row.title as string,
     content: row.content as string,
     project: row.project as string | undefined,
-    tags: JSON.parse((row.tags as string) || '[]'),
+    tags: safeJsonParse(row.tags as string, []),
     salience: row.salience as number,
     accessCount: row.access_count as number,
     lastAccessed: new Date(row.last_accessed as string),
     createdAt: new Date(row.created_at as string),
     decayedScore: (row.decayed_score as number) ?? (row.salience as number),
-    metadata: JSON.parse((row.metadata as string) || '{}'),
+    metadata: safeJsonParse(row.metadata as string, {}),
     embedding: row.embedding as Buffer | undefined,
     scope: (row.scope as 'project' | 'global') ?? 'project',
     transferable: Boolean(row.transferable),
@@ -357,25 +366,30 @@ export function addMemory(
     truncatedLength: truncationResult.content.length,
   };
 
-  const result = stmt.run(
-    type,
-    category,
-    input.title,
-    truncationResult.content,
-    input.project || null,
-    JSON.stringify(tags),
-    salience,
-    JSON.stringify(input.metadata || {}),
-    scope,
-    transferable
-  );
+  // Transaction: INSERT + defence UPDATE must be atomic to prevent wrong trust scores
+  const insertedId = db.transaction(() => {
+    const result = stmt.run(
+      type,
+      category,
+      input.title,
+      truncationResult.content,
+      input.project || null,
+      JSON.stringify(tags),
+      salience,
+      JSON.stringify(input.metadata || {}),
+      scope,
+      transferable
+    );
 
-  if (defenceResult) {
-    db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ? WHERE id = ?`)
-      .run(defenceResult.trust.score, defenceResult.sensitivity.level, `${source!.type}:${source!.identifier}`, result.lastInsertRowid);
-  }
+    if (defenceResult) {
+      db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ? WHERE id = ?`)
+        .run(defenceResult.trust.score, defenceResult.sensitivity.level, `${source!.type}:${source!.identifier}`, result.lastInsertRowid);
+    }
 
-  const memory = getMemoryById(result.lastInsertRowid as number)!;
+    return result.lastInsertRowid as number;
+  })();
+
+  const memory = getMemoryById(insertedId)!;
 
   // Emit event for real-time dashboard (in-process)
   emitMemoryCreated(memory);
@@ -406,7 +420,11 @@ export function addMemory(
 
   // DEFENCE: Store fragmentation data for cross-memory payload detection
   if (source) {
-    try { storeFragmentationData(memory.id, truncationResult.content); } catch {}
+    try {
+      storeFragmentationData(memory.id, truncationResult.content);
+    } catch (e) {
+      console.warn('[shieldcortex] Fragmentation data storage failed:', e instanceof Error ? e.message : e);
+    }
   }
 
   // SEMANTIC SEARCH: Generate embedding asynchronously (don't block INSERT)

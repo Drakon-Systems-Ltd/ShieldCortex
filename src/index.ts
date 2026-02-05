@@ -87,12 +87,9 @@ function parseArgs(): Args {
 async function startMcpServer(dbPath?: string): Promise<void> {
   // Create the MCP server
   const server = createServer(dbPath);
-
-  // Connect via stdio transport
   const transport = new StdioServerTransport();
-  await server.connect(transport);
 
-  // Handle graceful shutdown
+  // Register signal handlers BEFORE connect so cleanup runs even if connect() throws
   process.on('SIGINT', async () => {
     await server.close();
     process.exit(0);
@@ -102,6 +99,9 @@ async function startMcpServer(dbPath?: string): Promise<void> {
     await server.close();
     process.exit(0);
   });
+
+  // Connect via stdio transport
+  await server.connect(transport);
 }
 
 /**

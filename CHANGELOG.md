@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.19] - 2026-02-05
+
+### Security
+
+- **Owner spoofing prevention** — Null-source memories no longer default to `user:direct`. Uses non-spoofable `__system:unattributed` sentinel so agents cannot claim ownership of unattributed memories.
+
+### Fixed
+
+- **JSON.parse crash in rowToMemory** — Corrupted JSON in `tags` or `metadata` columns no longer crashes all search/get operations. Uses safe parse with fallback.
+- **INSERT + defence UPDATE now atomic** — Memory creation and trust score assignment wrapped in a single transaction. Prevents untrusted memories from getting default trust_score=1.0 on crash.
+- **WebSocket error handler closes connection** — Error handler now explicitly closes the socket to prevent stale connections accumulating.
+- **Broadcast removes failed clients** — Failed WebSocket send now removes client from tracking set and closes connection, preventing error spam.
+- **Fragmentation store errors now logged** — Empty catch block replaced with warning log so broken fragmentation storage is visible.
+- **MCP signal handlers registered before connect** — Graceful shutdown handlers set up before `server.connect()` so cleanup runs even if connection fails.
+
 ## [2.4.18] - 2026-02-05
 
 ### Fixed

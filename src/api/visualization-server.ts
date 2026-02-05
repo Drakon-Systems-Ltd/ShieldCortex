@@ -1380,6 +1380,7 @@ export function startVisualizationServer(dbPath?: string): void {
     ws.on('error', (error) => {
       console.error('[WS] Error:', error);
       clients.delete(ws);
+      try { ws.close(); } catch { /* already closing */ }
     });
   });
 
@@ -1393,6 +1394,8 @@ export function startVisualizationServer(dbPath?: string): void {
         }
       } catch (e) {
         console.error('[shieldcortex] Broadcast failed for client:', e);
+        clients.delete(client);
+        try { client.close(); } catch { /* already closing */ }
       }
     }
   }
