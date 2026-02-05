@@ -31,11 +31,34 @@ jobs:
       - run: cd dashboard && npm ci
       - run: npm run build:all
       - run: npm test
-      - run: npm publish
+
+      - name: Check if version already published
+        id: version_check
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          echo "Local version: $PACKAGE_VERSION"
+
+          # Check if this version exists on npm
+          if npm view shieldcortex@$PACKAGE_VERSION version 2>/dev/null; then
+            echo "Version $PACKAGE_VERSION already exists on npm"
+            echo "already_published=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version $PACKAGE_VERSION not yet published"
+            echo "already_published=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish to npm
+        if: steps.version_check.outputs.already_published == 'false'
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Skip publish (already exists)
+        if: steps.version_check.outputs.already_published == 'true'
+        run: echo "⚠️ Skipping publish - version already exists on npm"
+
       - name: Create GitHub Release
+        if: steps.version_check.outputs.already_published == 'false'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
