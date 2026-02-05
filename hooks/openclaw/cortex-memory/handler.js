@@ -256,6 +256,46 @@ async function onBootstrap(event) {
 }
 
 /**
+ * Keyword triggers with their categories and importance levels
+ * Order matters: more specific triggers should come first
+ */
+const KEYWORD_TRIGGERS = [
+  // Learning triggers
+  { phrase: "lesson learned", category: "learning", importance: "high" },
+  { phrase: "i learned", category: "learning", importance: "normal" },
+  { phrase: "til:", category: "learning", importance: "normal" },
+  { phrase: "today i learned", category: "learning", importance: "normal" },
+  
+  // Error/prevention triggers
+  { phrase: "never again", category: "error", importance: "critical" },
+  { phrase: "root cause was", category: "error", importance: "high" },
+  { phrase: "the fix was", category: "error", importance: "high" },
+  
+  // Preference triggers
+  { phrase: "always do", category: "preference", importance: "high" },
+  { phrase: "never do", category: "preference", importance: "high" },
+  { phrase: "i prefer", category: "preference", importance: "normal" },
+  { phrase: "we should always", category: "preference", importance: "high" },
+  
+  // Architecture/decision triggers
+  { phrase: "we decided", category: "architecture", importance: "high" },
+  { phrase: "decision made", category: "architecture", importance: "high" },
+  { phrase: "going with", category: "architecture", importance: "normal" },
+  
+  // Explicit memory triggers (highest priority - always critical)
+  { phrase: "remember this", category: "note", importance: "critical" },
+  { phrase: "don't forget", category: "note", importance: "critical" },
+  { phrase: "dont forget", category: "note", importance: "critical" },
+  { phrase: "this is important", category: "note", importance: "critical" },
+  { phrase: "make a note", category: "note", importance: "critical" },
+  { phrase: "for the record", category: "note", importance: "critical" },
+  { phrase: "note to self", category: "note", importance: "critical" },
+  { phrase: "important:", category: "note", importance: "critical" },
+  { phrase: "key point:", category: "note", importance: "high" },
+  { phrase: "crucial:", category: "note", importance: "critical" },
+];
+
+/**
  * Check message text for keyword triggers and save to memory
  * @param {string} messageText - The user's message text
  * @param {object} event - The event object for pushing response messages
@@ -265,38 +305,47 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
   if (!messageText || typeof messageText !== "string") return false;
 
   const lower = messageText.toLowerCase();
-  const triggers = ["remember this", "don't forget", "dont forget"];
-  const triggered = triggers.some((t) => lower.includes(t));
-  if (!triggered) return false;
-
-  let content = messageText;
-  for (const t of triggers) {
-    const idx = lower.indexOf(t);
+  
+  // Find the first matching trigger
+  let matchedTrigger = null;
+  let matchIdx = -1;
+  
+  for (const trigger of KEYWORD_TRIGGERS) {
+    const idx = lower.indexOf(trigger.phrase);
     if (idx !== -1) {
-      content = messageText.slice(idx + t.length).replace(/^[:\s]+/, "").trim();
+      matchedTrigger = trigger;
+      matchIdx = idx;
       break;
     }
   }
+  
+  if (!matchedTrigger) return false;
 
-  if (content.length < 5) return false;
+  // Extract content after the trigger phrase
+  let content = messageText.slice(matchIdx + matchedTrigger.phrase.length).replace(/^[:\s]+/, "").trim();
+  
+  // If content is too short, use the whole message as context
+  if (content.length < 5) {
+    content = messageText;
+  }
 
   const title = content.slice(0, 80).replace(/["\n]/g, " ").trim();
 
   const result = await callCortex("remember", {
     title,
     content: content.slice(0, 500),
-    category: "note",
+    category: matchedTrigger.category,
     project: "openclaw",
     scope: "global",
-    importance: "critical",
-    tags: "keyword-trigger,openclaw-hook",
+    importance: matchedTrigger.importance,
+    tags: `keyword-trigger,openclaw-hook,trigger:${matchedTrigger.phrase.replace(/\s+/g, "-")}`,
   });
 
   if (result) {
     if (event.messages) {
-      event.messages.push(`✅ Saved to Cortex memory: "${title}"`);
+      event.messages.push(`✅ Saved to Cortex memory (${matchedTrigger.category}): "${title}"`);
     }
-    console.log(`[cortex-memory] Keyword trigger saved: ${title}`);
+    console.log(`[cortex-memory] Keyword trigger "${matchedTrigger.phrase}" saved: ${title}`);
     return true;
   }
   return false;

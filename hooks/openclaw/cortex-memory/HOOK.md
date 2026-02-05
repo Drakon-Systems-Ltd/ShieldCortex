@@ -37,8 +37,36 @@ Integrates [ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) pe
 3. Agent starts with knowledge of past sessions
 
 ### Keyword Triggers
-- Say **"remember this"** or **"don't forget"** followed by content
-- Auto-saves to Cortex with critical importance
+
+Say any of these phrases to trigger an instant save to Cortex memory:
+
+| Trigger Phrase | Category | Importance |
+|---------------|----------|------------|
+| **"remember this"** | note | critical |
+| **"don't forget"** | note | critical |
+| **"this is important"** | note | critical |
+| **"make a note"** | note | critical |
+| **"for the record"** | note | critical |
+| **"note to self"** | note | critical |
+| **"important:"** | note | critical |
+| **"crucial:"** | note | critical |
+| **"key point:"** | note | high |
+| **"lesson learned"** | learning | high |
+| **"i learned"** | learning | normal |
+| **"TIL:"** | learning | normal |
+| **"today i learned"** | learning | normal |
+| **"never again"** | error | critical |
+| **"root cause was"** | error | high |
+| **"the fix was"** | error | high |
+| **"always do"** | preference | high |
+| **"never do"** | preference | high |
+| **"i prefer"** | preference | normal |
+| **"we should always"** | preference | high |
+| **"we decided"** | architecture | high |
+| **"decision made"** | architecture | high |
+| **"going with"** | architecture | normal |
+
+Content after the trigger phrase is extracted and saved as the memory content.
 
 ## Requirements
 
