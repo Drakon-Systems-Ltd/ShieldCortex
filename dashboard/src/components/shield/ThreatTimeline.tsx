@@ -2,7 +2,7 @@
 
 import { useAuditLogs } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 
 interface Props {
   timeRange: '24h' | '7d' | '30d';
@@ -10,13 +10,16 @@ interface Props {
 
 export function ThreatTimeline({ timeRange }: Props) {
   const { projectFilter } = useDashboardStore();
-  const hoursMap = { '24h': 24, '7d': 168, '30d': 720 };
+  const hoursMap = { '24h': 24, '7d': 168, '30d': 720 } as const;
+  const [baseTime, setBaseTime] = useState(() => Date.now());
+  useEffect(() => { setBaseTime(Date.now()); }, [timeRange]);
   // Round to nearest minute so the query key stays stable across re-renders
   const since = useMemo(() => {
-    const ms = Date.now() - hoursMap[timeRange] * 3600_000;
+    const ms = baseTime - hoursMap[timeRange] * 3600_000;
     const rounded = Math.floor(ms / 60_000) * 60_000;
     return new Date(rounded).toISOString();
-  }, [timeRange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hoursMap is stable
+  }, [baseTime, timeRange]);
 
   const { data, isLoading, isError } = useAuditLogs({ startTime: since, project: projectFilter || undefined, limit: 500 });
 
@@ -26,7 +29,7 @@ export function ThreatTimeline({ timeRange }: Props) {
 
     const bucketSize = timeRange === '24h' ? 3600_000 : timeRange === '7d' ? 6 * 3600_000 : 24 * 3600_000;
     const bucketCount = timeRange === '24h' ? 24 : timeRange === '7d' ? 28 : 30;
-    const now = Date.now();
+    const now = baseTime;
 
     const result = Array.from({ length: bucketCount }, (_, i) => ({
       time: now - (bucketCount - 1 - i) * bucketSize,
@@ -47,7 +50,7 @@ export function ThreatTimeline({ timeRange }: Props) {
     }
 
     return result;
-  }, [data, timeRange]);
+  }, [data, timeRange, baseTime]);
 
   const maxValue = Math.max(1, ...buckets.map((b) => b.allowed + b.blocked + b.quarantined));
 

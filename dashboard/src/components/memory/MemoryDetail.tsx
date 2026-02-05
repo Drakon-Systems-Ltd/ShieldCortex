@@ -59,9 +59,13 @@ export function MemoryDetail({
   // Show success flash when reinforcement completes
   useEffect(() => {
     if (reinforceSuccess && lastReinforcedId === memory.id) {
-      setShowSuccessFlash(true);
-      const timer = setTimeout(() => setShowSuccessFlash(false), 1500);
-      return () => clearTimeout(timer);
+      // Schedule state update to avoid synchronous setState warning
+      const flashTimer = setTimeout(() => setShowSuccessFlash(true), 0);
+      const hideTimer = setTimeout(() => setShowSuccessFlash(false), 1500);
+      return () => {
+        clearTimeout(flashTimer);
+        clearTimeout(hideTimer);
+      };
     }
   }, [reinforceSuccess, lastReinforcedId, memory.id]);
 

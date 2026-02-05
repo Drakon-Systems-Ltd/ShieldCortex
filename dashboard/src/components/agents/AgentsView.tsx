@@ -18,6 +18,15 @@ function parseHierarchy(identifier: string): string[] {
   return identifier.split('>').map((s) => s.trim());
 }
 
+// Helper for relative time - accepts current timestamp to avoid Date.now() during render
+function formatTimeAgo(ts: string, now: number): string {
+  const diff = now - new Date(ts).getTime();
+  if (diff < 60_000) return 'just now';
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
+  return `${Math.floor(diff / 86400_000)}d ago`;
+}
+
 function AgentIdentifier({ identifier, compact }: { identifier: string; compact?: boolean }) {
   const parts = parseHierarchy(identifier);
   if (parts.length === 1) {
@@ -78,6 +87,7 @@ export function AgentsView() {
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [tierFilter, setTierFilter] = useState<string | null>(null);
   const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const [now] = useState(() => Date.now()); // stable timestamp for relative times
 
   const { data, isLoading } = useAgentRegistry(timeRange, projectFilter ?? undefined);
   const agents = data?.agents ?? [];
@@ -115,13 +125,7 @@ export function AgentsView() {
     }
   };
 
-  const timeAgo = (ts: string) => {
-    const diff = Date.now() - new Date(ts).getTime();
-    if (diff < 60_000) return 'just now';
-    if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
-    if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
-    return `${Math.floor(diff / 86400_000)}d ago`;
-  };
+  // timeAgo helper is now formatTimeAgo() defined outside component
 
   return (
     <div className="flex h-full">
@@ -236,7 +240,7 @@ export function AgentsView() {
                 <span className={`text-xs tabular-nums ${agent.flagged_count > 0 ? 'text-red-400' : 'text-slate-500'}`}>
                   {agent.flagged_count}
                 </span>
-                <span className="text-[10px] text-slate-500">{timeAgo(agent.last_seen)}</span>
+                <span className="text-[10px] text-slate-500">{formatTimeAgo(agent.last_seen, now)}</span>
               </button>
             );
           })}

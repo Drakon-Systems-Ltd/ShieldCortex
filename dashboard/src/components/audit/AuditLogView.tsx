@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useAuditLogs } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
 
@@ -16,11 +16,14 @@ export function AuditLogView() {
   const [sourceFilter, setSourceFilter] = useState<string | undefined>(undefined);
   const [resultFilter, setResultFilter] = useState<string | undefined>(undefined);
 
-  const hoursMap = { '24h': 24, '7d': 168, '30d': 720 };
+  const hoursMap = { '24h': 24, '7d': 168, '30d': 720 } as const;
+  const [baseTime, setBaseTime] = useState(() => Date.now());
+  useEffect(() => { setBaseTime(Date.now()); }, [timeRange]);
   const since = useMemo(() => {
-    const ms = Date.now() - hoursMap[timeRange] * 3600_000;
+    const ms = baseTime - hoursMap[timeRange] * 3600_000;
     return new Date(Math.floor(ms / 60_000) * 60_000).toISOString();
-  }, [timeRange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hoursMap is stable
+  }, [baseTime, timeRange]);
 
   const { data, isLoading } = useAuditLogs({
     startTime: since,
