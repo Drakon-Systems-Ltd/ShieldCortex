@@ -26,7 +26,7 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
     "build": "tsc",
-    "build:dashboard": "cd dashboard && npm run build && cp -r .next/static .next/standalone/dashboard/.next/ && cp -r public .next/standalone/dashboard/",
+    "build:dashboard": "cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true)",
     "build:all": "npm run build && npm run build:dashboard",
     "start": "node dist/index.js",
     "start:api": "node dist/index.js --mode api",
@@ -39,7 +39,7 @@
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "audit:security": "npm audit --audit-level=moderate",
-    "prepublishOnly": "npm run build:all"
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "ai",
