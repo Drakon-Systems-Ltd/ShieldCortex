@@ -175,10 +175,12 @@ function startDashboard(): ChildProcess {
     });
   } else {
     // Fall back to npm run start (local development)
+    // Use explicit shell path for macOS Tahoe compatibility (no /bin/sh)
+    const shellPath = process.env.SHELL || '/bin/zsh';
     dashboard = spawn('npm', ['run', 'start'], {
       cwd: dashboardDir,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: true,
+      shell: shellPath,
     });
   }
 
@@ -199,7 +201,21 @@ function startDashboard(): ChildProcess {
 
   dashboard.on('error', (error) => {
     console.error('[dashboard] Failed to start:', error.message);
-    if (!useStandalone) {
+    if (error.message.includes('ENOENT') || error.message.includes('spawn')) {
+      console.error(`
+╔══════════════════════════════════════════════════════════════╗
+║  ⚠️  Dashboard spawn failed (shell not found)                 ║
+╠══════════════════════════════════════════════════════════════╣
+║  This can happen on newer macOS versions (Tahoe+).           ║
+║                                                              ║
+║  Manual workaround:                                          ║
+║    cd ${dashboardDir}
+║    npm run start                                             ║
+║                                                              ║
+║  Then visit: http://localhost:3030                           ║
+╚══════════════════════════════════════════════════════════════╝
+      `);
+    } else if (!useStandalone) {
       console.error('[dashboard] Make sure to run "npm run build" in the dashboard directory first.');
     }
   });

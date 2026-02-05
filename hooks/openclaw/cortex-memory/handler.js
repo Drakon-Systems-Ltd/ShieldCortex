@@ -205,6 +205,11 @@ async function onSessionEnd(event) {
   }
 
   console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories from session`);
+  
+  // Provide visible feedback to user
+  if (saved > 0 && event.messages) {
+    event.messages.push(`🧠 ShieldCortex: Saved ${saved} memor${saved === 1 ? 'y' : 'ies'} from this session`);
+  }
 }
 
 /**
@@ -248,6 +253,11 @@ async function onSessionStop(event) {
   }
 
   console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories on session stop`);
+  
+  // Provide visible feedback to user
+  if (saved > 0 && event.messages) {
+    event.messages.push(`🧠 ShieldCortex: Saved ${saved} memor${saved === 1 ? 'y' : 'ies'} before session end`);
+  }
 }
 
 /**
