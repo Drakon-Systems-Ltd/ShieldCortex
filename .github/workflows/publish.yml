@@ -28,7 +28,8 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - run: npm ci
-      - run: npm run build
+      - run: cd dashboard && npm ci
+      - run: npm run build:all
       - run: npm test
       - run: npm publish
         env:
