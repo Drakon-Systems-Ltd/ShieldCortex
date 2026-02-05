@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.17] - 2026-02-05
+
+### Fixed
+
+- **macOS Tahoe 26.2 dashboard spawn** — Dashboard now launches correctly when `/bin/sh` is sandboxed. Uses explicit shell path from `$SHELL` with `/bin/zsh` fallback.
+- **React 19 strict lint compliance** — Fixed `Date.now()` purity issues by using stable state-based timestamps. Fixed setState-in-effect patterns.
+- **CI stability** — Skipped flaky search reinforcement tests that timeout in GitHub Actions.
+
+### Improved
+
+- **Better spawn error messaging** — When dashboard spawn fails, users now see a clear manual workaround with exact commands.
+- **Resilient dashboard build** — Build script no longer fails if standalone output is unavailable (Turbopack compatibility).
+
+## [2.4.16] - 2026-02-05
+
+### Fixed
+
+- **macOS Tahoe spawn fix (initial)** — Added `shell: true` option for dashboard spawn process.
+
+## [2.4.15] - 2026-02-05
+
+### Fixed
+
+- **Dashboard spawn error handling** — Improved error messages for spawn failures.
+
 ## [2.4.14] - 2026-02-05
 
 ### Fixed
