@@ -298,6 +298,13 @@ async function main() {
     return;
   }
 
+  // Handle "config" subcommand (cloud sync configuration)
+  if (process.argv[2] === 'config') {
+    const { handleCloudConfig } = await import('./cloud/cli.js');
+    handleCloudConfig(process.argv.slice(3));
+    return;
+  }
+
   // Handle "status" subcommand
   if (process.argv[2] === 'status') {
     const { handleStatusCommand } = await import('./setup/status.js');

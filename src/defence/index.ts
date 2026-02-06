@@ -36,3 +36,8 @@ export { analyzeFragmentation, storeFragmentationData } from './fragmentation/in
 
 // Audit
 export { logAudit, queryAuditLogs, getAuditStats } from './audit/index.js';
+
+// Cloud
+export { getCloudConfig, setCloudConfig, clearCloudConfigCache } from '../cloud/config.js';
+export type { CloudConfig } from '../cloud/config.js';
+export { syncToCloud } from '../cloud/sync.js';

@@ -22,6 +22,7 @@ import { classifySensitivity } from './sensitivity/index.js';
 import { analyzeFragmentation } from './fragmentation/index.js';
 import { logAudit, createContentHash } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
+import { syncToCloud } from '../cloud/sync.js';
 
 export function runDefencePipeline(
   content: string,
@@ -118,7 +119,7 @@ export function runDefencePipeline(
       }
     }
 
-    return {
+    const pipelineResult = {
       allowed,
       firewall,
       fragmentation,
@@ -126,6 +127,15 @@ export function runDefencePipeline(
       trust,
       auditId,
     };
+
+    // 8. Sync audit data to cloud (fire-and-forget, never blocks)
+    try {
+      syncToCloud(pipelineResult, source, durationMs);
+    } catch {
+      // Cloud sync must never affect local pipeline
+    }
+
+    return pipelineResult;
   } catch (err) {
     // FAIL-CLOSED: on error, default to BLOCK for security
     const durationMs = Math.round(performance.now() - startTime);
