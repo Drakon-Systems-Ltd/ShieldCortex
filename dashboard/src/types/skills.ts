@@ -19,6 +19,7 @@ export interface SkillScanFileResult {
   summary: string;
   findings: SkillThreatFinding[];
   scanDurationMs: number;
+  trusted?: boolean;
 }
 
 export interface SkillScanAllResponse {

@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { FileSearch, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
-import { useSkillScanAll, useSkillScanContent } from '@/hooks/useSkillScan';
+import { FileSearch, Loader2, ChevronDown, ChevronRight, Cloud } from 'lucide-react';
+import { useSkillScanAll, useSkillScanContent, useSkillTrust, useSkillUntrust, useDeleteSkillFile } from '@/hooks/useSkillScan';
+import { useCloudStatus } from '@/hooks/useCloudStatus';
 import type { SkillScanAllResponse, SkillScanContentResult } from '@/types/skills';
 import { SkillFileList } from './SkillFileList';
 import { SeverityBadge } from './SeverityBadge';
@@ -23,12 +24,19 @@ const FORMATS = [
 export function SkillsView() {
   const scanAll = useSkillScanAll();
   const scanContent = useSkillScanContent();
+  const trustMutation = useSkillTrust();
+  const untrustMutation = useSkillUntrust();
+  const deleteMutation = useDeleteSkillFile();
+  const { data: cloudConfig } = useCloudStatus();
 
   const [scanResult, setScanResult] = useState<SkillScanAllResponse | null>(null);
   const [pasteResult, setPasteResult] = useState<SkillScanContentResult | null>(null);
   const [showPaste, setShowPaste] = useState(false);
   const [pasteContent, setPasteContent] = useState('');
   const [pasteFormat, setPasteFormat] = useState('');
+  const [showCloudUpsell, setShowCloudUpsell] = useState(false);
+
+  const cloudConnected = !!(cloudConfig?.enabled && cloudConfig?.apiKeySet);
 
   const handleScanAll = () => {
     scanAll.mutate(undefined, {
@@ -42,6 +50,59 @@ export function SkillsView() {
       { content: pasteContent, format: pasteFormat || undefined },
       { onSuccess: (data) => setPasteResult(data) },
     );
+  };
+
+  const handleTrust = (path: string) => {
+    trustMutation.mutate(path, {
+      onSuccess: () => {
+        // Update local state to reflect trust immediately
+        if (scanResult) {
+          setScanResult({
+            ...scanResult,
+            files: scanResult.files.map(f =>
+              f.path === path ? { ...f, trusted: true } : f
+            ),
+            threatCount: scanResult.files.filter(f => !f.safe && !f.trusted && f.path !== path).length,
+          });
+        }
+      },
+    });
+  };
+
+  const handleUntrust = (path: string) => {
+    untrustMutation.mutate(path, {
+      onSuccess: () => {
+        if (scanResult) {
+          setScanResult({
+            ...scanResult,
+            files: scanResult.files.map(f =>
+              f.path === path ? { ...f, trusted: false } : f
+            ),
+            threatCount: scanResult.files.filter(f => {
+              const isTrusted = f.path === path ? false : f.trusted;
+              return !f.safe && !isTrusted;
+            }).length,
+          });
+        }
+      },
+    });
+  };
+
+  const handleRemove = (path: string) => {
+    deleteMutation.mutate(path, {
+      onSuccess: () => {
+        // Remove from local state
+        if (scanResult) {
+          const updated = scanResult.files.filter(f => f.path !== path);
+          setScanResult({
+            ...scanResult,
+            files: updated,
+            totalScanned: updated.length,
+            threatCount: updated.filter(f => !f.safe && !f.trusted).length,
+          });
+        }
+      },
+    });
   };
 
   return (
@@ -68,6 +129,25 @@ export function SkillsView() {
         </button>
       </div>
 
+      {/* Cloud upsell banner */}
+      {showCloudUpsell && (
+        <div className="mb-4 bg-slate-900 border border-cyan-800/50 rounded-xl p-4 flex items-center gap-3">
+          <Cloud size={20} className="text-cyan-400 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-white">Connect to ShieldCortex Cloud</p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Enable one-click skill removal and cloud-powered threat intelligence.
+            </p>
+          </div>
+          <button
+            onClick={() => setShowCloudUpsell(false)}
+            className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Scan Results */}
       {scanResult ? (
         <div className="space-y-4">
@@ -91,7 +171,14 @@ export function SkillsView() {
           </div>
 
           {/* File list */}
-          <SkillFileList files={scanResult.files} />
+          <SkillFileList
+            files={scanResult.files}
+            cloudConnected={cloudConnected}
+            onTrust={handleTrust}
+            onUntrust={handleUntrust}
+            onRemove={handleRemove}
+            onCloudUpsell={() => setShowCloudUpsell(true)}
+          />
         </div>
       ) : !scanAll.isPending ? (
         /* Empty state */

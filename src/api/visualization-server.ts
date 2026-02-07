@@ -8,6 +8,8 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
+import { existsSync, unlinkSync } from 'fs';
+import { homedir } from 'os';
 import { WebSocketServer, WebSocket } from 'ws';
 import { getDatabase, initDatabase, checkpointWal } from '../database/init.js';
 import { Memory, MemoryConfig, DEFAULT_CONFIG } from '../memory/types.js';
@@ -51,7 +53,7 @@ import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
-import { getCloudConfig, setCloudConfig } from '../cloud/config.js';
+import { getCloudConfig, setCloudConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill } from '../cloud/config.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 
 const PORT = process.env.PORT || 3001;
@@ -1278,6 +1280,7 @@ export function startVisualizationServer(dbPath?: string): void {
     try {
       const { dir } = req.body ?? {};
       const files = discoverSkillFiles(dir);
+      const trusted = getTrustedSkills();
 
       const results = files.map((fp) => {
         const r = scanSkill(fp);
@@ -1290,10 +1293,11 @@ export function startVisualizationServer(dbPath?: string): void {
           summary: r.summary,
           findings: r.findings,
           scanDurationMs: r.scanDurationMs,
+          trusted: trusted.includes(fp),
         };
       });
 
-      const threatCount = results.filter((r) => !r.safe).length;
+      const threatCount = results.filter((r) => !r.safe && !r.trusted).length;
 
       res.json({
         files: results,
@@ -1301,6 +1305,79 @@ export function startVisualizationServer(dbPath?: string): void {
         threatCount,
         scannedAt: new Date().toISOString(),
       });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Trust a skill file
+  app.post('/api/skills/trust', (req: Request, res: Response) => {
+    try {
+      const { path: filePath } = req.body;
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: '"path" is required' });
+      }
+      addTrustedSkill(filePath);
+      res.json({ trusted: true, path: filePath });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Untrust a skill file
+  app.delete('/api/skills/trust', (req: Request, res: Response) => {
+    try {
+      const { path: filePath } = req.body;
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: '"path" is required' });
+      }
+      removeTrustedSkill(filePath);
+      res.json({ trusted: false, path: filePath });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Delete a skill file (security: only allows known skill locations)
+  app.delete('/api/skills/file', (req: Request, res: Response) => {
+    try {
+      const { path: filePath } = req.body;
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: '"path" is required' });
+      }
+
+      // Security: only allow deletion of files in known skill directories
+      const home = homedir();
+      const allowedPrefixes = [
+        `${home}/.claude/`,
+        `${home}/.openclaw/`,
+      ];
+      const allowedFiles = [
+        '.cursorrules', '.windsurfrules', '.clinerules',
+        'CLAUDE.md', 'copilot-instructions.md',
+        '.aider.conf.yml',
+      ];
+      const isAllowed = allowedPrefixes.some(p => filePath.startsWith(p))
+        || allowedFiles.some(f => filePath.endsWith(`/${f}`));
+
+      if (!isAllowed) {
+        return res.status(403).json({ error: 'Path is not in a known skill directory' });
+      }
+
+      if (!existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+
+      // Check cloud connection is required for deletion
+      const cloudConfig = getCloudConfig();
+      if (!cloudConfig.cloudEnabled || !cloudConfig.cloudApiKey) {
+        return res.status(403).json({ error: 'Cloud connection required for skill removal', requiresCloud: true });
+      }
+
+      unlinkSync(filePath);
+      // Also remove from trusted list if present
+      removeTrustedSkill(filePath);
+      res.json({ deleted: true, path: filePath });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

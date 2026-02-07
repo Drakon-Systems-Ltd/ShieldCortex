@@ -142,6 +142,16 @@ export function BrainControlCentre({
     consolidateMutation.mutate();
   }, [consolidateMutation]);
 
+  const handleClickContradictions = useCallback(() => {
+    const first = contradictionsData?.contradictions?.[0];
+    if (!first) return;
+    const memory = memories.find((m) => m.id === first.memoryAId);
+    if (memory) {
+      setSelectedMemory(memory);
+      if (!showRightSidebar) toggleRightSidebar();
+    }
+  }, [contradictionsData, memories, setSelectedMemory, showRightSidebar, toggleRightSidebar]);
+
   const handleActivityClick = useCallback(
     (eventData: unknown) => {
       const data = eventData as Record<string, unknown> | null;
@@ -178,6 +188,7 @@ export function BrainControlCentre({
         quarantineCount={quarantineCount}
         lastConsolidation={lastConsolidation}
         workerStatus={mappedWorkerStatus}
+        onClickContradictions={handleClickContradictions}
       />
 
       {/* Main content area: sidebar + brain + inspector */}
@@ -221,7 +232,7 @@ export function BrainControlCentre({
           <MemoryInspector
             memory={selectedMemory}
             links={selectedMemoryLinks}
-            onClose={() => setSelectedMemory(null)}
+            onClose={() => { setSelectedMemory(null); toggleRightSidebar(); }}
             onBoost={handleBoost}
             onDemote={handleDemote}
             onPromote={handlePromote}

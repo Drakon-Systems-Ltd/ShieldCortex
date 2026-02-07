@@ -41,3 +41,48 @@ export function useSkillScanContent() {
     mutationFn: scanContent,
   });
 }
+
+async function trustSkill(path: string): Promise<{ trusted: boolean; path: string }> {
+  const response = await fetch(`${API_BASE}/api/skills/trust`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) throw new Error('Failed to trust skill');
+  return response.json();
+}
+
+async function untrustSkill(path: string): Promise<{ trusted: boolean; path: string }> {
+  const response = await fetch(`${API_BASE}/api/skills/trust`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) throw new Error('Failed to untrust skill');
+  return response.json();
+}
+
+async function deleteSkillFile(path: string): Promise<{ deleted: boolean; path: string }> {
+  const response = await fetch(`${API_BASE}/api/skills/file`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to delete skill file');
+  }
+  return response.json();
+}
+
+export function useSkillTrust() {
+  return useMutation({ mutationFn: trustSkill });
+}
+
+export function useSkillUntrust() {
+  return useMutation({ mutationFn: untrustSkill });
+}
+
+export function useDeleteSkillFile() {
+  return useMutation({ mutationFn: deleteSkillFile });
+}

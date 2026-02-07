@@ -59,3 +59,46 @@ export function setCloudConfig(updates: Partial<CloudConfig>): void {
 export function clearCloudConfigCache(): void {
   cachedConfig = null;
 }
+
+// ── Trusted Skills ──────────────────────────────────────
+
+function readRawConfig(): Record<string, unknown> {
+  try {
+    if (existsSync(CONFIG_FILE)) {
+      return JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return {};
+}
+
+function writeRawConfig(raw: Record<string, unknown>): void {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, 2) + '\n');
+  cachedConfig = null;
+}
+
+export function getTrustedSkills(): string[] {
+  const raw = readRawConfig();
+  return Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
+}
+
+export function addTrustedSkill(path: string): void {
+  const raw = readRawConfig();
+  const list = Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
+  if (!list.includes(path)) {
+    list.push(path);
+    raw.trustedSkills = list;
+    writeRawConfig(raw);
+  }
+}
+
+export function removeTrustedSkill(path: string): void {
+  const raw = readRawConfig();
+  const list = Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
+  const idx = list.indexOf(path);
+  if (idx !== -1) {
+    list.splice(idx, 1);
+    raw.trustedSkills = list;
+    writeRawConfig(raw);
+  }
+}
