@@ -48,6 +48,7 @@ import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
+import { getCloudConfig, setCloudConfig } from '../cloud/config.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -512,6 +513,45 @@ export function startVisualizationServer(dbPath?: string): void {
     try {
       resume();
       res.json({ paused: false, message: 'Memory creation resumed' });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // CLOUD CONFIG ENDPOINTS
+  // ============================================
+
+  // Get cloud configuration status
+  app.get('/api/cloud/config', (_req: Request, res: Response) => {
+    try {
+      const config = getCloudConfig();
+      res.json({
+        enabled: config.cloudEnabled,
+        apiKeySet: !!config.cloudApiKey,
+        baseUrl: config.cloudBaseUrl,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Update cloud configuration
+  app.post('/api/cloud/config', (req: Request, res: Response) => {
+    try {
+      const { cloudApiKey, cloudEnabled, cloudBaseUrl } = req.body;
+      setCloudConfig({
+        ...(cloudApiKey !== undefined && { cloudApiKey }),
+        ...(cloudEnabled !== undefined && { cloudEnabled }),
+        ...(cloudBaseUrl !== undefined && { cloudBaseUrl }),
+      });
+      const updated = getCloudConfig();
+      res.json({
+        success: true,
+        enabled: updated.cloudEnabled,
+        apiKeySet: !!updated.cloudApiKey,
+        baseUrl: updated.cloudBaseUrl,
+      });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

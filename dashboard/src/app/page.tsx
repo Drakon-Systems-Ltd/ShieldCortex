@@ -22,7 +22,8 @@ import { AgentsView } from '@/components/agents/AgentsView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Memory } from '@/types/memory';
-import { Shield } from 'lucide-react';
+import { Shield, Cloud } from 'lucide-react';
+import { useCloudStatus } from '@/hooks/useCloudStatus';
 
 // Dynamic imports (avoid SSR issues with canvas/WebGL)
 const KnowledgeGraph = dynamic(
@@ -119,6 +120,10 @@ export default function DashboardPage() {
   const _resumeMutation = useResumeMemory();
   const isPaused = controlStatus?.paused ?? false;
 
+  // Cloud status
+  const { data: cloudStatus } = useCloudStatus();
+  const isCloudConnected = cloudStatus?.enabled && cloudStatus?.apiKeySet;
+
   const handleSelectMemory = (memory: Memory | null) => {
     setSelectedMemory(memory);
   };
@@ -151,6 +156,11 @@ export default function DashboardPage() {
             <h1 className="text-xl font-bold bg-gradient-to-r from-cyan-400 via-blue-400 to-emerald-400 bg-clip-text text-transparent">
               ShieldCortex
             </h1>
+            <Cloud
+              size={16}
+              className={isCloudConnected ? 'text-emerald-400' : 'text-slate-600'}
+              title={isCloudConnected ? 'Connected to ShieldCortex Cloud' : 'Cloud sync not configured'}
+            />
           </div>
 
           {/* Project Selector */}

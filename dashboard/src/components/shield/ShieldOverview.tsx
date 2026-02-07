@@ -5,6 +5,7 @@ import { PipelineStatus } from './PipelineStatus';
 import { QuarantinePreview } from './QuarantinePreview';
 import { ThreatTimeline } from './ThreatTimeline';
 import { DefenceStatsCard } from './DefenceStatsCard';
+import { CloudUpsellCard } from './CloudUpsellCard';
 
 export function ShieldOverview() {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
@@ -38,6 +39,9 @@ export function ShieldOverview() {
         <ThreatTimeline timeRange={timeRange} />
         <DefenceStatsCard timeRange={timeRange} />
       </div>
+
+      {/* Cloud upsell — hidden when already configured */}
+      <CloudUpsellCard />
     </div>
   );
 }

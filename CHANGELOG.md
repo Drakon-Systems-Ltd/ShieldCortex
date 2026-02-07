@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.20] - 2026-02-07
+
+### Added
+
+- **Cloud sync UI** — CloudUpsellCard on Shield overview prompts local users to connect to ShieldCortex Cloud. Enter email, verify via magic link, and auto-configure cloud sync without leaving the dashboard.
+- **Cloud status indicator** — Cloud icon in the dashboard header shows connection state (green when syncing, grey when disconnected).
+- **Cloud config API** — `GET /api/cloud/config` and `POST /api/cloud/config` endpoints on the local API server for reading and updating cloud sync settings.
+- **useCloudStatus hook** — React Query hook for polling cloud configuration state with 30-second refresh.
+
 ## [2.4.19] - 2026-02-05
 
 ### Security
