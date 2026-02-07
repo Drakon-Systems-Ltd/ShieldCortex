@@ -140,9 +140,9 @@ export function BrainControlCentre({
   const handleActivityClick = useCallback(
     (eventData: Record<string, unknown>) => {
       if (eventData?.memoryId) {
-        handleNavigateToMemory(eventData.memoryId);
+        handleNavigateToMemory(eventData.memoryId as number);
       } else if (eventData?.id) {
-        handleNavigateToMemory(eventData.id);
+        handleNavigateToMemory(eventData.id as number);
       }
     },
     [handleNavigateToMemory]
