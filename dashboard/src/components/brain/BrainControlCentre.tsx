@@ -138,7 +138,7 @@ export function BrainControlCentre({
   }, [consolidateMutation]);
 
   const handleActivityClick = useCallback(
-    (eventData: any) => {
+    (eventData: Record<string, unknown>) => {
       if (eventData?.memoryId) {
         handleNavigateToMemory(eventData.memoryId);
       } else if (eventData?.id) {

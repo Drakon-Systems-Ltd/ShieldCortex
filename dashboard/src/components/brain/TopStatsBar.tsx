@@ -14,7 +14,7 @@ interface TopStatsBarProps {
   contradictionCount: number;
   quarantineCount: number;
   lastConsolidation: string | null;
-  workerStatus: any;
+  workerStatus?: { running?: boolean; lastRun?: string } | null;
   onClickContradictions?: () => void;
   onClickQuarantine?: () => void;
   onClickConsolidation?: () => void;
@@ -65,8 +65,8 @@ export function TopStatsBar({
 
   const totalMemories = stats?.total ?? 0;
   const totalLinks =
-    (stats as any)?.totalLinks ??
-    (stats as any)?.links ??
+    (stats as MemoryStats & { totalLinks?: number; links?: number })?.totalLinks ??
+    (stats as MemoryStats & { totalLinks?: number; links?: number })?.links ??
     0;
 
   return (

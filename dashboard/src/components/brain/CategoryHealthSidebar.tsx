@@ -25,7 +25,7 @@ interface CategoryHealthSidebarProps {
   onConsolidate: () => void;
   isConsolidating: boolean;
   onScanContradictions?: () => void;
-  workerStatus?: any;
+  workerStatus?: { running?: boolean; lastRun?: string } | null;
 }
 
 export function CategoryHealthSidebar({
