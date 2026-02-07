@@ -29,6 +29,20 @@ Most AI agents are stateless — they forget everything between sessions. Shield
 
 **Stop choosing between memory and security. Get both.**
 
+### NEW: ShieldCortex Cloud
+
+See every threat across every project in one team dashboard. The local package now syncs audit data to [ShieldCortex Cloud](https://shieldcortex.ai) — sign up directly from the built-in dashboard, no CLI commands needed.
+
+```
+Local Agent                    ShieldCortex Cloud
+┌──────────────┐               ┌──────────────────────┐
+│  npm package │──audit sync──▶│  Team dashboard      │
+│  (free,      │               │  Audit log + stats   │
+│   unlimited) │               │  Team invites        │
+│              │               │  Usage analytics     │
+└──────────────┘               └──────────────────────┘
+```
+
 ---
 
 ## What You Get
@@ -264,6 +278,17 @@ npx shieldcortex --dashboard
 
 Views: Shield (defence overview), Audit Log, Quarantine, Memories, 3D Brain, Knowledge Graph.
 
+### Cloud Sync
+
+Connect your local dashboard to ShieldCortex Cloud and see threats from all your projects in one place. The dashboard includes a guided setup — just enter your email and click the magic link.
+
+```bash
+# Or configure via CLI
+npx shieldcortex config --cloud-api-key <key> --cloud-enable
+```
+
+Once connected, every local scan automatically syncs audit metadata (not content) to your Cloud dashboard.
+
 ### Auto-start on login
 
 ```bash
@@ -288,6 +313,8 @@ npx shieldcortex --version          # Show version
 npx shieldcortex service install    # Auto-start on login
 npx shieldcortex graph backfill     # Extract entities from existing memories
 npx shieldcortex openclaw install   # Install OpenClaw hook
+npx shieldcortex config --cloud-api-key <key>  # Set Cloud API key
+npx shieldcortex config --cloud-enable  # Enable cloud sync
 npx shieldcortex uninstall          # Full uninstall (requires confirmation)
 npx shieldcortex uninstall --confirm # Non-interactive uninstall
 ```
@@ -324,6 +351,7 @@ npx shieldcortex uninstall --confirm # Non-interactive uninstall
 | Sub-Agent Access Control | No | No | No | **Yes** |
 | Audit Trail | No | No | Partial | **Yes** |
 | Credential Protection | No | No | No | **Yes** |
+| Cloud Team Dashboard | No | Yes | Yes | **Yes** |
 | MCP Native | Yes | No | No | **Yes** |
 | Self-Hosted | Yes | No | Partial | **Yes** |
 | Open Source | Yes | Partial | Partial | **Yes** |
@@ -336,18 +364,22 @@ npx shieldcortex uninstall --confirm # Non-interactive uninstall
 
 | Tier | What You Get | Price |
 |------|--------------|-------|
-| **Free** | Full memory system + core security (firewall, audit, trust scoring) | Free |
-| **Pro** | + Sensitivity classifier, fragmentation detector, web dashboard | Coming soon |
+| **Free** | npm package (unlimited local scans) + Cloud (500 scans/month, 1 member, 7-day audit retention) | Free |
+| **Pro** | 10K cloud scans/month, team invites, 90-day retention | £29/mo |
+| **Team** | 100K cloud scans/month, unlimited members, 1-year retention | £99/mo |
+| **Enterprise** | Self-hosted, SLA, custom rules, dedicated support | [Contact us](https://shieldcortex.ai/pricing) |
 
-Free tier is fully functional for individual developers.
+The npm package is free and unlimited for local use. Cloud tiers add team visibility, longer retention, and higher scan limits. See [shieldcortex.ai/pricing](https://shieldcortex.ai/pricing) for details.
 
 ---
 
 ## Links
 
 - **Website:** [shieldcortex.ai](https://shieldcortex.ai)
+- **Cloud Dashboard:** [api.shieldcortex.ai](https://api.shieldcortex.ai)
 - **npm:** [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex)
 - **GitHub:** [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex)
+- **Docs:** [shieldcortex.ai/docs](https://shieldcortex.ai/docs)
 - **Architecture:** [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ---

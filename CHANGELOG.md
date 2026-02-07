@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.21] - 2026-02-07
+
+### Changed
+
+- **README** — Added Cloud dashboard section, cloud sync documentation, updated pricing tiers (Free/Pro/Team/Enterprise), added cloud CLI commands, updated comparison table.
+
+### Fixed
+
+- **Dashboard TypeScript build** — Fixed Lucide `Cloud` icon `title` prop not accepted by TypeScript types. Wrapped icon in a `<div>` with the title attribute.
+- **Dashboard ESLint** — Fixed unescaped apostrophe in CloudUpsellCard (`We'll` → `We&apos;ll`) triggering `react/no-unescaped-entities` rule.
+
 ## [2.4.20] - 2026-02-07
 
 ### Added
