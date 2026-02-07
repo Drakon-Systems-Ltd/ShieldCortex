@@ -179,8 +179,23 @@ const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX = 20; // max writes per window per source
 
 const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
+let rateLimitCheckCount = 0;
+
+function pruneRateLimitMap(): void {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitMap) {
+    if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+      rateLimitMap.delete(key);
+    }
+  }
+}
 
 function checkRateLimit(source: DefenceSource): boolean {
+  // Prune stale entries every 50 checks
+  if (++rateLimitCheckCount % 50 === 0) {
+    pruneRateLimitMap();
+  }
+
   const key = `${source.type}:${source.identifier}`;
   const now = Date.now();
   const entry = rateLimitMap.get(key);
@@ -704,6 +719,17 @@ const MAX_ENRICHMENT_SIZE = 2000; // Max chars to add per enrichment
 
 // Track last enrichment times (in-memory, ephemeral like activation cache)
 const enrichmentTimestamps = new Map<number, number>();
+let enrichmentCallCount = 0;
+
+function pruneEnrichmentTimestamps(): void {
+  const now = Date.now();
+  const cooldownMs = ENRICHMENT_COOLDOWN_HOURS * 60 * 60 * 1000;
+  for (const [memoryId, timestamp] of enrichmentTimestamps) {
+    if (now - timestamp > cooldownMs) {
+      enrichmentTimestamps.delete(memoryId);
+    }
+  }
+}
 
 /**
  * Enrichment result indicating what happened
@@ -734,6 +760,11 @@ export function enrichMemory(
   newContext: string,
   contextType: 'search' | 'access' | 'related' = 'access'
 ): EnrichmentResult {
+  // Prune stale cooldown entries every 100 calls
+  if (++enrichmentCallCount % 100 === 0) {
+    pruneEnrichmentTimestamps();
+  }
+
   const db = getDatabase();
   const memory = getMemoryById(memoryId);
 

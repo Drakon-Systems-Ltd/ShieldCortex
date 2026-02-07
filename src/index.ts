@@ -43,6 +43,8 @@ import { setupClaudeMd } from './setup/claude-md.js';
 import { handleHookCommand } from './setup/hooks.js';
 import { handleOpenClawCommand } from './setup/openclaw.js';
 import { createRequire } from 'module';
+import { disposeModel } from './embeddings/index.js';
+import { stopDefaultWorker } from './worker/brain-worker.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
@@ -91,12 +93,16 @@ async function startMcpServer(dbPath?: string): Promise<void> {
 
   // Register signal handlers BEFORE connect so cleanup runs even if connect() throws
   process.on('SIGINT', async () => {
+    stopDefaultWorker();
     await server.close();
+    await disposeModel();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
+    stopDefaultWorker();
     await server.close();
+    await disposeModel();
     process.exit(0);
   });
 
@@ -330,6 +336,156 @@ async function main() {
       process.exit(1);
     }
     return;
+  }
+
+  // Handle "scan-skill" subcommand — scan a single skill/instruction file
+  if (process.argv[2] === 'scan-skill') {
+    const filePath = process.argv[3];
+    if (!filePath) {
+      console.error('Usage: npx shieldcortex scan-skill <path>');
+      console.error('  Scans an agent instruction file for threats.');
+      console.error('  Supports: SKILL.md, HOOK.md, handler.js, .cursorrules,');
+      console.error('  .windsurfrules, .clinerules, CLAUDE.md, copilot-instructions.md,');
+      console.error('  .aider.conf.yml, .continue/config.json');
+      process.exit(1);
+    }
+    const { scanSkill } = await import('./defence/skill-scanner/index.js');
+    const result = scanSkill(filePath);
+
+    // Coloured output
+    const severityColor: Record<string, string> = {
+      critical: '\x1b[31m', // red
+      high: '\x1b[91m',     // bright red
+      medium: '\x1b[33m',   // yellow
+      low: '\x1b[36m',      // cyan
+    };
+    const reset = '\x1b[0m';
+    const bold = '\x1b[1m';
+
+    console.log(`\n${bold}Skill Scanner Report${reset}`);
+    console.log(`${'─'.repeat(50)}`);
+    console.log(`  Skill:   ${result.skillName}`);
+    console.log(`  Format:  ${result.format}`);
+    console.log(`  Risk:    ${result.safe ? '\x1b[32mSAFE\x1b[0m' : `${severityColor[result.riskLevel] ?? ''}${result.riskLevel.toUpperCase()}${reset}`}`);
+    console.log(`  Time:    ${result.scanDurationMs}ms`);
+
+    if (result.findings.length > 0) {
+      console.log(`\n${bold}Findings (${result.findings.length}):${reset}`);
+      for (const f of result.findings) {
+        const color = severityColor[f.severity] ?? '';
+        console.log(`  ${color}[${f.severity.toUpperCase()}]${reset} ${f.pattern}`);
+        console.log(`         ${f.description}`);
+        if (f.matchedText) {
+          console.log(`         Match: "${f.matchedText}"`);
+        }
+      }
+    } else {
+      console.log(`\n  \x1b[32mNo threats detected.\x1b[0m`);
+    }
+
+    console.log(`\n${result.summary}\n`);
+    process.exit(result.safe ? 0 : 1);
+  }
+
+  // Handle "scan-skills" subcommand — scan all installed skills/hooks
+  if (process.argv[2] === 'scan-skills') {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const { scanSkill, detectFormat } = await import('./defence/skill-scanner/index.js');
+    const { default: pathMod } = await import('node:path');
+
+    const customDir = process.argv.indexOf('--dir') !== -1
+      ? process.argv[process.argv.indexOf('--dir') + 1]
+      : undefined;
+
+    const filesToScan: string[] = [];
+
+    // Helper to add a file if it exists
+    function addIfExists(filePath: string): void {
+      try {
+        if (fs.existsSync(filePath)) filesToScan.push(filePath);
+      } catch { /* ignore */ }
+    }
+
+    // Helper to add all files in a directory (one level deep)
+    function addDirFiles(dirPath: string, patterns: string[]): void {
+      try {
+        if (!fs.existsSync(dirPath)) return;
+        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile() && patterns.some(p => entry.name === p || entry.name.endsWith(p))) {
+            filesToScan.push(pathMod.join(dirPath, entry.name));
+          } else if (entry.isDirectory()) {
+            // One level deeper for hook directories
+            try {
+              const subEntries = fs.readdirSync(pathMod.join(dirPath, entry.name), { withFileTypes: true });
+              for (const sub of subEntries) {
+                if (sub.isFile() && patterns.some(p => sub.name === p || sub.name.endsWith(p))) {
+                  filesToScan.push(pathMod.join(dirPath, entry.name, sub.name));
+                }
+              }
+            } catch { /* ignore */ }
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    const home = os.homedir();
+
+    if (customDir) {
+      // Custom directory — scan recursively for known filenames
+      addDirFiles(customDir, ['SKILL.md', 'HOOK.md', 'handler.js', '.cursorrules', '.windsurfrules', '.clinerules', 'CLAUDE.md', 'copilot-instructions.md', '.aider.conf.yml', 'config.json']);
+    } else {
+      // Default scan locations
+      // Claude Code marketplace skills
+      addDirFiles(pathMod.join(home, '.claude', 'plugins', 'cache'), ['SKILL.md']);
+      // Claude Code custom commands
+      addDirFiles(pathMod.join(home, '.claude', 'commands'), ['.md']);
+      // OpenClaw hooks
+      addDirFiles(pathMod.join(home, '.openclaw', 'hooks'), ['HOOK.md', 'handler.js']);
+      // CWD rule files
+      addIfExists(pathMod.join(process.cwd(), '.cursorrules'));
+      addIfExists(pathMod.join(process.cwd(), '.windsurfrules'));
+      addIfExists(pathMod.join(process.cwd(), '.clinerules'));
+      addIfExists(pathMod.join(process.cwd(), '.github', 'copilot-instructions.md'));
+      addIfExists(pathMod.join(process.cwd(), 'CLAUDE.md'));
+      addIfExists(pathMod.join(process.cwd(), '.aider.conf.yml'));
+      addIfExists(pathMod.join(process.cwd(), '.continue', 'config.json'));
+    }
+
+    if (filesToScan.length === 0) {
+      console.log('\nNo agent instruction files found to scan.');
+      console.log('Checked: Claude Code skills, OpenClaw hooks, .cursorrules, CLAUDE.md, and more.');
+      console.log('Use --dir <path> to scan a custom directory.\n');
+      process.exit(0);
+    }
+
+    const bold = '\x1b[1m';
+    const reset = '\x1b[0m';
+    console.log(`\n${bold}Scanning ${filesToScan.length} file(s)...${reset}\n`);
+
+    let threatCount = 0;
+    const results: Array<{ path: string; safe: boolean; riskLevel: string; summary: string }> = [];
+
+    for (const fp of filesToScan) {
+      const result = scanSkill(fp);
+      results.push({ path: fp, safe: result.safe, riskLevel: result.riskLevel, summary: result.summary });
+      if (!result.safe) threatCount++;
+
+      const icon = result.safe ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
+      const risk = result.safe ? '\x1b[32msafe\x1b[0m' : `\x1b[31m${result.riskLevel}\x1b[0m`;
+      console.log(`  ${icon} ${risk.padEnd(20)} ${fp}`);
+      if (!result.safe) {
+        for (const f of result.findings) {
+          if (f.severity === 'high' || f.severity === 'critical') {
+            console.log(`    \x1b[31m[${f.severity}]\x1b[0m ${f.description}`);
+          }
+        }
+      }
+    }
+
+    console.log(`\n${bold}Summary:${reset} ${filesToScan.length} scanned, ${threatCount} with threats\n`);
+    process.exit(threatCount > 0 ? 1 : 0);
   }
 
   const { dbPath, mode } = parseArgs();

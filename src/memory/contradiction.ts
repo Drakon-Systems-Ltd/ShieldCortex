@@ -251,8 +251,14 @@ export function detectContradictions(
 
   const db = getDatabase();
 
-  // Build query
-  let sql = 'SELECT * FROM memories WHERE 1=1';
+  // Build query — select only columns needed for contradiction checking
+  // Truncate content to 500 chars (regex patterns match short phrases)
+  // Exclude embedding BLOB to reduce memory pressure
+  let sql = `SELECT id, type, category, title,
+    SUBSTR(content, 1, 500) as content,
+    project, tags, salience, access_count, last_accessed,
+    created_at, decayed_score, metadata, scope, transferable
+    FROM memories WHERE 1=1`;
   const params: unknown[] = [];
 
   if (project) {

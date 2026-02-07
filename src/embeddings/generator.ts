@@ -50,11 +50,23 @@ export async function generateEmbedding(text: string): Promise<Float32Array> {
     normalize: true,
   });
 
-  // Handle both Tensor objects (new @huggingface/transformers) and plain objects
-  const data = typeof output.tolist === 'function'
-    ? new Float32Array(output.tolist().flat(Infinity) as number[])
-    : new Float32Array(output.data as ArrayLike<number>);
-  return data;
+  try {
+    // Prefer .data (direct typed array) over .tolist() to avoid intermediate allocations
+    if (output.data && (output.data as ArrayLike<number>).length > 0) {
+      return new Float32Array(output.data as ArrayLike<number>);
+    }
+    // Fallback for older/different Tensor implementations
+    if (typeof output.tolist === 'function') {
+      const list = output.tolist().flat(Infinity) as number[];
+      return new Float32Array(list);
+    }
+    throw new Error('Tensor has no .data or .tolist() — cannot extract embedding');
+  } finally {
+    // CRITICAL: Release ONNX native memory backing this tensor
+    if (output && typeof (output as { dispose?: () => void }).dispose === 'function') {
+      (output as { dispose: () => void }).dispose();
+    }
+  }
 }
 
 /**
@@ -94,4 +106,21 @@ export function isModelLoaded(): boolean {
  */
 export async function preloadModel(): Promise<void> {
   await getEmbeddingPipeline();
+}
+
+/**
+ * Dispose the embedding model and release ONNX session resources.
+ * Call during shutdown to prevent SIGABRT from orphaned ONNX thread pools.
+ */
+export async function disposeModel(): Promise<void> {
+  if (embeddingPipeline) {
+    try {
+      await embeddingPipeline.dispose();
+    } catch {
+      // Best-effort disposal — don't block shutdown
+    }
+    embeddingPipeline = null;
+  }
+  loadPromise = null;
+  isLoading = false;
 }

@@ -31,6 +31,10 @@ export function syncToCloud(
     timestamp: new Date().toISOString(),
   };
 
+  // Abort after 10 seconds to prevent pending fetch accumulation
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
   // Fire-and-forget — no await, catch all errors silently
   fetch(`${config.cloudBaseUrl}/v1/audit/ingest`, {
     method: 'POST',
@@ -39,7 +43,8 @@ export function syncToCloud(
       'Authorization': `Bearer ${config.cloudApiKey}`,
     },
     body: JSON.stringify({ entries: [entry] }),
-  }).catch(() => {
-    // Intentionally silent — cloud sync must never affect local operation
-  });
+    signal: controller.signal,
+  })
+    .then(() => clearTimeout(timeoutId))
+    .catch(() => clearTimeout(timeoutId));
 }
