@@ -66,12 +66,41 @@ Local Agent                    ShieldCortex Cloud
 | **Sensitivity Classifier** | Detects & redacts passwords, API keys, PII | Pro |
 | **Fragmentation Detector** | Catches slow-burn assembly attacks | Pro |
 
+### Skill Scanner (Agent Instruction Files)
+
+AI agents are configured by instruction files (`SKILL.md`, `CLAUDE.md`, `.cursorrules`, etc.) — and attackers are hiding prompt injections inside them. ShieldCortex scans all of them:
+
+| Format | File |
+|--------|------|
+| Claude Code Skills | `SKILL.md` |
+| Claude Code Config | `CLAUDE.md` |
+| OpenClaw Hooks | `HOOK.md`, `handler.js` |
+| Cursor | `.cursorrules` |
+| Windsurf | `.windsurfrules` |
+| Cline | `.clinerules` |
+| GitHub Copilot | `copilot-instructions.md` |
+| Aider | `.aider.conf.yml` |
+| Continue | `.continue/config.json` |
+
+```bash
+# Scan all instruction files on your machine
+npx shieldcortex scan-skills
+
+# Scan a specific file
+npx shieldcortex scan-skill ~/.claude/plugins/cache/.../SKILL.md
+```
+
+The dashboard Skills tab shows results with severity badges, expandable threat details, and actions:
+- **Trust** — Mark known-safe skills so they're not flagged on future scans (free, local)
+- **Remove** — Delete dangerous skill files from disk (cloud-connected, premium)
+
 ### Attack Vectors Blocked
 - **Direct injection** — `[SYSTEM: ignore previous]` hidden in content
 - **Credential harvesting** — Attempts to exfiltrate secrets
 - **Encoding tricks** — Base64/hex/unicode payloads
 - **Slow-burn assembly** — Attack fragments planted over days
 - **Privilege escalation** — System command references
+- **Skill file poisoning** — Hidden instructions in agent configuration files
 
 ### 🤖 Multi-Agent Security
 
@@ -276,7 +305,7 @@ npx shieldcortex --dashboard
 - **Dashboard**: http://localhost:3030
 - **API**: http://localhost:3001
 
-Views: Shield (defence overview), Audit Log, Quarantine, Memories, 3D Brain, Knowledge Graph.
+Views: Shield (defence overview), Audit Log, Quarantine, Memories, 3D Brain, Knowledge Graph, Skills Scanner.
 
 ### Cloud Sync
 
@@ -308,6 +337,8 @@ npx shieldcortex setup              # Auto-detect agent + configure hooks
 npx shieldcortex install            # Alias for setup
 npx shieldcortex migrate            # Migrate from Claude Cortex
 npx shieldcortex doctor             # Check installation health
+npx shieldcortex scan-skills         # Scan all agent instruction files
+npx shieldcortex scan-skill <file>  # Scan a specific instruction file
 npx shieldcortex --dashboard        # Start dashboard + API
 npx shieldcortex --version          # Show version
 npx shieldcortex service install    # Auto-start on login

@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.26] - 2026-02-07
+
+### Added
+
+- **Skill Scanner: Trust & Remove actions** — Scan results now show trust/untrust buttons (shield icon) and a cloud-gated remove button (trash icon) for dangerous skill files.
+- **Trusted skills** — Mark known-safe skills as trusted so they show a "TRUSTED" badge instead of threat warnings on future scans. Stored locally in `~/.shieldcortex/config.json`.
+- **Cloud-gated skill removal** — One-click delete of dangerous skill files from disk, gated behind cloud connection as a premium upsell. Path validation prevents arbitrary file deletion (only known skill directories allowed).
+- **Skill name display** — Scanner results now show the parsed skill name (e.g. "brainstorming", "test-driven-development") as the primary label instead of just "SKILL.md", with the shortened file path as a subtitle.
+- **Cloud upsell banner** — Non-cloud users clicking remove see a dismissible banner prompting them to connect to ShieldCortex Cloud.
+- **Contradictions click-through** — Clicking the "Contradictions" count in the Brain tab top stats bar now opens the right sidebar inspector with the first contradicting memory.
+- **3 new local API endpoints** — `POST /api/skills/trust`, `DELETE /api/skills/trust`, `DELETE /api/skills/file` for managing trusted skills and removing dangerous files.
+
+### Fixed
+
+- **Brain tab right sidebar not reopening** — Closing the MemoryInspector sidebar now correctly toggles both the selected memory and the sidebar visibility state. Previously, closing the sidebar cleared the memory but didn't toggle the sidebar flag, making it impossible to reopen.
+
 ## [2.4.25] - 2026-02-07
 
 ### Fixed
