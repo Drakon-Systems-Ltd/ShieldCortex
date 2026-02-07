@@ -38,13 +38,13 @@ const KnowledgeGraph = dynamic(
   }
 );
 
-const BrainScene = dynamic(
-  () => import('@/components/brain/BrainScene').then((mod) => mod.BrainScene),
+const BrainControlCentre = dynamic(
+  () => import('@/components/brain/BrainControlCentre').then((mod) => mod.BrainControlCentre),
   {
     ssr: false,
     loading: () => (
       <div className="w-full h-full flex items-center justify-center bg-slate-950">
-        <div className="text-slate-400 animate-pulse">Loading 3D Brain...</div>
+        <div className="text-slate-400 animate-pulse">Loading Brain Control Centre...</div>
       </div>
     ),
   }
@@ -100,7 +100,7 @@ export default function DashboardPage() {
     isLoading: memoriesLoading,
     isConnected,
   } = useMemoriesWithRealtime({
-    limit: 200,
+    limit: 1000,
     query: debouncedSearch || undefined,
     mode: debouncedSearch ? 'search' : 'recent',
     project: projectFilter || undefined,
@@ -319,18 +319,12 @@ export default function DashboardPage() {
             {viewMode === 'audit' && <AuditLogView />}
             {viewMode === 'quarantine' && <QuarantineView />}
             {viewMode === 'brain' && (
-              memoriesLoading ? (
-                <div className="w-full h-full flex items-center justify-center">
-                  <div className="text-slate-400 animate-pulse">Loading memories...</div>
-                </div>
-              ) : (
-                <BrainScene
-                  memories={memories}
-                  links={links}
-                  selectedMemory={selectedMemory}
-                  onSelectMemory={handleSelectMemory}
-                />
-              )
+              <BrainControlCentre
+                memories={memories}
+                links={links}
+                stats={stats}
+                isLoading={memoriesLoading}
+              />
             )}
             {viewMode === 'graph' && (
               <KnowledgeGraph
@@ -351,8 +345,8 @@ export default function DashboardPage() {
           </motion.div>
         </AnimatePresence>
 
-        {/* Right Detail Panel */}
-        {selectedMemory && !isSecurityView && (
+        {/* Right Detail Panel (not for brain view — it has its own inspector) */}
+        {selectedMemory && !isSecurityView && viewMode !== 'brain' && (
           <div className="w-80 border-l border-slate-800 overflow-y-auto shrink-0">
             <MemoryDetail
               memory={selectedMemory}

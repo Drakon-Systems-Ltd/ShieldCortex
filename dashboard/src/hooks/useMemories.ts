@@ -456,3 +456,170 @@ export function useContradictions(project?: string) {
     staleTime: 5 * 60 * 1000,
   });
 }
+
+// ============================================
+// BRAIN CONTROL CENTRE API
+// ============================================
+
+// Boost memory salience
+async function boostMemory(id: number): Promise<Memory> {
+  const response = await fetch(`${API_BASE}/api/memories/${id}/boost`, { method: 'POST' });
+  if (!response.ok) throw new Error('Failed to boost memory');
+  return response.json();
+}
+
+// Demote memory salience
+async function demoteMemory(id: number): Promise<Memory> {
+  const response = await fetch(`${API_BASE}/api/memories/${id}/demote`, { method: 'POST' });
+  if (!response.ok) throw new Error('Failed to demote memory');
+  return response.json();
+}
+
+// Promote STM → LTM
+async function promoteMemory(id: number): Promise<Memory> {
+  const response = await fetch(`${API_BASE}/api/memories/${id}/promote`, { method: 'POST' });
+  if (!response.ok) throw new Error('Failed to promote memory');
+  return response.json();
+}
+
+// Edit memory
+async function editMemory(id: number, updates: { title?: string; content?: string; tags?: string[]; category?: string }): Promise<Memory> {
+  const response = await fetch(`${API_BASE}/api/memories/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  if (!response.ok) throw new Error('Failed to edit memory');
+  return response.json();
+}
+
+// Delete memory
+async function removeMemory(id: number): Promise<{ success: boolean }> {
+  const response = await fetch(`${API_BASE}/api/memories/${id}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error('Failed to delete memory');
+  return response.json();
+}
+
+// Quarantine memory
+async function quarantineMemory(id: number, reason?: string): Promise<{ success: boolean }> {
+  const response = await fetch(`${API_BASE}/api/memories/${id}/quarantine`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!response.ok) throw new Error('Failed to quarantine memory');
+  return response.json();
+}
+
+// Create manual link
+async function createLink(data: { sourceId: number; targetId: number; relationship: string; strength?: number }): Promise<unknown> {
+  const response = await fetch(`${API_BASE}/api/links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) throw new Error('Failed to create link');
+  return response.json();
+}
+
+// Fetch worker status
+async function fetchWorkerStatus(): Promise<{ isRunning: boolean; lastLightTick: string | null; lastMediumTick: string | null; tickCount: number }> {
+  const response = await fetch(`${API_BASE}/api/worker/status`);
+  if (!response.ok) throw new Error('Failed to fetch worker status');
+  return response.json();
+}
+
+// Hook: Boost memory
+export function useBoostMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: boostMemory,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
+// Hook: Demote memory
+export function useDemoteMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: demoteMemory,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
+// Hook: Promote memory
+export function usePromoteMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: promoteMemory,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
+// Hook: Edit memory
+export function useEditMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, updates }: { id: number; updates: { title?: string; content?: string; tags?: string[]; category?: string } }) =>
+      editMemory(id, updates),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
+// Hook: Delete memory
+export function useDeleteMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: removeMemory,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+      queryClient.invalidateQueries({ queryKey: ['links'] });
+    },
+  });
+}
+
+// Hook: Quarantine memory
+export function useQuarantineMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: number; reason?: string }) =>
+      quarantineMemory(id, reason),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
+// Hook: Create manual link
+export function useCreateLink() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createLink,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['links'] });
+    },
+  });
+}
+
+// Hook: Worker status
+export function useWorkerStatus() {
+  return useQuery({
+    queryKey: ['worker-status'],
+    queryFn: fetchWorkerStatus,
+    refetchInterval: 15000,
+  });
+}

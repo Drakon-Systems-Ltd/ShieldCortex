@@ -34,6 +34,7 @@ interface BrainSceneProps {
   links?: MemoryLink[];
   selectedMemory: Memory | null;
   onSelectMemory: (memory: Memory | null) => void;
+  categoryFilter?: string | null;
 }
 
 interface BrainContentProps extends BrainSceneProps {
@@ -52,6 +53,7 @@ function BrainContent({
   pulses,
   onPulseComplete,
   memoryCategoryCounts: _memoryCategoryCounts,
+  categoryFilter,
 }: BrainContentProps) {
   // Calculate positions for all memories (deduplicate by ID to prevent React key errors)
   const memoryPositions = useMemo(() => {
@@ -98,6 +100,7 @@ function BrainContent({
           onSelect={onSelectMemory}
           isSelected={selectedMemory?.id === memory.id}
           colorMode={colorMode}
+          opacity={categoryFilter && memory.category !== categoryFilter ? 0.1 : 1}
         />
       ))}
 
@@ -124,6 +127,7 @@ export function BrainScene({
   links = [],
   selectedMemory,
   onSelectMemory,
+  categoryFilter,
 }: BrainSceneProps) {
   const [colorMode, setColorMode] = useState<ColorMode>('category');
   const [pulses, setPulses] = useState<Pulse[]>([]);
@@ -217,7 +221,7 @@ export function BrainScene({
       <Canvas
         camera={{ position: [0, 2, 12], fov: 55 }}
         gl={{ antialias: true, alpha: true }}
-        onClick={() => onSelectMemory(null)}
+        onPointerMissed={() => onSelectMemory(null)}
       >
         <Suspense fallback={null}>
           <BrainContent
@@ -229,19 +233,10 @@ export function BrainScene({
             pulses={pulses}
             onPulseComplete={handlePulseComplete}
             memoryCategoryCounts={memoryCategoryCounts}
+            categoryFilter={categoryFilter}
           />
         </Suspense>
       </Canvas>
-
-      {/* Simple info overlay */}
-      <div className="absolute bottom-4 left-4 bg-slate-900/90 border border-slate-700 rounded-lg p-3 text-xs backdrop-blur-sm">
-        <p className="text-slate-300">
-          {filteredMemories.length} memories
-        </p>
-        <p className="text-slate-500 mt-1">
-          Click to select • Drag to rotate
-        </p>
-      </div>
 
       {/* Timeline and color controls */}
       <TimelineControls

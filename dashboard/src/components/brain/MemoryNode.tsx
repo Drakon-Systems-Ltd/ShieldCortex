@@ -31,6 +31,7 @@ interface MemoryNodeProps {
   onSelect: (memory: Memory) => void;
   isSelected: boolean;
   colorMode?: 'category' | 'health' | 'age' | 'holographic'; // category = by type, health = decay heat map, age = time-based, holographic = Jarvis-style golden
+  opacity?: number; // 0-1, for category filter dimming
 }
 
 /**
@@ -93,6 +94,7 @@ function MemoryNodeInner({
   onSelect,
   isSelected,
   colorMode = 'category',
+  opacity = 1,
 }: MemoryNodeProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const [hovered, setHovered] = useState(false);
@@ -121,7 +123,7 @@ function MemoryNodeInner({
   // Node size based on salience (0.2 to 0.4) - larger for better visibility
   const size = useMemo(() => 0.2 + memory.salience * 0.2, [memory.salience]);
 
-  // Solid node material - no transparency for clarity
+  // Node material - supports opacity for category filter dimming
   const nodeMaterial = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
@@ -130,8 +132,10 @@ function MemoryNodeInner({
         emissiveIntensity: 0.3,
         metalness: 0.2,
         roughness: 0.5,
+        transparent: opacity < 1,
+        opacity,
       }),
-    [baseColor]
+    [baseColor, opacity]
   );
 
   // Subtle animation - increase emissive on hover
@@ -238,6 +242,7 @@ export const MemoryNode = memo(MemoryNodeInner, (prev, next) => {
     prev.memory.category === next.memory.category &&
     prev.isSelected === next.isSelected &&
     prev.colorMode === next.colorMode &&
+    prev.opacity === next.opacity &&
     prev.position[0] === next.position[0] &&
     prev.position[1] === next.position[1] &&
     prev.position[2] === next.position[2]

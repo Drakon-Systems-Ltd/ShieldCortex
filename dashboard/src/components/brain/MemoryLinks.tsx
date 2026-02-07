@@ -19,14 +19,17 @@ interface MemoryLinksProps {
   onLinkClick?: (link: MemoryLink) => void;
 }
 
-// Default connection color (light gray) and relationship colors for hover
-const DEFAULT_LINE_COLOR = '#cccccc';
+// Relationship colors — always visible (dimmed), brighter on hover
 const RELATIONSHIP_STYLES: Record<string, { color: string; label: string }> = {
-  references: { color: '#00d4ff', label: 'References' },  // Cyan - information flow
-  extends: { color: '#00ff88', label: 'Extends' },        // Green - growth
-  contradicts: { color: '#ff6b6b', label: 'Contradicts' }, // Red - conflict
-  related: { color: '#b388ff', label: 'Related' },        // Purple - association
+  references: { color: '#22d3ee', label: 'References' },  // Cyan - information flow
+  extends: { color: '#34d399', label: 'Extends' },        // Green - growth
+  contradicts: { color: '#f87171', label: 'Contradicts' }, // Red - conflict
+  related: { color: '#a78bfa', label: 'Related' },        // Purple - association
 };
+const DEFAULT_RELATIONSHIP = RELATIONSHIP_STYLES.related;
+
+// Cyan signal color matching the graph particles
+const SIGNAL_COLOR = '#22d3ee';
 
 // Bright signal pulse that travels along the neural fiber
 function NeuralSignal({
@@ -45,7 +48,7 @@ function NeuralSignal({
   useFrame((_, delta) => {
     if (!meshRef.current) return;
 
-    progressRef.current += delta * speed * 0.6; // Fast signal speed
+    progressRef.current += delta * speed * 1.2; // Fast darting electrons
     if (progressRef.current > 1) {
       progressRef.current = 0;
     }
@@ -60,26 +63,24 @@ function NeuralSignal({
     const opacity = fadeIn * fadeOut;
     (meshRef.current.material as THREE.MeshBasicMaterial).opacity = opacity;
 
-    // Trail effect
+    // Halo follows the main signal
     if (trailRef.current) {
-      const trailT = Math.max(0, progressRef.current - 0.08);
-      const trailPoint = curve.getPoint(trailT);
-      trailRef.current.position.copy(trailPoint);
-      (trailRef.current.material as THREE.MeshBasicMaterial).opacity = opacity * 0.5;
+      trailRef.current.position.copy(point);
+      (trailRef.current.material as THREE.MeshBasicMaterial).opacity = opacity * 0.25;
     }
   });
 
   return (
     <>
-      {/* Main signal - bright white */}
+      {/* Tiny electron dot */}
       <mesh ref={meshRef}>
-        <sphereGeometry args={[0.15, 12, 12]} />
-        <meshBasicMaterial color="#ffffff" transparent opacity={1} />
+        <sphereGeometry args={[0.04, 8, 8]} />
+        <meshBasicMaterial color={SIGNAL_COLOR} transparent opacity={1} />
       </mesh>
-      {/* Glow trail */}
+      {/* Faint glow around electron */}
       <mesh ref={trailRef}>
-        <sphereGeometry args={[0.1, 8, 8]} />
-        <meshBasicMaterial color="#ffffff" transparent opacity={0.6} />
+        <sphereGeometry args={[0.08, 6, 6]} />
+        <meshBasicMaterial color={SIGNAL_COLOR} transparent opacity={0.2} depthWrite={false} />
       </mesh>
     </>
   );
@@ -101,7 +102,7 @@ function NeuralConnection({
   onHover: () => void;
   onUnhover: () => void;
 }) {
-  const style = RELATIONSHIP_STYLES[link.relationship] || RELATIONSHIP_STYLES.related;
+  const style = RELATIONSHIP_STYLES[link.relationship] || DEFAULT_RELATIONSHIP;
 
   // Create organic curved path (like an axon)
   const { curve, points } = useMemo(() => {
@@ -137,19 +138,19 @@ function NeuralConnection({
     return { curve, points };
   }, [sourcePos, targetPos, link.strength]);
 
-  // Gray by default, relationship color on hover
-  const lineColor = isHovered ? style.color : DEFAULT_LINE_COLOR;
-  const lineWidth = isHovered ? 4 : 2 + link.strength * 1.5;
+  // Relationship color always visible — brighter on hover
+  const lineColor = style.color;
+  const lineWidth = isHovered ? 4 : 1.5 + link.strength * 2;
 
   return (
     <group>
-      {/* Neural fiber - gray by default, colored on hover */}
+      {/* Neural fiber — relationship-colored, brighter on hover */}
       <CatmullRomLine
         points={points}
         color={lineColor}
         lineWidth={lineWidth}
         transparent
-        opacity={isHovered ? 1 : 0.8}
+        opacity={isHovered ? 1 : 0.35}
       />
 
       {/* Bright white signal pulses traveling along fiber */}

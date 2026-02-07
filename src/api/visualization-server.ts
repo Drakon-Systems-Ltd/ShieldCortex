@@ -21,6 +21,9 @@ import {
   deleteMemory,
   accessMemory,
   updateDecayScores,
+  updateMemory,
+  promoteMemory,
+  createMemoryLink,
   rowToMemory,
 } from '../memory/store.js';
 import {
@@ -103,7 +106,7 @@ export function startVisualizationServer(dbPath?: string): void {
       const mode = typeof req.query.mode === 'string' ? req.query.mode : 'recent';
       const query = typeof req.query.query === 'string' ? req.query.query : undefined;
 
-      const limit = Math.min(parseInt(limitStr, 10) || 50, 200); // Cap at 200, default 50
+      const limit = Math.min(parseInt(limitStr, 10) || 50, 1000); // Cap at 1000, default 50
       const offset = parseInt(offsetStr, 10) || 0; // Default 0
 
       let memories: Memory[];
@@ -1129,6 +1132,115 @@ export function startVisualizationServer(dbPath?: string): void {
         : [];
 
       res.json({ path, sourceMemories });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // BRAIN CONTROL CENTRE
+  // ============================================
+
+  // Boost memory salience (+0.15, capped at 1.0)
+  app.post('/api/memories/:id/boost', (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string);
+      const memory = getMemoryById(id);
+      if (!memory) {
+        return res.status(404).json({ error: 'Memory not found' });
+      }
+      const newSalience = Math.min(1.0, (memory.salience ?? 0.5) + 0.15);
+      const updated = updateMemory(id, { salience: newSalience });
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Demote memory salience (-0.15, floor at 0.05)
+  app.post('/api/memories/:id/demote', (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string);
+      const memory = getMemoryById(id);
+      if (!memory) {
+        return res.status(404).json({ error: 'Memory not found' });
+      }
+      const newSalience = Math.max(0.05, (memory.salience ?? 0.5) - 0.15);
+      const updated = updateMemory(id, { salience: newSalience });
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Promote memory from STM to LTM
+  app.post('/api/memories/:id/promote', (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string);
+      const memory = promoteMemory(id);
+      if (!memory) {
+        return res.status(404).json({ error: 'Memory not found' });
+      }
+      res.json(memory);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Update memory (partial: title, content, tags, category)
+  app.patch('/api/memories/:id', (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string);
+      const updated = updateMemory(id, req.body);
+      if (!updated) {
+        return res.status(404).json({ error: 'Memory not found' });
+      }
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Quarantine a memory (move to quarantine table, delete original)
+  app.post('/api/memories/:id/quarantine', (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string);
+      const memory = getMemoryById(id);
+      if (!memory) {
+        return res.status(404).json({ error: 'Memory not found' });
+      }
+      const db = getDatabase();
+      db.prepare(
+        `INSERT INTO quarantine (original_title, original_content, source_type, source_identifier, reason, project, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
+      ).run(
+        memory.title,
+        memory.content,
+        'dashboard',
+        'brain-control',
+        req.body.reason || 'Manually quarantined from Brain dashboard',
+        memory.project || null,
+        new Date().toISOString()
+      );
+      deleteMemory(id);
+      res.json({ success: true, quarantined: id });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Create a manual link between two memories
+  app.post('/api/links', (req: Request, res: Response) => {
+    try {
+      const { sourceId, targetId, relationship, strength } = req.body;
+      if (!sourceId || !targetId || !relationship) {
+        return res.status(400).json({ error: 'sourceId, targetId, and relationship are required' });
+      }
+      const link = createMemoryLink(sourceId, targetId, relationship, strength ?? 0.5);
+      if (!link) {
+        return res.status(404).json({ error: 'One or both memories not found, or self-link attempted' });
+      }
+      res.json(link);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
