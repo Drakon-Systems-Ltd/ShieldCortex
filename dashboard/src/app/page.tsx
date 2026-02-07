@@ -156,11 +156,12 @@ export default function DashboardPage() {
             <h1 className="text-xl font-bold bg-gradient-to-r from-cyan-400 via-blue-400 to-emerald-400 bg-clip-text text-transparent">
               ShieldCortex
             </h1>
-            <Cloud
-              size={16}
-              className={isCloudConnected ? 'text-emerald-400' : 'text-slate-600'}
-              title={isCloudConnected ? 'Connected to ShieldCortex Cloud' : 'Cloud sync not configured'}
-            />
+            <div title={isCloudConnected ? 'Connected to ShieldCortex Cloud' : 'Cloud sync not configured'}>
+              <Cloud
+                size={16}
+                className={isCloudConnected ? 'text-emerald-400' : 'text-slate-600'}
+              />
+            </div>
           </div>
 
           {/* Project Selector */}
