@@ -649,10 +649,64 @@ function readSessionConversation(cwd) {
 }
 
 /**
+ * Read conversation text from a specific transcript JSONL path.
+ * Used when Claude Code provides transcript_path in hook data.
+ */
+function readTranscriptFromPath(transcriptPath) {
+  if (!transcriptPath) return '';
+
+  const resolvedPath = transcriptPath.replace(/^~/, homedir());
+  if (!existsSync(resolvedPath)) {
+    console.error(`[auto-extract] Transcript not found: ${resolvedPath}`);
+    return '';
+  }
+
+  try {
+    const content = readFileSync(resolvedPath, 'utf-8');
+    const lines = content.trim().split('\n');
+    const recentLines = lines.slice(-50);
+    const messages = [];
+
+    for (const line of recentLines) {
+      try {
+        const entry = JSON.parse(line);
+        const role = entry.type || entry.message?.role;
+        const msgContent = entry.message?.content;
+        if ((role === 'user' || role === 'assistant') && msgContent) {
+          const text = Array.isArray(msgContent)
+            ? msgContent.filter(c => c.type === 'text').map(c => c.text).join('\n')
+            : msgContent;
+          if (text && !text.startsWith('/')) {
+            messages.push(text);
+          }
+        }
+      } catch {
+        // Skip invalid lines
+      }
+    }
+
+    const result = messages.join('\n\n');
+    console.error(`[auto-extract] Read ${messages.length} messages from transcript (${result.length} chars)`);
+    return result;
+  } catch (err) {
+    console.error(`[auto-extract] Failed to read transcript: ${err.message}`);
+    return '';
+  }
+}
+
+/**
  * Extract conversation text from hook data, falling back to session JSONL
  */
 function extractConversationText(hookData) {
-  // Try different possible locations for conversation content
+  // Primary: use transcript_path provided by Claude Code
+  if (hookData.transcript_path) {
+    const transcript = readTranscriptFromPath(hookData.transcript_path);
+    if (transcript && transcript.length > 0) {
+      return transcript;
+    }
+  }
+
+  // Secondary: try other possible locations for conversation content
   const sources = [
     hookData.conversation,
     hookData.messages,
@@ -678,7 +732,7 @@ function extractConversationText(hookData) {
     }
   }
 
-  // Fallback: read the session JSONL file directly
+  // Fallback: auto-detect session JSONL from cwd
   return readSessionConversation(hookData.cwd);
 }
 
