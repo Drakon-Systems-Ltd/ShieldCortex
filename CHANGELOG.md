@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.25] - 2026-02-07
+
+### Fixed
+
+- **Skill file discovery** — `discoverSkillFiles()` now recursively scans `~/.claude/plugins/cache/` up to 6 levels deep. Previously only scanned one level, missing all Claude Code marketplace skills which are nested 6 levels deep.
+
 ## [2.4.24] - 2026-02-07
 
 ### Added

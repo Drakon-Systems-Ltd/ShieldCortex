@@ -25,28 +25,26 @@ function addIfExists(files: string[], filePath: string): void {
 }
 
 /**
- * Add files matching `patterns` from `dirPath`, scanning one level of
- * sub-directories (for hook directories like ~/.openclaw/hooks/my-hook/).
+ * Add files matching `patterns` from `dirPath`, scanning recursively
+ * up to `maxDepth` levels (for plugin caches with deep nesting).
  */
-function addDirFiles(files: string[], dirPath: string, patterns: string[]): void {
-  try {
-    if (!existsSync(dirPath)) return;
-    const entries = readdirSync(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isFile() && patterns.some(p => entry.name === p || entry.name.endsWith(p))) {
-        files.push(join(dirPath, entry.name));
-      } else if (entry.isDirectory()) {
-        try {
-          const subEntries = readdirSync(join(dirPath, entry.name), { withFileTypes: true });
-          for (const sub of subEntries) {
-            if (sub.isFile() && patterns.some(p => sub.name === p || sub.name.endsWith(p))) {
-              files.push(join(dirPath, entry.name, sub.name));
-            }
-          }
-        } catch { /* ignore */ }
+function addDirFiles(files: string[], dirPath: string, patterns: string[], maxDepth = 6): void {
+  function walk(dir: string, depth: number): void {
+    if (depth > maxDepth) return;
+    try {
+      if (!existsSync(dir)) return;
+      const entries = readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isFile() && patterns.some(p => entry.name === p || entry.name.endsWith(p))) {
+          files.push(fullPath);
+        } else if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          walk(fullPath, depth + 1);
+        }
       }
-    }
-  } catch { /* ignore */ }
+    } catch { /* ignore */ }
+  }
+  walk(dirPath, 0);
 }
 
 /**
