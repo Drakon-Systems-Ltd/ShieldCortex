@@ -64,6 +64,65 @@ function callCortex(tool, args = {}, options = { retries: 1, timeout: 15000 }) {
   });
 }
 
+// ==================== HOOK SCANNER ====================
+
+/**
+ * Scan installed OpenClaw hooks for potential threats
+ * Uses ShieldCortex's scanSkill via mcporter
+ * @returns {Promise<Array<{hookName: string, threat: string}>>}
+ */
+async function scanInstalledHooks() {
+  const path = await import("node:path");
+  const { homedir } = await import("node:os");
+
+  const hooksDir = path.join(homedir(), ".openclaw", "hooks");
+  const threats = [];
+
+  try {
+    const entries = await fs.readdir(hooksDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const hookDir = path.join(hooksDir, entry.name);
+
+      // Check for HOOK.md
+      const hookMdPath = path.join(hookDir, "HOOK.md");
+      try {
+        const hookContent = await fs.readFile(hookMdPath, "utf-8");
+        const result = await callCortex("scan_skill", {
+          content: hookContent,
+          name: entry.name,
+          format: "hook-md",
+        });
+
+        if (result && result.includes("unsafe")) {
+          threats.push({ hookName: entry.name, threat: `HOOK.md flagged as unsafe` });
+        }
+      } catch { /* No HOOK.md, skip */ }
+
+      // Check for handler.js
+      const handlerPath = path.join(hookDir, "handler.js");
+      try {
+        const handlerContent = await fs.readFile(handlerPath, "utf-8");
+        const result = await callCortex("scan_skill", {
+          content: handlerContent,
+          name: `${entry.name}/handler.js`,
+          format: "hook-js",
+        });
+
+        if (result && result.includes("unsafe")) {
+          threats.push({ hookName: entry.name, threat: `handler.js flagged as unsafe` });
+        }
+      } catch { /* No handler.js, skip */ }
+    }
+  } catch {
+    // Hooks directory doesn't exist or is unreadable
+  }
+
+  return threats;
+}
+
 // ==================== CONTENT EXTRACTION ====================
 
 const PATTERNS = {
@@ -283,6 +342,22 @@ async function onBootstrap(event) {
   });
 
   console.log("[cortex-memory] Injected past context into bootstrap");
+
+  // Scan installed hooks for threats
+  try {
+    const threats = await scanInstalledHooks();
+    if (threats.length > 0) {
+      const warnings = threats.map(t => `- ${t.hookName}: ${t.threat}`).join("\n");
+      context.bootstrapFiles.push({
+        name: "SHIELDCORTEX_WARNINGS.md",
+        content: `# ShieldCortex Security Warning\n\nThe following installed hooks have been flagged as potentially unsafe:\n\n${warnings}\n\nConsider running: \`npx shieldcortex scan-skills\` for a detailed report.`,
+      });
+      console.log(`[cortex-memory] WARNING: ${threats.length} hook(s) flagged as potentially unsafe`);
+    }
+  } catch (scanErr) {
+    // Hook scanning is best-effort — never block bootstrap
+    console.warn("[cortex-memory] Hook scan failed:", scanErr.message);
+  }
 }
 
 /**

@@ -19,6 +19,7 @@ import { ShieldOverview } from '@/components/shield/ShieldOverview';
 import { AuditLogView } from '@/components/audit/AuditLogView';
 import { QuarantineView } from '@/components/quarantine/QuarantineView';
 import { AgentsView } from '@/components/agents/AgentsView';
+import { SkillsView } from '@/components/skills/SkillsView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Memory } from '@/types/memory';
@@ -144,7 +145,7 @@ export default function DashboardPage() {
   };
 
   // Views that need memory data vs standalone views
-  const isSecurityView = viewMode === 'shield' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents';
+  const isSecurityView = viewMode === 'shield' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents' || viewMode === 'skills';
 
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
@@ -335,6 +336,7 @@ export default function DashboardPage() {
               />
             )}
             {viewMode === 'agents' && <AgentsView />}
+            {viewMode === 'skills' && <SkillsView />}
             {viewMode === 'memories' && (
               <MemoriesView
                 memories={memories}

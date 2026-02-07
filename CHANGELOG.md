@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.24] - 2026-02-07
+
+### Added
+
+- **Skill Scanner** — Framework-agnostic scanner for AI agent instruction files. Detects prompt injection, data exfiltration, tool abuse, and stealth instructions in SKILL.md, CLAUDE.md, .cursorrules, .windsurfrules, .clinerules, copilot-instructions.md, .aider.conf.yml, and .continue/config.json.
+- **Skill Scanner CLI** — `npx shieldcortex scan-skill <file>` and `npx shieldcortex scan-skills` commands for scanning individual files or discovering all instruction files.
+- **Skill Scanner Dashboard** — New "Skills" tab in the local dashboard with Scan All button, expandable file results, severity badges, and paste-to-scan area.
+- **SkillScannerCard** — Summary card on Shield overview showing scan results at a glance.
+- **`POST /api/skills/scan-all` endpoint** — Local API endpoint for batch discovery and scanning of all installed skill files.
+- **`discoverSkillFiles()` function** — Reusable file discovery extracted from CLI for use by both CLI and API.
+- **Session start hook** — Quick check for suspicious instruction files (.cursorrules, .windsurfrules, etc.) on every session start.
+
 ## [2.4.21] - 2026-02-07
 
 ### Changed

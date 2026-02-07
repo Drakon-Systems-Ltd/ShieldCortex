@@ -37,6 +37,10 @@ export { analyzeFragmentation, storeFragmentationData } from './fragmentation/in
 // Audit
 export { logAudit, queryAuditLogs, getAuditStats } from './audit/index.js';
 
+// Skill Scanner
+export { scanSkill, scanSkillContent, discoverSkillFiles, detectFormat, parseSkillFile, readSkillFile } from './skill-scanner/index.js';
+export type { SkillScanResult, SkillScanOptions, SkillThreatFinding, ParsedSkill, SkillFormat } from './skill-scanner/index.js';
+
 // Cloud
 export { getCloudConfig, setCloudConfig, clearCloudConfigCache } from '../cloud/config.js';
 export type { CloudConfig } from '../cloud/config.js';

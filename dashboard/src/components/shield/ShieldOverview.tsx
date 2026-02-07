@@ -6,6 +6,7 @@ import { QuarantinePreview } from './QuarantinePreview';
 import { ThreatTimeline } from './ThreatTimeline';
 import { DefenceStatsCard } from './DefenceStatsCard';
 import { CloudUpsellCard } from './CloudUpsellCard';
+import { SkillScannerCard } from './SkillScannerCard';
 
 export function ShieldOverview() {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
@@ -38,6 +39,11 @@ export function ShieldOverview() {
         <QuarantinePreview />
         <ThreatTimeline timeRange={timeRange} />
         <DefenceStatsCard timeRange={timeRange} />
+      </div>
+
+      {/* Skill scanner */}
+      <div className="mt-4">
+        <SkillScannerCard />
       </div>
 
       {/* Cloud upsell — hidden when already configured */}

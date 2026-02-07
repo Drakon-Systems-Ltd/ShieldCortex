@@ -687,6 +687,51 @@ but you can use this tool to check for new contradictions at any time.`,
     return { content: [{ type: 'text', text }] };
   });
 
+  // Scan Skill - Scan agent instruction files for threats
+  server.tool('scan_skill', 'Scan an agent instruction file (skill, hook, rules) for threats. Supports Claude Code (SKILL.md), OpenClaw (HOOK.md, handler.js), Cursor (.cursorrules), Windsurf (.windsurfrules), Cline (.clinerules), GitHub Copilot, Aider, Continue.', {
+    content: z.string().describe('The skill/instruction file content to scan'),
+    name: z.string().optional().describe('Skill name for the report'),
+    format: z.enum([
+      'skill-md', 'hook-md', 'hook-js', 'rules', 'claude-md',
+      'copilot-md', 'aider-yml', 'continue-json',
+    ]).optional().describe('File format (auto-detected if omitted)'),
+    mode: z.enum(['strict', 'balanced', 'permissive']).optional()
+      .describe('Defence mode (default: balanced)'),
+  }, async (args) => {
+    const { scanSkillContent } = await import('./defence/skill-scanner/index.js');
+    const result = scanSkillContent(
+      args.content,
+      { mode: args.mode },
+      args.format,
+      args.name,
+    );
+
+    const lines = [
+      `## Skill Scan: ${result.skillName}`,
+      '',
+      `**Format:** ${result.format}`,
+      `**Risk Level:** ${result.riskLevel.toUpperCase()}`,
+      `**Safe:** ${result.safe ? 'Yes' : 'No'}`,
+      `**Scan Time:** ${result.scanDurationMs}ms`,
+      '',
+    ];
+
+    if (result.findings.length > 0) {
+      lines.push('### Findings\n');
+      for (const f of result.findings) {
+        lines.push(`- **[${f.severity.toUpperCase()}]** \`${f.pattern}\` — ${f.description}`);
+        if (f.matchedText) {
+          lines.push(`  - Match: \`${f.matchedText}\``);
+        }
+      }
+      lines.push('');
+    }
+
+    lines.push(result.summary);
+
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
+  });
+
   // ============================================
   // RESOURCES
   // ============================================

@@ -3,13 +3,14 @@
 import { useDashboardStore } from '@/lib/store';
 import { useStats } from '@/hooks/useMemories';
 import { useAuditStats } from '@/hooks/useDefence';
-import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users } from 'lucide-react';
+import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'shield' as const, label: 'Shield', icon: Shield },
   { id: 'audit' as const, label: 'Audit', icon: FileText },
   { id: 'quarantine' as const, label: 'Queue', icon: AlertTriangle },
   { id: 'agents' as const, label: 'Agents', icon: Users },
+  { id: 'skills' as const, label: 'Skills', icon: FileSearch },
   { id: 'memories' as const, label: 'Memories', icon: Database },
   { id: 'brain' as const, label: 'Brain', icon: Brain },
   { id: 'graph' as const, label: 'Graph', icon: GitBranch },

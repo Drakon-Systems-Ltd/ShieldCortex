@@ -52,6 +52,7 @@ import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
 import { getCloudConfig, setCloudConfig } from '../cloud/config.js';
+import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -1241,6 +1242,65 @@ export function startVisualizationServer(dbPath?: string): void {
         return res.status(404).json({ error: 'One or both memories not found, or self-link attempted' });
       }
       res.json(link);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // SKILL SCANNER
+  // ============================================
+
+  // Scan a skill/instruction file for threats
+  app.post('/api/skills/scan', (req: Request, res: Response) => {
+    try {
+      const { path: filePath, content, format, name, mode } = req.body;
+
+      if (!filePath && !content) {
+        return res.status(400).json({ error: 'Either "path" (file path) or "content" (raw content) is required' });
+      }
+
+      let result;
+      if (filePath) {
+        result = scanSkill(filePath, { mode });
+      } else {
+        result = scanSkillContent(content, { mode }, format, name);
+      }
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Scan all installed skills/hooks across known locations
+  app.post('/api/skills/scan-all', (req: Request, res: Response) => {
+    try {
+      const { dir } = req.body ?? {};
+      const files = discoverSkillFiles(dir);
+
+      const results = files.map((fp) => {
+        const r = scanSkill(fp);
+        return {
+          path: fp,
+          safe: r.safe,
+          skillName: r.skillName,
+          format: r.format,
+          riskLevel: r.riskLevel,
+          summary: r.summary,
+          findings: r.findings,
+          scanDurationMs: r.scanDurationMs,
+        };
+      });
+
+      const threatCount = results.filter((r) => !r.safe).length;
+
+      res.json({
+        files: results,
+        totalScanned: results.length,
+        threatCount,
+        scannedAt: new Date().toISOString(),
+      });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

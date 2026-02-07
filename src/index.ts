@@ -389,69 +389,13 @@ async function main() {
 
   // Handle "scan-skills" subcommand — scan all installed skills/hooks
   if (process.argv[2] === 'scan-skills') {
-    const fs = await import('node:fs');
-    const os = await import('node:os');
-    const { scanSkill, detectFormat } = await import('./defence/skill-scanner/index.js');
-    const { default: pathMod } = await import('node:path');
+    const { scanSkill, discoverSkillFiles } = await import('./defence/skill-scanner/index.js');
 
     const customDir = process.argv.indexOf('--dir') !== -1
       ? process.argv[process.argv.indexOf('--dir') + 1]
       : undefined;
 
-    const filesToScan: string[] = [];
-
-    // Helper to add a file if it exists
-    function addIfExists(filePath: string): void {
-      try {
-        if (fs.existsSync(filePath)) filesToScan.push(filePath);
-      } catch { /* ignore */ }
-    }
-
-    // Helper to add all files in a directory (one level deep)
-    function addDirFiles(dirPath: string, patterns: string[]): void {
-      try {
-        if (!fs.existsSync(dirPath)) return;
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isFile() && patterns.some(p => entry.name === p || entry.name.endsWith(p))) {
-            filesToScan.push(pathMod.join(dirPath, entry.name));
-          } else if (entry.isDirectory()) {
-            // One level deeper for hook directories
-            try {
-              const subEntries = fs.readdirSync(pathMod.join(dirPath, entry.name), { withFileTypes: true });
-              for (const sub of subEntries) {
-                if (sub.isFile() && patterns.some(p => sub.name === p || sub.name.endsWith(p))) {
-                  filesToScan.push(pathMod.join(dirPath, entry.name, sub.name));
-                }
-              }
-            } catch { /* ignore */ }
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    const home = os.homedir();
-
-    if (customDir) {
-      // Custom directory — scan recursively for known filenames
-      addDirFiles(customDir, ['SKILL.md', 'HOOK.md', 'handler.js', '.cursorrules', '.windsurfrules', '.clinerules', 'CLAUDE.md', 'copilot-instructions.md', '.aider.conf.yml', 'config.json']);
-    } else {
-      // Default scan locations
-      // Claude Code marketplace skills
-      addDirFiles(pathMod.join(home, '.claude', 'plugins', 'cache'), ['SKILL.md']);
-      // Claude Code custom commands
-      addDirFiles(pathMod.join(home, '.claude', 'commands'), ['.md']);
-      // OpenClaw hooks
-      addDirFiles(pathMod.join(home, '.openclaw', 'hooks'), ['HOOK.md', 'handler.js']);
-      // CWD rule files
-      addIfExists(pathMod.join(process.cwd(), '.cursorrules'));
-      addIfExists(pathMod.join(process.cwd(), '.windsurfrules'));
-      addIfExists(pathMod.join(process.cwd(), '.clinerules'));
-      addIfExists(pathMod.join(process.cwd(), '.github', 'copilot-instructions.md'));
-      addIfExists(pathMod.join(process.cwd(), 'CLAUDE.md'));
-      addIfExists(pathMod.join(process.cwd(), '.aider.conf.yml'));
-      addIfExists(pathMod.join(process.cwd(), '.continue', 'config.json'));
-    }
+    const filesToScan = discoverSkillFiles(customDir);
 
     if (filesToScan.length === 0) {
       console.log('\nNo agent instruction files found to scan.');

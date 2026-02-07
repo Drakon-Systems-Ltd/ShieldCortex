@@ -11,7 +11,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -140,6 +140,56 @@ function formatContext(memories, project) {
   return lines.join('\n');
 }
 
+// ==================== SKILL FILE CHECK ====================
+
+/**
+ * Quick check of project instruction files for obviously suspicious content.
+ * This is a lightweight inline check — for full scanning use `npx shieldcortex scan-skills`.
+ */
+function checkProjectInstructionFiles(cwd) {
+  const warnings = [];
+
+  const filesToCheck = [
+    { path: '.cursorrules', name: '.cursorrules' },
+    { path: '.windsurfrules', name: '.windsurfrules' },
+    { path: '.clinerules', name: '.clinerules' },
+    { path: '.github/copilot-instructions.md', name: 'copilot-instructions.md' },
+  ];
+
+  // Suspicious patterns that indicate potential threats in instruction files
+  const suspiciousPatterns = [
+    { pattern: /ignore\s+(all\s+)?(safety|security|permission)/i, label: 'safety bypass' },
+    { pattern: /bypass\s+(the\s+)?(sandbox|permission|safety)/i, label: 'sandbox bypass' },
+    { pattern: /disable\s+(the\s+)?(firewall|security|protection)/i, label: 'security disable' },
+    { pattern: /curl\s+[\s\S]{0,100}-d\s+[\s\S]{0,100}https?:/i, label: 'data exfiltration' },
+    { pattern: /read\s+[\s\S]{0,50}~\/\.ssh/i, label: 'SSH key access' },
+    { pattern: /read\s+[\s\S]{0,50}~\/\.aws/i, label: 'AWS credential access' },
+    { pattern: /<!--[\s\S]{0,500}?(always|never|must|execute|run|send)[\s\S]{0,500}?-->/i, label: 'hidden HTML instruction' },
+    { pattern: /echo\s+[\s\S]{0,100}>\s*\//i, label: 'file write instruction' },
+    { pattern: /dangerouslyDisableSandbox/i, label: 'sandbox disable flag' },
+  ];
+
+  for (const file of filesToCheck) {
+    const fullPath = join(cwd, file.path);
+    if (!existsSync(fullPath)) continue;
+
+    try {
+      const content = readFileSync(fullPath, 'utf-8');
+
+      for (const { pattern, label } of suspiciousPatterns) {
+        if (pattern.test(content)) {
+          warnings.push(`${file.name}: suspicious pattern detected (${label})`);
+          break; // One warning per file is enough
+        }
+      }
+    } catch {
+      // File unreadable — skip
+    }
+  }
+
+  return warnings;
+}
+
 // ==================== MAIN HOOK LOGIC ====================
 
 let input = '';
@@ -211,6 +261,22 @@ No stored memories yet for this project.
 ${proactiveInstructions}
 `);
       console.error(`[shieldcortex] Session start: no memories found for "${project}"`);
+    }
+
+    // Quick check for suspicious project instruction files
+    try {
+      const cwd = hookData.cwd || process.cwd();
+      const skillWarnings = checkProjectInstructionFiles(cwd);
+      if (skillWarnings.length > 0) {
+        console.log(`\n⚠️  ShieldCortex detected suspicious instruction files:`);
+        for (const w of skillWarnings) {
+          console.log(`  - ${w}`);
+        }
+        console.log(`Run \`npx shieldcortex scan-skills\` for a full report.\n`);
+        console.error(`[shieldcortex] WARNING: ${skillWarnings.length} suspicious file(s) detected`);
+      }
+    } catch {
+      // Skill check is best-effort — never block session start
     }
 
     process.exit(0);
