@@ -175,7 +175,7 @@ export function CloudUpsellCard() {
           <Loader2 size={20} className="text-cyan-400 animate-spin" />
           <div>
             <p className="text-sm text-white font-medium">Check your email</p>
-            <p className="text-xs text-slate-400">Click the link in your inbox to complete setup. We'll auto-configure everything.</p>
+            <p className="text-xs text-slate-400">Click the link in your inbox to complete setup. We&apos;ll auto-configure everything.</p>
           </div>
         </div>
       )}
