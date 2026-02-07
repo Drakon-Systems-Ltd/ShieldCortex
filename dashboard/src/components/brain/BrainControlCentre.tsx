@@ -77,6 +77,11 @@ export function BrainControlCentre({
   // Calculate last consolidation time from worker status
   const lastConsolidation = workerStatus?.lastMediumTick ?? workerStatus?.lastLightTick ?? null;
 
+  // Map worker status to the shape expected by child components
+  const mappedWorkerStatus = workerStatus
+    ? { running: workerStatus.isRunning, lastRun: workerStatus.lastLightTick ?? workerStatus.lastMediumTick ?? undefined }
+    : null;
+
   // Handlers
   const handleSelectMemory = useCallback(
     (memory: Memory | null) => {
@@ -138,11 +143,12 @@ export function BrainControlCentre({
   }, [consolidateMutation]);
 
   const handleActivityClick = useCallback(
-    (eventData: Record<string, unknown>) => {
-      if (eventData?.memoryId) {
-        handleNavigateToMemory(eventData.memoryId as number);
-      } else if (eventData?.id) {
-        handleNavigateToMemory(eventData.id as number);
+    (eventData: unknown) => {
+      const data = eventData as Record<string, unknown> | null;
+      if (data?.memoryId) {
+        handleNavigateToMemory(data.memoryId as number);
+      } else if (data?.id) {
+        handleNavigateToMemory(data.id as number);
       }
     },
     [handleNavigateToMemory]
@@ -171,7 +177,7 @@ export function BrainControlCentre({
         contradictionCount={contradictionCount}
         quarantineCount={quarantineCount}
         lastConsolidation={lastConsolidation}
-        workerStatus={workerStatus}
+        workerStatus={mappedWorkerStatus}
       />
 
       {/* Main content area: sidebar + brain + inspector */}
@@ -185,7 +191,7 @@ export function BrainControlCentre({
             activeCategory={categoryFilter}
             onConsolidate={handleConsolidate}
             isConsolidating={consolidateMutation.isPending}
-            workerStatus={workerStatus}
+            workerStatus={mappedWorkerStatus}
           />
         )}
 
