@@ -1,4 +1,4 @@
-import { getCloudConfig } from './config.js';
+import { getCloudConfig, getDeviceId, getDeviceName } from './config.js';
 import type { DefencePipelineResult, DefenceSource } from '../defence/types.js';
 
 /**
@@ -28,6 +28,8 @@ export function syncToCloud(
     ),
     reason: result.firewall.reason,
     pipeline_duration_ms: durationMs,
+    device_id: getDeviceId(),
+    device_name: getDeviceName(),
     timestamp: new Date().toISOString(),
   };
 

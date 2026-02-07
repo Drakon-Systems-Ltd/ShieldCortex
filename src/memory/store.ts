@@ -44,7 +44,7 @@ import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult } from '../graph/resolve.js';
-import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
+import { runDefencePipeline, storeFragmentationData, syncQuarantineToCloud } from '../defence/index.js';
 import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
@@ -288,6 +288,21 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
     const db = getDatabase();
     db.prepare(`INSERT INTO quarantine (original_title, original_content, project, source_type, source_identifier, reason, threat_indicators, anomaly_score, firewall_result, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
       .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, result.firewall.result, result.auditId);
+
+    // Sync quarantine entry to cloud (fire-and-forget)
+    const indicators = result.firewall.threatIndicators.map(t =>
+      typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
+    );
+    syncQuarantineToCloud({
+      original_content: input.content,
+      original_title: input.title,
+      source_type: source.type,
+      source_identifier: source.identifier,
+      reason: result.firewall.reason,
+      threat_indicators: indicators,
+      anomaly_score: result.firewall.anomalyScore,
+      firewall_result: result.firewall.result,
+    });
   } catch (e) {
     console.error('[shieldcortex] Failed to quarantine memory:', e);
   }

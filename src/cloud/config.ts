@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, hostname } from 'os';
+import { randomUUID } from 'crypto';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -101,4 +102,36 @@ export function removeTrustedSkill(path: string): void {
     raw.trustedSkills = list;
     writeRawConfig(raw);
   }
+}
+
+// ── Device Identity ────────────────────────────────────
+
+/**
+ * Returns a stable UUID for this machine.
+ * Generates and persists on first call; reads from config thereafter.
+ */
+export function getDeviceId(): string {
+  const raw = readRawConfig();
+  if (typeof raw.deviceId === 'string' && raw.deviceId) {
+    return raw.deviceId;
+  }
+  const id = randomUUID();
+  raw.deviceId = id;
+  writeRawConfig(raw);
+  return id;
+}
+
+/**
+ * Returns the OS hostname for this machine.
+ * Stores in config on first call; reads from config thereafter.
+ */
+export function getDeviceName(): string {
+  const raw = readRawConfig();
+  if (typeof raw.deviceName === 'string' && raw.deviceName) {
+    return raw.deviceName;
+  }
+  const name = hostname();
+  raw.deviceName = name;
+  writeRawConfig(raw);
+  return name;
 }
