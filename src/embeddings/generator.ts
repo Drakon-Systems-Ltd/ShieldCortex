@@ -1,9 +1,13 @@
 import { pipeline, env } from '@huggingface/transformers';
 import type { FeatureExtractionPipeline } from '@huggingface/transformers';
+import { join } from 'path';
+import { homedir } from 'os';
 
 // Configure for operation
 env.allowRemoteModels = true;
 env.allowLocalModels = true;
+// Use a user-writable cache dir so global installs (owned by root) don't hit EACCES
+env.cacheDir = join(homedir(), '.cache', 'shieldcortex', 'models');
 
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
 let isLoading = false;
@@ -16,6 +20,10 @@ let loadPromise: Promise<FeatureExtractionPipeline> | null = null;
  * with better ARM64 Linux support
  */
 async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
+  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') {
+    throw new Error('Embeddings disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1');
+  }
+
   if (embeddingPipeline) return embeddingPipeline;
 
   if (isLoading && loadPromise) {

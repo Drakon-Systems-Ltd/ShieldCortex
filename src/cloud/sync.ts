@@ -30,6 +30,7 @@ export function syncToCloud(
     pipeline_duration_ms: durationMs,
     device_id: getDeviceId(),
     device_name: getDeviceName(),
+    platform: `${process.platform}/${process.arch}`,
     timestamp: new Date().toISOString(),
   };
 

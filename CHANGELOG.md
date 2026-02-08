@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.1] - 2026-02-08
+
+### Added
+
+- **`npx shieldcortex scan "text"` CLI command** — Lightweight content scanner that runs the full defence pipeline (firewall + trust + sensitivity) without starting the MCP server or loading ONNX models. Works immediately on ARM64 Linux.
+- **`SHIELDCORTEX_SKIP_EMBEDDINGS=1` env var** — Disables ONNX model loading for environments where it hangs (ARM64 Linux). MCP server still works, just without semantic search.
+- **Platform reporting** — Cloud sync now sends `platform` field (e.g. `linux/arm64`, `darwin/arm64`) with every audit entry, populating the Devices page.
+
+### Fixed
+
+- **HuggingFace cache permission error on global install** — Model cache now uses `~/.cache/shieldcortex/models/` instead of the library default (which falls inside root-owned `node_modules/` on global installs).
+
 ## [2.5.0] - 2026-02-07
 
 ### Added

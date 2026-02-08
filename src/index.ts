@@ -13,6 +13,7 @@
  *   npx shieldcortex --mode both             # Start both servers
  *   npx shieldcortex --dashboard             # Start API + Dashboard (admin panel)
  *   npx shieldcortex --db /path/to.db        # Custom database path
+ *   npx shieldcortex scan "text"               # Quick content scan (no MCP/ML)
  *   npx shieldcortex status                   # Show database and system status
  *   npx shieldcortex setup                    # Configure Claude for proactive memory use
  *   npx shieldcortex install                  # Alias for setup
@@ -336,6 +337,54 @@ async function main() {
       process.exit(1);
     }
     return;
+  }
+
+  // Handle "scan" subcommand — lightweight content scan (no MCP server, no ONNX model)
+  if (process.argv[2] === 'scan') {
+    const text = process.argv[3];
+    if (!text) {
+      console.error('Usage: npx shieldcortex scan "text to analyse"');
+      console.error('  Runs the defence pipeline (firewall + trust + sensitivity).');
+      console.error('  No MCP server or ML model required — works on ARM64.');
+      process.exit(1);
+    }
+
+    // Init database for audit logging
+    const os = await import('os');
+    const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.shieldcortex', 'memories.db');
+    const { initDatabase } = await import('./database/init.js');
+    initDatabase(dbPath);
+
+    const { runDefencePipeline } = await import('./defence/pipeline.js');
+    const source = { type: 'cli' as const, identifier: 'shieldcortex-scan' };
+    const result = runDefencePipeline(text, 'CLI Scan', source);
+
+    const bold = '\x1b[1m';
+    const reset = '\x1b[0m';
+    const green = '\x1b[32m';
+    const red = '\x1b[31m';
+    const yellow = '\x1b[33m';
+
+    const resultColor = result.firewall.result === 'ALLOW' ? green :
+                        result.firewall.result === 'QUARANTINE' ? yellow : red;
+
+    console.log(`\n${bold}ShieldCortex Scan Result${reset}`);
+    console.log(`${'─'.repeat(50)}`);
+    console.log(`  Result:      ${resultColor}${result.firewall.result}${reset}`);
+    console.log(`  Trust:       ${result.trust.score.toFixed(2)}`);
+    console.log(`  Sensitivity: ${result.sensitivity.level}`);
+    console.log(`  Anomaly:     ${result.firewall.anomalyScore.toFixed(2)}`);
+    console.log(`  Reason:      ${result.firewall.reason}`);
+
+    if (result.firewall.threatIndicators.length > 0) {
+      console.log(`  Threats:     ${result.firewall.threatIndicators.join(', ')}`);
+    }
+    if (result.firewall.blockedPatterns.length > 0) {
+      console.log(`  Patterns:    ${result.firewall.blockedPatterns.join(', ')}`);
+    }
+
+    console.log();
+    process.exit(result.allowed ? 0 : 1);
   }
 
   // Handle "scan-skill" subcommand — scan a single skill/instruction file
