@@ -1,7 +1,7 @@
 'use client';
 
 import { useDashboardStore } from '@/lib/store';
-import { useStats } from '@/hooks/useMemories';
+import { useStats, useVersion } from '@/hooks/useMemories';
 import { useAuditStats } from '@/hooks/useDefence';
 import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch } from 'lucide-react';
 
@@ -20,6 +20,7 @@ export function NavRail() {
   const { viewMode, setViewMode } = useDashboardStore();
   const { data: stats } = useStats();
   const { data: auditStats } = useAuditStats('24h');
+  const { data: versionData } = useVersion();
 
   const healthPercent = stats?.decayDistribution
     ? Math.round(
@@ -60,6 +61,7 @@ export function NavRail() {
       <div className="flex flex-col items-center gap-1 text-[10px] text-slate-500">
         {stats && <span>{stats.total}</span>}
         {healthPercent !== null && <span>{healthPercent}%</span>}
+        {versionData?.version && <span>v{versionData.version}</span>}
       </div>
     </nav>
   );

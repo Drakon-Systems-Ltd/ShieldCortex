@@ -35,6 +35,7 @@ export interface UpdateResult {
   newVersion: string | null;
   error?: string;
   requiresRestart: boolean;
+  mcpRestarted?: number;
 }
 
 /**
@@ -158,15 +159,56 @@ export function performUpdate(): Promise<UpdateResult> {
         // Get new version
         const newVersion = getCurrentVersion();
 
+        // Kill MCP servers so Claude Code restarts them with updated code
+        let mcpRestarted = 0;
+        if (newVersion !== previousVersion) {
+          mcpRestarted = restartMcpServers();
+        }
+
         resolve({
           success: true,
           previousVersion,
           newVersion,
           requiresRestart: newVersion !== previousVersion,
+          mcpRestarted,
         });
       }
     );
   });
+}
+
+/**
+ * Kill running MCP server processes so Claude Code respawns them with updated code.
+ * Finds shieldcortex node processes (excluding the current visualization server).
+ * Returns the number of processes signalled.
+ */
+export function restartMcpServers(): number {
+  let killed = 0;
+  try {
+    const output = execSync(
+      'pgrep -f "shieldcortex" 2>/dev/null || true',
+      { encoding: 'utf-8', timeout: 5000 },
+    ).trim();
+
+    if (!output) return 0;
+
+    const currentPid = process.pid;
+    for (const line of output.split('\n')) {
+      const pid = parseInt(line.trim(), 10);
+      if (!pid || pid === currentPid) continue;
+
+      try {
+        process.kill(pid, 'SIGTERM');
+        killed++;
+        console.log(`[shieldcortex] Sent SIGTERM to MCP server (pid ${pid})`);
+      } catch {
+        // Process may have already exited
+      }
+    }
+  } catch {
+    // pgrep not available or failed — non-critical
+  }
+  return killed;
 }
 
 /**

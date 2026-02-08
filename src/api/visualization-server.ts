@@ -53,7 +53,7 @@ import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
-import { getCloudConfig, setCloudConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill } from '../cloud/config.js';
+import { getCloudConfig, setCloudConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName } from '../cloud/config.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 
 const PORT = process.env.PORT || 3001;
@@ -94,7 +94,8 @@ export function startVisualizationServer(dbPath?: string): void {
 
   // Health check
   app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    const version = getCurrentVersion();
+    res.json({ status: 'ok', timestamp: new Date().toISOString(), version });
   });
 
   // Get all memories with filters and pagination
@@ -1298,13 +1299,46 @@ export function startVisualizationServer(dbPath?: string): void {
       });
 
       const threatCount = results.filter((r) => !r.safe && !r.trusted).length;
+      const scannedAt = new Date().toISOString();
 
       res.json({
         files: results,
         totalScanned: results.length,
         threatCount,
-        scannedAt: new Date().toISOString(),
+        scannedAt,
       });
+
+      // Fire-and-forget: sync results to cloud
+      const cloudConfig = getCloudConfig();
+      if (cloudConfig.cloudEnabled && cloudConfig.cloudApiKey) {
+        const payload = {
+          files: results.map((r) => ({
+            file_path: r.path,
+            skill_name: r.skillName,
+            format: r.format,
+            risk_level: r.riskLevel,
+            safe: r.safe,
+            summary: r.summary,
+            findings: r.findings,
+            scan_duration_ms: r.scanDurationMs,
+            trusted: r.trusted,
+          })),
+          device_id: getDeviceId(),
+          device_name: getDeviceName(),
+          platform: process.platform,
+          scanned_at: scannedAt,
+        };
+
+        fetch(`${cloudConfig.cloudBaseUrl}/v1/skills/ingest`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${cloudConfig.cloudApiKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(15_000),
+        }).catch(() => {});
+      }
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -1590,6 +1624,69 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // Retroactive sync: push existing quarantine items to cloud
+  app.post('/api/quarantine/sync-to-cloud', async (_req: Request, res: Response) => {
+    try {
+      const config = getCloudConfig();
+      if (!config.cloudEnabled || !config.cloudApiKey) {
+        return res.status(400).json({ error: 'Cloud not configured. Enable cloud sync first.' });
+      }
+
+      const db = getDatabase();
+      const rows = db.prepare(
+        'SELECT * FROM quarantine WHERE status = ? ORDER BY created_at ASC'
+      ).all('pending') as Record<string, unknown>[];
+
+      if (rows.length === 0) {
+        return res.json({ synced: 0, message: 'No pending quarantine items to sync.' });
+      }
+
+      let synced = 0;
+      const errors: string[] = [];
+
+      for (const row of rows) {
+        try {
+          const indicators: string[] = (() => {
+            try { return JSON.parse(row.threat_indicators as string ?? '[]'); }
+            catch { return []; }
+          })();
+
+          const resp = await fetch(`${config.cloudBaseUrl}/v1/quarantine/ingest`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${config.cloudApiKey}`,
+            },
+            body: JSON.stringify({
+              original_content: row.original_content,
+              original_title: row.original_title ?? undefined,
+              source_type: row.source_type ?? 'unknown',
+              source_identifier: row.source_identifier ?? 'unknown',
+              reason: row.reason ?? 'Unknown reason',
+              threat_indicators: indicators,
+              anomaly_score: row.anomaly_score ?? 0,
+              firewall_result: row.firewall_result ?? 'QUARANTINE',
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+
+          if (resp.ok) {
+            synced++;
+          } else {
+            const body = await resp.text().catch(() => '');
+            errors.push(`Item ${row.id}: ${resp.status} ${body.substring(0, 100)}`);
+          }
+        } catch (e) {
+          errors.push(`Item ${row.id}: ${(e as Error).message}`);
+        }
+      }
+
+      res.json({ synced, total: rows.length, errors: errors.length > 0 ? errors : undefined });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Create and start the background brain worker
   const brainWorker = new BrainWorker();
 
@@ -1823,6 +1920,24 @@ export function startVisualizationServer(dbPath?: string): void {
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  // Handle port-in-use and other listen errors gracefully
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n[ShieldCortex] Port ${PORT} is already in use.`);
+      console.error(`Another ShieldCortex instance may be running.\n`);
+      console.error(`  To fix:`);
+      console.error(`    1. Kill the existing process: lsof -ti :${PORT} | xargs kill`);
+      console.error(`    2. Or choose a different port: PORT=3002 npx shieldcortex --mode api\n`);
+    } else {
+      console.error(`[ShieldCortex] Server error: ${err.message}`);
+    }
+    // Stop worker and clean up before exiting
+    brainWorker.stop();
+    clearInterval(eventPollInterval);
+    clearInterval(cleanupInterval);
+    process.exit(1);
+  });
 
   server.listen(PORT, () => {
     console.log(`

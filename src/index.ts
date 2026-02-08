@@ -495,17 +495,30 @@ async function main() {
     startVisualizationServer(dbPath);
     dashboardProcess = startDashboard();
 
-    // Graceful shutdown for dashboard mode
-    const shutdown = (signal: string) => {
-      console.log(`\nReceived ${signal}, shutting down...`);
-      if (dashboardProcess) {
+    // Kill dashboard child process on any exit (prevents orphans)
+    const killDashboard = () => {
+      if (dashboardProcess && !dashboardProcess.killed) {
         dashboardProcess.kill('SIGTERM');
       }
+    };
+
+    // Clean up on normal signals
+    const shutdown = (signal: string) => {
+      console.log(`\nReceived ${signal}, shutting down...`);
+      killDashboard();
       process.exit(0);
     };
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+    // Clean up on any exit (catches crashes, EADDRINUSE, uncaught exceptions)
+    process.on('exit', killDashboard);
+    process.on('uncaughtException', (err) => {
+      console.error('[ShieldCortex] Uncaught exception:', err.message);
+      killDashboard();
+      process.exit(1);
+    });
   } else if (mode === 'both') {
     // Both modes - API in background, MCP in foreground
     console.log('Starting ShieldCortex in both modes...');

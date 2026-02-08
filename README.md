@@ -149,6 +149,39 @@ npx shieldcortex doctor
 
 ---
 
+## OpenClaw Setup
+
+**Three commands. That's it.** Works on macOS, Linux (including headless servers), and Windows.
+
+```bash
+# 1. Install globally
+npm install -g shieldcortex
+
+# 2. Install the OpenClaw hook
+sudo npx shieldcortex openclaw install
+
+# 3. Connect to Cloud (get your API key from the Cloud dashboard)
+npx shieldcortex config --cloud-api-key <your-key> --cloud-enable
+```
+
+Every memory your OpenClaw agent saves now passes through the 5-layer defence pipeline, and audit data syncs to your team's Cloud dashboard automatically.
+
+### Onboarding Team Members
+
+Adding someone to your team? Give them an API key and these three commands:
+
+```bash
+npm install -g shieldcortex
+sudo npx shieldcortex openclaw install
+npx shieldcortex config --cloud-api-key <team-api-key> --cloud-enable
+```
+
+No signup, no browser, no account creation needed. The API key ties their scans to your team. Their device appears in your Cloud dashboard automatically once scans start flowing.
+
+> **Headless servers?** No problem — ShieldCortex runs entirely via CLI. No GUI or browser required.
+
+---
+
 ## Supported Agents
 
 ShieldCortex is agent-agnostic middleware:
