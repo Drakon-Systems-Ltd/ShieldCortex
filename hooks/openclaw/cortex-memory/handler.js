@@ -9,6 +9,54 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 
+// ==================== SERVER COMMAND RESOLUTION ====================
+
+/**
+ * Resolve the fastest way to invoke shieldcortex:
+ * 1. ~/.shieldcortex/config.json "binaryPath" override
+ * 2. Global install detected via `which shieldcortex`
+ * 3. Fallback to `npx -y shieldcortex` (slow on ARM64)
+ */
+let _resolvedServerCmd = null;
+
+async function resolveServerCmd() {
+  if (_resolvedServerCmd) return _resolvedServerCmd;
+
+  const path = await import("node:path");
+  const { homedir } = await import("node:os");
+
+  // 1. Check config for explicit binaryPath
+  try {
+    const configPath = path.join(homedir(), ".shieldcortex", "config.json");
+    const config = JSON.parse(await fs.readFile(configPath, "utf-8"));
+    if (config.binaryPath) {
+      await fs.access(config.binaryPath);
+      _resolvedServerCmd = config.binaryPath;
+      console.log(`[cortex-memory] Using configured binary: ${config.binaryPath}`);
+      return _resolvedServerCmd;
+    }
+  } catch { /* Config not found, no binaryPath, or path invalid */ }
+
+  // 2. Try to find global install via `which`
+  try {
+    const { execFileSync } = await import("node:child_process");
+    const bin = execFileSync("which", ["shieldcortex"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    }).trim();
+    if (bin) {
+      _resolvedServerCmd = bin;
+      console.log(`[cortex-memory] Using global install: ${bin}`);
+      return _resolvedServerCmd;
+    }
+  } catch { /* Not in PATH */ }
+
+  // 3. Fall back to npx (slow but always works)
+  _resolvedServerCmd = "npx -y shieldcortex";
+  console.log("[cortex-memory] Falling back to npx -y shieldcortex (slow path)");
+  return _resolvedServerCmd;
+}
+
 // ==================== CORTEX MCP HELPER ====================
 
 /**
@@ -18,11 +66,13 @@ import fs from "node:fs/promises";
  * @param {object} options - Options { retries: number, timeout: number }
  * @returns {Promise<string|null>} Raw stdout or null on error
  */
-function callCortex(tool, args = {}, options = { retries: 1, timeout: 15000 }) {
+async function callCortex(tool, args = {}, options = { retries: 1, timeout: 15000 }) {
+  const serverCmd = await resolveServerCmd();
+
   return new Promise((resolve) => {
     const cmdArgs = [
       "mcporter", "call", "--stdio",
-      "npx -y shieldcortex",
+      serverCmd,
       tool,
     ];
     for (const [key, value] of Object.entries(args)) {

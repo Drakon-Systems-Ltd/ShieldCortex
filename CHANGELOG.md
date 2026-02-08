@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.2] - 2026-02-08
+
+### Fixed
+
+- **OpenClaw hook timeout on ARM64/slow systems** — The cortex-memory hook now detects globally-installed shieldcortex and uses the direct binary path instead of `npx -y shieldcortex`, which took 10+ seconds for package resolution. Resolution order: `binaryPath` in `~/.shieldcortex/config.json` > global install via `which` > fallback to `npx`. Users must re-run `sudo npx shieldcortex openclaw install` to update the hook.
+
 ## [2.5.1] - 2026-02-08
 
 ### Added
