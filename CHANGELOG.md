@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.0] - 2026-02-07
+
+### Added
+
+- **Device identity** — Each machine now generates a stable UUID on first run, stored in `~/.shieldcortex/config.json`. Sent with every cloud sync payload for per-device tracking.
+- **Quarantine cloud sync** — When the local firewall quarantines content, it now syncs the full content to ShieldCortex Cloud so the Quarantine Review page populates. Fire-and-forget, same as audit sync.
+- **Device name** — OS hostname is captured and sent alongside the device UUID for human-friendly identification.
+
+### Changed
+
+- **Cloud sync payload** — Now includes `device_id` (UUID) and `device_name` (hostname) fields in every audit ingest request.
+
 ## [2.4.26] - 2026-02-07
 
 ### Added
