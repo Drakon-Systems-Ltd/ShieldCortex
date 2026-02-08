@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.3] - 2026-02-08
+
+### Added
+
+- **Content-based format auto-detection** — When scanning skill content without a file path (cloud dashboard, API), the parser now infers the format from content patterns (frontmatter, JSON, JS exports, YAML keys). Improves scan accuracy for pasted content.
+
+### Fixed
+
+- **Skill scanner "unknown" format on cloud** — Pasted content with YAML frontmatter is now correctly identified as skill-md/hook-md instead of falling through as "unknown".
+
 ## [2.5.2] - 2026-02-08
 
 ### Fixed

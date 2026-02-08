@@ -244,16 +244,86 @@ function nameFromFilename(filename: string): string {
   return name || 'unknown';
 }
 
+// ── Content-Based Format Detection ──
+
+/**
+ * Auto-detect the skill format based on the content itself (no file path).
+ * Used when pasting content in the cloud dashboard with "Auto-detect" selected.
+ */
+export function detectFormatFromContent(content: string): SkillFormat {
+  const trimmed = content.trim();
+
+  // JSON-like content → continue-json
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.models || parsed.tabAutocompleteModel || parsed.customCommands) {
+        return 'continue-json';
+      }
+    } catch { /* not valid JSON */ }
+  }
+
+  // YAML frontmatter with name/description → skill-md or hook-md
+  if (trimmed.startsWith('---')) {
+    const closingIdx = trimmed.indexOf('\n---', 3);
+    if (closingIdx !== -1) {
+      const frontmatter = trimmed.slice(3, closingIdx).toLowerCase();
+      if (frontmatter.includes('trigger:') || frontmatter.includes('hook')) {
+        return 'hook-md';
+      }
+      return 'skill-md';
+    }
+  }
+
+  // JavaScript patterns → hook-js
+  if (
+    /^(\/\/|\/\*|import\s|export\s|const\s|module\.exports)/.test(trimmed) &&
+    (trimmed.includes('module.exports') || trimmed.includes('export default') || trimmed.includes('export const'))
+  ) {
+    return 'hook-js';
+  }
+
+  // YAML patterns (key: value) with aider-specific keys → aider-yml
+  if (/^(model|edit-format|auto-commits|lint-cmd)\s*:/m.test(trimmed)) {
+    return 'aider-yml';
+  }
+
+  // Markdown with cursor/windsurf/cline rule patterns
+  const lowerContent = trimmed.toLowerCase();
+  if (
+    lowerContent.includes('you are a') ||
+    lowerContent.includes('rules:') ||
+    lowerContent.includes('always follow') ||
+    lowerContent.includes('coding style')
+  ) {
+    // Check for copilot-instructions patterns
+    if (lowerContent.includes('github copilot') || lowerContent.includes('copilot')) {
+      return 'copilot-md';
+    }
+    return 'rules';
+  }
+
+  // Markdown starting with # heading → could be claude-md or skill-md
+  if (trimmed.startsWith('#')) {
+    if (lowerContent.includes('claude') && lowerContent.includes('project')) {
+      return 'claude-md';
+    }
+    return 'skill-md';
+  }
+
+  return 'unknown';
+}
+
 // ── Core Parser ──
 
 /**
  * Parse file content into a ParsedSkill structure.
  *
  * @param content  Raw file content
- * @param format   Detected format (defaults to 'unknown')
+ * @param format   Detected format (defaults to auto-detected from content)
  */
 export function parseSkillFile(content: string, format?: SkillFormat): ParsedSkill {
-  const effectiveFormat = format ?? 'unknown';
+  const effectiveFormat = format ?? detectFormatFromContent(content);
   const raw = content;
 
   // Guard against empty or binary-looking content

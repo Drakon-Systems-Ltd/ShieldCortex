@@ -21,7 +21,7 @@ export type {
 export { detectSkillThreats, detectCodeThreats } from './patterns.js';
 export type { SkillThreatResult } from './patterns.js';
 
-export { parseSkillFile, readSkillFile, detectFormat } from './parser.js';
+export { parseSkillFile, readSkillFile, detectFormat, detectFormatFromContent } from './parser.js';
 export type { ParsedSkill, SkillFormat } from './parser.js';
 
 export { discoverSkillFiles } from './discover.js';
