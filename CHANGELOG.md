@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.6.0] - 2026-02-09
+
+### Added
+
+- **Cloud sync retry queue** — Failed cloud sync requests are now queued in local SQLite and retried with exponential backoff (30s, 60s, 120s). After 3 failures, entries are marked as permanently failed. The BrainWorker processes up to 10 queued items every 5 minutes and purges entries older than 7 days.
+- **Cloud sync status indicator** — The local dashboard now shows a sync status dot in the Defence Overview: green (OK), amber (pending retries), red (failed items), or grey (disabled). Polls every 10 seconds.
+- **`lastSyncAt` tracking** — Successful cloud syncs now write a timestamp to `~/.shieldcortex/config.json`, displayed in the dashboard as "last sync N ago".
+
+### Fixed
+
+- **Graceful EADDRINUSE handling** — The API server now prints a clear error message with fix instructions when port 3001 is already in use, instead of crashing with an unhandled error.
+
 ## [2.5.3] - 2026-02-08
 
 ### Added
