@@ -6,6 +6,7 @@ import { QuarantinePreview } from './QuarantinePreview';
 import { ThreatTimeline } from './ThreatTimeline';
 import { DefenceStatsCard } from './DefenceStatsCard';
 import { CloudUpsellCard } from './CloudUpsellCard';
+import { CloudSyncStatus } from './CloudSyncStatus';
 import { SkillScannerCard } from './SkillScannerCard';
 
 export function ShieldOverview() {
@@ -32,6 +33,9 @@ export function ShieldOverview() {
           ))}
         </div>
       </div>
+
+      {/* Cloud sync status indicator */}
+      <CloudSyncStatus />
 
       {/* Four-quadrant grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

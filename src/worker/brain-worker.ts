@@ -32,6 +32,7 @@ import {
   emitWorkerMediumTick,
   emitPredictiveConsolidation,
 } from '../api/events.js';
+import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 
 /**
  * Brain Worker Class
@@ -170,6 +171,18 @@ export class BrainWorker {
         });
       }
 
+      // 3. Process cloud sync retry queue
+      try {
+        const retryResult = processRetryQueue();
+        if (retryResult.processed > 0) {
+          console.log(
+            `[BrainWorker] Sync retry queue: processed ${retryResult.processed} items`
+          );
+        }
+      } catch (retryError) {
+        console.error('[BrainWorker] Sync retry queue failed:', retryError);
+      }
+
       // Update stats
       this.lastLightTick = result.timestamp;
       this.stats.lightTicks++;
@@ -263,6 +276,16 @@ export class BrainWorker {
       console.log(`[brain-worker] Graph: ${entityCount} entities, ${tripleCount} triples${orphans.length > 0 ? `, pruned ${orphans.length} orphans` : ''}`);
     } catch (e) {
       console.error('[brain-worker] Graph maintenance failed:', e);
+    }
+
+    // Purge old sync queue entries (> 7 days)
+    try {
+      const purged = purgeOldEntries();
+      if (purged > 0) {
+        console.log(`[BrainWorker] Purged ${purged} old sync queue entries`);
+      }
+    } catch (e) {
+      console.error('[BrainWorker] Sync queue purge failed:', e);
     }
 
     return result;

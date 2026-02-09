@@ -63,7 +63,7 @@ export function clearCloudConfigCache(): void {
 
 // ── Trusted Skills ──────────────────────────────────────
 
-function readRawConfig(): Record<string, unknown> {
+export function readRawConfig(): Record<string, unknown> {
   try {
     if (existsSync(CONFIG_FILE)) {
       return JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));

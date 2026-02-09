@@ -53,7 +53,8 @@ import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
-import { getCloudConfig, setCloudConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName } from '../cloud/config.js';
+import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName } from '../cloud/config.js';
+import { getQueueStats } from '../cloud/sync-queue.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 
 const PORT = process.env.PORT || 3001;
@@ -558,6 +559,27 @@ export function startVisualizationServer(dbPath?: string): void {
         enabled: updated.cloudEnabled,
         apiKeySet: !!updated.cloudApiKey,
         baseUrl: updated.cloudBaseUrl,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Get cloud sync status (queue stats + config)
+  app.get('/api/cloud/sync-status', (_req: Request, res: Response) => {
+    try {
+      const config = getCloudConfig();
+      const raw = readRawConfig();
+      const queue = getQueueStats();
+
+      res.json({
+        enabled: config.cloudEnabled,
+        apiKeySet: !!config.cloudApiKey,
+        lastSyncAt: (typeof raw.lastSyncAt === 'string' ? raw.lastSyncAt : null) as string | null,
+        queue: {
+          pending: queue.pending,
+          failed: queue.failed,
+        },
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

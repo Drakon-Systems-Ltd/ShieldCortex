@@ -266,6 +266,26 @@ function runMigrations(database: Database.Database): void {
     // Safe to ignore
   }
 
+  // Migration: sync_queue table for cloud sync retry
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        payload TEXT NOT NULL,
+        attempts INTEGER DEFAULT 0,
+        max_attempts INTEGER DEFAULT 3,
+        next_retry_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','failed','synced')),
+        last_error TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        synced_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at);
+    `);
+  } catch {
+    // Table may already exist - safe to ignore
+  }
+
   // Migration: Ontology tables (entities, triples, memory_entities)
   try {
     database.exec(`
@@ -632,6 +652,20 @@ function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_frag_entities_memory ON fragmentation_entities(memory_id);
     CREATE INDEX IF NOT EXISTS idx_frag_entities_text ON fragmentation_entities(entity_value);
     CREATE INDEX IF NOT EXISTS idx_frag_entities_type ON fragmentation_entities(entity_type);
+
+    CREATE TABLE IF NOT EXISTS sync_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payload TEXT NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      max_attempts INTEGER DEFAULT 3,
+      next_retry_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','failed','synced')),
+      last_error TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      synced_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at);
   `;
 }
 

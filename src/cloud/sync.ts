@@ -1,4 +1,5 @@
 import { getCloudConfig, getDeviceId, getDeviceName } from './config.js';
+import { enqueueFailedSync } from './sync-queue.js';
 import type { DefencePipelineResult, DefenceSource } from '../defence/types.js';
 
 /**
@@ -48,6 +49,14 @@ export function syncToCloud(
     body: JSON.stringify({ entries: [entry] }),
     signal: controller.signal,
   })
-    .then(() => clearTimeout(timeoutId))
-    .catch(() => clearTimeout(timeoutId));
+    .then((res) => {
+      clearTimeout(timeoutId);
+      if (!res?.ok) {
+        try { enqueueFailedSync(entry); } catch { /* truly silent */ }
+      }
+    })
+    .catch(() => {
+      clearTimeout(timeoutId);
+      try { enqueueFailedSync(entry); } catch { /* truly silent */ }
+    });
 }
