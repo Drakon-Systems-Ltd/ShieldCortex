@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.6.1] - 2026-02-09
+
+### Fixed
+
+- **Dashboard startup crash on Node 22** — Removed fragile `require.resolve('shieldcortex/package.json')` self-reference that threw `ERR_PACKAGE_PATH_NOT_EXPORTED` on some Node 22 installs. Dashboard path is now resolved entirely via `__dirname`.
+
 ## [2.6.0] - 2026-02-09
 
 ### Added

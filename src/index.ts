@@ -119,6 +119,7 @@ function findDashboardPath(): { serverPath: string; cwd: string } | null {
   const fs = require('fs');
 
   // Candidate locations to check (in order of priority)
+  // All paths are relative to __dirname (dist/) — no self-referencing require.resolve
   const candidates: Array<{ serverPath: string; cwd: string }> = [
     // Standard npm package structure (dist/ is in package root)
     {
@@ -131,17 +132,6 @@ function findDashboardPath(): { serverPath: string; cwd: string } | null {
       cwd: path.resolve(__dirname, '..', '..', 'dashboard', '.next', 'standalone', 'dashboard'),
     },
   ];
-
-  // Try finding via package.json location (may fail if exports misconfigured)
-  try {
-    const pkgDir = path.dirname(require.resolve('shieldcortex/package.json'));
-    candidates.push({
-      serverPath: path.resolve(pkgDir, 'dashboard', '.next', 'standalone', 'dashboard', 'server.js'),
-      cwd: path.resolve(pkgDir, 'dashboard', '.next', 'standalone', 'dashboard'),
-    });
-  } catch {
-    // require.resolve may fail if package exports don't include ./package.json
-  }
 
   for (const candidate of candidates) {
     try {
