@@ -173,10 +173,11 @@ export class BrainWorker {
 
       // 3. Process cloud sync retry queue
       try {
-        const retryResult = processRetryQueue();
+        const retryResult = await processRetryQueue();
         if (retryResult.processed > 0) {
           console.log(
-            `[BrainWorker] Sync retry queue: processed ${retryResult.processed} items`
+            `[BrainWorker] Sync retry queue: processed ${retryResult.processed} ` +
+            `(${retryResult.succeeded} ok, ${retryResult.failed} retry, ${retryResult.permanentlyFailed} failed)`
           );
         }
       } catch (retryError) {

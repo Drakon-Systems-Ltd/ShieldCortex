@@ -6,7 +6,7 @@
  */
 
 import { getDatabase } from '../database/init.js';
-import { getCloudConfig } from './config.js';
+import { getCloudConfig, updateLastSyncAt } from './config.js';
 
 export interface SyncEntry {
   source_type: string;
@@ -53,10 +53,39 @@ export function enqueueFailedSync(entry: SyncEntry): void {
 }
 
 /**
+ * Mark a queue row as retrying (schedule next attempt) or permanently failed.
+ * Exponential backoff: 2^attempts * 30s (30s, 60s, 120s).
+ */
+function markRetryOrFailed(
+  rowId: number,
+  currentAttempts: number,
+  newAttempts: number,
+  maxAttempts: number,
+  errorMsg: string,
+): boolean {
+  const db = getDatabase();
+  if (newAttempts >= maxAttempts) {
+    db.prepare(`
+      UPDATE sync_queue SET status = 'failed', attempts = ?, last_error = ?
+      WHERE id = ?
+    `).run(newAttempts, errorMsg, rowId);
+    return true; // permanently failed
+  }
+  const backoffMs = Math.pow(2, currentAttempts) * 30_000;
+  const nextRetry = new Date(Date.now() + backoffMs).toISOString();
+  db.prepare(`
+    UPDATE sync_queue SET attempts = ?, next_retry_at = ?, last_error = ?
+    WHERE id = ?
+  `).run(newAttempts, nextRetry, errorMsg, rowId);
+  return false;
+}
+
+/**
  * Process pending items in the retry queue.
  * SELECT pending WHERE next_retry_at <= now, retry each (up to 10 per tick).
+ * Awaits each fetch so results are accurate and no double-processing occurs.
  */
-export function processRetryQueue(): SyncQueueResult {
+export async function processRetryQueue(): Promise<SyncQueueResult> {
   const db = getDatabase();
   const config = getCloudConfig();
 
@@ -97,13 +126,10 @@ export function processRetryQueue(): SyncQueueResult {
     const newAttempts = row.attempts + 1;
 
     try {
-      // Synchronous fetch wrapper — we're in a background tick, blocking is acceptable
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10_000);
 
-      // Fire the request (we handle the promise synchronously via the update logic below)
-      // Since BrainWorker lightTick is async, we can await here
-      const fetchPromise = fetch(`${config.cloudBaseUrl}/v1/audit/ingest`, {
+      const res = await fetch(`${config.cloudBaseUrl}/v1/audit/ingest`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -113,79 +139,26 @@ export function processRetryQueue(): SyncQueueResult {
         signal: controller.signal,
       });
 
-      // We need to handle this synchronously for the SQLite updates.
-      // Since processRetryQueue is called from an async context (lightTick),
-      // we'll make this function async-aware by using a sync approach:
-      // Mark as in-progress, then process results in a .then/.catch
-      // Actually, better approach: make processRetryQueue async
-      // But the spec says it returns SyncQueueResult synchronously.
-      // Solution: schedule the fetch and update DB on completion.
+      clearTimeout(timeoutId);
 
-      fetchPromise
-        .then((res) => {
-          clearTimeout(timeoutId);
-          if (res.ok) {
-            // Success — mark as synced
-            db.prepare(`
-              UPDATE sync_queue SET status = 'synced', attempts = ?, synced_at = ?, last_error = NULL
-              WHERE id = ?
-            `).run(newAttempts, new Date().toISOString(), row.id);
-          } else {
-            // HTTP error — schedule retry or mark as failed
-            const errorMsg = `HTTP ${res.status}`;
-            if (newAttempts >= row.max_attempts) {
-              db.prepare(`
-                UPDATE sync_queue SET status = 'failed', attempts = ?, last_error = ?
-                WHERE id = ?
-              `).run(newAttempts, errorMsg, row.id);
-            } else {
-              const backoffMs = Math.pow(2, newAttempts) * 30_000;
-              const nextRetry = new Date(Date.now() + backoffMs).toISOString();
-              db.prepare(`
-                UPDATE sync_queue SET attempts = ?, next_retry_at = ?, last_error = ?
-                WHERE id = ?
-              `).run(newAttempts, nextRetry, errorMsg, row.id);
-            }
-          }
-        })
-        .catch((err) => {
-          clearTimeout(timeoutId);
-          const errorMsg = (err as Error).message || 'Unknown error';
-          if (newAttempts >= row.max_attempts) {
-            db.prepare(`
-              UPDATE sync_queue SET status = 'failed', attempts = ?, last_error = ?
-              WHERE id = ?
-            `).run(newAttempts, errorMsg, row.id);
-          } else {
-            const backoffMs = Math.pow(2, newAttempts) * 30_000;
-            const nextRetry = new Date(Date.now() + backoffMs).toISOString();
-            db.prepare(`
-              UPDATE sync_queue SET attempts = ?, next_retry_at = ?, last_error = ?
-              WHERE id = ?
-            `).run(newAttempts, nextRetry, errorMsg, row.id);
-          }
-        });
-
-      // Optimistic: count as processed. Actual success/failure happens async.
-      // The DB updates happen in the .then/.catch above.
-
-    } catch {
-      // If even creating the fetch fails, mark appropriately
-      if (newAttempts >= row.max_attempts) {
+      if (res.ok) {
+        // Success — mark as synced
         db.prepare(`
-          UPDATE sync_queue SET status = 'failed', attempts = ?, last_error = 'fetch creation failed'
+          UPDATE sync_queue SET status = 'synced', attempts = ?, synced_at = ?, last_error = NULL
           WHERE id = ?
-        `).run(newAttempts, row.id);
-        result.permanentlyFailed++;
+        `).run(newAttempts, new Date().toISOString(), row.id);
+        result.succeeded++;
+        try { updateLastSyncAt(); } catch { /* non-critical */ }
       } else {
-        const backoffMs = Math.pow(2, newAttempts) * 30_000;
-        const nextRetry = new Date(Date.now() + backoffMs).toISOString();
-        db.prepare(`
-          UPDATE sync_queue SET attempts = ?, next_retry_at = ?, last_error = 'fetch creation failed'
-          WHERE id = ?
-        `).run(newAttempts, nextRetry, row.id);
-        result.failed++;
+        const permanent = markRetryOrFailed(row.id, row.attempts, newAttempts, row.max_attempts, `HTTP ${res.status}`);
+        if (permanent) result.permanentlyFailed++;
+        else result.failed++;
       }
+    } catch (err) {
+      const errorMsg = (err as Error).message || 'Unknown error';
+      const permanent = markRetryOrFailed(row.id, row.attempts, newAttempts, row.max_attempts, errorMsg);
+      if (permanent) result.permanentlyFailed++;
+      else result.failed++;
     }
   }
 

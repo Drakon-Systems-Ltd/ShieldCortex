@@ -1,4 +1,4 @@
-import { getCloudConfig, getDeviceId, getDeviceName } from './config.js';
+import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
 import { enqueueFailedSync } from './sync-queue.js';
 import type { DefencePipelineResult, DefenceSource } from '../defence/types.js';
 
@@ -53,6 +53,8 @@ export function syncToCloud(
       clearTimeout(timeoutId);
       if (!res?.ok) {
         try { enqueueFailedSync(entry); } catch { /* truly silent */ }
+      } else {
+        try { updateLastSyncAt(); } catch { /* truly silent */ }
       }
     })
     .catch(() => {

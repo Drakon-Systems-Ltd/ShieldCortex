@@ -104,6 +104,17 @@ export function removeTrustedSkill(path: string): void {
   }
 }
 
+// ── Sync Timestamp ────────────────────────────────────
+
+/**
+ * Write lastSyncAt timestamp to config.json on successful cloud sync.
+ */
+export function updateLastSyncAt(): void {
+  const raw = readRawConfig();
+  raw.lastSyncAt = new Date().toISOString();
+  writeRawConfig(raw);
+}
+
 // ── Device Identity ────────────────────────────────────
 
 /**
