@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.6.2] - 2026-02-09
+
+### Fixed
+
+- **Brain activity feed always empty** — The activity feed at the bottom of the Brain tab never showed events because WebSocket events weren't wired into the UI store. Events (creates, updates, deletes, consolidation, decay) now stream into the feed in real-time.
+
 ## [2.6.1] - 2026-02-09
 
 ### Fixed

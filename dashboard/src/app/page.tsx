@@ -22,7 +22,7 @@ import { AgentsView } from '@/components/agents/AgentsView';
 import { SkillsView } from '@/components/skills/SkillsView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Memory } from '@/types/memory';
+import { Memory, MemoryEvent } from '@/types/memory';
 import { Shield, Cloud } from 'lucide-react';
 import { useCloudStatus } from '@/hooks/useCloudStatus';
 
@@ -64,7 +64,7 @@ export default function DashboardPage() {
   const debouncedSearch = useDebouncedValue(searchQuery, 300);
 
   // Zustand store
-  const { viewMode, selectedMemory, setSelectedMemory, projectFilter, setProjectFilter } = useDashboardStore();
+  const { viewMode, selectedMemory, setSelectedMemory, projectFilter, setProjectFilter, addEvent } = useDashboardStore();
 
   // Search suggestions
   const { data: suggestions = [] } = useSuggestions(searchQuery);
@@ -100,6 +100,7 @@ export default function DashboardPage() {
     data: memories = [],
     isLoading: memoriesLoading,
     isConnected,
+    lastEvent,
   } = useMemoriesWithRealtime({
     limit: 1000,
     query: debouncedSearch || undefined,
@@ -110,6 +111,24 @@ export default function DashboardPage() {
   });
   const { data: stats, isLoading: _statsLoading } = useStats(projectFilter || undefined);
   const { data: links = [] } = useMemoryLinks(projectFilter || undefined);
+
+  // Wire WebSocket events into the activity feed store
+  const lastEventRef = useRef(lastEvent);
+  useEffect(() => {
+    if (!lastEvent || lastEvent === lastEventRef.current) return;
+    lastEventRef.current = lastEvent;
+    const feedTypes: Set<string> = new Set([
+      'memory_created', 'memory_accessed', 'memory_updated',
+      'memory_deleted', 'consolidation_complete', 'decay_tick',
+    ]);
+    if (feedTypes.has(lastEvent.type)) {
+      addEvent({
+        type: lastEvent.type as MemoryEvent['type'],
+        timestamp: lastEvent.timestamp,
+        data: lastEvent.data,
+      });
+    }
+  }, [lastEvent, addEvent]);
 
   // Mutations
   const accessMutation = useAccessMemory();
