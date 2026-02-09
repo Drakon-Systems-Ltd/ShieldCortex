@@ -47,10 +47,6 @@ export function BrainControlCentre({
     selectedMemory,
     setSelectedMemory,
     recentEvents,
-    showLeftSidebar,
-    showRightSidebar,
-    toggleLeftSidebar,
-    toggleRightSidebar,
     projectFilter,
   } = useDashboardStore();
 
@@ -148,9 +144,8 @@ export function BrainControlCentre({
     const memory = memories.find((m) => m.id === first.memoryAId);
     if (memory) {
       setSelectedMemory(memory);
-      if (!showRightSidebar) toggleRightSidebar();
     }
-  }, [contradictionsData, memories, setSelectedMemory, showRightSidebar, toggleRightSidebar]);
+  }, [contradictionsData, memories, setSelectedMemory]);
 
   const handleActivityClick = useCallback(
     (eventData: unknown) => {
@@ -194,17 +189,15 @@ export function BrainControlCentre({
       {/* Main content area: sidebar + brain + inspector */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* Left: Category Health Sidebar */}
-        {showLeftSidebar && (
-          <CategoryHealthSidebar
-            stats={stats ?? { total: 0, shortTerm: 0, longTerm: 0, episodic: 0, byCategory: {}, averageSalience: 0 }}
-            memories={memories}
-            onCategoryClick={setCategoryFilter}
-            activeCategory={categoryFilter}
-            onConsolidate={handleConsolidate}
-            isConsolidating={consolidateMutation.isPending}
-            workerStatus={mappedWorkerStatus}
-          />
-        )}
+        <CategoryHealthSidebar
+          stats={stats ?? { total: 0, shortTerm: 0, longTerm: 0, episodic: 0, byCategory: {}, averageSalience: 0 }}
+          memories={memories}
+          onCategoryClick={setCategoryFilter}
+          activeCategory={categoryFilter}
+          onConsolidate={handleConsolidate}
+          isConsolidating={consolidateMutation.isPending}
+          workerStatus={mappedWorkerStatus}
+        />
 
         {/* Centre: 3D Brain + Activity Feed */}
         <div className="flex-1 flex flex-col relative">
@@ -228,42 +221,20 @@ export function BrainControlCentre({
         </div>
 
         {/* Right: Memory Inspector */}
-        {showRightSidebar && (
-          <MemoryInspector
-            memory={selectedMemory}
-            links={selectedMemoryLinks}
-            onClose={() => { setSelectedMemory(null); toggleRightSidebar(); }}
-            onBoost={handleBoost}
-            onDemote={handleDemote}
-            onPromote={handlePromote}
-            onDelete={handleDelete}
-            onQuarantine={handleQuarantine}
-            onEdit={handleEdit}
-            onNavigateToMemory={handleNavigateToMemory}
-          />
-        )}
+        <MemoryInspector
+          memory={selectedMemory}
+          links={selectedMemoryLinks}
+          onClose={() => setSelectedMemory(null)}
+          onBoost={handleBoost}
+          onDemote={handleDemote}
+          onPromote={handlePromote}
+          onDelete={handleDelete}
+          onQuarantine={handleQuarantine}
+          onEdit={handleEdit}
+          onNavigateToMemory={handleNavigateToMemory}
+        />
       </div>
 
-      {/* Sidebar toggle buttons */}
-      <button
-        onClick={toggleLeftSidebar}
-        className="absolute left-0 top-1/2 -translate-y-1/2 z-10 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 rounded-r px-1 py-3 text-slate-400 hover:text-white transition-colors"
-        title={showLeftSidebar ? 'Hide sidebar' : 'Show sidebar'}
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-          <path d={showLeftSidebar ? 'M8 1L3 6l5 5' : 'M4 1l5 5-5 5'} stroke="currentColor" strokeWidth="1.5" fill="none" />
-        </svg>
-      </button>
-
-      <button
-        onClick={toggleRightSidebar}
-        className="absolute right-0 top-1/2 -translate-y-1/2 z-10 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 rounded-l px-1 py-3 text-slate-400 hover:text-white transition-colors"
-        title={showRightSidebar ? 'Hide inspector' : 'Show inspector'}
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-          <path d={showRightSidebar ? 'M4 1l5 5-5 5' : 'M8 1L3 6l5 5'} stroke="currentColor" strokeWidth="1.5" fill="none" />
-        </svg>
-      </button>
     </div>
   );
 }
