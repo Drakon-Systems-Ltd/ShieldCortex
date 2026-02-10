@@ -24,6 +24,7 @@ import { scanForCredentials, type CredentialScanResult } from './credential-leak
 import { logAudit, createContentHash } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
 import { syncToCloud } from '../cloud/sync.js';
+import { getDefenceMode } from '../cloud/config.js';
 
 export function runDefencePipeline(
   content: string,
@@ -32,7 +33,7 @@ export function runDefencePipeline(
   config?: DefenceConfig,
   project?: string,
 ): DefencePipelineResult {
-  const cfg = config ?? DEFAULT_DEFENCE_CONFIG;
+  const cfg = config ?? { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
   const startTime = performance.now();
 
   try {

@@ -53,7 +53,7 @@ import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
-import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName } from '../cloud/config.js';
+import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, type DefenceMode } from '../cloud/config.js';
 import { getQueueStats } from '../cloud/sync-queue.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 
@@ -560,6 +560,35 @@ export function startVisualizationServer(dbPath?: string): void {
         apiKeySet: !!updated.cloudApiKey,
         baseUrl: updated.cloudBaseUrl,
       });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // DEFENCE CONFIG ENDPOINTS
+  // ============================================
+
+  // Get defence configuration (firewall mode)
+  app.get('/api/defence/config', (_req: Request, res: Response) => {
+    try {
+      res.json({ mode: getDefenceMode() });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Update defence configuration (firewall mode)
+  app.post('/api/defence/config', (req: Request, res: Response) => {
+    try {
+      const { mode } = req.body;
+      const validModes: DefenceMode[] = ['strict', 'balanced', 'permissive'];
+      if (!mode || !validModes.includes(mode)) {
+        res.status(400).json({ error: `Invalid mode. Must be one of: ${validModes.join(', ')}` });
+        return;
+      }
+      setDefenceMode(mode);
+      res.json({ success: true, mode });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

@@ -164,3 +164,29 @@ export function useRejectQuarantine() {
     },
   });
 }
+
+// ── Defence Config ──
+
+export type DefenceMode = 'strict' | 'balanced' | 'permissive';
+
+export function useDefenceConfig() {
+  return useQuery<{ mode: DefenceMode }>({
+    queryKey: ['defence-config'],
+    queryFn: () => fetch(`${API_BASE}/api/defence/config`).then(r => r.json()),
+  });
+}
+
+export function useSetDefenceMode() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: DefenceMode) =>
+      fetch(`${API_BASE}/api/defence/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      }).then(r => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['defence-config'] });
+    },
+  });
+}

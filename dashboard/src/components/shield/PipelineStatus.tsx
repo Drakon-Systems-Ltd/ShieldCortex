@@ -1,8 +1,9 @@
 'use client';
 
-import { useAuditStats } from '@/hooks/useDefence';
+import { useState, useRef, useEffect } from 'react';
+import { useAuditStats, useDefenceConfig, useSetDefenceMode, type DefenceMode } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
-import { Shield, Flame, Eye, Puzzle, FileText } from 'lucide-react';
+import { Shield, Flame, Eye, Puzzle, FileText, ChevronDown } from 'lucide-react';
 
 const PIPELINE_LAYERS = [
   { key: 'trust', label: 'Trust', icon: Shield, color: 'text-blue-400', bg: 'bg-blue-400/10' },
@@ -12,6 +13,12 @@ const PIPELINE_LAYERS = [
   { key: 'audit', label: 'Audit', icon: FileText, color: 'text-green-400', bg: 'bg-green-400/10' },
 ];
 
+const MODE_STYLES: Record<DefenceMode, { color: string; bg: string }> = {
+  strict: { color: 'text-red-400', bg: 'bg-red-400/10' },
+  balanced: { color: 'text-cyan-400', bg: 'bg-cyan-400/10' },
+  permissive: { color: 'text-green-400', bg: 'bg-green-400/10' },
+};
+
 interface Props {
   timeRange: '24h' | '7d' | '30d';
 }
@@ -19,6 +26,24 @@ interface Props {
 export function PipelineStatus({ timeRange }: Props) {
   const { projectFilter } = useDashboardStore();
   const { data: stats, isLoading, isError } = useAuditStats(timeRange, projectFilter || undefined);
+  const { data: defenceConfig } = useDefenceConfig();
+  const setMode = useSetDefenceMode();
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const currentMode: DefenceMode = defenceConfig?.mode ?? 'balanced';
+  const style = MODE_STYLES[currentMode];
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    }
+    if (dropdownOpen) document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [dropdownOpen]);
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
@@ -63,12 +88,40 @@ export function PipelineStatus({ timeRange }: Props) {
         <div className="text-xs text-slate-500">No data</div>
       )}
 
-      {/* Firewall mode indicator */}
+      {/* Firewall mode selector */}
       <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
         <span className="text-xs text-slate-500">Firewall Mode</span>
-        <span className="text-xs font-medium text-cyan-400 bg-cyan-400/10 px-2 py-0.5 rounded">
-          balanced
-        </span>
+        <div className="relative" ref={dropdownRef}>
+          <button
+            onClick={() => setDropdownOpen(!dropdownOpen)}
+            className={`text-xs font-medium ${style.color} ${style.bg} px-2 py-0.5 rounded flex items-center gap-1 hover:opacity-80 transition-opacity`}
+          >
+            {currentMode}
+            <ChevronDown size={10} />
+          </button>
+          {dropdownOpen && (
+            <div className="absolute right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 min-w-[120px] py-1">
+              {(['strict', 'balanced', 'permissive'] as DefenceMode[]).map((mode) => {
+                const ms = MODE_STYLES[mode];
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => {
+                      setMode.mutate(mode);
+                      setDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-1.5 text-xs hover:bg-slate-700/50 transition-colors flex items-center justify-between ${
+                      mode === currentMode ? ms.color + ' font-medium' : 'text-slate-400'
+                    }`}
+                  >
+                    {mode}
+                    {mode === currentMode && <span className="text-[10px]">&#10003;</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

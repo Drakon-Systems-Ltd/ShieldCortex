@@ -115,6 +115,36 @@ export function updateLastSyncAt(): void {
   writeRawConfig(raw);
 }
 
+// ── Defence Mode ──────────────────────────────────────
+
+export type DefenceMode = 'strict' | 'balanced' | 'permissive';
+
+const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
+
+/**
+ * Returns the persisted defence mode, defaulting to 'balanced'.
+ */
+export function getDefenceMode(): DefenceMode {
+  const raw = readRawConfig();
+  const mode = raw.defenceMode;
+  if (typeof mode === 'string' && VALID_MODES.includes(mode as DefenceMode)) {
+    return mode as DefenceMode;
+  }
+  return 'balanced';
+}
+
+/**
+ * Persists the defence mode to ~/.shieldcortex/config.json.
+ */
+export function setDefenceMode(mode: DefenceMode): void {
+  if (!VALID_MODES.includes(mode)) {
+    throw new Error(`Invalid defence mode: ${mode}. Must be one of: ${VALID_MODES.join(', ')}`);
+  }
+  const raw = readRawConfig();
+  raw.defenceMode = mode;
+  writeRawConfig(raw);
+}
+
 // ── Device Identity ────────────────────────────────────
 
 /**
