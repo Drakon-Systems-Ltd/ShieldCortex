@@ -24,22 +24,22 @@ const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOO
  * Find the hooks directory for Claude Code or OpenClaw.
  *
  * Strategy:
- * 1. Check for ~/.claude/hooks/internal/ (Claude Code)
- * 2. Check for ~/.openclaw/hooks/internal/ (legacy OpenClaw)
+ * 1. Check for ~/.claude/hooks/ (Claude Code)
+ * 2. Check for ~/.openclaw/hooks/ (legacy OpenClaw)
  * 3. Fallback: detect binary and walk up to find hooks/bundled/ (old Node.js OpenClaw)
  */
 export function findOpenClawHooksDir(): string | null {
   const home = os.homedir();
 
-  // Claude Code: ~/.claude/hooks/internal/
-  const claudeHooksDir = path.join(home, '.claude', 'hooks', 'internal');
+  // Claude Code: ~/.claude/hooks/
+  const claudeHooksDir = path.join(home, '.claude', 'hooks');
   if (fs.existsSync(path.join(home, '.claude'))) {
-    // Claude Code config dir exists — use it even if hooks/internal/ doesn't exist yet
+    // Claude Code config dir exists — use it even if hooks/ doesn't exist yet
     return claudeHooksDir;
   }
 
-  // Legacy OpenClaw: ~/.openclaw/hooks/internal/
-  const openclawHooksDir = path.join(home, '.openclaw', 'hooks', 'internal');
+  // Legacy OpenClaw: ~/.openclaw/hooks/
+  const openclawHooksDir = path.join(home, '.openclaw', 'hooks');
   if (fs.existsSync(path.join(home, '.openclaw'))) {
     return openclawHooksDir;
   }
@@ -69,7 +69,7 @@ export function findOpenClawHooksDir(): string | null {
       dir = path.dirname(dir);
     }
 
-    // Binary found but no hooks/bundled/ — fall back to ~/.claude/hooks/internal/
+    // Binary found but no hooks/bundled/ — fall back to ~/.claude/hooks/
     return claudeHooksDir;
   } catch {
     return null;
@@ -95,7 +95,7 @@ export async function installOpenClawHook(): Promise<void> {
   // Copy hook files
   fs.mkdirSync(destDir, { recursive: true });
 
-  for (const file of ['HOOK.md', 'handler.js']) {
+  for (const file of ['HOOK.md', 'handler.ts']) {
     const src = path.join(HOOK_SOURCE, file);
     const dest = path.join(destDir, file);
     fs.copyFileSync(src, dest);
