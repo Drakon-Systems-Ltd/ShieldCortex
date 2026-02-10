@@ -34,6 +34,10 @@ export { classifySensitivity, redactContent, redactForDisplay } from './sensitiv
 // Fragmentation
 export { analyzeFragmentation, storeFragmentationData } from './fragmentation/index.js';
 
+// Credential Leak Detection (Layer 6)
+export { scanForCredentials, redactCredentials, DEFAULT_CREDENTIAL_CONFIG } from './credential-leak/index.js';
+export type { CredentialScanResult, CredentialFinding, CredentialDetectionConfig, CredentialType, CredentialSeverity } from './credential-leak/index.js';
+
 // Audit
 export { logAudit, queryAuditLogs, getAuditStats } from './audit/index.js';
 

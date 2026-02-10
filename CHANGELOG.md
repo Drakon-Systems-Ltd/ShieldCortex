@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.7.0] - 2026-02-10
+
+### Added
+
+- **Credential Leak Detection (Layer 6)** — New defence layer that detects API keys, tokens, private keys, connection strings, and environment secrets accidentally persisted in AI agent memory. Supports 25+ credential patterns across 11 providers (OpenAI, Anthropic, AWS, GitHub, Stripe, Google, Twilio, SendGrid, Slack, Mailgun, npm). Shannon entropy analysis catches high-entropy secrets that don't match known patterns.
+- **`scanForCredentials(content)`** — Standalone function for credential scanning outside the pipeline.
+- **`redactCredentials(content)`** — Replaces detected credentials with `[REDACTED-{type}-{provider}]` placeholders.
+- **CLI `scan` output** — Now shows credential findings with provider, type, severity, and confidence.
+
+### Changed
+
+- Defence pipeline upgraded from 5 to 6 layers — credential scan runs after fragmentation analysis, before the final decision.
+- `DefencePipelineResult` now includes optional `credentialScan` field when credentials are detected.
+- Critical and high severity credentials trigger `BLOCK`; medium triggers warnings; low is logged.
+
+## [2.6.4] - 2026-02-10
+
+### Fixed
+
+- **OpenClaw hook installer path bug** — `shieldcortex openclaw install` was creating hooks at `~/.claude/hooks/internal/cortex-memory/` instead of `~/.claude/hooks/cortex-memory/`. Removed erroneous `internal/` path segment for both Claude Code and legacy OpenClaw paths.
+- **Hook handler file extension** — Fixed handler file reference from `handler.js` to `handler.ts` to match the actual source file.
+
 ## [2.6.3] - 2026-02-10
 
 ### Added

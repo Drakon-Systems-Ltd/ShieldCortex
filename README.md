@@ -56,15 +56,16 @@ Local Agent                    ShieldCortex Cloud
 - **Auto-cleanup** — Configurable retention, importance-based expiry
 - **Full MCP support** — Works with any MCP-compatible agent
 
-### Security Layer (5 Defence Layers)
+### Security Layer (6 Defence Layers)
 | Layer | What It Does | Tier |
 |-------|-------------|------|
 | **Memory Firewall** | Blocks prompt injection, encoding tricks, hidden instructions | Free |
 | **Audit Logger** | Full forensic trail of every memory operation | Free |
 | **Trust Scorer** | Scores memories by source reliability | Free |
 | **Sub-Agent Security** | Access control, rate limiting, auto-quarantine | Free |
-| **Sensitivity Classifier** | Detects & redacts passwords, API keys, PII | Pro |
-| **Fragmentation Detector** | Catches slow-burn assembly attacks | Pro |
+| **Sensitivity Classifier** | Detects & redacts passwords, API keys, PII | Free |
+| **Fragmentation Detector** | Catches slow-burn assembly attacks | Free |
+| **Credential Leak Detector** | Blocks API keys, tokens, private keys, connection strings from persisting in memory | Free |
 
 ### Skill Scanner (Agent Instruction Files)
 
@@ -94,9 +95,37 @@ The dashboard Skills tab shows results with severity badges, expandable threat d
 - **Trust** — Mark known-safe skills so they're not flagged on future scans (free, local)
 - **Remove** — Delete dangerous skill files from disk (cloud-connected, premium)
 
+### NEW: Credential Leak Detection (v2.7.0)
+
+Agents sometimes accidentally persist secrets in memory — API keys pasted in chat, connection strings from debug output, private keys from config files. ShieldCortex now automatically detects and blocks these before they're stored.
+
+| Category | Providers / Patterns | Severity |
+|----------|---------------------|----------|
+| **API Keys** | OpenAI, Anthropic, AWS, GitHub, Stripe, Twilio, SendGrid, Slack, Google, npm | Critical |
+| **Auth Tokens** | JWT, Bearer headers, Basic auth | High |
+| **Private Keys** | RSA, EC, SSH, PKCS8 PEM blocks | Critical |
+| **Connection Strings** | PostgreSQL, MySQL, MongoDB, Redis (with passwords) | Critical |
+| **Env Secrets** | PASSWORD=, SECRET=, TOKEN=, API_KEY= assignments | High |
+| **High-Entropy Strings** | Shannon entropy > 4.5 on 20+ char tokens | Medium |
+
+```typescript
+import { scanForCredentials, redactCredentials } from 'shieldcortex/defence';
+
+// Standalone scan
+const result = scanForCredentials('My key is sk-abc123...');
+// → { leaked: true, findings: [{ type: 'api_key', provider: 'openai', severity: 'critical', action: 'blocked' }] }
+
+// Redact secrets from content
+const safe = redactCredentials('postgres://admin:pass@db.host/mydb');
+// → "[REDACTED-connection_string-postgres]"
+```
+
+Runs automatically in the defence pipeline — no configuration needed. Critical and high-severity findings are blocked by default.
+
 ### Attack Vectors Blocked
 - **Direct injection** — `[SYSTEM: ignore previous]` hidden in content
 - **Credential harvesting** — Attempts to exfiltrate secrets
+- **Credential persistence** — API keys, tokens, and passwords accidentally stored in memory
 - **Encoding tricks** — Base64/hex/unicode payloads
 - **Slow-burn assembly** — Attack fragments planted over days
 - **Privilege escalation** — System command references
@@ -164,7 +193,7 @@ sudo npx shieldcortex openclaw install
 npx shieldcortex config --cloud-api-key <your-key> --cloud-enable
 ```
 
-Every memory your OpenClaw agent saves now passes through the 5-layer defence pipeline, and audit data syncs to your team's Cloud dashboard automatically.
+Every memory your OpenClaw agent saves now passes through the 6-layer defence pipeline, and audit data syncs to your team's Cloud dashboard automatically.
 
 ### Onboarding Team Members
 
@@ -311,7 +340,7 @@ Session Start                During Session              Session End (/new)
 | **Context Injection** | On session start, relevant past memories are injected into the agent's bootstrap context |
 | **Keyword Triggers** | Say "remember this:" or "don't forget:" followed by content to save it with critical importance |
 | **Auto-Extraction** | On `/new`, the hook extracts architecture decisions, bug fixes, and learnings from the ending session |
-| **Security** | All content passes through the 5-layer defence pipeline before storage |
+| **Security** | All content passes through the 6-layer defence pipeline before storage |
 
 ### Shared Memory
 
@@ -377,6 +406,8 @@ npx shieldcortex --version          # Show version
 npx shieldcortex service install    # Auto-start on login
 npx shieldcortex graph backfill     # Extract entities from existing memories
 npx shieldcortex openclaw install   # Install OpenClaw hook
+npx shieldcortex copilot install    # Configure MCP for VS Code + Cursor
+npx shieldcortex scan "text"        # Quick content scan (credential + threat detection)
 npx shieldcortex config --cloud-api-key <key>  # Set Cloud API key
 npx shieldcortex config --cloud-enable  # Enable cloud sync
 npx shieldcortex uninstall          # Full uninstall (requires confirmation)

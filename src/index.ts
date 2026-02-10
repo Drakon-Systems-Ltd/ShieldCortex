@@ -383,6 +383,14 @@ async function main() {
       console.log(`  Patterns:    ${result.firewall.blockedPatterns.join(', ')}`);
     }
 
+    if (result.credentialScan && result.credentialScan.findings.length > 0) {
+      console.log(`\n${bold}Credential Findings (${result.credentialScan.findings.length}):${reset}`);
+      for (const f of result.credentialScan.findings) {
+        const sColor = f.severity === 'critical' ? red : f.severity === 'high' ? red : yellow;
+        console.log(`  ${sColor}[${f.severity.toUpperCase()}]${reset} ${f.provider ? f.provider + ' ' : ''}${f.type}: ${f.match} (${f.action})`);
+      }
+    }
+
     console.log();
     process.exit(result.allowed ? 0 : 1);
   }

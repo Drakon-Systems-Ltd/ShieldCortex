@@ -61,6 +61,7 @@ export interface DefencePipelineResult {
   fragmentation: FragmentationAnalysis | null;
   sensitivity: SensitivityClassification;
   trust: TrustScore;
+  credentialScan?: import('./credential-leak/index.js').CredentialScanResult;
   auditId: number;
 }
 

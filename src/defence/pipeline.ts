@@ -1,7 +1,7 @@
 /**
  * Defence Pipeline Orchestrator
  *
- * Runs all 5 defence layers in sequence and returns a unified result.
+ * Runs all 6 defence layers in sequence and returns a unified result.
  * Fail-closed: if any layer throws, the pipeline defaults to BLOCK for security.
  */
 
@@ -20,6 +20,7 @@ import { scoreSource } from './trust/index.js';
 import { analyzeFirewall } from './firewall/index.js';
 import { classifySensitivity } from './sensitivity/index.js';
 import { analyzeFragmentation } from './fragmentation/index.js';
+import { scanForCredentials, type CredentialScanResult } from './credential-leak/index.js';
 import { logAudit, createContentHash } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
 import { syncToCloud } from '../cloud/sync.js';
@@ -56,13 +57,30 @@ export function runDefencePipeline(
       fragmentation = analyzeFragmentation(content, title, cfg);
     }
 
-    // 5. Determine final decision
+    // 5. Run credential leak detection (Layer 6)
+    const credentialScan: CredentialScanResult = scanForCredentials(content);
+
+    // 6. Determine final decision
     let allowed: boolean;
     let reason: string;
+
+    // Check if credential scan produced any blocked findings
+    const credentialBlocked = credentialScan.findings.some(f => f.action === 'blocked');
 
     if (firewall.result === 'BLOCK') {
       allowed = false;
       reason = firewall.reason;
+    } else if (credentialBlocked) {
+      allowed = false;
+      const blockedTypes = credentialScan.findings
+        .filter(f => f.action === 'blocked')
+        .map(f => f.provider ? `${f.provider} ${f.type}` : f.type);
+      reason = `Blocked: credential leak detected (${blockedTypes.join(', ')})`;
+      // Also update firewall result to reflect the block
+      firewall.result = 'BLOCK';
+      if (!firewall.threatIndicators.includes('credential_leak')) {
+        firewall.threatIndicators.push('credential_leak');
+      }
     } else if (firewall.result === 'QUARANTINE') {
       allowed = false;
       reason = `Quarantined: ${firewall.reason}`;
@@ -78,6 +96,11 @@ export function runDefencePipeline(
     } else {
       allowed = true;
       reason = firewall.reason;
+    }
+
+    // Add credential_leak to threat indicators if any findings (even non-blocking)
+    if (credentialScan.leaked && !firewall.threatIndicators.includes('credential_leak')) {
+      firewall.threatIndicators.push('credential_leak');
     }
 
     const durationMs = Math.round(performance.now() - startTime);
@@ -119,12 +142,13 @@ export function runDefencePipeline(
       }
     }
 
-    const pipelineResult = {
+    const pipelineResult: DefencePipelineResult = {
       allowed,
       firewall,
       fragmentation,
       sensitivity,
       trust,
+      credentialScan: credentialScan.leaked ? credentialScan : undefined,
       auditId,
     };
 
