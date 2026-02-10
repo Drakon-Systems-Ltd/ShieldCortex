@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.7.1] - 2026-02-10
+
+### Added
+
+- **Persistent firewall mode** — Users can now set the defence mode (strict/balanced/permissive) via CLI (`npx shieldcortex config --mode strict`), and the setting persists in `~/.shieldcortex/config.json`. The pipeline reads the persisted mode as default instead of always using `balanced`.
+- **Dashboard mode selector** — Interactive dropdown in the Defence Pipeline card to switch firewall mode from the local dashboard. Colour-coded: strict (red), balanced (cyan), permissive (green).
+- **Defence config API** — `GET/POST /api/defence/config` endpoints for reading and setting the firewall mode programmatically.
+- **`--cloud-status` now shows defence mode** — The config status output includes the current firewall mode.
+
 ## [2.7.0] - 2026-02-10
 
 ### Added
