@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { authFetch } from '@/lib/auth';
 
 interface CloudConfig {
   enabled: boolean;
@@ -25,7 +26,7 @@ export function useUpdateCloudConfig() {
 
   return useMutation({
     mutationFn: async (config: Partial<{ cloudApiKey: string; cloudEnabled: boolean; cloudBaseUrl: string }>) => {
-      const res = await fetch(`${API_URL}/api/cloud/config`, {
+      const res = await authFetch(`${API_URL}/api/cloud/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),

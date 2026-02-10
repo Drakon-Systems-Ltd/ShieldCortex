@@ -10,6 +10,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { existsSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
+import { generateSessionToken, cleanupSessionToken, validateSessionToken, getSessionToken } from './session-token.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import { getDatabase, initDatabase, checkpointWal } from '../database/init.js';
 import { Memory, MemoryConfig, DEFAULT_CONFIG } from '../memory/types.js';
@@ -53,7 +54,8 @@ import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
-import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, type DefenceMode } from '../cloud/config.js';
+import { logAudit } from '../defence/audit/index.js';
+import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, type DefenceMode } from '../cloud/config.js';
 import { getQueueStats } from '../cloud/sync-queue.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 
@@ -88,6 +90,49 @@ export function startVisualizationServer(dbPath?: string): void {
     },
   }));
   app.use(express.json());
+
+  // ── Session Auth ────────────────────────────────────────
+  // Generate per-session token (written to ~/.shieldcortex/.api-token)
+  const sessionToken = generateSessionToken();
+  let tokenClaimed = false;
+
+  // Auth middleware: require Bearer token on all mutating requests
+  app.use((req: Request, res: Response, next) => {
+    // Allow GET, OPTIONS, HEAD — read-only
+    if (['GET', 'OPTIONS', 'HEAD'].includes(req.method)) {
+      return next();
+    }
+    // Allow the one-time token claim endpoint without auth
+    if (req.path === '/api/auth/session-token') {
+      return next();
+    }
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'Unauthorized', code: 'AUTH_REQUIRED' });
+      return;
+    }
+    const token = authHeader.slice(7);
+    if (!validateSessionToken(token)) {
+      res.status(401).json({ error: 'Invalid token', code: 'AUTH_INVALID' });
+      return;
+    }
+    next();
+  });
+
+  // One-time token handshake — dashboard claims on first load
+  app.get('/api/auth/session-token', (_req: Request, res: Response) => {
+    if (tokenClaimed) {
+      res.status(403).json({ error: 'Token already claimed', code: 'TOKEN_CLAIMED' });
+      return;
+    }
+    const token = getSessionToken();
+    if (!token) {
+      res.status(500).json({ error: 'No session token available' });
+      return;
+    }
+    tokenClaimed = true;
+    res.json({ token });
+  });
 
   // ============================================
   // REST API ENDPOINTS
@@ -569,10 +614,10 @@ export function startVisualizationServer(dbPath?: string): void {
   // DEFENCE CONFIG ENDPOINTS
   // ============================================
 
-  // Get defence configuration (firewall mode)
+  // Get defence configuration (firewall mode + integrity status)
   app.get('/api/defence/config', (_req: Request, res: Response) => {
     try {
-      res.json({ mode: getDefenceMode() });
+      res.json({ mode: getDefenceMode(), tampered: isConfigTampered() });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -1475,11 +1520,34 @@ export function startVisualizationServer(dbPath?: string): void {
   // ── Defence API v1 ──────────────────────────────────────────
 
   // Scan content through the defence pipeline
+  // NOTE: config parameter is intentionally ignored — always uses persisted mode (security hardening)
   app.post('/api/v1/scan', (req: Request, res: Response) => {
     try {
-      const { content, title, source, config } = req.body;
+      const { content, title, source } = req.body;
       if (!content || typeof content !== 'string') {
         return res.status(400).json({ error: 'content (string) is required' });
+      }
+
+      // Log if caller tried to override config (potential tampering)
+      if (req.body.config) {
+        try {
+          logAudit({
+            memory_id: null,
+            project: null,
+            timestamp: new Date().toISOString(),
+            source_type: 'api',
+            source_identifier: 'rest-api',
+            trust_score: 0,
+            sensitivity_level: 'INTERNAL',
+            firewall_result: 'ALLOW',
+            anomaly_score: 0.5,
+            threat_indicators: '["config_tampering"]',
+            blocked_patterns: '[]',
+            reason: 'config_override_attempt: scan endpoint config parameter ignored',
+            fragmentation_score: null,
+            pipeline_duration_ms: 0,
+          });
+        } catch { /* audit is best-effort */ }
       }
 
       const defenceSource: DefenceSource = {
@@ -1487,9 +1555,8 @@ export function startVisualizationServer(dbPath?: string): void {
         identifier: source?.identifier ?? 'rest-api',
       };
 
-      const defenceConfig: DefenceConfig = config
-        ? { ...DEFAULT_DEFENCE_CONFIG, ...config }
-        : DEFAULT_DEFENCE_CONFIG;
+      // Always use persisted config — no per-request overrides via HTTP
+      const defenceConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
 
       const result = runDefencePipeline(
         content,
@@ -1505,9 +1572,10 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Batch scan multiple items
+  // NOTE: config parameter is intentionally ignored — always uses persisted mode (security hardening)
   app.post('/api/v1/scan/batch', (req: Request, res: Response) => {
     try {
-      const { items, source, config } = req.body;
+      const { items, source } = req.body;
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: 'items (array) is required' });
       }
@@ -1520,9 +1588,8 @@ export function startVisualizationServer(dbPath?: string): void {
         identifier: source?.identifier ?? 'rest-api',
       };
 
-      const defenceConfig: DefenceConfig = config
-        ? { ...DEFAULT_DEFENCE_CONFIG, ...config }
-        : DEFAULT_DEFENCE_CONFIG;
+      // Always use persisted config — no per-request overrides via HTTP
+      const defenceConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
 
       const results = items.map((item: { content: string; title?: string }) => {
         if (!item.content || typeof item.content !== 'string') {
@@ -1933,6 +2000,9 @@ export function startVisualizationServer(dbPath?: string): void {
   // Graceful shutdown handler
   function gracefulShutdown(signal: string) {
     console.log(`\n[Server] Received ${signal}, shutting down gracefully...`);
+
+    // Clean up session token file
+    cleanupSessionToken();
 
     // Stop the brain worker
     brainWorker.stop();

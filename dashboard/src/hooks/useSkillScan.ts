@@ -2,11 +2,12 @@
 
 import { useMutation } from '@tanstack/react-query';
 import type { SkillScanAllResponse, SkillScanContentResult } from '@/types/skills';
+import { authFetch } from '@/lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 async function scanAll(dir?: string): Promise<SkillScanAllResponse> {
-  const response = await fetch(`${API_BASE}/api/skills/scan-all`, {
+  const response = await authFetch(`${API_BASE}/api/skills/scan-all`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ dir }),
@@ -21,7 +22,7 @@ async function scanContent(params: {
   name?: string;
   mode?: string;
 }): Promise<SkillScanContentResult> {
-  const response = await fetch(`${API_BASE}/api/skills/scan`, {
+  const response = await authFetch(`${API_BASE}/api/skills/scan`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -43,7 +44,7 @@ export function useSkillScanContent() {
 }
 
 async function trustSkill(path: string): Promise<{ trusted: boolean; path: string }> {
-  const response = await fetch(`${API_BASE}/api/skills/trust`, {
+  const response = await authFetch(`${API_BASE}/api/skills/trust`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -53,7 +54,7 @@ async function trustSkill(path: string): Promise<{ trusted: boolean; path: strin
 }
 
 async function untrustSkill(path: string): Promise<{ trusted: boolean; path: string }> {
-  const response = await fetch(`${API_BASE}/api/skills/trust`, {
+  const response = await authFetch(`${API_BASE}/api/skills/trust`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -63,7 +64,7 @@ async function untrustSkill(path: string): Promise<{ trusted: boolean; path: str
 }
 
 async function deleteSkillFile(path: string): Promise<{ deleted: boolean; path: string }> {
-  const response = await fetch(`${API_BASE}/api/skills/file`, {
+  const response = await authFetch(`${API_BASE}/api/skills/file`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),

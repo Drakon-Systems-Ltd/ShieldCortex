@@ -1,6 +1,7 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { authFetch } from '@/lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -88,7 +89,7 @@ async function fetchQuarantine(status: string = 'pending', limit: number = 50, p
 }
 
 async function approveQuarantine(id: number): Promise<{ success: boolean; id: number; status: string }> {
-  const response = await fetch(`${API_BASE}/api/v1/quarantine/${id}/approve`, {
+  const response = await authFetch(`${API_BASE}/api/v1/quarantine/${id}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reviewedBy: 'dashboard' }),
@@ -98,7 +99,7 @@ async function approveQuarantine(id: number): Promise<{ success: boolean; id: nu
 }
 
 async function rejectQuarantine(id: number, notes?: string): Promise<{ success: boolean; id: number; status: string }> {
-  const response = await fetch(`${API_BASE}/api/v1/quarantine/${id}/reject`, {
+  const response = await authFetch(`${API_BASE}/api/v1/quarantine/${id}/reject`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reviewedBy: 'dashboard', notes }),
@@ -170,7 +171,7 @@ export function useRejectQuarantine() {
 export type DefenceMode = 'strict' | 'balanced' | 'permissive';
 
 export function useDefenceConfig() {
-  return useQuery<{ mode: DefenceMode }>({
+  return useQuery<{ mode: DefenceMode; tampered: boolean }>({
     queryKey: ['defence-config'],
     queryFn: () => fetch(`${API_BASE}/api/defence/config`).then(r => r.json()),
   });
@@ -180,7 +181,7 @@ export function useSetDefenceMode() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (mode: DefenceMode) =>
-      fetch(`${API_BASE}/api/defence/config`, {
+      authFetch(`${API_BASE}/api/defence/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),

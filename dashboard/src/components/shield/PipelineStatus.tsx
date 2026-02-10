@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuditStats, useDefenceConfig, useSetDefenceMode, type DefenceMode } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
-import { Shield, Flame, Eye, Puzzle, FileText, ChevronDown } from 'lucide-react';
+import { Shield, Flame, Eye, Puzzle, FileText, ChevronDown, AlertTriangle } from 'lucide-react';
 
 const PIPELINE_LAYERS = [
   { key: 'trust', label: 'Trust', icon: Shield, color: 'text-blue-400', bg: 'bg-blue-400/10' },
@@ -47,6 +47,12 @@ export function PipelineStatus({ timeRange }: Props) {
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      {defenceConfig?.tampered && (
+        <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 mb-3">
+          <AlertTriangle size={14} className="text-red-400 shrink-0" />
+          <span className="text-xs text-red-400">Config integrity check failed — running in strict mode</span>
+        </div>
+      )}
       <h3 className="text-sm font-medium text-slate-300 mb-4">Defence Pipeline</h3>
 
       {/* Pipeline steps */}

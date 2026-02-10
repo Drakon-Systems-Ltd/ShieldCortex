@@ -46,7 +46,7 @@ export { scanSkill, scanSkillContent, discoverSkillFiles, detectFormat, detectFo
 export type { SkillScanResult, SkillScanOptions, SkillThreatFinding, ParsedSkill, SkillFormat } from './skill-scanner/index.js';
 
 // Cloud
-export { getCloudConfig, setCloudConfig, clearCloudConfigCache, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode } from '../cloud/config.js';
+export { getCloudConfig, setCloudConfig, clearCloudConfigCache, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered } from '../cloud/config.js';
 export type { CloudConfig, DefenceMode } from '../cloud/config.js';
 export { syncToCloud } from '../cloud/sync.js';
 export { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';

@@ -10,6 +10,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Memory, MemoryStats, MemoryLink } from '@/types/memory';
 import { useMemoryWebSocket } from '@/lib/websocket';
+import { authFetch } from '@/lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -83,7 +84,7 @@ async function fetchProjects(): Promise<{ projects: ProjectInfo[] }> {
 
 // Access a memory (reinforce)
 async function accessMemory(id: number): Promise<Memory> {
-  const response = await fetch(`${API_BASE}/api/memories/${id}/access`, {
+  const response = await authFetch(`${API_BASE}/api/memories/${id}/access`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to access memory');
@@ -97,7 +98,7 @@ async function triggerConsolidation(): Promise<{
   decayed: number;
   deleted: number;
 }> {
-  const response = await fetch(`${API_BASE}/api/consolidate`, {
+  const response = await authFetch(`${API_BASE}/api/consolidate`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to consolidate');
@@ -226,7 +227,7 @@ async function fetchControlStatus(): Promise<ControlStatus> {
 
 // Pause memory creation
 async function pauseMemoryCreation(): Promise<{ paused: boolean }> {
-  const response = await fetch(`${API_BASE}/api/control/pause`, {
+  const response = await authFetch(`${API_BASE}/api/control/pause`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to pause');
@@ -235,7 +236,7 @@ async function pauseMemoryCreation(): Promise<{ paused: boolean }> {
 
 // Resume memory creation
 async function resumeMemoryCreation(): Promise<{ paused: boolean }> {
-  const response = await fetch(`${API_BASE}/api/control/resume`, {
+  const response = await authFetch(`${API_BASE}/api/control/resume`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to resume');
@@ -314,7 +315,7 @@ async function checkForUpdates(force = false): Promise<VersionInfo> {
 
 // Perform update
 async function performUpdate(): Promise<UpdateResult> {
-  const response = await fetch(`${API_BASE}/api/version/update`, {
+  const response = await authFetch(`${API_BASE}/api/version/update`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to perform update');
@@ -323,7 +324,7 @@ async function performUpdate(): Promise<UpdateResult> {
 
 // Restart server
 async function restartServer(): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/api/version/restart`, {
+  const response = await authFetch(`${API_BASE}/api/version/restart`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to restart server');
@@ -463,28 +464,28 @@ export function useContradictions(project?: string) {
 
 // Boost memory salience
 async function boostMemory(id: number): Promise<Memory> {
-  const response = await fetch(`${API_BASE}/api/memories/${id}/boost`, { method: 'POST' });
+  const response = await authFetch(`${API_BASE}/api/memories/${id}/boost`, { method: 'POST' });
   if (!response.ok) throw new Error('Failed to boost memory');
   return response.json();
 }
 
 // Demote memory salience
 async function demoteMemory(id: number): Promise<Memory> {
-  const response = await fetch(`${API_BASE}/api/memories/${id}/demote`, { method: 'POST' });
+  const response = await authFetch(`${API_BASE}/api/memories/${id}/demote`, { method: 'POST' });
   if (!response.ok) throw new Error('Failed to demote memory');
   return response.json();
 }
 
 // Promote STM → LTM
 async function promoteMemory(id: number): Promise<Memory> {
-  const response = await fetch(`${API_BASE}/api/memories/${id}/promote`, { method: 'POST' });
+  const response = await authFetch(`${API_BASE}/api/memories/${id}/promote`, { method: 'POST' });
   if (!response.ok) throw new Error('Failed to promote memory');
   return response.json();
 }
 
 // Edit memory
 async function editMemory(id: number, updates: { title?: string; content?: string; tags?: string[]; category?: string }): Promise<Memory> {
-  const response = await fetch(`${API_BASE}/api/memories/${id}`, {
+  const response = await authFetch(`${API_BASE}/api/memories/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -495,14 +496,14 @@ async function editMemory(id: number, updates: { title?: string; content?: strin
 
 // Delete memory
 async function removeMemory(id: number): Promise<{ success: boolean }> {
-  const response = await fetch(`${API_BASE}/api/memories/${id}`, { method: 'DELETE' });
+  const response = await authFetch(`${API_BASE}/api/memories/${id}`, { method: 'DELETE' });
   if (!response.ok) throw new Error('Failed to delete memory');
   return response.json();
 }
 
 // Quarantine memory
 async function quarantineMemory(id: number, reason?: string): Promise<{ success: boolean }> {
-  const response = await fetch(`${API_BASE}/api/memories/${id}/quarantine`, {
+  const response = await authFetch(`${API_BASE}/api/memories/${id}/quarantine`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason }),
@@ -513,7 +514,7 @@ async function quarantineMemory(id: number, reason?: string): Promise<{ success:
 
 // Create manual link
 async function createLink(data: { sourceId: number; targetId: number; relationship: string; strength?: number }): Promise<unknown> {
-  const response = await fetch(`${API_BASE}/api/links`, {
+  const response = await authFetch(`${API_BASE}/api/links`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),

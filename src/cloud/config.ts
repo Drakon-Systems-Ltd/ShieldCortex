@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir, hostname } from 'os';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -11,10 +11,67 @@ export interface CloudConfig {
 
 const CONFIG_DIR = join(homedir(), '.shieldcortex');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+const SIG_FILE = join(CONFIG_DIR, '.config-sig');
+const INTEGRITY_KEY_FILE = join(CONFIG_DIR, '.integrity-key');
 const DEFAULT_BASE_URL = 'https://api.shieldcortex.ai';
 
 // Cache to avoid repeated file reads
 let cachedConfig: CloudConfig | null = null;
+
+// ── Config Integrity (HMAC) ──────────────────────────────
+
+let cachedIntegrityKey: string | null = null;
+let configTampered = false;
+
+function getIntegrityKey(): string {
+  if (cachedIntegrityKey) return cachedIntegrityKey;
+  try {
+    if (existsSync(INTEGRITY_KEY_FILE)) {
+      cachedIntegrityKey = readFileSync(INTEGRITY_KEY_FILE, 'utf-8').trim();
+      return cachedIntegrityKey;
+    }
+  } catch { /* ignore */ }
+  // Generate new key on first run
+  const key = randomBytes(32).toString('hex');
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(INTEGRITY_KEY_FILE, key, { mode: 0o600 });
+  try { chmodSync(INTEGRITY_KEY_FILE, 0o600); } catch { /* best-effort */ }
+  cachedIntegrityKey = key;
+  return key;
+}
+
+function signConfig(jsonContent: string): string {
+  return createHmac('sha256', getIntegrityKey()).update(jsonContent, 'utf-8').digest('hex');
+}
+
+function writeConfigSignature(jsonContent: string): void {
+  const sig = signConfig(jsonContent);
+  writeFileSync(SIG_FILE, sig, { mode: 0o600 });
+  try { chmodSync(SIG_FILE, 0o600); } catch { /* best-effort */ }
+}
+
+function verifyConfigIntegrity(jsonContent: string): boolean {
+  try {
+    if (!existsSync(SIG_FILE)) {
+      // First run after upgrade — create signature, don't flag tamper
+      writeConfigSignature(jsonContent);
+      return true;
+    }
+    const storedSig = readFileSync(SIG_FILE, 'utf-8').trim();
+    const computedSig = signConfig(jsonContent);
+    const a = Buffer.from(storedSig, 'utf-8');
+    const b = Buffer.from(computedSig, 'utf-8');
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+/** Returns true if config file tampering was detected. */
+export function isConfigTampered(): boolean {
+  return configTampered;
+}
 
 export function getCloudConfig(): CloudConfig {
   if (cachedConfig) return cachedConfig;
@@ -66,7 +123,18 @@ export function clearCloudConfigCache(): void {
 export function readRawConfig(): Record<string, unknown> {
   try {
     if (existsSync(CONFIG_FILE)) {
-      return JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+      const content = readFileSync(CONFIG_FILE, 'utf-8');
+      const data = JSON.parse(content);
+
+      // Verify HMAC integrity
+      if (!verifyConfigIntegrity(content)) {
+        configTampered = true;
+        console.error('[ShieldCortex] WARNING: Config file integrity check failed — possible tampering detected. Falling back to strict mode.');
+        // Force strict mode on tampered config
+        data.defenceMode = 'strict';
+      }
+
+      return data;
     }
   } catch { /* ignore */ }
   return {};
@@ -74,8 +142,13 @@ export function readRawConfig(): Record<string, unknown> {
 
 function writeRawConfig(raw: Record<string, unknown>): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, 2) + '\n');
+  const content = JSON.stringify(raw, null, 2) + '\n';
+  writeFileSync(CONFIG_FILE, content);
+  // Sign the config after writing
+  writeConfigSignature(content);
   cachedConfig = null;
+  // Clear tamper flag on legitimate write
+  configTampered = false;
 }
 
 export function getTrustedSkills(): string[] {

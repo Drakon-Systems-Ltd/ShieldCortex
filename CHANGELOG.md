@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.0] - 2026-02-10
+
+### Added
+
+- **Per-session API auth** — The local API server now generates a per-session token on startup and requires it for all mutating requests (POST/DELETE/PATCH). The dashboard claims the token via a one-time handshake endpoint that locks after the first request, preventing rogue processes from hijacking the API.
+- **Config file integrity (HMAC)** — `config.json` is signed with HMAC-SHA256 on every write and verified on every read. If tampering is detected, ShieldCortex falls back to strict mode (fail-closed) and shows a red warning banner in the dashboard.
+- **Config tamper warning** — The Defence Pipeline card in the dashboard displays an alert when config integrity verification fails.
+
+### Security
+
+- **Scan endpoint lockdown** — `POST /api/v1/scan` and `/api/v1/scan/batch` no longer accept a `config` body parameter. Attempts to override the defence config via the HTTP API are ignored and logged as `config_override_attempt` in the audit trail.
+- **Unauthenticated API closed** — All mutating endpoints now return 401 without a valid session token. GET endpoints remain open (read-only).
+- **Dashboard auth-aware fetch** — All dashboard mutation hooks use `authFetch()` to transparently include the session token.
+
 ## [2.7.1] - 2026-02-10
 
 ### Added
