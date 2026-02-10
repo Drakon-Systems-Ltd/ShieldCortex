@@ -26,6 +26,9 @@
  *   npx shieldcortex openclaw install        # Install OpenClaw hook
  *   npx shieldcortex openclaw uninstall      # Remove OpenClaw hook
  *   npx shieldcortex openclaw status         # Check OpenClaw hook status
+ *   npx shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
+ *   npx shieldcortex copilot uninstall       # Remove MCP server configuration
+ *   npx shieldcortex copilot status          # Check MCP server configuration
  *   npx shieldcortex migrate                  # Migrate from Claude Cortex
  *   npx shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block (requires confirmation)
  *   npx shieldcortex uninstall               # Full uninstall (requires confirmation)
@@ -43,6 +46,7 @@ import { handleServiceCommand } from './service/install.js';
 import { setupClaudeMd } from './setup/claude-md.js';
 import { handleHookCommand } from './setup/hooks.js';
 import { handleOpenClawCommand } from './setup/openclaw.js';
+import { handleCopilotCommand } from './setup/copilot.js';
 import { createRequire } from 'module';
 import { disposeModel } from './embeddings/index.js';
 import { stopDefaultWorker } from './worker/brain-worker.js';
@@ -286,6 +290,12 @@ async function main() {
   // Handle "openclaw" subcommand (backward compat: "clawdbot" also accepted)
   if (process.argv[2] === 'openclaw' || process.argv[2] === 'clawdbot') {
     await handleOpenClawCommand(process.argv[3] || '');
+    return;
+  }
+
+  // Handle "copilot" subcommand (VS Code + Cursor MCP setup)
+  if (process.argv[2] === 'copilot') {
+    await handleCopilotCommand(process.argv[3] || '');
     return;
   }
 

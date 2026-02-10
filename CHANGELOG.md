@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.6.3] - 2026-02-10
+
+### Added
+
+- **`shieldcortex copilot install`** — New command to configure the ShieldCortex MCP server for VS Code (GitHub Copilot) and Cursor. Supports install, uninstall, and status subcommands. Detects VS Code, VS Code Insiders, and Cursor automatically.
+
+### Fixed
+
+- **OpenClaw hook installer detection bug** — `shieldcortex openclaw install` failed with "OpenClaw is not installed" on machines with Claude Code but without the legacy OpenClaw binary. Now detects Claude Code via `~/.claude/` directory and the `claude` binary.
+
 ## [2.6.2] - 2026-02-09
 
 ### Fixed
