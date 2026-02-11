@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.1] - 2026-02-11
+
+### Fixed
+
+- **MCP process leak** — ShieldCortex processes no longer linger after mcporter disconnects. Added stdin EOF detection and a 60-second idle timeout as safety net. Each orphaned process used 200-275MB RAM; on constrained servers this caused OOM.
+
 ## [2.8.0] - 2026-02-10
 
 ### Added
