@@ -113,6 +113,28 @@ async function startMcpServer(dbPath?: string): Promise<void> {
 
   // Connect via stdio transport
   await server.connect(transport);
+
+  // Detect when the MCP client (mcporter) disconnects
+  process.stdin.on('end', async () => {
+    stopDefaultWorker();
+    await server.close();
+    await disposeModel();
+    process.exit(0);
+  });
+
+  // Idle timeout safety net — exit if no stdin data for 60 seconds
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const resetIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(async () => {
+      stopDefaultWorker();
+      await server.close();
+      await disposeModel();
+      process.exit(0);
+    }, 60_000);
+  };
+  process.stdin.on('data', resetIdleTimer);
+  resetIdleTimer();
 }
 
 /**
