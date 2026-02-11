@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.2] - 2026-02-11
+
+### Fixed
+
+- **OpenClaw hook self-scanning** — The cortex-memory hook scanner now skips itself and the `internal` hooks directory to avoid false-positive "potentially unsafe" warnings in logs.
+
 ## [2.8.1] - 2026-02-11
 
 ### Fixed

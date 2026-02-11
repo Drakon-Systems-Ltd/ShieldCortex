@@ -134,6 +134,9 @@ async function scanInstalledHooks() {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
 
+      // Skip self and internal hooks to avoid false positives
+      if (entry.name === 'cortex-memory' || entry.name === 'internal') continue;
+
       const hookDir = path.join(hooksDir, entry.name);
 
       // Check for HOOK.md
