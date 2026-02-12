@@ -93,8 +93,7 @@ export function startVisualizationServer(dbPath?: string): void {
 
   // ── Session Auth ────────────────────────────────────────
   // Generate per-session token (written to ~/.shieldcortex/.api-token)
-  const sessionToken = generateSessionToken();
-  let tokenClaimed = false;
+  generateSessionToken();
 
   // Auth middleware: require Bearer token on all mutating requests
   app.use((req: Request, res: Response, next) => {
@@ -119,18 +118,13 @@ export function startVisualizationServer(dbPath?: string): void {
     next();
   });
 
-  // One-time token handshake — dashboard claims on first load
+  // Token handshake — dashboard claims on load (survives page refresh)
   app.get('/api/auth/session-token', (_req: Request, res: Response) => {
-    if (tokenClaimed) {
-      res.status(403).json({ error: 'Token already claimed', code: 'TOKEN_CLAIMED' });
-      return;
-    }
     const token = getSessionToken();
     if (!token) {
       res.status(500).json({ error: 'No session token available' });
       return;
     }
-    tokenClaimed = true;
     res.json({ token });
   });
 

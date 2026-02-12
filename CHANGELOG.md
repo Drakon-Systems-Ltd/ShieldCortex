@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.3] - 2026-02-12
+
+### Fixed
+
+- **Dashboard auth breaks on page refresh** — The session token handshake endpoint was one-time-only, so refreshing the dashboard page lost the cached token and all mutations (mode changes, quarantine actions, etc.) silently failed with 401. Token endpoint now serves the same per-session token on every request.
+
 ## [2.8.2] - 2026-02-11
 
 ### Fixed
