@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.4] - 2026-02-12
+
+### Fixed
+
+- **OpenClaw hook installs to wrong directory** — On servers with both `~/.claude/` and `~/.openclaw/`, the installer preferred `~/.claude/hooks/` but OpenClaw reads from `~/.openclaw/hooks/`. Now installs to ALL detected hook directories and prefers `~/.openclaw/` for the `openclaw` subcommand.
+
 ## [2.8.3] - 2026-02-12
 
 ### Fixed

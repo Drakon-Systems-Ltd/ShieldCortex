@@ -28,20 +28,39 @@ const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOO
  * 2. Check for ~/.openclaw/hooks/ (legacy OpenClaw)
  * 3. Fallback: detect binary and walk up to find hooks/bundled/ (old Node.js OpenClaw)
  */
+/**
+ * Find ALL valid hook directories (for install to both locations).
+ */
+export function findAllHooksDirs(): string[] {
+  const home = os.homedir();
+  const dirs: string[] = [];
+
+  // OpenClaw: ~/.openclaw/hooks/ (check first — this is the "openclaw" command)
+  if (fs.existsSync(path.join(home, '.openclaw'))) {
+    dirs.push(path.join(home, '.openclaw', 'hooks'));
+  }
+
+  // Claude Code: ~/.claude/hooks/
+  if (fs.existsSync(path.join(home, '.claude'))) {
+    dirs.push(path.join(home, '.claude', 'hooks'));
+  }
+
+  return dirs;
+}
+
 export function findOpenClawHooksDir(): string | null {
   const home = os.homedir();
+
+  // OpenClaw: ~/.openclaw/hooks/ (prefer this for "openclaw" subcommand)
+  const openclawHooksDir = path.join(home, '.openclaw', 'hooks');
+  if (fs.existsSync(path.join(home, '.openclaw'))) {
+    return openclawHooksDir;
+  }
 
   // Claude Code: ~/.claude/hooks/
   const claudeHooksDir = path.join(home, '.claude', 'hooks');
   if (fs.existsSync(path.join(home, '.claude'))) {
-    // Claude Code config dir exists — use it even if hooks/ doesn't exist yet
     return claudeHooksDir;
-  }
-
-  // Legacy OpenClaw: ~/.openclaw/hooks/
-  const openclawHooksDir = path.join(home, '.openclaw', 'hooks');
-  if (fs.existsSync(path.join(home, '.openclaw'))) {
-    return openclawHooksDir;
   }
 
   // Fallback: detect binary and walk up (old Node.js-based OpenClaw installs)
@@ -77,9 +96,9 @@ export function findOpenClawHooksDir(): string | null {
 }
 
 export async function installOpenClawHook(): Promise<void> {
-  const hooksDir = findOpenClawHooksDir();
+  const hooksDirs = findAllHooksDirs();
 
-  if (!hooksDir) {
+  if (hooksDirs.length === 0) {
     console.error('Neither Claude Code nor OpenClaw is installed on this system.');
     console.log('Install Claude Code first: https://claude.ai/claude-code');
     process.exit(1);
@@ -90,19 +109,21 @@ export async function installOpenClawHook(): Promise<void> {
     process.exit(1);
   }
 
-  const destDir = path.join(hooksDir, HOOK_NAME);
+  // Install to ALL detected hook directories
+  for (const hooksDir of hooksDirs) {
+    const destDir = path.join(hooksDir, HOOK_NAME);
+    fs.mkdirSync(destDir, { recursive: true });
 
-  // Copy hook files
-  fs.mkdirSync(destDir, { recursive: true });
+    for (const file of ['HOOK.md', 'handler.ts']) {
+      const src = path.join(HOOK_SOURCE, file);
+      const dest = path.join(destDir, file);
+      fs.copyFileSync(src, dest);
+    }
 
-  for (const file of ['HOOK.md', 'handler.ts']) {
-    const src = path.join(HOOK_SOURCE, file);
-    const dest = path.join(destDir, file);
-    fs.copyFileSync(src, dest);
+    console.log(`✓ Installed cortex-memory hook to ${destDir}`);
   }
 
-  console.log(`✓ Installed cortex-memory hook to ${destDir}`);
-  console.log('  The hook will activate on next Claude Code restart.');
+  console.log('  The hook will activate on next restart.');
   console.log('');
   console.log('  What it does:');
   console.log('  • Auto-saves important session context on /new');
