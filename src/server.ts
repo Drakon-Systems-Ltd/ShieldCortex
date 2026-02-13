@@ -141,6 +141,7 @@ Content is scanned through the defence pipeline before storage. Suspicious conte
         .describe('Whether this memory can be transferred to other projects'),
       source: sourceParam,
     },
+    { title: 'Store Memory', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'remember');
       const result = await executeRemember({ ...args, source });
@@ -179,6 +180,7 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Recall mode'),
       source: sourceParam,
     },
+    { title: 'Search Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'recall');
       const result = await executeRecall({ ...args, source });
@@ -209,6 +211,7 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Confirm bulk delete'),
       source: sourceParam,
     },
+    { title: 'Delete Memories', readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'forget');
       const result = await executeForget({ ...args, source });
@@ -232,6 +235,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
         .describe('Output format'),
       source: sourceParam,
     },
+    { title: 'Get Project Context', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_context');
       const result = await executeGetContext({ ...args, source });
@@ -251,6 +255,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     {
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for global.'),
     },
+    { title: 'Start Session', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     async (args) => {
       const result = await executeStartSession(args);
       return {
@@ -272,6 +277,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       sessionId: z.number().describe('Session ID'),
       summary: z.string().optional().describe('Session summary'),
     },
+    { title: 'End Session', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const result = executeEndSession(args);
       if (!result.success) {
@@ -295,6 +301,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       force: z.boolean().optional().default(false).describe('Force consolidation'),
       dryRun: z.boolean().optional().default(false).describe('Preview what would happen without doing it'),
     },
+    { title: 'Run Memory Consolidation', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     async (args) => {
       const result = executeConsolidate(args);
       if (!result.success) {
@@ -339,6 +346,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     {
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for all projects.'),
     },
+    { title: 'Memory Statistics', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const result = executeStats(args);
       return {
@@ -358,6 +366,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       id: z.number().describe('Memory ID'),
       source: sourceParam,
     },
+    { title: 'Get Memory by ID', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_memory');
       const result = executeGetMemory({ ...args, source });
@@ -377,6 +386,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     {
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for all projects.'),
     },
+    { title: 'Export Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const result = executeExport(args);
       return {
@@ -397,6 +407,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     {
       data: z.string().describe('JSON data'),
     },
+    { title: 'Import Memories', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     async (args) => {
       const result = executeImport(args);
       return {
@@ -417,6 +428,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     {
       id: z.number().describe('Memory ID to find relationships for'),
     },
+    { title: 'Get Related Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const related = getRelatedMemories(args.id);
       if (related.length === 0) {
@@ -444,6 +456,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       strength: z.number().min(0).max(1).optional().default(0.5)
         .describe('Relationship strength (0-1)'),
     },
+    { title: 'Link Memories', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const link = createMemoryLink(
         args.sourceId,
@@ -465,6 +478,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     {
       project: z.string().describe(`Project name, or "${GLOBAL_PROJECT_SENTINEL}" for global scope`),
     },
+    { title: 'Switch Project', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const oldProject = getActiveProject();
       setActiveProject(args.project === GLOBAL_PROJECT_SENTINEL ? null : args.project);
@@ -483,6 +497,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     'get_project',
     'Show current project scope and detection info.',
     {},
+    { title: 'Show Current Project', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async () => {
       const info = getProjectContextInfo();
       const lines = [
@@ -520,6 +535,7 @@ but you can use this tool to check for new contradictions at any time.`,
       limit: z.number().min(1).max(50).optional().default(10)
         .describe('Maximum results to return'),
     },
+    { title: 'Detect Contradictions', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const project = args.project ?? getActiveProject() ?? undefined;
       const contradictions = detectContradictions({
@@ -563,6 +579,7 @@ but you can use this tool to check for new contradictions at any time.`,
       depth: z.number().optional().describe('Max traversal depth (default 2)'),
       predicates: z.array(z.string()).optional().describe('Filter by predicate types'),
     },
+    { title: 'Knowledge Graph Query', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => handleGraphQuery(args)
   );
 
@@ -575,6 +592,7 @@ but you can use this tool to check for new contradictions at any time.`,
       minMentions: z.number().optional().describe('Minimum memory references (default 1)'),
       limit: z.number().optional().describe('Max results (default 50)'),
     },
+    { title: 'List Graph Entities', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => handleGraphEntities(args)
   );
 
@@ -587,6 +605,7 @@ but you can use this tool to check for new contradictions at any time.`,
       to: z.string().describe('Target entity name'),
       maxDepth: z.number().optional().describe('Max path length (default 4)'),
     },
+    { title: 'Explain Entity Relationship', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => handleGraphExplain(args)
   );
 
@@ -602,7 +621,9 @@ but you can use this tool to check for new contradictions at any time.`,
     source: z.string().optional().describe('Filter by source'),
     firewallResult: z.enum(['ALLOW', 'BLOCK', 'QUARANTINE']).optional(),
     limit: z.number().default(50),
-  }, async (args) => {
+  },
+  { title: 'Query Audit Logs', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  async (args) => {
     const logs = queryAuditLogs(args);
     const text = logs.length === 0 ? 'No audit logs found.' : logs.map(l => `[${l.timestamp}] ${l.firewall_result} | source:${l.source_type}:${l.source_identifier} | trust:${l.trust_score}`).join('\n');
     return { content: [{ type: 'text', text }] };
@@ -614,7 +635,9 @@ but you can use this tool to check for new contradictions at any time.`,
     quarantineId: z.number().optional().describe('ID for approve/reject'),
     sourceIdentifier: z.string().optional().describe('Source identifier for batch approve (e.g. "user-spawned>task-1")'),
     notes: z.string().optional(),
-  }, async (args) => {
+  },
+  { title: 'Review Quarantined Memories', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  async (args) => {
     const db = (await import('./database/init.js')).getDatabase();
     if (args.action === 'list') {
       const items = db.prepare('SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT 50').all('pending');
@@ -655,7 +678,9 @@ but you can use this tool to check for new contradictions at any time.`,
   // Defence Stats
   server.tool('defence_stats', 'Get defence system statistics', {
     timeRange: z.enum(['24h', '7d', '30d']).default('24h'),
-  }, async (args) => {
+  },
+  { title: 'Defence Statistics', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  async (args) => {
     const stats = getAuditStats(args.timeRange);
     const lines = [
       `Defence Stats (${args.timeRange}):`,
@@ -675,7 +700,9 @@ but you can use this tool to check for new contradictions at any time.`,
   server.tool('scan_memories', 'Scan existing memories for signs of poisoning', {
     project: z.string().optional().describe('Scan specific project'),
     limit: z.number().default(1000).describe('Max memories to scan'),
-  }, async (args) => {
+  },
+  { title: 'Scan Memories for Poisoning', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  async (args) => {
     const report = scanExistingMemories({ project: args.project, limit: args.limit });
     let text = report.summary + '\n';
     if (report.threatsFound.length > 0) {
@@ -697,7 +724,9 @@ but you can use this tool to check for new contradictions at any time.`,
     ]).optional().describe('File format (auto-detected if omitted)'),
     mode: z.enum(['strict', 'balanced', 'permissive']).optional()
       .describe('Defence mode (default: balanced)'),
-  }, async (args) => {
+  },
+  { title: 'Scan Instruction File for Threats', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  async (args) => {
     const { scanSkillContent } = await import('./defence/skill-scanner/index.js');
     const result = scanSkillContent(
       args.content,

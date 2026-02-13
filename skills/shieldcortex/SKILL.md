@@ -4,7 +4,7 @@ description: Persistent memory system with security for AI agents. Remembers dec
 license: MIT
 metadata:
   author: Drakon Systems
-  version: 2.10.3
+  version: 2.10.4
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp]

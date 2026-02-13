@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.4] - 2026-02-13
+
+### Added
+
+- **MCP tool annotations** — All 24 MCP tools now include `title`, `readOnlyHint`, `destructiveHint`, and `idempotentHint` annotations per the MCP specification. Required for Anthropic Connectors Directory listing. 15 tools marked read-only, 8 write, 1 destructive (`forget`).
+
 ## [2.10.3] - 2026-02-13
 
 ### Added
