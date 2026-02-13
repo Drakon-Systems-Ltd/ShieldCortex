@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.0] - 2026-02-13
+
+### Fixed
+
+- **CRITICAL: `import('shieldcortex')` no longer crashes** — Previously, importing the package as a library triggered the MCP server, consumed stdin, spawned background workers, and eventually got SIGKILL'd by the OS. The `main()` CLI entrypoint now only runs when the file is executed directly (via `npx shieldcortex` or `node dist/index.js`), not when imported.
+
+- **Library exports now work** — `import { runDefencePipeline, addMemory, scanSkill } from 'shieldcortex'` now returns 70 named exports covering defence, memory, knowledge graph, skill scanning, and audit. Previously returned empty object `{}`.
+
+### Added
+
+- **New `src/lib.ts` library entry point** — Clean, side-effect-free module exporting all public APIs. Available via `import ... from 'shieldcortex'` (default) or `import ... from 'shieldcortex/lib'` (explicit).
+
+- **Exported APIs include:**
+  - Defence: `runDefencePipeline`, `analyzeFirewall`, `scanForCredentials`, `classifySensitivity`, `redactContent`
+  - Memory: `addMemory`, `getMemoryById`, `updateMemory`, `deleteMemory`, `accessMemory`
+  - Memory Intelligence: `calculateDecayedScore`, `processDecay`, `calculateSalience`, `consolidate`, `detectContradictions`, `activateMemory`
+  - Knowledge Graph: `extractFromMemory`, `processExtractionResult`, `backfillGraph`
+  - Skill Scanner: `scanSkill`, `scanSkillContent`, `discoverSkillFiles`
+  - Audit: `scanMemories`, `scanMcpConfigs`, `scanEnvFiles`, `scanRulesFiles`
+  - Version: `version`
+
 ## [2.9.0] - 2026-02-12
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "Complete memory system + security layer for AI agents. Native OpenClaw integration. Persistent storage, semantic search, prompt injection firewall, credential protection, and audit trail. One package, full solution.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -21,6 +21,10 @@
     "./defence": {
       "import": "./dist/defence/index.js",
       "types": "./dist/defence/index.d.ts"
+    },
+    "./lib": {
+      "import": "./dist/lib.js",
+      "types": "./dist/lib.d.ts"
     }
   },
   "type": "module",

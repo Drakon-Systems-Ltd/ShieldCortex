@@ -571,9 +571,26 @@ async function main() {
   }
 }
 
-// Run
-main().catch((error) => {
-  // Log to stderr to avoid corrupting MCP protocol
-  console.error('Failed to start shieldcortex server:', error);
-  process.exit(1);
-});
+// ── Library re-exports (safe, no side effects) ────────────
+// When imported as a library (`import { ... } from 'shieldcortex'`),
+// only these exports are evaluated — no MCP server, no workers.
+export * from './lib.js';
+
+// ── CLI guard ──────────────────────────────────────────────
+// Only run the CLI when executed directly (npx shieldcortex / node dist/index.js).
+// Skip when imported as a module (`import 'shieldcortex'`).
+const isCLI =
+  process.argv[1] &&
+  (
+    process.argv[1] === fileURLToPath(import.meta.url) ||
+    process.argv[1].endsWith('/shieldcortex/dist/index.js') ||
+    process.argv[1].endsWith('\\shieldcortex\\dist\\index.js')
+  );
+
+if (isCLI) {
+  main().catch((error) => {
+    // Log to stderr to avoid corrupting MCP protocol
+    console.error('Failed to start shieldcortex server:', error);
+    process.exit(1);
+  });
+}
