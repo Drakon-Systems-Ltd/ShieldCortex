@@ -2,7 +2,7 @@
 
 import { useAuditLogs } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useCallback } from 'react';
 
 interface Props {
   timeRange: '24h' | '7d' | '30d';
@@ -121,6 +121,14 @@ export function ThreatTimeline({ timeRange }: Props) {
               <span className="text-[10px] text-slate-500">Quarantined</span>
             </div>
           </div>
+
+          {/* Navigate to full audit view */}
+          <button
+            onClick={() => useDashboardStore.getState().setViewMode('audit')}
+            className="mt-3 w-full text-center text-xs text-cyan-400 hover:text-cyan-300 transition-colors py-1"
+          >
+            View detailed audit log &rarr;
+          </button>
         </>
       )}
     </div>

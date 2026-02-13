@@ -94,8 +94,16 @@ export function PipelineStatus({ timeRange }: Props) {
         <div className="text-xs text-slate-500">No data</div>
       )}
 
+      {/* View full audit log */}
+      <button
+        onClick={() => useDashboardStore.getState().setViewMode('audit')}
+        className="mt-3 w-full text-center text-xs text-cyan-400 hover:text-cyan-300 transition-colors py-1"
+      >
+        View full audit log &rarr;
+      </button>
+
       {/* Firewall mode selector */}
-      <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
+      <div className="mt-2 pt-3 border-t border-slate-800 flex items-center justify-between">
         <span className="text-xs text-slate-500">Firewall Mode</span>
         <div className="relative" ref={dropdownRef}>
           <button

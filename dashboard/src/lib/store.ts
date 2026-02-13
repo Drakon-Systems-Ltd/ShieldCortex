@@ -7,11 +7,16 @@
 
 import { create } from 'zustand';
 import { Memory, MemoryEvent } from '@/types/memory';
+import type { AuditEntry } from '@/hooks/useDefence';
 
 interface DashboardState {
   // Selected memory
   selectedMemory: Memory | null;
   setSelectedMemory: (memory: Memory | null) => void;
+
+  // Selected audit entry
+  selectedAuditEntry: AuditEntry | null;
+  setSelectedAuditEntry: (entry: AuditEntry | null) => void;
 
   // View mode
   viewMode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills';
@@ -49,6 +54,10 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   // Selected memory
   selectedMemory: null,
   setSelectedMemory: (memory) => set({ selectedMemory: memory }),
+
+  // Selected audit entry
+  selectedAuditEntry: null,
+  setSelectedAuditEntry: (entry) => set({ selectedAuditEntry: entry }),
 
   // View mode
   viewMode: 'shield',

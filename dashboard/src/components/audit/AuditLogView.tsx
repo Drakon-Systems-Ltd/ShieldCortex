@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
-import { useAuditLogs } from '@/hooks/useDefence';
+import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useAuditLogs, AuditEntry } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
 
 const RESULT_COLORS: Record<string, string> = {
@@ -11,7 +11,7 @@ const RESULT_COLORS: Record<string, string> = {
 };
 
 export function AuditLogView() {
-  const { projectFilter } = useDashboardStore();
+  const { projectFilter, selectedAuditEntry, setSelectedAuditEntry } = useDashboardStore();
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
   const [sourceFilter, setSourceFilter] = useState<string | undefined>(undefined);
   const [resultFilter, setResultFilter] = useState<string | undefined>(undefined);
@@ -34,6 +34,32 @@ export function AuditLogView() {
   });
 
   const logs = data?.logs ?? [];
+
+  // Keyboard navigation: Escape closes, Up/Down navigates
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (!selectedAuditEntry || logs.length === 0) return;
+    const idx = logs.findIndex((l) => l.id === selectedAuditEntry.id);
+    if (e.key === 'Escape') {
+      setSelectedAuditEntry(null);
+    } else if (e.key === 'ArrowDown' && idx < logs.length - 1) {
+      e.preventDefault();
+      setSelectedAuditEntry(logs[idx + 1]);
+    } else if (e.key === 'ArrowUp' && idx > 0) {
+      e.preventDefault();
+      setSelectedAuditEntry(logs[idx - 1]);
+    }
+  }, [selectedAuditEntry, logs, setSelectedAuditEntry]);
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleKeyDown]);
+
+  const handleRowClick = (entry: AuditEntry) => {
+    setSelectedAuditEntry(
+      selectedAuditEntry?.id === entry.id ? null : entry
+    );
+  };
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -113,7 +139,15 @@ export function AuditLogView() {
             </thead>
             <tbody>
               {logs.map((log) => (
-                <tr key={log.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                <tr
+                  key={log.id}
+                  onClick={() => handleRowClick(log)}
+                  className={`border-b border-slate-800/50 cursor-pointer transition-colors ${
+                    selectedAuditEntry?.id === log.id
+                      ? 'bg-cyan-500/10 hover:bg-cyan-500/15'
+                      : 'hover:bg-slate-800/30'
+                  }`}
+                >
                   <td className="px-4 py-2 text-slate-400 whitespace-nowrap">
                     {new Date(log.timestamp).toLocaleString()}
                   </td>

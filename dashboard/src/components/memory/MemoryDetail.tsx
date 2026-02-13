@@ -3,15 +3,17 @@
 /**
  * Memory Detail
  * Shows detailed information about a selected memory
- * including related memories and decay visualization
+ * including related memories, decay visualization, edit and delete actions
  */
 
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useCallback } from 'react';
 import { Memory, MemoryLink } from '@/types/memory';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { getCategoryColor, getTypeColor } from '@/lib/category-colors';
 import { calculateDecayFactor } from '@/lib/position-algorithm';
+import { useEditMemory, useDeleteMemory } from '@/hooks/useMemories';
 
 interface MemoryDetailProps {
   memory: Memory;
@@ -31,6 +33,9 @@ const RELATIONSHIP_STYLES: Record<string, { color: string; label: string; icon: 
   contradicts: { color: '#f87171', label: 'Contradicts', icon: '⊗' },
   related: { color: '#a78bfa', label: 'Related', icon: '~' },
 };
+
+const CATEGORIES = ['architecture', 'pattern', 'preference', 'error', 'context', 'learning', 'todo', 'note', 'relationship', 'custom'] as const;
+type Category = typeof CATEGORIES[number];
 
 // Get health status based on decay
 function getHealthStatus(decayFactor: number): { label: string; color: string; bgColor: string } {
@@ -56,10 +61,33 @@ export function MemoryDetail({
   const [showSuccessFlash, setShowSuccessFlash] = useState(false);
   const [lastReinforcedId, setLastReinforcedId] = useState<number | null>(null);
 
+  // Edit state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(memory.title);
+  const [editContent, setEditContent] = useState(memory.content);
+  const [editCategory, setEditCategory] = useState<Category>(memory.category as Category);
+  const [editTags, setEditTags] = useState((memory.tags || []).join(', '));
+
+  // Delete confirmation
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  // Mutations
+  const editMutation = useEditMemory();
+  const deleteMutation = useDeleteMemory();
+
+  // Reset edit state when memory changes
+  useEffect(() => {
+    setIsEditing(false);
+    setShowDeleteConfirm(false);
+    setEditTitle(memory.title);
+    setEditContent(memory.content);
+    setEditCategory(memory.category as Category);
+    setEditTags((memory.tags || []).join(', '));
+  }, [memory.id, memory.title, memory.content, memory.category, memory.tags]);
+
   // Show success flash when reinforcement completes
   useEffect(() => {
     if (reinforceSuccess && lastReinforcedId === memory.id) {
-      // Schedule state update to avoid synchronous setState warning
       const flashTimer = setTimeout(() => setShowSuccessFlash(true), 0);
       const hideTimer = setTimeout(() => setShowSuccessFlash(false), 1500);
       return () => {
@@ -72,6 +100,46 @@ export function MemoryDetail({
   const handleReinforce = () => {
     setLastReinforcedId(memory.id);
     onReinforce?.(memory.id);
+  };
+
+  const handleSaveEdit = useCallback(() => {
+    const tags = editTags
+      .split(',')
+      .map(t => t.trim())
+      .filter(Boolean);
+
+    editMutation.mutate(
+      {
+        id: memory.id,
+        updates: {
+          title: editTitle,
+          content: editContent,
+          category: editCategory,
+          tags,
+        },
+      },
+      {
+        onSuccess: () => {
+          setIsEditing(false);
+        },
+      }
+    );
+  }, [memory.id, editTitle, editContent, editCategory, editTags, editMutation]);
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditTitle(memory.title);
+    setEditContent(memory.content);
+    setEditCategory(memory.category as Category);
+    setEditTags((memory.tags || []).join(', '));
+  };
+
+  const handleDelete = () => {
+    deleteMutation.mutate(memory.id, {
+      onSuccess: () => {
+        onClose();
+      },
+    });
   };
 
   const decayFactor = calculateDecayFactor(memory);
@@ -112,7 +180,6 @@ export function MemoryDetail({
       }
     }
 
-    // Sort by strength
     return related.sort((a, b) => b.strength - a.strength);
   }, [memory.id, links, memories]);
 
@@ -137,28 +204,48 @@ export function MemoryDetail({
     <Card className={`bg-slate-900 border-slate-700 h-full overflow-auto transition-all duration-300 ${showSuccessFlash ? 'ring-2 ring-green-500 ring-opacity-75' : ''}`}>
       <CardHeader className="border-b border-slate-700 pb-3">
         <div className="flex items-start justify-between gap-2">
-          <CardTitle className="text-lg font-semibold text-white leading-tight">
-            {memory.title}
-          </CardTitle>
+          {isEditing ? (
+            <Input
+              value={editTitle}
+              onChange={(e) => setEditTitle(e.target.value)}
+              className="bg-slate-800 border-slate-600 text-white text-lg font-semibold"
+            />
+          ) : (
+            <CardTitle className="text-lg font-semibold text-white leading-tight">
+              {memory.title}
+            </CardTitle>
+          )}
           <Button
             variant="ghost"
             size="sm"
             onClick={onClose}
-            className="text-slate-400 hover:text-white -mt-1"
+            className="text-slate-400 hover:text-white -mt-1 shrink-0"
           >
             ✕
           </Button>
         </div>
         <div className="flex items-center gap-2 mt-2">
-          <span
-            className="px-2 py-0.5 rounded text-xs font-medium"
-            style={{
-              backgroundColor: categoryColor + '20',
-              color: categoryColor,
-            }}
-          >
-            {memory.category}
-          </span>
+          {isEditing ? (
+            <select
+              value={editCategory}
+              onChange={(e) => setEditCategory(e.target.value as Category)}
+              className="bg-slate-800 border border-slate-600 text-white text-xs rounded-lg px-2 py-1"
+            >
+              {CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>{cat}</option>
+              ))}
+            </select>
+          ) : (
+            <span
+              className="px-2 py-0.5 rounded text-xs font-medium"
+              style={{
+                backgroundColor: categoryColor + '20',
+                color: categoryColor,
+              }}
+            >
+              {memory.category}
+            </span>
+          )}
           <span
             className="px-2 py-0.5 rounded text-xs font-medium"
             style={{
@@ -175,90 +262,141 @@ export function MemoryDetail({
         {/* Content */}
         <div>
           <h4 className="text-xs font-medium text-slate-400 mb-1">Content</h4>
-          <p className="text-sm text-slate-200 whitespace-pre-wrap leading-relaxed">
-            {memory.content}
-          </p>
+          {isEditing ? (
+            <textarea
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              rows={6}
+              className="w-full bg-slate-800 border border-slate-600 text-sm text-slate-200 rounded-lg p-3 resize-y focus:ring-cyan-500 focus:border-cyan-500"
+            />
+          ) : (
+            <p className="text-sm text-slate-200 whitespace-pre-wrap leading-relaxed">
+              {memory.content}
+            </p>
+          )}
         </div>
+
+        {/* Tags (edit mode) */}
+        {isEditing && (
+          <div>
+            <h4 className="text-xs font-medium text-slate-400 mb-1">Tags (comma-separated)</h4>
+            <Input
+              value={editTags}
+              onChange={(e) => setEditTags(e.target.value)}
+              placeholder="tag1, tag2, tag3"
+              className="bg-slate-800 border-slate-600 text-white text-sm"
+            />
+          </div>
+        )}
+
+        {/* Edit/Save buttons */}
+        {isEditing ? (
+          <div className="flex gap-2">
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleSaveEdit}
+              disabled={editMutation.isPending}
+              className="flex-1 bg-emerald-600 hover:bg-emerald-700"
+            >
+              {editMutation.isPending ? 'Saving...' : 'Save Changes'}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCancelEdit}
+              className="flex-1 border-slate-600 text-slate-300 hover:text-white"
+            >
+              Cancel
+            </Button>
+          </div>
+        ) : null}
 
         {/* Health Status Banner */}
-        <div
-          className="rounded-lg p-3 flex items-center gap-3"
-          style={{ backgroundColor: healthStatus.bgColor }}
-        >
+        {!isEditing && (
           <div
-            className="w-3 h-3 rounded-full animate-pulse"
-            style={{ backgroundColor: healthStatus.color }}
-          />
-          <div>
-            <div className="text-sm font-medium" style={{ color: healthStatus.color }}>
-              {healthStatus.label}
-            </div>
-            <div className="text-xs text-slate-400">
-              {decayFactor > 0.7
-                ? 'Memory is strong and stable'
-                : decayFactor > 0.4
-                ? 'Memory is fading - reinforce to preserve'
-                : 'Memory at risk of deletion - reinforce now'}
+            className="rounded-lg p-3 flex items-center gap-3"
+            style={{ backgroundColor: healthStatus.bgColor }}
+          >
+            <div
+              className="w-3 h-3 rounded-full animate-pulse"
+              style={{ backgroundColor: healthStatus.color }}
+            />
+            <div>
+              <div className="text-sm font-medium" style={{ color: healthStatus.color }}>
+                {healthStatus.label}
+              </div>
+              <div className="text-xs text-slate-400">
+                {decayFactor > 0.7
+                  ? 'Memory is strong and stable'
+                  : decayFactor > 0.4
+                  ? 'Memory is fading - reinforce to preserve'
+                  : 'Memory at risk of deletion - reinforce now'}
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Metrics */}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="bg-slate-800 rounded-lg p-3">
-            <div className="text-xs text-slate-400">Salience</div>
-            <div className="text-lg font-bold text-white">
-              {(memory.salience * 100).toFixed(0)}%
+        {!isEditing && (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-slate-800 rounded-lg p-3">
+              <div className="text-xs text-slate-400">Salience</div>
+              <div className="text-lg font-bold text-white">
+                {(memory.salience * 100).toFixed(0)}%
+              </div>
+              <div className="mt-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500 rounded-full transition-all"
+                  style={{ width: `${memory.salience * 100}%` }}
+                />
+              </div>
             </div>
-            <div className="mt-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500 rounded-full transition-all"
-                style={{ width: `${memory.salience * 100}%` }}
-              />
-            </div>
-          </div>
 
-          <div className="bg-slate-800 rounded-lg p-3">
-            <div className="text-xs text-slate-400">Decay Factor</div>
-            <div className="text-lg font-bold text-white">
-              {(decayFactor * 100).toFixed(0)}%
-            </div>
-            <div className="mt-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all"
-                style={{
-                  width: `${decayFactor * 100}%`,
-                  backgroundColor: healthStatus.color,
-                }}
-              />
+            <div className="bg-slate-800 rounded-lg p-3">
+              <div className="text-xs text-slate-400">Decay Factor</div>
+              <div className="text-lg font-bold text-white">
+                {(decayFactor * 100).toFixed(0)}%
+              </div>
+              <div className="mt-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${decayFactor * 100}%`,
+                    backgroundColor: healthStatus.color,
+                  }}
+                />
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Access info */}
-        <div className={`bg-slate-800 rounded-lg p-3 space-y-2 transition-all duration-300 ${showSuccessFlash ? 'ring-1 ring-green-500/50' : ''}`}>
-          <div className="flex justify-between items-center">
-            <span className="text-xs text-slate-400">Access Count</span>
-            <span className={`text-sm font-medium transition-all duration-300 ${showSuccessFlash ? 'text-green-400 scale-110' : 'text-white'}`}>
-              {memory.accessCount} times
-            </span>
+        {!isEditing && (
+          <div className={`bg-slate-800 rounded-lg p-3 space-y-2 transition-all duration-300 ${showSuccessFlash ? 'ring-1 ring-green-500/50' : ''}`}>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-slate-400">Access Count</span>
+              <span className={`text-sm font-medium transition-all duration-300 ${showSuccessFlash ? 'text-green-400 scale-110' : 'text-white'}`}>
+                {memory.accessCount} times
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-slate-400">Last Accessed</span>
+              <span className={`text-sm transition-all duration-300 ${showSuccessFlash ? 'text-green-400' : 'text-white'}`}>
+                {showSuccessFlash ? 'Just now' : timeSince(memory.lastAccessed)}
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-slate-400">Created</span>
+              <span className="text-sm text-white">
+                {formatDate(memory.createdAt)}
+              </span>
+            </div>
           </div>
-          <div className="flex justify-between items-center">
-            <span className="text-xs text-slate-400">Last Accessed</span>
-            <span className={`text-sm transition-all duration-300 ${showSuccessFlash ? 'text-green-400' : 'text-white'}`}>
-              {showSuccessFlash ? 'Just now' : timeSince(memory.lastAccessed)}
-            </span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-xs text-slate-400">Created</span>
-            <span className="text-sm text-white">
-              {formatDate(memory.createdAt)}
-            </span>
-          </div>
-        </div>
+        )}
 
         {/* Related Memories */}
-        {relatedMemories.length > 0 && (
+        {!isEditing && relatedMemories.length > 0 && (
           <div>
             <h4 className="text-xs font-medium text-slate-400 mb-2 flex items-center gap-2">
               <span className="inline-block w-4 h-4">🔗</span>
@@ -314,8 +452,8 @@ export function MemoryDetail({
           </div>
         )}
 
-        {/* Tags */}
-        {memory.tags && memory.tags.length > 0 && (
+        {/* Tags (view mode) */}
+        {!isEditing && memory.tags && memory.tags.length > 0 && (
           <div>
             <h4 className="text-xs font-medium text-slate-400 mb-2">Tags</h4>
             <div className="flex flex-wrap gap-1">
@@ -332,32 +470,79 @@ export function MemoryDetail({
         )}
 
         {/* Actions */}
-        <div className="flex gap-2 pt-2">
-          {onReinforce && (
-            <Button
-              variant="default"
-              size="sm"
-              onClick={handleReinforce}
-              disabled={isReinforcing}
-              className={`flex-1 transition-all duration-300 ${
-                showSuccessFlash
-                  ? 'bg-green-600 hover:bg-green-600'
-                  : 'bg-blue-600 hover:bg-blue-700'
-              }`}
-            >
-              {isReinforcing ? (
-                <>
-                  <span className="animate-spin mr-2">⟳</span>
-                  Reinforcing...
-                </>
-              ) : showSuccessFlash ? (
-                <>✓ Reinforced!</>
-              ) : (
-                <>⚡ Reinforce Memory</>
+        {!isEditing && (
+          <div className="space-y-2 pt-2">
+            <div className="flex gap-2">
+              {onReinforce && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={handleReinforce}
+                  disabled={isReinforcing}
+                  className={`flex-1 transition-all duration-300 ${
+                    showSuccessFlash
+                      ? 'bg-green-600 hover:bg-green-600'
+                      : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
+                >
+                  {isReinforcing ? (
+                    <>
+                      <span className="animate-spin mr-2">⟳</span>
+                      Reinforcing...
+                    </>
+                  ) : showSuccessFlash ? (
+                    <>✓ Reinforced!</>
+                  ) : (
+                    <>⚡ Reinforce</>
+                  )}
+                </Button>
               )}
-            </Button>
-          )}
-        </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsEditing(true)}
+                className="flex-1 border-slate-600 text-slate-300 hover:text-white hover:bg-slate-700"
+              >
+                Edit
+              </Button>
+            </div>
+
+            {/* Delete */}
+            {showDeleteConfirm ? (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+                <p className="text-xs text-red-400 mb-2">Delete this memory permanently?</p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="default"
+                    size="sm"
+                    onClick={handleDelete}
+                    disabled={deleteMutation.isPending}
+                    className="flex-1 bg-red-600 hover:bg-red-700"
+                  >
+                    {deleteMutation.isPending ? 'Deleting...' : 'Confirm Delete'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="flex-1 border-slate-600 text-slate-300 hover:text-white"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowDeleteConfirm(true)}
+                className="w-full text-slate-500 hover:text-red-400 hover:bg-red-500/10"
+              >
+                Delete Memory
+              </Button>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

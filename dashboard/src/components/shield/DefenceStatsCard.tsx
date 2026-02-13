@@ -93,6 +93,14 @@ export function DefenceStatsCard({ timeRange }: Props) {
           </div>
         </div>
       )}
+
+      {/* Navigate to full audit view */}
+      <button
+        onClick={() => useDashboardStore.getState().setViewMode('audit')}
+        className="mt-3 w-full text-center text-xs text-cyan-400 hover:text-cyan-300 transition-colors py-1"
+      >
+        View full audit log &rarr;
+      </button>
     </div>
   );
 }

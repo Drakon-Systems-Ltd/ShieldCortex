@@ -17,6 +17,7 @@ import { MemoriesView } from '@/components/memories/MemoriesView';
 import { NavRail } from '@/components/nav/NavRail';
 import { ShieldOverview } from '@/components/shield/ShieldOverview';
 import { AuditLogView } from '@/components/audit/AuditLogView';
+import { AuditDetailPanel } from '@/components/audit/AuditDetailPanel';
 import { QuarantineView } from '@/components/quarantine/QuarantineView';
 import { AgentsView } from '@/components/agents/AgentsView';
 import { SkillsView } from '@/components/skills/SkillsView';
@@ -64,7 +65,7 @@ export default function DashboardPage() {
   const debouncedSearch = useDebouncedValue(searchQuery, 300);
 
   // Zustand store
-  const { viewMode, selectedMemory, setSelectedMemory, projectFilter, setProjectFilter, addEvent } = useDashboardStore();
+  const { viewMode, selectedMemory, setSelectedMemory, selectedAuditEntry, setSelectedAuditEntry, projectFilter, setProjectFilter, addEvent } = useDashboardStore();
 
   // Search suggestions
   const { data: suggestions = [] } = useSuggestions(searchQuery);
@@ -378,6 +379,21 @@ export default function DashboardPage() {
               onSelectMemory={handleSelectMemoryById}
               isReinforcing={accessMutation.isPending}
               reinforceSuccess={accessMutation.isSuccess}
+            />
+          </div>
+        )}
+
+        {/* Audit Detail Panel */}
+        {selectedAuditEntry && viewMode === 'audit' && (
+          <div className="w-80 border-l border-slate-800 overflow-y-auto shrink-0">
+            <AuditDetailPanel
+              entry={selectedAuditEntry}
+              onClose={() => setSelectedAuditEntry(null)}
+              onViewMemory={(memoryId) => {
+                setSelectedAuditEntry(null);
+                handleSelectMemoryById(memoryId);
+                useDashboardStore.getState().setViewMode('memories');
+              }}
             />
           </div>
         )}
