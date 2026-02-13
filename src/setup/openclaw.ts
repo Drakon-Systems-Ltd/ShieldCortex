@@ -21,78 +21,58 @@ const HOOK_NAME = 'cortex-memory';
 const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOOK_NAME);
 
 /**
- * Find the hooks directory for Claude Code or OpenClaw.
+ * Resolve the real user's home directory.
  *
- * Strategy:
- * 1. Check for ~/.claude/hooks/ (Claude Code)
- * 2. Check for ~/.openclaw/hooks/ (legacy OpenClaw)
- * 3. Fallback: detect binary and walk up to find hooks/bundled/ (old Node.js OpenClaw)
+ * When run under sudo, os.homedir() returns /root/.
+ * We check SUDO_USER first and resolve their actual home.
  */
+function resolveUserHome(): string {
+  const sudoUser = process.env.SUDO_USER;
+  if (sudoUser) {
+    try {
+      const homeDir = execSync(`eval echo ~${sudoUser}`, {
+        encoding: 'utf-8',
+      }).trim();
+      if (homeDir && fs.existsSync(homeDir)) {
+        return homeDir;
+      }
+    } catch {
+      // Fall through to os.homedir()
+    }
+  }
+  return os.homedir();
+}
+
 /**
- * Find ALL valid hook directories (for install to both locations).
+ * Find ALL valid hook directories for install/uninstall/status.
+ *
+ * Only returns user-space directories that survive package updates.
+ * Creates the hooks/ subdirectory if the parent config dir exists.
  */
 export function findAllHooksDirs(): string[] {
-  const home = os.homedir();
+  const home = resolveUserHome();
   const dirs: string[] = [];
 
-  // OpenClaw: ~/.openclaw/hooks/ (check first — this is the "openclaw" command)
-  if (fs.existsSync(path.join(home, '.openclaw'))) {
-    dirs.push(path.join(home, '.openclaw', 'hooks'));
-  }
+  const candidates = [
+    { config: '.openclaw', hooks: path.join(home, '.openclaw', 'hooks') },
+    { config: '.claude', hooks: path.join(home, '.claude', 'hooks') },
+  ];
 
-  // Claude Code: ~/.claude/hooks/
-  if (fs.existsSync(path.join(home, '.claude'))) {
-    dirs.push(path.join(home, '.claude', 'hooks'));
+  for (const { config, hooks } of candidates) {
+    const configDir = path.join(home, config);
+    if (fs.existsSync(configDir)) {
+      if (!fs.existsSync(hooks)) {
+        try {
+          fs.mkdirSync(hooks, { recursive: true });
+        } catch {
+          continue;
+        }
+      }
+      dirs.push(hooks);
+    }
   }
 
   return dirs;
-}
-
-export function findOpenClawHooksDir(): string | null {
-  const home = os.homedir();
-
-  // OpenClaw: ~/.openclaw/hooks/ (prefer this for "openclaw" subcommand)
-  const openclawHooksDir = path.join(home, '.openclaw', 'hooks');
-  if (fs.existsSync(path.join(home, '.openclaw'))) {
-    return openclawHooksDir;
-  }
-
-  // Claude Code: ~/.claude/hooks/
-  const claudeHooksDir = path.join(home, '.claude', 'hooks');
-  if (fs.existsSync(path.join(home, '.claude'))) {
-    return claudeHooksDir;
-  }
-
-  // Fallback: detect binary and walk up (old Node.js-based OpenClaw installs)
-  try {
-    const binPath = execSync(
-      'which claude 2>/dev/null || which openclaw 2>/dev/null || which clawdbot 2>/dev/null || which moltbot 2>/dev/null',
-      { encoding: 'utf-8' },
-    ).trim();
-
-    if (!binPath) return null;
-
-    const realBin = fs.realpathSync(binPath);
-
-    // Walk up from resolved path to find hooks/bundled/
-    let dir = path.dirname(realBin);
-    for (let i = 0; i < 5; i++) {
-      const candidate = path.join(dir, 'hooks', 'bundled');
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-      const distCandidate = path.join(dir, 'dist', 'hooks', 'bundled');
-      if (fs.existsSync(distCandidate)) {
-        return distCandidate;
-      }
-      dir = path.dirname(dir);
-    }
-
-    // Binary found but no hooks/bundled/ — fall back to ~/.claude/hooks/
-    return claudeHooksDir;
-  } catch {
-    return null;
-  }
 }
 
 export async function installOpenClawHook(): Promise<void> {
@@ -118,9 +98,16 @@ export async function installOpenClawHook(): Promise<void> {
       const src = path.join(HOOK_SOURCE, file);
       const dest = path.join(destDir, file);
       fs.copyFileSync(src, dest);
+
+      // Verify the copied file is readable
+      try {
+        fs.accessSync(dest, fs.constants.R_OK);
+      } catch {
+        console.error(`  Warning: ${dest} was copied but is not readable`);
+      }
     }
 
-    console.log(`✓ Installed cortex-memory hook to ${destDir}`);
+    console.log(`Installed cortex-memory hook to ${destDir}`);
   }
 
   console.log('  The hook will activate on next restart.');
@@ -132,38 +119,46 @@ export async function installOpenClawHook(): Promise<void> {
 }
 
 export async function uninstallOpenClawHook(): Promise<void> {
-  const hooksDir = findOpenClawHooksDir();
+  const hooksDirs = findAllHooksDirs();
 
-  if (!hooksDir) {
+  if (hooksDirs.length === 0) {
     console.log('Neither Claude Code nor OpenClaw is installed on this system.');
     return;
   }
 
-  const destDir = path.join(hooksDir, HOOK_NAME);
+  let removed = 0;
 
-  if (!fs.existsSync(destDir)) {
-    console.log('cortex-memory hook is not installed.');
-    return;
+  for (const hooksDir of hooksDirs) {
+    const destDir = path.join(hooksDir, HOOK_NAME);
+    if (fs.existsSync(destDir)) {
+      fs.rmSync(destDir, { recursive: true });
+      console.log(`Removed cortex-memory hook from ${destDir}`);
+      removed++;
+    }
   }
 
-  fs.rmSync(destDir, { recursive: true });
-  console.log(`✓ Removed cortex-memory hook from ${destDir}`);
+  if (removed === 0) {
+    console.log('cortex-memory hook is not installed in any location.');
+  }
 }
 
 export async function openClawHookStatus(): Promise<void> {
-  const hooksDir = findOpenClawHooksDir();
+  const hooksDirs = findAllHooksDirs();
 
-  if (!hooksDir) {
-    console.log('Claude Code / OpenClaw: not installed');
+  if (hooksDirs.length === 0) {
+    console.log('Claude Code / OpenClaw: not detected');
     return;
   }
 
-  const destDir = path.join(hooksDir, HOOK_NAME);
-  const installed = fs.existsSync(destDir);
+  console.log('Claude Code / OpenClaw: detected');
+  console.log('');
 
-  console.log(`Claude Code / OpenClaw: detected`);
-  console.log(`Hooks directory:  ${hooksDir}`);
-  console.log(`cortex-memory:    ${installed ? 'installed' : 'not installed'}`);
+  for (const hooksDir of hooksDirs) {
+    const destDir = path.join(hooksDir, HOOK_NAME);
+    const installed = fs.existsSync(destDir);
+    console.log(`  ${hooksDir}`);
+    console.log(`    cortex-memory: ${installed ? 'installed' : 'not installed'}`);
+  }
 }
 
 export async function handleOpenClawCommand(subcommand: string): Promise<void> {

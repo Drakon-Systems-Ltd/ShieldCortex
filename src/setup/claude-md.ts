@@ -12,7 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { installOpenClawHook, findOpenClawHooksDir } from './openclaw.js';
+import { installOpenClawHook, findAllHooksDirs } from './openclaw.js';
 import { setupHooks } from './settings-hooks.js';
 
 const MARKER = '# ShieldCortex — Memory System';
@@ -107,9 +107,9 @@ export async function setupClaudeMd(options?: { stopHook?: boolean }): Promise<v
   setupHooks(options);
 
   // 4. OpenClaw — if detected
-  const hooksDir = findOpenClawHooksDir();
-  if (hooksDir) {
-    const hookExists = fs.existsSync(path.join(hooksDir, 'cortex-memory'));
+  const hooksDirs = findAllHooksDirs();
+  if (hooksDirs.length > 0) {
+    const hookExists = hooksDirs.some(d => fs.existsSync(path.join(d, 'cortex-memory')));
     if (hookExists) {
       console.log('✓ OpenClaw: cortex-memory hook already installed');
     } else {
