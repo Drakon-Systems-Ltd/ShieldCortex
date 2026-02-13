@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.2] - 2026-02-13
+
+### Added
+
+- **Cloud heartbeat** — BrainWorker now sends a heartbeat to ShieldCortex Cloud every 5 minutes, keeping devices marked "Online" in the dashboard even when idle (no scans triggering cloud sync).
+
 ## [2.10.1] - 2026-02-13
 
 ### Fixed
