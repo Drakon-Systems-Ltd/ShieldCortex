@@ -44,6 +44,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { spawn, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import fs from 'fs';
 import { createServer } from './server.js';
 import { startVisualizationServer } from './api/visualization-server.js';
 import { handleServiceCommand } from './service/install.js';
@@ -579,12 +580,20 @@ export * from './lib.js';
 // ── CLI guard ──────────────────────────────────────────────
 // Only run the CLI when executed directly (npx shieldcortex / node dist/index.js).
 // Skip when imported as a module (`import 'shieldcortex'`).
+const resolvedArgv = (() => {
+  try { return process.argv[1] ? fs.realpathSync(process.argv[1]) : ''; }
+  catch { return process.argv[1] || ''; }
+})();
+const thisFile = fileURLToPath(import.meta.url);
+
 const isCLI =
   process.argv[1] &&
   (
-    process.argv[1] === fileURLToPath(import.meta.url) ||
+    process.argv[1] === thisFile ||
+    resolvedArgv === thisFile ||
     process.argv[1].endsWith('/shieldcortex/dist/index.js') ||
-    process.argv[1].endsWith('\\shieldcortex\\dist\\index.js')
+    process.argv[1].endsWith('\\shieldcortex\\dist\\index.js') ||
+    path.basename(process.argv[1]) === 'shieldcortex'
   );
 
 if (isCLI) {

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.1] - 2026-02-13
+
+### Fixed
+
+- **CLI guard fails with npm global bin symlink** — When installed globally (`npm install -g shieldcortex`) and invoked as a bare command (e.g. `"command": "shieldcortex"` in MCP config), the `isCLI` guard failed because `process.argv[1]` was the symlink path, not the resolved target. Added `fs.realpathSync()` to resolve symlinks and `path.basename()` fallback. Fixes [#2](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/2).
+
 ## [2.10.0] - 2026-02-13
 
 ### Fixed
