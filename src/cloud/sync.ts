@@ -3,6 +3,37 @@ import { enqueueFailedSync } from './sync-queue.js';
 import type { DefencePipelineResult, DefenceSource } from '../defence/types.js';
 
 /**
+ * Fire-and-forget: sends a heartbeat to ShieldCortex cloud so the
+ * device shows as "Online" even when idle (no scans triggering syncToCloud).
+ * Called by BrainWorker every 5 minutes.
+ */
+export function sendHeartbeat(): void {
+  const config = getCloudConfig();
+  if (!config.cloudEnabled || !config.cloudApiKey) return;
+
+  const payload = {
+    device_id: getDeviceId(),
+    device_name: getDeviceName(),
+    platform: `${process.platform}/${process.arch}`,
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+  fetch(`${config.cloudBaseUrl}/v1/devices/heartbeat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.cloudApiKey}`,
+    },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  })
+    .then(() => { clearTimeout(timeoutId); })
+    .catch(() => { clearTimeout(timeoutId); });
+}
+
+/**
  * Fire-and-forget: sends audit data to ShieldCortex cloud.
  * Never blocks, never throws. Silently swallows all errors.
  * Sends audit metadata ONLY — no content or titles.

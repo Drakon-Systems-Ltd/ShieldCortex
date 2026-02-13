@@ -33,6 +33,7 @@ import {
   emitPredictiveConsolidation,
 } from '../api/events.js';
 import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
+import { sendHeartbeat } from '../cloud/sync.js';
 
 /**
  * Brain Worker Class
@@ -182,6 +183,13 @@ export class BrainWorker {
         }
       } catch (retryError) {
         console.error('[BrainWorker] Sync retry queue failed:', retryError);
+      }
+
+      // 4. Send cloud heartbeat (keeps device status "Online")
+      try {
+        sendHeartbeat();
+      } catch {
+        // Truly silent — heartbeat is best-effort
       }
 
       // Update stats
