@@ -6,38 +6,38 @@
  * This server provides persistent, intelligent memory for Claude Code,
  * solving the context compaction and session persistence problems.
  *
- * Usage:
- *   npx shieldcortex                         # Start MCP server (default)
- *   npx shieldcortex --mode mcp              # Start MCP server
- *   npx shieldcortex --mode api              # Start visualization API server
- *   npx shieldcortex --mode both             # Start both servers
- *   npx shieldcortex --dashboard             # Start API + Dashboard (admin panel)
- *   npx shieldcortex --db /path/to.db        # Custom database path
- *   npx shieldcortex scan "text"               # Quick content scan (no MCP/ML)
- *   npx shieldcortex audit                    # Full security audit of agent environment
- *   npx shieldcortex audit --json             # Audit with JSON output
- *   npx shieldcortex audit --markdown         # Audit with Markdown output
- *   npx shieldcortex audit --ci               # Audit in CI mode (exit code reflects grade)
- *   npx shieldcortex status                   # Show database and system status
- *   npx shieldcortex setup                    # Configure Claude for proactive memory use
- *   npx shieldcortex install                  # Alias for setup
- *   npx shieldcortex hook pre-compact         # Run pre-compact hook (for settings.json)
- *   npx shieldcortex hook session-start       # Run session-start hook (for settings.json)
- *   npx shieldcortex hook session-end         # Run session-end hook (for settings.json)
- *   npx shieldcortex service install         # Auto-start dashboard on login
- *   npx shieldcortex service uninstall       # Remove auto-start
- *   npx shieldcortex service status          # Check service status
- *   npx shieldcortex openclaw install        # Install OpenClaw hook
- *   npx shieldcortex openclaw uninstall      # Remove OpenClaw hook
- *   npx shieldcortex openclaw status         # Check OpenClaw hook status
- *   npx shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
- *   npx shieldcortex copilot uninstall       # Remove MCP server configuration
- *   npx shieldcortex copilot status          # Check MCP server configuration
- *   npx shieldcortex migrate                  # Migrate from Claude Cortex
- *   npx shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block (requires confirmation)
- *   npx shieldcortex uninstall               # Full uninstall (requires confirmation)
- *   npx shieldcortex uninstall --confirm     # Full uninstall (non-interactive)
- *   npx shieldcortex uninstall --keep-logs   # Full uninstall but keep log files
+ * Usage (after `npm install -g shieldcortex`):
+ *   shieldcortex                         # Start MCP server (default)
+ *   shieldcortex --mode mcp              # Start MCP server
+ *   shieldcortex --mode api              # Start visualization API server
+ *   shieldcortex --mode both             # Start both servers
+ *   shieldcortex --dashboard             # Start API + Dashboard (admin panel)
+ *   shieldcortex --db /path/to.db        # Custom database path
+ *   shieldcortex scan "text"             # Quick content scan (no MCP/ML)
+ *   shieldcortex audit                   # Full security audit of agent environment
+ *   shieldcortex audit --json            # Audit with JSON output
+ *   shieldcortex audit --markdown        # Audit with Markdown output
+ *   shieldcortex audit --ci              # Audit in CI mode (exit code reflects grade)
+ *   shieldcortex status                  # Show database and system status
+ *   shieldcortex setup                   # Configure Claude for proactive memory use
+ *   shieldcortex install                 # Alias for setup
+ *   shieldcortex hook pre-compact        # Run pre-compact hook (for settings.json)
+ *   shieldcortex hook session-start      # Run session-start hook (for settings.json)
+ *   shieldcortex hook session-end        # Run session-end hook (for settings.json)
+ *   shieldcortex service install         # Auto-start dashboard on login
+ *   shieldcortex service uninstall       # Remove auto-start
+ *   shieldcortex service status          # Check service status
+ *   shieldcortex openclaw install        # Install OpenClaw hook
+ *   shieldcortex openclaw uninstall      # Remove OpenClaw hook
+ *   shieldcortex openclaw status         # Check OpenClaw hook status
+ *   shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
+ *   shieldcortex copilot uninstall       # Remove MCP server configuration
+ *   shieldcortex copilot status          # Check MCP server configuration
+ *   shieldcortex migrate                 # Migrate from Claude Cortex
+ *   shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block (requires confirmation)
+ *   shieldcortex uninstall               # Full uninstall (requires confirmation)
+ *   shieldcortex uninstall --confirm     # Full uninstall (non-interactive)
+ *   shieldcortex uninstall --keep-logs   # Full uninstall but keep log files
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -53,11 +53,41 @@ import { handleHookCommand } from './setup/hooks.js';
 import { handleOpenClawCommand } from './setup/openclaw.js';
 import { handleCopilotCommand } from './setup/copilot.js';
 import { createRequire } from 'module';
+import { execSync } from 'child_process';
 import { disposeModel } from './embeddings/index.js';
 import { stopDefaultWorker } from './worker/brain-worker.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
+
+/**
+ * Warn if running via npx cache with an outdated version.
+ * Only prints for interactive CLI commands (not MCP server mode).
+ */
+function checkVersionStaleness(): void {
+  // Skip for MCP server mode (no argv[2]) — stdout must stay clean for JSON-RPC
+  if (!process.argv[2]) return;
+
+  try {
+    const globalVersion = execSync('npm ls -g shieldcortex --depth=0 --json 2>/dev/null', {
+      encoding: 'utf-8',
+      timeout: 3000,
+    });
+    const parsed = JSON.parse(globalVersion);
+    const installed = parsed?.dependencies?.shieldcortex?.version;
+    if (installed && installed !== pkg.version) {
+      console.error(
+        `\x1b[33m⚠ Running shieldcortex v${pkg.version} (npx cache) but v${installed} is globally installed.\x1b[0m`
+      );
+      console.error(
+        `\x1b[33m  Use \`shieldcortex ${process.argv.slice(2).join(' ')}\` instead of \`npx shieldcortex\`.\x1b[0m`
+      );
+      console.error('');
+    }
+  } catch {
+    // Not globally installed, or npm not available — no warning needed
+  }
+}
 
 type ServerMode = 'mcp' | 'api' | 'both' | 'dashboard';
 
@@ -269,6 +299,9 @@ function startDashboard(): ChildProcess {
  * Main entry point
  */
 async function main() {
+  // Warn if npx is serving a stale cached version
+  checkVersionStaleness();
+
   // Handle --version / -v
   if (process.argv[2] === '--version' || process.argv[2] === '-v') {
     console.log(pkg.version);

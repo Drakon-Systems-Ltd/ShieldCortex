@@ -13,8 +13,8 @@
 
 ```bash
 npm install -g shieldcortex
-npx shieldcortex setup        # Claude Code / Cursor / VS Code
-npx shieldcortex openclaw install  # OpenClaw
+shieldcortex setup              # Claude Code / Cursor / VS Code
+shieldcortex openclaw install   # OpenClaw
 ```
 
 That's it. Your agent now remembers everything — and nobody can poison what it remembers.

@@ -35,20 +35,20 @@ npm install -g shieldcortex
 For OpenClaw integration (installs the cortex-memory hook):
 
 ```bash
-npx shieldcortex openclaw install
+shieldcortex openclaw install
 ```
 
 For Claude Code / VS Code / Cursor MCP integration:
 
 ```bash
-npx shieldcortex install
+shieldcortex install
 ```
 
 ## Quick Start
 
 ### As an OpenClaw hook (automatic)
 
-After `npx shieldcortex openclaw install`, the hook activates on next restart:
+After `shieldcortex openclaw install`, the hook activates on next restart:
 
 - **Auto-saves** important session context on compaction
 - **Injects** relevant past memories on session start
@@ -58,25 +58,25 @@ After `npx shieldcortex openclaw install`, the hook activates on next restart:
 
 ```bash
 # Check status
-npx shieldcortex status
+shieldcortex status
 
 # Scan content for threats
-npx shieldcortex scan "some text to check"
+shieldcortex scan "some text to check"
 
 # Full security audit of your agent environment
-npx shieldcortex audit
+shieldcortex audit
 
 # Scan all installed skills/instruction files for hidden threats
-npx shieldcortex scan-skills
+shieldcortex scan-skills
 
 # Scan a single skill file
-npx shieldcortex scan-skill ./path/to/SKILL.md
+shieldcortex scan-skill ./path/to/SKILL.md
 
 # Build knowledge graph from existing memories
-npx shieldcortex graph backfill
+shieldcortex graph backfill
 
 # Start the visual dashboard
-npx shieldcortex --dashboard
+shieldcortex --dashboard
 ```
 
 ### As a Library (programmatic)
@@ -157,7 +157,7 @@ const { entities, triples } = extractFromMemory(
 Sync audit data to a team dashboard for cross-project visibility:
 
 ```bash
-npx shieldcortex config set-api-key <your-key>
+shieldcortex config set-api-key <your-key>
 ```
 
 Free local package is unlimited. Cloud adds team dashboards, audit aggregation, and alerts.

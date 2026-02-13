@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.3] - 2026-02-13
+
+### Added
+
+- **Stale npx cache warning** — CLI now detects when `npx` is running a cached older version and prints a warning suggesting the globally installed binary instead.
+
+### Changed
+
+- **Docs use `shieldcortex` instead of `npx shieldcortex`** — README, SKILL.md, and CLI help updated to use the globally installed binary directly, avoiding npx cache staleness issues.
+
 ## [2.10.2] - 2026-02-13
 
 ### Added
