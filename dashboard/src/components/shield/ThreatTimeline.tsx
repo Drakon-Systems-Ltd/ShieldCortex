@@ -2,7 +2,7 @@
 
 import { useAuditLogs } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
-import { useMemo, useState, useEffect, useCallback } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 
 interface Props {
   timeRange: '24h' | '7d' | '30d';

@@ -75,15 +75,18 @@ export function MemoryDetail({
   const editMutation = useEditMemory();
   const deleteMutation = useDeleteMemory();
 
-  // Reset edit state when memory changes
-  useEffect(() => {
+  // Reset edit state when memory changes (React-recommended pattern for
+  // adjusting state based on prop changes — avoids cascading renders from effects)
+  const [prevMemoryId, setPrevMemoryId] = useState(memory.id);
+  if (prevMemoryId !== memory.id) {
+    setPrevMemoryId(memory.id);
     setIsEditing(false);
     setShowDeleteConfirm(false);
     setEditTitle(memory.title);
     setEditContent(memory.content);
     setEditCategory(memory.category as Category);
     setEditTags((memory.tags || []).join(', '));
-  }, [memory.id, memory.title, memory.content, memory.category, memory.tags]);
+  }
 
   // Show success flash when reinforcement completes
   useEffect(() => {
