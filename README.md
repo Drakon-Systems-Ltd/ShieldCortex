@@ -56,16 +56,20 @@ Local Agent                    ShieldCortex Cloud
 - **Auto-cleanup** — Configurable retention, importance-based expiry
 - **Full MCP support** — Works with any MCP-compatible agent
 
-### Security Layer (6 Defence Layers)
-| Layer | What It Does | Tier |
-|-------|-------------|------|
-| **Memory Firewall** | Blocks prompt injection, encoding tricks, hidden instructions | Free |
-| **Audit Logger** | Full forensic trail of every memory operation | Free |
-| **Trust Scorer** | Scores memories by source reliability | Free |
-| **Sub-Agent Security** | Access control, rate limiting, auto-quarantine | Free |
-| **Sensitivity Classifier** | Detects & redacts passwords, API keys, PII | Free |
-| **Fragmentation Detector** | Catches slow-burn assembly attacks | Free |
-| **Credential Leak Detector** | Blocks API keys, tokens, private keys, connection strings from persisting in memory | Free |
+### Security Layer
+
+**6-Layer Defence Pipeline** — every memory write passes through all six before storage:
+
+| Layer | What It Does |
+|-------|-------------|
+| 1. **Input Sanitisation** | Strip control characters, null bytes, dangerous formatting |
+| 2. **Pattern Detection** | Regex matching for known injection patterns, encoding tricks |
+| 3. **Semantic Analysis** | Embedding similarity to known attack corpus |
+| 4. **Structural Validation** | JSON/format integrity, fragmentation analysis |
+| 5. **Behavioural Scoring** | Anomaly detection, entropy analysis, trust scoring |
+| 6. **Credential Leak Detection** | Blocks API keys, tokens, private keys, connection strings (25+ patterns, 11 providers) |
+
+Plus: **Audit Logger** (full forensic trail), **Trust Scorer** (source-based reliability), **Sub-Agent Security** (hierarchical access control), **Sensitivity Classifier** (auto-redacts PII).
 
 ### Skill Scanner (Agent Instruction Files)
 
@@ -95,7 +99,33 @@ The dashboard Skills tab shows results with severity badges, expandable threat d
 - **Trust** — Mark known-safe skills so they're not flagged on future scans (free, local)
 - **Remove** — Delete dangerous skill files from disk (cloud-connected, premium)
 
-### NEW: Credential Leak Detection (v2.7.0)
+### NEW: Security Audit with A-F Grading (v2.9.0)
+
+Scan your entire AI agent environment for vulnerabilities in seconds:
+
+```bash
+npx shieldcortex audit
+```
+
+Four scanner modules run automatically:
+- **Memory Scanner** — Checks `~/.claude/`, Cursor, and Windsurf memory files for planted instructions and credential leaks
+- **MCP Config Scanner** — Audits 9 config locations for vulnerable servers (CVE-2025-6514), dangerous flags, and suspicious URLs
+- **Environment Scanner** — Discovers `.env` files, validates `.gitignore` coverage
+- **Rules File Scanner** — Detects Unicode-hidden backdoors (CVE-2025-54135/54136) and prompt injection in `.cursorrules`, `.windsurfrules`, `.clinerules`, `CLAUDE.md`
+
+Output modes: `--json` for programmatic use, `--markdown` for PR comments, `--ci` to fail builds on critical/high findings.
+
+#### GitHub Action
+
+```yaml
+- uses: Drakon-Systems-Ltd/ShieldCortex@v1
+  with:
+    fail-on-high: 'true'
+```
+
+Outputs `grade` (A-F), `findings` count, and a full `report` in JSON. The markdown summary is automatically added to the GitHub Actions step summary.
+
+### Credential Leak Detection (v2.7.0)
 
 Agents sometimes accidentally persist secrets in memory — API keys pasted in chat, connection strings from debug output, private keys from config files. ShieldCortex now automatically detects and blocks these before they're stored.
 
@@ -397,9 +427,14 @@ Works on macOS (launchd), Linux (systemd), and Windows.
 ```bash
 npx shieldcortex setup              # Auto-detect agent + configure hooks
 npx shieldcortex install            # Alias for setup
+npx shieldcortex audit              # Security audit with A-F grading
+npx shieldcortex audit --json       # JSON output (for CI/programmatic use)
+npx shieldcortex audit --markdown   # Markdown output (for PR comments)
+npx shieldcortex audit --ci         # CI mode (exit code 1 on critical/high)
 npx shieldcortex migrate            # Migrate from Claude Cortex
 npx shieldcortex doctor             # Check installation health
-npx shieldcortex scan-skills         # Scan all agent instruction files
+npx shieldcortex scan "text"        # Quick content scan (credential + threat detection)
+npx shieldcortex scan-skills        # Scan all agent instruction files
 npx shieldcortex scan-skill <file>  # Scan a specific instruction file
 npx shieldcortex --dashboard        # Start dashboard + API
 npx shieldcortex --version          # Show version
@@ -407,9 +442,9 @@ npx shieldcortex service install    # Auto-start on login
 npx shieldcortex graph backfill     # Extract entities from existing memories
 npx shieldcortex openclaw install   # Install OpenClaw hook
 npx shieldcortex copilot install    # Configure MCP for VS Code + Cursor
-npx shieldcortex scan "text"        # Quick content scan (credential + threat detection)
 npx shieldcortex config --cloud-api-key <key>  # Set Cloud API key
-npx shieldcortex config --cloud-enable  # Enable cloud sync
+npx shieldcortex config --cloud-enable          # Enable cloud sync
+npx shieldcortex config --mode strict           # Set defence mode (strict|balanced|permissive)
 npx shieldcortex uninstall          # Full uninstall (requires confirmation)
 npx shieldcortex uninstall --confirm # Non-interactive uninstall
 ```

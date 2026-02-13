@@ -34,6 +34,10 @@ coverage/
 
 # Internal docs
 docs/plans/
+
+# Blog assets (hosted externally)
+assets/devto-covers/
+docs/dashboard-defence.png
 COMPETITIVE-ANALYSIS.md
 GO-TO-MARKET.md
 SAAS-ARCHITECTURE.md

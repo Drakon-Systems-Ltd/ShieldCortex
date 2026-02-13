@@ -2,7 +2,7 @@
 
 ## Overview
 
-ShieldCortex is a security layer and brain-like memory system for AI agents. It combines persistent memory (STM/LTM/episodic) with a 5-layer defence pipeline that scans every memory write for threats.
+ShieldCortex is a security layer and brain-like memory system for AI agents. It combines persistent memory (STM/LTM/episodic) with a 6-layer defence pipeline that scans every memory write for threats.
 
 ```
 Agent → ShieldCortex → Memory Store (SQLite)

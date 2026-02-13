@@ -11,7 +11,7 @@ OpenClaw is a powerful AI coding assistant, but like most agents, it forgets eve
 | Sessions start from scratch | Past context auto-injected on startup |
 | Important decisions get lost | Auto-extracted and saved on `/new` |
 | Manual note-taking required | "Remember this..." keyword triggers |
-| Memory can be poisoned | 5-layer defence pipeline scans all content |
+| Memory can be poisoned | 6-layer defence pipeline scans all content |
 
 **The result:** Your OpenClaw sessions build on each other. Decisions persist. Context accumulates. And it's all protected from prompt injection attacks.
 
@@ -173,7 +173,7 @@ Memories are stored in `~/.shieldcortex/memories.db` (SQLite).
 
 ## Security
 
-All content saved through the hook passes through ShieldCortex's 5-layer defence pipeline:
+All content saved through the hook passes through ShieldCortex's 6-layer defence pipeline:
 
 1. **Memory Firewall** - Blocks prompt injection, encoding tricks
 2. **Audit Logger** - Full trail of every memory operation
@@ -263,7 +263,7 @@ Or disable without removing (in OpenClaw config):
 | Session memory | None | Full persistence |
 | Cross-session context | Manual copy/paste | Automatic injection |
 | Decision tracking | Lost on `/new` | Auto-extracted |
-| Security | None | 5-layer defence |
+| Security | None | 6-layer defence |
 | Claude Code sharing | N/A | Same database |
 
 ---
