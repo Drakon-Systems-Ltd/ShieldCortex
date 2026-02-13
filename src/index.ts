@@ -14,6 +14,10 @@
  *   npx shieldcortex --dashboard             # Start API + Dashboard (admin panel)
  *   npx shieldcortex --db /path/to.db        # Custom database path
  *   npx shieldcortex scan "text"               # Quick content scan (no MCP/ML)
+ *   npx shieldcortex audit                    # Full security audit of agent environment
+ *   npx shieldcortex audit --json             # Audit with JSON output
+ *   npx shieldcortex audit --markdown         # Audit with Markdown output
+ *   npx shieldcortex audit --ci               # Audit in CI mode (exit code reflects grade)
  *   npx shieldcortex status                   # Show database and system status
  *   npx shieldcortex setup                    # Configure Claude for proactive memory use
  *   npx shieldcortex install                  # Alias for setup
@@ -358,6 +362,13 @@ async function main() {
       console.error('Unknown graph command. Available: backfill');
       process.exit(1);
     }
+    return;
+  }
+
+  // Handle "audit" subcommand — full security audit of agent environment
+  if (process.argv[2] === 'audit') {
+    const { handleAuditCommand } = await import('./cli/audit.js');
+    await handleAuditCommand(process.argv.slice(3));
     return;
   }
 

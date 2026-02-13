@@ -1,0 +1,60 @@
+name: 'ShieldCortex Security Scan'
+description: 'Scan AI agent configs, memory files, and MCP servers for security threats'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  fail-on-high:
+    description: 'Fail the check if high or critical findings exist'
+    required: false
+    default: 'true'
+  node-version:
+    description: 'Node.js version to use'
+    required: false
+    default: '20'
+
+outputs:
+  grade:
+    description: 'Security grade (A-F)'
+  findings:
+    description: 'Number of findings'
+  report:
+    description: 'Full JSON report'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Run ShieldCortex Audit
+      id: audit
+      shell: bash
+      run: |
+        # Run audit in JSON mode
+        REPORT=$(npx -y shieldcortex@latest audit --json 2>/dev/null || true)
+
+        # Extract grade and findings count
+        GRADE=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.grade)" 2>/dev/null || echo "?")
+        FINDINGS=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.totalFindings)" 2>/dev/null || echo "0")
+        CRITICAL=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.bySeverity.critical||0)" 2>/dev/null || echo "0")
+        HIGH=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.bySeverity.high||0)" 2>/dev/null || echo "0")
+
+        echo "grade=$GRADE" >> $GITHUB_OUTPUT
+        echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
+        echo "report=$REPORT" >> $GITHUB_OUTPUT
+
+        # Generate markdown for PR comment
+        MARKDOWN=$(npx -y shieldcortex@latest audit --markdown 2>/dev/null || echo "ShieldCortex scan failed")
+        echo "$MARKDOWN" >> $GITHUB_STEP_SUMMARY
+
+        # Fail if requested and critical/high findings exist
+        if [ "${{ inputs.fail-on-high }}" = "true" ]; then
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "::error::ShieldCortex found $CRITICAL critical and $HIGH high severity findings"
+            exit 1
+          fi
+        fi

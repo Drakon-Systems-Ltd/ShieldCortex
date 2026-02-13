@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.9.0] - 2026-02-12
+
+### Added
+
+- **`npx shieldcortex audit` — comprehensive security scanner** — New command scans an AI agent's entire environment and produces a colour-coded security report with A-F grading. Four scanners run in sequence:
+  - **Memory Scanner** — Scans `~/.claude/`, Cursor, and Windsurf memory files for planted instructions, poisoned memories, and credential leaks using the full defence pipeline.
+  - **MCP Config Scanner** — Checks MCP server configs across 9 locations for known-vulnerable servers (e.g. `mcp-remote` CVE-2025-6514), dangerous flags (`--dangerously-skip-permissions`, `--yolo`), and suspicious URLs.
+  - **Environment Scanner** — Discovers `.env` files reachable by AI agents, runs credential leak detection, and flags files not protected by `.gitignore`.
+  - **Rules File Scanner** — Detects Unicode-hidden backdoors (the "Rules File Backdoor" attack pattern, CVE-2025-54135/54136) and prompt injection in `.cursorrules`, `.windsurfrules`, `.clinerules`, `CLAUDE.md`, and GitHub Copilot instructions.
+
+- **Three output modes** — `--json` for programmatic consumption, `--markdown` for GitHub PR comments and CI summaries, and default terminal mode with ASCII art shield header and ANSI colour-coded findings.
+
+- **CI mode** — `npx shieldcortex audit --ci` exits with code 1 if critical or high findings exist, suitable for CI/CD pipelines.
+
+- **GitHub Action** — `action.yml` composite action enables `shieldcortex/scan@v1` in GitHub workflows. Scans PRs for agent config security issues and posts results to the GitHub Step Summary.
+
 ## [2.8.4] - 2026-02-12
 
 ### Fixed
