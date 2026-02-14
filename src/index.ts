@@ -132,7 +132,20 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   const transport = new StdioServerTransport();
 
   // Register signal handlers BEFORE connect so cleanup runs even if connect() throws
+  // Handle SIGINT gracefully — Claude Code sends this to idle MCP servers.
+  // First SIGINT: log and stay alive (it may be a probe).
+  // Second SIGINT within 5s: actually exit.
+  let sigintCount = 0;
+  let sigintResetTimer: ReturnType<typeof setTimeout> | null = null;
   process.on('SIGINT', async () => {
+    sigintCount++;
+    if (sigintCount === 1) {
+      // First SIGINT — stay alive, reset counter after 5s
+      sigintResetTimer = setTimeout(() => { sigintCount = 0; }, 5000);
+      return;
+    }
+    // Second SIGINT — actually shut down
+    if (sigintResetTimer) clearTimeout(sigintResetTimer);
     stopDefaultWorker();
     await server.close();
     await disposeModel();
@@ -157,19 +170,23 @@ async function startMcpServer(dbPath?: string): Promise<void> {
     process.exit(0);
   });
 
-  // Idle timeout safety net — exit if no stdin data for 60 seconds
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(async () => {
-      stopDefaultWorker();
-      await server.close();
-      await disposeModel();
-      process.exit(0);
-    }, 60_000);
-  };
-  process.stdin.on('data', resetIdleTimer);
-  resetIdleTimer();
+  // Keepalive: send a JSON-RPC notification every 3 minutes to prevent
+  // Claude Code from considering the connection idle and sending SIGINT.
+  // See: https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/4
+  const KEEPALIVE_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+  const keepaliveTimer = setInterval(() => {
+    try {
+      // Send a JSON-RPC notification (no id = no response expected).
+      // Using $/ping which is a common LSP/MCP keepalive convention.
+      const msg = JSON.stringify({ jsonrpc: '2.0', method: '$/ping' });
+      process.stdout.write(`Content-Length: ${Buffer.byteLength(msg)}\r\n\r\n${msg}`);
+    } catch {
+      // stdout closed — client disconnected, let the 'end' handler deal with it
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+
+  // Clean up keepalive on exit
+  process.on('exit', () => clearInterval(keepaliveTimer));
 }
 
 /**
