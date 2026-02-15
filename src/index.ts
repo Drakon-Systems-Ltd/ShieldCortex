@@ -181,15 +181,17 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   // Keepalive: send a JSON-RPC notification every 3 minutes to prevent
   // Claude Code from considering the connection idle and sending SIGINT.
   // See: https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/4
+  // Routed through SDK transport to avoid stdout write races (#6).
   const KEEPALIVE_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
   const keepaliveTimer = setInterval(() => {
     try {
-      // Send a JSON-RPC notification (no id = no response expected).
-      // Using $/ping which is a common LSP/MCP keepalive convention.
-      const msg = JSON.stringify({ jsonrpc: '2.0', method: '$/ping' });
-      process.stdout.write(`Content-Length: ${Buffer.byteLength(msg)}\r\n\r\n${msg}`);
+      // Send via SDK so writes are serialised with tool responses.
+      // server.server is the underlying Protocol instance with notification().
+      server.server.notification({ method: '$/ping' }).catch(() => {
+        // Transport closed — let the stdin 'end' handler deal with it
+      });
     } catch {
-      // stdout closed — client disconnected, let the 'end' handler deal with it
+      // Server not connected — ignore
     }
   }, KEEPALIVE_INTERVAL_MS);
 

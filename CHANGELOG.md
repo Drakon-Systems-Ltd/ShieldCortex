@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.10] - 2026-02-13
+
+### Fixed
+
+- **Keepalive corrupts JSON-RPC stream** — The `$/ping` keepalive wrote directly to `process.stdout`, racing with the MCP SDK's `StdioServerTransport`. When both wrote simultaneously, the interleaved output corrupted the JSON-RPC stream, causing tool calls to hang indefinitely. Now routed through `server.server.notification()` so all writes are serialised by the SDK transport. ([#6](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/6))
+
 ## [2.10.8] - 2026-02-15
 
 ### Fixed
