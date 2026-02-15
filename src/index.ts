@@ -54,7 +54,7 @@ import { handleOpenClawCommand } from './setup/openclaw.js';
 import { handleCopilotCommand } from './setup/copilot.js';
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
-import { disposeModel } from './embeddings/index.js';
+import { disposeModel, preloadModel } from './embeddings/index.js';
 import { stopDefaultWorker } from './worker/brain-worker.js';
 
 const require = createRequire(import.meta.url);
@@ -161,6 +161,14 @@ async function startMcpServer(dbPath?: string): Promise<void> {
 
   // Connect via stdio transport
   await server.connect(transport);
+
+  // Preload embedding model in background so first tool call doesn't hang.
+  // Fire-and-forget: failure is fine — searchMemories falls back to FTS-only.
+  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
+    preloadModel().catch(err => {
+      console.error('[shieldcortex] Model preload failed (will retry on first use):', err.message);
+    });
+  }
 
   // Detect when the MCP client (mcporter) disconnects
   process.stdin.on('end', async () => {

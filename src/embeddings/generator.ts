@@ -13,6 +13,19 @@ let embeddingPipeline: FeatureExtractionPipeline | null = null;
 let isLoading = false;
 let loadPromise: Promise<FeatureExtractionPipeline> | null = null;
 
+const MODEL_LOAD_TIMEOUT_MS = 30_000;
+const INFERENCE_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer!));
+}
+
 /**
  * Lazy-load the embedding model
  * Model: all-MiniLM-L6-v2 (22MB, 384 dimensions)
@@ -31,14 +44,25 @@ async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
   }
 
   isLoading = true;
-  loadPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2') as unknown as Promise<FeatureExtractionPipeline>;
+  loadPromise = withTimeout(
+    pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2') as unknown as Promise<FeatureExtractionPipeline>,
+    MODEL_LOAD_TIMEOUT_MS,
+    'Model load',
+  );
 
   try {
     embeddingPipeline = await loadPromise;
     return embeddingPipeline;
-  } finally {
-    isLoading = false;
+  } catch (err) {
+    // Reset state so next call retries instead of returning stale rejected promise
     loadPromise = null;
+    isLoading = false;
+    throw err;
+  } finally {
+    if (embeddingPipeline) {
+      isLoading = false;
+      loadPromise = null;
+    }
   }
 }
 
@@ -53,10 +77,14 @@ export async function generateEmbedding(text: string): Promise<Float32Array> {
   // Truncate to ~512 tokens worth (~2000 chars) for model limits
   const truncated = text.slice(0, 2000);
 
-  const output = await extractor(truncated, {
-    pooling: 'mean',
-    normalize: true,
-  });
+  const output = await withTimeout(
+    extractor(truncated, {
+      pooling: 'mean',
+      normalize: true,
+    }),
+    INFERENCE_TIMEOUT_MS,
+    'Embedding inference',
+  );
 
   try {
     // Prefer .data (direct typed array) over .tolist() to avoid intermediate allocations
