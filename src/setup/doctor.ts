@@ -117,6 +117,54 @@ function checkHooks(): void {
   }
 }
 
+function checkOpenClawHooks(): void {
+  const home = os.homedir();
+
+  // Check for legacy .clawdbot hooks (should be migrated)
+  // Skip legacy check if .clawdbot is a symlink to .openclaw (common after OpenClaw rename)
+  const clawdbotDir = path.join(home, '.clawdbot');
+  const isSymlink = fs.existsSync(clawdbotDir) && fs.lstatSync(clawdbotDir).isSymbolicLink();
+
+  const legacyHookDirs = isSymlink ? [] : [
+    path.join(home, '.clawdbot', 'hooks', 'cortex-memory'),
+    path.join(home, '.clawdbot', 'hooks', 'internal', 'cortex-memory'),
+  ];
+  const newHookDirs = [
+    path.join(home, '.openclaw', 'hooks', 'cortex-memory'),
+    path.join(home, '.openclaw', 'hooks', 'internal', 'cortex-memory'),
+  ];
+  const legacyHookDir = legacyHookDirs.find(d => fs.existsSync(d)) || null;
+  const newHookDir = newHookDirs.find(d => fs.existsSync(d)) || null;
+
+  if (legacyHookDir) {
+    if (newHookDir) {
+      add('WARN', 'OpenClaw hook: found in BOTH ~/.clawdbot/ and ~/.openclaw/ — remove legacy with `npx shieldcortex migrate`');
+    } else {
+      add('FAIL', 'OpenClaw hook: only in legacy ~/.clawdbot/hooks/ — run `npx shieldcortex migrate` to fix');
+    }
+    return;
+  }
+
+  if (newHookDir) {
+    // Verify hook files are intact
+    const hookMd = path.join(newHookDir, 'HOOK.md');
+    const handler = path.join(newHookDir, 'handler.ts');
+    if (fs.existsSync(hookMd) && fs.existsSync(handler)) {
+      add('PASS', `OpenClaw hook: installed at ${newHookDir.replace(home, '~')}/`);
+    } else {
+      add('FAIL', 'OpenClaw hook: directory exists but files missing — reinstall with `npx shieldcortex openclaw install`');
+    }
+    return;
+  }
+
+  // Check if OpenClaw is even installed
+  const openclawDir = path.join(home, '.openclaw');
+  if (fs.existsSync(openclawDir)) {
+    add('WARN', 'OpenClaw detected but cortex-memory hook not installed — run `npx shieldcortex openclaw install`');
+  }
+  // If no .openclaw dir, user probably isn't using OpenClaw — skip silently
+}
+
 function checkMcp(): void {
   // Check project-level .mcp.json
   const projectMcp = path.join(process.cwd(), '.mcp.json');
@@ -148,6 +196,7 @@ export async function handleDoctorCommand(): Promise<void> {
   checkDatabase();
   checkClaudeMd();
   checkHooks();
+  checkOpenClawHooks();
   checkMcp();
 
   // Print results

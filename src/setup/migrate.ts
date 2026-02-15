@@ -313,28 +313,98 @@ export function migrateClaudeMd(): boolean {
   return changed;
 }
 
+/**
+ * Migrate OpenClaw hooks from legacy ~/.clawdbot/ to ~/.openclaw/.
+ * Non-destructive: copies files, then removes legacy directory.
+ */
+export function migrateOpenClawHooks(): { migrated: boolean; cleanedLegacy: boolean } {
+  const home = os.homedir();
+  // Check both possible legacy locations (skip if .clawdbot is a symlink to .openclaw)
+  const clawdbotDir = path.join(home, '.clawdbot');
+  const isSymlink = fs.existsSync(clawdbotDir) && fs.lstatSync(clawdbotDir).isSymbolicLink();
+  const legacyCandidates = isSymlink ? [] : [
+    path.join(home, '.clawdbot', 'hooks', 'internal', 'cortex-memory'),
+    path.join(home, '.clawdbot', 'hooks', 'cortex-memory'),
+  ];
+  const legacyHookDir = legacyCandidates.find(d => fs.existsSync(d)) || null;
+
+  // Check both possible new locations
+  const newCandidates = [
+    path.join(home, '.openclaw', 'hooks', 'internal', 'cortex-memory'),
+    path.join(home, '.openclaw', 'hooks', 'cortex-memory'),
+  ];
+  const newHookDir = newCandidates.find(d => fs.existsSync(d)) || path.join(home, '.openclaw', 'hooks', 'internal', 'cortex-memory');
+
+  if (!legacyHookDir) {
+    console.log('  No legacy ~/.clawdbot/hooks/cortex-memory/ found — skipping.');
+    return { migrated: false, cleanedLegacy: false };
+  }
+
+  let migrated = false;
+  let cleanedLegacy = false;
+
+  // Copy to new location if not already there
+  if (!fs.existsSync(newHookDir)) {
+    fs.mkdirSync(newHookDir, { recursive: true });
+    for (const file of fs.readdirSync(legacyHookDir)) {
+      fs.copyFileSync(
+        path.join(legacyHookDir, file),
+        path.join(newHookDir, file)
+      );
+    }
+    console.log(`  ✓ Copied hook from ~/.clawdbot/ → ~/.openclaw/`);
+    migrated = true;
+  } else {
+    console.log('  Hook already exists at ~/.openclaw/ — skipping copy.');
+  }
+
+  // Clean up legacy hook directory
+  try {
+    fs.rmSync(legacyHookDir, { recursive: true });
+    console.log('  ✓ Removed legacy ~/.clawdbot/hooks/cortex-memory/');
+    cleanedLegacy = true;
+
+    // Remove empty parent dirs if possible
+    const legacyHooksDir = path.join(home, '.clawdbot', 'hooks');
+    if (fs.existsSync(legacyHooksDir) && fs.readdirSync(legacyHooksDir).length === 0) {
+      fs.rmdirSync(legacyHooksDir);
+    }
+    const legacyBaseDir = path.join(home, '.clawdbot');
+    if (fs.existsSync(legacyBaseDir) && fs.readdirSync(legacyBaseDir).length === 0) {
+      fs.rmdirSync(legacyBaseDir);
+    }
+  } catch (err: any) {
+    console.log(`  Could not remove legacy directory: ${err.message}`);
+  }
+
+  return { migrated, cleanedLegacy };
+}
+
 export async function handleMigrateCommand(): Promise<void> {
   console.log('Migrating from Claude Cortex → ShieldCortex...\n');
 
-  console.log('[1/5] Settings (MCP server + hooks)');
+  console.log('[1/6] Settings (MCP server + hooks)');
   const { mcpSwapped, hooksSwapped } = migrateSettings();
 
-  console.log('\n[2/5] Database');
+  console.log('\n[2/6] Database');
   const { copied, merged, mergedCount, source } = migrateDatabase();
 
-  console.log('\n[3/5] CLAUDE.md');
+  console.log('\n[3/6] CLAUDE.md');
   const mdChanged = migrateClaudeMd();
 
-  console.log('\n[4/5] Cleanup old npm packages');
+  console.log('\n[4/6] OpenClaw hooks (clawdbot → openclaw)');
+  const { migrated: hooksMigrated, cleanedLegacy } = migrateOpenClawHooks();
+
+  console.log('\n[5/6] Cleanup old npm packages');
   const { uninstalled } = cleanupOldNpmPackages();
 
-  console.log('\n[5/5] Cleanup old services (LaunchAgents/systemd)');
+  console.log('\n[6/6] Cleanup old services (LaunchAgents/systemd)');
   const { removed } = cleanupOldServices();
 
   console.log('\n─────────────────────────────────');
   console.log('Migration complete.');
 
-  const noChanges = mcpSwapped === 0 && hooksSwapped === 0 && !copied && !merged && !mdChanged && uninstalled.length === 0 && removed.length === 0;
+  const noChanges = mcpSwapped === 0 && hooksSwapped === 0 && !copied && !merged && !mdChanged && !hooksMigrated && !cleanedLegacy && uninstalled.length === 0 && removed.length === 0;
 
   if (noChanges) {
     console.log('Nothing to migrate — you\'re already on ShieldCortex.');
@@ -345,6 +415,8 @@ export async function handleMigrateCommand(): Promise<void> {
     if (copied) console.log(`  ✓ Database copied (original preserved at ${source})`);
     if (merged) console.log(`  ✓ ${mergedCount} memories merged from ${source}`);
     if (mdChanged) console.log(`  ✓ CLAUDE.md markers updated`);
+    if (hooksMigrated) console.log(`  ✓ OpenClaw hook migrated from ~/.clawdbot/ to ~/.openclaw/`);
+    if (cleanedLegacy) console.log(`  ✓ Legacy ~/.clawdbot/hooks/ cleaned up`);
     if (uninstalled.length > 0) console.log(`  ✓ Uninstalled old npm packages: ${uninstalled.join(', ')}`);
     if (removed.length > 0) console.log(`  ✓ Removed old services: ${removed.join(', ')}`);
     console.log('\nRestart Claude Code to use the new configuration.');
