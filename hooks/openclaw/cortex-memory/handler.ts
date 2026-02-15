@@ -540,6 +540,108 @@ async function onKeywordTrigger(event) {
   await checkAndSaveKeywordTrigger(lastMessage, event);
 }
 
+// ==================== SELF-CHECK & SELF-HEAL ====================
+
+/**
+ * One-shot self-check that runs on first bootstrap per process.
+ * Detects legacy hook paths and attempts self-heal by copying files.
+ * 
+ * Safety: 
+ * - _selfCheckDone flag prevents re-runs (no loops)
+ * - All fs ops are sync-safe copies (no recursive watchers, no intervals)
+ * - Fails silently on any error — never blocks bootstrap
+ */
+let _selfCheckDone = false;
+
+async function selfCheckAndHeal(event) {
+  if (_selfCheckDone) return;
+  _selfCheckDone = true; // Set immediately to prevent re-entry
+
+  try {
+    const path = await import("node:path");
+    const { homedir } = await import("node:os");
+    const home = homedir();
+
+    // Where am I running from?
+    const myDir = path.dirname(new URL(import.meta.url).pathname);
+
+    // Expected locations (newest first)
+    const expectedDirs = [
+      path.join(home, ".openclaw", "hooks", "internal", "cortex-memory"),
+      path.join(home, ".openclaw", "hooks", "cortex-memory"),
+    ];
+
+    const isInExpectedLocation = expectedDirs.some(d => myDir.startsWith(d));
+
+    if (isInExpectedLocation) {
+      // Check for stale legacy copies that could cause confusion
+      const legacyDirs = [
+        path.join(home, ".clawdbot", "hooks", "cortex-memory"),
+        path.join(home, ".clawdbot", "hooks", "internal", "cortex-memory"),
+      ];
+
+      // Only check real directories, not symlinks pointing back to .openclaw
+      const clawdbotBase = path.join(home, ".clawdbot");
+      let isSymlink = false;
+      try {
+        const stat = await fs.lstat(clawdbotBase);
+        isSymlink = stat.isSymbolicLink();
+      } catch { /* doesn't exist */ }
+
+      if (!isSymlink) {
+        for (const legacyDir of legacyDirs) {
+          try {
+            await fs.access(legacyDir);
+            // Legacy dir exists and isn't a symlink — clean it up
+            await fs.rm(legacyDir, { recursive: true });
+            console.log(`[cortex-memory] Self-heal: removed stale legacy hook at ${legacyDir}`);
+          } catch { /* doesn't exist — good */ }
+        }
+      }
+
+      return; // All good
+    }
+
+    // We're running from an unexpected location — try to copy ourselves to the right place
+    const targetDir = expectedDirs[0]; // prefer hooks/internal/cortex-memory
+    const targetParent = path.dirname(targetDir);
+
+    // Ensure parent exists
+    await fs.mkdir(targetParent, { recursive: true });
+    await fs.mkdir(targetDir, { recursive: true });
+
+    // Copy our files to the expected location
+    const filesToCopy = ["HOOK.md", "handler.ts"];
+    let copiedCount = 0;
+
+    for (const file of filesToCopy) {
+      const src = path.join(myDir, file);
+      const dest = path.join(targetDir, file);
+      try {
+        await fs.access(src);
+        await fs.copyFile(src, dest);
+        copiedCount++;
+      } catch { /* source file missing — skip */ }
+    }
+
+    if (copiedCount > 0) {
+      console.log(`[cortex-memory] Self-heal: copied ${copiedCount} file(s) to ${targetDir}`);
+      console.log(`[cortex-memory] Hook will load from correct path on next restart`);
+
+      // Inject a warning into bootstrap context so the agent knows
+      if (event?.context?.bootstrapFiles && Array.isArray(event.context.bootstrapFiles)) {
+        event.context.bootstrapFiles.push({
+          name: "SHIELDCORTEX_HOOK_MIGRATED.md",
+          content: `# ShieldCortex Hook Self-Healed\n\nThe cortex-memory hook was running from an unexpected path (${myDir}).\nIt has been copied to ${targetDir}.\nA gateway restart will pick up the new location.\n\nNo action needed — this is informational.`,
+        });
+      }
+    }
+  } catch (err) {
+    // Self-check must NEVER break the hook — fail silently
+    console.warn("[cortex-memory] Self-check failed (non-fatal):", err instanceof Error ? err.message : String(err));
+  }
+}
+
 // ==================== MAIN HANDLER ====================
 
 const cortexMemoryHandler = async (event) => {
@@ -552,6 +654,7 @@ const cortexMemoryHandler = async (event) => {
       // Also save on clear/exit - these also end the session context
       await onSessionStop(event);
     } else if (event.type === "agent" && event.action === "bootstrap") {
+      await selfCheckAndHeal(event);
       await onBootstrap(event);
     } else if (event.type === "message") {
       // FIX: Check for keyword triggers on message events (not just commands)
