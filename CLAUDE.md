@@ -107,6 +107,38 @@ node -e "import('./dist/index.js').then(m => { console.log('Exports:', Object.ke
 ```
 Should output `Exports: 70` (or more) and exit cleanly — no SIGKILL, no hanging.
 
+## Repos & Social Proof
+
+### Two GitHub repos — one active, one redirect:
+- **`Drakon-Systems-Ltd/ShieldCortex`** (active) — all development happens here. npm publishes from here.
+- **`mkdelta221/claude-cortex`** (redirect, 46 ⭐) — the original project before the rebrand. README redirects to ShieldCortex. DO NOT archive this repo — the 46 stars are valuable social proof. No code updates needed, just keep the redirect README.
+
+### Why two repos?
+Stars don't transfer on rename/move. The 46 stars on claude-cortex are used for awesome-list submissions (require 10+ stars). ShieldCortex repo has 7 stars independently.
+
+### awesome-claude-skills
+- **PR:** https://github.com/travisvn/awesome-claude-skills/pull/139
+- **Submitted from:** mkdelta221 (not jarvis-drakon — they reject AI-submitted PRs)
+- **Links to:** mkdelta221/claude-cortex (46 stars, passes their 10-star threshold)
+- **Rules:** https://github.com/travisvn/awesome-claude-skills/blob/main/CONTRIBUTING.md
+  - Need 10+ GitHub stars
+  - No AI-automated submissions
+  - No SaaS wrappers / commercial segues
+  - Must provide standalone value
+
+### Marketing channels:
+- **Dev.to:** mkdelta221 / CyborgNinja1 — 7 articles in "ShieldCortex: AI Agent Security" series
+- **npm:** shieldcortex (2,300+ downloads)
+- **Reddit:** Draft posts ready for r/LocalLLaMA (memory angle) and r/cybersecurity (attack vector angle)
+- **Website:** shieldcortex.ai (Squarespace)
+
+### SaaS (ShieldCortex Cloud):
+- **Repo:** `Drakon-Systems-Ltd/ShieldCortex-internal` (PRIVATE)
+- **Live at:** api.shieldcortex.ai (Fly.io, 2 machines LHR)
+- **Database:** shieldcortex-db (Fly Postgres 17.2)
+- **Stripe:** Pro/Team/Enterprise prices configured, webhook active
+- **Dashboard:** Served alongside API, includes devices, audit, alerts, skills, webhooks, firewall rules
+
 ## Don't Break These
 
 - [ ] `npx shieldcortex scan "text"` — must work as CLI
