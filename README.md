@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)](https://github.com/Drakon-Systems-Ltd/ShieldCortex)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
+[![GitHub stars](https://img.shields.io/github/stars/Drakon-Systems-Ltd/ShieldCortex.svg?style=social)](https://github.com/Drakon-Systems-Ltd/ShieldCortex/stargazers)
 [![ClawHub](https://img.shields.io/badge/ClawHub-shieldcortex-orange)](https://clawhub.ai/k977rg07zt1erv2r2d9833yvmn812c89/shieldcortex)
 
 **Persistent memory + security for AI coding agents.**
