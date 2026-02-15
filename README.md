@@ -480,19 +480,6 @@ shieldcortex uninstall          # Full uninstall
 
 ---
 
-## Pricing
-
-| Tier | What You Get | Price |
-|------|--------------|-------|
-| **Free** | Full npm package (unlimited local use) + Cloud (500 scans/month) | Free |
-| **Pro** | 10K cloud scans/month, team invites, 90-day retention | £29/mo |
-| **Team** | 100K cloud scans/month, unlimited members, 1-year retention | £99/mo |
-| **Enterprise** | Self-hosted, SLA, custom rules | [Contact us](https://shieldcortex.ai/pricing) |
-
-The npm package is **free and unlimited** for local use. Cloud adds team dashboards and longer retention.
-
----
-
 ## Support
 
 If you find this project useful, consider supporting its development:
