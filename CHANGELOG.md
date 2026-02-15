@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.8] - 2026-02-15
+
+### Fixed
+
+- **Embedding model hang on first `remember` call** — The ONNX model load (`Xenova/all-MiniLM-L6-v2`) could block the event loop indefinitely on first invocation, causing Claude Code to consider the MCP connection dead. Added a 30-second timeout on model loading and a 10-second timeout on individual inference calls. Loading state is properly reset on timeout so retries work cleanly (no stale rejected promises). ([#5](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/5))
+
+### Added
+
+- **Model preload on server start** — `preloadModel()` is now called immediately after `server.connect()`, fire-and-forget. The model warms up in the background during session setup, so by the first tool call it's usually ready. Respects `SHIELDCORTEX_SKIP_EMBEDDINGS=1`.
+
+## [2.10.7] - 2026-02-15
+
+### Added
+
+- **OpenClaw hook self-check and self-heal** — The cortex-memory hook now detects on first bootstrap if it's running from an unexpected or legacy path. It auto-copies itself to the correct `~/.openclaw/hooks/internal/cortex-memory/` location and cleans up stale `.clawdbot` directories. One-shot per process (no loops or memory leaks), fails silently on any error. Injects an informational notice into bootstrap context when a migration occurs.
+
+## [2.10.6] - 2026-02-15
+
+### Added
+
+- **`doctor` checks OpenClaw hook paths** — `npx shieldcortex doctor` now verifies the cortex-memory hook is installed in the correct `~/.openclaw/hooks/` directory (including `internal/` subdirectory). Detects legacy `.clawdbot/hooks/` installs and recommends `npx shieldcortex migrate`.
+- **`migrate` handles OpenClaw hook paths** — New step 4/6 copies hooks from `~/.clawdbot/hooks/` to `~/.openclaw/hooks/` and cleans up legacy directories. Handles `.clawdbot` → `.openclaw` symlinks gracefully (skips migration when symlinked).
+
+## [2.10.5] - 2026-02-13
+
+### Changed
+
+- Maintenance release.
+
 ## [2.10.4] - 2026-02-13
 
 ### Added
