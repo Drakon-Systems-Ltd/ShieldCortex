@@ -64,6 +64,18 @@ export function findAllHooksDirs(): string[] {
   const home = resolveUserHome();
   const dirs: string[] = [];
 
+  // If openclaw command exists but config dir doesn't, create it
+  const openclawDir = path.join(home, '.openclaw');
+  if (!fs.existsSync(openclawDir)) {
+    try {
+      execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 });
+      // openclaw is installed but config dir missing — create it
+      fs.mkdirSync(openclawDir, { recursive: true });
+    } catch {
+      // openclaw not in PATH, skip
+    }
+  }
+
   const candidates = [
     { config: '.openclaw', hooks: path.join(home, '.openclaw', 'hooks') },
     { config: '.claude', hooks: path.join(home, '.claude', 'hooks') },
@@ -158,8 +170,8 @@ export async function installOpenClawHook(): Promise<void> {
   const hooksDirs = findAllHooksDirs();
 
   if (hooksDirs.length === 0) {
-    console.error('Neither Claude Code nor OpenClaw is installed on this system.');
-    console.log('Install Claude Code first: https://claude.ai/claude-code');
+    console.error('OpenClaw is not installed on this system.');
+    console.log('Install it first: npm install -g openclaw');
     process.exit(1);
   }
 

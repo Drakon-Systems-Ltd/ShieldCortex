@@ -14,6 +14,21 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const packageJsonPath = path.resolve(__dirname, '../../package.json');
 
+/**
+ * Version captured at module load time.
+ * This never changes during the process lifetime, so it accurately
+ * reflects the code that is actually running — even after an external
+ * npm update replaces the files on disk.
+ */
+const STARTUP_VERSION: string = (() => {
+  try {
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+    return packageJson.version;
+  } catch {
+    return 'unknown';
+  }
+})();
+
 // Cache for npm registry check (5 minute TTL)
 let versionCache: {
   latestVersion: string | null;
@@ -23,8 +38,10 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 export interface VersionInfo {
   currentVersion: string;
+  runningVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
+  stale: boolean;
   checkedAt: string;
   cacheHit: boolean;
 }
@@ -48,6 +65,15 @@ export function getCurrentVersion(): string {
   } catch {
     return 'unknown';
   }
+}
+
+/**
+ * Get the version that was running when this process started.
+ * Unlike getCurrentVersion(), this does NOT re-read from disk,
+ * so it remains accurate even after an external upgrade.
+ */
+export function getRunningVersion(): string {
+  return STARTUP_VERSION;
 }
 
 /**
@@ -76,10 +102,12 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
   if (!forceRefresh && versionCache && now - versionCache.checkedAt < CACHE_TTL) {
     return {
       currentVersion,
+      runningVersion: STARTUP_VERSION,
       latestVersion: versionCache.latestVersion,
       updateAvailable: versionCache.latestVersion
         ? isNewerVersion(versionCache.latestVersion, currentVersion)
         : false,
+      stale: STARTUP_VERSION !== currentVersion,
       checkedAt: new Date(versionCache.checkedAt).toISOString(),
       cacheHit: true,
     };
@@ -99,8 +127,10 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
 
     return {
       currentVersion,
+      runningVersion: STARTUP_VERSION,
       latestVersion: result,
       updateAvailable: isNewerVersion(result, currentVersion),
+      stale: STARTUP_VERSION !== currentVersion,
       checkedAt: new Date(now).toISOString(),
       cacheHit: false,
     };
@@ -108,8 +138,10 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
     // Network error or npm not available
     return {
       currentVersion,
+      runningVersion: STARTUP_VERSION,
       latestVersion: null,
       updateAvailable: false,
+      stale: STARTUP_VERSION !== currentVersion,
       checkedAt: new Date(now).toISOString(),
       cacheHit: false,
     };
@@ -120,7 +152,7 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
  * Perform npm update (runs in background)
  */
 export function performUpdate(): Promise<UpdateResult> {
-  const previousVersion = getCurrentVersion();
+  const previousVersion = STARTUP_VERSION;
 
   return new Promise(resolve => {
     exec(
@@ -169,7 +201,7 @@ export function performUpdate(): Promise<UpdateResult> {
           success: true,
           previousVersion,
           newVersion,
-          requiresRestart: newVersion !== previousVersion,
+          requiresRestart: newVersion !== STARTUP_VERSION,
           mcpRestarted,
         });
       }

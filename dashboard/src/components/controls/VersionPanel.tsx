@@ -95,6 +95,8 @@ export function VersionPanel() {
 
   const hasUpdate = updateInfo?.updateAvailable;
   const currentVersion = versionData?.version || 'unknown';
+  const runningVersion = versionData?.runningVersion;
+  const isStale = versionData?.stale === true;
   const latestVersion = updateInfo?.latestVersion;
 
   return (
@@ -111,6 +113,16 @@ export function VersionPanel() {
           )}
         </div>
       </div>
+
+      {/* Stale Version Warning */}
+      {isStale && (
+        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-amber-500/20 border border-amber-500/30 text-amber-300">
+          <div className="font-medium mb-0.5">Restart required</div>
+          <div className="text-amber-400/80">
+            Running v{runningVersion} but v{currentVersion} is installed. Restart to load the new version.
+          </div>
+        </div>
+      )}
 
       {/* Update Info */}
       {updateInfo && latestVersion && currentVersion !== latestVersion && (
@@ -167,7 +179,7 @@ export function VersionPanel() {
           </Button>
         )}
 
-        {showRestartPrompt && (
+        {(showRestartPrompt || isStale) && (
           <Button
             variant="outline"
             size="sm"

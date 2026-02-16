@@ -283,8 +283,10 @@ export function useResumeMemory() {
 // Version info from API
 export interface VersionInfo {
   currentVersion: string;
+  runningVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
+  stale: boolean;
   checkedAt: string;
   cacheHit: boolean;
 }
@@ -298,8 +300,8 @@ export interface UpdateResult {
   requiresRestart: boolean;
 }
 
-// Fetch current version
-async function fetchVersion(): Promise<{ version: string }> {
+// Fetch current version (with stale detection)
+async function fetchVersion(): Promise<{ version: string; runningVersion: string; stale: boolean }> {
   const response = await fetch(`${API_BASE}/api/version`);
   if (!response.ok) throw new Error('Failed to fetch version');
   return response.json();
@@ -331,12 +333,13 @@ async function restartServer(): Promise<{ success: boolean; message: string }> {
   return response.json();
 }
 
-// Hook: Get current version
+// Hook: Get current version (polls to detect external upgrades)
 export function useVersion() {
   return useQuery({
     queryKey: ['version'],
     queryFn: fetchVersion,
-    staleTime: Infinity, // Version doesn't change during session
+    refetchInterval: 60_000, // Poll every 60s to detect external upgrades
+    staleTime: 30_000,
   });
 }
 

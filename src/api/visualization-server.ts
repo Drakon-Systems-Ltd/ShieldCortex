@@ -49,7 +49,7 @@ import {
 } from './events.js';
 import { BrainWorker } from '../worker/brain-worker.js';
 import { isPaused, pause, resume, getControlStatus } from './control.js';
-import { getCurrentVersion, checkForUpdates, performUpdate, scheduleRestart } from './version.js';
+import { getCurrentVersion, getRunningVersion, checkForUpdates, performUpdate, scheduleRestart } from './version.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
@@ -134,7 +134,7 @@ export function startVisualizationServer(dbPath?: string): void {
 
   // Health check
   app.get('/api/health', (_req: Request, res: Response) => {
-    const version = getCurrentVersion();
+    const version = getRunningVersion();
     res.json({ status: 'ok', timestamp: new Date().toISOString(), version });
   });
 
@@ -658,11 +658,12 @@ export function startVisualizationServer(dbPath?: string): void {
   // VERSION ENDPOINTS
   // ============================================
 
-  // Get current version
+  // Get current version (with stale detection)
   app.get('/api/version', (_req: Request, res: Response) => {
     try {
       const version = getCurrentVersion();
-      res.json({ version });
+      const runningVersion = getRunningVersion();
+      res.json({ version, runningVersion, stale: runningVersion !== version });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
