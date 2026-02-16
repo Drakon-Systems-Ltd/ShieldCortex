@@ -40,9 +40,25 @@ interface OpenClawConfig {
 function resolveUserHome(): string {
   const sudoUser = process.env.SUDO_USER;
   if (sudoUser) {
+    // Try getent passwd (reliable on Linux)
+    try {
+      const entry = execSync(`getent passwd ${sudoUser}`, {
+        encoding: 'utf-8',
+        timeout: 5000,
+      }).trim();
+      const homeDir = entry.split(':')[5];
+      if (homeDir && fs.existsSync(homeDir)) {
+        return homeDir;
+      }
+    } catch {
+      // getent not available (macOS) — try tilde expansion
+    }
+
+    // Fallback: tilde expansion
     try {
       const homeDir = execSync(`eval echo ~${sudoUser}`, {
         encoding: 'utf-8',
+        timeout: 5000,
       }).trim();
       if (homeDir && fs.existsSync(homeDir)) {
         return homeDir;
@@ -181,23 +197,40 @@ export async function installOpenClawHook(): Promise<void> {
   }
 
   // Install to ALL detected hook directories
+  let installed = 0;
   for (const hooksDir of hooksDirs) {
     const destDir = path.join(hooksDir, HOOK_NAME);
-    fs.mkdirSync(destDir, { recursive: true });
+    try {
+      fs.mkdirSync(destDir, { recursive: true });
 
-    for (const file of ['HOOK.md', 'handler.ts']) {
-      const src = path.join(HOOK_SOURCE, file);
-      const dest = path.join(destDir, file);
-      fs.copyFileSync(src, dest);
+      for (const file of ['HOOK.md', 'handler.ts']) {
+        const src = path.join(HOOK_SOURCE, file);
+        const dest = path.join(destDir, file);
+        fs.copyFileSync(src, dest);
 
-      try {
-        fs.accessSync(dest, fs.constants.R_OK);
-      } catch {
-        console.error(`  Warning: ${dest} was copied but is not readable`);
+        try {
+          fs.accessSync(dest, fs.constants.R_OK);
+        } catch {
+          console.error(`  Warning: ${dest} was copied but is not readable`);
+        }
+      }
+
+      console.log(`Installed cortex-memory hook to ${destDir}`);
+      installed++;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM') {
+        console.warn(`  Skipped ${destDir} (permission denied)`);
+      } else {
+        throw err;
       }
     }
+  }
 
-    console.log(`Installed cortex-memory hook to ${destDir}`);
+  if (installed === 0) {
+    console.error('Could not install to any hook directory (permission denied).');
+    console.log('Try running with sudo, or fix permissions on your hooks directories.');
+    process.exit(1);
   }
 
   // Register real-time plugin in openclaw.json (OpenClaw only)
