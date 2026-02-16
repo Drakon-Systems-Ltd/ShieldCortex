@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.11.1] - 2026-02-16
+
+### Added
+
+- **Auto-register real-time plugin** — `openclaw install` now automatically registers the real-time scanning plugin in `~/.openclaw/openclaw.json`. No manual config editing needed.
+  - `openclaw uninstall` removes the plugin entry
+  - `openclaw status` reports plugin registration status and validates the source path
+  - Safely creates `openclaw.json` if it doesn't exist, preserves existing config
+
 ## [2.11.0] - 2026-02-16
 
 ### Added
