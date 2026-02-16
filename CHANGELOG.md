@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.11.0] - 2026-02-16
+
+### Added
+
+- **Real-time scanning plugin for OpenClaw** — New `plugins/openclaw/` module hooks into OpenClaw v2026.2.15+ `llm_input` and `llm_output` events for continuous protection:
+  - **`llm_input` defence scanning** — Every prompt and user message is scanned through the 6-layer defence pipeline before the model processes it. Threats are logged to `~/.shieldcortex/audit/realtime-YYYY-MM-DD.jsonl` and optionally synced to ShieldCortex Cloud.
+  - **`llm_output` memory extraction** — Assistant responses are pattern-matched in real-time for architecture decisions, error fixes, learnings, and preferences. Up to 3 high-salience memories auto-saved per turn — no more waiting for compaction.
+  - **Smart filtering** — Internal OpenClaw content (boot checks, heartbeats, system events) is automatically skipped to eliminate false positives.
+  - **Cloud sync** — When `cloudApiKey` is configured, threat detections are POSTed to `api.shieldcortex.ai` for team dashboards.
+  - **Fire-and-forget** — All scanning is non-blocking. Zero latency impact on LLM calls.
+
+### Changed
+
+- **Plugin included in npm package** — `plugins/` directory now ships with `npm install`, including compiled JS ready to load.
+
 ## [2.10.10] - 2026-02-13
 
 ### Fixed
