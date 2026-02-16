@@ -141,9 +141,12 @@ Your agent now has persistent memory via MCP. Ask it to "remember this" or just 
 ```bash
 npm install -g shieldcortex
 npx shieldcortex openclaw install
+openclaw gateway restart
 ```
 
-The hook auto-saves session context, injects relevant memories on startup, and responds to "remember this:" triggers.
+Installs both the cortex-memory hook and the real-time scanner plugin:
+- **Hook**: Auto-saves session context, injects memories on startup, "remember this:" trigger
+- **Plugin**: Real-time threat scanning on LLM inputs + automatic memory extraction from outputs (OpenClaw v2026.2.15+)
 
 ### For Claude.ai (Skill)
 
@@ -320,7 +323,7 @@ Auto-start on login: `npx shieldcortex service install`
 ```bash
 # Memory & Setup
 npx shieldcortex setup              # Auto-detect agent + configure
-npx shieldcortex openclaw install   # Install OpenClaw hook
+npx shieldcortex openclaw install   # Install OpenClaw hook + register plugin
 npx shieldcortex copilot install    # Configure MCP for VS Code + Cursor
 npx shieldcortex migrate            # Migrate from Claude Cortex
 npx shieldcortex doctor             # Check installation health

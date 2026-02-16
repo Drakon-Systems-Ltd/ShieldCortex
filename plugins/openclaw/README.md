@@ -11,19 +11,33 @@ Real-time defence scanning and memory extraction for OpenClaw v2026.2.15+.
 
 ## Installation
 
-Add to your `openclaw.json`:
+### Automatic (recommended)
+
+```bash
+npm install -g shieldcortex
+npx shieldcortex openclaw install
+openclaw gateway restart
+```
+
+The plugin is automatically registered in `openclaw.json` during installation.
+
+### Manual
+
+If you need to configure manually, add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
   "plugins": {
     "entries": {
       "shieldcortex-realtime": {
-        "source": "~/ShieldCortex/plugins/openclaw/index.ts"
+        "source": "/path/to/node_modules/shieldcortex/plugins/openclaw/index.ts"
       }
     }
   }
 }
 ```
+
+The `source` must be an absolute path. Find it with `npm root -g` (global) or `npm root` (local).
 
 Then restart the gateway:
 
