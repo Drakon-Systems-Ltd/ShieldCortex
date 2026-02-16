@@ -10,10 +10,8 @@ __tests__/
 jest.config.js
 coverage/
 
-# Documentation (except README)
+# Documentation
 docs/
-*.md
-!README.md
 
 # Development files
 .github/
