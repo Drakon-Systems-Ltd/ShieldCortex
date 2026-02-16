@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.2] - 2026-02-16
+
+### Added
+
+- **Version debug diagnostics** — `shieldcortex --version --debug` now shows the resolved entry point, package.json path, and argv[1] to help diagnose stale version issues. `shieldcortex doctor` also reports version resolution paths.
+
 ## [2.12.1] - 2026-02-16
 
 ### Fixed

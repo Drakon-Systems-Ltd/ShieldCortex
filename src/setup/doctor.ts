@@ -185,6 +185,28 @@ function checkMcp(): void {
   add('WARN', 'MCP: no cortex entry found in .mcp.json or ~/.claude.json');
 }
 
+function checkVersion(): void {
+  // Show where this code is running from (helps debug stale version issues)
+  const thisFile = fileURLToPath(import.meta.url);
+  const thisDir = path.dirname(thisFile);
+  const pkgPath = path.resolve(thisDir, '..', '..', 'package.json');
+
+  add('PASS', `Entry point: ${thisFile}`);
+
+  try {
+    const raw = fs.readFileSync(pkgPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    add('PASS', `package.json: ${pkgPath} → v${parsed.version}`);
+  } catch (err: any) {
+    add('FAIL', `package.json: ${pkgPath} — ${err.message}`);
+  }
+
+  // Check process.argv[1] — the actual script Node is running
+  if (process.argv[1] && process.argv[1] !== thisFile) {
+    add('WARN', `process.argv[1]: ${process.argv[1]} (differs from import.meta.url)`);
+  }
+}
+
 export async function handleDoctorCommand(): Promise<void> {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
@@ -192,6 +214,7 @@ export async function handleDoctorCommand(): Promise<void> {
 
   console.log(`\nShieldCortex Doctor v${pkg.version}\n`);
 
+  checkVersion();
   checkNode();
   checkDatabase();
   checkClaudeMd();

@@ -332,6 +332,14 @@ async function main() {
   // Handle --version / -v
   if (process.argv[2] === '--version' || process.argv[2] === '-v') {
     console.log(pkg.version);
+    // --version --debug: show resolution paths for diagnosing stale versions
+    if (process.argv[3] === '--debug') {
+      const { fileURLToPath } = await import('url');
+      const indexPath = fileURLToPath(import.meta.url);
+      console.log(`  entry:        ${indexPath}`);
+      console.log(`  package.json: ${require.resolve('../package.json')}`);
+      console.log(`  argv[1]:      ${process.argv[1]}`);
+    }
     return;
   }
 
