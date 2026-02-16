@@ -19,31 +19,19 @@ npx shieldcortex openclaw install
 openclaw gateway restart
 ```
 
-The plugin is automatically registered in `openclaw.json` during installation.
+The plugin is copied to `~/.openclaw/extensions/shieldcortex-realtime/` where OpenClaw discovers it automatically.
 
 ### Manual
 
-If you need to configure manually, add to `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "shieldcortex-realtime": {
-        "source": "/path/to/node_modules/shieldcortex/plugins/openclaw/index.ts"
-      }
-    }
-  }
-}
-```
-
-The `source` must be an absolute path. Find it with `npm root -g` (global) or `npm root` (local).
-
-Then restart the gateway:
+If you need to install manually, copy the compiled plugin files:
 
 ```bash
+mkdir -p ~/.openclaw/extensions/shieldcortex-realtime
+cp node_modules/shieldcortex/plugins/openclaw/dist/* ~/.openclaw/extensions/shieldcortex-realtime/
 openclaw gateway restart
 ```
+
+Find the package root with `npm root -g` (global) or `npm root` (local).
 
 ## Requirements
 

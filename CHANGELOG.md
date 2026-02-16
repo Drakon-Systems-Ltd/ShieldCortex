@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.0] - 2026-02-16
+
+### Fixed
+
+- **OpenClaw plugin now properly discoverable** — The installer copies the real-time scanning plugin to `~/.openclaw/extensions/shieldcortex-realtime/` where OpenClaw discovers it via its global extensions directory. Previously registered via `plugins.entries` in `openclaw.json` which caused config validation errors.
+
+### Changed
+
+- `openclaw install` installs both the cortex-memory hook and the real-time plugin
+- `openclaw uninstall` removes both the hook and the plugin from the extensions directory
+- `openclaw status` reports plugin installation status and path
+
 ## [2.11.1] - 2026-02-16
 
 ### Added

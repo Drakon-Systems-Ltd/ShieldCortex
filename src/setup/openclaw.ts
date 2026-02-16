@@ -1,7 +1,8 @@
 /**
- * Claude Code / OpenClaw hook installer.
+ * Claude Code / OpenClaw hook + plugin installer.
  *
- * Copies the cortex-memory hook into the hooks directory.
+ * Copies the cortex-memory hook into the hooks directory and
+ * the real-time plugin into the OpenClaw extensions directory.
  * Supports both Claude Code (native binary) and legacy OpenClaw (Node.js).
  */
 
@@ -19,6 +20,10 @@ const HOOK_NAME = 'cortex-memory';
 // Hook source is in hooks/openclaw/cortex-memory/ relative to project root
 // From dist/setup/, go up two levels to project root
 const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOOK_NAME);
+
+// Plugin compiled output in plugins/openclaw/dist/ relative to project root
+const PLUGIN_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'dist');
+const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
 
 /**
  * Resolve the real user's home directory.
@@ -131,6 +136,109 @@ function cleanupLegacyPlugin(): void {
   }
 }
 
+// ==================== Plugin (Extensions Directory) ====================
+
+/**
+ * Find or create the OpenClaw global extensions directory.
+ * Returns null if ~/.openclaw/ doesn't exist (OpenClaw not installed).
+ */
+function findExtensionsDir(): string | null {
+  const home = resolveUserHome();
+  const openclawDir = path.join(home, '.openclaw');
+  if (!fs.existsSync(openclawDir)) return null;
+
+  const extensionsDir = path.join(openclawDir, 'extensions');
+  if (!fs.existsSync(extensionsDir)) {
+    try {
+      fs.mkdirSync(extensionsDir, { recursive: true });
+    } catch {
+      return null;
+    }
+  }
+
+  return extensionsDir;
+}
+
+/**
+ * Copy the real-time plugin to ~/.openclaw/extensions/shieldcortex-realtime/
+ * so OpenClaw discovers it via the global extensions directory.
+ */
+function installPlugin(): boolean {
+  if (!fs.existsSync(PLUGIN_SOURCE)) {
+    console.warn('  Warning: Plugin source not found, skipping plugin install');
+    return false;
+  }
+
+  const extensionsDir = findExtensionsDir();
+  if (!extensionsDir) return false;
+
+  const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
+  try {
+    fs.mkdirSync(destDir, { recursive: true });
+
+    for (const file of ['index.js', 'openclaw.plugin.json']) {
+      const src = path.join(PLUGIN_SOURCE, file);
+      const dest = path.join(destDir, file);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, dest);
+      }
+    }
+
+    // Verify readability
+    const indexDest = path.join(destDir, 'index.js');
+    try {
+      fs.accessSync(indexDest, fs.constants.R_OK);
+    } catch {
+      console.warn(`  Warning: ${indexDest} copied but not readable`);
+    }
+
+    console.log(`Installed real-time plugin to ${destDir}`);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EACCES' || code === 'EPERM') {
+      console.warn(`  Skipped plugin install (permission denied on ${destDir})`);
+    } else {
+      console.warn(`  Warning: Could not install plugin: ${(err as Error).message}`);
+    }
+    return false;
+  }
+}
+
+/**
+ * Remove the plugin from ~/.openclaw/extensions/shieldcortex-realtime/
+ */
+function uninstallPlugin(): boolean {
+  const extensionsDir = findExtensionsDir();
+  if (!extensionsDir) return false;
+
+  const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
+  if (!fs.existsSync(destDir)) return false;
+
+  try {
+    fs.rmSync(destDir, { recursive: true });
+    console.log(`Removed real-time plugin from ${destDir}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check whether the plugin is installed in the extensions directory.
+ */
+function pluginStatus(): { installed: boolean; path?: string } {
+  const extensionsDir = findExtensionsDir();
+  if (!extensionsDir) return { installed: false };
+
+  const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
+  const indexPath = path.join(destDir, 'index.js');
+  if (fs.existsSync(indexPath)) {
+    return { installed: true, path: destDir };
+  }
+  return { installed: false };
+}
+
 // ==================== Commands ====================
 
 export async function installOpenClawHook(): Promise<void> {
@@ -187,11 +295,17 @@ export async function installOpenClawHook(): Promise<void> {
     process.exit(1);
   }
 
+  // Install the real-time plugin to the extensions directory
+  const pluginInstalled = installPlugin();
+
   console.log('');
   console.log('What was installed:');
   console.log('  • cortex-memory hook (auto-save, memory injection, "remember this:" trigger)');
+  if (pluginInstalled) {
+    console.log('  • shieldcortex-realtime plugin (real-time LLM input/output scanning)');
+  }
   console.log('');
-  console.log('Restart your agent to activate the hook.');
+  console.log('Restart your agent to activate.');
 }
 
 export async function uninstallOpenClawHook(): Promise<void> {
@@ -212,6 +326,9 @@ export async function uninstallOpenClawHook(): Promise<void> {
       removed++;
     }
   }
+
+  // Remove the real-time plugin
+  uninstallPlugin();
 
   // Clean up legacy plugin entry if present
   cleanupLegacyPlugin();
@@ -238,6 +355,10 @@ export async function openClawHookStatus(): Promise<void> {
     console.log(`  ${hooksDir}`);
     console.log(`    cortex-memory: ${installed ? 'installed' : 'not installed'}`);
   }
+
+  console.log('');
+  const plugin = pluginStatus();
+  console.log(`  Real-time plugin: ${plugin.installed ? `installed (${plugin.path})` : 'not installed'}`);
 }
 
 export async function handleOpenClawCommand(subcommand: string): Promise<void> {

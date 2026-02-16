@@ -323,7 +323,7 @@ Auto-start on login: `npx shieldcortex service install`
 ```bash
 # Memory & Setup
 npx shieldcortex setup              # Auto-detect agent + configure
-npx shieldcortex openclaw install   # Install OpenClaw hook + register plugin
+npx shieldcortex openclaw install   # Install OpenClaw hook + plugin
 npx shieldcortex copilot install    # Configure MCP for VS Code + Cursor
 npx shieldcortex migrate            # Migrate from Claude Cortex
 npx shieldcortex doctor             # Check installation health
