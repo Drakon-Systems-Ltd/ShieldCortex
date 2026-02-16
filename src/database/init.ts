@@ -343,6 +343,15 @@ export function getDatabase(): Database.Database {
 }
 
 /**
+ * Check whether the database has been initialized.
+ * Useful for library consumers (e.g. OpenClaw extensions) that import
+ * the defence pipeline without running the full MCP server.
+ */
+export function isDatabaseInitialized(): boolean {
+  return db !== null;
+}
+
+/**
  * Close the database connection with proper cleanup
  */
 export function closeDatabase(): void {

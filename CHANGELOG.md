@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.1] - 2026-02-16
+
+### Fixed
+
+- **Suppress "Database not initialized" error spam** — When ShieldCortex is used as a library (e.g. OpenClaw extension), `logAudit()` now silently skips if the database hasn't been initialized, instead of `console.error()`ing on every pipeline call. Defence scanning still works; only the SQLite audit trail is skipped.
+
 ## [2.12.0] - 2026-02-16
 
 ### Fixed

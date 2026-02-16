@@ -3,7 +3,7 @@
  */
 
 import { createHash } from 'crypto';
-import { getDatabase } from '../../database/init.js';
+import { getDatabase, isDatabaseInitialized } from '../../database/init.js';
 import type { AuditEntry } from '../types.js';
 
 /**
@@ -11,6 +11,8 @@ import type { AuditEntry } from '../types.js';
  * Fire-and-forget safe: errors are caught and logged, never thrown.
  */
 export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
+  if (!isDatabaseInitialized()) return -1;
+
   try {
     const db = getDatabase();
     const stmt = db.prepare(`
