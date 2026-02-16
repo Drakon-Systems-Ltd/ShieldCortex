@@ -21,12 +21,9 @@ const HOOK_NAME = 'cortex-memory';
 // From dist/setup/, go up two levels to project root
 const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOOK_NAME);
 
-// Plugin source for openclaw.json registration
-const PLUGIN_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'index.ts');
-
 interface OpenClawConfig {
   plugins?: {
-    entries?: Record<string, { source: string }>;
+    entries?: Record<string, { enabled: boolean }>;
   };
   [key: string]: unknown;
 }
@@ -141,16 +138,11 @@ function registerPlugin(): boolean {
   const configPath = getOpenClawConfigPath();
   if (!configPath) return false;
 
-  if (!fs.existsSync(PLUGIN_SOURCE)) {
-    console.warn('  Warning: Plugin source not found, skipping registration');
-    return false;
-  }
-
   const config = readOpenClawConfig(configPath);
   if (!config.plugins) config.plugins = {};
   if (!config.plugins.entries) config.plugins.entries = {};
 
-  config.plugins.entries['shieldcortex-realtime'] = { source: PLUGIN_SOURCE };
+  config.plugins.entries['shieldcortex-realtime'] = { enabled: true };
   writeOpenClawConfig(configPath, config);
   return true;
 }
@@ -170,14 +162,14 @@ function unregisterPlugin(): boolean {
   return true;
 }
 
-function isPluginRegistered(): { registered: boolean; source?: string } {
+function isPluginRegistered(): { registered: boolean } {
   const configPath = getOpenClawConfigPath();
   if (!configPath || !fs.existsSync(configPath)) return { registered: false };
 
   const config = readOpenClawConfig(configPath);
   const entry = config.plugins?.entries?.['shieldcortex-realtime'];
   if (!entry) return { registered: false };
-  return { registered: true, source: entry.source };
+  return { registered: true };
 }
 
 // ==================== Commands ====================
@@ -306,11 +298,6 @@ export async function openClawHookStatus(): Promise<void> {
     console.log('');
     console.log('  OpenClaw plugin:');
     console.log(`    shieldcortex-realtime: ${plugin.registered ? 'registered' : 'not registered'}`);
-    if (plugin.registered && plugin.source) {
-      const valid = fs.existsSync(plugin.source);
-      console.log(`    source: ${plugin.source}`);
-      if (!valid) console.log('    Warning: plugin source not found');
-    }
   }
 }
 
