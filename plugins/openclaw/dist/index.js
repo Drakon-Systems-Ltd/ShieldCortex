@@ -69,11 +69,48 @@ async function getPipeline() {
 }
 // ==================== CONTENT PATTERNS ====================
 const PATTERNS = {
-    architecture: [/\b(?:architecture|designed|structured)\b.*?(?:uses?|is|with)\b/i, /\b(?:decided?\s+to|going\s+with|chose)\b/i],
-    error: [/\b(?:fixed|resolved|solved)\s+(?:by|with|using)\b/i, /\b(?:solution|fix|root\s*cause)\s+(?:was|is)\b/i],
-    learning: [/\b(?:learned|discovered|turns?\s+out|figured\s+out|realized)\b/i],
-    preference: [/\b(?:always|never|prefer|should\s+always)\b/i],
-    note: [/\b(?:important|remember|key\s+point)\s*:/i],
+    architecture: [
+        /\b(?:architecture|designed|structured)\b.*?(?:uses?|is|with)\b/i,
+        /\b(?:decided?\s+to|going\s+with|chose)\b/i,
+        /\b(?:set\s+up|configured|installed|deployed|migrated)\b/i,
+        /\b(?:runs?\s+on|hosted\s+(?:on|at)|lives?\s+at|stored\s+(?:in|at))\b/i,
+        /\b(?:API|endpoint|webhook|token|credential)\s+(?:is|at|for|uses?)\b/i,
+        /\b(?:cron|scheduled|automated)\s+(?:job|task|to)\b/i,
+    ],
+    error: [
+        /\b(?:fixed|resolved|solved)\s+(?:by|with|using)\b/i,
+        /\b(?:solution|fix|root\s*cause)\s+(?:was|is)\b/i,
+        /\b(?:bug|issue|error|broken|failing)\s+(?:in|with|because|due)\b/i,
+        /\b(?:workaround|patched|hotfix)\b/i,
+        /\bthe\s+(?:problem|issue)\s+(?:was|is|turned\s+out)\b/i,
+    ],
+    learning: [
+        /\b(?:learned|discovered|turns?\s+out|figured\s+out|realized)\b/i,
+        /\b(?:gotcha|caveat|heads?\s*up|watch\s+out|be\s+careful)\b/i,
+        /\b(?:the\s+trick\s+is|key\s+thing|note\s+that)\b/i,
+        /\b(?:doesn.t\s+work|won.t\s+work|can.t\s+be|not\s+supported)\b/i,
+        /\b(?:needs?\s+to\s+be|must\s+be|has\s+to\s+be|requires?)\b/i,
+    ],
+    preference: [
+        /\b(?:always|never|prefer|should\s+always)\b/i,
+        /\b(?:michael\s+(?:wants?|likes?|prefers?|said|asked))\b/i,
+        /\b(?:we\s+(?:use|prefer|go\s+with|stick\s+with))\b/i,
+        /\b(?:don.t\s+use|avoid\s+using|instead\s+of)\b/i,
+    ],
+    context: [
+        /\b(?:password|login|account|credentials?)\s+(?:is|are|for|in|at|stored)\b/i,
+        /\b(?:1password|1P)\s+(?:item|vault|field)\b/i,
+        /\b(?:script|command)\s+(?:is|at|for|to)\b/i,
+        /\b(?:price|cost|budget|£|\$)\s*\d/i,
+        /\b(?:birthday|anniversary|reminder)\b/i,
+        /\b(?:contact|phone|email|address)\s+(?:is|for)\b/i,
+    ],
+    note: [
+        /\b(?:important|remember|key\s+point)\s*:/i,
+        /\b(?:summary|verdict|bottom\s+line|tldr|tl;dr)\s*:/i,
+        /\b(?:status|result|outcome)\s*:/i,
+        /\b(?:todo|action\s+item|next\s+step|follow\s*up)\b/i,
+    ],
 };
 function extractMemories(texts) {
     const out = [];
@@ -86,14 +123,14 @@ function extractMemories(texts) {
                 const title = text.slice(0, 80).replace(/["\n]/g, " ").trim();
                 if (!seen.has(title)) {
                     seen.add(title);
-                    out.push({ title, content: text.slice(0, 500), category: cat });
+                    out.push({ title, content: text.slice(0, 1000), category: cat });
                 }
                 break;
             }
-            if (out.length >= 3)
+            if (out.length >= 5)
                 break;
         }
-        if (out.length >= 3)
+        if (out.length >= 5)
             break;
     }
     return out;
@@ -219,7 +256,7 @@ export default {
     id: "shieldcortex-realtime",
     name: "ShieldCortex Real-time Scanner",
     description: "Real-time defence scanning on LLM inputs and memory extraction from outputs",
-    version: "2.11.0",
+    version: "2.12.3",
     register(api) {
         api.on("llm_input", handleLlmInput);
         api.on("llm_output", handleLlmOutput);
