@@ -236,7 +236,7 @@ function handleLlmOutput(event, ctx) {
                 const r = await callCortex("remember", {
                     title: mem.title, content: mem.content, category: mem.category,
                     project: ctx.agentId || "openclaw", scope: "global",
-                    importance: "normal", tags: "auto-extracted,realtime-plugin,llm-output",
+                    importance: "normal",
                 });
                 if (r)
                     saved++;
@@ -256,7 +256,7 @@ export default {
     id: "shieldcortex-realtime",
     name: "ShieldCortex Real-time Scanner",
     description: "Real-time defence scanning on LLM inputs and memory extraction from outputs",
-    version: "2.12.3",
+    version: "2.12.4",
     register(api) {
         api.on("llm_input", handleLlmInput);
         api.on("llm_output", handleLlmOutput);
