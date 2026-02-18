@@ -59,6 +59,16 @@ async function getPipeline() {
     if (_pipeline)
         return _pipeline;
     try {
+        // Initialize the database first — the pipeline's logAudit and persistEvent
+        // functions require it, and the plugin runs outside the MCP server context
+        // where initDatabase() would normally be called.
+        try {
+            const { initDatabase } = await import("shieldcortex");
+            initDatabase();
+        }
+        catch {
+            // Database init failed — pipeline will still work, audit logging will gracefully return -1
+        }
         const mod = await import("shieldcortex/defence");
         _pipeline = mod.runDefencePipeline;
         return _pipeline;

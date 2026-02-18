@@ -65,6 +65,44 @@ function resolveUserHome(): string {
 }
 
 /**
+ * Check whether the OpenClaw binary is installed on this system.
+ * Tries multiple detection methods to handle different install scenarios.
+ */
+function isOpenClawInstalled(): boolean {
+  // Method 1: Check if 'openclaw' is in PATH
+  try {
+    execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 });
+    return true;
+  } catch {
+    // not in PATH
+  }
+
+  // Method 2: Check common global npm install locations
+  const globalPaths = [
+    '/usr/lib/node_modules/openclaw',
+    '/usr/local/lib/node_modules/openclaw',
+  ];
+  // Also check npm global prefix
+  try {
+    const prefix = execSync('npm config get prefix', {
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
+    if (prefix) {
+      globalPaths.push(path.join(prefix, 'lib', 'node_modules', 'openclaw'));
+    }
+  } catch {
+    // npm not available or timed out
+  }
+
+  for (const p of globalPaths) {
+    if (fs.existsSync(p)) return true;
+  }
+
+  return false;
+}
+
+/**
  * Find ALL valid hook directories for install/uninstall/status.
  *
  * Only returns user-space directories that survive package updates.
@@ -74,15 +112,13 @@ export function findAllHooksDirs(): string[] {
   const home = resolveUserHome();
   const dirs: string[] = [];
 
-  // If openclaw command exists but config dir doesn't, create it
+  // If openclaw is installed but config dir doesn't exist yet, create it
   const openclawDir = path.join(home, '.openclaw');
-  if (!fs.existsSync(openclawDir)) {
+  if (!fs.existsSync(openclawDir) && isOpenClawInstalled()) {
     try {
-      execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 });
-      // openclaw is installed but config dir missing — create it
       fs.mkdirSync(openclawDir, { recursive: true });
     } catch {
-      // openclaw not in PATH, skip
+      // Could not create config dir — will still try other candidates
     }
   }
 
@@ -245,8 +281,20 @@ export async function installOpenClawHook(): Promise<void> {
   const hooksDirs = findAllHooksDirs();
 
   if (hooksDirs.length === 0) {
-    console.error('OpenClaw is not installed on this system.');
-    console.log('Install it first: npm install -g openclaw');
+    const home = resolveUserHome();
+    console.error('Could not find OpenClaw or Claude Code config directory.');
+    console.error('');
+    console.error('Debug info:');
+    console.error(`  Home directory: ${home}`);
+    console.error(`  ~/.openclaw/ exists: ${fs.existsSync(path.join(home, '.openclaw'))}`);
+    console.error(`  ~/.claude/ exists: ${fs.existsSync(path.join(home, '.claude'))}`);
+    console.error(`  OpenClaw binary found: ${isOpenClawInstalled()}`);
+    console.error('');
+    console.error('If OpenClaw is installed, try running directly:');
+    console.error('  shieldcortex openclaw install');
+    console.error('');
+    console.error('Or install OpenClaw first:');
+    console.error('  npm install -g openclaw');
     process.exit(1);
   }
 
