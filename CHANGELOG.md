@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.6] - 2026-02-18
+
+### Fixed
+
+- **Plugin database init** — OpenClaw real-time plugin now calls `initDatabase()` before loading the defence pipeline, so audit logging works correctly outside the MCP server context
+- **OpenClaw install diagnostics** — `isOpenClawInstalled()` check prevents spuriously creating `~/.openclaw/` on non-OpenClaw systems; better error output when install fails
+
 ## [2.12.5] - 2026-02-18
 
 ### Fixed
