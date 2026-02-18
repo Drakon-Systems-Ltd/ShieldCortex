@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.5] - 2026-02-18
+
+### Fixed
+
+- **OpenClaw hook crash on bootstrap injection** — `bootstrapFiles.push()` was missing the `path` property required by OpenClaw's `buildInjectedWorkspaceFiles`. All three injection sites (CORTEX_MEMORY.md, SHIELDCORTEX_WARNINGS.md, SHIELDCORTEX_HOOK_MIGRATED.md) now include `path` derived from the workspace directory, fixing `TypeError: Cannot read properties of undefined (reading 'replace')` on every gateway-routed agent run.
+
 ## [2.12.2] - 2026-02-16
 
 ### Added

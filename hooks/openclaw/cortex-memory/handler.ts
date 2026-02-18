@@ -8,6 +8,7 @@
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import path from "node:path";
 
 // ==================== SERVER COMMAND RESOLUTION ====================
 
@@ -379,6 +380,8 @@ async function onBootstrap(event) {
   const context = event.context || {};
   if (!Array.isArray(context.bootstrapFiles)) return;
 
+  const wsDir = context.workspaceDir || event?.workspaceDir || "/tmp";
+
   const result = await callCortex("get_context", {
     query: "openclaw session context",
     format: "summary",
@@ -391,6 +394,7 @@ async function onBootstrap(event) {
 
   context.bootstrapFiles.push({
     name: "CORTEX_MEMORY.md",
+    path: path.join(wsDir, "CORTEX_MEMORY.md"),
     content: `# Past Session Context (from ShieldCortex)\n\n${result}`,
   });
 
@@ -403,6 +407,7 @@ async function onBootstrap(event) {
       const warnings = threats.map(t => `- ${t.hookName}: ${t.threat}`).join("\n");
       context.bootstrapFiles.push({
         name: "SHIELDCORTEX_WARNINGS.md",
+        path: path.join(wsDir, "SHIELDCORTEX_WARNINGS.md"),
         content: `# ShieldCortex Security Warning\n\nThe following installed hooks have been flagged as potentially unsafe:\n\n${warnings}\n\nConsider running: \`npx shieldcortex scan-skills\` for a detailed report.`,
       });
       console.log(`[cortex-memory] WARNING: ${threats.length} hook(s) flagged as potentially unsafe`);
@@ -630,8 +635,10 @@ async function selfCheckAndHeal(event) {
 
       // Inject a warning into bootstrap context so the agent knows
       if (event?.context?.bootstrapFiles && Array.isArray(event.context.bootstrapFiles)) {
+        const wsDir = event?.context?.workspaceDir || event?.workspaceDir || "/tmp";
         event.context.bootstrapFiles.push({
           name: "SHIELDCORTEX_HOOK_MIGRATED.md",
+          path: path.join(wsDir, "SHIELDCORTEX_HOOK_MIGRATED.md"),
           content: `# ShieldCortex Hook Self-Healed\n\nThe cortex-memory hook was running from an unexpected path (${myDir}).\nIt has been copied to ${targetDir}.\nA gateway restart will pick up the new location.\n\nNo action needed — this is informational.`,
         });
       }
