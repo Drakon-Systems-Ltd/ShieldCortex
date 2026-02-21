@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.13.2] - 2026-02-21
+
+### Fixed
+
+- **Quarantine cloud sync gap** — `syncQuarantineToCloud` now fires for all QUARANTINE paths: pipeline-native results (pipeline.ts step 9) and post-pipeline sub-agent trust overrides (store.ts). Previously only memory writes synced quarantine content to cloud.
+
 ## [2.13.0] - 2026-02-21
 
 ### Added
