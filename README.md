@@ -384,6 +384,39 @@ npx shieldcortex --version          # Show version
 
 ---
 
+## Battle-Tested in Production
+
+ShieldCortex isn't a weekend project we uploaded and forgot. It runs **24/7 in production** across a fleet of three AI agents handling real data:
+
+| Agent | Role | Environment | Data Handled |
+|-------|------|------------|--------------|
+| **Jarvis** (Opus) | Commander — orchestrates everything | Oracle ARM server | Financial records, business operations, multi-agent delegation |
+| **TARS** (Sonnet) | Home automation & personal ops | Intel N100 (Umbrel) | Smart home, security cameras, family scheduling |
+| **E.D.I.T.H.** (Sonnet) | School IT & safeguarding | Dell PowerEdge T630 | Student data (GDPR), staff management, network security |
+
+These agents share memory, delegate tasks between each other, and handle sensitive data every day. ShieldCortex's access controls ensure E.D.I.T.H. can't read Jarvis's financial data, and TARS can't access student records.
+
+### Attacks We've Caught
+
+A [viral security audit](https://x.com/mrnacknack/status/2016134416897360212) (742K views) tested 10 attack vectors against AI agent platforms. We mapped every single one against our defences:
+
+| Attack Vector | Status |
+|--------------|--------|
+| Memory poisoning via prompt injection | ✅ Blocked |
+| Credential harvesting from agent memory | ✅ Blocked |
+| Cross-agent memory contamination | ✅ Blocked |
+| Malicious tool output injection | ✅ Blocked |
+| Context window overflow attacks | ✅ Blocked |
+| Privilege escalation via sub-agents | ✅ Blocked |
+| Memory exfiltration via crafted queries | ✅ Blocked |
+| Persistent backdoor insertion | ✅ Blocked |
+| Trust boundary violations | ✅ Blocked |
+| Audit trail tampering | ✅ Blocked |
+
+**10/10 defended.** Not in theory. In production.
+
+---
+
 ## Links
 
 - **Website:** [shieldcortex.ai](https://shieldcortex.ai)
