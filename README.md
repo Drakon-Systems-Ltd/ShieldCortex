@@ -60,6 +60,7 @@ Most AI memory tools give you a key-value store with search. ShieldCortex gives 
 | **Salience Scoring** | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Memory Poisoning Defence** | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Credential Leak Detection** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **LLM Verification (Tier 2)** | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Sub-Agent Access Control** | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Open Source | ✅ | ✅ | ✅ | Partial | Partial |
 | Self-Hosted | ✅ | ✅ | ✅ | ❌ | Partial |
@@ -174,18 +175,21 @@ curl -X POST http://localhost:3001/api/v1/scan \
   -d '{"content": "API uses OAuth2", "title": "Auth Architecture"}'
 ```
 
-### As a Library (70 Exported APIs)
+### As a Library (70+ Exported APIs)
 
 ```javascript
 import {
   addMemory,
   getMemoryById,
   runDefencePipeline,
+  runDefencePipelineWithVerify,  // async, with optional LLM verification
   scanSkill,
   extractFromMemory,
   consolidate,
   calculateDecayedScore,
   detectContradictions,
+  getVerifyConfig,
+  setVerifyConfig,
   initDatabase
 } from 'shieldcortex';
 
@@ -222,6 +226,24 @@ Researchers have [demonstrated memory poisoning attacks](https://embracethered.c
 | 4. **Structural Validation** | JSON/format integrity, fragmentation analysis |
 | 5. **Behavioural Scoring** | Anomaly detection, entropy analysis, trust scoring |
 | 6. **Credential Leak Detection** | Blocks API keys, tokens, private keys (25+ patterns, 11 providers) |
+| 7. **LLM Verification** *(optional)* | Cloud-based LLM second opinion on ambiguous content (Tier 2) |
+
+### Tiered Defence
+
+The pipeline runs in two tiers:
+
+- **Tier 1** (local, 1-5ms): Regex pattern detection — runs on every write, instant
+- **Tier 2** (cloud, 500-2000ms): LLM verification via Claude — optional, async, for content flagged as QUARANTINE
+
+Tier 2 is **fail-OPEN** — if the LLM is unavailable, the Tier 1 verdict stands. Two modes:
+- **Advisory** (default): fire-and-forget, non-blocking — LLM analyses in the background
+- **Enforce**: awaits LLM verdict, can upgrade QUARANTINE → BLOCK on high-confidence threats
+
+```bash
+# Enable LLM verification (requires cloud sync)
+npx shieldcortex config --cloud-api-key <key> --cloud-enable
+npx shieldcortex config --verify-enable --verify-mode advisory
+```
 
 ### Attack Vectors Blocked
 
@@ -309,8 +331,8 @@ Local Agent                    ShieldCortex Cloud
 ┌──────────────┐               ┌──────────────────────┐
 │  npm package │──audit sync──▶│  Team dashboard      │
 │  (free,      │               │  Audit log + stats   │
-│   unlimited) │               │  Team invites        │
-│              │               │  Usage analytics     │
+│   unlimited) │──verify req──▶│  LLM verification    │
+│              │◀─────verdict──│  Team invites        │
 └──────────────┘               └──────────────────────┘
 ```
 
@@ -344,6 +366,9 @@ npx shieldcortex service install    # Auto-start on login
 npx shieldcortex config --cloud-api-key <key>  # Set Cloud API key
 npx shieldcortex config --cloud-enable          # Enable cloud sync
 npx shieldcortex config --mode strict           # Defence mode
+npx shieldcortex config --verify-enable         # Enable LLM verification
+npx shieldcortex config --verify-mode enforce   # Enforce mode (await verdict)
+npx shieldcortex config --verify-timeout 5000   # Timeout in ms (1000-30000)
 
 # Maintenance
 npx shieldcortex uninstall          # Full uninstall

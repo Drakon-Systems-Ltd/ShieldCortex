@@ -7,7 +7,11 @@ ShieldCortex is a security layer and brain-like memory system for AI agents. It 
 ```
 Agent → ShieldCortex → Memory Store (SQLite)
          ↓
-    Trust → Firewall → Sensitivity → Fragmentation → Audit
+    Tier 1 (sync, 1-5ms):
+    Trust → Firewall → Sensitivity → Fragmentation → Credential → Audit
+         ↓ (if QUARANTINE + verify enabled)
+    Tier 2 (async, 500-2000ms):
+    Cloud LLM Verification → verdict → optional QUARANTINE→BLOCK upgrade
 ```
 
 ## Memory Model
@@ -51,7 +55,7 @@ Base salience: 0.25. Deletion threshold: 0.2.
 
 ## Defence Pipeline
 
-Every `addMemory()` call runs through 5 layers:
+Every `addMemory()` call runs through a tiered defence pipeline:
 
 ### 1. Trust Scorer (`src/defence/trust/`)
 Scores the source of the memory write:
@@ -96,6 +100,33 @@ Cross-references new memories with recent ones to catch multi-step assembly atta
 ### 5. Audit Logger (`src/defence/audit/`)
 
 Full forensic trail of every memory operation: source, trust score, firewall result, sensitivity level, anomaly score, threat indicators, blocked patterns, duration.
+
+### 6. Credential Leak Detection (`src/defence/credential-leak/`)
+
+Scans content for 25+ credential patterns across 11 providers (AWS, GitHub, Stripe, etc.). Entropy analysis catches generic secrets. Blocked credentials upgrade the firewall result to BLOCK.
+
+### Tier 2: LLM Verification (`src/cloud/verify.ts`)
+
+Optional async layer for content that Tier 1 flags as QUARANTINE. Submits content to `/v1/verify` for cloud-based LLM analysis (Claude 3.5 Haiku).
+
+- **Fail-OPEN** — if the LLM is unavailable or times out, the Tier 1 verdict stands unchanged
+- **Advisory mode** (default): fire-and-forget HTTP request, returns `{ status: 'pending' }` immediately
+- **Enforce mode**: awaits the LLM verdict; upgrades QUARANTINE → BLOCK if verdict is THREAT with confidence >= 0.7
+- Credentials are redacted before sending to the LLM
+- Configurable timeout (default 5000ms, range 1000-30000ms)
+- Gated by: cloud enabled + API key set + verify enabled + firewall result matches triggers
+
+**Config** (`~/.shieldcortex/config.json`):
+```json
+{
+  "verifyEnabled": true,
+  "verifyMode": "advisory",
+  "verifyTriggers": ["QUARANTINE"],
+  "verifyTimeoutMs": 5000
+}
+```
+
+**API**: `runDefencePipelineWithVerify()` wraps the sync pipeline and adds optional verification. Returns `DefencePipelineResultWithVerify` which extends the standard result with a `verification` field.
 
 ## Knowledge Graph (`src/graph/`)
 
@@ -154,8 +185,13 @@ shieldcortex/
 │   │   ├── similarity.ts           # Semantic similarity
 │   │   ├── activation.ts           # Spreading activation
 │   │   └── contradiction.ts        # Contradiction detection
+│   ├── cloud/
+│   │   ├── config.ts               # Cloud + verify config (~/.shieldcortex/config.json)
+│   │   ├── cli.ts                  # CLI flag handlers (cloud + verify)
+│   │   ├── sync.ts                 # Fire-and-forget audit sync
+│   │   └── verify.ts               # LLM verification HTTP client (Tier 2)
 │   ├── defence/
-│   │   ├── pipeline.ts             # Orchestrates all 5 layers
+│   │   ├── pipeline.ts             # Orchestrates all layers (sync + async verify)
 │   │   ├── types.ts                # Defence type definitions
 │   │   ├── firewall/
 │   │   │   ├── index.ts            # Firewall orchestrator
@@ -174,6 +210,8 @@ shieldcortex/
 │   │   │   ├── entity-extractor.ts
 │   │   │   ├── temporal-analyzer.ts
 │   │   │   └── assembly-detector.ts
+│   │   ├── credential-leak/
+│   │   │   └── index.ts            # 25+ credential patterns, entropy analysis
 │   │   ├── audit/
 │   │   │   ├── logger.ts           # Write audit entries
 │   │   │   └── queries.ts          # Query audit trail
