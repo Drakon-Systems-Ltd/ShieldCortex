@@ -25,6 +25,7 @@ import { scanForCredentials, type CredentialScanResult } from './credential-leak
 import { logAudit, createContentHash } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
 import { syncToCloud } from '../cloud/sync.js';
+import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { getDefenceMode } from '../cloud/config.js';
 
 export function runDefencePipeline(
@@ -159,6 +160,27 @@ export function runDefencePipeline(
       syncToCloud(pipelineResult, source, durationMs);
     } catch {
       // Cloud sync must never affect local pipeline
+    }
+
+    // 9. Sync quarantine content to cloud (fire-and-forget)
+    if (firewall.result === 'QUARANTINE') {
+      try {
+        const indicators = firewall.threatIndicators.map(t =>
+          typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
+        );
+        syncQuarantineToCloud({
+          original_content: content,
+          original_title: title,
+          source_type: source.type,
+          source_identifier: source.identifier,
+          reason,
+          threat_indicators: indicators,
+          anomaly_score: firewall.anomalyScore,
+          firewall_result: firewall.result,
+        });
+      } catch {
+        // Quarantine sync must never affect local pipeline
+      }
     }
 
     return pipelineResult;

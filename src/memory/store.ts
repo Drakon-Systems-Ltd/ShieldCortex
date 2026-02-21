@@ -44,7 +44,8 @@ import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult } from '../graph/resolve.js';
-import { runDefencePipeline, storeFragmentationData, syncQuarantineToCloud } from '../defence/index.js';
+import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
+import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
@@ -289,20 +290,9 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
     db.prepare(`INSERT INTO quarantine (original_title, original_content, project, source_type, source_identifier, reason, threat_indicators, anomaly_score, firewall_result, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
       .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, result.firewall.result, result.auditId);
 
-    // Sync quarantine entry to cloud (fire-and-forget)
-    const indicators = result.firewall.threatIndicators.map(t =>
-      typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
-    );
-    syncQuarantineToCloud({
-      original_content: input.content,
-      original_title: input.title,
-      source_type: source.type,
-      source_identifier: source.identifier,
-      reason: result.firewall.reason,
-      threat_indicators: indicators,
-      anomaly_score: result.firewall.anomalyScore,
-      firewall_result: result.firewall.result,
-    });
+    // Cloud quarantine sync is handled upstream:
+    // - Pipeline QUARANTINE → synced by pipeline.ts step 9
+    // - Post-pipeline override (sub-agent trust) → synced by addMemory() override block
   } catch (e) {
     console.error('[shieldcortex] Failed to quarantine memory:', e);
   }
@@ -353,6 +343,26 @@ export function addMemory(
       defenceResult.allowed = false;
       defenceResult.firewall.result = 'QUARANTINE';
       defenceResult.firewall.reason = `Sub-agent write (trust=${trust.toFixed(3)}) requires parent approval`;
+
+      // Pipeline returned ALLOW so pipeline.ts didn't sync quarantine content.
+      // Sync it now since we've overridden to QUARANTINE post-pipeline.
+      try {
+        const indicators = defenceResult.firewall.threatIndicators.map(t =>
+          typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
+        );
+        syncQuarantineToCloud({
+          original_content: input.content,
+          original_title: input.title,
+          source_type: source.type,
+          source_identifier: source.identifier,
+          reason: defenceResult.firewall.reason,
+          threat_indicators: indicators,
+          anomaly_score: defenceResult.firewall.anomalyScore,
+          firewall_result: defenceResult.firewall.result,
+        });
+      } catch {
+        // Cloud sync must never affect local quarantine flow
+      }
     }
 
     if (!defenceResult.allowed) {
