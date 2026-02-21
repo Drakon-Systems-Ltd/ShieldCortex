@@ -107,10 +107,13 @@ export function setCloudConfig(updates: Partial<CloudConfig>): void {
   if (updates.cloudEnabled !== undefined) existing.cloudEnabled = updates.cloudEnabled;
 
   mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2) + '\n');
+  const content = JSON.stringify(existing, null, 2) + '\n';
+  writeFileSync(CONFIG_FILE, content);
+  writeConfigSignature(content);
 
   // Invalidate cache
   cachedConfig = null;
+  configTampered = false;
 }
 
 /** Reset the in-memory cache (useful for testing) */

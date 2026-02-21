@@ -88,8 +88,9 @@ export function syncToCloud(
         try { updateLastSyncAt(); } catch { /* truly silent */ }
       }
     })
-    .catch(() => {
+    .catch((e: unknown) => {
       clearTimeout(timeoutId);
+      console.error('[shieldcortex] Cloud sync failed:', e instanceof Error ? e.message : String(e));
       try { enqueueFailedSync(entry); } catch { /* truly silent */ }
     });
 }

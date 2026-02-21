@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -243,8 +243,30 @@ function installPlugin(): boolean {
       }
     }
 
-    // Verify readability
+    // Resolve shieldcortex module path and patch the plugin
     const indexDest = path.join(destDir, 'index.js');
+    const packageRoot = path.resolve(__dirname, '..', '..');
+    const distIndexUrl = pathToFileURL(path.join(packageRoot, 'dist', 'index.js')).href;
+    const distDefenceUrl = pathToFileURL(path.join(packageRoot, 'dist', 'defence', 'index.js')).href;
+
+    try {
+      let pluginCode = fs.readFileSync(indexDest, 'utf-8');
+      pluginCode = pluginCode.replace(/import\("shieldcortex"\)/g, `import("${distIndexUrl}")`);
+      pluginCode = pluginCode.replace(/import\("shieldcortex\/defence"\)/g, `import("${distDefenceUrl}")`);
+
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8'));
+        pluginCode = pluginCode.replace(/version:\s*"[^"]*"/, `version: "${pkg.version}"`);
+      } catch {
+        // Keep existing version if package.json can't be read
+      }
+
+      fs.writeFileSync(indexDest, pluginCode, 'utf-8');
+    } catch (e) {
+      console.warn(`  Warning: Could not patch plugin imports/version: ${(e as Error).message}`);
+    }
+
+    // Verify readability
     try {
       fs.accessSync(indexDest, fs.constants.R_OK);
     } catch {

@@ -7,6 +7,7 @@
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
@@ -35,6 +36,11 @@ type PluginApi = {
 
 interface SCConfig { cloudApiKey?: string; cloudEndpoint?: string; binaryPath?: string }
 let _config: SCConfig | null = null;
+let _version = "0.0.0";
+try {
+  const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf-8"));
+  _version = pkg.version;
+} catch { /* fallback */ }
 
 async function loadConfig(): Promise<SCConfig> {
   if (_config) return _config;
@@ -78,16 +84,6 @@ let _pipeline: ((content: string, title: string, source: any, config?: any, proj
 async function getPipeline() {
   if (_pipeline) return _pipeline;
   try {
-    // Initialize the database first — the pipeline's logAudit and persistEvent
-    // functions require it, and the plugin runs outside the MCP server context
-    // where initDatabase() would normally be called.
-    try {
-      const { initDatabase } = await import("shieldcortex");
-      initDatabase();
-    } catch {
-      // Database init failed (e.g. better-sqlite3 not available) — pipeline
-      // will still work, audit logging will gracefully return -1
-    }
     const mod = await import("shieldcortex/defence");
     _pipeline = mod.runDefencePipeline;
     return _pipeline;
@@ -190,7 +186,7 @@ function handleLlmInput(event: LlmInputEvent, ctx: AgentCtx): void {
       const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t));
       for (const text of texts) {
         if (!text || text.length < 10) continue;
-        const result = pipeline(text, "llm_input", { type: "plugin", name: "openclaw-realtime", trust: "medium" });
+        const result = pipeline(text, "llm_input", { type: "plugin", identifier: "openclaw-realtime", name: "openclaw-realtime", trust: "medium" });
         if (result && !result.allowed) {
           console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.reason}`);
           const entry = {
@@ -242,11 +238,18 @@ export default {
   id: "shieldcortex-realtime",
   name: "ShieldCortex Real-time Scanner",
   description: "Real-time defence scanning on LLM inputs and memory extraction from outputs",
-  version: "2.11.0",
+  version: _version,
 
   register(api: PluginApi) {
     api.on("llm_input", handleLlmInput);
     api.on("llm_output", handleLlmOutput);
+    // Fire-and-forget: init database for local audit logging
+    import("shieldcortex")
+      .then((mod) => {
+        mod.initDatabase();
+        api.logger.info("[shieldcortex] Audit database initialized");
+      })
+      .catch((e) => api.logger.info("[shieldcortex] DB init deferred: " + (e instanceof Error ? e.message : String(e))));
     api.logger.info("[shieldcortex] Real-time scanning plugin registered (llm_input + llm_output)");
   },
 };
