@@ -97,16 +97,20 @@ export function extractEntities(content: string): ExtractedEntity[] {
 export function storeExtractedEntities(memoryId: number, entities: ExtractedEntity[]): void {
   if (entities.length === 0) return;
 
-  const db = getDatabase();
-  const stmt = db.prepare(
-    'INSERT INTO fragmentation_entities (memory_id, entity_type, entity_value) VALUES (?, ?, ?)'
-  );
+  try {
+    const db = getDatabase();
+    const stmt = db.prepare(
+      'INSERT INTO fragmentation_entities (memory_id, entity_type, entity_value) VALUES (?, ?, ?)'
+    );
 
-  const insertMany = db.transaction((items: ExtractedEntity[]) => {
-    for (const entity of items) {
-      stmt.run(memoryId, entity.type, entity.value);
-    }
-  });
+    const insertMany = db.transaction((items: ExtractedEntity[]) => {
+      for (const entity of items) {
+        stmt.run(memoryId, entity.type, entity.value);
+      }
+    });
 
-  insertMany(entities);
+    insertMany(entities);
+  } catch {
+    // DB not initialized (e.g. SaaS context) — skip entity storage
+  }
 }

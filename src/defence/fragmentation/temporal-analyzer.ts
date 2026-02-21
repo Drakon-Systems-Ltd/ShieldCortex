@@ -26,16 +26,21 @@ export interface RecentEntity {
  * Query fragmentation_entities for entries within the time window
  */
 export function getRecentEntities(windowHours: number): RecentEntity[] {
-  const db = getDatabase();
-  const rows = db.prepare(
-    `SELECT entity_type, entity_value, memory_id, created_at
-     FROM fragmentation_entities
-     WHERE created_at >= datetime('now', ? || ' hours')
-     ORDER BY created_at DESC
-     LIMIT 10000`
-  ).all(-windowHours) as RecentEntity[];
+  try {
+    const db = getDatabase();
+    const rows = db.prepare(
+      `SELECT entity_type, entity_value, memory_id, created_at
+       FROM fragmentation_entities
+       WHERE created_at >= datetime('now', ? || ' hours')
+       ORDER BY created_at DESC
+       LIMIT 10000`
+    ).all(-windowHours) as RecentEntity[];
 
-  return rows;
+    return rows;
+  } catch {
+    // DB not initialized (e.g. SaaS context) — no fragmentation data available
+    return [];
+  }
 }
 
 /**

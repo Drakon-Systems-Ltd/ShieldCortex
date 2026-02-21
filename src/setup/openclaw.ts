@@ -61,7 +61,30 @@ function resolveUserHome(): string {
       // Fall through to os.homedir()
     }
   }
-  return os.homedir();
+
+  const home = os.homedir();
+
+  // If we're root without SUDO_USER (e.g. after `sudo su -`),
+  // search /home/* for a user who has .openclaw/ or .claude/ configured.
+  if (home === '/root' || (process.getuid && process.getuid() === 0)) {
+    try {
+      const users = fs.readdirSync('/home');
+      for (const username of users) {
+        const userHome = path.join('/home', username);
+        try {
+          if (!fs.statSync(userHome).isDirectory()) continue;
+        } catch { continue; }
+        if (fs.existsSync(path.join(userHome, '.openclaw')) ||
+            fs.existsSync(path.join(userHome, '.claude'))) {
+          return userHome;
+        }
+      }
+    } catch {
+      // /home not readable
+    }
+  }
+
+  return home;
 }
 
 /**

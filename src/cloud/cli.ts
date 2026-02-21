@@ -1,16 +1,20 @@
-import { getCloudConfig, setCloudConfig, getDefenceMode, setDefenceMode, type DefenceMode } from './config.js';
+import { getCloudConfig, setCloudConfig, getDefenceMode, setDefenceMode, getVerifyConfig, setVerifyConfig, type DefenceMode } from './config.js';
 
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
+const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
 
 export function handleCloudConfig(args: string[]): void {
   if (args.includes('--cloud-status')) {
     const config = getCloudConfig();
     const mode = getDefenceMode();
+    const verify = getVerifyConfig();
     console.log('\nShieldCortex Configuration:');
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
     console.log(`  API Key:  ${config.cloudApiKey ? config.cloudApiKey.substring(0, 12) + '...' : 'Not set'}`);
     console.log(`  Base URL: ${config.cloudBaseUrl}`);
+    console.log(`  LLM Verify:   ${verify.verifyEnabled ? 'Enabled' : 'Disabled'} (${verify.verifyMode}, ${verify.verifyTimeoutMs}ms timeout)`);
+    console.log(`  Verify Triggers: ${verify.verifyTriggers.join(', ')}`);
     console.log('');
     return;
   }
@@ -55,6 +59,51 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  // ── Verify flags ──
+
+  if (args.includes('--verify-enable')) {
+    const config = getCloudConfig();
+    if (!config.cloudEnabled || !config.cloudApiKey) {
+      console.error('Error: Cloud sync must be enabled with an API key before enabling verification.');
+      console.error('Note: Your cloud API key must include the "verify" scope.');
+      process.exit(1);
+    }
+    setVerifyConfig({ verifyEnabled: true });
+    console.log('LLM verification enabled.');
+    console.log('Note: Your cloud API key must include the "verify" scope.');
+    changed = true;
+  }
+
+  if (args.includes('--verify-disable')) {
+    setVerifyConfig({ verifyEnabled: false });
+    console.log('LLM verification disabled.');
+    changed = true;
+  }
+
+  const verifyModeIdx = args.indexOf('--verify-mode');
+  if (verifyModeIdx !== -1 && args[verifyModeIdx + 1]) {
+    const vm = args[verifyModeIdx + 1];
+    if (!VALID_VERIFY_MODES.includes(vm as typeof VALID_VERIFY_MODES[number])) {
+      console.error(`Invalid verify mode: ${vm}. Must be one of: ${VALID_VERIFY_MODES.join(', ')}`);
+      process.exit(1);
+    }
+    setVerifyConfig({ verifyMode: vm as 'advisory' | 'enforce' });
+    console.log(`Verify mode set to: ${vm}`);
+    changed = true;
+  }
+
+  const verifyTimeoutIdx = args.indexOf('--verify-timeout');
+  if (verifyTimeoutIdx !== -1 && args[verifyTimeoutIdx + 1]) {
+    const ms = parseInt(args[verifyTimeoutIdx + 1], 10);
+    if (isNaN(ms) || ms < 1000 || ms > 30000) {
+      console.error('Invalid verify timeout. Must be between 1000 and 30000 ms.');
+      process.exit(1);
+    }
+    setVerifyConfig({ verifyTimeoutMs: ms });
+    console.log(`Verify timeout set to: ${ms}ms`);
+    changed = true;
+  }
+
   if (!changed) {
     console.log('Usage: npx shieldcortex config [options]');
     console.log('');
@@ -65,5 +114,11 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-enable         Enable cloud sync');
     console.log('  --cloud-disable        Disable cloud sync');
     console.log('  --cloud-status         Show current configuration');
+    console.log('');
+    console.log('LLM Verification:');
+    console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
+    console.log('  --verify-disable       Disable LLM verification');
+    console.log('  --verify-mode <mode>   Set verify mode (advisory|enforce)');
+    console.log('  --verify-timeout <ms>  Set verify timeout in ms (1000-30000)');
   }
 }

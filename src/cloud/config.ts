@@ -218,6 +218,48 @@ export function setDefenceMode(mode: DefenceMode): void {
   writeRawConfig(raw);
 }
 
+// ── Verify Config ─────────────────────────────────────
+
+export interface VerifyConfig {
+  verifyEnabled: boolean;
+  verifyMode: 'advisory' | 'enforce';
+  verifyTriggers: Array<'ALLOW' | 'BLOCK' | 'QUARANTINE'>;
+  verifyTimeoutMs: number;
+}
+
+const DEFAULT_VERIFY_CONFIG: VerifyConfig = {
+  verifyEnabled: false,
+  verifyMode: 'advisory',
+  verifyTriggers: ['QUARANTINE'],
+  verifyTimeoutMs: 5000,
+};
+
+/**
+ * Returns the persisted LLM verification config.
+ * Verify requires cloud to be configured (cloudEnabled + cloudApiKey).
+ */
+export function getVerifyConfig(): VerifyConfig {
+  const raw = readRawConfig();
+  return {
+    verifyEnabled: typeof raw.verifyEnabled === 'boolean' ? raw.verifyEnabled : DEFAULT_VERIFY_CONFIG.verifyEnabled,
+    verifyMode: raw.verifyMode === 'enforce' ? 'enforce' : DEFAULT_VERIFY_CONFIG.verifyMode,
+    verifyTriggers: Array.isArray(raw.verifyTriggers) ? raw.verifyTriggers as VerifyConfig['verifyTriggers'] : DEFAULT_VERIFY_CONFIG.verifyTriggers,
+    verifyTimeoutMs: typeof raw.verifyTimeoutMs === 'number' ? raw.verifyTimeoutMs : DEFAULT_VERIFY_CONFIG.verifyTimeoutMs,
+  };
+}
+
+/**
+ * Persists LLM verification config to ~/.shieldcortex/config.json.
+ */
+export function setVerifyConfig(updates: Partial<VerifyConfig>): void {
+  const raw = readRawConfig();
+  if (updates.verifyEnabled !== undefined) raw.verifyEnabled = updates.verifyEnabled;
+  if (updates.verifyMode !== undefined) raw.verifyMode = updates.verifyMode;
+  if (updates.verifyTriggers !== undefined) raw.verifyTriggers = updates.verifyTriggers;
+  if (updates.verifyTimeoutMs !== undefined) raw.verifyTimeoutMs = updates.verifyTimeoutMs;
+  writeRawConfig(raw);
+}
+
 // ── Device Identity ────────────────────────────────────
 
 /**

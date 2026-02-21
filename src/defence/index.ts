@@ -3,13 +3,14 @@
  */
 
 // Pipeline
-export { runDefencePipeline } from './pipeline.js';
+export { runDefencePipeline, runDefencePipelineWithVerify } from './pipeline.js';
 
 // Config & types
 export { DEFAULT_DEFENCE_CONFIG } from './types.js';
 export type {
   DefenceConfig,
   DefencePipelineResult,
+  DefencePipelineResultWithVerify,
   DefenceSource,
   FirewallAnalysis,
   FirewallResult,
@@ -18,6 +19,8 @@ export type {
   SensitivityLevel,
   ThreatIndicator,
   TrustScore,
+  VerifyResult,
+  VerifyThreat,
   QuarantineEntry,
   AuditEntry,
 } from './types.js';
@@ -46,7 +49,8 @@ export { scanSkill, scanSkillContent, discoverSkillFiles, detectFormat, detectFo
 export type { SkillScanResult, SkillScanOptions, SkillThreatFinding, ParsedSkill, SkillFormat } from './skill-scanner/index.js';
 
 // Cloud
-export { getCloudConfig, setCloudConfig, clearCloudConfigCache, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered } from '../cloud/config.js';
-export type { CloudConfig, DefenceMode } from '../cloud/config.js';
+export { getCloudConfig, setCloudConfig, clearCloudConfigCache, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, getVerifyConfig, setVerifyConfig } from '../cloud/config.js';
+export type { CloudConfig, DefenceMode, VerifyConfig } from '../cloud/config.js';
 export { syncToCloud } from '../cloud/sync.js';
 export { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
+export { submitVerification, pollVerification } from '../cloud/verify.js';

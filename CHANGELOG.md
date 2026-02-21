@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.13.0] - 2026-02-21
+
+### Added
+
+- **LLM Verification (Tier 2)** — Optional cloud-based LLM verification layer for content flagged by the regex firewall. Adds `runDefencePipelineWithVerify()` async wrapper that submits QUARANTINE'd content to `/v1/verify` for deeper analysis. Two modes:
+  - **Advisory** (default): fire-and-forget, non-blocking
+  - **Enforce**: awaits LLM verdict, upgrades QUARANTINE → BLOCK on high-confidence threats
+- **Verify CLI** — `npx shieldcortex config --verify-enable|--verify-disable|--verify-mode|--verify-timeout` for managing LLM verification settings
+- New exports: `submitVerification`, `pollVerification`, `getVerifyConfig`, `setVerifyConfig`
+- New types: `VerifyResult`, `VerifyThreat`, `DefencePipelineResultWithVerify`, `VerifyConfig`
+
+### Fixed
+
+- **Fragmentation false BLOCK in SaaS context** — `getRecentEntities()` and `storeExtractedEntities()` now gracefully handle missing SQLite database (try/catch with empty fallback), preventing fail-closed BLOCK decisions when the npm package is used as a library without `initDatabase()`
+- **Visualization server bound to 0.0.0.0** — Dashboard server now defaults to `127.0.0.1` (localhost only). Override with `SHIELDCORTEX_HOST` env var if LAN access is needed
+
 ## [2.12.6] - 2026-02-18
 
 ### Fixed

@@ -88,6 +88,38 @@ export const DEFAULT_DEFENCE_CONFIG: DefenceConfig = {
   strictSourceMode: false,
 };
 
+// ── LLM Verification Types ──
+
+export interface VerifyThreat {
+  type: string;
+  description: string;
+  severity: string;
+}
+
+export interface VerifyResult {
+  id: number;
+  verdict?: string;
+  confidence?: number;
+  threats_detected?: VerifyThreat[];
+  action?: string;
+  cached?: boolean;
+  duration_ms?: number;
+  status: string;
+}
+
+export interface DefencePipelineResultWithVerify extends DefencePipelineResult {
+  verification?: {
+    id: number;
+    status: 'pending' | 'completed' | 'failed' | 'skipped';
+    verdict?: string;
+    confidence?: number;
+    threats_detected?: VerifyThreat[];
+    action?: string;
+    mode: 'advisory' | 'enforce';
+    originalFirewallResult?: FirewallResult;
+  };
+}
+
 // ── Database Row Interfaces ──
 
 export interface QuarantineEntry {

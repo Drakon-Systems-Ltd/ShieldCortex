@@ -2055,7 +2055,8 @@ export function startVisualizationServer(dbPath?: string): void {
     process.exit(1);
   });
 
-  server.listen(PORT, () => {
+  const HOST = process.env.SHIELDCORTEX_HOST || '127.0.0.1';
+  server.listen(Number(PORT), HOST, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║             🧠 ShieldCortex API Server                       ║

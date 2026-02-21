@@ -8,6 +8,7 @@
 import type {
   DefenceConfig,
   DefencePipelineResult,
+  DefencePipelineResultWithVerify,
   DefenceSource,
   FirewallAnalysis,
   FragmentationAnalysis,
@@ -207,4 +208,79 @@ export function runDefencePipeline(
       auditId,
     };
   }
+}
+
+/**
+ * Async pipeline wrapper with optional LLM verification.
+ *
+ * Runs the synchronous defence pipeline, then optionally submits content
+ * for cloud-based LLM verification (Tier 2).
+ *
+ * Advisory mode: fire-and-forget (returns immediately with pending status)
+ * Enforce mode: awaits result, may upgrade QUARANTINE → BLOCK
+ * Fail-OPEN: if verification fails/times out, original verdict stands.
+ */
+export async function runDefencePipelineWithVerify(
+  content: string,
+  title: string,
+  source: DefenceSource,
+  config?: DefenceConfig,
+  project?: string,
+): Promise<DefencePipelineResultWithVerify> {
+  const result = runDefencePipeline(content, title, source, config, project);
+
+  // Lazy import to avoid circular dependencies and keep sync pipeline clean
+  const { getCloudConfig, getVerifyConfig } = await import('../cloud/config.js');
+  const verifyConfig = getVerifyConfig();
+  const cloudConfig = getCloudConfig();
+
+  // Check if verification should trigger
+  if (!cloudConfig.cloudEnabled || !cloudConfig.cloudApiKey || !verifyConfig.verifyEnabled) {
+    return result;
+  }
+
+  if (!verifyConfig.verifyTriggers.includes(result.firewall.result)) {
+    return result;
+  }
+
+  // Submit for verification
+  const { submitVerification } = await import('../cloud/verify.js');
+  const verifyResult = await submitVerification(content, title, result, source);
+
+  if (!verifyResult) {
+    return { ...result, verification: { id: 0, status: 'skipped', mode: verifyConfig.verifyMode } };
+  }
+
+  const verification: DefencePipelineResultWithVerify['verification'] = {
+    id: verifyResult.id,
+    status: verifyResult.status as 'pending' | 'completed' | 'failed',
+    verdict: verifyResult.verdict,
+    confidence: verifyResult.confidence,
+    threats_detected: verifyResult.threats_detected,
+    action: verifyResult.action,
+    mode: verifyConfig.verifyMode,
+  };
+
+  // In enforce mode, upgrade QUARANTINE → BLOCK if LLM says THREAT with high confidence
+  if (
+    verifyConfig.verifyMode === 'enforce' &&
+    verifyResult.status === 'completed' &&
+    verifyResult.verdict === 'THREAT' &&
+    (verifyResult.confidence ?? 0) >= 0.7 &&
+    result.firewall.result === 'QUARANTINE'
+  ) {
+    verification.originalFirewallResult = result.firewall.result;
+    return {
+      ...result,
+      allowed: false,
+      firewall: {
+        ...result.firewall,
+        result: 'BLOCK',
+        reason: `${result.firewall.reason} [LLM verified: THREAT, confidence ${verifyResult.confidence}]`,
+      },
+      verification,
+    };
+  }
+
+  return { ...result, verification };
 }

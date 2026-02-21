@@ -12,6 +12,7 @@
 // ── Defence ────────────────────────────────────────────────
 export {
   runDefencePipeline,
+  runDefencePipelineWithVerify,
   DEFAULT_DEFENCE_CONFIG,
   scoreSource,
   filterByTrust,
@@ -33,18 +34,26 @@ export {
   getCloudConfig,
   setCloudConfig,
   clearCloudConfigCache,
+  getVerifyConfig,
+  setVerifyConfig,
   syncToCloud,
   syncQuarantineToCloud,
+  submitVerification,
+  pollVerification,
   getDeviceId,
   getDeviceName,
 } from './defence/index.js';
 
 export type {
   DefenceConfig,
+  DefencePipelineResultWithVerify,
   DefenceSource,
   SensitivityLevel,
   FirewallResult,
+  VerifyResult,
+  VerifyThreat,
 } from './defence/types.js';
+export type { VerifyConfig } from './cloud/config.js';
 
 // ── Skill Scanner ──────────────────────────────────────────
 export {
