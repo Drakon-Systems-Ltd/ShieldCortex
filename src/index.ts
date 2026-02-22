@@ -441,6 +441,13 @@ async function main() {
     return;
   }
 
+  // Handle "iron-dome" subcommand — behaviour protection layer
+  if (process.argv[2] === 'iron-dome') {
+    const { handleIronDomeCommand } = await import('./cli/iron-dome.js');
+    await handleIronDomeCommand(process.argv.slice(3));
+    return;
+  }
+
   // Handle "scan" subcommand — lightweight content scan (no MCP server, no ONNX model)
   if (process.argv[2] === 'scan') {
     const text = process.argv[3];

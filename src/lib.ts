@@ -55,6 +55,31 @@ export type {
 } from './defence/types.js';
 export type { VerifyConfig } from './cloud/config.js';
 
+// ── Iron Dome ─────────────────────────────────────────────
+export {
+  activateIronDome,
+  deactivateIronDome,
+  getIronDomeStatus,
+  isChannelTrusted,
+  isActionAllowed,
+  scanForInjection,
+  checkPII,
+  handleKillPhrase,
+  IRON_DOME_PROFILES,
+  DEFAULT_IRON_DOME_CONFIG,
+} from './defence/iron-dome/index.js';
+
+export type {
+  IronDomeConfig,
+  IronDomeProfile,
+  InjectionScanResult,
+  InjectionDetection,
+  GatewayResult,
+  ActionGateResult,
+  PiiCheckResult,
+  KillSwitchResult,
+} from './defence/iron-dome/index.js';
+
 // ── Skill Scanner ──────────────────────────────────────────
 export {
   scanSkill,

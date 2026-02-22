@@ -762,6 +762,141 @@ but you can use this tool to check for new contradictions at any time.`,
   });
 
   // ============================================
+  // IRON DOME TOOLS
+  // ============================================
+
+  // Iron Dome Status
+  server.tool(
+    'iron_dome_status',
+    'Check if Iron Dome is active, show config summary including profile, trusted channels, and approval rules.',
+    {},
+    { title: 'Iron Dome Status', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    async () => {
+      const { getIronDomeStatus } = await import('./defence/iron-dome/index.js');
+      const status = getIronDomeStatus();
+
+      const lines = [
+        `## Iron Dome Status`,
+        '',
+        `**Active:** ${status.enabled ? 'Yes' : 'No'}`,
+      ];
+
+      if (status.enabled) {
+        const c = status.config;
+        lines.push(`**Profile:** ${c.profile ?? 'custom'}`);
+        lines.push(`**Trusted Channels:** ${c.trustedChannels.join(', ')}`);
+        lines.push(`**Kill Phrase:** "${c.killPhrase}"`);
+        lines.push(`**Require Approval:** ${c.requireApproval.join(', ')}`);
+        lines.push(`**Auto-Approve:** ${c.autoApprove.join(', ')}`);
+        lines.push(`**PII Never Output:** ${c.piiRules.neverOutput.length > 0 ? c.piiRules.neverOutput.join(', ') : '(none)'}`);
+        lines.push(`**PII Aggregates Only:** ${c.piiRules.aggregatesOnly.length > 0 ? c.piiRules.aggregatesOnly.join(', ') : '(none)'}`);
+      }
+
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    },
+  );
+
+  // Iron Dome Scan
+  server.tool(
+    'iron_dome_scan',
+    'Scan text for prompt injection patterns. Returns detections with category, severity, and matched text.',
+    {
+      text: z.string().describe('The text to scan for injection patterns'),
+    },
+    { title: 'Iron Dome Injection Scan', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    async (args) => {
+      const { scanForInjection } = await import('./defence/iron-dome/index.js');
+      const result = scanForInjection(args.text);
+
+      const lines = [
+        `## Iron Dome Scan Result`,
+        '',
+        `**Clean:** ${result.clean ? 'Yes' : 'No'}`,
+        `**Risk Level:** ${result.riskLevel}`,
+        `**Text Length:** ${result.textLength} chars`,
+        `**Summary:** ${result.summary}`,
+      ];
+
+      if (result.detections.length > 0) {
+        lines.push('', '### Detections', '');
+        for (const d of result.detections) {
+          lines.push(`- **[${d.severity.toUpperCase()}]** \`${d.category}\` / \`${d.pattern}\` — ${d.description}`);
+          lines.push(`  - Match: \`${d.match}\``);
+        }
+      }
+
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    },
+  );
+
+  // Iron Dome Check
+  server.tool(
+    'iron_dome_check',
+    'Check if an action is allowed (gateway + action gate). Use this before performing external actions like sending emails or deleting files.',
+    {
+      action: z.string().describe('The action type to check (e.g. "send_email", "delete_file", "api_call")'),
+      channel: z.string().optional().describe('The instruction channel (e.g. "terminal", "telegram", "email")'),
+      source: sourceParam,
+    },
+    { title: 'Iron Dome Action Check', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    async (args) => {
+      const { getIronDomeStatus, isActionAllowed, validateGateway } = await import('./defence/iron-dome/index.js');
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'iron_dome_check');
+      const status = getIronDomeStatus();
+
+      const lines = ['## Iron Dome Check', ''];
+
+      if (!status.enabled) {
+        lines.push('Iron Dome is not active. All actions are allowed.');
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      }
+
+      // Gateway check
+      if (args.channel) {
+        const gateway = validateGateway(args.channel, args.action, status.config, source);
+        lines.push(`**Gateway:** ${gateway.trustLevel} — ${gateway.reason}`);
+        if (!gateway.allowed) {
+          lines.push('', '**Result:** BLOCKED by gateway. Channel is not trusted.');
+          return { content: [{ type: 'text', text: lines.join('\n') }] };
+        }
+      }
+
+      // Action gate check
+      const gate = isActionAllowed(args.action, status.config, source);
+      lines.push(`**Action Gate:** ${gate.decision} — ${gate.reason}`);
+
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    },
+  );
+
+  // Iron Dome Activate
+  server.tool(
+    'iron_dome_activate',
+    'Activate Iron Dome with a profile. Profiles: school (GDPR strict), enterprise (financial protection), personal (lighter touch), paranoid (everything requires approval).',
+    {
+      profile: z.enum(['school', 'enterprise', 'personal', 'paranoid']).optional()
+        .describe('Security profile to activate'),
+    },
+    { title: 'Activate Iron Dome', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    async (args) => {
+      const { activateIronDome } = await import('./defence/iron-dome/index.js');
+      const config = activateIronDome(args.profile);
+
+      const lines = [
+        `## Iron Dome Activated`,
+        '',
+        `**Profile:** ${config.profile ?? 'default'}`,
+        `**Trusted Channels:** ${config.trustedChannels.join(', ')}`,
+        `**Kill Phrase:** "${config.killPhrase}"`,
+        `**Require Approval:** ${config.requireApproval.join(', ')}`,
+        `**Auto-Approve:** ${config.autoApprove.join(', ')}`,
+      ];
+
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    },
+  );
+
+  // ============================================
   // RESOURCES
   // ============================================
 

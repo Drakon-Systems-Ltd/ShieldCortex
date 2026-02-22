@@ -1,0 +1,154 @@
+/**
+ * Iron Dome — Behaviour Protection Layer
+ *
+ * Protects agent BEHAVIOUR (instruction gating, action approval, injection scanning)
+ * while the existing defence layer protects agent MEMORY.
+ *
+ * Main exports for the Iron Dome module.
+ */
+
+import { getDatabase } from '../../database/init.js';
+import type { IronDomeConfig, IronDomeProfile } from './config.js';
+import { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
+import { logIronDomeAudit } from './audit.js';
+
+// ── Re-exports ──
+
+export { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
+export type { IronDomeConfig, IronDomeProfile, IronDomePiiRules, IronDomeSubAgentRestrictions } from './config.js';
+
+export { scanForInjection } from './injection-scanner.js';
+export type { InjectionScanResult, InjectionDetection, InjectionSeverity, InjectionCategory } from './injection-scanner.js';
+
+export { isChannelTrusted, validateGateway } from './gateway.js';
+export type { GatewayResult } from './gateway.js';
+
+export { isActionAllowed } from './action-gate.js';
+export type { ActionGateResult, ActionDecision } from './action-gate.js';
+
+export { checkPII } from './pii-guard.js';
+export type { PiiCheckResult, PiiViolation } from './pii-guard.js';
+
+export { handleKillPhrase } from './kill-switch.js';
+export type { KillSwitchResult } from './kill-switch.js';
+
+export { logIronDomeAudit } from './audit.js';
+export type { IronDomeAuditEvent } from './audit.js';
+
+// ── Iron Dome State Management ──
+
+// In-memory config (persisted to SQLite iron_dome_config table)
+let activeConfig: IronDomeConfig = { ...DEFAULT_IRON_DOME_CONFIG };
+
+/**
+ * Ensure the iron_dome_config table exists.
+ */
+function ensureTable(): void {
+  try {
+    const db = getDatabase();
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS iron_dome_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+  } catch {
+    // Database may not be initialised yet — config stays in memory
+  }
+}
+
+/**
+ * Load Iron Dome configuration from the database.
+ */
+function loadConfig(): IronDomeConfig {
+  try {
+    ensureTable();
+    const db = getDatabase();
+    const row = db.prepare('SELECT value FROM iron_dome_config WHERE key = ?').get('config') as { value: string } | undefined;
+    if (row) {
+      activeConfig = JSON.parse(row.value);
+      return activeConfig;
+    }
+  } catch {
+    // Fall through to default
+  }
+  return activeConfig;
+}
+
+/**
+ * Save Iron Dome configuration to the database.
+ */
+function saveConfig(config: IronDomeConfig): void {
+  try {
+    ensureTable();
+    const db = getDatabase();
+    db.prepare(`
+      INSERT INTO iron_dome_config (key, value, updated_at)
+      VALUES ('config', ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(JSON.stringify(config));
+  } catch (err) {
+    console.error('[iron-dome] Failed to save config:', err);
+  }
+}
+
+/**
+ * Activate Iron Dome with an optional profile.
+ */
+export function activateIronDome(profile?: IronDomeProfile): IronDomeConfig {
+  let config: IronDomeConfig;
+
+  if (profile && IRON_DOME_PROFILES[profile]) {
+    config = {
+      ...IRON_DOME_PROFILES[profile],
+      enabled: true,
+    };
+  } else {
+    config = {
+      ...DEFAULT_IRON_DOME_CONFIG,
+      enabled: true,
+    };
+  }
+
+  activeConfig = config;
+  saveConfig(config);
+
+  logIronDomeAudit({
+    action: 'activate',
+    allowed: true,
+    reason: profile ? `Activated with profile: ${profile}` : 'Activated with default config',
+  });
+
+  return config;
+}
+
+/**
+ * Deactivate Iron Dome.
+ */
+export function deactivateIronDome(): void {
+  activeConfig = { ...DEFAULT_IRON_DOME_CONFIG, enabled: false };
+  saveConfig(activeConfig);
+
+  logIronDomeAudit({
+    action: 'deactivate',
+    allowed: true,
+    reason: 'Iron Dome deactivated',
+  });
+}
+
+/**
+ * Get the current Iron Dome status and configuration.
+ */
+export function getIronDomeStatus(): {
+  enabled: boolean;
+  config: IronDomeConfig;
+  profile?: IronDomeProfile;
+} {
+  const config = loadConfig();
+  return {
+    enabled: config.enabled,
+    config,
+    profile: config.profile,
+  };
+}

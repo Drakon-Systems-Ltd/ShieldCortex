@@ -48,6 +48,34 @@ export { logAudit, queryAuditLogs, getAuditStats } from './audit/index.js';
 export { scanSkill, scanSkillContent, discoverSkillFiles, detectFormat, detectFormatFromContent, parseSkillFile, readSkillFile } from './skill-scanner/index.js';
 export type { SkillScanResult, SkillScanOptions, SkillThreatFinding, ParsedSkill, SkillFormat } from './skill-scanner/index.js';
 
+// Iron Dome — Behaviour Protection Layer
+export {
+  activateIronDome,
+  deactivateIronDome,
+  getIronDomeStatus,
+  isChannelTrusted,
+  isActionAllowed,
+  scanForInjection,
+  checkPII,
+  handleKillPhrase,
+  IRON_DOME_PROFILES,
+  DEFAULT_IRON_DOME_CONFIG,
+} from './iron-dome/index.js';
+export type {
+  IronDomeConfig,
+  IronDomeProfile,
+  InjectionScanResult,
+  InjectionDetection,
+  InjectionSeverity,
+  InjectionCategory,
+  GatewayResult,
+  ActionGateResult,
+  ActionDecision,
+  PiiCheckResult,
+  PiiViolation,
+  KillSwitchResult,
+} from './iron-dome/index.js';
+
 // Cloud
 export { getCloudConfig, setCloudConfig, clearCloudConfigCache, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, getVerifyConfig, setVerifyConfig } from '../cloud/config.js';
 export type { CloudConfig, DefenceMode, VerifyConfig } from '../cloud/config.js';
