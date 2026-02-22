@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.14.0] - 2026-02-22
+
+### Added
+
+- **Iron Dome — Behaviour Protection Layer** — New defence module that protects agent *actions* from compromise, complementing the existing 6-layer memory defence pipeline. While the pipeline guards what goes INTO memory, Iron Dome guards what comes OUT as behaviour.
+
+  - **Prompt injection scanner** — 40+ detection patterns across 8 categories (fake system messages, authority claims, urgency/secrecy, credential extraction, instruction injection, encoding tricks, role manipulation, context escape). Returns severity (low/medium/high/critical) and risk level.
+  - **Instruction gateway** — Validates that instructions come from trusted channels (terminal, CLI, Slack, etc.) before allowing execution.
+  - **Action gate** — Controls what actions agents can take: auto-approve (read, search), requires-approval (send email, delete file, purchase), or blocked (sub-agent restricted operations).
+  - **PII guard** — Prevents output of protected personal data categories. Two rule types: `neverOutput` (completely blocked) and `aggregatesOnly` (only totals/averages permitted).
+  - **Kill switch** — Emergency stop on configurable trigger phrase (default: "full stop").
+  - **Sub-agent restrictions** — Blocks dangerous operations from spawned sub-agents and optionally sanitises context passed to them.
+
+- **4 pre-built profiles:**
+  - `school` — GDPR strict: pupil names, DOB, medical info, SEN status locked; attendance and grades aggregates-only
+  - `enterprise` — Financial protection: credit cards, bank accounts, salary locked; revenue and expenses aggregates-only
+  - `personal` — Lighter touch: passwords and financial data locked, more actions auto-approved
+  - `paranoid` — Terminal-only trust, nearly everything requires approval
+
+- **Iron Dome CLI:**
+  - `shieldcortex iron-dome activate [--profile school|enterprise|personal|paranoid]`
+  - `shieldcortex iron-dome status`
+  - `shieldcortex iron-dome deactivate`
+  - `shieldcortex iron-dome scan --text "..." | --file <path>`
+  - `shieldcortex iron-dome audit [--tail] [--search <term>]`
+
+- **4 new MCP tools:** `iron_dome_status`, `iron_dome_scan`, `iron_dome_check`, `iron_dome_activate`
+
+- **New library exports:** `activateIronDome`, `deactivateIronDome`, `getIronDomeStatus`, `scanForInjection`, `isChannelTrusted`, `isActionAllowed`, `checkPII`, `handleKillPhrase`, `IRON_DOME_PROFILES`, `DEFAULT_IRON_DOME_CONFIG` plus 8 type exports
+
 ## [2.13.3] - 2026-02-22
 
 ### Fixed
