@@ -338,6 +338,51 @@ Local Agent                    ShieldCortex Cloud
 
 Auto-start on login: `npx shieldcortex service install`
 
+### Compliance Audit Exports (Cloud)
+
+ShieldCortex Cloud supports compliance-grade audit exports via `GET /v1/audit/export` (`csv` or `json`).
+JSON supports two shapes:
+- Default: `shape=array` (backward-compatible raw array)
+- Compliance: `shape=envelope` (returns `{ meta, entries }`)
+
+Example: `GET /v1/audit/export?format=json&shape=envelope`
+
+Each export includes integrity metadata:
+- `X-ShieldCortex-Export-SHA256`
+- `X-ShieldCortex-Export-Count`
+- `X-ShieldCortex-Export-Generated-At`
+- `X-ShieldCortex-Export-Manifest-Id`
+- `X-ShieldCortex-Export-Signature`
+- `X-ShieldCortex-Export-Signature-Alg`
+- `X-ShieldCortex-Export-Manifest-Persisted`
+
+For `shape=envelope`, the file includes:
+- `meta.entries_sha256` (digest of the exported `entries` array)
+- `meta.entry_count`
+- `meta.generated_at`
+
+Manifest APIs:
+- `GET /v1/audit/exports` (history; supports `limit`, `offset`, `format`, `shape`, `search`)
+- `GET /v1/audit/exports/:manifestId` (details + verification status)
+- `POST /v1/audit/exports/:manifestId/verify` (hash/signature check)
+- `GET /v1/audit/exports/:manifestId/verifications` (verification audit trail events)
+- `GET /v1/audit/exports/:manifestId/verifications/export` (server-side CSV/JSON export with integrity headers)
+
+Verification export responses also include signed linkage headers:
+- `X-ShieldCortex-Verification-Export-Id`
+- `X-ShieldCortex-Verification-Export-Signature`
+- `X-ShieldCortex-Verification-Export-Signature-Alg`
+- `X-ShieldCortex-Verification-Export-Persisted`
+
+Quick verification:
+```bash
+# shape=array (default)
+cat shieldcortex-audit-YYYY-MM-DD.json | shasum -a 256
+
+# shape=envelope
+jq -c '.entries' shieldcortex-audit-YYYY-MM-DD.json | shasum -a 256
+```
+
 ---
 
 ## CLI Reference
