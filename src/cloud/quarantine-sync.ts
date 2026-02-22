@@ -1,8 +1,9 @@
 import { getCloudConfig, getDeviceId, getDeviceName } from './config.js';
+import { enqueueFailedQuarantineSync } from './sync-queue.js';
 
 /**
  * Fire-and-forget: sends quarantined content to ShieldCortex cloud.
- * Never blocks, never throws. Silently swallows all errors.
+ * Never blocks, never throws. Failed requests are logged and queued for retry.
  */
 export function syncQuarantineToCloud(entry: {
   original_content: string;
@@ -37,6 +38,15 @@ export function syncQuarantineToCloud(entry: {
     body: JSON.stringify(payload),
     signal: controller.signal,
   })
-    .catch(() => {})
+    .then((res) => {
+      if (!res?.ok) {
+        console.error(`[shieldcortex] Quarantine sync failed: HTTP ${res.status}`);
+        try { enqueueFailedQuarantineSync(payload); } catch { /* non-critical */ }
+      }
+    })
+    .catch((e: unknown) => {
+      console.error('[shieldcortex] Quarantine sync failed:', e instanceof Error ? e.message : String(e));
+      try { enqueueFailedQuarantineSync(payload); } catch { /* non-critical */ }
+    })
     .finally(() => clearTimeout(timeout));
 }

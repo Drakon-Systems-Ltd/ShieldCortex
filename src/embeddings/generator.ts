@@ -8,20 +8,49 @@
 import { Worker } from 'worker_threads';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const MODEL_LOAD_TIMEOUT_MS = 30_000;
 const INFERENCE_TIMEOUT_MS = 10_000;
+const WORKER_UNAVAILABLE_MSG = 'Embedding worker unavailable. Run `npm run build` so dist/embeddings/worker.js exists.';
 
 let worker: Worker | null = null;
 let workerReady = false;
 let msgId = 0;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+let resolvedWorkerPath: string | null | undefined;
+let loggedMissingWorker = false;
 
 function getWorkerPath(): string {
-  // In dist/ after compilation, worker.js lives alongside generator.js
-  return join(__dirname, 'worker.js');
+  if (resolvedWorkerPath !== undefined) {
+    if (resolvedWorkerPath === null) {
+      throw new Error(WORKER_UNAVAILABLE_MSG);
+    }
+    return resolvedWorkerPath;
+  }
+
+  const candidates = [
+    // In dist/ after compilation, worker.js lives alongside generator.js
+    join(__dirname, 'worker.js'),
+    // In source-mode development/tests, fall back to built artifact if present.
+    join(process.cwd(), 'dist', 'embeddings', 'worker.js'),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      resolvedWorkerPath = candidate;
+      return candidate;
+    }
+  }
+
+  resolvedWorkerPath = null;
+  if (!loggedMissingWorker) {
+    console.warn(`[shieldcortex] ${WORKER_UNAVAILABLE_MSG}`);
+    loggedMissingWorker = true;
+  }
+  throw new Error(WORKER_UNAVAILABLE_MSG);
 }
 
 function ensureWorker(): Worker {

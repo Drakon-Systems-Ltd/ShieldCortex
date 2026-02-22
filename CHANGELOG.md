@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.13.3] - 2026-02-22
+
+### Fixed
+
+- **Quarantine cloud sync reliability** — `syncQuarantineToCloud` now logs failures and enqueues failed uploads for retry instead of silently dropping errors.
+- **Retry queue endpoint coverage** — `sync_queue` retries now support both `/v1/audit/ingest` and `/v1/quarantine/ingest` payloads (with backward compatibility for legacy queued audit payloads).
+- **Embedding worker path resolution** — source-mode/dev/test runs now resolve the embedding worker more safely, reducing repeated worker startup failures when only `dist` worker artifacts exist.
+- **Async memory lifecycle noise** — async embedding persistence and cleanup paths now degrade more cleanly around DB teardown/uninitialized states.
+
 ## [2.13.2] - 2026-02-21
 
 ### Fixed

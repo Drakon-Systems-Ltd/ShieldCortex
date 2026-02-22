@@ -35,7 +35,7 @@ export function sendHeartbeat(): void {
 
 /**
  * Fire-and-forget: sends audit data to ShieldCortex cloud.
- * Never blocks, never throws. Silently swallows all errors.
+ * Never blocks, never throws. Failed requests are logged and queued for retry.
  * Sends audit metadata ONLY — no content or titles.
  */
 export function syncToCloud(

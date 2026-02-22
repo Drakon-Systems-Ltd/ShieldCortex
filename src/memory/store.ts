@@ -5,7 +5,7 @@
  * Handles storage, retrieval, and management of memories.
  */
 
-import { getDatabase } from '../database/init.js';
+import { getDatabase, isDatabaseInitialized } from '../database/init.js';
 import {
   Memory,
   MemoryInput,
@@ -480,10 +480,17 @@ export function addMemory(
           console.warn('[shieldcortex] Embedding generation returned invalid result for memory', memoryId);
         }
       } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        if (/database connection is not open/i.test(errMsg)) {
+          return;
+        }
         console.error('[shieldcortex] Failed to store embedding:', e);
       }
     })
     .catch(e => {
+      if (e instanceof Error && e.message.includes('Embedding worker unavailable')) {
+        return;
+      }
       console.error('[shieldcortex] Failed to generate embedding:', e);
     });
 
@@ -491,6 +498,9 @@ export function addMemory(
   // We use setImmediate to not block the insert response
   setImmediate(() => {
     try {
+      if (!isDatabaseInitialized()) {
+        return;
+      }
       const stats = getMemoryStats();
       if (
         stats.shortTerm > config.maxShortTermMemories ||

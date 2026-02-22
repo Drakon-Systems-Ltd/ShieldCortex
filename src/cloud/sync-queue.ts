@@ -2,6 +2,7 @@
  * Cloud Sync Retry Queue
  *
  * Replaces fire-and-forget cloud sync with a queue that retries failed syncs.
+ * Supports both audit metadata sync and quarantine content sync payloads.
  * Uses SQLite sync_queue table with exponential backoff.
  */
 
@@ -24,6 +25,24 @@ export interface SyncEntry {
   timestamp: string;
 }
 
+export interface QuarantineSyncEntry {
+  original_content: string;
+  original_title?: string;
+  source_type: string;
+  source_identifier: string;
+  reason: string;
+  threat_indicators: string[];
+  anomaly_score: number;
+  firewall_result: string;
+  device_id: string;
+  device_name: string;
+  timestamp: string;
+}
+
+type QueuePayload =
+  | { kind: 'audit'; entry: SyncEntry }
+  | { kind: 'quarantine'; entry: QuarantineSyncEntry };
+
 export interface QueueStats {
   pending: number;
   failed: number;
@@ -42,14 +61,67 @@ export interface SyncQueueResult {
  * INSERT into sync_queue with exponential backoff schedule.
  */
 export function enqueueFailedSync(entry: SyncEntry): void {
+  enqueuePayload({ kind: 'audit', entry });
+}
+
+/**
+ * Enqueue a failed quarantine sync entry for later retry.
+ */
+export function enqueueFailedQuarantineSync(entry: QuarantineSyncEntry): void {
+  enqueuePayload({ kind: 'quarantine', entry });
+}
+
+function enqueuePayload(payload: QueuePayload): void {
   const db = getDatabase();
-  const payload = JSON.stringify(entry);
+  const payloadJson = JSON.stringify(payload);
   const nextRetryAt = new Date(Date.now() + 30_000).toISOString(); // First retry in 30s
 
   db.prepare(`
     INSERT INTO sync_queue (payload, attempts, next_retry_at, status)
     VALUES (?, 0, ?, 'pending')
-  `).run(payload, nextRetryAt);
+  `).run(payloadJson, nextRetryAt);
+}
+
+function buildRetryRequest(payloadText: string): { path: string; body: string } {
+  const parsed = JSON.parse(payloadText) as unknown;
+
+  // Backwards compatibility with legacy queued audit entries (no envelope)
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !('kind' in parsed)) {
+    return {
+      path: '/v1/audit/ingest',
+      body: JSON.stringify({ entries: [parsed] }),
+    };
+  }
+
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    'kind' in parsed &&
+    (parsed as { kind: string }).kind === 'audit'
+  ) {
+    const payload = parsed as { kind: 'audit'; entry: SyncEntry };
+    return {
+      path: '/v1/audit/ingest',
+      body: JSON.stringify({ entries: [payload.entry] }),
+    };
+  }
+
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    'kind' in parsed &&
+    (parsed as { kind: string }).kind === 'quarantine'
+  ) {
+    const payload = parsed as { kind: 'quarantine'; entry: QuarantineSyncEntry };
+    return {
+      path: '/v1/quarantine/ingest',
+      body: JSON.stringify(payload.entry),
+    };
+  }
+
+  throw new Error('Unsupported sync queue payload');
 }
 
 /**
@@ -128,14 +200,15 @@ export async function processRetryQueue(): Promise<SyncQueueResult> {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10_000);
+      const request = buildRetryRequest(row.payload);
 
-      const res = await fetch(`${config.cloudBaseUrl}/v1/audit/ingest`, {
+      const res = await fetch(`${config.cloudBaseUrl}${request.path}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${config.cloudApiKey}`,
         },
-        body: JSON.stringify({ entries: [JSON.parse(row.payload)] }),
+        body: request.body,
         signal: controller.signal,
       });
 
