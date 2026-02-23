@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.15.2] - 2026-02-23
+- **Fix:** Confirmation protocol CLI now works when Iron Dome config predates the feature (graceful fallback to defaults)
+- **Fix:** `classifyAction` handles missing `confirmationProtocol` in legacy configs
+
 ## [2.15.1] - 2026-02-23
 - **User-configurable confirmation tiers** — Users can now move actions between RED/AMBER/GREEN tiers, add custom actions, and remove overrides via CLI or config
 - **CLI commands:** `iron-dome confirmation list|move|add|remove` for managing tiers

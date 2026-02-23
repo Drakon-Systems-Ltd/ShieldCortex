@@ -79,7 +79,8 @@ export function classifyAction(
   }
 
   const normAction = action.toLowerCase();
-  const protocol = mergeConfirmationProtocol(config.confirmationProtocol, config.confirmationOverrides);
+  const base = config.confirmationProtocol ?? { red: [], amber: [], green: [] };
+  const protocol = mergeConfirmationProtocol(base, config.confirmationOverrides);
 
   // Check RED tier first (most restrictive)
   const isRed = protocol.red.some(r => normAction.includes(r.toLowerCase()));

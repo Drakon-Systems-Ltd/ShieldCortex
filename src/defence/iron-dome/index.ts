@@ -165,7 +165,8 @@ export function getIronDomeStatus(): {
  */
 export function getEffectiveConfirmationProtocol(): IronDomeConfirmationProtocol {
   const config = loadConfig();
-  return mergeConfirmationProtocol(config.confirmationProtocol, config.confirmationOverrides);
+  const base = config.confirmationProtocol ?? DEFAULT_IRON_DOME_CONFIG.confirmationProtocol;
+  return mergeConfirmationProtocol(base, config.confirmationOverrides);
 }
 
 /**
