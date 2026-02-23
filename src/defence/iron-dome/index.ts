@@ -8,14 +8,19 @@
  */
 
 import { getDatabase } from '../../database/init.js';
-import type { IronDomeConfig, IronDomeProfile } from './config.js';
+import type { IronDomeConfig, IronDomeProfile, ConfirmationOverrides, IronDomeConfirmationProtocol } from './config.js';
 import { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
+import type { ConfirmationTier } from './confirmation-gate.js';
+import { mergeConfirmationProtocol } from './confirmation-gate.js';
 import { logIronDomeAudit } from './audit.js';
 
 // ── Re-exports ──
 
 export { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
-export type { IronDomeConfig, IronDomeProfile, IronDomePiiRules, IronDomeSubAgentRestrictions, IronDomeConfirmationProtocol } from './config.js';
+export type { IronDomeConfig, IronDomeProfile, IronDomePiiRules, IronDomeSubAgentRestrictions, IronDomeConfirmationProtocol, ConfirmationOverrides } from './config.js';
+
+export { classifyAction, requiresConfirmation, requiresAnnouncement, mergeConfirmationProtocol } from './confirmation-gate.js';
+export type { ConfirmationTier, ConfirmationResult } from './confirmation-gate.js';
 
 export { scanForInjection } from './injection-scanner.js';
 export type { InjectionScanResult, InjectionDetection, InjectionSeverity, InjectionCategory } from './injection-scanner.js';
@@ -151,4 +156,89 @@ export function getIronDomeStatus(): {
     config,
     profile: config.profile,
   };
+}
+
+// ── Confirmation Override Management ──
+
+/**
+ * Get the effective (merged) confirmation protocol — base + user overrides.
+ */
+export function getEffectiveConfirmationProtocol(): IronDomeConfirmationProtocol {
+  const config = loadConfig();
+  return mergeConfirmationProtocol(config.confirmationProtocol, config.confirmationOverrides);
+}
+
+/**
+ * Get just the user overrides (without the base protocol).
+ */
+export function getConfirmationOverrides(): ConfirmationOverrides {
+  const config = loadConfig();
+  return config.confirmationOverrides ?? {};
+}
+
+/**
+ * Move an action to a different confirmation tier.
+ * Adds the action to user overrides so it takes precedence over profile defaults.
+ */
+export function moveConfirmationAction(action: string, tier: ConfirmationTier): void {
+  const config = loadConfig();
+  const overrides = config.confirmationOverrides ?? {};
+
+  const normAction = action.toLowerCase();
+
+  // Remove from all override tiers first
+  if (overrides.red) overrides.red = overrides.red.filter(a => a.toLowerCase() !== normAction);
+  if (overrides.amber) overrides.amber = overrides.amber.filter(a => a.toLowerCase() !== normAction);
+  if (overrides.green) overrides.green = overrides.green.filter(a => a.toLowerCase() !== normAction);
+
+  // Add to the target tier
+  if (!overrides[tier]) overrides[tier] = [];
+  overrides[tier]!.push(normAction);
+
+  config.confirmationOverrides = overrides;
+  activeConfig = config;
+  saveConfig(config);
+
+  logIronDomeAudit({
+    action: 'confirmation_override',
+    actionType: normAction,
+    allowed: true,
+    reason: `Moved "${normAction}" to ${tier.toUpperCase()} tier`,
+  });
+}
+
+/**
+ * Remove a user override for an action (reverts to profile default).
+ * Returns true if the action was found in overrides, false if it wasn't overridden.
+ */
+export function removeConfirmationOverride(action: string): boolean {
+  const config = loadConfig();
+  const overrides = config.confirmationOverrides;
+  if (!overrides) return false;
+
+  const normAction = action.toLowerCase();
+  let found = false;
+
+  for (const tier of ['red', 'amber', 'green'] as const) {
+    if (overrides[tier]) {
+      const before = overrides[tier]!.length;
+      overrides[tier] = overrides[tier]!.filter(a => a.toLowerCase() !== normAction);
+      if (overrides[tier]!.length < before) found = true;
+    }
+  }
+
+  if (found) {
+    config.confirmationOverrides = overrides;
+    activeConfig = config;
+    saveConfig(config);
+
+    logIronDomeAudit({
+      action: 'confirmation_override',
+      actionType: normAction,
+      allowed: true,
+      reason: `Removed override for "${normAction}" (reverted to default)`,
+    });
+  }
+
+  return found;
 }

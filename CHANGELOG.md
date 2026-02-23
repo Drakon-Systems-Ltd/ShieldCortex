@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.15.1] - 2026-02-23
+- **User-configurable confirmation tiers** — Users can now move actions between RED/AMBER/GREEN tiers, add custom actions, and remove overrides via CLI or config
+- **CLI commands:** `iron-dome confirmation list|move|add|remove` for managing tiers
+- **Config merging** — User overrides merge with profile defaults (user wins on conflicts)
+
 ## [2.15.0] - 2026-02-23
 
 ### Added

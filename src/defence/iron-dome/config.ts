@@ -25,6 +25,17 @@ export interface IronDomeConfirmationProtocol {
   green: string[];  // Free to execute silently
 }
 
+/**
+ * User overrides for the confirmation protocol.
+ * Each field is optional — only specified tiers are overridden.
+ * Actions listed here take precedence over the profile defaults.
+ */
+export interface ConfirmationOverrides {
+  red?: string[];
+  amber?: string[];
+  green?: string[];
+}
+
 export interface IronDomeConfig {
   enabled: boolean;
   trustedChannels: string[];
@@ -34,6 +45,7 @@ export interface IronDomeConfig {
   piiRules: IronDomePiiRules;
   subAgentRestrictions: IronDomeSubAgentRestrictions;
   confirmationProtocol: IronDomeConfirmationProtocol;
+  confirmationOverrides?: ConfirmationOverrides;
   profile?: IronDomeProfile;
 }
 

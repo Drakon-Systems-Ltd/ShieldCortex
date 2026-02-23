@@ -6,7 +6,7 @@
  * whether explicit user confirmation, announcement, or silent execution is appropriate.
  */
 
-import type { IronDomeConfig } from './config.js';
+import type { IronDomeConfig, IronDomeConfirmationProtocol, ConfirmationOverrides } from './config.js';
 import { logIronDomeAudit } from './audit.js';
 
 export type ConfirmationTier = 'red' | 'amber' | 'green';
@@ -19,12 +19,51 @@ export interface ConfirmationResult {
 }
 
 /**
+ * Merge user overrides into a base confirmation protocol.
+ *
+ * Each overridden action is removed from its original tier and placed
+ * into the user-specified tier. New actions (not in any default tier)
+ * are simply added to the specified tier.
+ */
+export function mergeConfirmationProtocol(
+  base: IronDomeConfirmationProtocol,
+  overrides?: ConfirmationOverrides,
+): IronDomeConfirmationProtocol {
+  if (!overrides) return base;
+
+  // Collect all overridden action → tier mappings
+  const overrideMap = new Map<string, ConfirmationTier>();
+  for (const action of overrides.red ?? []) overrideMap.set(action.toLowerCase(), 'red');
+  for (const action of overrides.amber ?? []) overrideMap.set(action.toLowerCase(), 'amber');
+  for (const action of overrides.green ?? []) overrideMap.set(action.toLowerCase(), 'green');
+
+  if (overrideMap.size === 0) return base;
+
+  // Start with base tiers, remove any actions that the user is overriding
+  const red = base.red.filter(a => !overrideMap.has(a.toLowerCase()));
+  const amber = base.amber.filter(a => !overrideMap.has(a.toLowerCase()));
+  const green = base.green.filter(a => !overrideMap.has(a.toLowerCase()));
+
+  // Add overridden actions to their new tiers
+  for (const [action, tier] of overrideMap) {
+    if (tier === 'red') red.push(action);
+    else if (tier === 'amber') amber.push(action);
+    else green.push(action);
+  }
+
+  return { red, amber, green };
+}
+
+/**
  * Classify an action into a confirmation tier based on the Iron Dome configuration.
  *
  * - RED: Destructive actions that ALWAYS require explicit user confirmation.
  * - AMBER: Actions that should be announced before proceeding.
  * - GREEN: Safe actions that can execute silently.
  * - Unknown actions default to AMBER (safe default).
+ *
+ * User overrides from `config.confirmationOverrides` are merged with profile
+ * defaults, with user choices taking precedence.
  */
 export function classifyAction(
   action: string,
@@ -40,7 +79,7 @@ export function classifyAction(
   }
 
   const normAction = action.toLowerCase();
-  const protocol = config.confirmationProtocol;
+  const protocol = mergeConfirmationProtocol(config.confirmationProtocol, config.confirmationOverrides);
 
   // Check RED tier first (most restrictive)
   const isRed = protocol.red.some(r => normAction.includes(r.toLowerCase()));

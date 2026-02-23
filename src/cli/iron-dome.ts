@@ -19,8 +19,13 @@ import {
   deactivateIronDome,
   getIronDomeStatus,
   scanForInjection,
+  getEffectiveConfirmationProtocol,
+  getConfirmationOverrides,
+  moveConfirmationAction,
+  removeConfirmationOverride,
 } from '../defence/iron-dome/index.js';
 import type { IronDomeProfile } from '../defence/iron-dome/config.js';
+import type { ConfirmationTier } from '../defence/iron-dome/confirmation-gate.js';
 import { queryAuditLogs } from '../defence/audit/index.js';
 
 const bold = '\x1b[1m';
@@ -68,6 +73,9 @@ export async function handleIronDomeCommand(args: string[]): Promise<void> {
     case 'audit':
       handleAudit(args.slice(1));
       break;
+    case 'confirmation':
+      handleConfirmation(args.slice(1));
+      break;
     default:
       console.error(`Unknown iron-dome command: ${subcommand}`);
       printUsage();
@@ -85,6 +93,10 @@ ${bold}Usage:${reset}
   shieldcortex iron-dome deactivate
   shieldcortex iron-dome scan --text "..." | --file <path>
   shieldcortex iron-dome audit [--tail] [--search <term>]
+  shieldcortex iron-dome confirmation list
+  shieldcortex iron-dome confirmation move <action> <red|amber|green>
+  shieldcortex iron-dome confirmation add <action> <red|amber|green>
+  shieldcortex iron-dome confirmation remove <action>
 
 ${bold}Profiles:${reset}
   school       GDPR strict, pupil data locked
@@ -256,4 +268,71 @@ function printAuditLogs(logs: any[]): void {
   }
 
   console.log();
+}
+
+function handleConfirmation(args: string[]): void {
+  const sub = args[0];
+
+  if (!sub || sub === 'list') {
+    const protocol = getEffectiveConfirmationProtocol();
+    const overrides = getConfirmationOverrides();
+
+    console.log(`\n${bold}Destructive Action Confirmation Protocol${reset}\n`);
+
+    const printTier = (label: string, color: string, actions: string[], overrideList?: string[]) => {
+      console.log(`${color}${bold}${label}${reset}`);
+      if (actions.length === 0) {
+        console.log(`  ${dim}(none)${reset}`);
+      } else {
+        for (const a of actions.sort()) {
+          const isOverride = overrideList?.some(o => o.toLowerCase() === a.toLowerCase());
+          const suffix = isOverride ? ` ${dim}(user override)${reset}` : '';
+          console.log(`  ${a}${suffix}`);
+        }
+      }
+      console.log();
+    };
+
+    printTier('🔴 RED — Always confirm', red, protocol.red, [
+      ...(overrides.red ?? []),
+    ]);
+    printTier('🟡 AMBER — Announce', '\x1b[33m', protocol.amber, [
+      ...(overrides.amber ?? []),
+    ]);
+    printTier('🟢 GREEN — Free', green, protocol.green, [
+      ...(overrides.green ?? []),
+    ]);
+    return;
+  }
+
+  if (sub === 'move' || sub === 'add') {
+    const action = args[1];
+    const tier = args[2] as ConfirmationTier;
+    if (!action || !tier || !['red', 'amber', 'green'].includes(tier)) {
+      console.error(`${red}Usage: shieldcortex iron-dome confirmation ${sub} <action> <red|amber|green>${reset}`);
+      process.exit(1);
+    }
+    moveConfirmationAction(action, tier);
+    console.log(`${green}✓${reset} ${sub === 'move' ? 'Moved' : 'Added'} "${action}" to ${tier.toUpperCase()} tier`);
+    return;
+  }
+
+  if (sub === 'remove') {
+    const action = args[1];
+    if (!action) {
+      console.error(`${red}Usage: shieldcortex iron-dome confirmation remove <action>${reset}`);
+      process.exit(1);
+    }
+    const found = removeConfirmationOverride(action);
+    if (found) {
+      console.log(`${green}✓${reset} Removed override for "${action}" (reverted to profile default)`);
+    } else {
+      console.log(`${dim}No override found for "${action}"${reset}`);
+    }
+    return;
+  }
+
+  console.error(`${red}Unknown confirmation command: ${sub}${reset}`);
+  console.error('Available: list, move, add, remove');
+  process.exit(1);
 }
