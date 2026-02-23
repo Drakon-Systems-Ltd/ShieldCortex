@@ -3,7 +3,7 @@
 import { useDashboardStore } from '@/lib/store';
 import { useStats, useVersion } from '@/hooks/useMemories';
 import { useAuditStats } from '@/hooks/useDefence';
-import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch } from 'lucide-react';
+import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch, Zap } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'shield' as const, label: 'Shield', icon: Shield },
@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { id: 'quarantine' as const, label: 'Queue', icon: AlertTriangle },
   { id: 'agents' as const, label: 'Agents', icon: Users },
   { id: 'skills' as const, label: 'Skills', icon: FileSearch },
+  { id: 'dome' as const, label: 'Dome', icon: Zap },
   { id: 'memories' as const, label: 'Memories', icon: Database },
   { id: 'brain' as const, label: 'Brain', icon: Brain },
   { id: 'graph' as const, label: 'Graph', icon: GitBranch },
@@ -41,7 +42,9 @@ export function NavRail() {
             onClick={() => setViewMode(id)}
             className={`relative w-10 h-10 rounded-lg flex flex-col items-center justify-center gap-0.5 transition-colors ${
               viewMode === id
-                ? 'bg-cyan-600/20 text-cyan-400'
+                ? id === 'dome'
+                  ? 'bg-red-600/20 text-red-400'
+                  : 'bg-cyan-600/20 text-cyan-400'
                 : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
             }`}
             title={label}

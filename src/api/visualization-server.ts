@@ -58,6 +58,8 @@ import { logAudit } from '../defence/audit/index.js';
 import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, type DefenceMode } from '../cloud/config.js';
 import { getQueueStats } from '../cloud/sync-queue.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
+import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection } from '../defence/iron-dome/index.js';
+import type { IronDomeProfile } from '../defence/iron-dome/index.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -1503,6 +1505,65 @@ export function startVisualizationServer(dbPath?: string): void {
       // Also remove from trusted list if present
       removeTrustedSkill(filePath);
       res.json({ deleted: true, path: filePath });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // IRON DOME (Behaviour Protection)
+  // ============================================
+
+  app.get('/api/iron-dome/status', (_req: Request, res: Response) => {
+    try {
+      const status = getIronDomeStatus();
+      res.json(status);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/iron-dome/activate', (req: Request, res: Response) => {
+    try {
+      const { profile } = req.body;
+      const validProfiles: IronDomeProfile[] = ['school', 'enterprise', 'personal', 'paranoid'];
+      if (profile && !validProfiles.includes(profile)) {
+        return res.status(400).json({ error: `Invalid profile. Must be one of: ${validProfiles.join(', ')}` });
+      }
+      const config = activateIronDome(profile);
+      res.json({ success: true, config });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/iron-dome/deactivate', (_req: Request, res: Response) => {
+    try {
+      deactivateIronDome();
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/iron-dome/scan', (req: Request, res: Response) => {
+    try {
+      const { text } = req.body;
+      if (!text || typeof text !== 'string') {
+        return res.status(400).json({ error: 'text (string) is required' });
+      }
+      const result = scanForInjection(text);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.get('/api/iron-dome/audit', (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string, 10) || 50;
+      const logs = queryAgentOperations('iron-dome', { limit });
+      res.json({ logs, total: logs.length });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

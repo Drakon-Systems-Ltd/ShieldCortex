@@ -8,6 +8,7 @@ import { DefenceStatsCard } from './DefenceStatsCard';
 import { CloudUpsellCard } from './CloudUpsellCard';
 import { CloudSyncStatus } from './CloudSyncStatus';
 import { SkillScannerCard } from './SkillScannerCard';
+import { IronDomeCard } from './IronDomeCard';
 
 export function ShieldOverview() {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
@@ -48,6 +49,11 @@ export function ShieldOverview() {
       {/* Skill scanner */}
       <div className="mt-4">
         <SkillScannerCard />
+      </div>
+
+      {/* Iron Dome status */}
+      <div className="mt-4">
+        <IronDomeCard />
       </div>
 
       {/* Cloud upsell — hidden when already configured */}
