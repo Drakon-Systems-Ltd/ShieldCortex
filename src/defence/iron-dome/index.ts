@@ -15,7 +15,7 @@ import { logIronDomeAudit } from './audit.js';
 // ── Re-exports ──
 
 export { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
-export type { IronDomeConfig, IronDomeProfile, IronDomePiiRules, IronDomeSubAgentRestrictions } from './config.js';
+export type { IronDomeConfig, IronDomeProfile, IronDomePiiRules, IronDomeSubAgentRestrictions, IronDomeConfirmationProtocol } from './config.js';
 
 export { scanForInjection } from './injection-scanner.js';
 export type { InjectionScanResult, InjectionDetection, InjectionSeverity, InjectionCategory } from './injection-scanner.js';

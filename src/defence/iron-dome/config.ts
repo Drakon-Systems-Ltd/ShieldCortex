@@ -19,6 +19,12 @@ export interface IronDomeSubAgentRestrictions {
 
 export type IronDomeProfile = 'school' | 'enterprise' | 'personal' | 'paranoid';
 
+export interface IronDomeConfirmationProtocol {
+  red: string[];    // ALWAYS require explicit user confirmation
+  amber: string[];  // Announce before proceeding
+  green: string[];  // Free to execute silently
+}
+
 export interface IronDomeConfig {
   enabled: boolean;
   trustedChannels: string[];
@@ -27,6 +33,7 @@ export interface IronDomeConfig {
   autoApprove: string[];
   piiRules: IronDomePiiRules;
   subAgentRestrictions: IronDomeSubAgentRestrictions;
+  confirmationProtocol: IronDomeConfirmationProtocol;
   profile?: IronDomeProfile;
 }
 
@@ -45,6 +52,22 @@ export const DEFAULT_IRON_DOME_CONFIG: IronDomeConfig = {
   subAgentRestrictions: {
     blockedOperations: [],
     sanitiseContext: false,
+  },
+  confirmationProtocol: {
+    red: [
+      'rm', 'rmdir', 'delete', 'drop', 'truncate', 'purge', 'wipe', 'shred', 'destroy',
+      'remove_cron', 'disable_service', 'stop_service', 'revoke_token', 'rotate_credentials',
+      'force_push', 'delete_branch', 'modify_firewall', 'modify_netplan', 'modify_systemd',
+      'modify_dns', 'bulk_email_delete', 'chmod_recursive', 'chown_recursive',
+    ],
+    amber: [
+      'edit_file', 'install_package', 'update_package', 'create_cron',
+      'restart_service', 'modify_config', 'database_migrate',
+    ],
+    green: [
+      'read_file', 'write_new_file', 'git_commit', 'git_push', 'run_report',
+      'web_search', 'web_fetch', 'create_directory', 'list_files',
+    ],
   },
 };
 
@@ -73,6 +96,24 @@ export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'e
       blockedOperations: ['export_pupil_data', 'bulk_email', 'modify_safeguarding'],
       sanitiseContext: true,
     },
+    confirmationProtocol: {
+      red: [
+        'rm', 'rmdir', 'delete', 'drop', 'truncate', 'purge', 'wipe', 'shred', 'destroy',
+        'remove_cron', 'disable_service', 'stop_service', 'revoke_token', 'rotate_credentials',
+        'force_push', 'delete_branch', 'modify_firewall', 'modify_netplan', 'modify_systemd',
+        'modify_dns', 'bulk_email_delete', 'chmod_recursive', 'chown_recursive',
+        'export_pupil_data', 'modify_safeguarding', 'delete_records',
+      ],
+      amber: [
+        'edit_file', 'install_package', 'update_package', 'create_cron',
+        'restart_service', 'modify_config', 'database_migrate', 'create_report',
+        'modify_records', 'share_data',
+      ],
+      green: [
+        'read_file', 'write_new_file', 'git_commit', 'git_push', 'run_report',
+        'web_search', 'web_fetch', 'create_directory', 'list_files',
+      ],
+    },
     profile: 'school',
   },
 
@@ -97,6 +138,24 @@ export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'e
       blockedOperations: ['export_financial_data', 'modify_payroll'],
       sanitiseContext: true,
     },
+    confirmationProtocol: {
+      red: [
+        'rm', 'rmdir', 'delete', 'drop', 'truncate', 'purge', 'wipe', 'shred', 'destroy',
+        'remove_cron', 'disable_service', 'stop_service', 'revoke_token', 'rotate_credentials',
+        'force_push', 'delete_branch', 'modify_firewall', 'modify_netplan', 'modify_systemd',
+        'modify_dns', 'bulk_email_delete', 'chmod_recursive', 'chown_recursive',
+        'export_financial_data', 'modify_payroll', 'transfer_funds',
+      ],
+      amber: [
+        'edit_file', 'install_package', 'update_package', 'create_cron',
+        'restart_service', 'modify_config', 'database_migrate', 'deploy',
+        'modify_permissions', 'export_data',
+      ],
+      green: [
+        'read_file', 'write_new_file', 'git_commit', 'git_push', 'run_report',
+        'web_search', 'web_fetch', 'create_directory', 'list_files', 'lint', 'test',
+      ],
+    },
     profile: 'enterprise',
   },
 
@@ -117,6 +176,20 @@ export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'e
     subAgentRestrictions: {
       blockedOperations: [],
       sanitiseContext: false,
+    },
+    confirmationProtocol: {
+      red: [
+        'rm', 'rmdir', 'delete', 'drop', 'truncate', 'purge', 'wipe', 'shred', 'destroy',
+        'revoke_token', 'rotate_credentials', 'force_push', 'delete_branch',
+      ],
+      amber: [
+        'edit_file', 'install_package', 'update_package', 'create_cron',
+        'restart_service', 'modify_config', 'database_migrate',
+      ],
+      green: [
+        'read_file', 'write_new_file', 'git_commit', 'git_push', 'run_report',
+        'web_search', 'web_fetch', 'create_directory', 'list_files', 'api_call', 'create_file',
+      ],
     },
     profile: 'personal',
   },
@@ -141,6 +214,25 @@ export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'e
     subAgentRestrictions: {
       blockedOperations: ['export_data', 'network_request', 'install_package'],
       sanitiseContext: true,
+    },
+    confirmationProtocol: {
+      red: [
+        'rm', 'rmdir', 'delete', 'drop', 'truncate', 'purge', 'wipe', 'shred', 'destroy',
+        'remove_cron', 'disable_service', 'stop_service', 'revoke_token', 'rotate_credentials',
+        'force_push', 'delete_branch', 'modify_firewall', 'modify_netplan', 'modify_systemd',
+        'modify_dns', 'bulk_email_delete', 'chmod_recursive', 'chown_recursive',
+        'send_email', 'api_call', 'purchase', 'transfer_funds', 'deploy',
+        'export_data', 'share_data', 'modify_permissions', 'install_package',
+        'run_script', 'network_request', 'create_file', 'modify_file',
+      ],
+      amber: [
+        'create_cron', 'restart_service', 'modify_config', 'database_migrate',
+        'git_push', 'write_new_file',
+      ],
+      green: [
+        'read_file', 'git_commit', 'run_report', 'list_files', 'search',
+        'calculate', 'format',
+      ],
     },
     profile: 'paranoid',
   },

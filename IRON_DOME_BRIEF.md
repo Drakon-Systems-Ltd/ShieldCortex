@@ -110,9 +110,47 @@ Each detection returns: `{ category, pattern, severity: 'low'|'medium'|'high'|'c
 - Use existing trust scoring — Iron Dome gateway builds on trust concepts
 - Dashboard: Add Iron Dome status panel (future — not in this PR)
 
+### 8. Destructive Action Confirmation Protocol
+
+3-tier classification system that gates destructive actions before they execute.
+
+```
+RED    — ALWAYS requires explicit user confirmation (irreversible/destructive)
+AMBER  — Announce before proceeding (should be visible, but not blocking)
+GREEN  — Free to execute silently (safe, read-only, or low-risk)
+```
+
+**Default RED actions:** `rm`, `rmdir`, `delete`, `drop`, `truncate`, `purge`, `wipe`, `shred`, `destroy`, `remove_cron`, `disable_service`, `stop_service`, `revoke_token`, `rotate_credentials`, `force_push`, `delete_branch`, `modify_firewall`, `modify_netplan`, `modify_systemd`, `modify_dns`, `bulk_email_delete`, `chmod_recursive`, `chown_recursive`
+
+**Default AMBER actions:** `edit_file`, `install_package`, `update_package`, `create_cron`, `restart_service`, `modify_config`, `database_migrate`
+
+**Default GREEN actions:** `read_file`, `write_new_file`, `git_commit`, `git_push`, `run_report`, `web_search`, `web_fetch`, `create_directory`, `list_files`
+
+**Key behaviours:**
+- Unknown/unclassified actions default to **AMBER** (safe default)
+- RED takes priority when an action matches multiple tiers
+- Matching is case-insensitive and uses partial (contains) matching
+- When Iron Dome is disabled, all actions resolve to GREEN
+- Each profile (school/enterprise/personal/paranoid) has its own tier lists
+- RED classifications are audit-logged via `logIronDomeAudit`
+
+**API:**
+```typescript
+import { classifyAction, requiresConfirmation, requiresAnnouncement } from './confirmation-gate.js';
+
+classifyAction('rm -rf /tmp', config);
+// → { tier: 'red', action: 'rm -rf /tmp', description: '...', reversible: false }
+
+requiresConfirmation('delete', config);  // true (RED)
+requiresAnnouncement('edit_file', config); // true (RED or AMBER)
+```
+
+**New types:** `ConfirmationTier`, `ConfirmationResult`
+**New config field:** `confirmationProtocol: { red: string[], amber: string[], green: string[] }`
+
 ## Rules
 - TypeScript strict, ESM
-- Tests for scanner, gateway, and action gate (these are security-critical)
+- Tests for scanner, gateway, action gate, and confirmation gate (these are security-critical)
 - Don't break existing exports or tests
 - Run `npm run build` and `npm test` before committing
 - Commit with descriptive message

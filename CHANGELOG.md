@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.15.0] - 2026-02-23
+
+### Added
+
+- **Iron Dome — Destructive Action Confirmation Protocol** — 3-tier classification system (RED/AMBER/GREEN) that gates destructive actions before they execute. RED actions (rm, delete, drop, force_push, etc.) always require explicit user confirmation. AMBER actions are announced before proceeding. GREEN actions execute silently. Unknown actions default to AMBER as a safe fallback. Matching is case-insensitive with partial (contains) matching so `rm -rf /tmp` correctly matches the `rm` rule.
+
+  - `classifyAction(action, config)` — Returns tier, description, and reversibility for any action
+  - `requiresConfirmation(action, config)` — Quick check: is this a RED-tier action?
+  - `requiresAnnouncement(action, config)` — Quick check: is this RED or AMBER?
+  - RED classifications are audit-logged via `logIronDomeAudit`
+  - Each profile (school/enterprise/personal/paranoid) has its own tier lists with profile-specific additions (e.g. school adds `export_pupil_data`, enterprise adds `transfer_funds`, paranoid promotes most actions to RED)
+
+- **New config field:** `confirmationProtocol: { red: string[], amber: string[], green: string[] }` on `IronDomeConfig`
+
+- **New types:** `ConfirmationTier`, `ConfirmationResult`, `IronDomeConfirmationProtocol`
+
 ## [2.14.0] - 2026-02-22
 
 ### Added
