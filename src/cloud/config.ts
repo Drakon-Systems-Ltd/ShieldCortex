@@ -180,6 +180,28 @@ export function removeTrustedSkill(path: string): void {
   }
 }
 
+// ── Cloud Iron Dome Cache ─────────────────────────────
+
+/**
+ * Persist cloud Iron Dome data (patterns + policy) to config.json with HMAC integrity.
+ */
+export function setCloudIronDomeCache(data: Record<string, unknown>): void {
+  const raw = readRawConfig();
+  raw.cloudIronDome = data;
+  writeRawConfig(raw);
+}
+
+/**
+ * Read cached cloud Iron Dome data from config.json.
+ */
+export function getCloudIronDomeCache(): Record<string, unknown> | null {
+  const raw = readRawConfig();
+  if (raw.cloudIronDome && typeof raw.cloudIronDome === 'object') {
+    return raw.cloudIronDome as Record<string, unknown>;
+  }
+  return null;
+}
+
 // ── Sync Timestamp ────────────────────────────────────
 
 /**

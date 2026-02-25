@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.16.0] - 2026-02-25
+
+### Added
+
+- **Iron Dome Cloud Sync** — Custom injection patterns and central policies defined in the ShieldCortex cloud dashboard are now synced to all connected devices automatically
+  - `setExternalPatterns()` — Register cloud-synced regex patterns for injection scanning alongside the 23 built-in patterns
+  - `getExternalPatternCount()` — Returns the count of active cloud patterns
+  - `getEffectiveIronDomeConfig()` — Returns merged config: cloud policy overrides + base profile + local enabled flag
+  - `refreshCloudIronDome()` — Fetches patterns + policy from cloud (10s timeout, disk cache fallback)
+  - `applyCachedCloudPatterns()` — Loads cached patterns from disk on startup
+  - Cloud patterns and policy are persisted to `~/.shieldcortex/config.json` with HMAC integrity
+  - Brain worker refreshes cloud Iron Dome data every 5 minutes (light tick)
+  - Invalid cloud regex patterns are silently skipped; valid ones scan alongside built-in patterns
+  - `InjectionDetection.category` widened from `InjectionCategory` to `InjectionCategory | string` to support custom categories
+
 ## [2.15.2] - 2026-02-23
 - **Fix:** Confirmation protocol CLI now works when Iron Dome config predates the feature (graceful fallback to defaults)
 - **Fix:** `classifyAction` handles missing `confirmationProtocol` in legacy configs

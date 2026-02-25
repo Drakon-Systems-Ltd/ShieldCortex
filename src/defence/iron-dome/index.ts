@@ -13,6 +13,8 @@ import { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
 import type { ConfirmationTier } from './confirmation-gate.js';
 import { mergeConfirmationProtocol } from './confirmation-gate.js';
 import { logIronDomeAudit } from './audit.js';
+import { getCloudIronDomeCache } from '../../cloud/iron-dome-sync.js';
+import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
 
 // ── Re-exports ──
 
@@ -22,7 +24,8 @@ export type { IronDomeConfig, IronDomeProfile, IronDomePiiRules, IronDomeSubAgen
 export { classifyAction, requiresConfirmation, requiresAnnouncement, mergeConfirmationProtocol } from './confirmation-gate.js';
 export type { ConfirmationTier, ConfirmationResult } from './confirmation-gate.js';
 
-export { scanForInjection } from './injection-scanner.js';
+import { getExternalPatternCount as _getExternalPatternCount } from './injection-scanner.js';
+export { scanForInjection, setExternalPatterns, getExternalPatternCount } from './injection-scanner.js';
 export type { InjectionScanResult, InjectionDetection, InjectionSeverity, InjectionCategory } from './injection-scanner.js';
 
 export { isChannelTrusted, validateGateway } from './gateway.js';
@@ -149,13 +152,91 @@ export function getIronDomeStatus(): {
   enabled: boolean;
   config: IronDomeConfig;
   profile?: IronDomeProfile;
+  cloudPolicy?: boolean;
+  externalPatterns?: number;
 } {
   const config = loadConfig();
+  const cache = getCloudIronDomeCache();
+
   return {
     enabled: config.enabled,
     config,
     profile: config.profile,
+    cloudPolicy: !!(cache?.policy),
+    externalPatterns: _getExternalPatternCount(),
   };
+}
+
+/**
+ * Get the effective Iron Dome configuration, merging cloud policy overrides.
+ *
+ * Priority: local enabled flag > cloud policy overrides > base profile defaults
+ *
+ * If cloud is enabled and a policy is cached, the base profile from the cloud
+ * policy is used, with config_overrides deep-merged on top.
+ * If cloud is disabled or no cached policy, returns local config unchanged.
+ */
+export function getEffectiveIronDomeConfig(): IronDomeConfig {
+  const localConfig = loadConfig();
+
+  // If Iron Dome isn't enabled locally, don't apply cloud config
+  if (!localConfig.enabled) return localConfig;
+
+  const cache = getCloudIronDomeCache();
+  if (!cache?.policy) return localConfig;
+
+  const cloudPolicy: CloudPolicy = cache.policy;
+  const profileKey = cloudPolicy.base_profile as IronDomeProfile;
+  const baseProfile = IRON_DOME_PROFILES[profileKey];
+  if (!baseProfile) return localConfig;
+
+  // Start with the cloud base profile
+  const merged: IronDomeConfig = {
+    ...baseProfile,
+    enabled: true,
+  };
+
+  // Apply config_overrides from cloud policy
+  const overrides = cloudPolicy.config_overrides;
+  if (overrides.trustedChannels && Array.isArray(overrides.trustedChannels)) {
+    merged.trustedChannels = overrides.trustedChannels as string[];
+  }
+  if (typeof overrides.killPhrase === 'string') {
+    merged.killPhrase = overrides.killPhrase;
+  }
+  if (overrides.requireApproval && Array.isArray(overrides.requireApproval)) {
+    merged.requireApproval = overrides.requireApproval as string[];
+  }
+  if (overrides.autoApprove && Array.isArray(overrides.autoApprove)) {
+    merged.autoApprove = overrides.autoApprove as string[];
+  }
+  if (overrides.piiRules && typeof overrides.piiRules === 'object') {
+    const pii = overrides.piiRules as Record<string, unknown>;
+    merged.piiRules = {
+      ...merged.piiRules,
+      ...(pii.neverOutput && Array.isArray(pii.neverOutput) ? { neverOutput: pii.neverOutput as string[] } : {}),
+      ...(pii.aggregatesOnly && Array.isArray(pii.aggregatesOnly) ? { aggregatesOnly: pii.aggregatesOnly as string[] } : {}),
+    };
+  }
+  if (overrides.subAgentRestrictions && typeof overrides.subAgentRestrictions === 'object') {
+    const sub = overrides.subAgentRestrictions as Record<string, unknown>;
+    merged.subAgentRestrictions = {
+      ...merged.subAgentRestrictions,
+      ...(sub.blockedOperations && Array.isArray(sub.blockedOperations) ? { blockedOperations: sub.blockedOperations as string[] } : {}),
+      ...(typeof sub.sanitiseContext === 'boolean' ? { sanitiseContext: sub.sanitiseContext } : {}),
+    };
+  }
+  if (overrides.confirmationProtocol && typeof overrides.confirmationProtocol === 'object') {
+    const conf = overrides.confirmationProtocol as Record<string, unknown>;
+    merged.confirmationProtocol = {
+      ...merged.confirmationProtocol,
+      ...(conf.red && Array.isArray(conf.red) ? { red: conf.red as string[] } : {}),
+      ...(conf.amber && Array.isArray(conf.amber) ? { amber: conf.amber as string[] } : {}),
+      ...(conf.green && Array.isArray(conf.green) ? { green: conf.green as string[] } : {}),
+    };
+  }
+
+  return merged;
 }
 
 // ── Confirmation Override Management ──

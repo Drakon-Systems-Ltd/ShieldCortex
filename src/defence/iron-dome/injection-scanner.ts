@@ -21,7 +21,7 @@ export type InjectionCategory =
   | 'context_escape';
 
 export interface InjectionDetection {
-  category: InjectionCategory;
+  category: InjectionCategory | string;
   severity: InjectionSeverity;
   pattern: string;
   match: string;
@@ -290,6 +290,53 @@ pattern(
   /(?:respond\s+(?:only\s+)?with|your\s+(?:only\s+)?(?:response|output|reply)\s+(?:should|must|will)\s+be|output\s+(?:exactly|only|nothing\s+(?:but|except))|say\s+(?:only|exactly|nothing\s+(?:but|except)))\s+/gi,
 );
 
+// ── External Patterns (Cloud Sync) ──
+
+interface ExternalPatternDef {
+  category: string;
+  severity: InjectionSeverity;
+  name: string;
+  description: string;
+  regex: RegExp;
+}
+
+let externalPatterns: ExternalPatternDef[] = [];
+
+/**
+ * Register cloud-synced patterns for injection scanning.
+ * Compiles each regex, skipping invalid ones silently.
+ */
+export function setExternalPatterns(
+  patterns: Array<{ pattern: string; category: string; severity: string }>,
+): void {
+  const compiled: ExternalPatternDef[] = [];
+  for (const p of patterns) {
+    try {
+      const regex = new RegExp(p.pattern, 'gi');
+      const severity = (['critical', 'high', 'medium', 'low'].includes(p.severity)
+        ? p.severity
+        : 'medium') as InjectionSeverity;
+      compiled.push({
+        category: p.category,
+        severity,
+        name: `custom:${p.category}`,
+        description: `Custom pattern: ${p.category}`,
+        regex,
+      });
+    } catch {
+      // Skip invalid regex patterns silently
+    }
+  }
+  externalPatterns = compiled;
+}
+
+/**
+ * Returns the count of currently registered external patterns.
+ */
+export function getExternalPatternCount(): number {
+  return externalPatterns.length;
+}
+
 // ── Scanner ──
 
 /**
@@ -298,13 +345,29 @@ pattern(
 export function scanForInjection(text: string): InjectionScanResult {
   const detections: InjectionDetection[] = [];
 
+  // Scan built-in patterns
   for (const pat of PATTERNS) {
     // Reset lastIndex for global regexes
     pat.regex.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pat.regex.exec(text)) !== null) {
       detections.push({
-        category: pat.category,
+        category: pat.category as string,
+        severity: pat.severity,
+        pattern: pat.name,
+        match: match[0].trim().slice(0, 200),
+        description: pat.description,
+      });
+    }
+  }
+
+  // Scan external (cloud-synced) patterns
+  for (const pat of externalPatterns) {
+    pat.regex.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pat.regex.exec(text)) !== null) {
+      detections.push({
+        category: pat.category as string,
         severity: pat.severity,
         pattern: pat.name,
         match: match[0].trim().slice(0, 200),

@@ -34,6 +34,7 @@ import {
 } from '../api/events.js';
 import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 import { sendHeartbeat } from '../cloud/sync.js';
+import { refreshCloudIronDome, applyCachedCloudPatterns } from '../cloud/iron-dome-sync.js';
 
 /**
  * Brain Worker Class
@@ -94,6 +95,13 @@ export class BrainWorker {
       () => this.mediumTick(),
       this.config.mediumTickIntervalMs
     );
+
+    // Apply cached cloud Iron Dome patterns immediately on start
+    try {
+      applyCachedCloudPatterns();
+    } catch {
+      // Non-critical — cloud patterns are best-effort
+    }
 
     // Run initial light tick after a short delay (10 seconds)
     // This allows the server to fully initialize first
@@ -190,6 +198,13 @@ export class BrainWorker {
         sendHeartbeat();
       } catch {
         // Truly silent — heartbeat is best-effort
+      }
+
+      // 5. Refresh Iron Dome cloud patterns + policy
+      try {
+        await refreshCloudIronDome();
+      } catch {
+        // Non-critical — cloud Iron Dome sync is best-effort
       }
 
       // Update stats
