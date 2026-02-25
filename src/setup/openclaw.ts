@@ -235,11 +235,18 @@ function installPlugin(): boolean {
   try {
     fs.mkdirSync(destDir, { recursive: true });
 
-    for (const file of ['index.js', 'openclaw.plugin.json']) {
+    const requiredFiles = ['index.js', 'openclaw.plugin.json'];
+    for (const file of requiredFiles) {
       const src = path.join(PLUGIN_SOURCE, file);
       const dest = path.join(destDir, file);
       if (fs.existsSync(src)) {
         fs.copyFileSync(src, dest);
+      } else {
+        console.warn(`  Warning: ${file} not found in plugin source (${PLUGIN_SOURCE})`);
+        if (file === 'openclaw.plugin.json') {
+          console.warn('  OpenClaw will fail to load the plugin without this manifest.');
+          console.warn('  This is a build issue — try rebuilding with: npm run build');
+        }
       }
     }
 
