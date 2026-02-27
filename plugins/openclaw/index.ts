@@ -2,10 +2,11 @@
  * ShieldCortex Real-time Scanning Plugin for OpenClaw v2026.2.15+
  *
  * Hooks into llm_input/llm_output for real-time defence scanning
- * and memory extraction. All operations are fire-and-forget.
+ * and optional memory extraction. All operations are fire-and-forget.
  */
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -34,7 +35,15 @@ type PluginApi = {
 
 // ==================== CONFIG ====================
 
-interface SCConfig { cloudApiKey?: string; cloudEndpoint?: string; binaryPath?: string }
+interface SCConfig {
+  cloudApiKey?: string;
+  cloudEndpoint?: string;
+  binaryPath?: string;
+  openclawAutoMemory?: boolean;
+  openclawAutoMemoryDedupe?: boolean;
+  openclawAutoMemoryNoveltyThreshold?: number;
+  openclawAutoMemoryMaxRecent?: number;
+}
 let _config: SCConfig | null = null;
 let _version = "0.0.0";
 try {
@@ -48,6 +57,14 @@ async function loadConfig(): Promise<SCConfig> {
     _config = JSON.parse(await fs.readFile(path.join(homedir(), ".shieldcortex", "config.json"), "utf-8"));
   } catch { _config = {}; }
   return _config!;
+}
+
+function isAutoMemoryEnabled(config: SCConfig): boolean {
+  return config.openclawAutoMemory === true;
+}
+
+function isAutoMemoryDedupeEnabled(config: SCConfig): boolean {
+  return config.openclawAutoMemoryDedupe !== false;
 }
 
 // ==================== SERVER CMD ====================
@@ -133,6 +150,10 @@ function extractUserContent(msgs: unknown[]): string[] {
 }
 
 const AUDIT_DIR = path.join(homedir(), ".shieldcortex", "audit");
+const NOVELTY_CACHE_FILE = path.join(homedir(), ".shieldcortex", "openclaw-memory-cache.json");
+const DEFAULT_NOVELTY_THRESHOLD = 0.88;
+const DEFAULT_MAX_RECENT = 300;
+const MIN_NOVELTY_CHARS = 40;
 
 async function auditLog(entry: Record<string, unknown>) {
   try {
@@ -155,6 +176,147 @@ async function cloudSync(threat: Record<string, unknown>) {
       signal: AbortSignal.timeout(5000),
     });
   } catch {}
+}
+
+type NoveltyEntry = {
+  hash: string;
+  tokenHashes: string[];
+  title: string;
+  category: string;
+  createdAt: string;
+};
+
+function normalizeMemoryText(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[`"'\\]/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hashToken(token: string): string {
+  return createHash("sha1").update(token).digest("hex").slice(0, 12);
+}
+
+function buildTokenHashes(normalized: string): string[] {
+  const words = normalized.split(" ").filter((w) => w.length >= 3);
+  const set = new Set<string>();
+
+  for (let i = 0; i < words.length; i++) {
+    set.add(hashToken(words[i]));
+    if (i < words.length - 1) set.add(hashToken(`${words[i]}_${words[i + 1]}`));
+  }
+
+  return Array.from(set).slice(0, 200);
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+async function loadNoveltyCache(maxRecent: number): Promise<NoveltyEntry[]> {
+  try {
+    const raw = JSON.parse(await fs.readFile(NOVELTY_CACHE_FILE, "utf-8"));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((entry) => entry && typeof entry.hash === "string" && Array.isArray(entry.tokenHashes))
+      .slice(0, maxRecent) as NoveltyEntry[];
+  } catch {
+    return [];
+  }
+}
+
+async function saveNoveltyCache(entries: NoveltyEntry[]): Promise<void> {
+  await fs.mkdir(path.dirname(NOVELTY_CACHE_FILE), { recursive: true });
+  await fs.writeFile(NOVELTY_CACHE_FILE, JSON.stringify(entries, null, 2) + "\n", "utf-8");
+}
+
+function inspectNovelty(content: string, entries: NoveltyEntry[], threshold: number): {
+  allow: boolean;
+  contentHash: string | null;
+  tokenHashes: string[];
+  reason?: string;
+} {
+  const normalized = normalizeMemoryText(content);
+  if (normalized.length < MIN_NOVELTY_CHARS) {
+    return { allow: true, contentHash: null, tokenHashes: [] };
+  }
+
+  const contentHash = createHash("sha256").update(normalized).digest("hex").slice(0, 24);
+  if (entries.some((entry) => entry.hash === contentHash)) {
+    return { allow: false, contentHash, tokenHashes: [], reason: "exact duplicate" };
+  }
+
+  const tokenHashes = buildTokenHashes(normalized);
+  const currentSet = new Set(tokenHashes);
+
+  for (const entry of entries) {
+    const score = jaccardSimilarity(currentSet, new Set(entry.tokenHashes || []));
+    if (score >= threshold) {
+      return {
+        allow: false,
+        contentHash,
+        tokenHashes,
+        reason: `near duplicate (similarity ${score.toFixed(2)})`,
+      };
+    }
+  }
+
+  return { allow: true, contentHash, tokenHashes };
+}
+
+async function createNoveltyGate(config: SCConfig): Promise<{
+  inspect: (content: string) => { allow: boolean; contentHash: string | null; tokenHashes: string[]; reason?: string };
+  remember: (memory: { title: string; category: string }, novelty: { contentHash: string | null; tokenHashes: string[] }) => void;
+  flush: () => Promise<void>;
+}> {
+  const thresholdRaw = Number(config.openclawAutoMemoryNoveltyThreshold);
+  const maxRecentRaw = Number(config.openclawAutoMemoryMaxRecent);
+  const threshold = Number.isFinite(thresholdRaw)
+    ? clamp(thresholdRaw, 0.6, 0.99)
+    : DEFAULT_NOVELTY_THRESHOLD;
+  const maxRecent = Number.isFinite(maxRecentRaw)
+    ? Math.floor(clamp(maxRecentRaw, 50, 1000))
+    : DEFAULT_MAX_RECENT;
+
+  const enabled = isAutoMemoryDedupeEnabled(config);
+  const entries = enabled ? await loadNoveltyCache(maxRecent) : [];
+  let dirty = false;
+
+  return {
+    inspect(content: string) {
+      if (!enabled) return { allow: true, contentHash: null, tokenHashes: [] };
+      return inspectNovelty(content, entries, threshold);
+    },
+    remember(memory, novelty) {
+      if (!enabled || !novelty.contentHash || novelty.tokenHashes.length === 0) return;
+      entries.unshift({
+        hash: novelty.contentHash,
+        tokenHashes: novelty.tokenHashes,
+        title: String(memory.title || "").slice(0, 120),
+        category: String(memory.category || "note"),
+        createdAt: new Date().toISOString(),
+      });
+      if (entries.length > maxRecent) entries.length = maxRecent;
+      dirty = true;
+    },
+    async flush() {
+      if (!enabled || !dirty) return;
+      await saveNoveltyCache(entries);
+    },
+  };
 }
 
 // ==================== HOOK HANDLERS ====================
@@ -208,23 +370,38 @@ function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
   // Fire and forget
   (async () => {
     try {
+      const config = await loadConfig();
+      if (!isAutoMemoryEnabled(config)) return;
+
       const texts = event.assistantTexts.filter(t => t && t.length >= 30);
       if (!texts.length) return;
       const memories = extractMemories(texts);
       if (!memories.length) return;
 
+      const noveltyGate = await createNoveltyGate(config);
       let saved = 0;
+      let skipped = 0;
       for (const mem of memories) {
+        const novelty = noveltyGate.inspect(mem.content);
+        if (!novelty.allow) {
+          skipped++;
+          continue;
+        }
+
         const r = await callCortex("remember", {
           title: mem.title, content: mem.content, category: mem.category,
           project: ctx.agentId || "openclaw", scope: "global",
           importance: "normal", tags: "auto-extracted,realtime-plugin,llm-output",
         });
-        if (r) saved++;
+        if (r) {
+          saved++;
+          noveltyGate.remember(mem, novelty);
+        }
       }
+      await noveltyGate.flush();
       if (saved) {
-        console.log(`[shieldcortex] Extracted ${saved} memor${saved === 1 ? "y" : "ies"} from LLM output`);
-        auditLog({ type: "memory", hook: "llm_output", sessionId: event.sessionId, count: saved, ts: new Date().toISOString() });
+        console.log(`[shieldcortex] Extracted ${saved} memor${saved === 1 ? "y" : "ies"} from LLM output (${skipped} duplicates skipped)`);
+        auditLog({ type: "memory", hook: "llm_output", sessionId: event.sessionId, count: saved, skipped, ts: new Date().toISOString() });
       }
     } catch (e) {
       console.error("[shieldcortex] llm_output error:", e instanceof Error ? e.message : String(e));
@@ -237,7 +414,7 @@ function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
 export default {
   id: "shieldcortex-realtime",
   name: "ShieldCortex Real-time Scanner",
-  description: "Real-time defence scanning on LLM inputs and memory extraction from outputs",
+  description: "Real-time defence scanning on LLM inputs with optional memory extraction from outputs",
   version: _version,
 
   register(api: PluginApi) {

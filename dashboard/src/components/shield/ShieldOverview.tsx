@@ -9,6 +9,7 @@ import { CloudUpsellCard } from './CloudUpsellCard';
 import { CloudSyncStatus } from './CloudSyncStatus';
 import { SkillScannerCard } from './SkillScannerCard';
 import { IronDomeCard } from './IronDomeCard';
+import { OpenClawMemoryPanel } from './OpenClawMemoryPanel';
 
 export function ShieldOverview() {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
@@ -54,6 +55,11 @@ export function ShieldOverview() {
       {/* Iron Dome status */}
       <div className="mt-4">
         <IronDomeCard />
+      </div>
+
+      {/* OpenClaw memory complement settings */}
+      <div className="mt-4">
+        <OpenClawMemoryPanel />
       </div>
 
       {/* Cloud upsell — hidden when already configured */}

@@ -30,6 +30,8 @@
  *   shieldcortex openclaw install        # Install OpenClaw hook
  *   shieldcortex openclaw uninstall      # Remove OpenClaw hook
  *   shieldcortex openclaw status         # Check OpenClaw hook status
+ *   shieldcortex config --openclaw-auto-memory true   # Enable OpenClaw auto-memory extraction
+ *   shieldcortex config --openclaw-auto-memory false  # Disable OpenClaw auto-memory extraction
  *   shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
  *   shieldcortex copilot uninstall       # Remove MCP server configuration
  *   shieldcortex copilot status          # Check MCP server configuration

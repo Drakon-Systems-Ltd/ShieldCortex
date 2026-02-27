@@ -55,7 +55,7 @@ import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
 import { logAudit } from '../defence/audit/index.js';
-import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, type DefenceMode } from '../cloud/config.js';
+import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, getOpenClawMemoryConfig, setOpenClawMemoryConfig, type DefenceMode } from '../cloud/config.js';
 import { getQueueStats } from '../cloud/sync-queue.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection } from '../defence/iron-dome/index.js';
@@ -576,10 +576,12 @@ export function startVisualizationServer(dbPath?: string): void {
   app.get('/api/cloud/config', (_req: Request, res: Response) => {
     try {
       const config = getCloudConfig();
+      const openclawMemory = getOpenClawMemoryConfig();
       res.json({
         enabled: config.cloudEnabled,
         apiKeySet: !!config.cloudApiKey,
         baseUrl: config.cloudBaseUrl,
+        openclawMemory,
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -589,18 +591,60 @@ export function startVisualizationServer(dbPath?: string): void {
   // Update cloud configuration
   app.post('/api/cloud/config', (req: Request, res: Response) => {
     try {
-      const { cloudApiKey, cloudEnabled, cloudBaseUrl } = req.body;
+      const {
+        cloudApiKey,
+        cloudEnabled,
+        cloudBaseUrl,
+        openclawAutoMemory,
+        openclawAutoMemoryDedupe,
+        openclawAutoMemoryNoveltyThreshold,
+        openclawAutoMemoryMaxRecent,
+      } = req.body;
+
+      if (openclawAutoMemory !== undefined && typeof openclawAutoMemory !== 'boolean') {
+        res.status(400).json({ error: 'openclawAutoMemory must be a boolean' });
+        return;
+      }
+      if (openclawAutoMemoryDedupe !== undefined && typeof openclawAutoMemoryDedupe !== 'boolean') {
+        res.status(400).json({ error: 'openclawAutoMemoryDedupe must be a boolean' });
+        return;
+      }
+      if (
+        openclawAutoMemoryNoveltyThreshold !== undefined &&
+        (typeof openclawAutoMemoryNoveltyThreshold !== 'number' || Number.isNaN(openclawAutoMemoryNoveltyThreshold))
+      ) {
+        res.status(400).json({ error: 'openclawAutoMemoryNoveltyThreshold must be a number' });
+        return;
+      }
+      if (
+        openclawAutoMemoryMaxRecent !== undefined &&
+        (typeof openclawAutoMemoryMaxRecent !== 'number' || Number.isNaN(openclawAutoMemoryMaxRecent))
+      ) {
+        res.status(400).json({ error: 'openclawAutoMemoryMaxRecent must be a number' });
+        return;
+      }
+
       setCloudConfig({
         ...(cloudApiKey !== undefined && { cloudApiKey }),
         ...(cloudEnabled !== undefined && { cloudEnabled }),
         ...(cloudBaseUrl !== undefined && { cloudBaseUrl }),
       });
+
+      setOpenClawMemoryConfig({
+        ...(openclawAutoMemory !== undefined && { autoMemory: openclawAutoMemory }),
+        ...(openclawAutoMemoryDedupe !== undefined && { dedupe: openclawAutoMemoryDedupe }),
+        ...(openclawAutoMemoryNoveltyThreshold !== undefined && { noveltyThreshold: openclawAutoMemoryNoveltyThreshold }),
+        ...(openclawAutoMemoryMaxRecent !== undefined && { maxRecent: openclawAutoMemoryMaxRecent }),
+      });
+
       const updated = getCloudConfig();
+      const openclawMemory = getOpenClawMemoryConfig();
       res.json({
         success: true,
         enabled: updated.cloudEnabled,
         apiKeySet: !!updated.cloudApiKey,
         baseUrl: updated.cloudBaseUrl,
+        openclawMemory,
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

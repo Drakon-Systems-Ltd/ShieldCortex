@@ -1,6 +1,6 @@
 ---
 name: cortex-memory
-description: "Persistent brain-like memory via ShieldCortex — auto-saves session context and recalls past knowledge"
+description: "Persistent brain-like memory via ShieldCortex — recalls past knowledge, with optional auto-save"
 homepage: https://github.com/Drakon-Systems-Ltd/ShieldCortex
 metadata:
   {
@@ -16,20 +16,24 @@ metadata:
 
 # Cortex Memory Hook
 
-Integrates [ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) persistent memory. Automatically saves important session context and recalls past knowledge at session start.
+Integrates [ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) persistent memory. Recalls past knowledge at session start, and can optionally auto-save important session context.
 
 ## What It Does
 
 ### On `/new` (Session End)
+When `openclawAutoMemory` is enabled:
 1. Reads the ending session transcript
 2. Pattern-matches for decisions, bug fixes, learnings, architecture changes, and preferences
 3. Saves up to 5 high-salience memories to ShieldCortex via mcporter
+4. Skips exact and near-duplicate memories using novelty filtering
 
 ### On `/stop`, `/clear`, `/exit` (Session End)
+When `openclawAutoMemory` is enabled:
 1. Captures the current session transcript before it ends
 2. Pattern-matches for important content (same patterns as `/new`)
 3. Saves memories with a `session-stop` tag for tracking
 4. **Ensures work is saved** even when explicitly ending a session
+5. Skips exact and near-duplicate memories using novelty filtering
 
 ### On Session Start (Agent Bootstrap)
 1. Calls Cortex `get_context` to retrieve relevant memories
@@ -67,6 +71,32 @@ Say any of these phrases to trigger an instant save to Cortex memory:
 | **"going with"** | architecture | normal |
 
 Content after the trigger phrase is extracted and saved as the memory content.
+
+## Optional Auto-Memory
+
+Auto-memory extraction is disabled by default to avoid duplicate/noisy memory when another system is already primary.
+
+Enable auto-save with CLI:
+
+```bash
+npx shieldcortex config --openclaw-auto-memory true
+```
+
+Disable it:
+
+```bash
+npx shieldcortex config --openclaw-auto-memory false
+```
+
+Enable auto-save with:
+
+```json
+{
+  "openclawAutoMemory": true
+}
+```
+
+in `~/.shieldcortex/config.json`.
 
 ## Requirements
 

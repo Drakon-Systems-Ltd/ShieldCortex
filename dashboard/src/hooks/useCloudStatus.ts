@@ -5,6 +5,12 @@ interface CloudConfig {
   enabled: boolean;
   apiKeySet: boolean;
   baseUrl: string;
+  openclawMemory: {
+    autoMemory: boolean;
+    dedupe: boolean;
+    noveltyThreshold: number;
+    maxRecent: number;
+  };
 }
 
 const API_URL = 'http://localhost:3001';
@@ -13,7 +19,7 @@ export function useCloudStatus() {
   return useQuery<CloudConfig>({
     queryKey: ['cloud-config'],
     queryFn: async () => {
-      const res = await fetch(`${API_URL}/api/cloud/config`);
+      const res = await authFetch(`${API_URL}/api/cloud/config`);
       if (!res.ok) throw new Error('Failed to fetch cloud config');
       return res.json();
     },
@@ -25,7 +31,17 @@ export function useUpdateCloudConfig() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (config: Partial<{ cloudApiKey: string; cloudEnabled: boolean; cloudBaseUrl: string }>) => {
+    mutationFn: async (
+      config: Partial<{
+        cloudApiKey: string;
+        cloudEnabled: boolean;
+        cloudBaseUrl: string;
+        openclawAutoMemory: boolean;
+        openclawAutoMemoryDedupe: boolean;
+        openclawAutoMemoryNoveltyThreshold: number;
+        openclawAutoMemoryMaxRecent: number;
+      }>
+    ) => {
       const res = await authFetch(`${API_URL}/api/cloud/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

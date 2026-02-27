@@ -7,10 +7,33 @@
  * - Keyword-triggered memory saves
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 
 // ==================== SERVER COMMAND RESOLUTION ====================
+
+let _shieldConfig = null;
+let _autoMemoryNoticeShown = false;
+
+async function loadShieldConfig() {
+  if (_shieldConfig) return _shieldConfig;
+
+  try {
+    const configPath = path.join(homedir(), ".shieldcortex", "config.json");
+    _shieldConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+  } catch {
+    _shieldConfig = {};
+  }
+
+  return _shieldConfig;
+}
+
+async function isOpenClawAutoMemoryEnabled() {
+  const config = await loadShieldConfig();
+  return config?.openclawAutoMemory === true;
+}
 
 /**
  * Resolve the fastest way to invoke shieldcortex:
@@ -23,14 +46,10 @@ let _resolvedServerCmd = null;
 async function resolveServerCmd() {
   if (_resolvedServerCmd) return _resolvedServerCmd;
 
-  const path = await import("node:path");
-  const { homedir } = await import("node:os");
-
   // 1. Check config for explicit binaryPath
   try {
-    const configPath = path.join(homedir(), ".shieldcortex", "config.json");
-    const config = JSON.parse(await fs.readFile(configPath, "utf-8"));
-    if (config.binaryPath) {
+    const config = await loadShieldConfig();
+    if (config?.binaryPath) {
       await fs.access(config.binaryPath);
       _resolvedServerCmd = config.binaryPath;
       console.log(`[cortex-memory] Using configured binary: ${config.binaryPath}`);
@@ -113,6 +132,150 @@ async function callCortex(tool, args = {}, options = { retries: 1, timeout: 1500
 
     attempt();
   });
+}
+
+// ==================== NOVELTY / DEDUPE GATE ====================
+
+const NOVELTY_CACHE_FILE = path.join(homedir(), ".shieldcortex", "openclaw-memory-cache.json");
+const DEFAULT_NOVELTY_THRESHOLD = 0.88;
+const DEFAULT_MAX_RECENT = 300;
+const MIN_NOVELTY_CHARS = 40;
+
+function normalizeMemoryText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[`"'\\]/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hashToken(token) {
+  return createHash("sha1").update(token).digest("hex").slice(0, 12);
+}
+
+function buildTokenHashes(normalized) {
+  const words = normalized.split(" ").filter((w) => w.length >= 3);
+  const set = new Set();
+
+  for (let i = 0; i < words.length; i++) {
+    set.add(hashToken(words[i]));
+    if (i < words.length - 1) {
+      set.add(hashToken(`${words[i]}_${words[i + 1]}`));
+    }
+  }
+
+  return Array.from(set).slice(0, 200);
+}
+
+function jaccardSimilarity(a, b) {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+async function getNoveltyConfig() {
+  const config = await loadShieldConfig();
+  const rawThreshold = Number(config?.openclawAutoMemoryNoveltyThreshold);
+  const rawMaxRecent = Number(config?.openclawAutoMemoryMaxRecent);
+  return {
+    enabled: config?.openclawAutoMemoryDedupe !== false,
+    threshold: Number.isFinite(rawThreshold)
+      ? clamp(rawThreshold, 0.6, 0.99)
+      : DEFAULT_NOVELTY_THRESHOLD,
+    maxRecent: Number.isFinite(rawMaxRecent)
+      ? Math.floor(clamp(rawMaxRecent, 50, 1000))
+      : DEFAULT_MAX_RECENT,
+  };
+}
+
+async function loadNoveltyCache(maxRecent) {
+  try {
+    const raw = JSON.parse(await fs.readFile(NOVELTY_CACHE_FILE, "utf-8"));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((entry) => entry && typeof entry.hash === "string" && Array.isArray(entry.tokenHashes))
+      .slice(0, maxRecent);
+  } catch {
+    return [];
+  }
+}
+
+async function saveNoveltyCache(entries) {
+  await fs.mkdir(path.dirname(NOVELTY_CACHE_FILE), { recursive: true });
+  await fs.writeFile(NOVELTY_CACHE_FILE, JSON.stringify(entries, null, 2) + "\n", "utf-8");
+}
+
+function inspectNovelty(content, entries, threshold) {
+  const normalized = normalizeMemoryText(content);
+  if (normalized.length < MIN_NOVELTY_CHARS) {
+    return { allow: true, normalized, contentHash: null, tokenHashes: [] };
+  }
+
+  const contentHash = createHash("sha256").update(normalized).digest("hex").slice(0, 24);
+  if (entries.some((entry) => entry.hash === contentHash)) {
+    return { allow: false, normalized, contentHash, tokenHashes: [], reason: "exact duplicate" };
+  }
+
+  const tokenHashes = buildTokenHashes(normalized);
+  const currentSet = new Set(tokenHashes);
+  let bestSimilarity = 0;
+
+  for (const entry of entries) {
+    const score = jaccardSimilarity(currentSet, new Set(entry.tokenHashes || []));
+    if (score > bestSimilarity) bestSimilarity = score;
+    if (score >= threshold) {
+      return {
+        allow: false,
+        normalized,
+        contentHash,
+        tokenHashes,
+        reason: `near duplicate (similarity ${score.toFixed(2)})`,
+      };
+    }
+  }
+
+  return { allow: true, normalized, contentHash, tokenHashes, bestSimilarity };
+}
+
+async function createNoveltyGate() {
+  const cfg = await getNoveltyConfig();
+  const entries = cfg.enabled ? await loadNoveltyCache(cfg.maxRecent) : [];
+  let dirty = false;
+
+  return {
+    enabled: cfg.enabled,
+    inspect(content) {
+      if (!cfg.enabled) return { allow: true, reason: null };
+      return inspectNovelty(content, entries, cfg.threshold);
+    },
+    remember(memory, novelty) {
+      if (!cfg.enabled) return;
+      if (!novelty?.contentHash || !Array.isArray(novelty?.tokenHashes)) return;
+      entries.unshift({
+        hash: novelty.contentHash,
+        tokenHashes: novelty.tokenHashes,
+        title: String(memory?.title || "").slice(0, 120),
+        category: String(memory?.category || "note"),
+        createdAt: new Date().toISOString(),
+      });
+      if (entries.length > cfg.maxRecent) entries.length = cfg.maxRecent;
+      dirty = true;
+    },
+    async flush() {
+      if (!cfg.enabled || !dirty) return;
+      await saveNoveltyCache(entries);
+    },
+  };
 }
 
 // ==================== HOOK SCANNER ====================
@@ -282,6 +445,14 @@ async function getRecentMessages(sessionFilePath) {
  * Handle command:new — extract memories from ending session
  */
 async function onSessionEnd(event) {
+  if (!(await isOpenClawAutoMemoryEnabled())) {
+    if (!_autoMemoryNoticeShown) {
+      console.log("[cortex-memory] Auto memory extraction disabled (set openclawAutoMemory=true to enable)");
+      _autoMemoryNoticeShown = true;
+    }
+    return;
+  }
+
   const context = event.context || {};
   const sessionEntry = context.previousSessionEntry || context.sessionEntry || {};
   const sessionFile = sessionEntry.sessionFile;
@@ -303,8 +474,16 @@ async function onSessionEnd(event) {
     return;
   }
 
+  const noveltyGate = await createNoveltyGate();
   let saved = 0;
+  let skipped = 0;
   for (const mem of memories) {
+    const novelty = noveltyGate.inspect(mem.content);
+    if (!novelty.allow) {
+      skipped++;
+      continue;
+    }
+
     const result = await callCortex("remember", {
       title: mem.title,
       content: mem.content,
@@ -314,10 +493,14 @@ async function onSessionEnd(event) {
       importance: "high",
       tags: "auto-extracted,openclaw-hook",
     });
-    if (result) saved++;
+    if (result) {
+      saved++;
+      noveltyGate.remember(mem, novelty);
+    }
   }
+  await noveltyGate.flush();
 
-  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories from session`);
+  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories from session (${skipped} skipped as duplicates)`);
   
   // Provide visible feedback to user
   if (saved > 0 && event.messages) {
@@ -330,6 +513,14 @@ async function onSessionEnd(event) {
  * This fires when user explicitly calls /stop
  */
 async function onSessionStop(event) {
+  if (!(await isOpenClawAutoMemoryEnabled())) {
+    if (!_autoMemoryNoticeShown) {
+      console.log("[cortex-memory] Auto memory extraction disabled (set openclawAutoMemory=true to enable)");
+      _autoMemoryNoticeShown = true;
+    }
+    return;
+  }
+
   const context = event.context || {};
   const sessionEntry = context.sessionEntry || {};
   const sessionFile = sessionEntry.sessionFile;
@@ -351,8 +542,16 @@ async function onSessionStop(event) {
     return;
   }
 
+  const noveltyGate = await createNoveltyGate();
   let saved = 0;
+  let skipped = 0;
   for (const mem of memories) {
+    const novelty = noveltyGate.inspect(mem.content);
+    if (!novelty.allow) {
+      skipped++;
+      continue;
+    }
+
     const result = await callCortex("remember", {
       title: mem.title,
       content: mem.content,
@@ -362,10 +561,14 @@ async function onSessionStop(event) {
       importance: "high",
       tags: "auto-extracted,openclaw-hook,session-stop",
     });
-    if (result) saved++;
+    if (result) {
+      saved++;
+      noveltyGate.remember(mem, novelty);
+    }
   }
+  await noveltyGate.flush();
 
-  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories on session stop`);
+  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories on session stop (${skipped} skipped as duplicates)`);
   
   // Provide visible feedback to user
   if (saved > 0 && event.messages) {

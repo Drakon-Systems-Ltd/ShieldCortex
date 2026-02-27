@@ -285,6 +285,77 @@ export function setVerifyConfig(updates: Partial<VerifyConfig>): void {
   writeRawConfig(raw);
 }
 
+// ── OpenClaw Memory Config ────────────────────────────
+
+export interface OpenClawMemoryConfig {
+  autoMemory: boolean;
+  dedupe: boolean;
+  noveltyThreshold: number;
+  maxRecent: number;
+}
+
+const DEFAULT_OPENCLAW_MEMORY_CONFIG: OpenClawMemoryConfig = {
+  autoMemory: false,
+  dedupe: true,
+  noveltyThreshold: 0.88,
+  maxRecent: 300,
+};
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+/**
+ * Returns persisted OpenClaw memory integration config with safe defaults.
+ */
+export function getOpenClawMemoryConfig(): OpenClawMemoryConfig {
+  const raw = readRawConfig();
+  const threshold = typeof raw.openclawAutoMemoryNoveltyThreshold === 'number'
+    ? clamp(raw.openclawAutoMemoryNoveltyThreshold, 0.6, 0.99)
+    : DEFAULT_OPENCLAW_MEMORY_CONFIG.noveltyThreshold;
+  const maxRecent = typeof raw.openclawAutoMemoryMaxRecent === 'number'
+    ? Math.floor(clamp(raw.openclawAutoMemoryMaxRecent, 50, 1000))
+    : DEFAULT_OPENCLAW_MEMORY_CONFIG.maxRecent;
+
+  return {
+    autoMemory: raw.openclawAutoMemory === true,
+    dedupe: raw.openclawAutoMemoryDedupe !== false,
+    noveltyThreshold: threshold,
+    maxRecent,
+  };
+}
+
+/**
+ * Persists OpenClaw memory integration config.
+ */
+export function setOpenClawMemoryConfig(updates: Partial<OpenClawMemoryConfig>): void {
+  const raw = readRawConfig();
+  if (updates.autoMemory !== undefined) raw.openclawAutoMemory = updates.autoMemory;
+  if (updates.dedupe !== undefined) raw.openclawAutoMemoryDedupe = updates.dedupe;
+  if (updates.noveltyThreshold !== undefined) {
+    raw.openclawAutoMemoryNoveltyThreshold = clamp(updates.noveltyThreshold, 0.6, 0.99);
+  }
+  if (updates.maxRecent !== undefined) {
+    raw.openclawAutoMemoryMaxRecent = Math.floor(clamp(updates.maxRecent, 50, 1000));
+  }
+  writeRawConfig(raw);
+}
+
+/**
+ * Returns whether OpenClaw auto-memory extraction is enabled.
+ * Default is false (opt-in).
+ */
+export function getOpenClawAutoMemory(): boolean {
+  return getOpenClawMemoryConfig().autoMemory;
+}
+
+/**
+ * Persists OpenClaw auto-memory extraction preference.
+ */
+export function setOpenClawAutoMemory(enabled: boolean): void {
+  setOpenClawMemoryConfig({ autoMemory: enabled });
+}
+
 // ── Device Identity ────────────────────────────────────
 
 /**

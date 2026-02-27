@@ -94,10 +94,12 @@ export function runDefencePipeline(
       allowed = false;
       reason = `Quarantined: fragmentation score ${fragmentation.score} exceeds threshold ${cfg.autoQuarantineThreshold}`;
       firewall.result = 'QUARANTINE';
+      firewall.reason = reason;
     } else if (sensitivity.level === 'RESTRICTED') {
       allowed = false;
       reason = `Blocked: content classified as RESTRICTED (${sensitivity.detectedPatterns.join(', ')})`;
       firewall.result = 'BLOCK';
+      firewall.reason = reason;
       if (!firewall.threatIndicators.includes('restricted_content')) {
         firewall.threatIndicators.push('restricted_content');
       }
@@ -105,6 +107,9 @@ export function runDefencePipeline(
       allowed = true;
       reason = firewall.reason;
     }
+
+    // Keep top-level reason and firewall.reason consistent for downstream callers.
+    firewall.reason = reason;
 
     // Add credential_leak to threat indicators if any findings (even non-blocking)
     if (credentialScan.leaked && !firewall.threatIndicators.includes('credential_leak')) {

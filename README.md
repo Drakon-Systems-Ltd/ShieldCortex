@@ -147,8 +147,30 @@ openclaw gateway restart
 ```
 
 Installs both the cortex-memory hook and the real-time scanner plugin:
-- **Hook**: Auto-saves session context, injects memories on startup, "remember this:" trigger
-- **Plugin**: Real-time threat scanning on LLM inputs + automatic memory extraction from outputs (OpenClaw v2026.2.15+)
+- **Hook**: Memory injection + explicit `"remember this"` trigger
+- **Plugin**: Real-time threat scanning on LLM inputs (OpenClaw v2026.2.15+)
+
+Auto-memory extraction is optional and disabled by default. Enable it only if you want ShieldCortex to write memories automatically:
+
+```bash
+npx shieldcortex config --openclaw-auto-memory true
+```
+
+Disable again:
+
+```bash
+npx shieldcortex config --openclaw-auto-memory false
+```
+
+Equivalent config file entry:
+
+```json
+{
+  "openclawAutoMemory": true
+}
+```
+
+When enabled, ShieldCortex applies a novelty gate (exact + near-duplicate detection) before writing, so it reduces memory noise instead of duplicating every output.
 
 ### For Claude.ai (Skill)
 
@@ -164,6 +186,29 @@ The skill teaches Claude when and how to use ShieldCortex's MCP tools — rememb
 import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain';
 const memory = new ShieldCortexMemory({ mode: 'balanced' });
 ```
+
+### Complement Existing Memory Systems (Optional)
+
+If your agent already has built-in memory (OpenClaw, custom adapters, markdown memory, etc.), you can keep it as primary and add ShieldCortex as a defence and quality layer:
+
+```javascript
+import { ShieldCortexGuardedMemoryBridge } from 'shieldcortex/integrations/universal';
+import { OpenClawMarkdownBackend } from 'shieldcortex/integrations/openclaw';
+
+const nativeMemory = new OpenClawMarkdownBackend();
+const guarded = new ShieldCortexGuardedMemoryBridge(nativeMemory, {
+  mode: 'balanced',
+  blockOnThreat: true, // set false for advisory-only mode
+  sourceIdentifier: 'openclaw-memory-bridge'
+});
+
+await guarded.save({
+  title: 'Architecture decision',
+  content: 'Auth service uses PostgreSQL and Redis.'
+});
+```
+
+This keeps memory optional: ShieldCortex complements external memory systems instead of replacing them.
 
 ### For Any Agent (REST API)
 

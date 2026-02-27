@@ -1,4 +1,14 @@
-import { getCloudConfig, setCloudConfig, getDefenceMode, setDefenceMode, getVerifyConfig, setVerifyConfig, type DefenceMode } from './config.js';
+import {
+  getCloudConfig,
+  setCloudConfig,
+  getDefenceMode,
+  setDefenceMode,
+  getVerifyConfig,
+  setVerifyConfig,
+  getOpenClawAutoMemory,
+  setOpenClawAutoMemory,
+  type DefenceMode,
+} from './config.js';
 
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
@@ -8,6 +18,7 @@ export function handleCloudConfig(args: string[]): void {
     const config = getCloudConfig();
     const mode = getDefenceMode();
     const verify = getVerifyConfig();
+    const openclawAutoMemory = getOpenClawAutoMemory();
     console.log('\nShieldCortex Configuration:');
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
@@ -15,6 +26,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log(`  Base URL: ${config.cloudBaseUrl}`);
     console.log(`  LLM Verify:   ${verify.verifyEnabled ? 'Enabled' : 'Disabled'} (${verify.verifyMode}, ${verify.verifyTimeoutMs}ms timeout)`);
     console.log(`  Verify Triggers: ${verify.verifyTriggers.join(', ')}`);
+    console.log(`  OpenClaw Auto-Memory: ${openclawAutoMemory ? 'Enabled' : 'Disabled'}`);
     console.log('');
     return;
   }
@@ -104,6 +116,24 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  const openclawAutoMemoryIdx = args.indexOf('--openclaw-auto-memory');
+  if (openclawAutoMemoryIdx !== -1) {
+    const value = args[openclawAutoMemoryIdx + 1];
+    if (!value) {
+      console.error('Missing value for --openclaw-auto-memory. Use true or false.');
+      process.exit(1);
+    }
+    const normalized = value.toLowerCase();
+    if (normalized !== 'true' && normalized !== 'false') {
+      console.error(`Invalid value for --openclaw-auto-memory: ${value}. Use true or false.`);
+      process.exit(1);
+    }
+    const enabled = normalized === 'true';
+    setOpenClawAutoMemory(enabled);
+    console.log(`OpenClaw auto-memory ${enabled ? 'enabled' : 'disabled'}.`);
+    changed = true;
+  }
+
   if (!changed) {
     console.log('Usage: npx shieldcortex config [options]');
     console.log('');
@@ -114,6 +144,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-enable         Enable cloud sync');
     console.log('  --cloud-disable        Disable cloud sync');
     console.log('  --cloud-status         Show current configuration');
+    console.log('  --openclaw-auto-memory <true|false>  Enable or disable OpenClaw auto-memory extraction');
     console.log('');
     console.log('LLM Verification:');
     console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');

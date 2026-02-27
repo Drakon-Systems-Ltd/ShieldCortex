@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "2.16.2",
+  "version": "2.17.0",
   "description": "Persistent brain for AI agents. Knowledge graphs, memory decay, contradiction detection, Iron Dome behaviour protection — plus the only defence pipeline that stops memory poisoning. Works with Claude Code, OpenClaw, LangChain, and any MCP agent.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,6 +13,14 @@
     "./integrations/langchain": {
       "import": "./dist/integrations/langchain.js",
       "types": "./dist/integrations/langchain.d.ts"
+    },
+    "./integrations/universal": {
+      "import": "./dist/integrations/universal.js",
+      "types": "./dist/integrations/universal.d.ts"
+    },
+    "./integrations/openclaw": {
+      "import": "./dist/integrations/openclaw.js",
+      "types": "./dist/integrations/openclaw.d.ts"
     },
     "./integrations": {
       "import": "./dist/integrations/index.js",

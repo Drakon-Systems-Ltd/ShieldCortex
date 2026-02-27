@@ -77,8 +77,8 @@ export type {
 } from './iron-dome/index.js';
 
 // Cloud
-export { getCloudConfig, setCloudConfig, clearCloudConfigCache, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, getVerifyConfig, setVerifyConfig } from '../cloud/config.js';
-export type { CloudConfig, DefenceMode, VerifyConfig } from '../cloud/config.js';
+export { getCloudConfig, setCloudConfig, clearCloudConfigCache, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, getVerifyConfig, setVerifyConfig, getOpenClawAutoMemory, setOpenClawAutoMemory, getOpenClawMemoryConfig, setOpenClawMemoryConfig } from '../cloud/config.js';
+export type { CloudConfig, DefenceMode, VerifyConfig, OpenClawMemoryConfig } from '../cloud/config.js';
 export { syncToCloud } from '../cloud/sync.js';
 export { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 export { submitVerification, pollVerification } from '../cloud/verify.js';

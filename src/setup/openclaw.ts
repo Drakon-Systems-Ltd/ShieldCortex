@@ -400,9 +400,10 @@ export async function installOpenClawHook(): Promise<void> {
 
   console.log('');
   console.log('What was installed:');
-  console.log('  • cortex-memory hook (auto-save, memory injection, "remember this:" trigger)');
+  console.log('  • cortex-memory hook (memory injection + "remember this:" trigger)');
+  console.log('    Auto-save is optional: shieldcortex config --openclaw-auto-memory true');
   if (pluginInstalled) {
-    console.log('  • shieldcortex-realtime plugin (real-time LLM input/output scanning)');
+    console.log('  • shieldcortex-realtime plugin (real-time LLM input scanning + optional output extraction)');
   }
   console.log('');
   console.log('Restart your agent to activate.');

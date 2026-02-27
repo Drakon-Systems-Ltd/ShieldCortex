@@ -34,6 +34,10 @@ export {
   getCloudConfig,
   setCloudConfig,
   clearCloudConfigCache,
+  getOpenClawAutoMemory,
+  setOpenClawAutoMemory,
+  getOpenClawMemoryConfig,
+  setOpenClawMemoryConfig,
   getVerifyConfig,
   setVerifyConfig,
   syncToCloud,
@@ -112,6 +116,25 @@ export { jaccardSimilarity, hasSignificantOverlap, wordOverlap } from './memory/
 export { consolidate, mergeSimilarMemories, exportMemories, importMemories } from './memory/consolidate.js';
 export { detectContradictions } from './memory/contradiction.js';
 export { activateMemory, getActivationBoost, getActivationLevel, getActiveMemories } from './memory/activation.js';
+
+// ── Integrations ────────────────────────────────────────────
+export {
+  ShieldCortexMemory,
+  ShieldCortexGuard,
+  ShieldCortexGuardedMemoryBridge,
+  MarkdownMemoryBackend,
+  OpenClawMarkdownBackend,
+} from './integrations/index.js';
+
+export type {
+  ShieldCortexMemoryConfig,
+  ShieldCortexGuardConfig,
+  ExternalMemoryBackend,
+  ExternalMemoryRecord,
+  GuardedMemoryBridgeConfig,
+  GuardedSaveResult,
+  GuardedSearchResult,
+} from './integrations/index.js';
 
 // ── Knowledge Graph ────────────────────────────────────────
 export { extractFromMemory } from './graph/extract.js';
