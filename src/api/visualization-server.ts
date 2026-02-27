@@ -97,14 +97,15 @@ export function startVisualizationServer(dbPath?: string): void {
   // Generate per-session token (written to ~/.shieldcortex/.api-token)
   generateSessionToken();
 
-  // Auth middleware: require Bearer token on all mutating requests
+  // Auth middleware: require Bearer token on all requests except public paths
+  const publicPaths = ['/api/health', '/api/auth/session-token'];
   app.use((req: Request, res: Response, next) => {
-    // Allow GET, OPTIONS, HEAD — read-only
-    if (['GET', 'OPTIONS', 'HEAD'].includes(req.method)) {
+    // Allow OPTIONS/HEAD for CORS preflight
+    if (['OPTIONS', 'HEAD'].includes(req.method)) {
       return next();
     }
-    // Allow the one-time token claim endpoint without auth
-    if (req.path === '/api/auth/session-token') {
+    // Public endpoints that never need auth
+    if (publicPaths.includes(req.path)) {
       return next();
     }
     const authHeader = req.headers.authorization;
@@ -1907,7 +1908,15 @@ export function startVisualizationServer(dbPath?: string): void {
 
   const wss = new WebSocketServer({ server, path: '/ws/events' });
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', (ws: WebSocket, req) => {
+    // Validate auth token from query string: ws://localhost:3001/ws/events?token=<token>
+    const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+    const token = url.searchParams.get('token');
+    if (!token || !validateSessionToken(token)) {
+      ws.close(4401, 'Unauthorized');
+      return;
+    }
+
     clients.add(ws);
     console.log(`[WS] Client connected. Total: ${clients.size}`);
 

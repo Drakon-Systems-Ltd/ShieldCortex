@@ -287,8 +287,10 @@ export class MemoryBlockedError extends Error {
 function quarantineMemory(input: MemoryInput, source: DefenceSource, result: DefencePipelineResult): void {
   try {
     const db = getDatabase();
+    // Defensive: coerce firewall_result if content was blocked but result is still ALLOW
+    const firewallResult = result.firewall.result === 'ALLOW' ? 'BLOCK' : result.firewall.result;
     db.prepare(`INSERT INTO quarantine (original_title, original_content, project, source_type, source_identifier, reason, threat_indicators, anomaly_score, firewall_result, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
-      .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, result.firewall.result, result.auditId);
+      .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, firewallResult, result.auditId);
 
     // Cloud quarantine sync is handled upstream:
     // - Pipeline QUARANTINE → synced by pipeline.ts step 9

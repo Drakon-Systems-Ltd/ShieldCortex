@@ -40,17 +40,9 @@ export async function getApiToken(): Promise<string> {
 
 /**
  * Auth-aware fetch wrapper.
- * Adds Authorization header on POST/PATCH/DELETE/PUT requests.
- * GET requests pass through without auth.
+ * Adds Authorization header on all requests (server requires auth on all non-public endpoints).
  */
 export async function authFetch(url: string, options?: RequestInit): Promise<Response> {
-  const method = (options?.method || 'GET').toUpperCase();
-
-  // GET/HEAD/OPTIONS don't need auth
-  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    return fetch(url, options);
-  }
-
   const token = await getApiToken();
   const headers = new Headers(options?.headers);
   headers.set('Authorization', `Bearer ${token}`);

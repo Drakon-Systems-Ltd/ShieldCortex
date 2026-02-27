@@ -18,6 +18,7 @@ export type ThreatIndicator =
   | 'credential_leak'
   | 'external_url'
   | 'fragmented_payload'
+  | 'restricted_content'
   | 'pipeline_error';
 
 // ── Core Interfaces ──

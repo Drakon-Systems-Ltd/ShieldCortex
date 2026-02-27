@@ -93,9 +93,14 @@ export function runDefencePipeline(
     ) {
       allowed = false;
       reason = `Quarantined: fragmentation score ${fragmentation.score} exceeds threshold ${cfg.autoQuarantineThreshold}`;
+      firewall.result = 'QUARANTINE';
     } else if (sensitivity.level === 'RESTRICTED') {
       allowed = false;
       reason = `Blocked: content classified as RESTRICTED (${sensitivity.detectedPatterns.join(', ')})`;
+      firewall.result = 'BLOCK';
+      if (!firewall.threatIndicators.includes('restricted_content')) {
+        firewall.threatIndicators.push('restricted_content');
+      }
     } else {
       allowed = true;
       reason = firewall.reason;

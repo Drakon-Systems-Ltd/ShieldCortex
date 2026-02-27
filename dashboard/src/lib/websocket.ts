@@ -7,8 +7,9 @@
 
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { getApiToken } from './auth';
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws/events';
+const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws/events';
 
 export type WebSocketEventType =
   | 'initial_state'
@@ -74,7 +75,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
     onMessageRef.current = onMessage;
   }, [onMessage]);
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (!enabled || wsRef.current?.readyState === WebSocket.OPEN) return;
 
     // Clear any pending reconnect timeout
@@ -84,7 +85,9 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
     }
 
     try {
-      const ws = new WebSocket(WS_URL);
+      const token = await getApiToken();
+      const wsUrl = `${WS_BASE_URL}?token=${encodeURIComponent(token)}`;
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
