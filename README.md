@@ -288,23 +288,11 @@ Interactive knowledge graph showing entities and relationships extracted from me
 
 ![Knowledge Graph](docs/images/dashboard-graph.png)
 
-### Memory Browser
-
-Browse, search, and filter memories in grid or list view. Filter by project, category, type, and tags.
-
-![Memory Browser](docs/images/dashboard-memories.png)
-
 ### Audit Log
 
 Full forensic audit log of every memory operation — timestamps, sources, trust scores, anomaly scores, and threat reasons.
 
 ![Audit Log](docs/images/dashboard-audit.png)
-
-### Quarantine Review
-
-Review quarantined memories that triggered defence alerts. Approve false positives or reject genuine threats.
-
-![Quarantine Review](docs/images/dashboard-quarantine.png)
 
 ### Skills Scanner
 
