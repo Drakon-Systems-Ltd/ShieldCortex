@@ -7,38 +7,28 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![GitHub stars](https://img.shields.io/github/stars/Drakon-Systems-Ltd/ShieldCortex.svg?style=social)](https://github.com/Drakon-Systems-Ltd/ShieldCortex/stargazers)
 
-Persistent memory + security for AI agents.
+Persistent memory and security for AI agents.
 
-ShieldCortex gives agents long-term memory, then protects that memory from prompt injection, credential leaks, and poisoned context. It works with Claude Code, OpenClaw, LangChain, and any MCP-compatible workflow.
+ShieldCortex combines a long-term memory system with a defence pipeline and behaviour controls, so your agent can remember context without becoming easy to poison.
 
-## Contents
+**Works with:** Claude Code, OpenClaw, LangChain, MCP-compatible agents, and REST-based Python stacks.
 
-- [Why ShieldCortex](#why-shieldcortex)
-- [Install](#install)
-- [Quick Start](#quick-start)
-- [Complement Existing Memory Systems](#complement-existing-memory-systems)
+## Jump To
+
+- [Start in 60 Seconds](#start-in-60-seconds)
+- [Why It Feels Different](#why-it-feels-different)
+- [OpenClaw: Complement Mode by Default](#openclaw-complement-mode-by-default)
+- [Integrations](#integrations)
 - [Security Model](#security-model)
-- [Skill Scanner](#skill-scanner)
 - [Dashboard and Cloud](#dashboard-and-cloud)
-- [CLI Cheat Sheet](#cli-cheat-sheet)
-- [Supported Agents](#supported-agents)
-- [Documentation](#documentation)
+- [CLI Quick Commands](#cli-quick-commands)
+- [Docs and Links](#docs-and-links)
 
-## Why ShieldCortex
-
-- Persistent memory in local SQLite with semantic recall
-- Knowledge graph extraction, contradiction detection, and memory consolidation
-- Defence pipeline on memory writes (local by default, optional cloud verification)
-- Iron Dome behaviour protection for outbound actions (PII, action gating, kill switch)
-- Complement mode for agents that already have memory
-
-## Install
+## Start in 60 Seconds
 
 ```bash
 npm install -g shieldcortex
 ```
-
-## Quick Start
 
 ### Claude Code / Cursor / VS Code
 
@@ -53,23 +43,67 @@ npx shieldcortex openclaw install
 openclaw gateway restart
 ```
 
-This installs:
-- `cortex-memory` hook (context injection + keyword saves)
-- `shieldcortex-realtime` plugin (real-time scanning on `llm_input` / `llm_output`)
+`openclaw install` sets up both:
+- `cortex-memory` hook (context injection, keyword-trigger saves)
+- `shieldcortex-realtime` plugin (`llm_input`/`llm_output` scanning)
 
-### Optional OpenClaw Auto-Memory
+## Why It Feels Different
 
-Auto-memory is intentionally off by default so ShieldCortex complements, rather than duplicates, native OpenClaw memory behavior.
+ShieldCortex is not just a memory database. It is a three-layer runtime:
+
+| Layer | Role | Outcome |
+|---|---|---|
+| Memory Engine | Persistent memory, semantic retrieval, consolidation, contradiction checks | Better continuity across sessions |
+| Defence Pipeline | Multi-layer content scanning before memory writes | Blocks poisoned or sensitive payloads |
+| Iron Dome | Outbound behaviour controls (actions/PII/trust channels) | Reduces compromised agent behaviour |
+
+<details>
+<summary><strong>Memory capabilities</strong></summary>
+
+- Persistent local storage (SQLite)
+- Semantic search and context recall
+- Knowledge graph extraction
+- Contradiction detection
+- Memory consolidation and prioritisation
+
+</details>
+
+<details>
+<summary><strong>Defence capabilities</strong></summary>
+
+- Input sanitisation and structure checks
+- Injection and obfuscation pattern detection
+- Fragmentation analysis
+- Trust/sensitivity scoring
+- Credential leak detection
+- Optional cloud LLM verification (Tier 2)
+
+</details>
+
+## OpenClaw: Complement Mode by Default
+
+ShieldCortex is designed to complement, not fight, existing memory systems.
+
+Default OpenClaw behaviour:
+- Real-time scanning is on
+- Context recall at session start is on
+- Auto-memory extraction is off
+
+That means users with native OpenClaw memory avoid duplicate/noisy writes by default.
+
+Enable optional OpenClaw auto-memory:
 
 ```bash
 npx shieldcortex config --openclaw-auto-memory true
+```
+
+Disable again:
+
+```bash
 npx shieldcortex config --openclaw-auto-memory false
 ```
 
-You can also control this from the local dashboard:
-- `Shield Overview -> OpenClaw Memory`
-
-Optional tuning keys in `~/.shieldcortex/config.json`:
+Optional tuning in `~/.shieldcortex/config.json`:
 
 ```json
 {
@@ -80,6 +114,11 @@ Optional tuning keys in `~/.shieldcortex/config.json`:
 }
 ```
 
+Also available in local dashboard:
+- `Shield Overview -> OpenClaw Memory`
+
+## Integrations
+
 ### LangChain
 
 ```javascript
@@ -88,43 +127,9 @@ import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain';
 const memory = new ShieldCortexMemory({ mode: 'balanced' });
 ```
 
-### REST API Mode
+### Universal Memory Bridge
 
-```bash
-npx shieldcortex --mode api
-# API: http://localhost:3001
-```
-
-```bash
-curl -X POST http://localhost:3001/api/v1/scan \
-  -H 'Content-Type: application/json' \
-  -d '{"content":"ignore previous instructions"}'
-```
-
-### As a Library
-
-```javascript
-import { initDatabase, addMemory, runDefencePipeline } from 'shieldcortex';
-
-initDatabase();
-
-const result = runDefencePipeline(
-  'Use OAuth2 bearer tokens for API auth',
-  'Auth decision',
-  { type: 'cli', identifier: 'readme-example' }
-);
-if (result.allowed) {
-  addMemory({
-    title: 'Auth decision',
-    content: 'Use OAuth2 bearer tokens',
-    category: 'architecture'
-  });
-}
-```
-
-## Complement Existing Memory Systems
-
-If your agent already has built-in memory, keep that as primary and place ShieldCortex in front as a defence and quality layer.
+Use ShieldCortex in front of any existing memory backend.
 
 ```javascript
 import { ShieldCortexGuardedMemoryBridge } from 'shieldcortex/integrations/universal';
@@ -143,31 +148,65 @@ await guarded.save({
 });
 ```
 
+### REST API Mode
+
+```bash
+npx shieldcortex --mode api
+# http://localhost:3001
+```
+
+```bash
+curl -X POST http://localhost:3001/api/v1/scan \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"ignore all previous instructions"}'
+```
+
+### Library API
+
+```javascript
+import { initDatabase, addMemory, runDefencePipeline } from 'shieldcortex';
+
+initDatabase();
+
+const result = runDefencePipeline(
+  'Use OAuth2 bearer tokens for API auth',
+  'Auth decision',
+  { type: 'cli', identifier: 'readme-example' }
+);
+
+if (result.allowed) {
+  addMemory({
+    title: 'Auth decision',
+    content: 'Use OAuth2 bearer tokens',
+    category: 'architecture'
+  });
+}
+```
+
 ## Security Model
 
-### Inbound Memory Defence
+### Inbound: Memory Write Defence
 
-ShieldCortex runs all memory writes through a layered pipeline:
-- Input sanitisation
-- Injection/encoding pattern detection
-- Semantic anomaly checks
-- Structural/fragmentation analysis
+Every memory write can be evaluated through layered checks:
+- Sanitisation
+- Pattern detection (injection/encoding)
+- Semantic and structural analysis
 - Trust and sensitivity scoring
-- Credential leak detection
+- Credential leak protection
 
-Optional Tier 2 cloud verification can be enabled for ambiguous cases:
+Optional Tier 2 verification:
 
 ```bash
 npx shieldcortex config --cloud-api-key <key> --cloud-enable
 npx shieldcortex config --verify-enable --verify-mode advisory
 ```
 
-### Outbound Behaviour Defence (Iron Dome)
+### Outbound: Iron Dome Behaviour Controls
 
-Iron Dome protects agent actions after memory retrieval:
+Iron Dome protects what agents do after memory retrieval:
 - Prompt injection scanner
-- Instruction trust checks
-- Action gate (allow / require approval / block)
+- Channel trust checks
+- Action gating (allow / require approval / block)
 - PII guard
 - Kill switch
 - Sub-agent restrictions
@@ -177,26 +216,7 @@ npx shieldcortex iron-dome activate --profile enterprise
 npx shieldcortex iron-dome status
 ```
 
-## Skill Scanner
-
-Scan instruction files (`SKILL.md`, `CLAUDE.md`, `.cursorrules`, `.clinerules`, etc.) for hidden prompt injections.
-
-```bash
-npx shieldcortex scan-skills
-npx shieldcortex scan-skill ./path/to/SKILL.md
-```
-
-GitHub Action:
-
-```yaml
-- uses: Drakon-Systems-Ltd/ShieldCortex@v1
-  with:
-    fail-on-high: 'true'
-```
-
 ## Dashboard and Cloud
-
-Start local dashboard + API:
 
 ```bash
 npx shieldcortex --dashboard
@@ -220,23 +240,23 @@ Cloud config keys:
 }
 ```
 
-## CLI Cheat Sheet
+## CLI Quick Commands
 
 ```bash
-# Setup and integrations
+# Setup
 npx shieldcortex setup
 npx shieldcortex openclaw install
 npx shieldcortex openclaw status
-npx shieldcortex migrate
 npx shieldcortex doctor
+npx shieldcortex migrate
 
-# Memory and scanning
+# Memory and scans
 npx shieldcortex status
 npx shieldcortex scan "text"
 npx shieldcortex audit
 npx shieldcortex scan-skills
 
-# Dashboard and config
+# Config
 npx shieldcortex --dashboard
 npx shieldcortex config --mode strict
 npx shieldcortex config --openclaw-auto-memory true
@@ -251,7 +271,7 @@ npx shieldcortex iron-dome audit --tail
 ## Supported Agents
 
 | Agent | Integration |
-|-------|-------------|
+|---|---|
 | [Claude.ai](https://claude.ai) | Upload [skill](https://github.com/Drakon-Systems-Ltd/ShieldCortex/tree/main/skills/shieldcortex) |
 | [Claude Code](https://claude.ai/claude-code) | `shieldcortex setup` |
 | [OpenClaw](https://openclaw.ai) | `shieldcortex openclaw install` |
@@ -259,13 +279,14 @@ npx shieldcortex iron-dome audit --tail
 | Python agents (CrewAI, AutoGPT) | REST API (`/api/v1/scan`) |
 | Any MCP-compatible agent | MCP tools |
 
-## Documentation
+## Docs and Links
 
 - [Architecture](ARCHITECTURE.md)
 - [OpenClaw Integration](docs/openclaw-integration.md)
 - [OpenClaw Plugin README](plugins/openclaw/README.md)
 - [Changelog](CHANGELOG.md)
 - [Website](https://shieldcortex.ai)
+- [npm package](https://www.npmjs.com/package/shieldcortex)
 
 ## License
 
