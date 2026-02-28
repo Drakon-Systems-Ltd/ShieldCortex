@@ -1,13 +1,13 @@
 ---
 name: shieldcortex
-description: Persistent memory system with security for AI agents. Remembers decisions, preferences, architecture, and context across sessions with knowledge graphs, decay, contradiction detection, and a 6-layer defence pipeline. Use when asked to "remember this", "what do we know about", "recall context", "scan for threats", "run security audit", "check memory stats", or when starting a new session and needing prior context.
+description: Persistent memory system with security for AI agents. Remembers decisions, preferences, architecture, and context across sessions with knowledge graphs, decay, contradiction detection, and a 6-layer defence pipeline with Iron Dome behavioural protection. Use when asked to "remember this", "what do we know about", "recall context", "scan for threats", "run security audit", "check memory stats", or when starting a new session and needing prior context.
 license: MIT
 metadata:
   author: Drakon Systems
-  version: 2.10.4
+  version: 2.17.0
   mcp-server: shieldcortex
   category: memory-and-security
-  tags: [memory, security, knowledge-graph, mcp]
+  tags: [memory, security, knowledge-graph, mcp, iron-dome]
 ---
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
@@ -31,6 +31,12 @@ Install the npm package globally, then configure the MCP server:
 ```bash
 npm install -g shieldcortex
 shieldcortex install
+```
+
+Python SDK also available:
+
+```bash
+pip install shieldcortex
 ```
 
 ## Core Workflow
@@ -111,7 +117,18 @@ Every memory write passes through a 6-layer defence pipeline:
 3. Semantic Analysis — embedding similarity to attack corpus
 4. Structural Validation — JSON/format integrity checks
 5. Behavioural Scoring — anomaly detection over time
-6. Credential Leak Detection — blocks API keys, tokens, private keys
+6. Credential Leak Detection — blocks API keys, tokens, private keys (25+ patterns, 11 providers)
+
+### Iron Dome
+
+Behavioural security layer that controls what agents can do, not just what they remember:
+
+- `iron_dome_activate` — activate with a profile: `school`, `enterprise`, `personal`, or `paranoid`
+- `iron_dome_status` — check active profile, trusted channels, and approval rules
+- `iron_dome_check` — gate an action (e.g., send_email, delete_file) before execution
+- `iron_dome_scan` — scan text for prompt injection patterns
+
+Profiles control action gates (what actions require approval), channel trust (which instruction sources are trusted), and approval rules.
 
 ### Security Tools
 
@@ -120,6 +137,23 @@ Every memory write passes through a 6-layer defence pipeline:
 - `quarantine_review` — review and manage quarantined memories (list, approve, reject)
 - `scan_memories` — scan existing memories for signs of poisoning
 - `scan_skill` — scan an instruction file for hidden threats (SKILL.md, .cursorrules, CLAUDE.md, etc.)
+
+## Universal Memory Bridge
+
+ShieldCortex can act as a security layer for any memory backend — not just its own. Use `ShieldCortexGuardedMemoryBridge` to wrap any memory system with the full defence pipeline:
+
+```javascript
+import { ShieldCortexGuardedMemoryBridge, MarkdownMemoryBackend } from 'shieldcortex';
+
+const bridge = new ShieldCortexGuardedMemoryBridge({
+  backend: new MarkdownMemoryBackend('~/.my-memories/'),
+});
+
+// All writes pass through the 6-layer defence pipeline
+await bridge.write({ title: 'Decision', content: 'Use PostgreSQL' });
+```
+
+Built-in backends: `MarkdownMemoryBackend`, `OpenClawMarkdownBackend`. Implement the backend interface for custom storage.
 
 ## Project Scoping
 
@@ -155,8 +189,24 @@ Every memory write passes through a 6-layer defence pipeline:
 - Mark important memories as `importance: "critical"` to prevent decay
 - Access memories regularly — `recall` boosts activation and prevents decay
 
+## OpenClaw Auto-Memory
+
+When using the OpenClaw hook, auto-memory extraction is off by default. Enable it to automatically extract memories from session output:
+
+```bash
+npx shieldcortex config --openclaw-auto-memory
+```
+
+When enabled, the system deduplicates against recent memories to avoid storing duplicates. Configure with:
+
+- `openclawAutoMemory` — enable/disable (default: false)
+- `openclawAutoMemoryDedupe` — deduplicate against existing memories (default: true)
+- `openclawAutoMemoryNoveltyThreshold` — similarity threshold for deduplication (default: 0.88)
+- `openclawAutoMemoryMaxRecent` — number of recent memories to check (default: 300)
+
 ## Links
 
 - npm: https://www.npmjs.com/package/shieldcortex
+- PyPI: https://pypi.org/project/shieldcortex
 - GitHub: https://github.com/Drakon-Systems-Ltd/ShieldCortex
 - Website: https://shieldcortex.ai

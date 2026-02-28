@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.17.1] - 2026-02-28
+
+### Added
+
+- **Hook check in `shieldcortex status`** — warns when Claude Code hooks are not configured, with instructions to run `shieldcortex install`
+- **Post-uninstall guidance** — `shieldcortex uninstall` now shows how to remove the npm package and clear npx cache
+
+### Changed
+
+- **README rewrite** — security-first positioning, dashboard screenshots, Iron Dome and Universal Memory Bridge sections, comparison table
+- **ClawHub skills** — updated both SKILL.md files to v2.17.0 with Iron Dome, Universal Memory Bridge, Python SDK, and auto-memory config
+
 ## [2.16.0] - 2026-02-25
 
 ### Added

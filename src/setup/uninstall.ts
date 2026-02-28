@@ -226,5 +226,10 @@ export async function uninstallAll(options?: { keepLogs?: boolean }): Promise<vo
   }
 
   console.log('\nDatabase preserved at ~/.shieldcortex/memories.db — delete manually if desired.');
-  console.log('Uninstall complete.');
+  console.log('Uninstall complete.\n');
+  console.log('To also remove the npm package:');
+  console.log('  npm uninstall -g shieldcortex');
+  console.log('\nTo clear the npx cache:');
+  console.log('  npx cache clean shieldcortex  (npm 9+)');
+  console.log('  rm -rf ~/.npm/_npx             (older npm)\n');
 }

@@ -4,7 +4,7 @@ Give your AI agent a brain that persists between sessions — and protect it fro
 
 ## Description
 
-ShieldCortex is a complete memory system with built-in security. It gives AI agents persistent, intelligent memory with semantic search, knowledge graphs, decay-based forgetting, and contradiction detection. Every memory write passes through a 6-layer defence pipeline that blocks prompt injection, credential leaks, and poisoning attacks.
+ShieldCortex is a complete memory system with built-in security. It gives AI agents persistent, intelligent memory with semantic search, knowledge graphs, decay-based forgetting, and contradiction detection. Every memory write passes through a 6-layer defence pipeline that blocks prompt injection, credential leaks, and poisoning attacks. Iron Dome adds behavioural protection with action gates, security profiles, and full audit trails.
 
 **Use when:**
 - You want your agent to remember things between sessions (decisions, preferences, architecture, context)
@@ -12,9 +12,11 @@ ShieldCortex is a complete memory system with built-in security. It gives AI age
 - You want automatic memory consolidation, decay, and cleanup
 - You want knowledge graph extraction from memories (entities, relationships)
 - You need to protect memory from prompt injection or poisoning attacks
-- You want credential leak detection in memory writes
+- You want credential leak detection in memory writes (25+ patterns, 11 providers)
 - You want to audit what's been stored in and retrieved from memory
 - You want to scan agent instruction files (SKILL.md, .cursorrules, CLAUDE.md) for hidden threats
+- You want behavioural protection with Iron Dome (action gates, security profiles)
+- You want to guard any memory backend with the defence pipeline (Universal Memory Bridge)
 
 **Do NOT use when:**
 - You only need simple key-value storage (use a config file)
@@ -24,12 +26,18 @@ ShieldCortex is a complete memory system with built-in security. It gives AI age
 ## Prerequisites
 
 - Node.js >= 18
-- npm or pnpm
+- npm or pnpm (or pip for Python)
 
 ## Install
 
 ```bash
 npm install -g shieldcortex
+```
+
+Python SDK:
+
+```bash
+pip install shieldcortex
 ```
 
 For OpenClaw integration (installs the cortex-memory hook):
@@ -50,9 +58,14 @@ shieldcortex install
 
 After `shieldcortex openclaw install`, the hook activates on next restart:
 
-- **Auto-saves** important session context on compaction
 - **Injects** relevant past memories on session start
 - **"remember this: ..."** keyword trigger saves memories inline
+- **Auto-memory** (opt-in) — extracts important context on session end with smart deduplication
+
+Enable auto-memory:
+```bash
+npx shieldcortex config --openclaw-auto-memory
+```
 
 ### CLI Commands
 
@@ -146,11 +159,36 @@ const { entities, triples } = extractFromMemory(
 |-------|-----------|
 | **Input Sanitisation** | Strip control characters, null bytes, dangerous formatting |
 | **Pattern Detection** | Regex matching for known injection patterns |
-| **Anomaly Scoring** | Entropy analysis, behavioural deviation detection |
+| **Semantic Analysis** | Embedding similarity to attack corpus |
+| **Structural Validation** | JSON/format integrity checks |
+| **Behavioural Scoring** | Anomaly detection over time |
 | **Credential Leak Detection** | Blocks API keys, tokens, private keys (25+ patterns, 11 providers) |
 | **Trust Scoring** | Source-based reliability scoring for memory writes |
 | **Audit Trail** | Full forensic log of every memory operation |
 | **Skill Scanner** | Detect prompt injection in SKILL.md, .cursorrules, CLAUDE.md |
+
+### Iron Dome
+
+Behavioural security layer that controls what agents can do:
+
+- **Security Profiles** — `school`, `enterprise`, `personal`, `paranoid` — each with tailored action gates and trust levels
+- **Action Gates** — gate dangerous actions (send_email, delete_file, api_call) requiring approval before execution
+- **Injection Scanning** — scan any text for prompt injection patterns with severity and category
+- **Full Audit Trail** — every action check is logged for forensic review
+
+### Universal Memory Bridge
+
+Guard any memory backend with the defence pipeline — not just ShieldCortex's built-in storage:
+
+```javascript
+import { ShieldCortexGuardedMemoryBridge, MarkdownMemoryBackend } from 'shieldcortex';
+
+const bridge = new ShieldCortexGuardedMemoryBridge({
+  backend: new MarkdownMemoryBackend('~/.my-memories/'),
+});
+```
+
+Built-in backends: `MarkdownMemoryBackend`, `OpenClawMarkdownBackend`. Implement the backend interface for custom storage.
 
 ## ShieldCortex Cloud (Optional)
 
@@ -165,10 +203,7 @@ Free local package is unlimited. Cloud adds team dashboards, audit aggregation, 
 ## Links
 
 - **npm:** https://www.npmjs.com/package/shieldcortex
+- **PyPI:** https://pypi.org/project/shieldcortex
 - **GitHub:** https://github.com/Drakon-Systems-Ltd/ShieldCortex
 - **Website:** https://shieldcortex.ai
-- **Docs:** https://github.com/Drakon-Systems-Ltd/ShieldCortex#readme
-
-## 70 Exported APIs
-
-The library exports 70 named functions and types covering defence, memory, knowledge graph, skill scanning, and audit. Full list in the [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md#2100---2026-02-13).
+- **Docs:** https://shieldcortex.ai/docs

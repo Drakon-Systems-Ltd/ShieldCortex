@@ -97,6 +97,31 @@ function getStatusInfo(dbPath: string): StatusInfo {
   };
 }
 
+const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
+
+function checkHooksConfigured(): boolean {
+  try {
+    if (!fs.existsSync(SETTINGS_PATH)) return false;
+    const settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+    if (!settings.hooks || typeof settings.hooks !== 'object') return false;
+
+    // Check if any hook category has a ShieldCortex hook entry
+    for (const category of Object.values(settings.hooks)) {
+      if (!Array.isArray(category)) continue;
+      for (const entry of category) {
+        const hooks = (entry as any)?.hooks;
+        if (!Array.isArray(hooks)) continue;
+        if (hooks.some((h: any) => typeof h.command === 'string' && h.command.includes('shieldcortex'))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export async function handleStatusCommand(): Promise<void> {
   // Determine database path
   const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.shieldcortex', 'memories.db');
@@ -121,6 +146,9 @@ export async function handleStatusCommand(): Promise<void> {
       ? info.projects.slice(0, 5).join(', ') + (info.projects.length > 5 ? ` (+${info.projects.length - 5} more)` : '')
       : 'none';
 
+    // Check if hooks are configured
+    const hooksConfigured = checkHooksConfigured();
+
     console.log(`
 🧠 ShieldCortex Status
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -136,7 +164,13 @@ export async function handleStatusCommand(): Promise<void> {
   Last activity: ${info.lastActivity || 'never'}
 
   Defence:       ${info.quarantined} quarantined, ${info.threatsBlocked} threats blocked
+  Hooks:         ${hooksConfigured ? 'configured' : '⚠️  not configured'}
 `);
+
+    if (!hooksConfigured) {
+      console.log(`  ⚠️  Claude Code hooks are not set up. Memory won't auto-save or inject context.`);
+      console.log(`     Run: shieldcortex install\n`);
+    }
   } catch (error) {
     console.error('Failed to get status:', error);
     process.exit(1);
