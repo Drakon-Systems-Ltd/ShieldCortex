@@ -1,279 +1,129 @@
 # OpenClaw Integration
 
-ShieldCortex provides native hook integration for [OpenClaw](https://openclaw.dev) (and its variants Moltbot, Clawdbot). One command gives your OpenClaw sessions persistent memory with security protection.
+ShieldCortex integrates with [OpenClaw](https://openclaw.dev) in complement mode by default:
+- Real-time defence scanning is on
+- Context recall at session start is on
+- Automatic memory writes are opt-in (off by default)
 
-## Why ShieldCortex + OpenClaw?
+This lets OpenClaw keep its native memory behavior while ShieldCortex adds security, auditability, and lower-noise memory extraction when enabled.
 
-OpenClaw is a powerful AI coding assistant, but like most agents, it forgets everything between sessions. ShieldCortex fixes that:
-
-| Problem | Solution |
-|---------|----------|
-| Sessions start from scratch | Past context auto-injected on startup |
-| Important decisions get lost | Auto-extracted and saved on `/new` |
-| Manual note-taking required | "Remember this..." keyword triggers |
-| Memory can be poisoned | 6-layer defence pipeline scans all content |
-
-**The result:** Your OpenClaw sessions build on each other. Decisions persist. Context accumulates. And it's all protected from prompt injection attacks.
-
----
-
-## Installation
+## Install
 
 ```bash
-# Install the hook (requires sudo for global npm installs)
-sudo npx shieldcortex openclaw install
+npm install -g shieldcortex
+npx shieldcortex openclaw install
+openclaw gateway restart
 ```
 
-**Why sudo?** OpenClaw is typically installed globally (`npm install -g openclaw`), so its hooks directory (`/usr/lib/node_modules/openclaw/dist/hooks/bundled/`) requires root access.
-
-If you installed OpenClaw locally or have write access to the hooks directory, you can omit `sudo`.
-
-### Verify Installation
+Check status:
 
 ```bash
 npx shieldcortex openclaw status
 ```
 
-Output:
-```
-OpenClaw: installed
-Hooks directory:  /usr/lib/node_modules/openclaw/dist/hooks/bundled
-cortex-memory:    installed
-```
+## What gets installed
 
----
+`shieldcortex openclaw install` installs both components:
 
-## What Gets Installed
+1. `cortex-memory` hook
+- Path: `~/.openclaw/hooks/internal/cortex-memory/` (or `~/.openclaw/hooks/cortex-memory/` on some installs)
+- Handles session bootstrap context injection + explicit keyword saves
 
-The installer copies the `cortex-memory` hook to OpenClaw's bundled hooks directory:
+2. `shieldcortex-realtime` plugin
+- Path: `~/.openclaw/extensions/shieldcortex-realtime/`
+- Hooks into `llm_input` and `llm_output`
 
-```
-<openclaw-install>/dist/hooks/bundled/cortex-memory/
-  ├── HOOK.md      # Hook metadata and documentation
-  └── handler.js   # Event handler implementation
-```
+## Default behavior (safe complement mode)
 
-The hook registers for three OpenClaw events:
-- `command:new` - Session end
-- `agent:bootstrap` - Session start
-- `command` - All commands (for keyword triggers)
+Enabled by default:
+- `agent:bootstrap`: inject relevant prior context (`CORTEX_MEMORY.md`)
+- Keyword triggers: saves when user explicitly says phrases like `remember this:`
+- `llm_input` scanning: real-time threat detection + audit logging
 
----
+Disabled by default:
+- Auto-extract on `/new`, `/stop`, `/clear`, `/exit`
+- `llm_output` auto-memory extraction
 
-## How It Works
+This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
 
-### Session Lifecycle
+## Enable optional auto-memory
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    OpenClaw Session Lifecycle                     │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌─────────────┐      ┌─────────────┐      ┌─────────────┐       │
-│  │   START     │ ───▶ │   WORKING   │ ───▶ │    /new     │       │
-│  │             │      │             │      │             │       │
-│  └──────┬──────┘      └──────┬──────┘      └──────┬──────┘       │
-│         │                    │                    │               │
-│         ▼                    ▼                    ▼               │
-│  ┌─────────────┐      ┌─────────────┐      ┌─────────────┐       │
-│  │ get_context │      │ "remember   │      │  Extract    │       │
-│  │ → inject    │      │  this: ..." │      │  memories   │       │
-│  │   past      │      │  → save     │      │  → save     │       │
-│  └─────────────┘      └─────────────┘      └─────────────┘       │
-│                                                                   │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-### 1. Session Start (Bootstrap)
-
-When OpenClaw starts a new session, the hook:
-
-1. Calls ShieldCortex `get_context` to retrieve relevant past memories
-2. Formats them as a `CORTEX_MEMORY.md` file
-3. Injects into the agent's bootstrap context
-
-**What the agent sees:**
-
-```markdown
-# Past Session Context (from ShieldCortex)
-
-## Architecture
-- Using PostgreSQL with Drizzle ORM (decided Jan 15)
-- API routes follow /api/v1/{resource} pattern
-
-## Preferences
-- Always use TypeScript strict mode
-- Prefer async/await over callbacks
-
-## Recent Work
-- Fixed authentication bug in login flow
-- Added rate limiting to API endpoints
-```
-
-### 2. During Session (Keyword Triggers)
-
-Say any of these phrases followed by content:
-- **"remember this:"**
-- **"don't forget:"**
-
-Example:
-```
-User: remember this: the API key for production is rotated monthly
-```
-
-The hook:
-1. Detects the keyword trigger
-2. Extracts the content after the trigger phrase
-3. Saves to ShieldCortex with `critical` importance
-4. Confirms: `Saved to Cortex memory: "the API key for production is rotated monthly"`
-
-### 3. Session End (`/new`)
-
-When you run `/new` to start a fresh session, the hook:
-
-1. Reads the last 30 messages from the ending session
-2. Pattern-matches for high-value content:
-   - **Architecture decisions** ("decided to use...", "structured as...")
-   - **Bug fixes** ("fixed by...", "root cause was...")
-   - **Learnings** ("discovered that...", "turns out...")
-   - **Preferences** ("always...", "never...", "prefer...")
-   - **Important notes** ("important:", "key point:")
-3. Saves up to 5 memories with `high` importance
-4. Logs: `[cortex-memory] Saved 3/5 memories from session`
-
----
-
-## Configuration
-
-The hook works out of the box with sensible defaults. Currently there are no user-configurable options.
-
-**Default behaviour:**
-- Project scope: `openclaw` (shared across all OpenClaw sessions)
-- Memory scope: `global` (accessible from Claude Code too)
-- Auto-extract limit: 5 memories per session
-- Keyword trigger importance: `critical`
-- Auto-extract importance: `high`
-
----
-
-## Database & Sharing
-
-Memories are stored in `~/.shieldcortex/memories.db` (SQLite).
-
-**Key point:** This database is shared with Claude Code. Memories created in OpenClaw are immediately available in Claude Code sessions, and vice versa.
-
-```
-┌──────────────┐     ┌──────────────────────┐     ┌──────────────┐
-│   OpenClaw   │ ──▶ │ ~/.shieldcortex/     │ ◀── │  Claude Code │
-│   Sessions   │     │   memories.db        │     │   Sessions   │
-└──────────────┘     └──────────────────────┘     └──────────────┘
-```
-
----
-
-## Security
-
-All content saved through the hook passes through ShieldCortex's 6-layer defence pipeline:
-
-1. **Memory Firewall** - Blocks prompt injection, encoding tricks
-2. **Audit Logger** - Full trail of every memory operation
-3. **Trust Scorer** - Rates memories by source reliability
-4. **Sensitivity Classifier** - Detects credentials/PII (Pro)
-5. **Fragmentation Detector** - Catches multi-part attacks (Pro)
-
-Malicious content is automatically quarantined for human review.
-
----
-
-## Troubleshooting
-
-### "OpenClaw is not installed on this system"
-
-The installer couldn't find OpenClaw. Check:
+CLI:
 
 ```bash
-which openclaw    # or: which moltbot, which clawdbot
+npx shieldcortex config --openclaw-auto-memory true
 ```
 
-If not found, install OpenClaw first:
-```bash
-npm install -g openclaw
-```
-
-### "Hook source files not found"
-
-Your ShieldCortex installation may be corrupted. Reinstall:
-```bash
-npm install -g shieldcortex
-```
-
-### Hook not triggering
-
-1. Check the hook is installed:
-   ```bash
-   npx shieldcortex openclaw status
-   ```
-
-2. Restart OpenClaw after installing the hook
-
-3. Check OpenClaw logs for `[cortex-memory]` messages
-
-### Permission denied during install
-
-The hooks directory requires root access:
-```bash
-sudo npx shieldcortex openclaw install
-```
-
-### Memories not appearing in Claude Code
-
-Ensure both tools are using the same database path (`~/.shieldcortex/memories.db`). Check with:
-```bash
-npx shieldcortex status
-```
-
----
-
-## Uninstalling
+Disable:
 
 ```bash
-sudo npx shieldcortex openclaw uninstall
+npx shieldcortex config --openclaw-auto-memory false
 ```
 
-Or disable without removing (in OpenClaw config):
+Dashboard:
+- Start dashboard with `npx shieldcortex --dashboard`
+- Open `Shield Overview -> OpenClaw Memory`
+- Toggle auto-memory and dedupe settings
+
+Config file (`~/.shieldcortex/config.json`):
 
 ```json
 {
-  "hooks": {
-    "internal": {
-      "entries": {
-        "cortex-memory": { "enabled": false }
-      }
-    }
-  }
+  "openclawAutoMemory": true,
+  "openclawAutoMemoryDedupe": true,
+  "openclawAutoMemoryNoveltyThreshold": 0.88,
+  "openclawAutoMemoryMaxRecent": 300
 }
 ```
 
----
+Tuning bounds:
+- `openclawAutoMemoryNoveltyThreshold`: `0.6` to `0.99`
+- `openclawAutoMemoryMaxRecent`: `50` to `1000`
 
-## How It Compares
+## Security and audit
 
-| Feature | Raw OpenClaw | + ShieldCortex |
-|---------|--------------|----------------|
-| Session memory | None | Full persistence |
-| Cross-session context | Manual copy/paste | Automatic injection |
-| Decision tracking | Lost on `/new` | Auto-extracted |
-| Security | None | 6-layer defence |
-| Claude Code sharing | N/A | Same database |
+All memory writes routed through ShieldCortex are scanned by the defence pipeline and recorded in audit logs. Threat detections from the real-time plugin can also sync to cloud when configured.
 
----
+Optional cloud config example:
+
+```json
+{
+  "cloudApiKey": "sc_...",
+  "cloudBaseUrl": "https://api.shieldcortex.ai",
+  "cloudEnabled": true
+}
+```
+
+## Shared database
+
+Memories are stored in `~/.shieldcortex/memories.db` and shared across ShieldCortex integrations (including Claude Code + OpenClaw when both use ShieldCortex memory tools).
+
+## Troubleshooting
+
+OpenClaw not detected:
+
+```bash
+which openclaw
+```
+
+Hook/plugin not active after install:
+1. Run `npx shieldcortex openclaw status`
+2. Restart OpenClaw gateway
+3. Reinstall with `npx shieldcortex openclaw install`
+
+Auto-memory not saving:
+1. Confirm `openclawAutoMemory` is enabled
+2. Check `~/.shieldcortex/config.json` for expected values
+3. Check plugin/hook logs for `shieldcortex` or `cortex-memory` messages
+
+## Uninstall
+
+```bash
+npx shieldcortex openclaw uninstall
+```
 
 ## Related
 
-- [ShieldCortex README](../README.md) - Full documentation
-- [Architecture](../ARCHITECTURE.md) - How ShieldCortex works internally
-- [LangChain Integration](./langchain-integration.md) - For LangChain users
-
----
-
-**Questions?** [Open an issue](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues)
+- [README](../README.md)
+- [OpenClaw plugin README](../plugins/openclaw/README.md)
+- [Architecture](../ARCHITECTURE.md)

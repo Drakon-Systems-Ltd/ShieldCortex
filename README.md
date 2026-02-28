@@ -172,6 +172,18 @@ Equivalent config file entry:
 
 When enabled, ShieldCortex applies a novelty gate (exact + near-duplicate detection) before writing, so it reduces memory noise instead of duplicating every output.
 
+Optional tuning keys:
+
+```json
+{
+  "openclawAutoMemoryDedupe": true,
+  "openclawAutoMemoryNoveltyThreshold": 0.88,
+  "openclawAutoMemoryMaxRecent": 300
+}
+```
+
+You can also manage these settings in the local dashboard: `Shield Overview -> OpenClaw Memory`.
+
 ### For Claude.ai (Skill)
 
 1. Download the [`skills/shieldcortex/`](https://github.com/Drakon-Systems-Ltd/ShieldCortex/tree/main/skills/shieldcortex) folder
@@ -478,6 +490,8 @@ npx shieldcortex --dashboard
 
 Views: Shield Overview, Audit Log, Quarantine, Memories, 3D Brain Visualisation, Knowledge Graph, Skills Scanner.
 
+OpenClaw users can manage optional auto-memory behavior directly in the dashboard (`Shield Overview -> OpenClaw Memory`) without editing `~/.shieldcortex/config.json`.
+
 ### ShieldCortex Cloud
 
 See threats from all your projects in one team dashboard:
@@ -571,6 +585,7 @@ npx shieldcortex service install    # Auto-start on login
 npx shieldcortex config --cloud-api-key <key>  # Set Cloud API key
 npx shieldcortex config --cloud-enable          # Enable cloud sync
 npx shieldcortex config --mode strict           # Defence mode
+npx shieldcortex config --openclaw-auto-memory true  # Enable OpenClaw auto-memory
 npx shieldcortex config --verify-enable         # Enable LLM verification
 npx shieldcortex config --verify-mode enforce   # Enforce mode (await verdict)
 npx shieldcortex config --verify-timeout 5000   # Timeout in ms (1000-30000)

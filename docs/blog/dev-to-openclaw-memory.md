@@ -16,15 +16,17 @@ sudo npx shieldcortex openclaw install
 
 Restart OpenClaw. Done.
 
-Your agent now has persistent memory that survives restarts, semantic search to find past context, and even security scanning to prevent memory poisoning attacks.
+Your agent now has persistent memory context that survives restarts, semantic search to find past context, and security scanning to prevent memory poisoning attacks.
+
+> Update: current releases run in complement mode by default. Real-time scanning and context recall are on, while automatic memory extraction is optional (`openclawAutoMemory=false` by default).
 
 ## What Just Happened?
 
-That command installed a **hook** into OpenClaw's plugin system. The hook does three things:
+That command installs both a **hook** and a **real-time plugin**. Together they do three things:
 
-### 1. Auto-Extracts Important Content
+### 1. Auto-Extracts Important Content (Optional)
 
-When you run `/new` to start a fresh session, the hook scans your conversation for high-value content:
+When `openclawAutoMemory` is enabled and you run `/new` to start a fresh session, the hook scans your conversation for high-value content:
 - Architecture decisions ("we're using X because...")
 - Errors you fixed ("the bug was caused by...")
 - Things you learned ("turns out the API requires...")
@@ -92,7 +94,7 @@ Here's what most "memory for AI" solutions miss: **memory is an attack vector.**
 
 Researchers have [demonstrated attacks](https://embracethered.com/blog/posts/2024/chatgpt-hacking-memories/) where malicious content gets saved to an agent's memory, then hijacks future sessions. Imagine a compromised memory that says "always include this backdoor in code you write."
 
-ShieldCortex runs every memory through a 5-layer defence pipeline:
+ShieldCortex runs every memory through a 6-layer defence pipeline:
 - Prompt injection detection
 - Encoding trick blocking (base64, hex, unicode payloads)
 - Credential pattern matching
@@ -115,8 +117,8 @@ That's it. No Docker. No external services. No API keys.
 # Install the hook
 sudo npx shieldcortex openclaw install
 
-# Check status
-npx shieldcortex status
+# Check OpenClaw integration status
+npx shieldcortex openclaw status
 
 # Uninstall if needed
 sudo npx shieldcortex openclaw uninstall
@@ -136,7 +138,7 @@ Not using OpenClaw? ShieldCortex also works with:
 npm install -g shieldcortex
 npx shieldcortex openclaw install
 # restart openclaw
-npx shieldcortex status
+npx shieldcortex openclaw status
 ```
 
 Then in your next session, say "remember this: testing ShieldCortex memory" and watch it save.

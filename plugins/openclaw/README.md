@@ -73,6 +73,8 @@ Novelty filtering is enabled by default when auto-memory is on. Optional tuning 
 }
 ```
 
+You can also manage these settings from the local dashboard in `Shield Overview -> OpenClaw Memory`.
+
 ## Cloud Sync (optional)
 
 Add your API key to `~/.shieldcortex/config.json`:
@@ -80,7 +82,7 @@ Add your API key to `~/.shieldcortex/config.json`:
 ```json
 {
   "cloudApiKey": "sc_...",
-  "cloudEndpoint": "https://api.shieldcortex.ai"
+  "cloudBaseUrl": "https://api.shieldcortex.ai"
 }
 ```
 
