@@ -1,7 +1,7 @@
 'use client';
 
 import { Shield } from 'lucide-react';
-import { useIronDomeStatus, useIronDomeAudit } from '@/hooks/useIronDome';
+import { useIronDomeStatus, useIronDomeAudit, type IronDomeAuditLog } from '@/hooks/useIronDome';
 import { useDashboardStore } from '@/lib/store';
 
 export function IronDomeCard() {
@@ -11,15 +11,12 @@ export function IronDomeCard() {
   const isActive = status?.enabled ?? false;
   const profileName = status?.profile ?? 'custom';
 
-  // Derive 24h stats from audit logs
-  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-  const recentLogs = (auditData?.logs ?? []).filter(
-    (log: any) => new Date(log.timestamp).getTime() > oneDayAgo
-  );
-  const detections = recentLogs.filter(
-    (log: any) => log.reason?.includes('[iron-dome:') && log.firewall_result === 'BLOCK'
+  // Derive stats from recent audit logs (query already limits to 100)
+  const logs = auditData?.logs ?? [];
+  const detections = logs.filter(
+    (log: IronDomeAuditLog) => log.reason?.includes('[iron-dome:') && log.firewall_result === 'BLOCK'
   ).length;
-  const totalEvents = recentLogs.length;
+  const totalEvents = logs.length;
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">

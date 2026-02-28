@@ -42,6 +42,13 @@ export interface InjectionScanResult {
   summary: string;
 }
 
+export interface IronDomeAuditLog {
+  id?: number;
+  firewall_result: string;
+  reason?: string;
+  timestamp: string;
+}
+
 // ── Fetch Functions ──
 
 async function fetchIronDomeStatus(): Promise<IronDomeStatus> {
@@ -78,7 +85,7 @@ async function scanForInjection(text: string): Promise<InjectionScanResult> {
   return res.json();
 }
 
-async function fetchIronDomeAudit(limit?: number): Promise<{ logs: any[]; total: number }> {
+async function fetchIronDomeAudit(limit?: number): Promise<{ logs: IronDomeAuditLog[]; total: number }> {
   const params = new URLSearchParams();
   if (limit) params.set('limit', limit.toString());
   const res = await fetch(`${API_BASE}/api/iron-dome/audit?${params}`);

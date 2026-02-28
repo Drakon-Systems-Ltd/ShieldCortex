@@ -23,6 +23,7 @@ import {
   useIronDomeAudit,
   type IronDomeProfile,
   type InjectionScanResult,
+  type IronDomeAuditLog,
 } from '@/hooks/useIronDome';
 
 const PROFILES: { id: IronDomeProfile; label: string; description: string; icon: typeof Shield }[] = [
@@ -87,8 +88,8 @@ export function IronDomeView() {
 
   // Derive event feed stats
   const logs = auditData?.logs ?? [];
-  const blockCount = logs.filter((l: any) => l.firewall_result === 'BLOCK').length;
-  const allowCount = logs.filter((l: any) => l.firewall_result === 'ALLOW').length;
+  const blockCount = logs.filter((l: IronDomeAuditLog) => l.firewall_result === 'BLOCK').length;
+  const allowCount = logs.filter((l: IronDomeAuditLog) => l.firewall_result === 'ALLOW').length;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -320,7 +321,7 @@ export function IronDomeView() {
                 </p>
               </div>
             ) : (
-              logs.map((log: any, i: number) => (
+              logs.map((log: IronDomeAuditLog, i: number) => (
                 <div
                   key={log.id ?? i}
                   className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-800/50 text-xs"
