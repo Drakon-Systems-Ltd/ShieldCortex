@@ -35,6 +35,9 @@
  *   shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
  *   shieldcortex copilot uninstall       # Remove MCP server configuration
  *   shieldcortex copilot status          # Check MCP server configuration
+ *   shieldcortex license activate <key>  # Activate a licence key
+ *   shieldcortex license status          # Show current licence tier and features
+ *   shieldcortex license deactivate      # Remove licence
  *   shieldcortex migrate                 # Migrate from Claude Cortex
  *   shieldcortex setup uninstall         # Remove hooks + CLAUDE.md block (requires confirmation)
  *   shieldcortex uninstall               # Full uninstall (requires confirmation)
@@ -433,6 +436,13 @@ async function main() {
       console.error('Unknown graph command. Available: backfill');
       process.exit(1);
     }
+    return;
+  }
+
+  // Handle "license" subcommand (also "licence" for British spelling)
+  if (process.argv[2] === 'license' || process.argv[2] === 'licence') {
+    const { handleLicenseCommand } = await import('./license/cli.js');
+    await handleLicenseCommand(process.argv.slice(3));
     return;
   }
 

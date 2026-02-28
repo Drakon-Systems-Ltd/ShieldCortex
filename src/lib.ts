@@ -149,6 +149,24 @@ export { scanMemories, scanMcpConfigs, scanEnvFiles, scanRulesFiles } from './au
 export { formatTerminalReport, formatMarkdownReport, formatJsonReport } from './audit/index.js';
 export type { AuditFinding, AuditSeverity } from './audit/types.js';
 
+// ── License ────────────────────────────────────────────────
+export {
+  getLicense,
+  getLicenseTier,
+  isFeatureEnabled,
+  requireFeature,
+  listFeatures,
+  FeatureGatedError,
+  verifyLicenseKey,
+  TIER_RANK,
+} from './license/index.js';
+
+export type {
+  LicenseTier,
+  LicenseInfo,
+  GatedFeature,
+} from './license/index.js';
+
 // ── Version ────────────────────────────────────────────────
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);

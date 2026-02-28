@@ -26,6 +26,7 @@ import { logAudit, createContentHash } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
 import { syncToCloud } from '../cloud/sync.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
+import { isFeatureEnabled } from '../license/gate.js';
 import { getDefenceMode } from '../cloud/config.js';
 
 export function runDefencePipeline(
@@ -166,14 +167,16 @@ export function runDefencePipeline(
     };
 
     // 8. Sync audit data to cloud (fire-and-forget, never blocks)
-    try {
-      syncToCloud(pipelineResult, source, durationMs);
-    } catch {
-      // Cloud sync must never affect local pipeline
+    if (isFeatureEnabled('cloud_sync')) {
+      try {
+        syncToCloud(pipelineResult, source, durationMs);
+      } catch {
+        // Cloud sync must never affect local pipeline
+      }
     }
 
     // 9. Sync quarantine content to cloud (fire-and-forget)
-    if (firewall.result === 'QUARANTINE') {
+    if (isFeatureEnabled('cloud_sync') && firewall.result === 'QUARANTINE') {
       try {
         const indicators = firewall.threatIndicators.map(t =>
           typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)

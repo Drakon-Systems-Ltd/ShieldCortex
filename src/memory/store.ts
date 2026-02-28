@@ -46,6 +46,7 @@ import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
+import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
@@ -348,7 +349,7 @@ export function addMemory(
 
       // Pipeline returned ALLOW so pipeline.ts didn't sync quarantine content.
       // Sync it now since we've overridden to QUARANTINE post-pipeline.
-      try {
+      if (isFeatureEnabled('cloud_sync')) try {
         const indicators = defenceResult.firewall.threatIndicators.map(t =>
           typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
         );

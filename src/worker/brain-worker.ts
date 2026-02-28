@@ -35,6 +35,7 @@ import {
 import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 import { sendHeartbeat } from '../cloud/sync.js';
 import { refreshCloudIronDome, applyCachedCloudPatterns } from '../cloud/iron-dome-sync.js';
+import { isFeatureEnabled } from '../license/gate.js';
 
 /**
  * Brain Worker Class
@@ -96,11 +97,13 @@ export class BrainWorker {
       this.config.mediumTickIntervalMs
     );
 
-    // Apply cached cloud Iron Dome patterns immediately on start
-    try {
-      applyCachedCloudPatterns();
-    } catch {
-      // Non-critical — cloud patterns are best-effort
+    // Apply cached cloud Iron Dome patterns immediately on start (requires Pro+)
+    if (isFeatureEnabled('custom_injection_patterns')) {
+      try {
+        applyCachedCloudPatterns();
+      } catch {
+        // Non-critical — cloud patterns are best-effort
+      }
     }
 
     // Run initial light tick after a short delay (10 seconds)
@@ -193,18 +196,22 @@ export class BrainWorker {
         console.error('[BrainWorker] Sync retry queue failed:', retryError);
       }
 
-      // 4. Send cloud heartbeat (keeps device status "Online")
-      try {
-        sendHeartbeat();
-      } catch {
-        // Truly silent — heartbeat is best-effort
+      // 4. Send cloud heartbeat (keeps device status "Online") — Team+ only
+      if (isFeatureEnabled('cloud_sync')) {
+        try {
+          sendHeartbeat();
+        } catch {
+          // Truly silent — heartbeat is best-effort
+        }
       }
 
-      // 5. Refresh Iron Dome cloud patterns + policy
-      try {
-        await refreshCloudIronDome();
-      } catch {
-        // Non-critical — cloud Iron Dome sync is best-effort
+      // 5. Refresh Iron Dome cloud patterns + policy — Pro+ only
+      if (isFeatureEnabled('custom_injection_patterns')) {
+        try {
+          await refreshCloudIronDome();
+        } catch {
+          // Non-critical — cloud Iron Dome sync is best-effort
+        }
       }
 
       // Update stats

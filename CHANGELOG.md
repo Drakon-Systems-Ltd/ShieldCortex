@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.18.0] - 2026-02-28
+
+### Added
+
+- **License key system** — Ed25519-signed offline licence verification (`shieldcortex license activate/status/deactivate`)
+- **Feature gating** — `requireFeature()` / `isFeatureEnabled()` for Pro and Team tier features
+- **8 gated features** — custom injection patterns, custom Iron Dome policies, custom firewall rules, audit export, skill scanner deep, cloud sync, team management, shared patterns
+- **Online validation** — periodic 24h check against SaaS API for revocation detection
+
+### Changed
+
+- Cloud sync, heartbeat, and pattern/policy sync now respect licence tier (Team+ only)
+- Iron Dome cloud policy overrides gated behind Pro licence (built-in profiles remain free)
+
 ## [2.17.1] - 2026-02-28
 
 ### Added

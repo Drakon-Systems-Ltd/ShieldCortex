@@ -13,6 +13,7 @@ import { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
 import type { ConfirmationTier } from './confirmation-gate.js';
 import { mergeConfirmationProtocol } from './confirmation-gate.js';
 import { logIronDomeAudit } from './audit.js';
+import { isFeatureEnabled } from '../../license/gate.js';
 import { getCloudIronDomeCache } from '../../cloud/iron-dome-sync.js';
 import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
 
@@ -181,6 +182,10 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
 
   // If Iron Dome isn't enabled locally, don't apply cloud config
   if (!localConfig.enabled) return localConfig;
+
+  // Cloud policy overrides require a Pro licence — return local config
+  // (which uses built-in profiles) unchanged for free users
+  if (!isFeatureEnabled('custom_iron_dome_policies')) return localConfig;
 
   const cache = getCloudIronDomeCache();
   if (!cache?.policy) return localConfig;

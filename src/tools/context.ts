@@ -318,6 +318,9 @@ export function executeExport(input: { project?: string }): {
   error?: string;
 } {
   try {
+    // Memory export is free — audit_export will gate the audit trail
+    // export when that feature is built (defence/audit/export.ts)
+
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
     const projectFilter = resolvedProject ?? undefined;
