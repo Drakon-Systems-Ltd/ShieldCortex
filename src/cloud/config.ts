@@ -295,7 +295,7 @@ export interface OpenClawMemoryConfig {
 }
 
 const DEFAULT_OPENCLAW_MEMORY_CONFIG: OpenClawMemoryConfig = {
-  autoMemory: false,
+  autoMemory: true,
   dedupe: true,
   noveltyThreshold: 0.88,
   maxRecent: 300,
@@ -318,7 +318,7 @@ export function getOpenClawMemoryConfig(): OpenClawMemoryConfig {
     : DEFAULT_OPENCLAW_MEMORY_CONFIG.maxRecent;
 
   return {
-    autoMemory: raw.openclawAutoMemory === true,
+    autoMemory: raw.openclawAutoMemory !== false,
     dedupe: raw.openclawAutoMemoryDedupe !== false,
     noveltyThreshold: threshold,
     maxRecent,
@@ -343,7 +343,7 @@ export function setOpenClawMemoryConfig(updates: Partial<OpenClawMemoryConfig>):
 
 /**
  * Returns whether OpenClaw auto-memory extraction is enabled.
- * Default is false (opt-in).
+ * Default is true (on by default, opt-out with --openclaw-auto-memory false).
  */
 export function getOpenClawAutoMemory(): boolean {
   return getOpenClawMemoryConfig().autoMemory;
@@ -354,6 +354,39 @@ export function getOpenClawAutoMemory(): boolean {
  */
 export function setOpenClawAutoMemory(enabled: boolean): void {
   setOpenClawMemoryConfig({ autoMemory: enabled });
+}
+
+// ── Tool Response Scan Config ─────────────────────────
+
+export interface ToolResponseScanConfig {
+  scanToolResponses: boolean;
+  toolResponseMode: 'advisory' | 'enforce';
+}
+
+const DEFAULT_TOOL_RESPONSE_SCAN_CONFIG: ToolResponseScanConfig = {
+  scanToolResponses: true,
+  toolResponseMode: 'advisory',
+};
+
+/**
+ * Returns tool response scanning config with safe defaults.
+ */
+export function getToolResponseScanConfig(): ToolResponseScanConfig {
+  const raw = readRawConfig();
+  return {
+    scanToolResponses: raw.scanToolResponses !== false,
+    toolResponseMode: raw.toolResponseMode === 'enforce' ? 'enforce' : DEFAULT_TOOL_RESPONSE_SCAN_CONFIG.toolResponseMode,
+  };
+}
+
+/**
+ * Persists tool response scanning config.
+ */
+export function setToolResponseScanConfig(updates: Partial<ToolResponseScanConfig>): void {
+  const raw = readRawConfig();
+  if (updates.scanToolResponses !== undefined) raw.scanToolResponses = updates.scanToolResponses;
+  if (updates.toolResponseMode !== undefined) raw.toolResponseMode = updates.toolResponseMode;
+  writeRawConfig(raw);
 }
 
 // ── Device Identity ────────────────────────────────────

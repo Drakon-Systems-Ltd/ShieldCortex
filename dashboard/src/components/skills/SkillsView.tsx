@@ -8,6 +8,7 @@ import type { SkillScanAllResponse, SkillScanContentResult } from '@/types/skill
 import { SkillFileList } from './SkillFileList';
 import { SeverityBadge } from './SeverityBadge';
 import { SkillFindingDetails } from './SkillFindingDetails';
+import { DeepScanPanel } from './DeepScanPanel';
 
 const FORMATS = [
   { value: '', label: 'Auto-detect' },
@@ -253,6 +254,11 @@ export function SkillsView() {
             )}
           </div>
         )}
+      </div>
+
+      {/* Pro: Deep skill scanner */}
+      <div className="mt-4">
+        <DeepScanPanel />
       </div>
     </div>
   );

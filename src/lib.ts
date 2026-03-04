@@ -59,6 +59,10 @@ export type {
 } from './defence/types.js';
 export type { VerifyConfig } from './cloud/config.js';
 
+// ── Tool Response Scanner ─────────────────────────────────
+export { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
+export type { ToolResponseScanResult } from './defence/types.js';
+
 // ── Iron Dome ─────────────────────────────────────────────
 export {
   activateIronDome,

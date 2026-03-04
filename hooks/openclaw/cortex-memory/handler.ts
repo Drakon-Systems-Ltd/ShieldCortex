@@ -32,7 +32,7 @@ async function loadShieldConfig() {
 
 async function isOpenClawAutoMemoryEnabled() {
   const config = await loadShieldConfig();
-  return config?.openclawAutoMemory === true;
+  return config?.openclawAutoMemory !== false;
 }
 
 /**

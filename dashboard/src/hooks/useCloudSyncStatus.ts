@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { authFetch } from '@/lib/auth';
 
 const API_URL = 'http://localhost:3001';
 
@@ -13,7 +14,7 @@ export function useCloudSyncStatus() {
   return useQuery<CloudSyncStatus>({
     queryKey: ['cloud-sync-status'],
     queryFn: async () => {
-      const res = await fetch(`${API_URL}/api/cloud/sync-status`);
+      const res = await authFetch(`${API_URL}/api/cloud/sync-status`);
       if (!res.ok) throw new Error('Failed to fetch sync status');
       return res.json();
     },

@@ -60,8 +60,46 @@ import { getQueueStats } from '../cloud/sync-queue.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection } from '../defence/iron-dome/index.js';
 import type { IronDomeProfile } from '../defence/iron-dome/index.js';
+import { getLicense, getLicenseTier, activateLicense, deactivateLicense, clearLicenseCache } from '../license/store.js';
+import { listFeatures, requireFeature, FeatureGatedError } from '../license/gate.js';
+import type { GatedFeature } from '../license/gate.js';
+import type { FeatureGatedResponse } from '../license/types.js';
+import { validateOnceNow } from '../license/validate.js';
 
 const PORT = process.env.PORT || 3001;
+
+/**
+ * In-memory counters for FEATURE_GATED (403) responses per feature.
+ * Lightweight telemetry to detect noisy free-tier clients hammering gated endpoints.
+ */
+const gatedCounters: Record<string, number> = {};
+
+/**
+ * Express middleware that gates an endpoint behind a Pro/Team licence feature.
+ * Wraps requireFeature() — one source of truth for tier checks.
+ * Returns a structured 403 (FeatureGatedResponse) if the feature isn't enabled.
+ */
+function requireProFeature(feature: GatedFeature) {
+  return (_req: Request, res: Response, next: (err?: unknown) => void) => {
+    try {
+      requireFeature(feature);
+      next();
+    } catch (err) {
+      if (err instanceof FeatureGatedError) {
+        gatedCounters[err.feature] = (gatedCounters[err.feature] || 0) + 1;
+        const body: FeatureGatedResponse = {
+          error: 'Feature requires upgrade',
+          code: 'FEATURE_GATED',
+          feature: err.feature,
+          requiredTier: err.requiredTier,
+          upgradeUrl: 'https://shieldcortex.ai/pricing',
+        };
+        return res.status(403).json(body);
+      }
+      next(err);
+    }
+  };
+}
 
 // Track connected WebSocket clients
 const clients = new Set<WebSocket>();
@@ -139,6 +177,12 @@ export function startVisualizationServer(dbPath?: string): void {
   app.get('/api/health', (_req: Request, res: Response) => {
     const version = getRunningVersion();
     res.json({ status: 'ok', timestamp: new Date().toISOString(), version });
+  });
+
+  // Feature-gated response counters (detect noisy free-tier clients)
+  app.get('/api/gated-stats', (_req: Request, res: Response) => {
+    const total = Object.values(gatedCounters).reduce((sum, n) => sum + n, 0);
+    res.json({ total, byFeature: { ...gatedCounters } });
   });
 
   // Get all memories with filters and pagination
@@ -1941,6 +1985,270 @@ export function startVisualizationServer(dbPath?: string): void {
         ...result,
         timestamp: result.timestamp.toISOString(),
       });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // LICENSE
+  // ============================================
+
+  app.get('/api/license/status', (_req: Request, res: Response) => {
+    try {
+      const info = getLicense();
+      const features = listFeatures();
+      res.json({
+        tier: info.tier,
+        valid: info.valid,
+        email: info.email,
+        expiresAt: info.expiresAt?.toISOString() ?? null,
+        daysUntilExpiry: info.daysUntilExpiry,
+        teamId: info.teamId,
+        features,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/license/activate', async (req: Request, res: Response) => {
+    try {
+      const { key } = req.body;
+      if (!key || typeof key !== 'string') {
+        return res.status(400).json({ error: 'License key is required' });
+      }
+
+      const info = activateLicense(key.trim());
+
+      // Fire online validation (non-blocking but wait briefly for immediate feedback)
+      const validationStatus = await validateOnceNow();
+
+      const features = listFeatures();
+      res.json({
+        success: true,
+        tier: info.tier,
+        valid: info.valid,
+        email: info.email,
+        expiresAt: info.expiresAt?.toISOString() ?? null,
+        daysUntilExpiry: info.daysUntilExpiry,
+        validationStatus,
+        features,
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/license/deactivate', (_req: Request, res: Response) => {
+    try {
+      deactivateLicense();
+      const features = listFeatures();
+      res.json({
+        success: true,
+        tier: 'free',
+        features,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ============================================
+  // PRO FEATURE ENDPOINTS
+  // ============================================
+
+  // ── Custom Firewall Rules ────────────────────
+  app.get('/api/firewall-rules', requireProFeature('custom_firewall_rules'), (_req: Request, res: Response) => {
+    try {
+      const { listFirewallRules } = require('../defence/custom-rules/store.js');
+      const rules = listFirewallRules();
+      res.json({ rules, total: rules.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/firewall-rules', requireProFeature('custom_firewall_rules'), (req: Request, res: Response) => {
+    try {
+      const { createFirewallRule } = require('../defence/custom-rules/store.js');
+      const { name, priority, condition_type, condition_value, action } = req.body;
+      if (!name || !condition_type || !condition_value || !action) {
+        return res.status(400).json({ error: 'name, condition_type, condition_value, and action are required' });
+      }
+      const rule = createFirewallRule({ name, priority: priority ?? 100, condition_type, condition_value, action });
+      res.status(201).json(rule);
+    } catch (error) {
+      const msg = (error as Error).message;
+      const status = msg.includes('Maximum') ? 400 : 500;
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  app.patch('/api/firewall-rules/:id', requireProFeature('custom_firewall_rules'), (req: Request, res: Response) => {
+    try {
+      const { updateFirewallRule } = require('../defence/custom-rules/store.js');
+      const rule = updateFirewallRule(Number(req.params.id), req.body);
+      if (!rule) return res.status(404).json({ error: 'Rule not found' });
+      res.json(rule);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.delete('/api/firewall-rules/:id', requireProFeature('custom_firewall_rules'), (req: Request, res: Response) => {
+    try {
+      const { deleteFirewallRule } = require('../defence/custom-rules/store.js');
+      const deleted = deleteFirewallRule(Number(req.params.id));
+      if (!deleted) return res.status(404).json({ error: 'Rule not found' });
+      res.json({ success: true, id: Number(req.params.id) });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ── Custom Injection Patterns ────────────────
+  app.get('/api/patterns', requireProFeature('custom_injection_patterns'), (_req: Request, res: Response) => {
+    try {
+      const { listCustomPatterns } = require('../defence/custom-patterns/store.js');
+      const patterns = listCustomPatterns();
+      res.json({ patterns, total: patterns.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/patterns', requireProFeature('custom_injection_patterns'), (req: Request, res: Response) => {
+    try {
+      const { createCustomPattern, validateRegex } = require('../defence/custom-patterns/store.js');
+      const { name, category, severity, regex, description } = req.body;
+      if (!name || !regex) {
+        return res.status(400).json({ error: 'name and regex are required' });
+      }
+      // Validate regex safety before creating
+      const validation = validateRegex(regex);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+      const pattern = createCustomPattern({
+        name,
+        category: category || 'custom',
+        severity: severity || 'medium',
+        regex,
+        description,
+      });
+      res.status(201).json(pattern);
+    } catch (error) {
+      const msg = (error as Error).message;
+      const status = msg.includes('Maximum') || msg.includes('Invalid') || msg.includes('rejected') ? 400 : 500;
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/patterns/:id', requireProFeature('custom_injection_patterns'), (req: Request, res: Response) => {
+    try {
+      const { deleteCustomPattern } = require('../defence/custom-patterns/store.js');
+      const deleted = deleteCustomPattern(Number(req.params.id));
+      if (!deleted) return res.status(404).json({ error: 'Pattern not found' });
+      res.json({ success: true, id: Number(req.params.id) });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/patterns/:id/test', requireProFeature('custom_injection_patterns'), (req: Request, res: Response) => {
+    try {
+      const { testPattern } = require('../defence/custom-patterns/store.js');
+      const { text } = req.body;
+      if (!text) return res.status(400).json({ error: 'text is required' });
+      const result = testPattern(Number(req.params.id), text);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ── Custom Iron Dome Policies ────────────────
+  app.get('/api/iron-dome/policies', requireProFeature('custom_iron_dome_policies'), (_req: Request, res: Response) => {
+    try {
+      const { listIronDomePolicies } = require('../defence/iron-dome/custom-policies.js');
+      const policies = listIronDomePolicies();
+      res.json({ policies, total: policies.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/iron-dome/policies', requireProFeature('custom_iron_dome_policies'), (req: Request, res: Response) => {
+    try {
+      const { createIronDomePolicy } = require('../defence/iron-dome/custom-policies.js');
+      const { name, description, config } = req.body;
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      const policy = createIronDomePolicy({ name, description, config: config || {} });
+      res.status(201).json(policy);
+    } catch (error) {
+      const msg = (error as Error).message;
+      const status = msg.includes('Maximum') ? 400 : 500;
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/iron-dome/policies/:id', requireProFeature('custom_iron_dome_policies'), (req: Request, res: Response) => {
+    try {
+      const { deleteIronDomePolicy } = require('../defence/iron-dome/custom-policies.js');
+      const deleted = deleteIronDomePolicy(Number(req.params.id));
+      if (!deleted) return res.status(404).json({ error: 'Policy not found' });
+      res.json({ success: true, id: Number(req.params.id) });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.put('/api/iron-dome/policies/:id/activate', requireProFeature('custom_iron_dome_policies'), (req: Request, res: Response) => {
+    try {
+      const { activateIronDomePolicy } = require('../defence/iron-dome/custom-policies.js');
+      const policy = activateIronDomePolicy(Number(req.params.id));
+      if (!policy) return res.status(404).json({ error: 'Policy not found' });
+      res.json(policy);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ── Audit Export ─────────────────────────────
+  app.get('/api/audit/export', requireProFeature('audit_export'), (req: Request, res: Response) => {
+    try {
+      const { exportAuditJSON, exportAuditCSV } = require('../defence/audit/export.js');
+      const format = (req.query.format as string) || 'json';
+      const startTime = req.query.startTime as string | undefined;
+      const endTime = req.query.endTime as string | undefined;
+
+      if (format === 'csv') {
+        const csv = exportAuditCSV(startTime, endTime);
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="shieldcortex-audit-${Date.now()}.csv"`);
+        res.send(csv);
+      } else {
+        const json = exportAuditJSON(startTime, endTime);
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', `attachment; filename="shieldcortex-audit-${Date.now()}.json"`);
+        res.send(json);
+      }
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // ── Deep Skill Scanner ───────────────────────
+  app.post('/api/skills/deep-scan', requireProFeature('skill_scanner_deep'), async (req: Request, res: Response) => {
+    try {
+      const { runDeepScan } = require('../defence/skill-scanner/deep-scan.js');
+      const { files } = req.body;
+      if (!files || !Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: 'files array is required (each with name and content)' });
+      }
+      const result = await runDeepScan(files);
+      res.json(result);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

@@ -38,6 +38,7 @@ shieldcortex install           # ready in 30 seconds
 - [Universal Memory Bridge](#universal-memory-bridge)
 - [Dashboard](#dashboard)
 - [Integrations](#integrations)
+- [Licence](#licence)
 - [Cloud](#cloud)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
@@ -347,25 +348,49 @@ if (result.allowed) {
 
 ---
 
+## Licence
+
+ShieldCortex is **free and unlimited locally**. Pro features unlock with a licence key — no cloud required.
+
+| | Free | Pro £29/mo | Team £99/mo | Enterprise |
+|---|---|---|---|---|
+| **6-layer defence pipeline** | Full | Full | Full | Full |
+| **Unlimited local scans** | Yes | Yes | Yes | Yes |
+| **Local dashboard** | Yes | Yes | Yes | Yes |
+| **Iron Dome (built-in profiles)** | Yes | Yes | Yes | Yes |
+| **Custom injection patterns** | — | Up to 50 | Unlimited | Unlimited |
+| **Custom Iron Dome policies** | — | Yes | Yes | Yes |
+| **Custom firewall rules** | — | Yes | Yes | Yes |
+| **Audit export (JSON/CSV)** | — | Yes | Yes | Yes |
+| **Skill scanner deep mode** | — | Yes | Yes | Yes |
+| **Cloud audit sync** | — | — | Yes | Yes |
+| **Multi-device visibility** | — | — | Yes | Yes |
+| **Team management** | — | — | Yes | Yes |
+
+```bash
+# Activate a licence key (received by email after subscribing)
+shieldcortex license activate sc_pro_...
+
+# Check licence status
+shieldcortex license status
+
+# Remove licence
+shieldcortex license deactivate
+```
+
+Licence keys are verified offline using Ed25519 signatures. No cloud connection needed for Pro features.
+
+See plans and subscribe at [shieldcortex.ai/pricing](https://shieldcortex.ai/pricing).
+
+---
+
 ## Cloud
 
-ShieldCortex is **free and unlimited locally**. Cloud adds team visibility:
-
-| | Free | Pro | Team | Enterprise |
-|---|---|---|---|---|
-| **Local scans** | Unlimited | Unlimited | Unlimited | Unlimited |
-| **Cloud scans/mo** | 500 | 10,000 | 100,000 | Custom |
-| **Team members** | 1 | 5 | Unlimited | Unlimited |
-| **Audit retention** | 7 days | 90 days | 1 year | Custom |
-| **Price** | Free | $29/mo | $99/mo | Contact us |
-
-Enable cloud sync:
+Team and Enterprise plans include cloud sync for centralised audit logs and multi-device visibility.
 
 ```bash
 shieldcortex config --cloud-api-key <key> --cloud-enable
 ```
-
-Cloud config:
 
 ```json
 {
@@ -375,7 +400,7 @@ Cloud config:
 }
 ```
 
-Sign up at [shieldcortex.ai](https://shieldcortex.ai).
+Cloud sync is fire-and-forget — metadata only, never blocks your agent.
 
 ---
 
@@ -403,6 +428,11 @@ shieldcortex iron-dome activate --profile enterprise
 shieldcortex iron-dome status
 shieldcortex iron-dome scan --text "..."
 shieldcortex iron-dome audit --tail
+
+# Licence
+shieldcortex license activate <key>           # Activate a licence key
+shieldcortex license status                   # Show tier, expiry, features
+shieldcortex license deactivate               # Remove licence
 
 # Config
 shieldcortex config --mode strict

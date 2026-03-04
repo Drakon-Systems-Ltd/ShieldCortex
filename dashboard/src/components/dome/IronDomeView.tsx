@@ -25,6 +25,8 @@ import {
   type InjectionScanResult,
   type IronDomeAuditLog,
 } from '@/hooks/useIronDome';
+import { CustomPatternsPanel } from './CustomPatternsPanel';
+import { CustomPoliciesPanel } from './CustomPoliciesPanel';
 
 const PROFILES: { id: IronDomeProfile; label: string; description: string; icon: typeof Shield }[] = [
   { id: 'personal', label: 'Personal', description: 'Lighter touch for solo use', icon: Shield },
@@ -342,6 +344,16 @@ export function IronDomeView() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Pro: Custom injection patterns */}
+      <div className="mt-4">
+        <CustomPatternsPanel />
+      </div>
+
+      {/* Pro: Custom Iron Dome policies */}
+      <div className="mt-4">
+        <CustomPoliciesPanel />
       </div>
     </div>
   );

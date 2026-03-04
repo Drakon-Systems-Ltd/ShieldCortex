@@ -67,7 +67,7 @@ async function fetchAuditLogs(options?: {
   if (options?.project) params.set('project', options.project);
   if (options?.limit) params.set('limit', options.limit.toString());
 
-  const response = await fetch(`${API_BASE}/api/v1/audit?${params}`);
+  const response = await authFetch(`${API_BASE}/api/v1/audit?${params}`);
   if (!response.ok) throw new Error('Failed to fetch audit logs');
   return response.json();
 }
@@ -75,7 +75,7 @@ async function fetchAuditLogs(options?: {
 async function fetchAuditStats(timeRange: '24h' | '7d' | '30d', project?: string): Promise<AuditStats> {
   const params = new URLSearchParams({ timeRange });
   if (project) params.set('project', project);
-  const response = await fetch(`${API_BASE}/api/v1/audit/stats?${params}`);
+  const response = await authFetch(`${API_BASE}/api/v1/audit/stats?${params}`);
   if (!response.ok) throw new Error('Failed to fetch audit stats');
   return response.json();
 }
@@ -83,7 +83,7 @@ async function fetchAuditStats(timeRange: '24h' | '7d' | '30d', project?: string
 async function fetchQuarantine(status: string = 'pending', limit: number = 50, project?: string): Promise<{ items: QuarantineItem[]; total: number }> {
   const params = new URLSearchParams({ status, limit: limit.toString() });
   if (project) params.set('project', project);
-  const response = await fetch(`${API_BASE}/api/v1/quarantine?${params}`);
+  const response = await authFetch(`${API_BASE}/api/v1/quarantine?${params}`);
   if (!response.ok) throw new Error('Failed to fetch quarantine');
   return response.json();
 }
@@ -173,7 +173,7 @@ export type DefenceMode = 'strict' | 'balanced' | 'permissive';
 export function useDefenceConfig() {
   return useQuery<{ mode: DefenceMode; tampered: boolean }>({
     queryKey: ['defence-config'],
-    queryFn: () => fetch(`${API_BASE}/api/defence/config`).then(r => r.json()),
+    queryFn: () => authFetch(`${API_BASE}/api/defence/config`).then(r => r.json()),
   });
 }
 

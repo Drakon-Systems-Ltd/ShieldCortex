@@ -52,7 +52,7 @@ export interface IronDomeAuditLog {
 // ── Fetch Functions ──
 
 async function fetchIronDomeStatus(): Promise<IronDomeStatus> {
-  const res = await fetch(`${API_BASE}/api/iron-dome/status`);
+  const res = await authFetch(`${API_BASE}/api/iron-dome/status`);
   if (!res.ok) throw new Error('Failed to fetch Iron Dome status');
   return res.json();
 }
@@ -88,7 +88,7 @@ async function scanForInjection(text: string): Promise<InjectionScanResult> {
 async function fetchIronDomeAudit(limit?: number): Promise<{ logs: IronDomeAuditLog[]; total: number }> {
   const params = new URLSearchParams();
   if (limit) params.set('limit', limit.toString());
-  const res = await fetch(`${API_BASE}/api/iron-dome/audit?${params}`);
+  const res = await authFetch(`${API_BASE}/api/iron-dome/audit?${params}`);
   if (!res.ok) throw new Error('Failed to fetch Iron Dome audit');
   return res.json();
 }

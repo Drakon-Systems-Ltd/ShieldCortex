@@ -28,6 +28,7 @@ import { syncToCloud } from '../cloud/sync.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { getDefenceMode } from '../cloud/config.js';
+import { isDatabaseInitialized } from '../database/init.js';
 
 export function runDefencePipeline(
   content: string,
@@ -107,6 +108,74 @@ export function runDefencePipeline(
     } else {
       allowed = true;
       reason = firewall.reason;
+    }
+
+    // 6b. Apply custom firewall rules (Pro feature, additive only — can tighten, never weaken)
+    if (allowed && isFeatureEnabled('custom_firewall_rules') && isDatabaseInitialized()) {
+      try {
+        const { getEnabledFirewallRules } = require('./custom-rules/store.js');
+        const customRules = getEnabledFirewallRules();
+        for (const rule of customRules) {
+          try {
+            const regex = new RegExp(rule.condition_value, 'gi');
+            if (regex.test(content) || regex.test(title)) {
+              if (rule.action === 'block') {
+                allowed = false;
+                reason = `Blocked by custom rule: ${rule.name}`;
+                firewall.result = 'BLOCK';
+                if (!firewall.threatIndicators.includes('custom_rule')) {
+                  firewall.threatIndicators.push('custom_rule');
+                }
+                break; // Block is final
+              } else if (rule.action === 'quarantine' && firewall.result !== 'BLOCK') {
+                allowed = false;
+                reason = `Quarantined by custom rule: ${rule.name}`;
+                firewall.result = 'QUARANTINE';
+                if (!firewall.threatIndicators.includes('custom_rule')) {
+                  firewall.threatIndicators.push('custom_rule');
+                }
+              }
+              // 'allow' action: no-op — custom rules cannot weaken built-in decisions
+            }
+          } catch {
+            // Skip invalid regex in custom rules
+          }
+        }
+      } catch {
+        // Custom rules store not available — skip silently
+      }
+    }
+
+    // 6c. Apply custom injection patterns (Pro feature, additive)
+    if (allowed && isFeatureEnabled('custom_injection_patterns') && isDatabaseInitialized()) {
+      try {
+        const { getEnabledCustomPatterns } = require('./custom-patterns/store.js');
+        const customPatterns = getEnabledCustomPatterns();
+        for (const pattern of customPatterns) {
+          try {
+            const regex = new RegExp(pattern.regex, 'gi');
+            if (regex.test(content) || regex.test(title)) {
+              if (pattern.severity === 'critical' || pattern.severity === 'high') {
+                allowed = false;
+                reason = `Blocked by custom pattern: ${pattern.name} (${pattern.severity})`;
+                firewall.result = 'BLOCK';
+              } else {
+                allowed = false;
+                reason = `Quarantined by custom pattern: ${pattern.name} (${pattern.severity})`;
+                firewall.result = 'QUARANTINE';
+              }
+              if (!firewall.threatIndicators.includes('custom_pattern')) {
+                firewall.threatIndicators.push('custom_pattern');
+              }
+              break;
+            }
+          } catch {
+            // Skip invalid regex in custom patterns
+          }
+        }
+      } catch {
+        // Custom patterns store not available — skip silently
+      }
     }
 
     // Keep top-level reason and firewall.reason consistent for downstream callers.

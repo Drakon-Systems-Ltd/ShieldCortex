@@ -1,15 +1,18 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Cloud, ArrowRight, Loader2, CheckCircle2, X } from 'lucide-react';
+import { Cloud, ArrowRight, Loader2, CheckCircle2, X, ExternalLink } from 'lucide-react';
+import { authFetch } from '@/lib/auth';
 import { useAuditStats } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
+import { useLicenseStatus } from '@/hooks/useLicense';
 
 type CardState = 'upsell' | 'polling' | 'success' | 'hidden';
 
 export function CloudUpsellCard() {
   const { projectFilter } = useDashboardStore();
   const { data: stats } = useAuditStats('30d', projectFilter || undefined);
+  const { data: license } = useLicenseStatus();
   const [state, setState] = useState<CardState>('upsell');
   const [email, setEmail] = useState('');
   const [setupId, setSetupId] = useState<string | null>(null);
@@ -30,7 +33,7 @@ export function CloudUpsellCard() {
 
   // Check if cloud is already configured
   useEffect(() => {
-    fetch('http://localhost:3001/api/cloud/config')
+    authFetch('http://localhost:3001/api/cloud/config')
       .then(res => res.json())
       .then(data => {
         if (data.enabled && data.apiKeySet) {
@@ -51,7 +54,7 @@ export function CloudUpsellCard() {
 
         if (data.status === 'complete' && data.api_key) {
           // Auto-configure local cloud sync
-          await fetch('http://localhost:3001/api/cloud/config', {
+          await authFetch('http://localhost:3001/api/cloud/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -116,6 +119,44 @@ export function CloudUpsellCard() {
 
   const blockedCount = stats?.blockedCount ?? 0;
   const totalOps = stats?.totalOperations ?? 0;
+  const tier = license?.tier ?? 'free';
+  const hasCloudAccess = tier === 'team' || tier === 'enterprise';
+
+  // Free/Pro users: show upgrade prompt instead of cloud setup
+  if (!hasCloudAccess && state === 'upsell') {
+    return (
+      <div className="mt-4 bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950/20 border border-violet-800/30 rounded-xl p-5 relative">
+        <button
+          onClick={handleDismiss}
+          className="absolute top-3 right-3 text-slate-500 hover:text-slate-300 transition-colors"
+          title="Dismiss for 30 days"
+        >
+          <X size={16} />
+        </button>
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Cloud size={20} className="text-violet-400" />
+            <h3 className="text-sm font-semibold text-white">Cloud Sync</h3>
+            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded text-violet-400 bg-violet-400/10">Team</span>
+          </div>
+          <p className="text-sm text-slate-300">
+            {blockedCount > 0
+              ? `You've blocked ${blockedCount} threats locally. Upgrade to Team to sync across devices and give your team visibility.`
+              : 'Sync defence data across devices, share audit logs with your team, and get centralised alerts.'}
+          </p>
+          <a
+            href="https://shieldcortex.ai/pricing"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium text-white transition-colors"
+          >
+            Upgrade to Team
+            <ExternalLink size={12} />
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mt-4 bg-gradient-to-br from-slate-900 via-slate-900 to-cyan-950/30 border border-cyan-800/30 rounded-xl p-5 relative">
@@ -166,7 +207,7 @@ export function CloudUpsellCard() {
             <p className="text-xs text-red-400">{error}</p>
           )}
 
-          <p className="text-[10px] text-slate-500">Free tier: 500 scans/month, 7-day retention. No credit card required.</p>
+          <p className="text-[10px] text-slate-500">Your Team licence includes cloud sync. Enter your email to connect.</p>
         </div>
       )}
 

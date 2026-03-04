@@ -16,9 +16,10 @@ const TYPE_SCORES: Record<DefenceSource['type'], number> = {
   hook: 0.8,
   api: 0.7,
   file: 0.6,
+  tool_response: 0.5,
+  agent: 0.5,
   email: 0.4,
   web: 0.3,
-  agent: 0.5,
 };
 
 const HIERARCHY_DISPLAY = [

@@ -60,7 +60,7 @@ async function loadConfig(): Promise<SCConfig> {
 }
 
 function isAutoMemoryEnabled(config: SCConfig): boolean {
-  return config.openclawAutoMemory === true;
+  return config.openclawAutoMemory !== false;
 }
 
 function isAutoMemoryDedupeEnabled(config: SCConfig): boolean {

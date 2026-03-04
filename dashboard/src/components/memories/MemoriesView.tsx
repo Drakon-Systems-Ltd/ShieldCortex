@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { authFetch } from '@/lib/auth';
 import { Memory } from '@/types/memory';
 import { MemoryCard } from './MemoryCard';
 
@@ -55,7 +56,7 @@ export function MemoriesView({ memories, selectedMemory, onSelectMemory }: Memor
     try {
       await Promise.all(
         Array.from(checked).map((id) =>
-          fetch(`${API_BASE}/api/memories/${id}`, { method: 'DELETE' })
+          authFetch(`${API_BASE}/api/memories/${id}`, { method: 'DELETE' })
         )
       );
       setChecked(new Set());

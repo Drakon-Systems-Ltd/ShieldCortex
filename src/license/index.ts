@@ -17,6 +17,7 @@ export { scheduleOnlineValidation } from './validate.js';
 // ── Types ────────────────────────────────────────────────
 export type { LicenseTier, LicenseInfo, LicensePayload, LicenseFile } from './keys.js';
 export type { GatedFeature } from './gate.js';
+export type { FeatureGatedResponse } from './types.js';
 export { TIER_RANK, KEY_PREFIXES, EXPIRY_GRACE_DAYS } from './keys.js';
 
 // ── CLI (imported lazily from src/index.ts) ──────────────

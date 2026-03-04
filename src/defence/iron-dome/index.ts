@@ -16,6 +16,7 @@ import { logIronDomeAudit } from './audit.js';
 import { isFeatureEnabled } from '../../license/gate.js';
 import { getCloudIronDomeCache } from '../../cloud/iron-dome-sync.js';
 import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
+import { isDatabaseInitialized } from '../../database/init.js';
 
 // ── Re-exports ──
 
@@ -169,23 +170,66 @@ export function getIronDomeStatus(): {
 }
 
 /**
- * Get the effective Iron Dome configuration, merging cloud policy overrides.
+ * Get the effective Iron Dome configuration, merging policy overrides.
  *
- * Priority: local enabled flag > cloud policy overrides > base profile defaults
+ * Priority: local enabled flag > local custom policy (if active) > cloud policy overrides > base profile defaults
  *
- * If cloud is enabled and a policy is cached, the base profile from the cloud
- * policy is used, with config_overrides deep-merged on top.
- * If cloud is disabled or no cached policy, returns local config unchanged.
+ * If a local custom policy is active (dashboard-managed, SQLite), it takes
+ * precedence over cloud policies. Otherwise falls through to cloud policy
+ * overrides, then built-in profile defaults.
  */
 export function getEffectiveIronDomeConfig(): IronDomeConfig {
   const localConfig = loadConfig();
 
-  // If Iron Dome isn't enabled locally, don't apply cloud config
+  // If Iron Dome isn't enabled locally, don't apply any overrides
   if (!localConfig.enabled) return localConfig;
 
-  // Cloud policy overrides require a Pro licence — return local config
+  // Custom policies require a Pro licence — return local config
   // (which uses built-in profiles) unchanged for free users
   if (!isFeatureEnabled('custom_iron_dome_policies')) return localConfig;
+
+  // Check for active local custom policy (takes precedence over cloud)
+  if (isDatabaseInitialized()) {
+    try {
+      const { getActiveIronDomePolicy } = require('./custom-policies.js');
+      const activePolicy = getActiveIronDomePolicy();
+      if (activePolicy) {
+        const policyConfig = JSON.parse(activePolicy.config);
+        // Use the custom policy's base profile, fall back to local
+        const profileKey = policyConfig.baseProfile as IronDomeProfile;
+        const baseProfile = profileKey ? IRON_DOME_PROFILES[profileKey] : null;
+        const merged: IronDomeConfig = {
+          ...(baseProfile ?? localConfig),
+          enabled: true,
+        };
+        // Apply policy config overrides
+        if (policyConfig.trustedChannels && Array.isArray(policyConfig.trustedChannels)) {
+          merged.trustedChannels = policyConfig.trustedChannels;
+        }
+        if (typeof policyConfig.killPhrase === 'string') {
+          merged.killPhrase = policyConfig.killPhrase;
+        }
+        if (policyConfig.requireApproval && Array.isArray(policyConfig.requireApproval)) {
+          merged.requireApproval = policyConfig.requireApproval;
+        }
+        if (policyConfig.autoApprove && Array.isArray(policyConfig.autoApprove)) {
+          merged.autoApprove = policyConfig.autoApprove;
+        }
+        if (policyConfig.piiRules && typeof policyConfig.piiRules === 'object') {
+          merged.piiRules = { ...merged.piiRules, ...policyConfig.piiRules };
+        }
+        if (policyConfig.subAgentRestrictions && typeof policyConfig.subAgentRestrictions === 'object') {
+          merged.subAgentRestrictions = { ...merged.subAgentRestrictions, ...policyConfig.subAgentRestrictions };
+        }
+        if (policyConfig.confirmationProtocol && typeof policyConfig.confirmationProtocol === 'object') {
+          merged.confirmationProtocol = { ...merged.confirmationProtocol, ...policyConfig.confirmationProtocol };
+        }
+        return merged;
+      }
+    } catch {
+      // Custom policies store not available — fall through to cloud
+    }
+  }
 
   const cache = getCloudIronDomeCache();
   if (!cache?.policy) return localConfig;

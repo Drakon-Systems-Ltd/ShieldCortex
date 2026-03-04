@@ -8,9 +8,9 @@
  */
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { authFetch } from '@/lib/auth';
 import { Memory, MemoryStats, MemoryLink } from '@/types/memory';
 import { useMemoryWebSocket } from '@/lib/websocket';
-import { authFetch } from '@/lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -47,7 +47,7 @@ async function fetchMemories(options?: {
   if (options?.mode) params.set('mode', options.mode);
   if (options?.query) params.set('query', options.query);
 
-  const response = await fetch(`${API_BASE}/api/memories?${params}`);
+  const response = await authFetch(`${API_BASE}/api/memories?${params}`);
   if (!response.ok) throw new Error('Failed to fetch memories');
   return response.json();
 }
@@ -55,7 +55,7 @@ async function fetchMemories(options?: {
 // Fetch memory stats
 async function fetchStats(project?: string): Promise<MemoryStats> {
   const params = project ? `?project=${project}` : '';
-  const response = await fetch(`${API_BASE}/api/stats${params}`);
+  const response = await authFetch(`${API_BASE}/api/stats${params}`);
   if (!response.ok) throw new Error('Failed to fetch stats');
   return response.json();
 }
@@ -63,7 +63,7 @@ async function fetchStats(project?: string): Promise<MemoryStats> {
 // Fetch memory links
 async function fetchLinks(project?: string): Promise<MemoryLink[]> {
   const params = project ? `?project=${project}` : '';
-  const response = await fetch(`${API_BASE}/api/links${params}`);
+  const response = await authFetch(`${API_BASE}/api/links${params}`);
   if (!response.ok) throw new Error('Failed to fetch links');
   return response.json();
 }
@@ -77,7 +77,7 @@ export interface ProjectInfo {
 
 // Fetch list of projects
 async function fetchProjects(): Promise<{ projects: ProjectInfo[] }> {
-  const response = await fetch(`${API_BASE}/api/projects`);
+  const response = await authFetch(`${API_BASE}/api/projects`);
   if (!response.ok) throw new Error('Failed to fetch projects');
   return response.json();
 }
@@ -220,7 +220,7 @@ export interface ControlStatus {
 
 // Fetch control status
 async function fetchControlStatus(): Promise<ControlStatus> {
-  const response = await fetch(`${API_BASE}/api/control/status`);
+  const response = await authFetch(`${API_BASE}/api/control/status`);
   if (!response.ok) throw new Error('Failed to fetch control status');
   return response.json();
 }
@@ -302,7 +302,7 @@ export interface UpdateResult {
 
 // Fetch current version (with stale detection)
 async function fetchVersion(): Promise<{ version: string; runningVersion: string; stale: boolean }> {
-  const response = await fetch(`${API_BASE}/api/version`);
+  const response = await authFetch(`${API_BASE}/api/version`);
   if (!response.ok) throw new Error('Failed to fetch version');
   return response.json();
 }
@@ -310,7 +310,7 @@ async function fetchVersion(): Promise<{ version: string; runningVersion: string
 // Check for updates
 async function checkForUpdates(force = false): Promise<VersionInfo> {
   const params = force ? '?force=true' : '';
-  const response = await fetch(`${API_BASE}/api/version/check${params}`);
+  const response = await authFetch(`${API_BASE}/api/version/check${params}`);
   if (!response.ok) throw new Error('Failed to check for updates');
   return response.json();
 }
@@ -400,7 +400,7 @@ export interface ActivityDay {
 
 async function fetchActivity(project?: string): Promise<{ activity: ActivityDay[] }> {
   const params = project ? `?project=${project}` : '';
-  const response = await fetch(`${API_BASE}/api/memories/activity${params}`);
+  const response = await authFetch(`${API_BASE}/api/memories/activity${params}`);
   if (!response.ok) throw new Error('Failed to fetch activity');
   return response.json();
 }
@@ -422,7 +422,7 @@ export interface QualityData {
 
 async function fetchQuality(project?: string): Promise<QualityData> {
   const params = project ? `?project=${project}` : '';
-  const response = await fetch(`${API_BASE}/api/memories/quality${params}`);
+  const response = await authFetch(`${API_BASE}/api/memories/quality${params}`);
   if (!response.ok) throw new Error('Failed to fetch quality');
   return response.json();
 }
@@ -448,7 +448,7 @@ export interface Contradiction {
 
 async function fetchContradictions(project?: string): Promise<{ contradictions: Contradiction[]; count: number }> {
   const params = project ? `?project=${project}` : '';
-  const response = await fetch(`${API_BASE}/api/contradictions${params}`);
+  const response = await authFetch(`${API_BASE}/api/contradictions${params}`);
   if (!response.ok) throw new Error('Failed to fetch contradictions');
   return response.json();
 }
@@ -528,7 +528,7 @@ async function createLink(data: { sourceId: number; targetId: number; relationsh
 
 // Fetch worker status
 async function fetchWorkerStatus(): Promise<{ isRunning: boolean; lastLightTick: string | null; lastMediumTick: string | null; tickCount: number }> {
-  const response = await fetch(`${API_BASE}/api/worker/status`);
+  const response = await authFetch(`${API_BASE}/api/worker/status`);
   if (!response.ok) throw new Error('Failed to fetch worker status');
   return response.json();
 }

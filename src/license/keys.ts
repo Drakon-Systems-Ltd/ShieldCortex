@@ -10,7 +10,7 @@
  * Generated once; the matching private key is stored in Fly.io as LICENSE_SIGNING_KEY.
  */
 export const LICENSE_PUBLIC_KEY_HEX =
-  '302a300506032b657003210053e006dc81bf14eda2b2481868f7bbad49b614b3dafe24f950202c4f712f955d';
+  '302a300506032b65700321005a6eff26e79a9010983cdb86dab56f26151110a870100608163441d7d71d7add';
 
 // ── Types ────────────────────────────────────────────────
 

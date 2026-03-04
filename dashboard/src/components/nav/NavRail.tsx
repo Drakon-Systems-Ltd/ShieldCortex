@@ -3,6 +3,7 @@
 import { useDashboardStore } from '@/lib/store';
 import { useStats, useVersion } from '@/hooks/useMemories';
 import { useAuditStats } from '@/hooks/useDefence';
+import { useLicenseStatus } from '@/hooks/useLicense';
 import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch, Zap } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -17,11 +18,17 @@ const NAV_ITEMS = [
   { id: 'graph' as const, label: 'Graph', icon: GitBranch },
 ];
 
+// Tabs that contain Pro-gated panels
+const PRO_TABS = new Set(['shield', 'audit', 'skills', 'dome']);
+
 export function NavRail() {
   const { viewMode, setViewMode } = useDashboardStore();
   const { data: stats } = useStats();
   const { data: auditStats } = useAuditStats('24h');
   const { data: versionData } = useVersion();
+  const { data: license } = useLicenseStatus();
+
+  const isFreeTier = !license || license.tier === 'free';
 
   const healthPercent = stats?.decayDistribution
     ? Math.round(
@@ -54,6 +61,11 @@ export function NavRail() {
             {id === 'shield' && blockedCount > 0 && (
               <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] rounded-full bg-red-500 text-white text-[8px] flex items-center justify-center px-0.5">
                 {blockedCount > 99 ? '99+' : blockedCount}
+              </span>
+            )}
+            {isFreeTier && PRO_TABS.has(id) && (
+              <span className="absolute -bottom-0.5 -left-0.5 px-1 h-[12px] rounded-full bg-cyan-600/80 text-white text-[7px] font-bold flex items-center justify-center leading-none">
+                PRO
               </span>
             )}
           </button>

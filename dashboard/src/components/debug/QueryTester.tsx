@@ -8,6 +8,7 @@
  */
 
 import { useState } from 'react';
+import { authFetch } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Memory } from '@/types/memory';
@@ -41,7 +42,7 @@ export function QueryTester() {
         limit: '20',
       });
 
-      const response = await fetch(`${API_BASE}/api/memories?${params}`);
+      const response = await authFetch(`${API_BASE}/api/memories?${params}`);
       if (!response.ok) {
         throw new Error(`Search failed: ${response.statusText}`);
       }

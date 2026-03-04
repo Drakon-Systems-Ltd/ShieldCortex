@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useAuditLogs, AuditEntry } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
+import { AuditExportPanel } from './AuditExportPanel';
 
 const RESULT_COLORS: Record<string, string> = {
   ALLOW: 'bg-green-500/10 text-green-400',
@@ -175,6 +176,11 @@ export function AuditLogView() {
             </tbody>
           </table>
         )}
+      </div>
+
+      {/* Pro: Audit export */}
+      <div className="mt-4">
+        <AuditExportPanel />
       </div>
     </div>
   );

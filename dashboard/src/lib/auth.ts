@@ -49,3 +49,39 @@ export async function authFetch(url: string, options?: RequestInit): Promise<Res
 
   return fetch(url, { ...options, headers });
 }
+
+// ── Feature gating helpers ────────────────────────────────
+
+/**
+ * Error thrown when accessing a Pro/Team feature without the required licence.
+ * Used by gatedFetch and checked in React Query retry logic.
+ */
+export class FeatureLockedError extends Error {
+  feature: string;
+  requiredTier: string;
+
+  constructor(feature: string, requiredTier: string) {
+    super(`Feature locked: ${feature}`);
+    this.name = 'FeatureLockedError';
+    this.feature = feature;
+    this.requiredTier = requiredTier;
+  }
+}
+
+/**
+ * Auth-aware fetch that detects structured 403 (FEATURE_GATED) responses
+ * and throws FeatureLockedError instead of returning the response.
+ *
+ * Use in hooks for Pro-gated endpoints — React Query can then short-circuit
+ * retries and components can check `isLocked` instead of showing error UI.
+ */
+export async function gatedFetch(url: string, options?: RequestInit): Promise<Response> {
+  const response = await authFetch(url, options);
+  if (response.status === 403) {
+    const body = await response.json().catch(() => ({}));
+    if (body.code === 'FEATURE_GATED') {
+      throw new FeatureLockedError(body.feature, body.requiredTier);
+    }
+  }
+  return response;
+}

@@ -1,6 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
+import { authFetch } from '@/lib/auth';
 import type { AgentInfo, AgentTimelinePoint } from '../types/agents';
 import type { AuditEntry } from './useDefence';
 
@@ -14,7 +15,7 @@ async function fetchAgentRegistry(
 ): Promise<{ agents: AgentInfo[] }> {
   const params = new URLSearchParams({ timeRange });
   if (project) params.set('project', project);
-  const response = await fetch(`${API_BASE}/api/v1/agents?${params}`);
+  const response = await authFetch(`${API_BASE}/api/v1/agents?${params}`);
   if (!response.ok) throw new Error('Failed to fetch agent registry');
   return response.json();
 }
@@ -27,7 +28,7 @@ async function fetchAgentTimeline(
   const encoded = encodeURIComponent(identifier);
   const params = new URLSearchParams({ timeRange });
   if (project) params.set('project', project);
-  const response = await fetch(`${API_BASE}/api/v1/agents/${encoded}/timeline?${params}`);
+  const response = await authFetch(`${API_BASE}/api/v1/agents/${encoded}/timeline?${params}`);
   if (!response.ok) throw new Error('Failed to fetch agent timeline');
   return response.json();
 }
@@ -42,7 +43,7 @@ async function fetchAgentOperations(
   if (options?.offset) params.set('offset', options.offset.toString());
   if (options?.firewallResult) params.set('firewallResult', options.firewallResult);
   if (options?.project) params.set('project', options.project);
-  const response = await fetch(`${API_BASE}/api/v1/agents/${encoded}/operations?${params}`);
+  const response = await authFetch(`${API_BASE}/api/v1/agents/${encoded}/operations?${params}`);
   if (!response.ok) throw new Error('Failed to fetch agent operations');
   return response.json();
 }

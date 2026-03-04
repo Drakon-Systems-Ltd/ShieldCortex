@@ -8,6 +8,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { authFetch } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -97,7 +98,7 @@ export function SqlConsole() {
     const startTime = performance.now();
 
     try {
-      const response = await fetch(`${API_BASE}/api/sql`, {
+      const response = await authFetch(`${API_BASE}/api/sql`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: query.trim(), allowWrite }),

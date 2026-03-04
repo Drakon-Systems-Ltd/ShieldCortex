@@ -19,13 +19,27 @@ export type ThreatIndicator =
   | 'external_url'
   | 'fragmented_payload'
   | 'restricted_content'
-  | 'pipeline_error';
+  | 'pipeline_error'
+  | 'custom_rule'
+  | 'custom_pattern';
 
 // ── Core Interfaces ──
 
 export interface DefenceSource {
-  type: 'user' | 'cli' | 'hook' | 'email' | 'web' | 'agent' | 'file' | 'api';
+  type: 'user' | 'cli' | 'hook' | 'email' | 'web' | 'agent' | 'file' | 'api' | 'tool_response';
   identifier: string;
+}
+
+export interface ToolResponseScanResult {
+  clean: boolean;
+  mode: 'advisory' | 'enforce';
+  toolName: string;
+  injection: import('./iron-dome/injection-scanner.js').InjectionScanResult;
+  credentials: import('./credential-leak/index.js').CredentialScanResult;
+  threatIndicators: ThreatIndicator[];
+  summary: string;
+  durationMs: number;
+  auditId: number;
 }
 
 export interface FirewallAnalysis {

@@ -7,7 +7,7 @@ Real-time defence scanning and memory extraction for OpenClaw v2026.2.15+.
 | Hook | Action |
 |------|--------|
 | `llm_input` | Scans prompts + history through ShieldCortex defence pipeline. Logs threats, writes audit log, optionally syncs to cloud. **Fire-and-forget.** |
-| `llm_output` | Optional memory extraction from assistant responses (disabled by default). Saves to ShieldCortex memory via mcporter when enabled, with novelty/dedupe filtering to reduce noise. **Fire-and-forget.** |
+| `llm_output` | Memory extraction from assistant responses (enabled by default). Saves to ShieldCortex memory via mcporter with novelty/dedupe filtering to reduce noise. Disable with `npx shieldcortex config --openclaw-auto-memory false`. **Fire-and-forget.** |
 
 ## Installation
 
@@ -39,15 +39,9 @@ Find the package root with `npm root -g` (global) or `npm root` (local).
 - ShieldCortex installed globally (`npm i -g shieldcortex`) or at `~/ShieldCortex/`
 - `mcporter` available via npx (for memory saves)
 
-## Optional Auto-Memory
+## Auto-Memory
 
-Auto-memory extraction is off by default to avoid duplicate/noisy memory when OpenClaw already has native memory.
-
-Enable it:
-
-```bash
-npx shieldcortex config --openclaw-auto-memory true
-```
+Auto-memory extraction is on by default. ShieldCortex complements your existing memory system with built-in deduplication to avoid noise.
 
 Disable it:
 
@@ -55,7 +49,13 @@ Disable it:
 npx shieldcortex config --openclaw-auto-memory false
 ```
 
-Enable it in `~/.shieldcortex/config.json`:
+Re-enable it:
+
+```bash
+npx shieldcortex config --openclaw-auto-memory true
+```
+
+Or set directly in `~/.shieldcortex/config.json`:
 
 ```json
 {

@@ -72,23 +72,23 @@ Say any of these phrases to trigger an instant save to Cortex memory:
 
 Content after the trigger phrase is extracted and saved as the memory content.
 
-## Optional Auto-Memory
+## Auto-Memory
 
-Auto-memory extraction is disabled by default to avoid duplicate/noisy memory when another system is already primary.
+Auto-memory extraction is enabled by default. ShieldCortex complements your existing memory system by capturing decisions, fixes, and learnings with built-in deduplication to avoid noise.
 
-Enable auto-save with CLI:
-
-```bash
-npx shieldcortex config --openclaw-auto-memory true
-```
-
-Disable it:
+Disable auto-save with CLI:
 
 ```bash
 npx shieldcortex config --openclaw-auto-memory false
 ```
 
-Enable auto-save with:
+Re-enable it:
+
+```bash
+npx shieldcortex config --openclaw-auto-memory true
+```
+
+Or set directly in config:
 
 ```json
 {

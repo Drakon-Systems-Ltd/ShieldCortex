@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { Search, X } from 'lucide-react';
+import { authFetch } from '@/lib/auth';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false });
 
@@ -122,8 +123,8 @@ export default function OntologyGraph() {
       setError(null);
       try {
         const [entRes, triRes] = await Promise.all([
-          fetch(`${API_BASE}/api/graph/entities?limit=500`).then(r => r.json()),
-          fetch(`${API_BASE}/api/graph/triples?limit=500`).then(r => r.json()),
+          authFetch(`${API_BASE}/api/graph/entities?limit=500`).then(r => r.json()),
+          authFetch(`${API_BASE}/api/graph/triples?limit=500`).then(r => r.json()),
         ]);
         if (cancelled) return;
         setEntities(entRes.entities || []);
@@ -225,8 +226,8 @@ export default function OntologyGraph() {
   // Fetch entity detail (triples + memories)
   const fetchEntityDetail = useCallback((entity: Entity) => {
     Promise.all([
-      fetch(`${API_BASE}/api/graph/entities/${entity.id}/triples`).then(r => r.json()),
-      fetch(`${API_BASE}/api/graph/entities/${entity.id}/memories`).then(r => r.json()),
+      authFetch(`${API_BASE}/api/graph/entities/${entity.id}/triples`).then(r => r.json()),
+      authFetch(`${API_BASE}/api/graph/entities/${entity.id}/memories`).then(r => r.json()),
     ])
       .then(([triData, memData]) => {
         setSelectedEntity({

@@ -227,3 +227,45 @@ CREATE TABLE IF NOT EXISTS sync_queue (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at);
+
+-- Pro feature: Custom injection patterns
+CREATE TABLE IF NOT EXISTS custom_patterns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'custom',
+  severity TEXT NOT NULL DEFAULT 'medium' CHECK(severity IN ('critical', 'high', 'medium', 'low')),
+  regex TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_custom_patterns_enabled ON custom_patterns(enabled);
+
+-- Pro feature: Custom Iron Dome policies
+CREATE TABLE IF NOT EXISTS iron_dome_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  config TEXT NOT NULL DEFAULT '{}',
+  is_active INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- At most one active policy at any time
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dome_policies_active ON iron_dome_policies(is_active) WHERE is_active = 1;
+
+-- Pro feature: Custom firewall rules
+CREATE TABLE IF NOT EXISTS firewall_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 100,
+  condition_type TEXT NOT NULL,
+  condition_value TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('block', 'allow', 'quarantine')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_firewall_rules_priority ON firewall_rules(priority);
+CREATE INDEX IF NOT EXISTS idx_firewall_rules_enabled ON firewall_rules(enabled);

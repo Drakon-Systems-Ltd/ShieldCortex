@@ -41,12 +41,50 @@ import { scanExistingMemories } from './defence/scanner/index.js';
 import type { FirewallResult as FwResult, DefenceSource } from './defence/types.js';
 import { resolveSource } from './defence/trust/env-detector.js';
 import { logAudit } from './defence/audit/logger.js';
+import { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
+import { getToolResponseScanConfig } from './cloud/config.js';
 
 // Shared source schema for access control on MCP tools
 const sourceParam = z.object({
-  type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
+  type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
   identifier: z.string(),
 }).optional().describe('Caller identity for access control (agents should pass this)');
+
+/**
+ * Wrap an MCP tool handler to scan its response for threats.
+ * Advisory mode: appends a warning but never blocks.
+ * Enforce mode: can redact credential leaks.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function withResponseScan(toolName: string, handler: (...args: any[]) => any): (...args: any[]) => any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (...handlerArgs: any[]) => {
+    const result = await handler(...handlerArgs);
+    const config = getToolResponseScanConfig();
+    if (!config.scanToolResponses || !shouldScanToolResponse(toolName)) return result;
+
+    const textContent = result.content
+      .filter((c: { type: string }) => c.type === 'text')
+      .map((c: { text: string }) => c.text)
+      .join('\n');
+
+    if (textContent.length < 20) return result;
+
+    const scan = scanToolResponse(toolName, textContent, config.toolResponseMode);
+    if (scan.clean) return result;
+
+    // Append warning to the response
+    return {
+      content: [
+        ...result.content,
+        {
+          type: 'text' as const,
+          text: `\n---\n**[ShieldCortex]** ${scan.summary}\nAudit ID: ${scan.auditId}`,
+        },
+      ],
+    };
+  };
+}
 
 /**
  * Resolve source for an MCP tool call, inferring from environment if not declared.
@@ -181,13 +219,13 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       source: sourceParam,
     },
     { title: 'Search Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withResponseScan('recall', async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'recall');
       const result = await executeRecall({ ...args, source });
       return {
         content: [{ type: 'text', text: formatRecallResult(result, true) }],
       };
-    }
+    })
   );
 
   // Forget - Delete memories
@@ -236,7 +274,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       source: sourceParam,
     },
     { title: 'Get Project Context', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withResponseScan('get_context', async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_context');
       const result = await executeGetContext({ ...args, source });
       return {
@@ -245,7 +283,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: result.success ? result.context! : `Error: ${result.error}`
         }],
       };
-    }
+    })
   );
 
   // Start Session
@@ -367,7 +405,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       source: sourceParam,
     },
     { title: 'Get Memory by ID', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withResponseScan('get_memory', async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_memory');
       const result = executeGetMemory({ ...args, source });
       return {
@@ -376,7 +414,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: result.success ? formatMemory(result.memory!, true) : `Error: ${result.error}`
         }],
       };
-    }
+    })
   );
 
   // Export memories
@@ -387,7 +425,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for all projects.'),
     },
     { title: 'Export Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withResponseScan('export_memories', async (args) => {
       const result = executeExport(args);
       return {
         content: [{
@@ -397,7 +435,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
             : `Error: ${result.error}`
         }],
       };
-    }
+    })
   );
 
   // Import memories
@@ -429,7 +467,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       id: z.number().describe('Memory ID to find relationships for'),
     },
     { title: 'Get Related Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withResponseScan('get_related', async (args) => {
       const related = getRelatedMemories(args.id);
       if (related.length === 0) {
         return { content: [{ type: 'text', text: 'No related memories found.' }] };
@@ -441,7 +479,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
         lines.push(`  ID: ${r.memory.id} | ${r.memory.category} | ${(r.memory.salience * 100).toFixed(0)}% salience`);
       }
       return { content: [{ type: 'text', text: lines.join('\n') }] };
-    }
+    })
   );
 
   // Link Memories
@@ -536,7 +574,7 @@ but you can use this tool to check for new contradictions at any time.`,
         .describe('Maximum results to return'),
     },
     { title: 'Detect Contradictions', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withResponseScan('detect_contradictions', async (args) => {
       const project = args.project ?? getActiveProject() ?? undefined;
       const contradictions = detectContradictions({
         project,
@@ -563,7 +601,7 @@ but you can use this tool to check for new contradictions at any time.`,
       lines.push(`\n*Found ${contradictions.length} potential contradiction(s). Use \`get_related\` to see linked contradictions.*`);
 
       return { content: [{ type: 'text', text: lines.join('\n') }] };
-    }
+    })
   );
 
   // ============================================
@@ -580,7 +618,7 @@ but you can use this tool to check for new contradictions at any time.`,
       predicates: z.array(z.string()).optional().describe('Filter by predicate types'),
     },
     { title: 'Knowledge Graph Query', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => handleGraphQuery(args)
+    withResponseScan('graph_query', async (args) => handleGraphQuery(args))
   );
 
   // Graph Entities - List known entities
@@ -593,7 +631,7 @@ but you can use this tool to check for new contradictions at any time.`,
       limit: z.number().optional().describe('Max results (default 50)'),
     },
     { title: 'List Graph Entities', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => handleGraphEntities(args)
+    withResponseScan('graph_entities', async (args) => handleGraphEntities(args))
   );
 
   // Graph Explain - Find paths between entities
@@ -606,7 +644,7 @@ but you can use this tool to check for new contradictions at any time.`,
       maxDepth: z.number().optional().describe('Max path length (default 4)'),
     },
     { title: 'Explain Entity Relationship', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => handleGraphExplain(args)
+    withResponseScan('graph_explain', async (args) => handleGraphExplain(args))
   );
 
   // ============================================
@@ -695,6 +733,67 @@ but you can use this tool to check for new contradictions at any time.`,
     }
     return { content: [{ type: 'text', text: lines.join('\n') }] };
   });
+
+  // Scan Tool Response — manual scanning for external MCP server outputs
+  server.tool(
+    'scan_tool_response',
+    `Scan a tool response for injection attacks and credential leaks.
+Use this to verify responses from external MCP servers before trusting their content.
+Runs injection detection (40+ patterns) and credential leak scanning (25+ providers).`,
+    {
+      toolName: z.string().describe('Name of the tool that produced the response'),
+      content: z.string().describe('The tool response content to scan'),
+      mode: z.enum(['advisory', 'enforce']).optional()
+        .describe('Scan mode: advisory (log only) or enforce (can redact). Default: advisory'),
+    },
+    { title: 'Scan Tool Response', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    async (args) => {
+      const scan = scanToolResponse(args.toolName, args.content, args.mode as 'advisory' | 'enforce' | undefined);
+
+      const lines = [
+        `## Tool Response Scan: ${args.toolName}`,
+        '',
+        `**Clean:** ${scan.clean ? 'Yes' : 'No'}`,
+        `**Mode:** ${scan.mode}`,
+        `**Duration:** ${scan.durationMs}ms`,
+        '',
+      ];
+
+      if (!scan.injection.clean) {
+        lines.push('### Injection Detection');
+        lines.push(`**Risk Level:** ${scan.injection.riskLevel}`);
+        lines.push(`**Detections:** ${scan.injection.detections.length}`);
+        for (const d of scan.injection.detections) {
+          lines.push(`- **[${d.severity}]** \`${d.category}\` — ${d.description}`);
+          if (d.match) {
+            lines.push(`  - Match: \`${d.match.substring(0, 100)}\``);
+          }
+        }
+        lines.push('');
+      }
+
+      if (scan.credentials.leaked) {
+        lines.push('### Credential Leaks');
+        for (const f of scan.credentials.findings) {
+          lines.push(`- **${f.provider}** ${f.type} detected (${f.severity})`);
+        }
+        lines.push('');
+      }
+
+      if (scan.threatIndicators.length > 0) {
+        lines.push(`**Threat Indicators:** ${scan.threatIndicators.join(', ')}`);
+      }
+
+      if (scan.auditId > 0) {
+        lines.push(`**Audit ID:** ${scan.auditId}`);
+      }
+
+      lines.push('');
+      lines.push(scan.summary);
+
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    }
+  );
 
   // Scan Memories
   server.tool('scan_memories', 'Scan existing memories for signs of poisoning', {

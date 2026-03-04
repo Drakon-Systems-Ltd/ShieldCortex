@@ -28,7 +28,7 @@ export const getContextSchema = z.object({
   format: z.enum(['summary', 'detailed', 'raw']).optional().default('summary')
     .describe('Output format'),
   source: z.object({
-    type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
+    type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
   }).optional().describe('Caller identity for access control'),
 });

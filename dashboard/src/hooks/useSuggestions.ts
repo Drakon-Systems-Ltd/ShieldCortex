@@ -5,6 +5,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
+import { authFetch } from '@/lib/auth';
 import { useDebouncedValue } from './useDebouncedValue';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -20,7 +21,7 @@ async function fetchSuggestions(query: string): Promise<Suggestion[]> {
     return [];
   }
 
-  const response = await fetch(
+  const response = await authFetch(
     `${API_URL}/api/suggestions?q=${encodeURIComponent(query)}&limit=8`
   );
 

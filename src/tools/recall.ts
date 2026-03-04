@@ -13,7 +13,7 @@ import { resolveProject } from '../context/project-context.js';
 import type { DefenceSource } from '../defence/types.js';
 
 const sourceSchema = z.object({
-  type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
+  type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
   identifier: z.string(),
 }).optional().describe('Caller identity for access control');
 

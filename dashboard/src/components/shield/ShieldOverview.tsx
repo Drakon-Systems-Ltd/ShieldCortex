@@ -10,6 +10,8 @@ import { CloudSyncStatus } from './CloudSyncStatus';
 import { SkillScannerCard } from './SkillScannerCard';
 import { IronDomeCard } from './IronDomeCard';
 import { OpenClawMemoryPanel } from './OpenClawMemoryPanel';
+import { LicenseStatusCard } from './LicenseStatusCard';
+import { CustomFirewallRulesPanel } from './CustomFirewallRulesPanel';
 
 export function ShieldOverview() {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
@@ -36,6 +38,9 @@ export function ShieldOverview() {
         </div>
       </div>
 
+      {/* Licence status */}
+      <LicenseStatusCard />
+
       {/* Cloud sync status indicator */}
       <CloudSyncStatus />
 
@@ -60,6 +65,11 @@ export function ShieldOverview() {
       {/* OpenClaw memory complement settings */}
       <div className="mt-4">
         <OpenClawMemoryPanel />
+      </div>
+
+      {/* Pro: Custom firewall rules */}
+      <div className="mt-4">
+        <CustomFirewallRulesPanel />
       </div>
 
       {/* Cloud upsell — hidden when already configured */}

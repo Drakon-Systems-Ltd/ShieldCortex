@@ -32,7 +32,7 @@ export const forgetSchema = z.object({
   confirm: z.boolean().optional().default(false)
     .describe('Confirm bulk deletion (required for operations affecting multiple memories)'),
   source: z.object({
-    type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api']),
+    type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
   }).optional().describe('Caller identity for access control'),
 });
