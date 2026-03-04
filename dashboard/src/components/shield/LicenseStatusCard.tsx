@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { Shield, Key, CheckCircle2, XCircle, Loader2, ExternalLink, Sparkles, Lock, ChevronDown, ChevronUp } from 'lucide-react';
+import { Shield, Key, CheckCircle2, XCircle, Loader2, Sparkles, Lock, ChevronDown, ChevronUp } from 'lucide-react';
 import { useLicenseStatus, useActivateLicense, useDeactivateLicense } from '@/hooks/useLicense';
-import { TIER_LABELS, TIER_COLOURS, TIER_BG } from '@/lib/license';
+import { useBillingSetup } from '@/hooks/useBillingSetup';
+import { TIER_LABELS, TIER_COLOURS, TIER_BG, PLAN_PRICING } from '@/lib/license';
 
 /** Pro features shown in the free-tier CTA — short, punchy descriptions */
 const PRO_HIGHLIGHTS = [
@@ -14,12 +15,17 @@ const PRO_HIGHLIGHTS = [
   'Skill scanner deep mode',
 ];
 
+type UpgradeView = 'default' | 'checkout' | 'activate';
+
 export function LicenseStatusCard() {
   const { data: license, isLoading } = useLicenseStatus();
   const activateMutation = useActivateLicense();
   const deactivateMutation = useDeactivateLicense();
+  const billing = useBillingSetup();
   const [keyInput, setKeyInput] = useState('');
-  const [showActivate, setShowActivate] = useState(false);
+  const [upgradeView, setUpgradeView] = useState<UpgradeView>('default');
+  const [email, setEmail] = useState('');
+  const [plan, setPlan] = useState<'pro' | 'team'>('pro');
   const [showFeatures, setShowFeatures] = useState(false);
 
   if (isLoading || !license) {
@@ -42,7 +48,7 @@ export function LicenseStatusCard() {
     activateMutation.mutate(keyInput.trim(), {
       onSuccess: () => {
         setKeyInput('');
-        setShowActivate(false);
+        setUpgradeView('default');
       },
     });
   };
@@ -89,28 +95,81 @@ export function LicenseStatusCard() {
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-3">
-            {!showActivate ? (
-              <>
-                <a
-                  href="https://shieldcortex.ai/pricing"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors"
-                >
-                  View Plans
-                  <ExternalLink size={11} />
-                </a>
+          {billing.state === 'complete' ? (
+            <div className="flex items-center gap-2 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+              <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
+              <span className="text-xs text-emerald-300">Pro activated! Your dashboard is refreshing...</span>
+            </div>
+          ) : billing.state === 'polling' || billing.state === 'activating' ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 p-3 bg-cyan-500/10 border border-cyan-500/20 rounded-lg">
+                <Loader2 size={14} className="text-cyan-400 animate-spin shrink-0" />
+                <span className="text-xs text-cyan-300">
+                  {billing.state === 'activating' ? 'Activating licence...' : 'Complete payment in the Stripe tab...'}
+                </span>
+              </div>
+              <button
+                onClick={() => { billing.reset(); setUpgradeView('default'); }}
+                className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : upgradeView === 'checkout' ? (
+            <div className="space-y-3">
+              <div>
+                <label className="text-[10px] text-slate-500 mb-1 block">Email</label>
+                <input
+                  type="email"
+                  placeholder="you@company.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                  autoFocus
+                />
+              </div>
+              <div className="flex gap-2">
+                {(['pro', 'team'] as const).map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => setPlan(p)}
+                    className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg border transition-colors ${
+                      plan === p
+                        ? 'bg-cyan-600/20 border-cyan-500/50 text-cyan-300'
+                        : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-600'
+                    }`}
+                  >
+                    {PLAN_PRICING[p].label} — {PLAN_PRICING[p].price}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setShowActivate(true)}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors border border-slate-700"
+                  onClick={() => billing.startCheckout(email, plan)}
+                  disabled={billing.state === 'submitting' || !email.trim()}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded-lg transition-colors"
                 >
-                  <Key size={12} />
-                  I Have a Key
+                  {billing.state === 'submitting' ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    'Continue to Checkout'
+                  )}
                 </button>
-              </>
-            ) : (
-              <form onSubmit={handleActivate} className="flex-1 flex gap-2">
+                <button
+                  onClick={() => { setUpgradeView('default'); billing.reset(); }}
+                  className="px-3 py-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                >
+                  Back
+                </button>
+              </div>
+              {billing.error && (
+                <p className="text-xs text-red-400">{billing.error}</p>
+              )}
+            </div>
+          ) : upgradeView === 'activate' ? (
+            <div className="space-y-2">
+              <form onSubmit={handleActivate} className="flex gap-2">
                 <input
                   type="text"
                   placeholder="sc_pro_..."
@@ -128,26 +187,57 @@ export function LicenseStatusCard() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setShowActivate(false); setKeyInput(''); activateMutation.reset(); }}
+                  onClick={() => { setUpgradeView('default'); setKeyInput(''); activateMutation.reset(); }}
                   className="px-3 py-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
                 >
-                  Cancel
+                  Back
                 </button>
               </form>
-            )}
-          </div>
-
-          {/* CLI hint */}
-          <p className="mt-3 text-[10px] text-slate-600">
-            Or via CLI: <code className="text-slate-500 bg-slate-800/50 px-1 py-0.5 rounded">shieldcortex license activate sc_pro_...</code>
-          </p>
-
-          {/* Error */}
-          {activateMutation.isError && (
-            <p className="mt-2 text-xs text-red-400">
-              {activateMutation.error instanceof Error ? activateMutation.error.message : 'Activation failed'}
-            </p>
-          )}
+              {activateMutation.isError && (
+                <p className="text-xs text-red-400">
+                  {activateMutation.error instanceof Error ? activateMutation.error.message : 'Activation failed'}
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setUpgradeView('checkout')}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors"
+                >
+                  Upgrade to Pro
+                </button>
+                <button
+                  onClick={() => setUpgradeView('activate')}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors border border-slate-700"
+                >
+                  <Key size={12} />
+                  I Have a Key
+                </button>
+              </div>
+              {billing.error && (
+                <div className="space-y-2">
+                  <p className="text-xs text-red-400">{billing.error}</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => { billing.reset(); setUpgradeView('checkout'); }}
+                      className="text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors"
+                    >
+                      Try Again
+                    </button>
+                    <span className="text-[10px] text-slate-600">·</span>
+                    <button
+                      onClick={() => { billing.reset(); setUpgradeView('activate'); }}
+                      className="text-[10px] text-slate-400 hover:text-slate-300 transition-colors"
+                    >
+                      I Have a Key
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )
         </div>
       </div>
     );

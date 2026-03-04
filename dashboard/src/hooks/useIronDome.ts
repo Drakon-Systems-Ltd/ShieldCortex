@@ -85,6 +85,28 @@ async function scanForInjection(text: string): Promise<InjectionScanResult> {
   return res.json();
 }
 
+async function emergencyStop(): Promise<{ stopped: boolean; message: string }> {
+  const res = await authFetch(`${API_BASE}/api/iron-dome/emergency-stop`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to trigger emergency stop');
+  return res.json();
+}
+
+async function resumeOperations(): Promise<{ resumed: boolean; message: string }> {
+  const res = await authFetch(`${API_BASE}/api/iron-dome/resume`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to resume operations');
+  return res.json();
+}
+
+async function fetchControlStatus(): Promise<{ paused: boolean; uptime: number; uptimeFormatted: string }> {
+  const res = await authFetch(`${API_BASE}/api/control/status`);
+  if (!res.ok) throw new Error('Failed to fetch control status');
+  return res.json();
+}
+
 async function fetchIronDomeAudit(limit?: number): Promise<{ logs: IronDomeAuditLog[]; total: number }> {
   const params = new URLSearchParams();
   if (limit) params.set('limit', limit.toString());
@@ -136,6 +158,38 @@ export function useIronDomeAudit(limit?: number) {
     queryKey: ['iron-dome-audit', limit],
     queryFn: () => fetchIronDomeAudit(limit),
     refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useEmergencyStop() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: emergencyStop,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['iron-dome-status'] });
+      queryClient.invalidateQueries({ queryKey: ['iron-dome-audit'] });
+      queryClient.invalidateQueries({ queryKey: ['control-status'] });
+    },
+  });
+}
+
+export function useResumeOperations() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: resumeOperations,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['control-status'] });
+      queryClient.invalidateQueries({ queryKey: ['iron-dome-status'] });
+    },
+  });
+}
+
+export function useControlStatus() {
+  return useQuery({
+    queryKey: ['control-status'],
+    queryFn: fetchControlStatus,
+    refetchInterval: 5000, // Poll more frequently for pause state
     retry: 2,
   });
 }

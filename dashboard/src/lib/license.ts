@@ -31,3 +31,8 @@ export const TIER_BG: Record<LicenseTier, string> = {
   team: 'bg-violet-400/10',
   enterprise: 'bg-amber-400/10',
 };
+
+export const PLAN_PRICING: Record<'pro' | 'team', { label: string; price: string }> = {
+  pro: { label: 'Pro', price: '£29/mo' },
+  team: { label: 'Team', price: '£99/mo' },
+};

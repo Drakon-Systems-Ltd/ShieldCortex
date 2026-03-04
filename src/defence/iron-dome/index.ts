@@ -17,6 +17,8 @@ import { isFeatureEnabled } from '../../license/gate.js';
 import { getCloudIronDomeCache } from '../../cloud/iron-dome-sync.js';
 import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
 import { isDatabaseInitialized } from '../../database/init.js';
+import { handleKillPhrase } from './kill-switch.js';
+import { pause } from '../../api/control.js';
 
 // ── Re-exports ──
 
@@ -41,6 +43,7 @@ export type { PiiCheckResult, PiiViolation } from './pii-guard.js';
 
 export { handleKillPhrase } from './kill-switch.js';
 export type { KillSwitchResult } from './kill-switch.js';
+// checkKillPhrase is defined in this file (wired version that triggers emergency stop)
 
 export { logIronDomeAudit } from './audit.js';
 export type { IronDomeAuditEvent } from './audit.js';
@@ -145,6 +148,20 @@ export function deactivateIronDome(): void {
     allowed: true,
     reason: 'Iron Dome deactivated',
   });
+}
+
+/**
+ * Check input for the kill phrase and trigger emergency stop if detected.
+ * Halts all agent operations (memory creation paused) while Iron Dome
+ * stays active — the agent is told to stop and wait for instruction.
+ */
+export function checkKillPhrase(input: string): import('./kill-switch.js').KillSwitchResult {
+  const config = loadConfig();
+  const result = handleKillPhrase(input, config);
+  if (result.triggered) {
+    pause(); // Halt agent — Iron Dome stays active to keep protecting
+  }
+  return result;
 }
 
 /**

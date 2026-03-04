@@ -58,7 +58,7 @@ import { logAudit } from '../defence/audit/index.js';
 import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, getOpenClawMemoryConfig, setOpenClawMemoryConfig, type DefenceMode } from '../cloud/config.js';
 import { getQueueStats } from '../cloud/sync-queue.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
-import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection } from '../defence/iron-dome/index.js';
+import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection, logIronDomeAudit } from '../defence/iron-dome/index.js';
 import type { IronDomeProfile } from '../defence/iron-dome/index.js';
 import { getLicense, getLicenseTier, activateLicense, deactivateLicense, clearLicenseCache } from '../license/store.js';
 import { listFeatures, requireFeature, FeatureGatedError } from '../license/gate.js';
@@ -1630,6 +1630,37 @@ export function startVisualizationServer(dbPath?: string): void {
     try {
       deactivateIronDome();
       res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Emergency Stop — halt all agent operations, Iron Dome stays active
+  app.post('/api/iron-dome/emergency-stop', (_req: Request, res: Response) => {
+    try {
+      pause();
+      logIronDomeAudit({
+        action: 'kill_switch',
+        allowed: false,
+        reason: 'Emergency stop triggered — agent halted, awaiting instruction',
+      });
+      res.json({
+        stopped: true,
+        message: 'Agent halted. All memory operations paused. Iron Dome remains active. Investigate before resuming.',
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Resume agent operations after investigation
+  app.post('/api/iron-dome/resume', (_req: Request, res: Response) => {
+    try {
+      resume();
+      res.json({
+        resumed: true,
+        message: 'Agent operations resumed. Iron Dome continues protecting.',
+      });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

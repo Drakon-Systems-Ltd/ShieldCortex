@@ -14,6 +14,8 @@ import {
   ShieldOff,
   Users,
   Scan,
+  OctagonX,
+  Play,
 } from 'lucide-react';
 import {
   useIronDomeStatus,
@@ -21,6 +23,9 @@ import {
   useDeactivateIronDome,
   useIronDomeScan,
   useIronDomeAudit,
+  useEmergencyStop,
+  useResumeOperations,
+  useControlStatus,
   type IronDomeProfile,
   type InjectionScanResult,
   type IronDomeAuditLog,
@@ -66,10 +71,15 @@ export function IronDomeView() {
   const deactivateMutation = useDeactivateIronDome();
   const scanMutation = useIronDomeScan();
 
+  const emergencyStopMutation = useEmergencyStop();
+  const resumeMutation = useResumeOperations();
+  const { data: controlStatus } = useControlStatus();
+
   const [scanText, setScanText] = useState('');
   const [scanResult, setScanResult] = useState<InjectionScanResult | null>(null);
 
   const isActive = status?.enabled ?? false;
+  const isPaused = controlStatus?.paused ?? false;
   const activeProfile = status?.profile;
   const config = status?.config;
 
@@ -214,6 +224,66 @@ export function IronDomeView() {
               </span>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── EMERGENCY STOP ── */}
+      {isPaused ? (
+        <div className="bg-red-950/50 border-2 border-red-500/50 rounded-xl p-5 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <OctagonX size={18} className="text-red-400" />
+            <h3 className="text-sm font-bold text-red-400 uppercase tracking-wide">Agent Halted</h3>
+          </div>
+          <p className="text-xs text-red-300/80 mb-2">
+            Your agent has been stopped and is waiting for instruction. All memory operations are frozen — no reads, writes, or modifications.
+          </p>
+          <p className="text-xs text-green-400/80 mb-4">
+            Iron Dome remains active and continues protecting.
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => resumeMutation.mutate()}
+              disabled={resumeMutation.isPending}
+              className="flex items-center gap-1.5 px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded-lg text-xs font-medium text-white transition-colors"
+            >
+              {resumeMutation.isPending ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Play size={12} />
+              )}
+              Resume Agent
+            </button>
+            <span className="text-[10px] text-slate-500">
+              Only resume after you&apos;ve investigated the threat
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-slate-900 border border-orange-500/30 rounded-xl p-4 mb-6">
+          <div className="flex items-center gap-2 mb-2">
+            <OctagonX size={14} className="text-orange-400" />
+            <h3 className="text-sm font-medium text-orange-300">Emergency Stop</h3>
+          </div>
+          <p className="text-xs text-slate-400 mb-3">
+            Immediately halts your agent when you suspect it has been compromised or is acting on poisoned data. The agent stops all operations and waits for your instruction. Iron Dome stays active.
+          </p>
+          {config?.killPhrase && (
+            <p className="text-[10px] text-slate-500 mb-3">
+              Kill phrase: <span className="font-mono text-slate-400">&quot;{config.killPhrase}&quot;</span> — say this in conversation for hands-free stop
+            </p>
+          )}
+          <button
+            onClick={() => emergencyStopMutation.mutate()}
+            disabled={emergencyStopMutation.isPending}
+            className="flex items-center gap-1.5 px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded-lg text-xs font-bold text-white uppercase tracking-wider transition-colors"
+          >
+            {emergencyStopMutation.isPending ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <OctagonX size={14} />
+            )}
+            Emergency Stop
+          </button>
         </div>
       )}
 
