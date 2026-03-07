@@ -318,7 +318,7 @@ export function getOpenClawMemoryConfig(): OpenClawMemoryConfig {
     : DEFAULT_OPENCLAW_MEMORY_CONFIG.maxRecent;
 
   return {
-    autoMemory: raw.openclawAutoMemory !== false,
+    autoMemory: raw.openclawAutoMemory === true,
     dedupe: raw.openclawAutoMemoryDedupe !== false,
     noveltyThreshold: threshold,
     maxRecent,

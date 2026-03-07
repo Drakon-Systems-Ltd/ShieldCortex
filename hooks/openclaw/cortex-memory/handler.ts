@@ -32,7 +32,8 @@ async function loadShieldConfig() {
 
 async function isOpenClawAutoMemoryEnabled() {
   const config = await loadShieldConfig();
-  return config?.openclawAutoMemory !== false;
+  // Default OFF — OpenClaw has its own memory system. User must explicitly opt in.
+  return config?.openclawAutoMemory === true;
 }
 
 /**
@@ -79,6 +80,15 @@ async function resolveServerCmd() {
 
 // ==================== CORTEX MCP HELPER ====================
 
+let _lastCallErrorType = null;
+
+function classifyCallError(err) {
+  if (err.killed || err.code === "ETIMEDOUT" || err.signal === "SIGTERM") return "timeout";
+  if (/ENOENT|not found|command not found/i.test(err.message || "")) return "not-found";
+  if (/mcporter/i.test(err.message || "")) return "mcporter";
+  return "unknown";
+}
+
 /**
  * Call a ShieldCortex MCP tool via mcporter
  * @param {string} tool - Tool name (e.g., "remember", "recall", "get_context")
@@ -121,8 +131,24 @@ async function callCortex(tool, args = {}, options = { retries: 1, timeout: 1500
             return;
           }
 
-          console.error(`[cortex-memory] ${errorType} on ${tool} after ${attempts} attempt(s):`, err.message);
-          if (err.code) console.error(`[cortex-memory] Error code: ${err.code}`);
+          // One-time categorised warning per error type (prevents spam)
+          const category = classifyCallError(err);
+          if (category !== _lastCallErrorType) {
+            _lastCallErrorType = category;
+            switch (category) {
+              case "timeout":
+                console.warn("[cortex-memory] ShieldCortex call timed out (15s). Memory may be under heavy load.");
+                break;
+              case "not-found":
+                console.warn("[cortex-memory] ShieldCortex binary not found. Run: npm install -g shieldcortex");
+                break;
+              case "mcporter":
+                console.warn("[cortex-memory] mcporter failed to reach ShieldCortex MCP server. Is it configured?");
+                break;
+              default:
+                console.warn(`[cortex-memory] ShieldCortex call failed: ${err.message}`);
+            }
+          }
           resolve(null);
           return;
         }
@@ -278,6 +304,21 @@ async function createNoveltyGate() {
   };
 }
 
+// ==================== SHARED NOVELTY GATE ====================
+
+/**
+ * Process-level shared novelty gate for ALL save paths (session-end, session-stop, keyword triggers).
+ * Avoids redundant disk round-trips and ensures cross-path deduplication.
+ */
+let _sharedNoveltyGate = null;
+
+async function getSharedNoveltyGate() {
+  if (!_sharedNoveltyGate) {
+    _sharedNoveltyGate = await createNoveltyGate();
+  }
+  return _sharedNoveltyGate;
+}
+
 // ==================== HOOK SCANNER ====================
 
 /**
@@ -357,7 +398,10 @@ const PATTERNS = {
     /\b(?:TIL|today\s+I\s+learned)\b/i,
   ],
   preference: [
-    /\b(?:always|never|prefer|don't\s+like|should\s+always)\b/i,
+    /\b(?:I|we|you\s+should)\s+(?:always|never)\b/i,
+    /\b(?:always\s+use|never\s+use|never\s+commit)\b/i,
+    /\bprefer(?:\s+to)?\s+\w+/i,
+    /\bshould\s+always\b/i,
   ],
   note: [
     /\b(?:important|remember|key\s+point|crucial|note)\s*:/i,
@@ -474,7 +518,7 @@ async function onSessionEnd(event) {
     return;
   }
 
-  const noveltyGate = await createNoveltyGate();
+  const noveltyGate = await getSharedNoveltyGate();
   let saved = 0;
   let skipped = 0;
   for (const mem of memories) {
@@ -501,7 +545,7 @@ async function onSessionEnd(event) {
   await noveltyGate.flush();
 
   console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories from session (${skipped} skipped as duplicates)`);
-  
+
   // Provide visible feedback to user
   if (saved > 0 && event.messages) {
     event.messages.push(`🧠 ShieldCortex: Saved ${saved} memor${saved === 1 ? 'y' : 'ies'} from this session`);
@@ -542,7 +586,7 @@ async function onSessionStop(event) {
     return;
   }
 
-  const noveltyGate = await createNoveltyGate();
+  const noveltyGate = await getSharedNoveltyGate();
   let saved = 0;
   let skipped = 0;
   for (const mem of memories) {
@@ -679,13 +723,21 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
 
   // Extract content after the trigger phrase
   let content = messageText.slice(matchIdx + matchedTrigger.phrase.length).replace(/^[:\s]+/, "").trim();
-  
+
   // If content is too short, use the whole message as context
   if (content.length < 5) {
     content = messageText;
   }
 
   const title = content.slice(0, 80).replace(/["\n]/g, " ").trim();
+
+  // Deduplicate via shared novelty gate (same gate used by session-end/stop extraction)
+  const noveltyGate = await getSharedNoveltyGate();
+  const novelty = noveltyGate.inspect(content.slice(0, 500));
+  if (!novelty.allow) {
+    console.log(`[cortex-memory] Keyword trigger skipped (duplicate): "${title}"`);
+    return false;
+  }
 
   const result = await callCortex("remember", {
     title,
@@ -698,6 +750,8 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
   });
 
   if (result) {
+    noveltyGate.remember({ content: content.slice(0, 500), title, category: matchedTrigger.category }, novelty);
+    await noveltyGate.flush();
     if (event.messages) {
       event.messages.push(`✅ Saved to Cortex memory (${matchedTrigger.category}): "${title}"`);
     }

@@ -60,7 +60,8 @@ async function loadConfig(): Promise<SCConfig> {
 }
 
 function isAutoMemoryEnabled(config: SCConfig): boolean {
-  return config.openclawAutoMemory !== false;
+  // Default OFF — OpenClaw has its own memory system. User must explicitly opt in.
+  return config.openclawAutoMemory === true;
 }
 
 function isAutoMemoryDedupeEnabled(config: SCConfig): boolean {
@@ -84,12 +85,42 @@ async function resolveServerCmd(): Promise<string> {
 
 // ==================== MCP HELPER ====================
 
+let _lastErrorType: string | null = null;
+
+function classifyCallError(err: Error & { code?: string; killed?: boolean; signal?: string }): string {
+  if (err.killed || err.code === "ETIMEDOUT" || err.signal === "SIGTERM") return "timeout";
+  if (/ENOENT|not found|command not found/i.test(err.message)) return "not-found";
+  if (/mcporter/i.test(err.message)) return "mcporter";
+  return "unknown";
+}
+
 function callCortex(tool: string, args: Record<string, string> = {}): Promise<string | null> {
   return resolveServerCmd().then(serverCmd => new Promise(resolve => {
     const cmdArgs = ["mcporter", "call", "--stdio", serverCmd, tool];
     for (const [k, v] of Object.entries(args)) cmdArgs.push(`${k}:${String(v).replace(/'/g, "''")}`);
     execFile("npx", cmdArgs, { timeout: 15000, maxBuffer: 256 * 1024 }, (err, stdout) => {
-      resolve(err ? null : stdout?.trim() || null);
+      if (err) {
+        const errorType = classifyCallError(err as any);
+        if (errorType !== _lastErrorType) {
+          _lastErrorType = errorType;
+          switch (errorType) {
+            case "timeout":
+              console.warn("[shieldcortex] ShieldCortex call timed out (15s). Memory may be under heavy load.");
+              break;
+            case "not-found":
+              console.warn("[shieldcortex] ShieldCortex binary not found. Run: npm install -g shieldcortex");
+              break;
+            case "mcporter":
+              console.warn("[shieldcortex] mcporter failed to reach ShieldCortex MCP server. Is it configured?");
+              break;
+            default:
+              console.warn(`[shieldcortex] ShieldCortex call failed: ${err.message}`);
+          }
+        }
+        resolve(null);
+        return;
+      }
+      resolve(stdout?.trim() || null);
     });
   }));
 }
@@ -113,7 +144,12 @@ const PATTERNS: Record<string, RegExp[]> = {
   architecture: [/\b(?:architecture|designed|structured)\b.*?(?:uses?|is|with)\b/i, /\b(?:decided?\s+to|going\s+with|chose)\b/i],
   error: [/\b(?:fixed|resolved|solved)\s+(?:by|with|using)\b/i, /\b(?:solution|fix|root\s*cause)\s+(?:was|is)\b/i],
   learning: [/\b(?:learned|discovered|turns?\s+out|figured\s+out|realized)\b/i],
-  preference: [/\b(?:always|never|prefer|should\s+always)\b/i],
+  preference: [
+    /\b(?:I|we|you\s+should)\s+(?:always|never)\b/i,
+    /\b(?:always\s+use|never\s+use|never\s+commit)\b/i,
+    /\bprefer(?:\s+to)?\s+\w+/i,
+    /\bshould\s+always\b/i,
+  ],
   note: [/\b(?:important|remember|key\s+point)\s*:/i],
 };
 
@@ -366,6 +402,18 @@ function handleLlmInput(event: LlmInputEvent, ctx: AgentCtx): void {
   })();
 }
 
+// Skip text blocks that are ShieldCortex/OpenClaw tool-result pass-throughs
+function isToolResultContent(text: string): boolean {
+  // ShieldCortex recall returns "Found N memories:" header
+  if (/^Found \d+ memor(?:y|ies):/m.test(text)) return true;
+  // ShieldCortex get_context returns structured context blocks
+  if (/^## (?:Architecture|Patterns|Preferences|Errors|Context)/m.test(text)) return true;
+  // OpenClaw tool-result wrapper markers
+  if (/^\[tool_result\b/i.test(text.trim())) return true;
+  if (/^<tool_result\b/i.test(text.trim())) return true;
+  return false;
+}
+
 function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
   // Fire and forget
   (async () => {
@@ -373,7 +421,9 @@ function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
       const config = await loadConfig();
       if (!isAutoMemoryEnabled(config)) return;
 
-      const texts = event.assistantTexts.filter(t => t && t.length >= 30);
+      const texts = event.assistantTexts
+        .filter(t => t && t.length >= 30)
+        .filter(t => !isToolResultContent(t));
       if (!texts.length) return;
       const memories = extractMemories(texts);
       if (!memories.length) return;
