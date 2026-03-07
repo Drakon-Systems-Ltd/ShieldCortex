@@ -18,13 +18,18 @@ npm install -g shieldcortex
 shieldcortex install
 ```
 
-That's it. Your agent now has persistent memory with semantic search, a knowledge graph, automatic decay, contradiction detection, and a 6-layer security pipeline that prevents memory poisoning. No config files. No database setup. No cloud account required.
+> [!NOTE]
+> Every feature works locally without a cloud account or licence key. Free and MIT licensed.
 
 **Works with** Claude Code · Cursor · VS Code · OpenClaw · LangChain · any MCP-compatible agent · Python via REST API
 
-<br>
+---
 
-## The problem
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+
+---
+
+## 🧠 The Problem
 
 AI agents are stateless. Every session starts from zero. Teams work around this with markdown files, custom prompts, or bolted-on vector databases — all of which are fragile, unsearchable, and completely unprotected from injection attacks.
 
@@ -32,47 +37,41 @@ ShieldCortex replaces all of that with one install command.
 
 <br>
 
-## What you get
+## ✨ What You Get
 
 ### Memory that works like a brain
 
 Your agent doesn't just store text — it *understands* it.
 
-- **Semantic search** — finds memories by meaning using FTS5 + vector embeddings (all-MiniLM-L6-v2), not just keyword matching
-- **Knowledge graph** — entities and relationships extracted automatically from every memory, navigable in the dashboard
-- **Natural decay** — old, unaccessed memories fade over time; important ones persist — just like human memory
-- **Contradiction detection** — new memories that conflict with existing ones get flagged before they cause confusion
-- **Auto-consolidation** — duplicate and overlapping memories merge automatically, keeping your memory store clean
-- **Project isolation** — memories scoped per project by default, with cross-project queries when you need them
+- 🔍 **Semantic search** — finds memories by meaning using FTS5 + vector embeddings (all-MiniLM-L6-v2), not just keyword matching
+- 🕸️ **Knowledge graph** — entities and relationships extracted automatically from every memory, navigable in the dashboard
+- ⏳ **Natural decay** — old, unaccessed memories fade over time; important ones persist — just like human memory
+- ⚡ **Contradiction detection** — new memories that conflict with existing ones get flagged before they cause confusion
+- 🧹 **Auto-consolidation** — duplicate and overlapping memories merge automatically, keeping your memory store clean
+- 📁 **Project isolation** — memories scoped per project by default, with cross-project queries when you need them
+- 🔔 **Webhooks** — POST notifications on memory events, HMAC-SHA256 signed
+- 📅 **Expiry rules** — auto-delete TODOs after 30 days, keep architecture decisions forever
 
 ### Security that's invisible until it matters
 
 Every memory write passes through 6 defence layers before it's stored:
 
-```
-Input Sanitisation → Pattern Detection → Semantic Analysis →
-Structural Validation → Behavioural Scoring → Credential Leak Detection
-```
-
-This catches prompt injection, encoding tricks, obfuscated attacks, API keys accidentally stored in memory, and novel attack patterns via embedding similarity. Blocked content goes to quarantine for review — nothing is silently dropped.
-
-### A dashboard you'll actually use
-
-```bash
-shieldcortex dashboard
+```diff
++ ✅ Input Sanitisation       → strips control chars, null bytes, dangerous formatting
++ ✅ Pattern Detection        → catches known injection patterns, encoding tricks
++ ✅ Semantic Analysis        → embedding similarity to attack corpus — catches novel attacks
++ ✅ Structural Validation    → JSON integrity, format anomalies, fragmentation attempts
++ ✅ Behavioural Scoring      → entropy analysis, anomaly detection, baseline deviation
++ ✅ Credential Leak Detection → API keys, tokens, private keys — 25+ patterns, 11 providers
 ```
 
-![Shield Overview — scan stats, quarantine queue, threat timeline](docs/images/dashboard-shield.png)
-
-Real-time defence overview, knowledge graph explorer, memory timeline, and full audit log with trust scores and threat reasons. Keyboard shortcuts throughout — press `?`.
-
-![Audit Log — forensic view of every memory operation](docs/images/dashboard-audit.png)
+Blocked content goes to quarantine for review — nothing is silently dropped.
 
 <br>
 
-## Quick start
+## 🚀 Quick Start
 
-### For Claude Code, Cursor, or VS Code
+### Claude Code / Cursor / VS Code
 
 ```bash
 npm install -g shieldcortex
@@ -95,7 +94,7 @@ shieldcortex doctor
 ✅ API server: running (port 3001)
 ```
 
-### For Python
+### Python
 
 ```bash
 pip install shieldcortex
@@ -134,7 +133,12 @@ const memories = await searchMemories('authentication approach');
 
 <br>
 
-## How it compares
+## 📊 How It Compares
+
+<details>
+<summary><strong>Feature comparison table</strong></summary>
+
+<br>
 
 | | ShieldCortex | Markdown files | Vector DB + DIY |
 |---|:---:|:---:|:---:|
@@ -149,39 +153,115 @@ const memories = await searchMemories('authentication approach');
 | Behaviour controls | Iron Dome | None | None |
 | Audit trail | Dashboard | None | Build it yourself |
 
+</details>
+
 <br>
 
-## Iron Dome — behaviour controls
+## 🛡️ Iron Dome
 
-Beyond memory, ShieldCortex can control what your agent is *allowed to do*.
+Controls what your agent is *allowed to do* — not just what it remembers.
 
 ```bash
 shieldcortex iron-dome activate --profile enterprise
 ```
 
-- **Security profiles** — `enterprise`, `personal`, `paranoid`, `school`
-- **Action gates** — allow, require approval, or block actions like `send_email`, `delete_file`, `api_call`
-- **PII guard** — detect and block personally identifiable information in outbound actions
-- **Kill switch** — emergency shutdown of all agent actions, immediate effect
-- **Full audit trail** — every action check logged for forensic review
+- 🏢 **Security profiles** — `enterprise`, `personal`, `paranoid`, `school`
+- 🚦 **Action gates** — allow, require approval, or block actions like `send_email`, `delete_file`, `api_call`
+- 🔒 **PII guard** — detect and block personally identifiable information in outbound actions
+- 🚨 **Kill switch** — emergency shutdown of all agent actions, immediate effect
+- 📋 **Full audit trail** — every action check logged for forensic review
 
 <br>
 
-## Integrations
+## 🐾 OpenClaw Integration
 
-| Platform | How to connect |
+ShieldCortex is a first-class citizen in [OpenClaw](https://github.com/openclaw) — the open-source AI agent framework. One command connects them:
+
+```bash
+shieldcortex openclaw install
+```
+
+This installs **two components** that work together:
+
+### Hook — Session Lifecycle Memory
+
+Listens for session events and keyword triggers throughout the agent lifecycle:
+
+- 🧠 **Auto-extraction** — when a session ends, high-salience content (decisions, bug fixes, learnings, architecture notes) is automatically saved to memory
+- 💬 **Keyword triggers** — say "remember this:", "don't forget:", or "this is important:" and the content is captured immediately with the right category and importance
+- 🔄 **Novelty filtering** — Jaccard similarity deduplication prevents the same insight from being saved twice
+
+### Plugin — Real-Time Defence
+
+Scans every prompt and response as they flow through OpenClaw:
+
+- 🛡️ **Inbound scanning** — every LLM input passes through the 6-layer defence pipeline in real time
+- 📤 **Outbound extraction** — architectural decisions and learnings detected in assistant responses are auto-saved to memory
+- 📋 **Audit trail** — all scans logged to `~/.shieldcortex/audit/` with full threat details
+
+> [!TIP]
+> Auto-extraction is **off by default** to respect OpenClaw's native memory system. Enable it when you want both:
+> ```bash
+> shieldcortex config --openclaw-auto-memory true
+> ```
+
+### How they complement each other
+
+| | OpenClaw Native | + ShieldCortex |
+|---|---|---|
+| Memory | Markdown-based | SQLite + FTS5 + vector embeddings + knowledge graph |
+| Search | File search | Semantic search — find by meaning, not just keywords |
+| Security | None | 6-layer defence pipeline on every memory write |
+| Decay | Manual cleanup | Automatic — old memories fade, important ones persist |
+| Deduplication | None | Novelty gate with configurable similarity threshold |
+| Audit | None | Full forensic log of every operation |
+
+OpenClaw handles agent orchestration. ShieldCortex handles what the agent *remembers* and keeps it safe. Together, your agents get persistent, searchable, secure memory without building any of it yourself.
+
+<br>
+
+## 📊 Dashboard
+
+Built-in visual dashboard with keyboard shortcuts throughout — press <kbd>?</kbd> to see them all.
+
+```bash
+shieldcortex dashboard
+```
+
+**Shield Overview** — scan counts, block rates, quarantine queue, threat timeline, and memory health score.
+
+![Shield Overview](docs/images/dashboard-shield.png)
+
+**Knowledge Graph** — ego-centric entity navigation. Focus on one entity, see its neighbours and relationships. Click to explore.
+
+**Timeline** — every memory, chronologically. Filter by category, type, or search. Edit memories inline.
+
+**Audit Log** — full forensic log of every memory operation with trust scores and threat reasons.
+
+![Audit Log](docs/images/dashboard-audit.png)
+
+<br>
+
+## 🔌 Integrations
+
+| Platform | Setup |
 |---|---|
-| Claude Code | `shieldcortex install` |
-| Cursor | `shieldcortex install` |
-| VS Code (Copilot) | `shieldcortex install` |
-| OpenClaw | `shieldcortex openclaw install` |
-| LangChain JS | `import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'` |
-| Python (CrewAI, AutoGPT, etc.) | `pip install shieldcortex` |
-| Any MCP-compatible agent | `shieldcortex install` |
+| **Claude Code** | `shieldcortex install` |
+| **Cursor** | `shieldcortex install` |
+| **VS Code** (Copilot) | `shieldcortex install` |
+| **OpenClaw** | `shieldcortex openclaw install` — [details above](#-openclaw-integration) |
+| **LangChain JS** | `import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'` |
+| **Python** (CrewAI, AutoGPT, etc.) | `pip install shieldcortex` |
+| **Any MCP agent** | `shieldcortex install` |
 
 <br>
 
-## CLI reference
+## 💻 CLI
+
+<details>
+<summary><strong>Full CLI reference</strong></summary>
+
+<br>
 
 ```bash
 shieldcortex install              # Set up MCP server + hooks
@@ -192,11 +272,21 @@ shieldcortex scan-skills          # Scan installed agent skills for threats
 shieldcortex dashboard            # Launch the visual dashboard
 shieldcortex iron-dome activate   # Enable behaviour controls
 shieldcortex iron-dome status     # Check Iron Dome status
+shieldcortex openclaw install     # Connect to OpenClaw
+shieldcortex openclaw status      # Check OpenClaw hook status
+shieldcortex config --key value   # Update configuration
 ```
+
+</details>
 
 <br>
 
-## Configuration
+## ⚙️ Configuration
+
+<details>
+<summary><strong>Configuration reference</strong></summary>
+
+<br>
 
 All config lives in `~/.shieldcortex/config.json`:
 
@@ -225,20 +315,28 @@ All config lives in `~/.shieldcortex/config.json`:
 
 Full reference: [docs/configuration.md](docs/configuration.md)
 
+</details>
+
 <br>
 
-## Free and open source
+## 💚 Free and Open Source
 
-ShieldCortex is **MIT licensed** and **free for unlimited local use**. Every feature on this page works without a licence key, cloud account, or credit card.
+ShieldCortex is **MIT licensed** and **free for unlimited local use**. Everything on this page works without a licence key, cloud account, or credit card.
 
 [ShieldCortex Cloud](https://shieldcortex.ai/pricing) optionally adds custom injection patterns, cloud audit sync, multi-device visibility, and team management.
 
-<br>
-
-## Links
-
-[Website](https://shieldcortex.ai) · [Documentation](https://shieldcortex.ai/docs) · [npm](https://www.npmjs.com/package/shieldcortex) · [PyPI](https://pypi.org/project/shieldcortex/) · [Changelog](CHANGELOG.md)
-
 ---
 
-MIT License · Built by [Drakon Systems](https://drakonsystems.com)
+<p align="center">
+  <a href="https://shieldcortex.ai">Website</a> ·
+  <a href="https://shieldcortex.ai/docs">Documentation</a> ·
+  <a href="https://www.npmjs.com/package/shieldcortex">npm</a> ·
+  <a href="https://pypi.org/project/shieldcortex/">PyPI</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+<p align="center">
+  MIT License · Built by <a href="https://drakonsystems.com">Drakon Systems</a>
+  <br><br>
+  <sub>Built with SQLite · better-sqlite3 · all-MiniLM-L6-v2 · Next.js</sub>
+</p>
