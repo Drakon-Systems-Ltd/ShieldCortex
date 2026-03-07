@@ -237,7 +237,7 @@ export function LicenseStatusCard() {
                 </div>
               )}
             </div>
-          )
+          )}
         </div>
       </div>
     );

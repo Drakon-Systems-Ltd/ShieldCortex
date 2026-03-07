@@ -35,6 +35,8 @@ const EVENT_COLORS: Record<MemoryEventType, string> = {
   update_failed: 'text-red-400',
   server_restarting: 'text-orange-400',
   defence_event: 'text-red-400',
+  kill_switch_activated: 'text-red-500',
+  kill_switch_deactivated: 'text-green-500',
 };
 
 const EVENT_ICONS: Record<MemoryEventType, string> = {
@@ -54,6 +56,8 @@ const EVENT_ICONS: Record<MemoryEventType, string> = {
   update_failed: '✗',
   server_restarting: '🔄',
   defence_event: '🛡',
+  kill_switch_activated: '🛑',
+  kill_switch_deactivated: '▶',
 };
 
 export function ActivityLog() {
@@ -76,6 +80,8 @@ export function ActivityLog() {
     update_failed: true,
     server_restarting: true,
     defence_event: true,
+    kill_switch_activated: true,
+    kill_switch_deactivated: true,
   });
 
   const logContainerRef = useRef<HTMLDivElement>(null);
