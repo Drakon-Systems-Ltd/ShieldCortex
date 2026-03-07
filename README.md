@@ -20,7 +20,7 @@ shieldcortex install
 
 That's it. Your agent now has persistent memory with semantic search, a knowledge graph, automatic decay, contradiction detection, and a 6-layer security pipeline that prevents memory poisoning. No config files. No database setup. No cloud account required.
 
-**Works with** Claude Code · Cursor · VS Code · LangChain · any MCP-compatible agent · Python via REST API
+**Works with** Claude Code · Cursor · VS Code · OpenClaw · LangChain · any MCP-compatible agent · Python via REST API
 
 <br>
 
@@ -174,6 +174,7 @@ shieldcortex iron-dome activate --profile enterprise
 | Claude Code | `shieldcortex install` |
 | Cursor | `shieldcortex install` |
 | VS Code (Copilot) | `shieldcortex install` |
+| OpenClaw | `shieldcortex openclaw install` |
 | LangChain JS | `import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'` |
 | Python (CrewAI, AutoGPT, etc.) | `pip install shieldcortex` |
 | Any MCP-compatible agent | `shieldcortex install` |
