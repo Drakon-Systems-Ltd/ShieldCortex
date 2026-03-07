@@ -48,7 +48,7 @@ import {
   cleanupOldEvents,
 } from './events.js';
 import { BrainWorker } from '../worker/brain-worker.js';
-import { isPaused, pause, resume, getControlStatus } from './control.js';
+import { isPaused, pause, resume, getControlStatus, isKillSwitchActive, getKillSwitchMeta, activateKillSwitch, deactivateKillSwitch } from './control.js';
 import { getCurrentVersion, getRunningVersion, checkForUpdates, performUpdate, scheduleRestart } from './version.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
@@ -170,6 +170,24 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // ============================================
+  // KILL SWITCH GUARD MIDDLEWARE
+  // ============================================
+
+  /**
+   * Express middleware that blocks requests when the kill switch is active.
+   * Returns 423 Locked with kill switch metadata.
+   */
+  function requireNotLocked(_req: Request, res: Response, next: (err?: unknown) => void) {
+    if (!isKillSwitchActive()) return next();
+    const meta = getKillSwitchMeta();
+    res.status(423).json({
+      error: 'Kill switch active — operation blocked',
+      code: 'KILL_SWITCH_ACTIVE',
+      killSwitch: meta,
+    });
+  }
+
+  // ============================================
   // REST API ENDPOINTS
   // ============================================
 
@@ -186,7 +204,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get all memories with filters and pagination
-  app.get('/api/memories', async (req: Request, res: Response) => {
+  app.get('/api/memories', requireNotLocked, async (req: Request, res: Response) => {
     try {
       // Extract query params as strings
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
@@ -254,7 +272,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Activity data for heatmap (must be before :id route)
-  app.get('/api/memories/activity', (req: Request, res: Response) => {
+  app.get('/api/memories/activity', requireNotLocked, (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
       const db = getDatabase();
@@ -282,7 +300,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Memory quality analysis (must be before :id route)
-  app.get('/api/memories/quality', (req: Request, res: Response) => {
+  app.get('/api/memories/quality', requireNotLocked, (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
       const db = getDatabase();
@@ -323,7 +341,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get single memory by ID
-  app.get('/api/memories/:id', (req: Request, res: Response) => {
+  app.get('/api/memories/:id', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const memory = getMemoryById(id);
@@ -340,7 +358,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Create memory
-  app.post('/api/memories', (req: Request, res: Response) => {
+  app.post('/api/memories', requireNotLocked, (req: Request, res: Response) => {
     try {
       const { title, content, type, category, project, tags, salience } = req.body;
 
@@ -373,7 +391,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Delete memory
-  app.delete('/api/memories/:id', (req: Request, res: Response) => {
+  app.delete('/api/memories/:id', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const success = deleteMemory(id);
@@ -387,7 +405,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Access/reinforce memory
-  app.post('/api/memories/:id/access', (req: Request, res: Response) => {
+  app.post('/api/memories/:id/access', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const memory = accessMemory(id);
@@ -448,7 +466,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get currently activated memories (spreading activation)
-  app.get('/api/activation', (_req: Request, res: Response) => {
+  app.get('/api/activation', requireNotLocked, (_req: Request, res: Response) => {
     try {
       const activeMemories = getActiveMemories();
       const stats = getActivationStats();
@@ -468,7 +486,7 @@ export function startVisualizationServer(dbPath?: string): void {
   // ============================================
 
   // Get detected contradictions
-  app.get('/api/contradictions', (req: Request, res: Response) => {
+  app.get('/api/contradictions', requireNotLocked, (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
       const category = typeof req.query.category === 'string' ? req.query.category : undefined;
@@ -504,7 +522,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get contradictions for a specific memory
-  app.get('/api/memories/:id/contradictions', (req: Request, res: Response) => {
+  app.get('/api/memories/:id/contradictions', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       if (isNaN(id)) {
@@ -530,7 +548,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Manually enrich a memory with new context
-  app.post('/api/memories/:id/enrich', (req: Request, res: Response) => {
+  app.post('/api/memories/:id/enrich', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       if (isNaN(id)) {
@@ -592,9 +610,12 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
-  // Pause memory creation
+  // Pause memory creation (soft pause — kill switch takes precedence)
   app.post('/api/control/pause', (_req: Request, res: Response) => {
     try {
+      if (isKillSwitchActive()) {
+        return res.status(409).json({ error: 'Kill switch is active — use /api/iron-dome/resume to deactivate first', code: 'KILL_SWITCH_ACTIVE' });
+      }
       pause();
       res.json({ paused: true, message: 'Memory creation paused' });
     } catch (error) {
@@ -602,9 +623,12 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
-  // Resume memory creation
+  // Resume memory creation (soft resume — cannot override kill switch)
   app.post('/api/control/resume', (_req: Request, res: Response) => {
     try {
+      if (isKillSwitchActive()) {
+        return res.status(409).json({ error: 'Kill switch is active — use /api/iron-dome/resume to deactivate first', code: 'KILL_SWITCH_ACTIVE' });
+      }
       resume();
       res.json({ paused: false, message: 'Memory creation resumed' });
     } catch (error) {
@@ -833,7 +857,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get memory links/relationships
-  app.get('/api/links', (req: Request, res: Response) => {
+  app.get('/api/links', requireNotLocked, (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
       const db = getDatabase();
@@ -892,7 +916,7 @@ export function startVisualizationServer(dbPath?: string): void {
   // ============================================
 
   // Execute SQL query (with safety restrictions)
-  app.post('/api/sql', (req: Request, res: Response) => {
+  app.post('/api/sql', requireNotLocked, (req: Request, res: Response) => {
     try {
       const { query, allowWrite } = req.body;
 
@@ -960,7 +984,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Trigger consolidation
-  app.post('/api/consolidate', (_req: Request, res: Response) => {
+  app.post('/api/consolidate', requireNotLocked, (_req: Request, res: Response) => {
     try {
       const result = consolidate();
       // Emit event for Activity log
@@ -975,7 +999,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get context summary
-  app.get('/api/context', async (req: Request, res: Response) => {
+  app.get('/api/context', requireNotLocked, async (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
       const summary = await generateContextSummary(project);
@@ -991,7 +1015,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get search suggestions (for autocomplete)
-  app.get('/api/suggestions', (req: Request, res: Response) => {
+  app.get('/api/suggestions', requireNotLocked, (req: Request, res: Response) => {
     try {
       const query = typeof req.query.q === 'string' ? req.query.q : '';
       const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit) : 10;
@@ -1062,7 +1086,7 @@ export function startVisualizationServer(dbPath?: string): void {
   // ============================================
 
   // List entities with optional filters and pagination
-  app.get('/api/graph/entities', (req: Request, res: Response) => {
+  app.get('/api/graph/entities', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const type = typeof req.query.type === 'string' ? req.query.type : undefined;
@@ -1110,7 +1134,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get triples for a specific entity
-  app.get('/api/graph/entities/:id/triples', (req: Request, res: Response) => {
+  app.get('/api/graph/entities/:id/triples', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const id = parseInt(req.params.id as string);
@@ -1135,7 +1159,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Get memories linked to a specific entity
-  app.get('/api/graph/entities/:id/memories', (req: Request, res: Response) => {
+  app.get('/api/graph/entities/:id/memories', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const id = parseInt(req.params.id as string);
@@ -1159,7 +1183,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // List triples with optional predicate filter and pagination
-  app.get('/api/graph/triples', (req: Request, res: Response) => {
+  app.get('/api/graph/triples', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const predicate = typeof req.query.predicate === 'string' ? req.query.predicate : undefined;
@@ -1197,7 +1221,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Search entities by name
-  app.get('/api/graph/search', (req: Request, res: Response) => {
+  app.get('/api/graph/search', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const q = typeof req.query.q === 'string' ? req.query.q : '';
@@ -1229,7 +1253,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Find path between two entities using BFS
-  app.get('/api/graph/paths', (req: Request, res: Response) => {
+  app.get('/api/graph/paths', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const fromName = typeof req.query.from === 'string' ? req.query.from : '';
@@ -1328,7 +1352,7 @@ export function startVisualizationServer(dbPath?: string): void {
   // ============================================
 
   // Boost memory salience (+0.15, capped at 1.0)
-  app.post('/api/memories/:id/boost', (req: Request, res: Response) => {
+  app.post('/api/memories/:id/boost', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const memory = getMemoryById(id);
@@ -1344,7 +1368,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Demote memory salience (-0.15, floor at 0.05)
-  app.post('/api/memories/:id/demote', (req: Request, res: Response) => {
+  app.post('/api/memories/:id/demote', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const memory = getMemoryById(id);
@@ -1360,7 +1384,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Promote memory from STM to LTM
-  app.post('/api/memories/:id/promote', (req: Request, res: Response) => {
+  app.post('/api/memories/:id/promote', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const memory = promoteMemory(id);
@@ -1374,7 +1398,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Update memory (partial: title, content, tags, category)
-  app.patch('/api/memories/:id', (req: Request, res: Response) => {
+  app.patch('/api/memories/:id', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const updated = updateMemory(id, req.body);
@@ -1388,7 +1412,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Quarantine a memory (move to quarantine table, delete original)
-  app.post('/api/memories/:id/quarantine', (req: Request, res: Response) => {
+  app.post('/api/memories/:id/quarantine', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
       const memory = getMemoryById(id);
@@ -1416,7 +1440,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Create a manual link between two memories
-  app.post('/api/links', (req: Request, res: Response) => {
+  app.post('/api/links', requireNotLocked, (req: Request, res: Response) => {
     try {
       const { sourceId, targetId, relationship, strength } = req.body;
       if (!sourceId || !targetId || !relationship) {
@@ -1635,31 +1659,29 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
-  // Emergency Stop — halt all agent operations, Iron Dome stays active
+  // Emergency Stop — activates kill switch, blocks ALL agent operations
   app.post('/api/iron-dome/emergency-stop', (_req: Request, res: Response) => {
     try {
-      pause();
-      logIronDomeAudit({
-        action: 'kill_switch',
-        allowed: false,
-        reason: 'Emergency stop triggered — agent halted, awaiting instruction',
-      });
+      activateKillSwitch({ source: 'manual' });
       res.json({
         stopped: true,
-        message: 'Agent halted. All memory operations paused. Iron Dome remains active. Investigate before resuming.',
+        killSwitchActive: true,
+        message: 'Kill switch activated. All agent operations blocked. Iron Dome remains active. Investigate before resuming.',
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
   });
 
-  // Resume agent operations after investigation
-  app.post('/api/iron-dome/resume', (_req: Request, res: Response) => {
+  // Resume agent operations after investigation (requires reason)
+  app.post('/api/iron-dome/resume', (req: Request, res: Response) => {
     try {
-      resume();
+      const reason = req.body?.reason || 'Resumed via dashboard';
+      deactivateKillSwitch(reason);
       res.json({
         resumed: true,
-        message: 'Agent operations resumed. Iron Dome continues protecting.',
+        killSwitchActive: false,
+        message: 'Kill switch deactivated. Agent operations resumed. Iron Dome continues protecting.',
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -1882,7 +1904,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Approve quarantined item
-  app.post('/api/v1/quarantine/:id/approve', (req: Request, res: Response) => {
+  app.post('/api/v1/quarantine/:id/approve', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const id = parseInt(req.params.id as string, 10);
@@ -1900,7 +1922,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Reject quarantined item
-  app.post('/api/v1/quarantine/:id/reject', (req: Request, res: Response) => {
+  app.post('/api/v1/quarantine/:id/reject', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const id = parseInt(req.params.id as string, 10);
@@ -1919,7 +1941,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Retroactive sync: push existing quarantine items to cloud
-  app.post('/api/quarantine/sync-to-cloud', async (_req: Request, res: Response) => {
+  app.post('/api/quarantine/sync-to-cloud', requireNotLocked, async (_req: Request, res: Response) => {
     try {
       const config = getCloudConfig();
       if (!config.cloudEnabled || !config.cloudApiKey) {
@@ -1994,7 +2016,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Manually trigger light tick (for testing)
-  app.post('/api/worker/trigger-light', async (_req: Request, res: Response) => {
+  app.post('/api/worker/trigger-light', requireNotLocked, async (_req: Request, res: Response) => {
     try {
       const result = await brainWorker.triggerLightTick();
       res.json({
@@ -2008,7 +2030,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Manually trigger medium tick (for testing)
-  app.post('/api/worker/trigger-medium', async (_req: Request, res: Response) => {
+  app.post('/api/worker/trigger-medium', requireNotLocked, async (_req: Request, res: Response) => {
     try {
       const result = await brainWorker.triggerMediumTick();
       res.json({

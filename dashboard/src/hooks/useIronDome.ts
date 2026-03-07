@@ -93,15 +93,32 @@ async function emergencyStop(): Promise<{ stopped: boolean; message: string }> {
   return res.json();
 }
 
-async function resumeOperations(): Promise<{ resumed: boolean; message: string }> {
+async function resumeOperations(reason?: string): Promise<{ resumed: boolean; message: string }> {
   const res = await authFetch(`${API_BASE}/api/iron-dome/resume`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: reason || 'Resumed via dashboard' }),
   });
   if (!res.ok) throw new Error('Failed to resume operations');
   return res.json();
 }
 
-async function fetchControlStatus(): Promise<{ paused: boolean; uptime: number; uptimeFormatted: string }> {
+export interface ControlStatus {
+  mode: 'active' | 'paused' | 'kill_switch';
+  paused: boolean;
+  killSwitchActive: boolean;
+  killSwitchMeta: {
+    triggeredAt: string;
+    source: string;
+    phrase?: string;
+    reason?: string;
+    memoryCountAtTrigger?: number;
+  } | null;
+  uptime: number;
+  uptimeFormatted: string;
+}
+
+async function fetchControlStatus(): Promise<ControlStatus> {
   const res = await authFetch(`${API_BASE}/api/control/status`);
   if (!res.ok) throw new Error('Failed to fetch control status');
   return res.json();
@@ -177,19 +194,20 @@ export function useEmergencyStop() {
 export function useResumeOperations() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: resumeOperations,
+    mutationFn: (reason?: string) => resumeOperations(reason),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['control-status'] });
       queryClient.invalidateQueries({ queryKey: ['iron-dome-status'] });
+      queryClient.invalidateQueries({ queryKey: ['iron-dome-audit'] });
     },
   });
 }
 
 export function useControlStatus() {
-  return useQuery({
+  return useQuery<ControlStatus>({
     queryKey: ['control-status'],
     queryFn: fetchControlStatus,
-    refetchInterval: 5000, // Poll more frequently for pause state
+    refetchInterval: 5000, // Poll more frequently for pause/kill switch state
     retry: 2,
   });
 }

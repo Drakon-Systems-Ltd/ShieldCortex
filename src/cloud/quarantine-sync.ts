@@ -1,9 +1,13 @@
 import { getCloudConfig, getDeviceId, getDeviceName } from './config.js';
 import { enqueueFailedQuarantineSync } from './sync-queue.js';
+import { redactCredentials } from '../defence/credential-leak/index.js';
 
 /**
  * Fire-and-forget: sends quarantined content to ShieldCortex cloud.
  * Never blocks, never throws. Failed requests are logged and queued for retry.
+ *
+ * IMPORTANT: Content is redacted before transmission — credentials and secrets
+ * are replaced with [REDACTED-{type}] placeholders to prevent PII/secret leakage.
  */
 export function syncQuarantineToCloud(entry: {
   original_content: string;
@@ -20,6 +24,9 @@ export function syncQuarantineToCloud(entry: {
 
   const payload = {
     ...entry,
+    // Redact credentials/secrets before sending to cloud
+    original_content: redactCredentials(entry.original_content),
+    original_title: entry.original_title ? redactCredentials(entry.original_title) : entry.original_title,
     device_id: getDeviceId(),
     device_name: getDeviceName(),
     timestamp: new Date().toISOString(),

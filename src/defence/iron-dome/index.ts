@@ -18,7 +18,7 @@ import { getCloudIronDomeCache } from '../../cloud/iron-dome-sync.js';
 import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
 import { isDatabaseInitialized } from '../../database/init.js';
 import { handleKillPhrase } from './kill-switch.js';
-import { pause } from '../../api/control.js';
+import { activateKillSwitch } from '../../api/control.js';
 
 // ── Re-exports ──
 
@@ -152,14 +152,17 @@ export function deactivateIronDome(): void {
 
 /**
  * Check input for the kill phrase and trigger emergency stop if detected.
- * Halts all agent operations (memory creation paused) while Iron Dome
- * stays active — the agent is told to stop and wait for instruction.
+ * Activates full kill switch lockdown — blocks ALL agent operations
+ * (not just memory writes). Iron Dome stays active to keep protecting.
  */
 export function checkKillPhrase(input: string): import('./kill-switch.js').KillSwitchResult {
   const config = loadConfig();
   const result = handleKillPhrase(input, config);
   if (result.triggered) {
-    pause(); // Halt agent — Iron Dome stays active to keep protecting
+    activateKillSwitch({
+      source: 'kill_phrase',
+      phrase: result.phrase,
+    });
   }
   return result;
 }

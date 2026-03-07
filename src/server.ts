@@ -44,6 +44,16 @@ import { logAudit } from './defence/audit/logger.js';
 import { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
 import { getToolResponseScanConfig } from './cloud/config.js';
 
+import {
+  isKillSwitchActive,
+  getKillSwitchMeta,
+  assertOperationAllowed,
+  activateKillSwitch,
+  deactivateKillSwitch,
+  KillSwitchError,
+} from './api/control.js';
+import type { OperationKind } from './api/control.js';
+
 // Shared source schema for access control on MCP tools
 const sourceParam = z.object({
   type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
@@ -118,6 +128,54 @@ function resolveToolSource(declaredSource: DefenceSource | undefined, toolName: 
 }
 
 /**
+ * Wrap an MCP tool handler to enforce kill switch lockdown.
+ * If the kill switch is active and the operation kind is blocked,
+ * returns a lockdown error instead of executing the handler.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function withKillSwitchGuard(kind: OperationKind, handler: (...args: any[]) => any): (...args: any[]) => any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (...handlerArgs: any[]) => {
+    try {
+      assertOperationAllowed(kind);
+    } catch (e) {
+      if (e instanceof KillSwitchError) {
+        const meta = e.meta;
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `## KILL SWITCH ACTIVE\n\nAll operations are locked down.\n\n` +
+              `**Triggered:** ${meta?.triggeredAt ?? 'unknown'}\n` +
+              `**Source:** ${meta?.source ?? 'unknown'}\n` +
+              (meta?.phrase ? `**Phrase:** "${meta.phrase}"\n` : '') +
+              `\nUse \`iron_dome_resume\` to resume after investigation.`,
+          }],
+          isError: true,
+        };
+      }
+      throw e;
+    }
+    return handler(...handlerArgs);
+  };
+}
+
+/**
+ * Check text for kill phrase and trigger kill switch if detected.
+ * Returns true if kill switch was activated.
+ */
+function checkAndTriggerKillSwitch(text: string, source: string): boolean {
+  if (isKillSwitchActive()) return false; // already active
+  try {
+    // Lazy import to avoid circular deps
+    const ironDome = require('./defence/iron-dome/index.js');
+    const result = ironDome.checkKillPhrase(text);
+    return result.triggered;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Create and configure the MCP server
  */
 export function createServer(dbPath?: string): McpServer {
@@ -180,13 +238,22 @@ Content is scanned through the defence pipeline before storage. Suspicious conte
       source: sourceParam,
     },
     { title: 'Store Memory', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    async (args) => {
+    withKillSwitchGuard('memory_write', async (args) => {
+      // Check for kill phrase in content before storing
+      const textToCheck = `${args.title ?? ''} ${args.content ?? ''}`;
+      if (checkAndTriggerKillSwitch(textToCheck, 'remember')) {
+        const meta = getKillSwitchMeta();
+        return {
+          content: [{ type: 'text' as const, text: `## KILL SWITCH ACTIVATED\n\nKill phrase detected in memory content. All operations locked down.\n\nTriggered: ${meta?.triggeredAt}\nUse \`iron_dome_resume\` to resume after investigation.` }],
+          isError: true,
+        };
+      }
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'remember');
       const result = await executeRemember({ ...args, source });
       return {
         content: [{ type: 'text', text: formatRememberResult(result) }],
       };
-    }
+    })
   );
 
   // Recall - Search and retrieve memories
@@ -219,13 +286,13 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       source: sourceParam,
     },
     { title: 'Search Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('recall', async (args) => {
+    withKillSwitchGuard('memory_read', withResponseScan('recall', async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'recall');
       const result = await executeRecall({ ...args, source });
       return {
         content: [{ type: 'text', text: formatRecallResult(result, true) }],
       };
-    })
+    }))
   );
 
   // Forget - Delete memories
@@ -250,13 +317,13 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       source: sourceParam,
     },
     { title: 'Delete Memories', readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    async (args) => {
+    withKillSwitchGuard('memory_write', async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'forget');
       const result = await executeForget({ ...args, source });
       return {
         content: [{ type: 'text', text: formatForgetResult(result) }],
       };
-    }
+    })
   );
 
   // Get Context - THE KEY TOOL
@@ -274,7 +341,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       source: sourceParam,
     },
     { title: 'Get Project Context', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('get_context', async (args) => {
+    withKillSwitchGuard('memory_read', withResponseScan('get_context', async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_context');
       const result = await executeGetContext({ ...args, source });
       return {
@@ -283,7 +350,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: result.success ? result.context! : `Error: ${result.error}`
         }],
       };
-    })
+    }))
   );
 
   // Start Session
@@ -294,7 +361,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for global.'),
     },
     { title: 'Start Session', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    async (args) => {
+    withKillSwitchGuard('memory_write', async (args) => {
       const result = await executeStartSession(args);
       return {
         content: [{
@@ -304,7 +371,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
             : `Error: ${result.error}`
         }],
       };
-    }
+    })
   );
 
   // End Session
@@ -316,7 +383,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       summary: z.string().optional().describe('Session summary'),
     },
     { title: 'End Session', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withKillSwitchGuard('memory_write', async (args) => {
       const result = executeEndSession(args);
       if (!result.success) {
         return { content: [{ type: 'text', text: `Error: ${result.error}` }] };
@@ -328,7 +395,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: `Session ended. Consolidation: ${r.consolidated} promoted, ${r.decayed} decayed, ${r.deleted} deleted.`
         }],
       };
-    }
+    })
   );
 
   // Consolidate
@@ -340,7 +407,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       dryRun: z.boolean().optional().default(false).describe('Preview what would happen without doing it'),
     },
     { title: 'Run Memory Consolidation', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    async (args) => {
+    withKillSwitchGuard('consolidation', async (args) => {
       const result = executeConsolidate(args);
       if (!result.success) {
         return { content: [{ type: 'text', text: `Error: ${result.error}` }] };
@@ -374,7 +441,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: `Consolidation: ${r.consolidated} promoted, ${r.decayed} updated, ${r.deleted} deleted.`
         }],
       };
-    }
+    })
   );
 
   // Stats
@@ -385,7 +452,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for all projects.'),
     },
     { title: 'Memory Statistics', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withKillSwitchGuard('status', async (args) => {
       const result = executeStats(args);
       return {
         content: [{
@@ -393,7 +460,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: result.success ? formatStats(result.stats!) : `Error: ${result.error}`
         }],
       };
-    }
+    })
   );
 
   // Get Memory by ID
@@ -405,7 +472,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       source: sourceParam,
     },
     { title: 'Get Memory by ID', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('get_memory', async (args) => {
+    withKillSwitchGuard('memory_read', withResponseScan('get_memory', async (args) => {
       const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_memory');
       const result = executeGetMemory({ ...args, source });
       return {
@@ -414,7 +481,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: result.success ? formatMemory(result.memory!, true) : `Error: ${result.error}`
         }],
       };
-    })
+    }))
   );
 
   // Export memories
@@ -425,7 +492,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for all projects.'),
     },
     { title: 'Export Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('export_memories', async (args) => {
+    withKillSwitchGuard('memory_read', withResponseScan('export_memories', async (args) => {
       const result = executeExport(args);
       return {
         content: [{
@@ -435,7 +502,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
             : `Error: ${result.error}`
         }],
       };
-    })
+    }))
   );
 
   // Import memories
@@ -446,7 +513,24 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       data: z.string().describe('JSON data'),
     },
     { title: 'Import Memories', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    async (args) => {
+    withKillSwitchGuard('memory_write', async (args) => {
+      // Check imported content for kill phrase
+      try {
+        const parsed = JSON.parse(args.data);
+        const entries = Array.isArray(parsed) ? parsed : (parsed.memories ?? []);
+        for (const entry of entries) {
+          const text = `${entry.title ?? ''} ${entry.content ?? ''}`;
+          if (checkAndTriggerKillSwitch(text, 'import_memories')) {
+            const meta = getKillSwitchMeta();
+            return {
+              content: [{ type: 'text' as const, text: `## KILL SWITCH ACTIVATED\n\nKill phrase detected in imported content. All operations locked down.\n\nTriggered: ${meta?.triggeredAt}\nUse \`iron_dome_resume\` to resume after investigation.` }],
+              isError: true,
+            };
+          }
+        }
+      } catch {
+        // JSON parse failures will be caught by executeImport
+      }
       const result = executeImport(args);
       return {
         content: [{
@@ -456,7 +540,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
             : `Error: ${result.error}`
         }],
       };
-    }
+    })
   );
 
   // Get Related Memories
@@ -467,7 +551,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       id: z.number().describe('Memory ID to find relationships for'),
     },
     { title: 'Get Related Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('get_related', async (args) => {
+    withKillSwitchGuard('memory_read', withResponseScan('get_related', async (args) => {
       const related = getRelatedMemories(args.id);
       if (related.length === 0) {
         return { content: [{ type: 'text', text: 'No related memories found.' }] };
@@ -479,7 +563,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
         lines.push(`  ID: ${r.memory.id} | ${r.memory.category} | ${(r.memory.salience * 100).toFixed(0)}% salience`);
       }
       return { content: [{ type: 'text', text: lines.join('\n') }] };
-    })
+    }))
   );
 
   // Link Memories
@@ -495,7 +579,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
         .describe('Relationship strength (0-1)'),
     },
     { title: 'Link Memories', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withKillSwitchGuard('memory_write', async (args) => {
       const link = createMemoryLink(
         args.sourceId,
         args.targetId,
@@ -506,7 +590,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
         return { content: [{ type: 'text', text: 'Failed to create link. Memories may not exist or link already exists.' }] };
       }
       return { content: [{ type: 'text', text: `✓ Linked memory ${args.sourceId} → ${args.targetId} (${args.relationship})` }] };
-    }
+    })
   );
 
   // Set Project - Switch active project context
@@ -517,7 +601,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       project: z.string().describe(`Project name, or "${GLOBAL_PROJECT_SENTINEL}" for global scope`),
     },
     { title: 'Switch Project', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withKillSwitchGuard('config', async (args) => {
       const oldProject = getActiveProject();
       setActiveProject(args.project === GLOBAL_PROJECT_SENTINEL ? null : args.project);
       const newProject = getActiveProject();
@@ -527,10 +611,10 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           text: `Project context changed: ${oldProject || 'global'} → ${newProject || 'global'}`
         }]
       };
-    }
+    })
   );
 
-  // Get Project - Show current project scope
+  // Get Project - Show current project scope (status — allowed during lockdown)
   server.tool(
     'get_project',
     'Show current project scope and detection info.',
@@ -574,7 +658,7 @@ but you can use this tool to check for new contradictions at any time.`,
         .describe('Maximum results to return'),
     },
     { title: 'Detect Contradictions', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('detect_contradictions', async (args) => {
+    withKillSwitchGuard('consolidation', withResponseScan('detect_contradictions', async (args) => {
       const project = args.project ?? getActiveProject() ?? undefined;
       const contradictions = detectContradictions({
         project,
@@ -601,7 +685,7 @@ but you can use this tool to check for new contradictions at any time.`,
       lines.push(`\n*Found ${contradictions.length} potential contradiction(s). Use \`get_related\` to see linked contradictions.*`);
 
       return { content: [{ type: 'text', text: lines.join('\n') }] };
-    })
+    }))
   );
 
   // ============================================
@@ -618,7 +702,7 @@ but you can use this tool to check for new contradictions at any time.`,
       predicates: z.array(z.string()).optional().describe('Filter by predicate types'),
     },
     { title: 'Knowledge Graph Query', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('graph_query', async (args) => handleGraphQuery(args))
+    withKillSwitchGuard('graph', withResponseScan('graph_query', async (args) => handleGraphQuery(args)))
   );
 
   // Graph Entities - List known entities
@@ -631,7 +715,7 @@ but you can use this tool to check for new contradictions at any time.`,
       limit: z.number().optional().describe('Max results (default 50)'),
     },
     { title: 'List Graph Entities', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('graph_entities', async (args) => handleGraphEntities(args))
+    withKillSwitchGuard('graph', withResponseScan('graph_entities', async (args) => handleGraphEntities(args)))
   );
 
   // Graph Explain - Find paths between entities
@@ -644,7 +728,7 @@ but you can use this tool to check for new contradictions at any time.`,
       maxDepth: z.number().optional().describe('Max path length (default 4)'),
     },
     { title: 'Explain Entity Relationship', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
-    withResponseScan('graph_explain', async (args) => handleGraphExplain(args))
+    withKillSwitchGuard('graph', withResponseScan('graph_explain', async (args) => handleGraphExplain(args)))
   );
 
   // ============================================
@@ -675,7 +759,7 @@ but you can use this tool to check for new contradictions at any time.`,
     notes: z.string().optional(),
   },
   { title: 'Review Quarantined Memories', readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-  async (args) => {
+  withKillSwitchGuard('memory_write', async (args) => {
     const db = (await import('./database/init.js')).getDatabase();
     if (args.action === 'list') {
       const items = db.prepare('SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT 50').all('pending');
@@ -711,9 +795,9 @@ but you can use this tool to check for new contradictions at any time.`,
       return { content: [{ type: 'text', text: `Batch approved ${items.length} items from "${args.sourceIdentifier}" (${promoted} promoted to memory).` }] };
     }
     return { content: [{ type: 'text', text: 'Invalid action or missing required parameters.' }] };
-  });
+  }));
 
-  // Defence Stats
+  // Defence Stats (allowed during lockdown)
   server.tool('defence_stats', 'Get defence system statistics', {
     timeRange: z.enum(['24h', '7d', '30d']).default('24h'),
   },
@@ -748,6 +832,14 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
     },
     { title: 'Scan Tool Response', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
+      // Check for kill phrase in scanned content
+      if (checkAndTriggerKillSwitch(args.content, 'scan_tool_response')) {
+        const meta = getKillSwitchMeta();
+        return {
+          content: [{ type: 'text' as const, text: `## KILL SWITCH ACTIVATED\n\nKill phrase detected in tool response. All operations locked down.\n\nTriggered: ${meta?.triggeredAt}\nUse \`iron_dome_resume\` to resume after investigation.` }],
+          isError: true,
+        };
+      }
       const scan = scanToolResponse(args.toolName, args.content, args.mode as 'advisory' | 'enforce' | undefined);
 
       const lines = [
@@ -864,21 +956,35 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
   // IRON DOME TOOLS
   // ============================================
 
-  // Iron Dome Status
+  // Iron Dome Status (allowed during lockdown — forensic access)
   server.tool(
     'iron_dome_status',
-    'Check if Iron Dome is active, show config summary including profile, trusted channels, and approval rules.',
+    'Check if Iron Dome is active and show kill switch state. Shows config summary including profile, trusted channels, and approval rules.',
     {},
     { title: 'Iron Dome Status', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async () => {
       const { getIronDomeStatus } = await import('./defence/iron-dome/index.js');
       const status = getIronDomeStatus();
+      const killMeta = getKillSwitchMeta();
 
       const lines = [
         `## Iron Dome Status`,
         '',
-        `**Active:** ${status.enabled ? 'Yes' : 'No'}`,
       ];
+
+      // Kill switch state (most important — show first)
+      if (isKillSwitchActive() && killMeta) {
+        lines.push(`**KILL SWITCH: ACTIVE**`);
+        lines.push(`**Triggered:** ${killMeta.triggeredAt}`);
+        lines.push(`**Source:** ${killMeta.source}`);
+        if (killMeta.phrase) lines.push(`**Phrase:** "${killMeta.phrase}"`);
+        if (killMeta.memoryCountAtTrigger != null) lines.push(`**Memories at trigger:** ${killMeta.memoryCountAtTrigger}`);
+        lines.push('');
+        lines.push('> All operations are locked down. Use `iron_dome_resume` to resume.');
+        lines.push('');
+      }
+
+      lines.push(`**Iron Dome Active:** ${status.enabled ? 'Yes' : 'No'}`);
 
       if (status.enabled) {
         const c = status.config;
@@ -977,7 +1083,7 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
         .describe('Security profile to activate'),
     },
     { title: 'Activate Iron Dome', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    async (args) => {
+    withKillSwitchGuard('config', async (args) => {
       const { activateIronDome } = await import('./defence/iron-dome/index.js');
       const config = activateIronDome(args.profile);
 
@@ -992,6 +1098,56 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
       ];
 
       return { content: [{ type: 'text', text: lines.join('\n') }] };
+    }),
+  );
+
+  // ============================================
+  // IRON DOME EMERGENCY TOOLS
+  // ============================================
+
+  // Emergency Stop — NOT guarded (must always work)
+  server.tool(
+    'iron_dome_emergency_stop',
+    'Emergency kill switch — immediately locks down ALL agent operations. Use when you detect suspicious activity. Reversible via iron_dome_resume.',
+    {},
+    { title: 'Emergency Stop', readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    async () => {
+      activateKillSwitch({ source: 'mcp_tool' });
+      const meta = getKillSwitchMeta();
+      return {
+        content: [{
+          type: 'text',
+          text: `## KILL SWITCH ACTIVATED\n\nAll operations locked down.\n\n` +
+            `**Triggered:** ${meta?.triggeredAt}\n` +
+            `**Source:** MCP tool\n\n` +
+            `Memory creation, recall, graph queries, and all other operations are blocked.\n` +
+            `Use \`iron_dome_resume\` with a reason to resume after investigation.`,
+        }],
+      };
+    },
+  );
+
+  // Resume — NOT guarded (this IS the unlock)
+  server.tool(
+    'iron_dome_resume',
+    'Resume agent operations after kill switch investigation. Only use after confirming the threat has been addressed.',
+    {
+      reason: z.string().describe('Why operations are being resumed (required for audit trail)'),
+    },
+    { title: 'Resume Operations', readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    async (args) => {
+      if (!isKillSwitchActive()) {
+        return {
+          content: [{ type: 'text', text: 'Kill switch is not active. No action needed.' }],
+        };
+      }
+      deactivateKillSwitch(args.reason);
+      return {
+        content: [{
+          type: 'text',
+          text: `## Operations Resumed\n\nKill switch deactivated.\n**Reason:** ${args.reason}\n\nAll tools are now operational. Iron Dome continues protecting.`,
+        }],
+      };
     },
   );
 
@@ -999,11 +1155,14 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
   // RESOURCES
   // ============================================
 
-  // Project context resource
+  // Project context resource (blocked during kill switch)
   server.resource(
     'memory://context',
     'memory://context',
     async () => {
+      if (isKillSwitchActive()) {
+        return { contents: [{ uri: 'memory://context', mimeType: 'text/plain', text: '[KILL SWITCH ACTIVE] Memory access blocked.' }] };
+      }
       const summary = await generateContextSummary();
       return {
         contents: [{
@@ -1015,11 +1174,14 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
     }
   );
 
-  // Important memories resource
+  // Important memories resource (blocked during kill switch)
   server.resource(
     'memory://important',
     'memory://important',
     async () => {
+      if (isKillSwitchActive()) {
+        return { contents: [{ uri: 'memory://important', mimeType: 'text/plain', text: '[KILL SWITCH ACTIVE] Memory access blocked.' }] };
+      }
       const memories = getHighPriorityMemories(20);
       const text = memories.map(m =>
         `## ${m.title}\n${m.content}\n*${m.category} | ${(m.salience * 100).toFixed(0)}% salience*\n`
@@ -1035,11 +1197,14 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
     }
   );
 
-  // Recent memories resource
+  // Recent memories resource (blocked during kill switch)
   server.resource(
     'memory://recent',
     'memory://recent',
     async () => {
+      if (isKillSwitchActive()) {
+        return { contents: [{ uri: 'memory://recent', mimeType: 'text/plain', text: '[KILL SWITCH ACTIVE] Memory access blocked.' }] };
+      }
       const memories = getRecentMemories(15);
       const text = memories.map(m =>
         `- **${m.title}** (${m.category}): ${m.content.slice(0, 100)}...`
@@ -1059,11 +1224,16 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
   // PROMPTS
   // ============================================
 
-  // Context restoration prompt
+  // Context restoration prompt (blocked during kill switch)
   server.prompt(
     'restore_context',
     'Restore context after compaction or at session start',
     async () => {
+      if (isKillSwitchActive()) {
+        return {
+          messages: [{ role: 'user' as const, content: { type: 'text' as const, text: '[KILL SWITCH ACTIVE] Context restoration blocked. Use iron_dome_resume to resume.' } }],
+        };
+      }
       const summary = await generateContextSummary();
       const context = formatContextSummary(summary);
 

@@ -88,6 +88,24 @@ export type {
   KillSwitchResult,
 } from './defence/iron-dome/index.js';
 
+// ── Kill Switch / Control ─────────────────────────────────
+export {
+  activateKillSwitch,
+  deactivateKillSwitch,
+  isKillSwitchActive,
+  getKillSwitchMeta,
+  assertOperationAllowed,
+  isPaused,
+  getControlStatus,
+  KillSwitchError,
+} from './api/control.js';
+
+export type {
+  ControlMode,
+  OperationKind,
+  KillSwitchMeta,
+} from './api/control.js';
+
 // ── Skill Scanner ──────────────────────────────────────────
 export {
   scanSkill,

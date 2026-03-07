@@ -26,6 +26,9 @@ export type WebSocketEventType =
   | 'predictive_consolidation'
   // Defence events
   | 'defence_event'
+  // Kill switch events
+  | 'kill_switch_activated'
+  | 'kill_switch_deactivated'
   // Version/Update events
   | 'update_started'
   | 'update_complete'
@@ -159,6 +162,14 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['agent-timeline'] });
               queryClient.invalidateQueries({ queryKey: ['audit-logs'] });
               queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+              break;
+
+            case 'kill_switch_activated':
+            case 'kill_switch_deactivated':
+              // Kill switch state changed — refresh control + iron dome status immediately
+              queryClient.invalidateQueries({ queryKey: ['control-status'] });
+              queryClient.invalidateQueries({ queryKey: ['iron-dome-status'] });
+              queryClient.invalidateQueries({ queryKey: ['iron-dome-audit'] });
               break;
 
             case 'worker_light_tick':

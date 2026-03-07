@@ -5,6 +5,7 @@
  *
  * Provides controls for pausing/resuming memory creation
  * and displays server status including uptime.
+ * Shows kill switch state when active.
  */
 
 import { useControlStatus, usePauseMemory, useResumeMemory, useConsolidate } from '@/hooks/useMemories';
@@ -18,6 +19,7 @@ export function ControlPanel() {
   const consolidateMutation = useConsolidate();
 
   const isPaused = status?.paused ?? false;
+  const isKillSwitchActive = (status as any)?.killSwitchActive ?? false;
   const isToggling = pauseMutation.isPending || resumeMutation.isPending;
 
   const handleTogglePause = () => {
@@ -43,8 +45,16 @@ export function ControlPanel() {
 
   return (
     <div className="space-y-3">
-      {/* Status Banner (only when paused) */}
-      {isPaused && (
+      {/* Kill Switch Banner */}
+      {isKillSwitchActive && (
+        <div className="px-3 py-2 rounded-lg bg-red-500/20 border border-red-500/50 text-red-300 text-sm flex items-center gap-2">
+          <span className="text-lg">🛑</span>
+          <span className="font-bold">KILL SWITCH ACTIVE</span>
+        </div>
+      )}
+
+      {/* Pause Banner (only when paused but NOT kill switch) */}
+      {isPaused && !isKillSwitchActive && (
         <div className="px-3 py-2 rounded-lg bg-orange-500/20 border border-orange-500/50 text-orange-300 text-sm flex items-center gap-2">
           <span className="text-lg">⏸</span>
           <span>Memory creation paused</span>
@@ -52,15 +62,18 @@ export function ControlPanel() {
       )}
 
       {/* Server Status */}
-      <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700">
+      <div className={`p-3 rounded-lg bg-slate-800/50 border ${isKillSwitchActive ? 'border-red-500/50' : 'border-slate-700'}`}>
         <div className="flex items-center justify-between mb-3">
           <span className="text-sm text-slate-400">Server Status</span>
           <div className="flex items-center gap-2">
             <span
-              className={`w-2 h-2 rounded-full ${isPaused ? 'bg-orange-500' : 'bg-green-500'}`}
+              className={`w-2 h-2 rounded-full ${
+                isKillSwitchActive ? 'bg-red-500 animate-pulse' :
+                isPaused ? 'bg-orange-500' : 'bg-green-500'
+              }`}
             />
             <span className="text-xs text-slate-300">
-              {isPaused ? 'Paused' : 'Active'}
+              {isKillSwitchActive ? 'Locked Down' : isPaused ? 'Paused' : 'Active'}
             </span>
           </div>
         </div>
@@ -69,19 +82,21 @@ export function ControlPanel() {
           Uptime: {status?.uptimeFormatted || '—'}
         </div>
 
-        {/* Control Buttons */}
+        {/* Control Buttons — disabled during kill switch */}
         <div className="grid grid-cols-2 gap-2">
           <Button
             variant="outline"
             size="sm"
             onClick={handleTogglePause}
-            disabled={isToggling}
+            disabled={isToggling || isKillSwitchActive}
             className={`text-xs ${
-              isPaused
-                ? 'border-green-600 text-green-400 hover:bg-green-600/20 hover:text-green-300'
-                : 'border-orange-600 text-orange-400 hover:bg-orange-600/20 hover:text-orange-300'
+              isKillSwitchActive
+                ? 'border-red-800 text-red-600 opacity-50 cursor-not-allowed'
+                : isPaused
+                  ? 'border-green-600 text-green-400 hover:bg-green-600/20 hover:text-green-300'
+                  : 'border-orange-600 text-orange-400 hover:bg-orange-600/20 hover:text-orange-300'
             }`}
-            title={isPaused ? 'Resume memory creation' : 'Pause memory creation'}
+            title={isKillSwitchActive ? 'Kill switch active — use Iron Dome to resume' : isPaused ? 'Resume memory creation' : 'Pause memory creation'}
           >
             {isToggling ? '...' : isPaused ? '▶ Resume' : '⏸ Pause'}
           </Button>
@@ -90,9 +105,9 @@ export function ControlPanel() {
             variant="outline"
             size="sm"
             onClick={handleConsolidate}
-            disabled={consolidateMutation.isPending}
-            className="text-xs border-slate-600 text-slate-300 hover:bg-slate-600/20"
-            title="Consolidate memories (promote STM to LTM)"
+            disabled={consolidateMutation.isPending || isKillSwitchActive}
+            className={`text-xs ${isKillSwitchActive ? 'border-red-800 text-red-600 opacity-50 cursor-not-allowed' : 'border-slate-600 text-slate-300 hover:bg-slate-600/20'}`}
+            title={isKillSwitchActive ? 'Kill switch active — operations blocked' : 'Consolidate memories (promote STM to LTM)'}
           >
             {consolidateMutation.isPending ? '...' : '🔄 Sync'}
           </Button>

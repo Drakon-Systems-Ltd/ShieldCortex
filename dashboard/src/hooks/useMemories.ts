@@ -213,7 +213,16 @@ export function useConsolidate() {
 
 // Control status response
 export interface ControlStatus {
+  mode: 'active' | 'paused' | 'kill_switch';
   paused: boolean;
+  killSwitchActive: boolean;
+  killSwitchMeta: {
+    triggeredAt: string;
+    source: string;
+    phrase?: string;
+    reason?: string;
+    memoryCountAtTrigger?: number;
+  } | null;
   uptime: number;
   uptimeFormatted: string;
 }

@@ -17,6 +17,7 @@ import type {
 } from './types.js';
 import { DEFAULT_DEFENCE_CONFIG } from './types.js';
 
+import { sanitiseInput } from './input-sanitisation/index.js';
 import { scoreSource } from './trust/index.js';
 import { analyzeFirewall } from './firewall/index.js';
 import { classifySensitivity } from './sensitivity/index.js';
@@ -41,29 +42,40 @@ export function runDefencePipeline(
   const startTime = performance.now();
 
   try {
-    // 1. Score trust
+    // 1. Input sanitisation (Layer 1) — strip dangerous bytes before analysis
+    const sanitisation = sanitiseInput(content);
+    const cleanContent = sanitisation.sanitised;
+
+    // 2. Score trust
     const trust: TrustScore = scoreSource(source);
 
-    // 2. Run firewall
+    // 3. Run firewall (on sanitised content)
     const firewall: FirewallAnalysis = analyzeFirewall(
-      content,
+      cleanContent,
       title,
       source,
       trust.score,
       cfg,
     );
 
-    // 3. Classify sensitivity
-    const sensitivity: SensitivityClassification = classifySensitivity(content, title);
-
-    // 4. Run fragmentation detection (if enabled and firewall didn't block)
-    let fragmentation: FragmentationAnalysis | null = null;
-    if (cfg.enableFragmentationDetection && firewall.result !== 'BLOCK') {
-      fragmentation = analyzeFragmentation(content, title, cfg);
+    // Carry forward any sanitisation threat indicators
+    for (const indicator of sanitisation.threatIndicators) {
+      if (!firewall.threatIndicators.includes(indicator)) {
+        firewall.threatIndicators.push(indicator);
+      }
     }
 
-    // 5. Run credential leak detection (Layer 6)
-    const credentialScan: CredentialScanResult = scanForCredentials(content);
+    // 4. Classify sensitivity
+    const sensitivity: SensitivityClassification = classifySensitivity(cleanContent, title);
+
+    // 5. Run fragmentation detection (if enabled and firewall didn't block)
+    let fragmentation: FragmentationAnalysis | null = null;
+    if (cfg.enableFragmentationDetection && firewall.result !== 'BLOCK') {
+      fragmentation = analyzeFragmentation(cleanContent, title, cfg);
+    }
+
+    // 6. Run credential leak detection
+    const credentialScan: CredentialScanResult = scanForCredentials(cleanContent);
 
     // 6. Determine final decision
     let allowed: boolean;
@@ -118,7 +130,7 @@ export function runDefencePipeline(
         for (const rule of customRules) {
           try {
             const regex = new RegExp(rule.condition_value, 'gi');
-            if (regex.test(content) || regex.test(title)) {
+            if (regex.test(cleanContent) || regex.test(title)) {
               if (rule.action === 'block') {
                 allowed = false;
                 reason = `Blocked by custom rule: ${rule.name}`;
@@ -154,7 +166,7 @@ export function runDefencePipeline(
         for (const pattern of customPatterns) {
           try {
             const regex = new RegExp(pattern.regex, 'gi');
-            if (regex.test(content) || regex.test(title)) {
+            if (regex.test(cleanContent) || regex.test(title)) {
               if (pattern.severity === 'critical' || pattern.severity === 'high') {
                 allowed = false;
                 reason = `Blocked by custom pattern: ${pattern.name} (${pattern.severity})`;

@@ -94,3 +94,49 @@ export function syncToCloud(
       try { enqueueFailedSync(entry); } catch { /* truly silent */ }
     });
 }
+
+/**
+ * Fire-and-forget: sends a kill switch alert to ShieldCortex cloud.
+ * Shaped as a normal audit ingest entry so the SaaS API accepts it.
+ */
+export function sendKillSwitchAlert(meta: {
+  source: string;
+  phrase?: string;
+  reason?: string;
+  memoryCountAtTrigger?: number;
+  triggeredAt: string;
+}): void {
+  const config = getCloudConfig();
+  if (!config.cloudEnabled || !config.cloudApiKey) return;
+
+  const entry = {
+    source_type: 'kill_switch',
+    source_identifier: meta.source,
+    trust_score: 0,
+    sensitivity_level: 'RESTRICTED',
+    firewall_result: 'BLOCK',
+    anomaly_score: 1,
+    threat_indicators: ['kill_switch'],
+    reason: `Kill switch activated. Source: ${meta.source}.${meta.phrase ? ` Phrase: "${meta.phrase}".` : ''}${meta.reason ? ` ${meta.reason}` : ''}`,
+    pipeline_duration_ms: 0,
+    device_id: getDeviceId(),
+    device_name: getDeviceName(),
+    platform: `${process.platform}/${process.arch}`,
+    timestamp: meta.triggeredAt,
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+  fetch(`${config.cloudBaseUrl}/v1/audit/ingest`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.cloudApiKey}`,
+    },
+    body: JSON.stringify({ entries: [entry] }),
+    signal: controller.signal,
+  })
+    .then(() => { clearTimeout(timeoutId); })
+    .catch(() => { clearTimeout(timeoutId); });
+}

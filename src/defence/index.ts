@@ -25,6 +25,10 @@ export type {
   AuditEntry,
 } from './types.js';
 
+// Input Sanitisation (Layer 1)
+export { sanitiseInput } from './input-sanitisation/index.js';
+export type { SanitisationResult, SanitisationCategory } from './input-sanitisation/index.js';
+
 // Trust
 export { scoreSource, filterByTrust } from './trust/index.js';
 

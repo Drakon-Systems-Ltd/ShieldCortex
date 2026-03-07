@@ -334,6 +334,53 @@ async function main() {
   // Warn if npx is serving a stale cached version
   checkVersionStaleness();
 
+  // Handle --help / -h / help / unknown args
+  if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
+    const bold = '\x1b[1m';
+    const cyan = '\x1b[36m';
+    const reset = '\x1b[0m';
+    console.log(`
+${bold}ShieldCortex${reset} v${pkg.version} — AI Agent Memory Security
+
+${bold}USAGE${reset}
+  shieldcortex [command] [options]
+
+${bold}COMMANDS${reset}
+  ${cyan}scan${reset} <text>           Scan text through the defence pipeline
+  ${cyan}scan-skill${reset} <path>     Scan an agent instruction file for threats
+  ${cyan}scan-skills${reset}           Scan all installed skills/hooks
+  ${cyan}dashboard${reset}             Open the local security dashboard
+  ${cyan}status${reset}                Show current protection status
+  ${cyan}doctor${reset}                Diagnose installation issues
+  ${cyan}config${reset} [options]      Configure cloud sync and settings
+  ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
+  ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
+  ${cyan}audit${reset} [options]       Run a full security audit
+  ${cyan}setup${reset}                 Install ShieldCortex into your project
+  ${cyan}uninstall${reset}             Remove ShieldCortex from your project
+  ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
+  ${cyan}copilot${reset} <action>      Set up VS Code / Cursor MCP integration
+  ${cyan}graph${reset} backfill        Backfill knowledge graph from memories
+  ${cyan}hook${reset} <action>         Manage hooks (start, stop, status)
+  ${cyan}service${reset} <action>      Manage background service
+
+${bold}OPTIONS${reset}
+  --version, -v        Show version
+  --help, -h           Show this help message
+
+${bold}EXAMPLES${reset}
+  shieldcortex scan "ignore previous instructions"
+  shieldcortex scan-skill ~/.claude/skills/my-skill/SKILL.md
+  shieldcortex dashboard
+  shieldcortex license activate sc_pro_...
+  shieldcortex config --cloud-enable --cloud-api-key <key>
+
+${bold}DOCS${reset}
+  https://shieldcortex.ai/docs
+`);
+    return;
+  }
+
   // Handle --version / -v
   if (process.argv[2] === '--version' || process.argv[2] === '-v') {
     console.log(pkg.version);
@@ -608,6 +655,20 @@ async function main() {
 
     console.log(`\n${bold}Summary:${reset} ${filesToScan.length} scanned, ${threatCount} with threats\n`);
     process.exit(threatCount > 0 ? 1 : 0);
+  }
+
+  // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
+  const knownCommands = new Set([
+    'doctor', 'setup', 'install', 'migrate', 'uninstall', 'hook',
+    'openclaw', 'clawdbot', 'copilot', 'service', 'config', 'status',
+    'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan',
+    'scan-skill', 'scan-skills', 'dashboard', 'api',
+  ]);
+  const arg = process.argv[2];
+  if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
+    console.error(`Unknown command: ${arg}`);
+    console.error(`Run 'shieldcortex --help' for a list of commands.`);
+    process.exit(1);
   }
 
   const { dbPath, mode } = parseArgs();

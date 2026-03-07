@@ -25,8 +25,9 @@ import { IronDomeView } from '@/components/dome/IronDomeView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Memory, MemoryEvent } from '@/types/memory';
-import { Shield, Cloud } from 'lucide-react';
+import { Shield, Cloud, OctagonX, Loader2 } from 'lucide-react';
 import { useCloudStatus } from '@/hooks/useCloudStatus';
+import { useEmergencyStop } from '@/hooks/useIronDome';
 
 // Dynamic imports (avoid SSR issues with canvas/WebGL)
 const KnowledgeGraph = dynamic(
@@ -146,6 +147,10 @@ export default function DashboardPage() {
   const { data: cloudStatus } = useCloudStatus();
   const isCloudConnected = cloudStatus?.enabled && cloudStatus?.apiKeySet;
 
+  // Kill switch / emergency stop
+  const emergencyStopMutation = useEmergencyStop();
+  const isKillSwitchActive = controlStatus?.killSwitchActive ?? false;
+
   const handleSelectMemory = (memory: Memory | null) => {
     setSelectedMemory(memory);
   };
@@ -253,11 +258,37 @@ export default function DashboardPage() {
             Filters {(typeFilter || categoryFilter) && '•'}
           </Button>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          {/* Emergency Stop Button — always visible */}
+          {isKillSwitchActive ? (
+            <button
+              onClick={() => useDashboardStore.getState().setViewMode('dome')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600/20 border border-red-500/50 rounded-lg text-xs font-bold text-red-400 uppercase tracking-wider animate-pulse cursor-pointer"
+              title="Kill switch is active — click to view details"
+            >
+              <OctagonX size={14} />
+              Kill Switch Active
+            </button>
+          ) : (
+            <button
+              onClick={() => emergencyStopMutation.mutate()}
+              disabled={emergencyStopMutation.isPending}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600/10 border border-red-500/30 hover:bg-red-600/20 hover:border-red-500/50 disabled:opacity-50 rounded-lg text-xs font-medium text-red-400 transition-colors"
+              title="Emergency Stop — immediately halt all agent operations"
+            >
+              {emergencyStopMutation.isPending ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <OctagonX size={14} />
+              )}
+              Emergency Stop
+            </button>
+          )}
+
           <div className="flex items-center gap-2 text-xs text-slate-400 px-2">
             <span
-              className={`w-2 h-2 rounded-full ${isPaused ? 'bg-orange-500 animate-pulse' : (isConnected ? 'bg-green-500' : 'bg-yellow-500')}`}
-              title={isPaused ? 'Memory creation paused' : (isConnected ? 'Real-time connected' : 'Polling mode')}
+              className={`w-2 h-2 rounded-full ${isKillSwitchActive ? 'bg-red-500 animate-pulse' : isPaused ? 'bg-orange-500 animate-pulse' : (isConnected ? 'bg-green-500' : 'bg-yellow-500')}`}
+              title={isKillSwitchActive ? 'Kill switch active — all operations blocked' : isPaused ? 'Memory creation paused' : (isConnected ? 'Real-time connected' : 'Polling mode')}
             />
             {stats?.total ?? memories.length} memories
           </div>

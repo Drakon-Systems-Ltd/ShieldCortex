@@ -25,6 +25,9 @@ export type MemoryEventType =
   | 'predictive_consolidation'
   // Defence events
   | 'defence_event'
+  // Kill switch events
+  | 'kill_switch_activated'
+  | 'kill_switch_deactivated'
   // Version/Update events
   | 'update_started'
   | 'update_complete'
@@ -242,6 +245,26 @@ export function emitPredictiveConsolidation(data: {
   result: ConsolidationResult;
 }): void {
   memoryEvents.emit('predictive_consolidation', data);
+}
+
+// Kill switch event emitters
+export function emitKillSwitchActivated(data: {
+  triggeredAt: string;
+  source: string;
+  phrase?: string;
+  reason?: string;
+  memoryCountAtTrigger?: number;
+}): void {
+  memoryEvents.emit('kill_switch_activated', data);
+  persistEvent('kill_switch_activated', data);
+}
+
+export function emitKillSwitchDeactivated(data: {
+  reason: string;
+  previousMeta: unknown;
+}): void {
+  memoryEvents.emit('kill_switch_deactivated', data);
+  persistEvent('kill_switch_deactivated', data);
 }
 
 // ============================================================================

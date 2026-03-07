@@ -29,6 +29,7 @@ import {
   type IronDomeProfile,
   type InjectionScanResult,
   type IronDomeAuditLog,
+  type ControlStatus,
 } from '@/hooks/useIronDome';
 import { CustomPatternsPanel } from './CustomPatternsPanel';
 import { CustomPoliciesPanel } from './CustomPoliciesPanel';
@@ -77,8 +78,11 @@ export function IronDomeView() {
 
   const [scanText, setScanText] = useState('');
   const [scanResult, setScanResult] = useState<InjectionScanResult | null>(null);
+  const [resumeReason, setResumeReason] = useState('');
 
   const isActive = status?.enabled ?? false;
+  const isKillSwitchActive = controlStatus?.killSwitchActive ?? false;
+  const killSwitchMeta = controlStatus?.killSwitchMeta ?? null;
   const isPaused = controlStatus?.paused ?? false;
   const activeProfile = status?.profile;
   const config = status?.config;
@@ -227,35 +231,72 @@ export function IronDomeView() {
         </div>
       )}
 
-      {/* ── EMERGENCY STOP ── */}
-      {isPaused ? (
-        <div className="bg-red-950/50 border-2 border-red-500/50 rounded-xl p-5 mb-6">
+      {/* ── KILL SWITCH / EMERGENCY STOP ── */}
+      {isKillSwitchActive ? (
+        <div className="bg-red-950/50 border-2 border-red-500/50 rounded-xl p-5 mb-6 animate-pulse-slow">
           <div className="flex items-center gap-2 mb-3">
             <OctagonX size={18} className="text-red-400" />
-            <h3 className="text-sm font-bold text-red-400 uppercase tracking-wide">Agent Halted</h3>
+            <h3 className="text-sm font-bold text-red-400 uppercase tracking-wide">Kill Switch Active</h3>
+            <span className="ml-auto text-[10px] bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full border border-red-500/30">
+              LOCKDOWN
+            </span>
           </div>
           <p className="text-xs text-red-300/80 mb-2">
-            Your agent has been stopped and is waiting for instruction. All memory operations are frozen — no reads, writes, or modifications.
+            All agent operations are blocked. No memory reads, writes, graph queries, or consolidation. Iron Dome remains active and continues protecting.
           </p>
-          <p className="text-xs text-green-400/80 mb-4">
-            Iron Dome remains active and continues protecting.
-          </p>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => resumeMutation.mutate()}
-              disabled={resumeMutation.isPending}
-              className="flex items-center gap-1.5 px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded-lg text-xs font-medium text-white transition-colors"
-            >
-              {resumeMutation.isPending ? (
-                <Loader2 size={12} className="animate-spin" />
-              ) : (
-                <Play size={12} />
+
+          {/* Kill switch metadata */}
+          {killSwitchMeta && (
+            <div className="bg-red-950/30 border border-red-500/20 rounded-lg p-3 mb-4 space-y-1">
+              <div className="text-[10px] text-slate-500">
+                <span className="text-red-400 font-medium">Triggered:</span>{' '}
+                {new Date(killSwitchMeta.triggeredAt).toLocaleString()}
+              </div>
+              <div className="text-[10px] text-slate-500">
+                <span className="text-red-400 font-medium">Source:</span>{' '}
+                {killSwitchMeta.source === 'kill_phrase' ? `Kill phrase "${killSwitchMeta.phrase}"` :
+                 killSwitchMeta.source === 'manual' ? 'Manual (dashboard)' :
+                 killSwitchMeta.source === 'mcp_tool' ? 'MCP tool' : killSwitchMeta.source}
+              </div>
+              {killSwitchMeta.memoryCountAtTrigger !== undefined && (
+                <div className="text-[10px] text-slate-500">
+                  <span className="text-red-400 font-medium">Memories at trigger:</span>{' '}
+                  {killSwitchMeta.memoryCountAtTrigger}
+                </div>
               )}
-              Resume Agent
-            </button>
-            <span className="text-[10px] text-slate-500">
-              Only resume after you&apos;ve investigated the threat
-            </span>
+            </div>
+          )}
+
+          {/* Resume with reason */}
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={resumeReason}
+              onChange={(e) => setResumeReason(e.target.value)}
+              placeholder="Reason for resuming (required)..."
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => {
+                  if (!resumeReason.trim()) return;
+                  resumeMutation.mutate(resumeReason.trim());
+                  setResumeReason('');
+                }}
+                disabled={resumeMutation.isPending || !resumeReason.trim()}
+                className="flex items-center gap-1.5 px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded-lg text-xs font-medium text-white transition-colors"
+              >
+                {resumeMutation.isPending ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Play size={12} />
+                )}
+                Resume Agent
+              </button>
+              <span className="text-[10px] text-slate-500">
+                Only resume after you&apos;ve investigated the threat
+              </span>
+            </div>
           </div>
         </div>
       ) : (
@@ -265,7 +306,7 @@ export function IronDomeView() {
             <h3 className="text-sm font-medium text-orange-300">Emergency Stop</h3>
           </div>
           <p className="text-xs text-slate-400 mb-3">
-            Immediately halts your agent when you suspect it has been compromised or is acting on poisoned data. The agent stops all operations and waits for your instruction. Iron Dome stays active.
+            Immediately halts your agent when you suspect it has been compromised or is acting on poisoned data. Blocks ALL operations — no reads, writes, or modifications. Iron Dome stays active.
           </p>
           {config?.killPhrase && (
             <p className="text-[10px] text-slate-500 mb-3">
