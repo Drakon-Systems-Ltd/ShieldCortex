@@ -2165,6 +2165,60 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // Bulk approve quarantined items
+  app.post('/api/v1/quarantine/bulk-approve', requireNotLocked, (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const ids: number[] = req.body?.ids;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: 'ids must be a non-empty array of numbers' });
+      }
+      const reviewedBy = req.body?.reviewedBy ?? 'dashboard';
+      const now = new Date().toISOString();
+      const stmt = db.prepare(
+        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?'
+      );
+      let updated = 0;
+      const txn = db.transaction(() => {
+        for (const id of ids) {
+          const result = stmt.run('approved', now, reviewedBy, id, 'pending');
+          updated += result.changes;
+        }
+      });
+      txn();
+      res.json({ success: true, updated, total: ids.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Bulk reject quarantined items
+  app.post('/api/v1/quarantine/bulk-reject', requireNotLocked, (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const ids: number[] = req.body?.ids;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: 'ids must be a non-empty array of numbers' });
+      }
+      const reviewedBy = req.body?.reviewedBy ?? 'dashboard';
+      const now = new Date().toISOString();
+      const stmt = db.prepare(
+        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?'
+      );
+      let updated = 0;
+      const txn = db.transaction(() => {
+        for (const id of ids) {
+          const result = stmt.run('rejected', now, reviewedBy, id, 'pending');
+          updated += result.changes;
+        }
+      });
+      txn();
+      res.json({ success: true, updated, total: ids.length });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Retroactive sync: push existing quarantine items to cloud
   app.post('/api/quarantine/sync-to-cloud', requireNotLocked, async (_req: Request, res: Response) => {
     try {

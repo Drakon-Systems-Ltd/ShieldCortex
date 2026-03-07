@@ -108,6 +108,26 @@ async function rejectQuarantine(id: number, notes?: string): Promise<{ success: 
   return response.json();
 }
 
+async function bulkApproveQuarantine(ids: number[]): Promise<{ success: boolean; updated: number; total: number }> {
+  const response = await authFetch(`${API_BASE}/api/v1/quarantine/bulk-approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, reviewedBy: 'dashboard' }),
+  });
+  if (!response.ok) throw new Error('Failed to bulk approve');
+  return response.json();
+}
+
+async function bulkRejectQuarantine(ids: number[]): Promise<{ success: boolean; updated: number; total: number }> {
+  const response = await authFetch(`${API_BASE}/api/v1/quarantine/bulk-reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, reviewedBy: 'dashboard' }),
+  });
+  if (!response.ok) throw new Error('Failed to bulk reject');
+  return response.json();
+}
+
 // ── Hooks ──
 
 export function useAuditLogs(options?: {
@@ -159,6 +179,28 @@ export function useRejectQuarantine() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, notes }: { id: number; notes?: string }) => rejectQuarantine(id, notes),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['quarantine'] });
+      queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+    },
+  });
+}
+
+export function useBulkApproveQuarantine() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: bulkApproveQuarantine,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['quarantine'] });
+      queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+    },
+  });
+}
+
+export function useBulkRejectQuarantine() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: bulkRejectQuarantine,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quarantine'] });
       queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
