@@ -578,6 +578,12 @@ async function onSessionStop(event) {
 
 /**
  * Handle agent:bootstrap — inject past context into agent
+ *
+ * NOTE: Context injection disabled as of v2026.2.26.
+ * OpenClaw's native Memory Search now handles context recall at bootstrap.
+ * The old get_context injection caused ~40x duplication of CORTEX_MEMORY.md
+ * in the system prompt, eating the entire context window.
+ * Hook remains active for keyword triggers + session-end auto-save.
  */
 async function onBootstrap(event) {
   const context = event.context || {};
@@ -585,25 +591,9 @@ async function onBootstrap(event) {
 
   const wsDir = context.workspaceDir || event?.workspaceDir || "/tmp";
 
-  const result = await callCortex("get_context", {
-    query: "openclaw session context",
-    format: "summary",
-  });
+  // Context injection removed — native OpenClaw Memory Search handles this now.
 
-  if (!result || result.length < 20) {
-    console.log("[cortex-memory] No context to inject");
-    return;
-  }
-
-  context.bootstrapFiles.push({
-    name: "CORTEX_MEMORY.md",
-    path: path.join(wsDir, "CORTEX_MEMORY.md"),
-    content: `# Past Session Context (from ShieldCortex)\n\n${result}`,
-  });
-
-  console.log("[cortex-memory] Injected past context into bootstrap");
-
-  // Scan installed hooks for threats
+  // Scan installed hooks for threats (still useful)
   try {
     const threats = await scanInstalledHooks();
     if (threats.length > 0) {
