@@ -208,7 +208,7 @@ ShieldCortex provides a full-featured memory system, not just a security layer:
 | Feature | Description |
 |---|---|
 | **Persistent Storage** | SQLite-backed, survives restarts and context compaction |
-| **Semantic Search** | Find memories by meaning, not just keywords |
+| **Semantic Search** | Full-text search with vector embedding fallback (all-MiniLM-L6-v2) |
 | **Knowledge Graph** | Automatic entity and relationship extraction |
 | **Project Scoping** | Isolate memories per project/workspace |
 | **Importance Levels** | Critical, high, normal, low — with automatic decay |
@@ -263,7 +263,7 @@ Built-in backends: `MarkdownMemoryBackend`, `OpenClawMarkdownBackend`. Implement
 
 ## Dashboard
 
-ShieldCortex includes a built-in visual dashboard for monitoring memory health, reviewing threats, and managing quarantined items.
+ShieldCortex includes a built-in visual dashboard for monitoring memory health, reviewing threats, and managing quarantined items. Keyboard shortcuts throughout — press `?` to see them all.
 
 ```bash
 shieldcortex --dashboard
@@ -273,21 +273,23 @@ shieldcortex --dashboard
 
 ### Defence Overview
 
-Real-time view of the defence pipeline — scan counts, block rates, quarantine queue, and threat timeline.
+Real-time view of the defence pipeline — scan counts, block rates, quarantine queue, threat timeline, and **Memory Health Score** (freshness, graph coverage, consistency, consolidation in a single gauge).
 
 ![Defence Overview](docs/images/dashboard-shield.png)
 
-### Brain Visualisation
-
-3D brain visualisation showing memory clusters by category, health scores, and age distribution. Click any cluster to inspect individual memories.
-
-![Brain Visualisation](docs/images/dashboard-brain.png)
-
 ### Knowledge Graph
 
-Interactive knowledge graph showing entities and relationships extracted from memories. Select any node to see salience, decay factor, related memories, and tags.
+Ego-centric knowledge graph — focus on one entity, see its direct neighbours and relationships. Click any node to re-centre. Searchable entity list, relationship sidebar, and path finder.
 
 ![Knowledge Graph](docs/images/dashboard-graph.png)
+
+### Memory Timeline
+
+Chronological view of all memories grouped by day. Filter by category, memory type (STM/LTM/Episodic), or search text. Each card shows title, category badge, importance, and truncated content.
+
+### Inline Editing
+
+Click the pencil icon on any memory to edit its title, content, category, and tags in-place. Only changed fields are saved.
 
 ### Audit Log
 
@@ -453,6 +455,8 @@ All configuration lives in `~/.shieldcortex/config.json`:
 
 | Key | Default | Description |
 |---|---|---|
+| `webhooks` | `[]` | Webhook endpoints for memory event notifications |
+| `expiryRules` | `[]` | Auto-delete rules by category, type, tag, or age |
 | `mode` | `balanced` | Defence mode: `strict`, `balanced`, `permissive` |
 | `cloudApiKey` | — | Cloud API key (`sc_live_...`) |
 | `cloudBaseUrl` | `https://api.shieldcortex.ai` | Cloud API URL |
@@ -478,7 +482,7 @@ Environment variables:
 | | ShieldCortex | Raw Memory (no security) | Vector DB + custom |
 |---|---|---|---|
 | Memory persistence | Yes | Yes | Yes |
-| Semantic search | Yes | No | Yes |
+| Semantic search | FTS5 + vector embeddings | No | Yes |
 | Knowledge graphs | Yes | No | No |
 | Injection protection | 6-layer pipeline | None | DIY |
 | Credential leak detection | 25+ patterns | None | DIY |

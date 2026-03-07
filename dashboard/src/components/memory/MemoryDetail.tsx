@@ -14,6 +14,7 @@ import { Input } from '@/components/ui/input';
 import { getCategoryColor, getTypeColor } from '@/lib/category-colors';
 import { calculateDecayFactor } from '@/lib/position-algorithm';
 import { useEditMemory, useDeleteMemory } from '@/hooks/useMemories';
+import { Pencil, Check } from 'lucide-react';
 
 interface MemoryDetailProps {
   memory: Memory;
@@ -59,6 +60,7 @@ export function MemoryDetail({
   reinforceSuccess = false,
 }: MemoryDetailProps) {
   const [showSuccessFlash, setShowSuccessFlash] = useState(false);
+  const [showSaveSuccess, setShowSaveSuccess] = useState(false);
   const [lastReinforcedId, setLastReinforcedId] = useState<number | null>(null);
 
   // Edit state
@@ -111,19 +113,30 @@ export function MemoryDetail({
       .map(t => t.trim())
       .filter(Boolean);
 
+    // Only send changed fields
+    const updates: Record<string, unknown> = {};
+    if (editTitle !== memory.title) updates.title = editTitle;
+    if (editContent !== memory.content) updates.content = editContent;
+    if (editCategory !== memory.category) updates.category = editCategory;
+    const currentTags = (memory.tags || []).join(', ');
+    if (editTags !== currentTags) updates.tags = tags;
+
+    // Nothing changed — just exit edit mode
+    if (Object.keys(updates).length === 0) {
+      setIsEditing(false);
+      return;
+    }
+
     editMutation.mutate(
       {
         id: memory.id,
-        updates: {
-          title: editTitle,
-          content: editContent,
-          category: editCategory,
-          tags,
-        },
+        updates: updates as { title?: string; content?: string; category?: string; tags?: string[] },
       },
       {
         onSuccess: () => {
           setIsEditing(false);
+          setShowSaveSuccess(true);
+          setTimeout(() => setShowSaveSuccess(false), 1500);
         },
       }
     );
@@ -204,7 +217,7 @@ export function MemoryDetail({
   };
 
   return (
-    <Card className={`bg-slate-900 border-slate-700 h-full overflow-auto transition-all duration-300 ${showSuccessFlash ? 'ring-2 ring-green-500 ring-opacity-75' : ''}`}>
+    <Card className={`bg-slate-900 border-slate-700 h-full overflow-auto transition-all duration-300 ${showSuccessFlash ? 'ring-2 ring-green-500 ring-opacity-75' : ''} ${showSaveSuccess ? 'ring-2 ring-emerald-500 ring-opacity-75' : ''}`}>
       <CardHeader className="border-b border-slate-700 pb-3">
         <div className="flex items-start justify-between gap-2">
           {isEditing ? (
@@ -214,18 +227,32 @@ export function MemoryDetail({
               className="bg-slate-800 border-slate-600 text-white text-lg font-semibold"
             />
           ) : (
-            <CardTitle className="text-lg font-semibold text-white leading-tight">
+            <CardTitle className="text-lg font-semibold text-white leading-tight flex items-center gap-2">
+              {showSaveSuccess && <Check className="w-4 h-4 text-emerald-400 shrink-0" />}
               {memory.title}
             </CardTitle>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onClose}
-            className="text-slate-400 hover:text-white -mt-1 shrink-0"
-          >
-            ✕
-          </Button>
+          <div className="flex items-center gap-1 shrink-0 -mt-1">
+            {!isEditing && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsEditing(true)}
+                className="text-slate-400 hover:text-white"
+                title="Edit memory"
+              >
+                <Pencil className="w-4 h-4" />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              className="text-slate-400 hover:text-white"
+            >
+              ✕
+            </Button>
+          </div>
         </div>
         <div className="flex items-center gap-2 mt-2">
           {isEditing ? (
@@ -475,40 +502,30 @@ export function MemoryDetail({
         {/* Actions */}
         {!isEditing && (
           <div className="space-y-2 pt-2">
-            <div className="flex gap-2">
-              {onReinforce && (
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={handleReinforce}
-                  disabled={isReinforcing}
-                  className={`flex-1 transition-all duration-300 ${
-                    showSuccessFlash
-                      ? 'bg-green-600 hover:bg-green-600'
-                      : 'bg-blue-600 hover:bg-blue-700'
-                  }`}
-                >
-                  {isReinforcing ? (
-                    <>
-                      <span className="animate-spin mr-2">⟳</span>
-                      Reinforcing...
-                    </>
-                  ) : showSuccessFlash ? (
-                    <>✓ Reinforced!</>
-                  ) : (
-                    <>⚡ Reinforce</>
-                  )}
-                </Button>
-              )}
+            {onReinforce && (
               <Button
-                variant="outline"
+                variant="default"
                 size="sm"
-                onClick={() => setIsEditing(true)}
-                className="flex-1 border-slate-600 text-slate-300 hover:text-white hover:bg-slate-700"
+                onClick={handleReinforce}
+                disabled={isReinforcing}
+                className={`w-full transition-all duration-300 ${
+                  showSuccessFlash
+                    ? 'bg-green-600 hover:bg-green-600'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
               >
-                Edit
+                {isReinforcing ? (
+                  <>
+                    <span className="animate-spin mr-2">⟳</span>
+                    Reinforcing...
+                  </>
+                ) : showSuccessFlash ? (
+                  <>✓ Reinforced!</>
+                ) : (
+                  <>⚡ Reinforce</>
+                )}
               </Button>
-            </div>
+            )}
 
             {/* Delete */}
             {showDeleteConfirm ? (

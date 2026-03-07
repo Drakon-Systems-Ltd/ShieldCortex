@@ -25,6 +25,7 @@ import {
   searchMemories,
   getMemoryStats,
   updateDecayScores,
+  addMemory,
 } from './store.js';
 import {
   calculateDecayedScore,
@@ -113,7 +114,16 @@ export function consolidate(
     // Prune activation cache to prevent unbounded growth
     pruneActivationCache();
 
-    return { consolidated, decayed, deleted, contradictionsFound, contradictionsLinked, salienceEvolved };
+    // Content-aware deduplication of long-term memories
+    let deduplicated = 0;
+    try {
+      const dedup = deduplicateMemories();
+      deduplicated = dedup.merged;
+    } catch (e) {
+      console.error('[shieldcortex] Deduplication failed:', e);
+    }
+
+    return { consolidated, decayed, deleted, contradictionsFound, contradictionsLinked, salienceEvolved, deduplicated };
   });
 }
 
@@ -161,6 +171,277 @@ function evolveSalience(db: any): number {
   }
 
   return updated;
+}
+
+/**
+ * Compute Levenshtein distance between two strings.
+ * Returns normalised similarity (0.0 = no match, 1.0 = identical).
+ */
+function levenshteinSimilarity(a: string, b: string): number {
+  const la = a.length;
+  const lb = b.length;
+  if (la === 0 && lb === 0) return 1;
+  if (la === 0 || lb === 0) return 0;
+
+  const prev = new Array<number>(lb + 1);
+  const curr = new Array<number>(lb + 1);
+  for (let j = 0; j <= lb; j++) prev[j] = j;
+
+  for (let i = 1; i <= la; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= lb; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= lb; j++) prev[j] = curr[j];
+  }
+
+  const maxLen = Math.max(la, lb);
+  return 1 - prev[lb] / maxLen;
+}
+
+/**
+ * Extract words from text, lowercased and deduplicated.
+ */
+function extractWords(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1)
+  );
+}
+
+/**
+ * Compute word-overlap ratio between two texts.
+ * Returns the proportion of shared words relative to the smaller set.
+ */
+function wordOverlap(a: string, b: string): number {
+  const wordsA = extractWords(a);
+  const wordsB = extractWords(b);
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+
+  let shared = 0;
+  for (const w of wordsA) {
+    if (wordsB.has(w)) shared++;
+  }
+  const minSize = Math.min(wordsA.size, wordsB.size);
+  return shared / minSize;
+}
+
+/**
+ * Count shared words between two texts.
+ */
+function sharedWordCount(a: string, b: string): number {
+  const wordsA = extractWords(a);
+  const wordsB = extractWords(b);
+  let count = 0;
+  for (const w of wordsA) {
+    if (wordsB.has(w)) count++;
+  }
+  return count;
+}
+
+/**
+ * Find memories with very similar titles/content and merge them.
+ * Keeps the newer one, appends unique content from the older one.
+ */
+export function deduplicateMemories(options?: { dryRun?: boolean }): {
+  merged: number;
+  pairs: Array<{ kept: number; removed: number; similarity: string }>;
+} {
+  const dryRun = options?.dryRun ?? false;
+
+  return withTransaction(() => {
+    const db = getDatabase();
+    const pairs: Array<{ kept: number; removed: number; similarity: string }> = [];
+
+    // Query all LTM memories
+    const ltmMemories = db.prepare(
+      "SELECT * FROM memories WHERE type = 'long_term' ORDER BY created_at ASC"
+    ).all() as Record<string, unknown>[];
+
+    // Group by category
+    const groups = new Map<string, Record<string, unknown>[]>();
+    for (const mem of ltmMemories) {
+      const cat = (mem.category as string) || 'note';
+      if (!groups.has(cat)) groups.set(cat, []);
+      groups.get(cat)!.push(mem);
+    }
+
+    const removed = new Set<number>();
+
+    for (const [, group] of groups) {
+      if (group.length < 2) continue;
+
+      for (let i = 0; i < group.length; i++) {
+        const memA = group[i];
+        if (removed.has(memA.id as number)) continue;
+
+        for (let j = i + 1; j < group.length; j++) {
+          const memB = group[j];
+          if (removed.has(memB.id as number)) continue;
+
+          const titleA = (memA.title as string) || '';
+          const titleB = (memB.title as string) || '';
+          const contentA = (memA.content as string) || '';
+          const contentB = (memB.content as string) || '';
+
+          // Check title similarity: Levenshtein > 0.7 OR 3+ shared words
+          const titleSim = levenshteinSimilarity(titleA.toLowerCase(), titleB.toLowerCase());
+          const titleSharedWords = sharedWordCount(titleA, titleB);
+          const titlesMatch = titleSim > 0.7 || titleSharedWords >= 3;
+
+          if (!titlesMatch) continue;
+
+          // Check content overlap > 50%
+          const contentOverlap = wordOverlap(contentA, contentB);
+          if (contentOverlap <= 0.5) continue;
+
+          // They are duplicates — keep the one with higher salience (or newer if equal)
+          const salienceA = (memA.salience as number) || 0;
+          const salienceB = (memB.salience as number) || 0;
+          const createdA = new Date((memA.created_at as string) || 0).getTime();
+          const createdB = new Date((memB.created_at as string) || 0).getTime();
+
+          let kept: Record<string, unknown>;
+          let discarded: Record<string, unknown>;
+          if (salienceA > salienceB || (salienceA === salienceB && createdA >= createdB)) {
+            kept = memA;
+            discarded = memB;
+          } else {
+            kept = memB;
+            discarded = memA;
+          }
+
+          const similarity = `title=${titleSim.toFixed(2)}, content=${contentOverlap.toFixed(2)}`;
+
+          if (!dryRun) {
+            // Append unique sentences from discarded to kept
+            const keptContent = (kept.content as string) || '';
+            const discardedContent = (discarded.content as string) || '';
+            const keptSentences = new Set(
+              keptContent.split(/[.!?\n]+/).map(s => s.trim().toLowerCase()).filter(s => s.length > 0)
+            );
+            const uniqueSentences = discardedContent
+              .split(/[.!?\n]+/)
+              .map(s => s.trim())
+              .filter(s => s.length > 0 && !keptSentences.has(s.toLowerCase()));
+
+            if (uniqueSentences.length > 0) {
+              const mergedContent = keptContent + '\n\nMerged from duplicate:\n' + uniqueSentences.join('. ') + '.';
+              db.prepare('UPDATE memories SET content = ? WHERE id = ?').run(mergedContent, kept.id as number);
+            }
+
+            deleteMemory(discarded.id as number);
+          }
+
+          removed.add(discarded.id as number);
+          pairs.push({
+            kept: kept.id as number,
+            removed: discarded.id as number,
+            similarity,
+          });
+        }
+      }
+    }
+
+    return { merged: pairs.length, pairs };
+  });
+}
+
+/**
+ * Group memories by topic and create summary memories for large clusters.
+ */
+export function clusterAndSummarise(options?: { minClusterSize?: number }): {
+  clusters: number;
+  summariesCreated: number;
+} {
+  const minSize = options?.minClusterSize ?? 5;
+
+  return withTransaction(() => {
+    const db = getDatabase();
+    let clusters = 0;
+    let summariesCreated = 0;
+
+    // Get all LTM memories with their tags
+    const ltmMemories = db.prepare(
+      "SELECT * FROM memories WHERE type = 'long_term' ORDER BY category ASC, created_at ASC"
+    ).all() as Record<string, unknown>[];
+
+    // Group by category + shared tags
+    // Key: "category|tag1,tag2,..." (sorted tags)
+    const tagGroups = new Map<string, Record<string, unknown>[]>();
+
+    for (const mem of ltmMemories) {
+      let tags: string[] = [];
+      try {
+        tags = JSON.parse((mem.tags as string) || '[]') as string[];
+      } catch {
+        // skip invalid tags
+      }
+
+      // Skip auto-summary memories from being clustered again
+      const title = (mem.title as string) || '';
+      if (title.startsWith('Summary:')) continue;
+
+      const category = (mem.category as string) || 'note';
+      const sortedTags = tags.filter(t => t !== 'auto-summary').sort();
+      const key = `${category}|${sortedTags.join(',')}`;
+
+      if (!tagGroups.has(key)) tagGroups.set(key, []);
+      tagGroups.get(key)!.push(mem);
+    }
+
+    for (const [key, group] of tagGroups) {
+      if (group.length < minSize) continue;
+
+      clusters++;
+
+      const [category, tagsStr] = key.split('|');
+      const commonTags = tagsStr || 'general';
+      const summaryTitle = `Summary: ${category} — ${commonTags}`;
+
+      // Check if a summary already exists for this cluster
+      const existing = db.prepare(
+        "SELECT id FROM memories WHERE title = ? AND type = 'long_term'"
+      ).get(summaryTitle) as { id: number } | undefined;
+
+      if (existing) continue;
+
+      // Create bullet list of all memory titles
+      const bulletList = group
+        .map(m => `- ${(m.title as string) || 'Untitled'}`)
+        .join('\n');
+      const summaryContent = `Cluster of ${group.length} memories:\n${bulletList}`;
+
+      // Determine project from group (use most common)
+      const projectCounts = new Map<string, number>();
+      for (const m of group) {
+        const proj = (m.project as string) || '';
+        projectCounts.set(proj, (projectCounts.get(proj) || 0) + 1);
+      }
+      let bestProject = '';
+      let bestCount = 0;
+      for (const [proj, count] of projectCounts) {
+        if (count > bestCount) {
+          bestProject = proj;
+          bestCount = count;
+        }
+      }
+
+      addMemory({
+        type: 'long_term',
+        category: category as any,
+        title: summaryTitle,
+        content: summaryContent,
+        project: bestProject || undefined,
+        tags: ['auto-summary'],
+        salience: 0.6,
+      });
+
+      summariesCreated++;
+    }
+
+    return { clusters, summariesCreated };
+  });
 }
 
 /**

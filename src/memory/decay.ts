@@ -6,6 +6,7 @@
  */
 
 import { Memory, MemoryConfig, DEFAULT_CONFIG, DELETION_THRESHOLDS } from './types.js';
+import { applyExpiryRules } from './expiry.js';
 
 /**
  * Calculate the current decayed score for a memory
@@ -187,6 +188,14 @@ export function processDecay(
       toPromote.push(memory.id);
     }
   }
+
+  // Apply user-defined expiry rules after decay processing
+  try {
+    const { deleted, protected: kept } = applyExpiryRules();
+    if (deleted > 0) {
+      console.log(`[expiry] Deleted ${deleted} expired memories (${kept} protected)`);
+    }
+  } catch { /* silent */ }
 
   return { toDelete, toPromote, updated };
 }

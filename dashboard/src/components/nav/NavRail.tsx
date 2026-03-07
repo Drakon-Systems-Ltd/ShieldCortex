@@ -4,7 +4,9 @@ import { useDashboardStore } from '@/lib/store';
 import { useStats, useVersion } from '@/hooks/useMemories';
 import { useAuditStats } from '@/hooks/useDefence';
 import { useLicenseStatus } from '@/hooks/useLicense';
-import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch, Zap } from 'lucide-react';
+import { useActivityTrend } from '@/hooks/useActivityTrend';
+import { Sparkline } from '@/components/nav/Sparkline';
+import { Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch, Zap, Clock } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'shield' as const, label: 'Shield', icon: Shield },
@@ -14,6 +16,7 @@ const NAV_ITEMS = [
   { id: 'skills' as const, label: 'Skills', icon: FileSearch },
   { id: 'dome' as const, label: 'Dome', icon: Zap },
   { id: 'memories' as const, label: 'Memories', icon: Database },
+  { id: 'timeline' as const, label: 'Timeline', icon: Clock },
   { id: 'brain' as const, label: 'Brain', icon: Brain },
   { id: 'graph' as const, label: 'Graph', icon: GitBranch },
 ];
@@ -27,6 +30,7 @@ export function NavRail() {
   const { data: auditStats } = useAuditStats('24h');
   const { data: versionData } = useVersion();
   const { data: license } = useLicenseStatus();
+  const { memoryTrend, threatTrend } = useActivityTrend();
 
   const isFreeTier = !license || license.tier === 'free';
 
@@ -43,11 +47,22 @@ export function NavRail() {
   return (
     <nav className="w-14 border-r border-slate-800 bg-slate-900/50 flex flex-col items-center py-3 shrink-0">
       <div className="flex-1 flex flex-col items-center gap-1">
-        {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
+        {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
+          const sparkData =
+            id === 'memories' ? memoryTrend :
+            id === 'shield' ? threatTrend :
+            null;
+          const sparkColor =
+            id === 'shield' ? '#f87171' : '#22d3ee';
+          const hasSparkData = sparkData && sparkData.some(v => v > 0);
+
+          return (
           <button
             key={id}
             onClick={() => setViewMode(id)}
-            className={`relative w-10 h-10 rounded-lg flex flex-col items-center justify-center gap-0.5 transition-colors ${
+            className={`relative w-10 rounded-lg flex flex-col items-center justify-center gap-0.5 transition-colors ${
+              hasSparkData ? 'h-12' : 'h-10'
+            } ${
               viewMode === id
                 ? id === 'dome'
                   ? 'bg-red-600/20 text-red-400'
@@ -57,6 +72,9 @@ export function NavRail() {
             title={label}
           >
             <Icon size={18} />
+            {hasSparkData && (
+              <Sparkline data={sparkData} color={sparkColor} width={24} height={10} />
+            )}
             <span className="text-[9px] leading-none">{label}</span>
             {id === 'shield' && blockedCount > 0 && (
               <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] rounded-full bg-red-500 text-white text-[8px] flex items-center justify-center px-0.5">
@@ -69,7 +87,8 @@ export function NavRail() {
               </span>
             )}
           </button>
-        ))}
+          );
+        })}
       </div>
 
       {/* Bottom stats */}

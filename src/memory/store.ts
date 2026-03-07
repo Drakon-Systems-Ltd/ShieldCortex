@@ -51,6 +51,7 @@ import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
 import { logAudit } from '../defence/audit/logger.js';
+import { dispatchWebhook } from '../events/webhooks.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -293,6 +294,9 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
     db.prepare(`INSERT INTO quarantine (original_title, original_content, project, source_type, source_identifier, reason, threat_indicators, anomaly_score, firewall_result, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
       .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, firewallResult, result.auditId);
 
+    // Webhook notification (fire-and-forget)
+    dispatchWebhook('memory_quarantined', { id: null, title: input.title, reason: result.firewall.reason });
+
     // Cloud quarantine sync is handled upstream:
     // - Pipeline QUARANTINE → synced by pipeline.ts step 9
     // - Post-pipeline override (sub-agent trust) → synced by addMemory() override block
@@ -438,6 +442,9 @@ export function addMemory(
   emitMemoryCreated(memory);
   // Persist event for cross-process IPC (MCP → Dashboard)
   persistEvent('memory_created', { memory });
+
+  // Webhook notification (fire-and-forget)
+  dispatchWebhook('memory_created', { id: memory.id, title: memory.title, category: memory.category });
 
   // ORGANIC FEATURE: Auto-link to related memories
   // This builds the knowledge graph automatically as memories are created
@@ -1293,6 +1300,100 @@ export async function searchMemories(
   }
 
   return finalResults;
+}
+
+/**
+ * Recall with embedding-based vector similarity fallback.
+ *
+ * 1. First tries FTS5 search (existing searchMemories)
+ * 2. If FTS5 returns < 3 results, also runs embedding similarity search
+ * 3. Merges results (FTS5 first, then embedding results not already in FTS5 set)
+ * 4. Caps at `limit` (default 15)
+ * 5. The `threshold` (default 0.3) filters out low-similarity embedding results
+ */
+export async function recallWithEmbeddings(
+  query: string,
+  options?: { limit?: number; project?: string; threshold?: number },
+): Promise<Memory[]> {
+  const limit = options?.limit ?? 15;
+  const threshold = options?.threshold ?? 0.3;
+
+  // Step 1: Try FTS5 search first
+  let ftsResults: SearchResult[] = [];
+  try {
+    ftsResults = await searchMemories({
+      query,
+      project: options?.project,
+      limit,
+      includeGlobal: true,
+    });
+  } catch (e) {
+    // FTS search failed — continue to embedding fallback
+    console.warn('[shieldcortex] FTS search failed in recallWithEmbeddings:', (e as Error).message);
+  }
+
+  const ftsMemories = ftsResults.map(r => r.memory);
+
+  // Step 2: If FTS5 returns >= 3 results, no need for embedding fallback
+  if (ftsMemories.length >= 3) {
+    return ftsMemories.slice(0, limit);
+  }
+
+  // Step 3: Run embedding similarity search as fallback
+  try {
+    const { initEmbeddings, findSimilarMemories } = await import('./embedding.js');
+
+    const ready = await initEmbeddings();
+    if (!ready) {
+      return ftsMemories.slice(0, limit);
+    }
+
+    // Get candidate memories from the database (not already in FTS results)
+    const ftsIds = new Set(ftsMemories.map(m => m.id));
+    const db = getDatabase();
+
+    let sql = 'SELECT id, title, content FROM memories WHERE 1=1';
+    const params: unknown[] = [];
+
+    if (options?.project) {
+      sql += ` AND (project = ? OR scope = 'global')`;
+      params.push(options.project);
+    }
+
+    sql += ' ORDER BY salience DESC, last_accessed DESC LIMIT 200';
+
+    const candidates = db.prepare(sql).all(...params) as Array<{ id: number; title: string; content: string }>;
+
+    // Filter out memories already returned by FTS
+    const newCandidates = candidates.filter(c => !ftsIds.has(c.id));
+
+    if (newCandidates.length === 0) {
+      return ftsMemories.slice(0, limit);
+    }
+
+    // Find similar memories using embeddings
+    const remainingSlots = limit - ftsMemories.length;
+    const similar = await findSimilarMemories(query, newCandidates, remainingSlots);
+
+    // Filter by threshold and fetch full Memory objects
+    const embeddingMemories: Memory[] = [];
+    for (const hit of similar) {
+      if (hit.score < threshold) continue;
+
+      const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(hit.id) as Record<string, unknown> | undefined;
+      if (row) {
+        embeddingMemories.push(rowToMemory(row));
+      }
+    }
+
+    // Step 4: Merge — FTS results first, then embedding results
+    const merged = [...ftsMemories, ...embeddingMemories];
+    return merged.slice(0, limit);
+  } catch (e) {
+    // Embedding fallback failed — return whatever FTS found
+    console.warn('[shieldcortex] Embedding fallback failed:', (e as Error).message);
+    return ftsMemories.slice(0, limit);
+  }
 }
 
 /**

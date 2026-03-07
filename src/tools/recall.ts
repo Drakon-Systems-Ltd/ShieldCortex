@@ -5,7 +5,7 @@
  */
 
 import { z } from 'zod';
-import { searchMemories, accessMemory, getRecentMemories, getHighPriorityMemories } from '../memory/store.js';
+import { searchMemories, recallWithEmbeddings, accessMemory, getRecentMemories, getHighPriorityMemories } from '../memory/store.js';
 import { formatTimeSinceAccess } from '../memory/decay.js';
 import { Memory, SearchResult } from '../memory/types.js';
 import { MemoryNotFoundError, formatErrorForMcp } from '../errors.js';
@@ -71,6 +71,7 @@ export async function executeRecall(input: RecallInput): Promise<{
 
       case 'search':
       default:
+        // Use embedding-enhanced recall: FTS5 first, vector fallback if < 3 results
         const results = await searchMemories({
           query: input.query || '',
           category: input.category,
@@ -82,6 +83,30 @@ export async function executeRecall(input: RecallInput): Promise<{
           includeGlobal: input.includeGlobal,
         }, undefined, source);
         memories = results.map(r => r.memory);
+
+        // If FTS5 returned few results, try embedding fallback for additional matches
+        if (memories.length < 3 && input.query && input.query.trim()) {
+          try {
+            const embeddingMemories = await recallWithEmbeddings(input.query, {
+              limit: input.limit,
+              project: projectFilter,
+              threshold: 0.3,
+            });
+            // Merge: keep FTS results, add new embedding results
+            const existingIds = new Set(memories.map(m => m.id));
+            for (const em of embeddingMemories) {
+              if (!existingIds.has(em.id)) {
+                memories.push(em);
+                existingIds.add(em.id);
+              }
+            }
+            // Cap at limit
+            memories = memories.slice(0, input.limit);
+          } catch {
+            // Embedding fallback failed silently — FTS results are still valid
+          }
+        }
+
         // Extract contradictions from search results
         const contradictionEntries = results
           .filter(r => r.contradictions && r.contradictions.length > 0)

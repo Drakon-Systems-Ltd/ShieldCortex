@@ -3,10 +3,11 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -47,6 +48,96 @@ function getDefaultDbPath(): string {
 }
 
 /**
+ * Back up a corrupt database file with a timestamped name.
+ * Returns the backup path.
+ */
+function backupCorruptDatabase(dbPath: string): string {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = `${dbPath}.corrupt.${timestamp}`;
+  try {
+    renameSync(dbPath, backupPath);
+  } catch {
+    // If rename fails (e.g. cross-device), try copy + delete
+    try {
+      copyFileSync(dbPath, backupPath);
+      unlinkSync(dbPath);
+    } catch {
+      // Last resort — just note the backup path
+    }
+  }
+  // Also back up WAL and SHM files if present
+  for (const suffix of ['-wal', '-shm']) {
+    const walPath = dbPath + suffix;
+    if (existsSync(walPath)) {
+      try {
+        renameSync(walPath, backupPath + suffix);
+      } catch { /* best-effort */ }
+    }
+  }
+  return backupPath;
+}
+
+/**
+ * Attempt to recover a corrupt database by dumping and reimporting.
+ * Returns a new Database instance on success, or null on failure.
+ */
+function attemptDumpRecovery(dbPath: string): Database.Database | null {
+  try {
+    // Use sqlite3 CLI to dump — it can often recover partial data
+    const dumpOutput = execSync(`sqlite3 "${dbPath}" .dump`, {
+      encoding: 'utf-8',
+      timeout: 30000,
+      maxBuffer: 100 * 1024 * 1024,
+    });
+
+    if (!dumpOutput || dumpOutput.trim().length === 0) return null;
+
+    // Back up the corrupt file
+    const backupPath = backupCorruptDatabase(dbPath);
+    console.log(`[database] Backed up corrupt database to: ${backupPath}`);
+
+    // Create fresh database and import the dump
+    const freshDb = new Database(dbPath);
+    try {
+      freshDb.exec(dumpOutput);
+      console.log('[database] Successfully recovered data via dump/reimport.');
+      return freshDb;
+    } catch {
+      // Dump reimport failed — close and let caller handle fresh creation
+      freshDb.close();
+      if (existsSync(dbPath)) {
+        try { unlinkSync(dbPath); } catch { /* best-effort */ }
+      }
+      return null;
+    }
+  } catch {
+    // sqlite3 CLI not available or dump failed
+    return null;
+  }
+}
+
+/**
+ * Run integrity check on an open database.
+ * Returns 'ok' if healthy, or the error message if corrupt.
+ */
+function runIntegrityCheck(database: Database.Database): string {
+  try {
+    // Quick check first (checks first page only)
+    const quickResult = database.pragma('integrity_check(1)') as { integrity_check: string }[];
+    const quickStatus = quickResult?.[0]?.integrity_check || 'ok';
+    if (quickStatus !== 'ok') {
+      return quickStatus;
+    }
+
+    // Full check
+    const fullResult = database.pragma('integrity_check') as { integrity_check: string }[];
+    return fullResult?.[0]?.integrity_check || 'ok';
+  } catch (e) {
+    return `integrity check threw: ${e}`;
+  }
+}
+
+/**
  * Initialize the database connection
  */
 export function initDatabase(dbPath?: string): Database.Database {
@@ -67,8 +158,47 @@ export function initDatabase(dbPath?: string): Database.Database {
   // Store path for size monitoring
   currentDbPath = expandedPath;
 
-  // Create database connection
-  db = new Database(expandedPath);
+  // Wrap the initial open in try/catch to handle corrupt files gracefully
+  let database: Database.Database;
+  try {
+    database = new Database(expandedPath);
+  } catch (openError) {
+    // Database file is corrupt or not a valid SQLite database
+    console.error('❌ Database file is corrupt or not a valid SQLite database.');
+
+    const backupPath = backupCorruptDatabase(expandedPath);
+    console.error(`   Backed up to ${backupPath}`);
+    console.error('   Creating fresh database...');
+
+    database = new Database(expandedPath);
+  }
+
+  // Integrity check on existing databases (skip for newly created files)
+  if (existsSync(expandedPath) && statSync(expandedPath).size > 0) {
+    const integrityResult = runIntegrityCheck(database);
+    if (integrityResult !== 'ok') {
+      console.warn(`[database] WARNING: Database integrity check failed: ${integrityResult}`);
+
+      // Close the corrupt connection before attempting recovery
+      database.close();
+
+      // Attempt dump/reimport recovery
+      const recovered = attemptDumpRecovery(expandedPath);
+      if (recovered) {
+        database = recovered;
+      } else {
+        // Recovery failed — backup and create fresh
+        if (existsSync(expandedPath)) {
+          const backupPath = backupCorruptDatabase(expandedPath);
+          console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
+        }
+        console.error('[database] Creating fresh database...');
+        database = new Database(expandedPath);
+      }
+    }
+  }
+
+  db = database;
 
   // Enable WAL mode for better concurrency
   db.pragma('journal_mode = WAL');
@@ -331,6 +461,11 @@ function runMigrations(database: Database.Database): void {
     // Tables may already exist - safe to ignore
   }
 
+  // Migration: graph_extraction_version column for incremental graph backfill
+  if (!columnNames.has('graph_extraction_version')) {
+    database.exec('ALTER TABLE memories ADD COLUMN graph_extraction_version INTEGER DEFAULT 0');
+  }
+
   // Migration: Pro feature tables (custom_patterns, iron_dome_policies, firewall_rules)
   try {
     database.exec(`
@@ -418,6 +553,85 @@ export function closeDatabase(): void {
       lockFilePath = null;
     }
   }
+}
+
+/**
+ * Repair or verify database health.
+ * Intended for `shieldcortex doctor` CLI command.
+ */
+export function repairDatabase(): { status: 'ok' | 'repaired' | 'recreated'; message: string } {
+  const database = getDatabase();
+
+  // Step 1: Integrity check
+  const integrityResult = runIntegrityCheck(database);
+
+  if (integrityResult === 'ok') {
+    return { status: 'ok', message: 'Database is healthy' };
+  }
+
+  console.warn(`[database] Integrity check failed: ${integrityResult}`);
+  console.warn('[database] Attempting repair via VACUUM and REINDEX...');
+
+  // Step 2: Try VACUUM + REINDEX
+  try {
+    database.exec('REINDEX');
+    database.exec('VACUUM');
+
+    // Re-check after repair attempt
+    const recheckResult = runIntegrityCheck(database);
+    if (recheckResult === 'ok') {
+      return { status: 'repaired', message: 'Database repaired successfully via VACUUM/REINDEX' };
+    }
+  } catch (e) {
+    console.warn(`[database] VACUUM/REINDEX failed: ${e}`);
+  }
+
+  // Step 3: Still corrupt — backup and recreate
+  if (!currentDbPath) {
+    return { status: 'recreated', message: 'Database path unknown — cannot backup. Please reinitialise.' };
+  }
+
+  // Close current connection
+  try {
+    database.close();
+  } catch { /* best-effort */ }
+  db = null;
+
+  // Attempt dump recovery first
+  const recovered = attemptDumpRecovery(currentDbPath);
+  if (recovered) {
+    db = recovered;
+    // Re-apply pragmas
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('foreign_keys = ON');
+    db.pragma('busy_timeout = 10000');
+    db.pragma('wal_autocheckpoint = 100');
+    return { status: 'repaired', message: 'Database recovered via dump/reimport. Some data may have been lost.' };
+  }
+
+  // Full recreation
+  const backupPath = backupCorruptDatabase(currentDbPath);
+  db = new Database(currentDbPath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 10000');
+  db.pragma('wal_autocheckpoint = 100');
+
+  // Re-apply schema
+  const schemaPath = join(__dirname, 'schema.sql');
+  if (existsSync(schemaPath)) {
+    const schema = readFileSync(schemaPath, 'utf-8');
+    db.exec(schema);
+  } else {
+    db.exec(getInlineSchema());
+  }
+
+  return {
+    status: 'recreated',
+    message: `Database was unrecoverable. Corrupt file backed up to ${backupPath}. Fresh database created.`,
+  };
 }
 
 /**
@@ -533,7 +747,8 @@ function getInlineSchema(): string {
       transferable INTEGER DEFAULT 0,
       trust_score REAL DEFAULT 1.0,
       sensitivity_level TEXT DEFAULT 'INTERNAL',
-      source TEXT DEFAULT 'user:direct'
+      source TEXT DEFAULT 'user:direct',
+      graph_extraction_version INTEGER DEFAULT 0
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

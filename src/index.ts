@@ -397,8 +397,8 @@ ${bold}DOCS${reset}
 
   // Handle "doctor" subcommand
   if (process.argv[2] === 'doctor') {
-    const { handleDoctorCommand } = await import('./setup/doctor.js');
-    await handleDoctorCommand();
+    const { runDoctor } = await import('./cli/doctor.js');
+    await runDoctor();
     return;
   }
 
@@ -476,9 +476,12 @@ ${bold}DOCS${reset}
       initDatabase(dbPath);
 
       const { backfillGraph } = await import('./graph/backfill.js');
-      console.log('Backfilling knowledge graph from existing memories...');
-      const result = backfillGraph();
-      console.log(`Done! Extracted ${result.entities} new entities, ${result.triples} new triples from ${result.memoriesProcessed} memories.`);
+      const force = process.argv.includes('--force');
+      console.log(force
+        ? 'Force backfilling knowledge graph from ALL memories...'
+        : 'Backfilling knowledge graph from new/updated memories...');
+      const result = backfillGraph({ force });
+      console.log(`Done! Extracted ${result.entities} new entities, ${result.triples} new triples from ${result.memoriesProcessed} memories (${result.memoriesSkipped} skipped).`);
     } else {
       console.error('Unknown graph command. Available: backfill');
       process.exit(1);

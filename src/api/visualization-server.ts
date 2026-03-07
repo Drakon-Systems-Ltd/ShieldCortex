@@ -465,6 +465,85 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // Memory health score (composite metric)
+  app.get('/api/health-score', requireNotLocked, (_req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+
+      // ── Freshness ──
+      const totalCount = (db.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number }).count;
+      const freshCount = (db.prepare('SELECT COUNT(*) as count FROM memories WHERE decayed_score > 0.3').get() as { count: number }).count;
+      const freshnessScore = totalCount > 0 ? Math.round((freshCount / totalCount) * 100) : 100;
+      const freshPct = totalCount > 0 ? Math.round((freshCount / totalCount) * 100) : 100;
+
+      // ── Coverage ──
+      const linkedCount = (db.prepare('SELECT COUNT(DISTINCT memory_id) as count FROM memory_entities').get() as { count: number }).count;
+      const coverageScore = totalCount > 0 ? Math.round((linkedCount / totalCount) * 100) : 0;
+
+      // ── Consistency ──
+      const contradictionCount = (db.prepare("SELECT COUNT(*) as count FROM memory_links WHERE relationship = 'contradicts'").get() as { count: number }).count;
+      const consistencyScore = Math.max(0, 100 - (contradictionCount * 10));
+
+      // ── Consolidation ──
+      const lastConsolidated = db.prepare(
+        "SELECT created_at FROM memories WHERE type = 'long_term' AND tags LIKE '%auto-consolidated%' ORDER BY created_at DESC LIMIT 1"
+      ).get() as { created_at: string } | undefined;
+
+      let consolidationScore = 25;
+      if (lastConsolidated) {
+        const hoursAgo = (Date.now() - new Date(lastConsolidated.created_at).getTime()) / (1000 * 60 * 60);
+        if (hoursAgo <= 4) consolidationScore = 100;
+        else if (hoursAgo <= 8) consolidationScore = 75;
+        else if (hoursAgo <= 24) consolidationScore = 50;
+        else consolidationScore = 25;
+      }
+
+      // ── Overall (weighted average) ──
+      const overall = Math.round(
+        freshnessScore * 0.3 +
+        coverageScore * 0.25 +
+        consistencyScore * 0.25 +
+        consolidationScore * 0.2
+      );
+
+      // ── Consolidation detail text ──
+      let consolidationDetail = 'No consolidated memories found';
+      if (lastConsolidated) {
+        const hoursAgo = (Date.now() - new Date(lastConsolidated.created_at).getTime()) / (1000 * 60 * 60);
+        if (hoursAgo < 1) consolidationDetail = 'Last consolidated less than 1 hour ago';
+        else consolidationDetail = `Last consolidated ${Math.round(hoursAgo)} hours ago`;
+      }
+
+      res.json({
+        overall,
+        components: {
+          freshness: {
+            score: freshnessScore,
+            label: 'Memory Freshness',
+            detail: `${freshPct}% of memories above decay threshold`,
+          },
+          coverage: {
+            score: coverageScore,
+            label: 'Graph Coverage',
+            detail: `${coverageScore}% of memories have entity links`,
+          },
+          consistency: {
+            score: consistencyScore,
+            label: 'Consistency',
+            detail: `${contradictionCount} contradictions detected`,
+          },
+          consolidation: {
+            score: consolidationScore,
+            label: 'Consolidation',
+            detail: consolidationDetail,
+          },
+        },
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Get currently activated memories (spreading activation)
   app.get('/api/activation', requireNotLocked, (_req: Request, res: Response) => {
     try {
@@ -1182,12 +1261,118 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
+  // Get neighbourhood of an entity: the entity, its direct neighbours, and connecting triples
+  app.get('/api/graph/entities/:id/neighbourhood', requireNotLocked, (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const id = parseInt(req.params.id as string);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid entity ID' });
+      }
+
+      // Get the focal entity
+      const focal = db.prepare('SELECT id, name, type, memory_count as memoryCount, aliases FROM entities WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+      if (!focal) {
+        return res.status(404).json({ error: 'Entity not found' });
+      }
+      focal.aliases = JSON.parse((focal.aliases as string) || '[]');
+
+      // Get all triples involving this entity (exclude related_to noise — only meaningful predicates)
+      const triplesAll = db.prepare(`
+        SELECT t.id, t.subject_id, t.object_id, t.predicate,
+               s.name as subject_name, s.type as subject_type, s.memory_count as subject_count,
+               o.name as object_name, o.type as object_type, o.memory_count as object_count
+        FROM triples t
+        JOIN entities s ON s.id = t.subject_id
+        JOIN entities o ON o.id = t.object_id
+        WHERE (t.subject_id = ? OR t.object_id = ?)
+        ORDER BY
+          CASE WHEN t.predicate != 'related_to' THEN 0 ELSE 1 END,
+          CASE WHEN t.subject_id = ? THEN o.memory_count ELSE s.memory_count END DESC
+      `).all(id, id, id) as Record<string, unknown>[];
+
+      // Collect unique neighbour IDs, prioritising meaningful predicates
+      const neighbourIds = new Map<number, { predicate: string; count: number }>();
+      const meaningfulTriples: Record<string, unknown>[] = [];
+      const relatedToTriples: Record<string, unknown>[] = [];
+
+      for (const t of triplesAll) {
+        const neighbourId = t.subject_id === id ? t.object_id as number : t.subject_id as number;
+        const count = t.subject_id === id ? t.object_count as number : t.subject_count as number;
+        if (neighbourId === id) continue;
+
+        if (t.predicate !== 'related_to') {
+          meaningfulTriples.push(t);
+          if (!neighbourIds.has(neighbourId)) {
+            neighbourIds.set(neighbourId, { predicate: t.predicate as string, count });
+          }
+        } else {
+          relatedToTriples.push(t);
+        }
+      }
+
+      // Add related_to neighbours up to a cap (prefer high memory count)
+      for (const t of relatedToTriples) {
+        if (neighbourIds.size >= 25) break;
+        const neighbourId = t.subject_id === id ? t.object_id as number : t.subject_id as number;
+        const count = t.subject_id === id ? t.object_count as number : t.subject_count as number;
+        if (!neighbourIds.has(neighbourId)) {
+          neighbourIds.set(neighbourId, { predicate: 'related_to', count });
+        }
+      }
+
+      // Build triples list (only for included neighbours)
+      const includedTriples = [
+        ...meaningfulTriples.filter(t => {
+          const nid = t.subject_id === id ? t.object_id as number : t.subject_id as number;
+          return neighbourIds.has(nid);
+        }),
+        ...relatedToTriples.filter(t => {
+          const nid = t.subject_id === id ? t.object_id as number : t.subject_id as number;
+          return neighbourIds.has(nid);
+        }),
+      ];
+
+      // Deduplicate triples by id
+      const seenTriples = new Set<number>();
+      const uniqueTriples = includedTriples.filter(t => {
+        if (seenTriples.has(t.id as number)) return false;
+        seenTriples.add(t.id as number);
+        return true;
+      });
+
+      // Fetch neighbour entities
+      const neighbourEntities: Record<string, unknown>[] = [];
+      if (neighbourIds.size > 0) {
+        const ids = [...neighbourIds.keys()];
+        const placeholders = ids.map(() => '?').join(',');
+        const rows = db.prepare(`
+          SELECT id, name, type, memory_count as memoryCount, aliases
+          FROM entities WHERE id IN (${placeholders})
+        `).all(...ids) as Record<string, unknown>[];
+        for (const r of rows) {
+          r.aliases = JSON.parse((r.aliases as string) || '[]');
+          neighbourEntities.push(r);
+        }
+      }
+
+      res.json({
+        focal,
+        neighbours: neighbourEntities,
+        triples: uniqueTriples,
+        totalConnections: triplesAll.length,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // List triples with optional predicate filter and pagination
   app.get('/api/graph/triples', requireNotLocked, (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const predicate = typeof req.query.predicate === 'string' ? req.query.predicate : undefined;
-      const limit = typeof req.query.limit === 'string' ? Math.min(parseInt(req.query.limit), 500) : 100;
+      const limit = typeof req.query.limit === 'string' ? Math.min(parseInt(req.query.limit), 10000) : 100;
       const offset = typeof req.query.offset === 'string' ? parseInt(req.query.offset) : 0;
 
       let whereClause = '';
@@ -1198,6 +1383,8 @@ export function startVisualizationServer(dbPath?: string): void {
         params.push(predicate);
       }
 
+      // For large triple sets, only return triples involving the top 500 entities
+      // to keep response sizes manageable
       const totalRow = db.prepare(
         `SELECT COUNT(*) as count FROM triples t ${whereClause}`
       ).get(...params) as { count: number };
@@ -1397,11 +1584,49 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   });
 
-  // Update memory (partial: title, content, tags, category)
+  // Update memory (partial: title, content, tags, category, importance/salience)
   app.patch('/api/memories/:id', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string);
-      const updated = updateMemory(id, req.body);
+      const { title, content, category, tags, importance } = req.body;
+
+      // Validate provided fields
+      if (title !== undefined) {
+        if (typeof title !== 'string' || title.trim().length === 0) {
+          return res.status(400).json({ error: 'Title must be a non-empty string' });
+        }
+      }
+      if (content !== undefined) {
+        if (typeof content !== 'string') {
+          return res.status(400).json({ error: 'Content must be a string' });
+        }
+      }
+      const validCategories = ['architecture', 'pattern', 'preference', 'error', 'context', 'learning', 'todo', 'note', 'relationship', 'custom'];
+      if (category !== undefined) {
+        if (!validCategories.includes(category)) {
+          return res.status(400).json({ error: `Category must be one of: ${validCategories.join(', ')}` });
+        }
+      }
+      if (tags !== undefined) {
+        if (!Array.isArray(tags) || !tags.every((t: unknown) => typeof t === 'string')) {
+          return res.status(400).json({ error: 'Tags must be an array of strings' });
+        }
+      }
+      if (importance !== undefined) {
+        if (typeof importance !== 'number' || importance < 0 || importance > 1) {
+          return res.status(400).json({ error: 'Importance must be a number between 0 and 1' });
+        }
+      }
+
+      // Build clean updates object (map importance → salience)
+      const updates: Record<string, unknown> = {};
+      if (title !== undefined) updates.title = title.trim();
+      if (content !== undefined) updates.content = content;
+      if (category !== undefined) updates.category = category;
+      if (tags !== undefined) updates.tags = tags;
+      if (importance !== undefined) updates.salience = importance;
+
+      const updated = updateMemory(id, updates);
       if (!updated) {
         return res.status(404).json({ error: 'Memory not found' });
       }

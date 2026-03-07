@@ -186,12 +186,39 @@ export function extractFromMemory(title: string, content: string, category: stri
   const triples: ExtractedTriple[] = [];
   const tripleSet = new Set<string>();
 
+  // Build a set of known entity names for resolving regex captures
+  const knownNames = new Set<string>();
+  const nameLookup = new Map<string, string>(); // lowercase → canonical name
+  for (const [key] of entityMap) {
+    const name = key.split('::')[0];
+    knownNames.add(name);
+    nameLookup.set(name.toLowerCase(), name);
+  }
+  for (const [lower, canonical] of TOOLS_LOWER) {
+    nameLookup.set(lower, canonical);
+  }
+  for (const [lower, canonical] of LANGUAGES_LOWER) {
+    nameLookup.set(lower, canonical);
+  }
+
+  // Resolve a raw capture to a known entity name
+  function resolveEntityName(raw: string): string | null {
+    if (!raw || STOPWORDS.has(raw.toLowerCase())) return null;
+    // Exact match
+    if (knownNames.has(raw)) return raw;
+    // Case-insensitive match
+    const canonical = nameLookup.get(raw.toLowerCase());
+    if (canonical) return canonical;
+    return null;
+  }
+
   function addTriple(subject: string, predicate: string, object: string): void {
+    if (subject === object) return;
     const key = `${subject}|${predicate}|${object}`;
     if (!tripleSet.has(key)) {
       tripleSet.add(key);
       triples.push({ subject, predicate, object });
-      // Ensure referenced entities exist
+      // Ensure referenced entities exist in entityMap
       ensureEntity(subject);
       ensureEntity(object);
     }
@@ -199,71 +226,103 @@ export function extractFromMemory(title: string, content: string, category: stri
 
   function ensureEntity(name: string): void {
     if (STOPWORDS.has(name.toLowerCase())) return;
-    // Check if any entity with this name exists
     for (const [key] of entityMap) {
       if (key.startsWith(name + '::')) return;
     }
-    // Guess type — only promote to entity if it's a known tool/language
     if (TOOLS_LOWER.has(name.toLowerCase())) {
       addEntity(TOOLS_LOWER.get(name.toLowerCase())!, 'tool');
     } else if (LANGUAGES_LOWER.has(name.toLowerCase())) {
       addEntity(LANGUAGES_LOWER.get(name.toLowerCase())!, 'language');
     }
-    // Don't create concept entities for unknown words in triples
   }
 
-  function isKnownEntity(name: string): boolean {
-    if (STOPWORDS.has(name.toLowerCase())) return false;
-    for (const [key] of entityMap) {
-      if (key.startsWith(name + '::') || key.toLowerCase().startsWith(name.toLowerCase() + '::')) return true;
-    }
-    return TOOLS_LOWER.has(name.toLowerCase()) || LANGUAGES_LOWER.has(name.toLowerCase());
-  }
+  // Entity name pattern for regexes — captures dotted names like Next.js, Node.js
+  const ENT = `(\\w+(?:[.-]\\w+)*)`;
 
   // "using X for Y" → X uses Y
-  for (const m of text.matchAll(/\busing\s+(\w+(?:\.\w+)?)\s+for\s+(\w+(?:\s+\w+)?)\b/gi)) {
-    addTriple(m[1], 'uses', m[2]);
+  for (const m of text.matchAll(new RegExp(`\\busing\\s+${ENT}\\s+for\\s+${ENT}`, 'gi'))) {
+    const subj = resolveEntityName(m[1]);
+    const obj = resolveEntityName(m[2]);
+    if (subj && obj) addTriple(subj, 'uses', obj);
   }
 
   // "replaced X with Y" → Y replaces X
-  for (const m of text.matchAll(/\breplaced\s+(\w+)\s+with\s+(\w+)\b/gi)) {
-    addTriple(m[2], 'replaces', m[1]);
+  for (const m of text.matchAll(new RegExp(`\\breplaced\\s+${ENT}\\s+with\\s+${ENT}`, 'gi'))) {
+    const old = resolveEntityName(m[1]);
+    const nw = resolveEntityName(m[2]);
+    if (old && nw) addTriple(nw, 'replaces', old);
   }
 
   // "X depends on Y"
-  for (const m of text.matchAll(/\b(\w+)\s+depends\s+on\s+(\w+)\b/gi)) {
-    addTriple(m[1], 'depends_on', m[2]);
+  for (const m of text.matchAll(new RegExp(`${ENT}\\s+depends\\s+on\\s+${ENT}`, 'gi'))) {
+    const subj = resolveEntityName(m[1]);
+    const obj = resolveEntityName(m[2]);
+    if (subj && obj) addTriple(subj, 'depends_on', obj);
   }
 
-  // "fixed X by Y" — only if X or Y are known entities
-  for (const m of text.matchAll(/\bfixed\s+(\w+)\s+by\s+(\w+)\b/gi)) {
-    if (isKnownEntity(m[1]) || isKnownEntity(m[2])) {
-      addTriple(m[2], 'fixes', m[1]);
-    }
+  // "X uses Y" / "X built with Y" / "X powered by Y"
+  for (const m of text.matchAll(new RegExp(`${ENT}\\s+(?:uses|built\\s+with|powered\\s+by)\\s+${ENT}`, 'gi'))) {
+    const subj = resolveEntityName(m[1]);
+    const obj = resolveEntityName(m[2]);
+    if (subj && obj) addTriple(subj, 'uses', obj);
+  }
+
+  // "fixed X by Y" — only if both resolve
+  for (const m of text.matchAll(new RegExp(`\\bfixed\\s+${ENT}\\s+by\\s+${ENT}`, 'gi'))) {
+    const what = resolveEntityName(m[1]);
+    const how = resolveEntityName(m[2]);
+    if (what && how) addTriple(how, 'fixes', what);
   }
 
   // "chose X over Y"
-  for (const m of text.matchAll(/\bchose\s+(\w+)\s+over\s+(\w+)\b/gi)) {
-    addTriple('project', 'prefers', m[1]);
-    addTriple('project', 'avoids', m[2]);
+  for (const m of text.matchAll(new RegExp(`\\bchose\\s+${ENT}\\s+over\\s+${ENT}`, 'gi'))) {
+    const pref = resolveEntityName(m[1]);
+    const avoid = resolveEntityName(m[2]);
+    if (pref) addTriple('project', 'prefers', pref);
+    if (avoid) addTriple('project', 'avoids', avoid);
   }
 
   // "X configured with Y"
-  for (const m of text.matchAll(/\b(\w+)\s+configured\s+with\s+(\w+)\b/gi)) {
-    addTriple(m[1], 'configures', m[2]);
+  for (const m of text.matchAll(new RegExp(`${ENT}\\s+configured\\s+with\\s+${ENT}`, 'gi'))) {
+    const subj = resolveEntityName(m[1]);
+    const obj = resolveEntityName(m[2]);
+    if (subj && obj) addTriple(subj, 'configures', obj);
   }
 
-  // "implemented X" — only if X is a known entity
-  for (const m of text.matchAll(/\bimplemented\s+(\w+)\b/gi)) {
-    const word = m[1];
-    if (isKnownEntity(word)) {
-      addTriple('project', 'implements', word);
-    }
+  // "implemented X" — only if X resolves
+  for (const m of text.matchAll(new RegExp(`\\bimplemented\\s+${ENT}`, 'gi'))) {
+    const what = resolveEntityName(m[1]);
+    if (what) addTriple('project', 'implements', what);
   }
 
   // "X extends Y"
-  for (const m of text.matchAll(/\b(\w+)\s+extends\s+(\w+)\b/gi)) {
-    addTriple(m[1], 'extends', m[2]);
+  for (const m of text.matchAll(new RegExp(`${ENT}\\s+extends\\s+${ENT}`, 'gi'))) {
+    const subj = resolveEntityName(m[1]);
+    const obj = resolveEntityName(m[2]);
+    if (subj && obj) addTriple(subj, 'extends', obj);
+  }
+
+  // --- Co-occurrence triples ---
+  // Entities appearing in the same memory are related.
+  // Generate "co_occurs_with" triples for entities in the same text.
+  const entityNames = Array.from(entityMap.values())
+    .filter(e => !STOPWORDS.has(e.name.toLowerCase()))
+    .map(e => e.name);
+  // Only generate co-occurrence for manageable counts (avoid O(n^2) explosion)
+  if (entityNames.length >= 2 && entityNames.length <= 20) {
+    for (let i = 0; i < entityNames.length; i++) {
+      for (let j = i + 1; j < entityNames.length; j++) {
+        addTriple(entityNames[i], 'related_to', entityNames[j]);
+      }
+    }
+  } else if (entityNames.length > 20) {
+    // For large entity sets, only link the first 10 most important (first found = in title/early content)
+    const top = entityNames.slice(0, 10);
+    for (let i = 0; i < top.length; i++) {
+      for (let j = i + 1; j < top.length; j++) {
+        addTriple(top[i], 'related_to', top[j]);
+      }
+    }
   }
 
   return {

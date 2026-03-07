@@ -73,6 +73,7 @@ export interface ConsolidationResult {
   contradictionsFound?: number;  // Phase 3: Contradictions detected
   contradictionsLinked?: number; // Phase 3: Contradiction links created
   salienceEvolved?: number;     // Memories with salience adjusted by structural importance
+  deduplicated?: number;        // Near-duplicate LTM memories merged
 }
 
 export interface ContextSummary {

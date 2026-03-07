@@ -5,6 +5,7 @@ import { PipelineStatus } from './PipelineStatus';
 import { QuarantinePreview } from './QuarantinePreview';
 import { ThreatTimeline } from './ThreatTimeline';
 import { DefenceStatsCard } from './DefenceStatsCard';
+import HealthScore from '../health/HealthScore';
 import { CloudUpsellCard } from './CloudUpsellCard';
 import { CloudSyncStatus } from './CloudSyncStatus';
 import { SkillScannerCard } from './SkillScannerCard';
@@ -50,6 +51,11 @@ export function ShieldOverview() {
         <QuarantinePreview />
         <ThreatTimeline timeRange={timeRange} />
         <DefenceStatsCard timeRange={timeRange} />
+      </div>
+
+      {/* Memory Health */}
+      <div className="mt-4">
+        <HealthScore />
       </div>
 
       {/* Skill scanner */}

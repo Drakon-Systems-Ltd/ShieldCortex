@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.20.0] - 2026-03-07
+
+### Added
+
+- **Ego-centric knowledge graph** — Graph tab rebuilt with focus-on-one-entity navigation. Click any neighbour to re-centre. New `/api/graph/entities/:id/neighbourhood` endpoint
+- **Memory Timeline** — New Timeline tab showing memories chronologically, grouped by day, with category/type filters and search
+- **Memory Health Score** — Circular progress widget on Shield tab (freshness, graph coverage, consistency, consolidation). New `/api/health-score` endpoint
+- **Embedding-based recall** — Vector similarity fallback using `all-MiniLM-L6-v2` when FTS5 returns fewer than 3 results. Embedding cache in SQLite
+- **NavRail sparklines** — 7-day trend micro-charts on Shield and Memories nav items
+- **Keyboard shortcuts** — Press `?` for help. `g+s` Shield, `g+m` Memories, `g+t` Timeline, `/` search, `Escape` close panels
+- **Memory inline editing** — Edit title, content, category, tags in-place from the detail panel
+- **`shieldcortex doctor`** — 9-point installation health checker (database, schema, hooks, processes, disk, locks, embeddings)
+- **Webhooks** — POST notifications on memory events with HMAC-SHA256 signing. Configure in `~/.shieldcortex/config.json`
+- **Memory expiry rules** — Auto-delete memories by category/type/tag/age. Protects critical memories. Configure in config.json
+- **Content-aware consolidation** — Deduplicates near-identical memories, creates summary memories for topic clusters
+- **Corrupt database recovery** — Auto-detects corruption, backs up, attempts recovery, creates fresh DB as last resort
+- **Incremental graph extraction** — Tracks extraction version per memory, skips already-processed ones. `--force` to re-extract
+
+### Changed
+
+- Graph triple extraction captures dotted names (`Next.js`, `Node.js`)
+- Co-occurrence triples generated for entities in the same memory
+- Graph API triples limit raised from 500 to 10,000
+- `PATCH /api/memories/:id` now validates input fields
+
 ## [2.18.0] - 2026-02-28
 
 ### Added

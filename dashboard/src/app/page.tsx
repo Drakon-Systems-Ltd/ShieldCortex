@@ -5,13 +5,14 @@
  * Security-first dashboard for ShieldCortex
  */
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import dynamic from 'next/dynamic';
 import { useMemoriesWithRealtime, useStats, useAccessMemory, useConsolidate, useProjects, useMemoryLinks, useControlStatus, usePauseMemory, useResumeMemory } from '@/hooks/useMemories';
 import { useDashboardStore } from '@/lib/store';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useSuggestions } from '@/hooks/useSuggestions';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { MemoryDetail } from '@/components/memory/MemoryDetail';
 import { MemoriesView } from '@/components/memories/MemoriesView';
 import { NavRail } from '@/components/nav/NavRail';
@@ -22,16 +23,18 @@ import { QuarantineView } from '@/components/quarantine/QuarantineView';
 import { AgentsView } from '@/components/agents/AgentsView';
 import { SkillsView } from '@/components/skills/SkillsView';
 import { IronDomeView } from '@/components/dome/IronDomeView';
+import MemoryTimeline from '@/components/timeline/MemoryTimeline';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { ShortcutsHelp } from '@/components/ui/ShortcutsHelp';
 import { Memory, MemoryEvent } from '@/types/memory';
 import { Shield, Cloud, OctagonX, Loader2 } from 'lucide-react';
 import { useCloudStatus } from '@/hooks/useCloudStatus';
 import { useEmergencyStop } from '@/hooks/useIronDome';
 
 // Dynamic imports (avoid SSR issues with canvas/WebGL)
-const KnowledgeGraph = dynamic(
-  () => import('@/components/graph/KnowledgeGraph'),
+const UnifiedGraph = dynamic(
+  () => import('@/components/graph/UnifiedGraph'),
   {
     ssr: false,
     loading: () => (
@@ -67,7 +70,28 @@ export default function DashboardPage() {
   const debouncedSearch = useDebouncedValue(searchQuery, 300);
 
   // Zustand store
-  const { viewMode, selectedMemory, setSelectedMemory, selectedAuditEntry, setSelectedAuditEntry, projectFilter, setProjectFilter, addEvent } = useDashboardStore();
+  const { viewMode, setViewMode, selectedMemory, setSelectedMemory, selectedAuditEntry, setSelectedAuditEntry, projectFilter, setProjectFilter, addEvent } = useDashboardStore();
+
+  // Keyboard shortcuts
+  const handleFocusSearch = useCallback(() => {
+    searchInputRef.current?.focus();
+  }, []);
+
+  const handleClosePanel = useCallback(() => {
+    setSelectedMemory(null);
+    setSelectedAuditEntry(null);
+  }, [setSelectedMemory, setSelectedAuditEntry]);
+
+  const handleNavigate = useCallback((view: string) => {
+    setViewMode(view as Parameters<typeof setViewMode>[0]);
+  }, [setViewMode]);
+
+  const { showHelp, setShowHelp } = useKeyboardShortcuts({
+    onFocusSearch: handleFocusSearch,
+    onClosePanel: handleClosePanel,
+    onNavigate: handleNavigate,
+    onToggleHelp: () => {}, // state managed internally by the hook
+  });
 
   // Search suggestions
   const { data: suggestions = [] } = useSuggestions(searchQuery);
@@ -379,14 +403,8 @@ export default function DashboardPage() {
                 isLoading={memoriesLoading}
               />
             )}
-            {viewMode === 'graph' && (
-              <KnowledgeGraph
-                memories={memories}
-                links={links}
-                selectedMemory={selectedMemory}
-                onSelectMemory={handleSelectMemory}
-              />
-            )}
+            {viewMode === 'graph' && <UnifiedGraph />}
+            {viewMode === 'timeline' && <MemoryTimeline />}
             {viewMode === 'agents' && <AgentsView />}
             {viewMode === 'skills' && <SkillsView />}
             {viewMode === 'dome' && <IronDomeView />}
@@ -401,7 +419,7 @@ export default function DashboardPage() {
         </AnimatePresence>
 
         {/* Right Detail Panel (not for brain view — it has its own inspector) */}
-        {selectedMemory && !isSecurityView && viewMode !== 'brain' && (
+        {selectedMemory && !isSecurityView && viewMode !== 'brain' && viewMode !== 'graph' && viewMode !== 'timeline' && (
           <div className="w-80 border-l border-slate-800 overflow-y-auto shrink-0">
             <MemoryDetail
               memory={selectedMemory}
@@ -431,6 +449,9 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Keyboard shortcuts help overlay */}
+      <ShortcutsHelp open={showHelp} onClose={() => setShowHelp(false)} />
     </div>
   );
 }
