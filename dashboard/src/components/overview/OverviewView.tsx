@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { AlertTriangle, ArrowRight, CheckCircle2, Clock3, Database, FileSearch, GitBranch, Lock, Shield, Sparkles } from 'lucide-react';
 import { useDashboardStore } from '@/lib/store';
 import { TIER_BG, TIER_LABELS, TIER_COLOURS, type GatedFeature } from '@/lib/license';
@@ -180,17 +180,17 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
     [stats?.byCategory],
   );
 
-  const openView = (target: ViewMode) => {
+  const openView = useCallback((target: ViewMode) => {
     setSelectedMemory(null);
     setViewMode(target);
-  };
+  }, [setSelectedMemory, setViewMode]);
 
-  const openMemories = (filters?: { category?: string | null; type?: string | null }) => {
+  const openMemories = useCallback((filters?: { category?: string | null; type?: string | null }) => {
     setCategoryFilter(filters?.category ?? null);
     setTypeFilter(filters?.type ?? null);
     setSelectedMemory(null);
     setViewMode('memories');
-  };
+  }, [setCategoryFilter, setSelectedMemory, setTypeFilter, setViewMode]);
 
   const urgentActions = useMemo<ActionCard[]>(() => {
     const actions: ActionCard[] = [];
@@ -247,7 +247,7 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
     }
 
     return actions.slice(0, 4);
-  }, [pendingQuarantine, contradictionCount, staleCount, neverAccessedCount, duplicateCount, thinCategories]);
+  }, [pendingQuarantine, contradictionCount, staleCount, neverAccessedCount, duplicateCount, thinCategories, openMemories, openView]);
 
   const freeWorkflows = [
     {

@@ -16,7 +16,7 @@ const INNER_H = HEIGHT - PAD.top - PAD.bottom;
 
 export function TrustTimeline({ identifier, timeRange }: Props) {
   const { data, isLoading } = useAgentTimeline(identifier, timeRange);
-  const points = data?.points ?? [];
+  const points = useMemo(() => data?.points ?? [], [data?.points]);
 
   const { linePath, dots, xLabels } = useMemo(() => {
     if (points.length === 0) return { linePath: '', dots: [], xLabels: [] };

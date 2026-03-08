@@ -34,7 +34,7 @@ export function AuditLogView() {
     limit: 200,
   });
 
-  const logs = data?.logs ?? [];
+  const logs = useMemo(() => data?.logs ?? [], [data?.logs]);
 
   // Keyboard navigation: Escape closes, Up/Down navigates
   const handleKeyDown = useCallback((e: KeyboardEvent) => {

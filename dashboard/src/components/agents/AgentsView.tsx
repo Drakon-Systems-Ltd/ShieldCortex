@@ -90,7 +90,7 @@ export function AgentsView() {
   const [now] = useState(() => Date.now()); // stable timestamp for relative times
 
   const { data, isLoading } = useAgentRegistry(timeRange, projectFilter ?? undefined);
-  const agents = data?.agents ?? [];
+  const agents = useMemo(() => data?.agents ?? [], [data?.agents]);
 
   // Filter
   const filtered = useMemo(() => {

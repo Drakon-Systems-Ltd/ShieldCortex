@@ -8,12 +8,17 @@
  * Search to jump to any entity. Back button for navigation history.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactElement } from 'react';
 import dynamic from 'next/dynamic';
 import { Search, X, ArrowLeft, Globe, ChevronRight } from 'lucide-react';
+import type {
+  ForceGraphMethods,
+  ForceGraphProps,
+  GraphData,
+  LinkObject,
+  NodeObject,
+} from 'react-force-graph-2d';
 import { authFetch } from '@/lib/auth';
-
-const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false });
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -111,12 +116,19 @@ interface GraphLink {
   predicate: string;
 }
 
+type ForceGraphRef = ForceGraphMethods<NodeObject<GraphNode>, LinkObject<GraphNode, GraphLink>>;
+type ForceGraphComponentProps = ForceGraphProps<GraphNode, GraphLink> & {
+  ref?: MutableRefObject<ForceGraphRef | undefined>;
+};
+type ForceGraphComponent = (props: ForceGraphComponentProps) => ReactElement;
+
+const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false }) as unknown as ForceGraphComponent;
+
 // ── Component ──────────────────────────────────────────────
 
 export default function UnifiedGraph() {
   const containerRef = useRef<HTMLDivElement>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const graphRef = useRef<any>(null);
+  const graphRef = useRef<ForceGraphRef | undefined>(undefined);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
   // Navigation state
@@ -238,7 +250,7 @@ export default function UnifiedGraph() {
   }, [searchQuery]);
 
   // ── Build graph data ──────────────────────────────────────
-  const graphData = useMemo(() => {
+  const graphData = useMemo<GraphData<GraphNode, GraphLink>>(() => {
     if (!neighbourhood) return { nodes: [], links: [] };
 
     const allEntities = [neighbourhood.focal, ...neighbourhood.neighbours];
@@ -375,8 +387,7 @@ export default function UnifiedGraph() {
 
   // ── Canvas render: links ──────────────────────────────────
   const linkCanvasObject = useCallback(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+    (link: LinkObject<GraphNode, GraphLink>, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const source = link.source as unknown as { x: number; y: number };
       const target = link.target as unknown as { x: number; y: number };
       if (!source?.x || !target?.x) return;
@@ -686,14 +697,14 @@ export default function UnifiedGraph() {
           {!loading && !error && graphData.nodes.length > 0 && dimensions.width > 0 && (
             <ForceGraph2D
               ref={graphRef}
-              graphData={graphData as any}
+              graphData={graphData}
               width={dimensions.width}
               height={dimensions.height}
               backgroundColor="rgba(0,0,0,0)"
-              nodeCanvasObject={nodeCanvasObject as any}
-              nodeLabel={nodeLabel as any}
-              onNodeClick={handleNodeClick as any}
-              linkCanvasObject={linkCanvasObject as any}
+              nodeCanvasObject={nodeCanvasObject}
+              nodeLabel={nodeLabel}
+              onNodeClick={handleNodeClick}
+              linkCanvasObject={linkCanvasObject}
               linkDirectionalArrowLength={6}
               linkDirectionalArrowRelPos={0.85}
               d3AlphaDecay={0.05}

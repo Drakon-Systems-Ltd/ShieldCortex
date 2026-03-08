@@ -58,7 +58,7 @@ function PoliciesTable() {
       {isLoading ? (
         <div className="text-xs text-slate-500 py-4 text-center">Loading policies...</div>
       ) : policies.length === 0 ? (
-        <div className="text-xs text-slate-500 py-4 text-center">No custom policies yet. Click "Create Policy" to get started.</div>
+        <div className="text-xs text-slate-500 py-4 text-center">No custom policies yet. Click &quot;Create Policy&quot; to get started.</div>
       ) : (
         <div className="space-y-1">
           {policies.map(policy => (

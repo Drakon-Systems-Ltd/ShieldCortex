@@ -29,7 +29,6 @@ import {
   type IronDomeProfile,
   type InjectionScanResult,
   type IronDomeAuditLog,
-  type ControlStatus,
 } from '@/hooks/useIronDome';
 import { CustomPatternsPanel } from './CustomPatternsPanel';
 import { CustomPoliciesPanel } from './CustomPoliciesPanel';
@@ -83,7 +82,6 @@ export function IronDomeView() {
   const isActive = status?.enabled ?? false;
   const isKillSwitchActive = controlStatus?.killSwitchActive ?? false;
   const killSwitchMeta = controlStatus?.killSwitchMeta ?? null;
-  const isPaused = controlStatus?.paused ?? false;
   const activeProfile = status?.profile;
   const config = status?.config;
 

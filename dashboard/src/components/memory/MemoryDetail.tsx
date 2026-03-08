@@ -6,7 +6,7 @@
  * including related memories, decay visualization, edit and delete actions
  */
 
-import { useMemo, useState, useEffect, useCallback } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { Memory, MemoryLink } from '@/types/memory';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -107,7 +107,7 @@ export function MemoryDetail({
     onReinforce?.(memory.id);
   };
 
-  const handleSaveEdit = useCallback(() => {
+  const handleSaveEdit = () => {
     const tags = editTags
       .split(',')
       .map(t => t.trim())
@@ -140,7 +140,7 @@ export function MemoryDetail({
         },
       }
     );
-  }, [memory.id, editTitle, editContent, editCategory, editTags, editMutation]);
+  };
 
   const handleCancelEdit = () => {
     setIsEditing(false);

@@ -78,7 +78,7 @@ function PatternsTable() {
       {isLoading ? (
         <div className="text-xs text-slate-500 py-4 text-center">Loading patterns...</div>
       ) : patterns.length === 0 ? (
-        <div className="text-xs text-slate-500 py-4 text-center">No custom patterns yet. Click "Add Pattern" to create one.</div>
+        <div className="text-xs text-slate-500 py-4 text-center">No custom patterns yet. Click &quot;Add Pattern&quot; to create one.</div>
       ) : (
         <div className="space-y-1">
           {patterns.map(pattern => (

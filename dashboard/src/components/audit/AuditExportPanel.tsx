@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { Download, FileJson, FileText } from 'lucide-react';
 import { ProFeatureGate } from '../shield/ProFeatureGate';
 import { useAuditExport } from '@/hooks/useAuditExport';
-import { PREVIEW_EXPORT } from '@/lib/pro-previews';
 
 function ExportForm() {
   const exportAudit = useAuditExport();
@@ -49,35 +48,6 @@ function ExportForm() {
 
       {exportAudit.error && <p className="text-xs text-red-400">{(exportAudit.error as Error).message}</p>}
       {exportAudit.isSuccess && <p className="text-xs text-green-400">Export downloaded successfully.</p>}
-    </div>
-  );
-}
-
-function PreviewContent() {
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <Download size={16} className="text-cyan-400" />
-        <h3 className="text-sm font-medium text-slate-200">Export Audit Logs</h3>
-      </div>
-
-      <div className="flex items-center gap-3">
-        <div className="flex rounded-lg overflow-hidden border border-slate-700">
-          <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-cyan-600/20 text-cyan-400">
-            <FileJson size={12} /> JSON
-          </div>
-          <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-slate-800 text-slate-400">
-            <FileText size={12} /> CSV
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 px-4 py-1.5 text-xs bg-cyan-600/40 text-white rounded-lg">
-          <Download size={12} /> Export
-        </div>
-      </div>
-
-      <p className="text-[10px] text-slate-500">
-        {PREVIEW_EXPORT.totalRecords.toLocaleString()} audit records available
-      </p>
     </div>
   );
 }

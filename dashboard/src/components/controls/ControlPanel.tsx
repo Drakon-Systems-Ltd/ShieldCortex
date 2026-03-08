@@ -8,7 +8,7 @@
  * Shows kill switch state when active.
  */
 
-import { useControlStatus, usePauseMemory, useResumeMemory, useConsolidate } from '@/hooks/useMemories';
+import { useControlStatus, usePauseMemory, useResumeMemory, useConsolidate, type ControlStatus } from '@/hooks/useMemories';
 import { Button } from '@/components/ui/button';
 import { VersionPanel } from './VersionPanel';
 
@@ -19,7 +19,7 @@ export function ControlPanel() {
   const consolidateMutation = useConsolidate();
 
   const isPaused = status?.paused ?? false;
-  const isKillSwitchActive = (status as any)?.killSwitchActive ?? false;
+  const isKillSwitchActive = (status as ControlStatus | undefined)?.killSwitchActive ?? false;
   const isToggling = pauseMutation.isPending || resumeMutation.isPending;
 
   const handleTogglePause = () => {

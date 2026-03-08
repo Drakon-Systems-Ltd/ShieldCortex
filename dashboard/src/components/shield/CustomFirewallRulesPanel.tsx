@@ -76,7 +76,7 @@ function RulesTable() {
       {isLoading ? (
         <div className="text-xs text-slate-500 py-4 text-center">Loading rules...</div>
       ) : rules.length === 0 ? (
-        <div className="text-xs text-slate-500 py-4 text-center">No custom rules yet. Click "Add Rule" to create one.</div>
+        <div className="text-xs text-slate-500 py-4 text-center">No custom rules yet. Click &quot;Add Rule&quot; to create one.</div>
       ) : (
         <div className="space-y-1">
           {rules.map(rule => (
