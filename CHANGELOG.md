@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.1] - 2026-03-08
+
+### Fixed
+
+- **CI Jest wrapper compatibility** — removed the direct `--localstorage-file` Node flag from `scripts/run-jest.mjs`, which failed on GitHub Actions Node 20
+
 ## [3.0.0] - 2026-03-08
 
 ### Added

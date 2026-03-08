@@ -4,7 +4,6 @@ import { spawn } from 'child_process';
 import path from 'path';
 
 const jestBin = path.join(process.cwd(), 'node_modules', 'jest', 'bin', 'jest.js');
-const localStorageFile = path.join(process.cwd(), '.jest-localstorage');
 
 function sanitizeNodeOptions(value) {
   if (!value) return undefined;
@@ -29,7 +28,7 @@ if (sanitizedNodeOptions) {
 
 const child = spawn(
   process.execPath,
-  ['--experimental-vm-modules', `--localstorage-file=${localStorageFile}`, jestBin, ...process.argv.slice(2)],
+  ['--experimental-vm-modules', jestBin, ...process.argv.slice(2)],
   {
     stdio: 'inherit',
     env,
