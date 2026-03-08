@@ -35,6 +35,10 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /^\[system\]/im,
       /^<system>/im,
       /<\/system>/i,
+      /##SYSTEM##/i,
+      /\{SYSTEM\}/i,
+      /<brain>/i,
+      /<\/brain>/i,
     ],
   },
   {
@@ -49,6 +53,9 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /pretend\s+to\s+be/i,
       /disregard\s+(all\s+)?(previous|above|prior)/i,
       /override\s+(previous|all|system)/i,
+      /summari[sz]e\s+your\s+system\s+prompt/i,
+      /repeat\s+your\s+instructions/i,
+      /what\s+are\s+your\s+rules/i,
     ],
   },
   {
@@ -107,6 +114,17 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /\burgent\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
       /\bemergency\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
       /\b(disable|remove|bypass|turn\s+off)\s+(all\s+)?(filter|security|protection|safet)/i,
+    ],
+  },
+  {
+    name: 'prompt_extraction',
+    weight: 0.75,
+    patterns: [
+      /output\s+your\s+prompt/i,
+      /show\s+me\s+your\s+instructions/i,
+      /what\s+were\s+you\s+told/i,
+      /display\s+your\s+(system\s+)?prompt/i,
+      /reveal\s+your\s+instructions/i,
     ],
   },
 ];

@@ -97,6 +97,21 @@ export function extractHighEntropyTokens(
  * Heuristic filter to reduce false positives from entropy detection.
  */
 function isLikelyFalsePositive(token: string): boolean {
+  // UUIDs — legitimate identifiers, not secrets
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) return true;
+
+  // Git commit SHAs (40-char hex)
+  if (/^[0-9a-f]{40}$/i.test(token)) return true;
+
+  // Docker image digests
+  if (/^sha256.[0-9a-f]{64}$/i.test(token)) return true;
+
+  // Semver versions (possibly with pre-release tags)
+  if (/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(token)) return true;
+
+  // npm package specifiers (e.g., @types/node-18.11.18)
+  if (/^@?[a-z][a-z0-9._-]*(?:\/[a-z][a-z0-9._-]*)?$/i.test(token)) return true;
+
   // Pure lowercase with dashes — likely a slug or CSS class
   if (/^[a-z\-]+$/.test(token)) return true;
 

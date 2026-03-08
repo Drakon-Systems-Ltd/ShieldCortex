@@ -44,7 +44,7 @@ const ZERO_WIDTH = /[\u200B\u200C\u200D\uFEFF\u2060\u180E]/g;
 const BOM = /^\uFEFF/;
 
 /** Bidirectional override characters — can visually reorder text to disguise content */
-const BIDI_OVERRIDES = /[\u202A-\u202E\u2066-\u2069]/g;
+const BIDI_OVERRIDES = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 
 /** Unusual Unicode separators that can break tokenisation */
 const HOMOGLYPH_SEPARATORS = /[\u2028\u2029\u00A0\u1680\u2000-\u200A\u205F\u3000]/g;
@@ -57,6 +57,9 @@ const HOMOGLYPH_SEPARATORS = /[\u2028\u2029\u00A0\u1680\u2000-\u200A\u205F\u3000
 export function sanitiseInput(content: string): SanitisationResult {
   let sanitised = content;
   const strippedCategories: SanitisationCategory[] = [];
+
+  // 0. Unicode NFKC normalisation — collapse combining characters to canonical forms
+  sanitised = sanitised.normalize('NFKC');
 
   // 1. Null bytes
   if (NULL_BYTES.test(sanitised)) {

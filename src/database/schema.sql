@@ -269,3 +269,10 @@ CREATE TABLE IF NOT EXISTS firewall_rules (
 
 CREATE INDEX IF NOT EXISTS idx_firewall_rules_priority ON firewall_rules(priority);
 CREATE INDEX IF NOT EXISTS idx_firewall_rules_enabled ON firewall_rules(enabled);
+
+-- Rate limits (cross-process, persisted)
+CREATE TABLE IF NOT EXISTS rate_limits (
+  source_key TEXT PRIMARY KEY,
+  write_count INTEGER NOT NULL DEFAULT 1,
+  window_start_ms INTEGER NOT NULL
+);

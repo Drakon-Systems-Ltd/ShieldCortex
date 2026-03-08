@@ -189,6 +189,62 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     confidence: 0.30,
     // UUIDs are very common — only flagged as low confidence
   },
+  // Hugging Face
+  {
+    name: 'Hugging Face API Token',
+    type: 'api_key',
+    provider: 'huggingface',
+    regex: /hf_[A-Za-z0-9]{34,}/g,
+    severity: 'critical',
+    confidence: 0.96,
+  },
+  // Databricks
+  {
+    name: 'Databricks API Token',
+    type: 'api_key',
+    provider: 'databricks',
+    regex: /dapi[a-f0-9]{32,}/g,
+    severity: 'critical',
+    confidence: 0.94,
+  },
+  // DigitalOcean
+  {
+    name: 'DigitalOcean Personal Access Token',
+    type: 'api_key',
+    provider: 'digitalocean',
+    regex: /dop_v1_[a-f0-9]{64}/g,
+    severity: 'critical',
+    confidence: 0.97,
+  },
+  // Firebase Cloud Messaging
+  {
+    name: 'Firebase Cloud Messaging Key',
+    type: 'api_key',
+    provider: 'firebase',
+    regex: /AAAA[A-Za-z0-9_-]{40,}/g,
+    severity: 'critical',
+    confidence: 0.90,
+    minLength: 44,
+  },
+  // HashiCorp Vault
+  {
+    name: 'HashiCorp Vault Token',
+    type: 'api_key',
+    provider: 'hashicorp',
+    regex: /hvs\.[A-Za-z0-9_-]{24,}/g,
+    severity: 'critical',
+    confidence: 0.96,
+  },
+  // Azure Subscription Key
+  {
+    name: 'Azure Subscription Key',
+    type: 'api_key',
+    provider: 'azure',
+    regex: /[a-f0-9]{32}/g,
+    severity: 'medium',
+    confidence: 0.35,
+    minLength: 32,
+  },
 ];
 
 // ── Generic Secret Patterns ──

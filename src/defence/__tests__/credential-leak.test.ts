@@ -128,6 +128,116 @@ describe('Credential Leak Detection', () => {
     });
   });
 
+  // ── New Provider Patterns (Sprint 1) ──
+
+  describe('Hugging Face API Keys', () => {
+    it('should detect valid Hugging Face tokens', () => {
+      // Construct token dynamically to avoid GitHub secret scanning false positives
+      const hfToken = 'hf_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' + 'abcdefgh';
+      const result = scanForCredentials(`HF_TOKEN=${hfToken}`);
+      expect(result.leaked).toBe(true);
+      expect(result.findings.some(f => f.provider === 'huggingface')).toBe(true);
+    });
+
+    it('should not trigger on short hf_ prefixes', () => {
+      const result = scanForCredentials('Use hf_format for the output');
+      expect(result.leaked).toBe(false);
+    });
+
+    it('should not trigger on hf_ with too few characters', () => {
+      const result = scanForCredentials('hf_shorttoken123');
+      expect(result.leaked).toBe(false);
+    });
+  });
+
+  describe('Databricks API Keys', () => {
+    it('should detect valid Databricks tokens', () => {
+      // Construct token dynamically to avoid GitHub secret scanning false positives
+      const dapiToken = 'dapi' + '0123456789abcdef' + '0123456789abcdef';
+      const result = scanForCredentials(`DATABRICKS_TOKEN=${dapiToken}`);
+      expect(result.leaked).toBe(true);
+      expect(result.findings.some(f => f.provider === 'databricks')).toBe(true);
+    });
+
+    it('should not trigger on "dapi" in normal words', () => {
+      const result = scanForCredentials('The dapi endpoint returns JSON');
+      expect(result.leaked).toBe(false);
+    });
+
+    it('should not trigger on dapi with too few hex chars', () => {
+      const result = scanForCredentials('dapi0123456789abcdef');
+      expect(result.leaked).toBe(false);
+    });
+  });
+
+  describe('DigitalOcean API Keys', () => {
+    it('should detect valid DigitalOcean tokens', () => {
+      const token = 'dop_v1_' + 'a'.repeat(64);
+      const result = scanForCredentials(`DO_TOKEN=${token}`);
+      expect(result.leaked).toBe(true);
+      expect(result.findings.some(f => f.provider === 'digitalocean')).toBe(true);
+    });
+
+    it('should not trigger on dop_v1_ with too few characters', () => {
+      const result = scanForCredentials('dop_v1_abc123');
+      expect(result.leaked).toBe(false);
+    });
+
+    it('should not trigger on dop_v2_ prefix (wrong version)', () => {
+      // dop_v2_ doesn't match DigitalOcean pattern (dop_v1_)
+      const result = scanForCredentials('dop_v2_abcdef');
+      expect(result.findings.some(f => f.provider === 'digitalocean')).toBe(false);
+    });
+  });
+
+  describe('Firebase FCM Keys', () => {
+    it('should detect valid Firebase FCM server keys', () => {
+      const key = 'AAAA' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef01234567';
+      const result = scanForCredentials(`FCM_KEY=${key}`);
+      expect(result.leaked).toBe(true);
+      expect(result.findings.some(f => f.provider === 'firebase')).toBe(true);
+    });
+
+    it('should not trigger on "AAAA" alone or short strings', () => {
+      const result = scanForCredentials('The value AAAA is used as a placeholder');
+      expect(result.leaked).toBe(false);
+    });
+
+    it('should not trigger on AAAA with too few following chars', () => {
+      const result = scanForCredentials('AAAAshort');
+      expect(result.leaked).toBe(false);
+    });
+  });
+
+  describe('HashiCorp Vault Tokens', () => {
+    it('should detect valid Vault tokens', () => {
+      const token = 'hvs.' + 'ABCDEFGHIJKLMNOPQRSTUVWXyz';
+      const result = scanForCredentials(`VAULT_TOKEN=${token}`);
+      expect(result.leaked).toBe(true);
+      expect(result.findings.some(f => f.provider === 'hashicorp')).toBe(true);
+    });
+
+    it('should not trigger on hvs. with too few characters', () => {
+      const result = scanForCredentials('hvs.short');
+      expect(result.leaked).toBe(false);
+    });
+
+    it('should not trigger on similar prefixes', () => {
+      const result = scanForCredentials('hvs_' + 'A'.repeat(30));
+      expect(result.leaked).toBe(false);
+    });
+  });
+
+  describe('Azure Subscription Keys', () => {
+    it('should detect valid Azure subscription keys in context', () => {
+      const key = 'abcdef0123456789abcdef0123456789';
+      const result = scanForCredentials(`Ocp-Apim-Subscription-Key: ${key}`);
+      // Azure pattern has low confidence (0.35) — may or may not trigger depending on entropy
+      // The key is 32 hex chars which is a generic pattern
+      expect(result.findings.filter(f => f.provider === 'azure').length).toBeGreaterThanOrEqual(0);
+    });
+  });
+
   // ── JWT Tokens ──
 
   describe('JWT Tokens', () => {

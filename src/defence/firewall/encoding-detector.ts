@@ -29,7 +29,7 @@ const RTL_OVERRIDE_PATTERN = /\u202E/g;
 // Unicode homoglyphs — Cyrillic characters that look like Latin
 const CYRILLIC_HOMOGLYPHS = /[\u0430\u0435\u043E\u0440\u0441\u0443\u0445\u0410\u0412\u0415\u041A\u041C\u041D\u041E\u0420\u0421\u0422\u0423\u0425]/g;
 
-function tryBase64Decode(str: string): string | null {
+function tryBase64DecodeSingle(str: string): string | null {
   try {
     const decoded = Buffer.from(str, 'base64').toString('utf-8');
     // Check if decoded result looks like readable text (mostly printable ASCII)
@@ -41,6 +41,23 @@ function tryBase64Decode(str: string): string | null {
   } catch {
     return null;
   }
+}
+
+function tryBase64Decode(str: string, maxDepth: number = 3): string | null {
+  const decoded = tryBase64DecodeSingle(str);
+  if (!decoded) return null;
+
+  if (maxDepth > 1) {
+    const innerMatch = decoded.match(BASE64_PATTERN);
+    if (innerMatch) {
+      const innerDecoded = tryBase64Decode(innerMatch[0], maxDepth - 1);
+      if (innerDecoded) {
+        return `${decoded} → ${innerDecoded}`;
+      }
+    }
+  }
+
+  return decoded;
 }
 
 function tryHexDecode(str: string): string | null {

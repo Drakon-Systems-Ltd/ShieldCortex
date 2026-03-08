@@ -9,8 +9,8 @@ import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const _currentFile = fileURLToPath(import.meta.url);
+const _currentDir = dirname(_currentFile);
 
 let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
@@ -226,7 +226,7 @@ export function initDatabase(dbPath?: string): Database.Database {
   runMigrations(db);
 
   // Run schema (uses IF NOT EXISTS, safe for existing tables and indexes)
-  const schemaPath = join(__dirname, 'schema.sql');
+  const schemaPath = join(_currentDir, 'schema.sql');
   if (existsSync(schemaPath)) {
     const schema = readFileSync(schemaPath, 'utf-8');
     db.exec(schema);
@@ -503,6 +503,12 @@ function runMigrations(database: Database.Database): void {
       );
       CREATE INDEX IF NOT EXISTS idx_firewall_rules_priority ON firewall_rules(priority);
       CREATE INDEX IF NOT EXISTS idx_firewall_rules_enabled ON firewall_rules(enabled);
+
+      CREATE TABLE IF NOT EXISTS rate_limits (
+        source_key TEXT PRIMARY KEY,
+        write_count INTEGER NOT NULL DEFAULT 1,
+        window_start_ms INTEGER NOT NULL
+      );
     `);
   } catch {
     // Tables may already exist - safe to ignore
@@ -620,7 +626,7 @@ export function repairDatabase(): { status: 'ok' | 'repaired' | 'recreated'; mes
   db.pragma('wal_autocheckpoint = 100');
 
   // Re-apply schema
-  const schemaPath = join(__dirname, 'schema.sql');
+  const schemaPath = join(_currentDir, 'schema.sql');
   if (existsSync(schemaPath)) {
     const schema = readFileSync(schemaPath, 'utf-8');
     db.exec(schema);
@@ -967,6 +973,12 @@ function getInlineSchema(): string {
     );
     CREATE INDEX IF NOT EXISTS idx_firewall_rules_priority ON firewall_rules(priority);
     CREATE INDEX IF NOT EXISTS idx_firewall_rules_enabled ON firewall_rules(enabled);
+
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      source_key TEXT PRIMARY KEY,
+      write_count INTEGER NOT NULL DEFAULT 1,
+      window_start_ms INTEGER NOT NULL
+    );
   `;
 }
 
