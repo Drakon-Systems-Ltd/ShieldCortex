@@ -4,61 +4,27 @@
  * Hooks into llm_input/llm_output for real-time defence scanning
  * and optional memory extraction. All operations are fire-and-forget.
  */
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { homedir } from "node:os";
+import { createOpenClawRuntime } from "../../../hooks/openclaw/cortex-memory/runtime.mjs";
 let _config = null;
+const runtime = createOpenClawRuntime({ logPrefix: "[shieldcortex]" });
 async function loadConfig() {
     if (_config)
         return _config;
-    try {
-        _config = JSON.parse(await fs.readFile(path.join(homedir(), ".shieldcortex", "config.json"), "utf-8"));
-    }
-    catch {
-        _config = {};
-    }
+    _config = await runtime.loadShieldConfig();
     return _config;
 }
 function isAutoMemoryEnabled(config) {
-    return config.openclawAutoMemory === true;
+    return runtime.isOpenClawAutoMemoryEnabled(config);
 }
 function isAutoMemoryDedupeEnabled(config) {
     return config.openclawAutoMemoryDedupe !== false;
 }
-// ==================== SERVER CMD ====================
-let _serverCmd = null;
-async function resolveServerCmd() {
-    if (_serverCmd)
-        return _serverCmd;
-    const config = await loadConfig();
-    if (config.binaryPath) {
-        try {
-            await fs.access(config.binaryPath);
-            return (_serverCmd = config.binaryPath);
-        }
-        catch { }
-    }
-    try {
-        const { execFileSync } = await import("node:child_process");
-        const bin = execFileSync("which", ["shieldcortex"], { encoding: "utf-8", timeout: 3000 }).trim();
-        if (bin)
-            return (_serverCmd = bin);
-    }
-    catch { }
-    return (_serverCmd = "npx -y shieldcortex");
-}
-// ==================== MCP HELPER ====================
 function callCortex(tool, args = {}) {
-    return resolveServerCmd().then(serverCmd => new Promise(resolve => {
-        const cmdArgs = ["mcporter", "call", "--stdio", serverCmd, tool];
-        for (const [k, v] of Object.entries(args))
-            cmdArgs.push(`${k}:${String(v).replace(/'/g, "''")}`);
-        execFile("npx", cmdArgs, { timeout: 15000, maxBuffer: 256 * 1024 }, (err, stdout) => {
-            resolve(err ? null : stdout?.trim() || null);
-        });
-    }));
+    return runtime.callCortex(tool, args);
 }
 // ==================== DEFENCE PIPELINE ====================
 let _pipeline = null;

@@ -53,6 +53,16 @@ import { scoreSource } from '../defence/trust/source-scorer.js';
 import { logAudit } from '../defence/audit/logger.js';
 import { dispatchWebhook } from '../events/webhooks.js';
 import { getCachedQueryEmbedding, findSimilarMemories } from './embedding.js';
+import {
+  buildSearchExplanation,
+  calculateLinkBoost,
+  calculateTagScore,
+  detectQueryCategory,
+  extractQueryTags,
+  SearchExecutionOptions,
+  SearchScoringContext,
+  vectorSearch,
+} from './search.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -951,229 +961,6 @@ export function updateDecayScores(): number {
   return updated;
 }
 
-/**
- * Detect the likely category a query is asking about
- */
-function detectQueryCategory(query: string): MemoryCategory | null {
-  const lower = query.toLowerCase();
-
-  if (/architect|design|structure|pattern|system|schema|model/.test(lower)) {
-    return 'architecture';
-  }
-  if (/error|bug|fix|issue|crash|exception|fail|problem/.test(lower)) {
-    return 'error';
-  }
-  if (/prefer|always|never|style|convention|like|want/.test(lower)) {
-    return 'preference';
-  }
-  if (/learn|discover|realiz|found\s+out|turns?\s+out/.test(lower)) {
-    return 'learning';
-  }
-  if (/todo|task|pending|need\s+to|should\s+do/.test(lower)) {
-    return 'todo';
-  }
-  if (/relation|depend|connect|link|reference/.test(lower)) {
-    return 'relationship';
-  }
-
-  return null;
-}
-
-/**
- * Calculate a boost for memories linked to high-salience memories
- */
-function calculateLinkBoost(memoryId: number, db: ReturnType<typeof getDatabase>): number {
-  try {
-    // Get linked memories and their salience
-    const linked = db.prepare(`
-      SELECT m.salience, ml.strength
-      FROM memory_links ml
-      JOIN memories m ON (m.id = ml.target_id OR m.id = ml.source_id)
-      WHERE (ml.source_id = ? OR ml.target_id = ?)
-        AND m.id != ?
-    `).all(memoryId, memoryId, memoryId) as { salience: number; strength: number }[];
-
-    if (linked.length === 0) return 0;
-
-    // Calculate weighted average of linked memory salience
-    const totalWeight = linked.reduce((sum, l) => sum + l.strength, 0);
-    if (totalWeight === 0) return 0;
-
-    const weightedSalience = linked.reduce(
-      (sum, l) => sum + l.salience * l.strength,
-      0
-    ) / totalWeight;
-
-    // Cap boost at 0.15
-    return Math.min(0.15, weightedSalience * 0.2);
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * Calculate partial tag match score
- */
-function calculateTagScore(queryTags: string[], memoryTags: string[]): number {
-  if (queryTags.length === 0 || memoryTags.length === 0) return 0;
-
-  // Count partial matches (substring matching)
-  let matches = 0;
-  for (const qt of queryTags) {
-    const qtLower = qt.toLowerCase();
-    if (memoryTags.some(mt => mt.toLowerCase().includes(qtLower) || qtLower.includes(mt.toLowerCase()))) {
-      matches++;
-    }
-  }
-
-  return (matches / queryTags.length) * 0.1;
-}
-
-/**
- * Extract potential tags from a query string
- */
-function extractQueryTags(query: string): string[] {
-  // Extract words that might be tags (tech terms, project-specific terms)
-  const words = query.toLowerCase().split(/\s+/);
-  return words.filter(w =>
-    w.length > 2 &&
-    /^[a-z][a-z0-9-]*$/.test(w) &&
-    !['the', 'and', 'for', 'with', 'how', 'what', 'when', 'where', 'why'].includes(w)
-  );
-}
-
-/**
- * Search memories by vector similarity
- * Returns memories sorted by cosine similarity to the query embedding
- */
-function vectorSearch(
-  queryEmbedding: Float32Array,
-  limit: number,
-  project?: string,
-  includeGlobal: boolean = true
-): Array<{ memory: Memory; similarity: number }> {
-  const db = getDatabase();
-
-  // Get memories with embeddings
-  let query = `
-    SELECT * FROM memories
-    WHERE embedding IS NOT NULL
-  `;
-  const params: unknown[] = [];
-
-  if (project && includeGlobal) {
-    query += ` AND (project = ? OR scope = 'global')`;
-    params.push(project);
-  } else if (project) {
-    query += ` AND project = ?`;
-    params.push(project);
-  }
-
-  const rows = db.prepare(query).all(...params) as Record<string, unknown>[];
-
-  // Calculate similarities
-  const results = rows
-    .map(row => {
-      const embeddingBuffer = row.embedding as Buffer;
-      const embedding = new Float32Array(embeddingBuffer.buffer, embeddingBuffer.byteOffset, embeddingBuffer.length / 4);
-      const similarity = cosineSimilarity(queryEmbedding, embedding);
-      return {
-        memory: rowToMemory(row),
-        similarity,
-      };
-    })
-    .filter(r => r.similarity > 0.3) // Threshold for relevance
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, limit);
-
-  return results;
-}
-
-interface SearchExecutionOptions {
-  enableSideEffects: boolean;
-  includeExplanation: boolean;
-}
-
-interface SearchScoringContext {
-  db: ReturnType<typeof getDatabase>;
-  config: MemoryConfig;
-  detectedCategory: MemoryCategory | null;
-  queryTags: string[];
-  vectorResults: Map<number, number>;
-  query: string;
-}
-
-function buildSearchExplanation(
-  memory: Memory,
-  context: SearchScoringContext,
-  values: {
-    ftsScore: number;
-    vectorSimilarity: number;
-    vectorBoost: number;
-    decayedScore: number;
-    priorityBoost: number;
-    recencyBoost: number;
-    categoryBoost: number;
-    linkBoost: number;
-    tagBoost: number;
-    activationBoost: number;
-    finalScore: number;
-  },
-): SearchResult['explanation'] {
-  const matchedTags = context.queryTags.filter((queryTag) =>
-    memory.tags.some((memoryTag) => {
-      const lowerMemoryTag = memoryTag.toLowerCase();
-      return lowerMemoryTag.includes(queryTag) || queryTag.includes(lowerMemoryTag);
-    }),
-  );
-
-  const reasons: string[] = [];
-  if (values.vectorSimilarity > 0) {
-    reasons.push(`Semantic similarity ${(values.vectorSimilarity * 100).toFixed(0)}%`);
-  }
-  if (values.ftsScore > 0.3) {
-    reasons.push('Strong keyword match');
-  }
-  if (values.categoryBoost > 0 && context.detectedCategory) {
-    reasons.push(`Matches ${context.detectedCategory} category intent`);
-  }
-  if (matchedTags.length > 0) {
-    reasons.push(`Shared tags: ${matchedTags.slice(0, 3).join(', ')}`);
-  }
-  if (values.recencyBoost > 0) {
-    reasons.push('Recently accessed');
-  }
-  if (values.linkBoost > 0) {
-    reasons.push('Connected to related memories');
-  }
-  if (values.activationBoost > 0) {
-    reasons.push('Activated by recent recall activity');
-  }
-  if (reasons.length === 0) {
-    reasons.push('Ranked by salience and base recall heuristics');
-  }
-
-  return {
-    query: context.query,
-    reasons,
-    breakdown: {
-      ftsScore: values.ftsScore,
-      vectorSimilarity: values.vectorSimilarity,
-      vectorBoost: values.vectorBoost,
-      decayedScore: values.decayedScore,
-      priorityBoost: values.priorityBoost,
-      recencyBoost: values.recencyBoost,
-      categoryBoost: values.categoryBoost,
-      linkBoost: values.linkBoost,
-      tagBoost: values.tagBoost,
-      activationBoost: values.activationBoost,
-      finalScore: values.finalScore,
-      matchedTags,
-      matchedCategory: values.categoryBoost > 0 ? context.detectedCategory : null,
-    },
-  };
-}
-
 async function searchMemoriesInternal(
   options: SearchOptions,
   config: MemoryConfig,
@@ -1198,7 +985,7 @@ async function searchMemoriesInternal(
       if (!queryEmbedding) {
         throw new Error('query embedding unavailable');
       }
-      const vectorHits = vectorSearch(queryEmbedding, limit * 2, options.project, includeGlobal);
+      const vectorHits = vectorSearch(db, rowToMemory, queryEmbedding, limit * 2, options.project, includeGlobal);
       for (const hit of vectorHits) {
         vectorResults.set(hit.memory.id, hit.similarity);
       }

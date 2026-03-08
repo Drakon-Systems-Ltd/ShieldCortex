@@ -5,12 +5,12 @@
  * and optional memory extraction. All operations are fire-and-forget.
  */
 
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
+import { createOpenClawRuntime } from "../../hooks/openclaw/cortex-memory/runtime.mjs";
 
 // ==================== TYPES (inline to avoid import issues) ====================
 
@@ -46,6 +46,7 @@ interface SCConfig {
 }
 let _config: SCConfig | null = null;
 let _version = "0.0.0";
+const runtime = createOpenClawRuntime({ logPrefix: "[shieldcortex]" });
 try {
   const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf-8"));
   _version = pkg.version;
@@ -53,76 +54,20 @@ try {
 
 async function loadConfig(): Promise<SCConfig> {
   if (_config) return _config;
-  try {
-    _config = JSON.parse(await fs.readFile(path.join(homedir(), ".shieldcortex", "config.json"), "utf-8"));
-  } catch { _config = {}; }
-  return _config!;
+  _config = await runtime.loadShieldConfig() as SCConfig;
+  return _config;
 }
 
 function isAutoMemoryEnabled(config: SCConfig): boolean {
-  // Default OFF — OpenClaw has its own memory system. User must explicitly opt in.
-  return config.openclawAutoMemory === true;
+  return runtime.isOpenClawAutoMemoryEnabled(config);
 }
 
 function isAutoMemoryDedupeEnabled(config: SCConfig): boolean {
   return config.openclawAutoMemoryDedupe !== false;
 }
 
-// ==================== SERVER CMD ====================
-
-let _serverCmd: string | null = null;
-async function resolveServerCmd(): Promise<string> {
-  if (_serverCmd) return _serverCmd;
-  const config = await loadConfig();
-  if (config.binaryPath) { try { await fs.access(config.binaryPath); return (_serverCmd = config.binaryPath); } catch {} }
-  try {
-    const { execFileSync } = await import("node:child_process");
-    const bin = execFileSync("which", ["shieldcortex"], { encoding: "utf-8", timeout: 3000 }).trim();
-    if (bin) return (_serverCmd = bin);
-  } catch {}
-  return (_serverCmd = "npx -y shieldcortex");
-}
-
-// ==================== MCP HELPER ====================
-
-let _lastErrorType: string | null = null;
-
-function classifyCallError(err: Error & { code?: string; killed?: boolean; signal?: string }): string {
-  if (err.killed || err.code === "ETIMEDOUT" || err.signal === "SIGTERM") return "timeout";
-  if (/ENOENT|not found|command not found/i.test(err.message)) return "not-found";
-  if (/mcporter/i.test(err.message)) return "mcporter";
-  return "unknown";
-}
-
 function callCortex(tool: string, args: Record<string, string> = {}): Promise<string | null> {
-  return resolveServerCmd().then(serverCmd => new Promise(resolve => {
-    const cmdArgs = ["mcporter", "call", "--stdio", serverCmd, tool];
-    for (const [k, v] of Object.entries(args)) cmdArgs.push(`${k}:${String(v).replace(/'/g, "''")}`);
-    execFile("npx", cmdArgs, { timeout: 15000, maxBuffer: 256 * 1024 }, (err, stdout) => {
-      if (err) {
-        const errorType = classifyCallError(err as any);
-        if (errorType !== _lastErrorType) {
-          _lastErrorType = errorType;
-          switch (errorType) {
-            case "timeout":
-              console.warn("[shieldcortex] ShieldCortex call timed out (15s). Memory may be under heavy load.");
-              break;
-            case "not-found":
-              console.warn("[shieldcortex] ShieldCortex binary not found. Run: npm install -g shieldcortex");
-              break;
-            case "mcporter":
-              console.warn("[shieldcortex] mcporter failed to reach ShieldCortex MCP server. Is it configured?");
-              break;
-            default:
-              console.warn(`[shieldcortex] ShieldCortex call failed: ${err.message}`);
-          }
-        }
-        resolve(null);
-        return;
-      }
-      resolve(stdout?.trim() || null);
-    });
-  }));
+  return runtime.callCortex(tool, args);
 }
 
 // ==================== DEFENCE PIPELINE ====================

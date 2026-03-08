@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "Persistent brain for AI agents. Knowledge graphs, memory decay, contradiction detection, Iron Dome behaviour protection — plus the only defence pipeline that stops memory poisoning. Works with Claude Code, OpenClaw, LangChain, and any MCP agent.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,7 +39,7 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
     "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/",
-    "build:dashboard": "cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true)",
+    "build:dashboard": "cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true) && cd .. && node scripts/prune-dashboard-standalone.mjs",
     "build:all": "npm run build && npm run build:dashboard",
     "start": "node dist/index.js",
     "start:api": "node dist/index.js --mode api",
@@ -123,8 +123,12 @@
     "dist",
     "hooks/openclaw",
     "plugins/openclaw/dist",
-    "scripts/*.mjs",
-    "scripts/*.sh",
+    "scripts/postinstall.mjs",
+    "scripts/pre-compact-hook.mjs",
+    "scripts/run-jest.mjs",
+    "scripts/session-end-hook.mjs",
+    "scripts/session-start-hook.mjs",
+    "scripts/stop-hook.mjs",
     "dashboard/.next/standalone"
   ]
 }

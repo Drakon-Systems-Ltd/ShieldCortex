@@ -6,158 +6,22 @@
  * - Context injection on agent bootstrap
  * - Keyword-triggered memory saves
  */
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { createOpenClawRuntime } from "./runtime.mjs";
 
 // ==================== SERVER COMMAND RESOLUTION ====================
 
-let _shieldConfig = null;
 let _autoMemoryNoticeShown = false;
-
-async function loadShieldConfig() {
-  if (_shieldConfig) return _shieldConfig;
-
-  try {
-    const configPath = path.join(homedir(), ".shieldcortex", "config.json");
-    _shieldConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
-  } catch {
-    _shieldConfig = {};
-  }
-
-  return _shieldConfig;
-}
+const runtime = createOpenClawRuntime({ logPrefix: "[cortex-memory]" });
+const loadShieldConfig = runtime.loadShieldConfig;
+const callCortex = runtime.callCortex;
 
 async function isOpenClawAutoMemoryEnabled() {
   const config = await loadShieldConfig();
-  // Default OFF — OpenClaw has its own memory system. User must explicitly opt in.
-  return config?.openclawAutoMemory === true;
-}
-
-/**
- * Resolve the fastest way to invoke shieldcortex:
- * 1. ~/.shieldcortex/config.json "binaryPath" override
- * 2. Global install detected via `which shieldcortex`
- * 3. Fallback to `npx -y shieldcortex` (slow on ARM64)
- */
-let _resolvedServerCmd = null;
-
-async function resolveServerCmd() {
-  if (_resolvedServerCmd) return _resolvedServerCmd;
-
-  // 1. Check config for explicit binaryPath
-  try {
-    const config = await loadShieldConfig();
-    if (config?.binaryPath) {
-      await fs.access(config.binaryPath);
-      _resolvedServerCmd = config.binaryPath;
-      console.log(`[cortex-memory] Using configured binary: ${config.binaryPath}`);
-      return _resolvedServerCmd;
-    }
-  } catch { /* Config not found, no binaryPath, or path invalid */ }
-
-  // 2. Try to find global install via `which`
-  try {
-    const { execFileSync } = await import("node:child_process");
-    const bin = execFileSync("which", ["shieldcortex"], {
-      encoding: "utf-8",
-      timeout: 3000,
-    }).trim();
-    if (bin) {
-      _resolvedServerCmd = bin;
-      console.log(`[cortex-memory] Using global install: ${bin}`);
-      return _resolvedServerCmd;
-    }
-  } catch { /* Not in PATH */ }
-
-  // 3. Fall back to npx (slow but always works)
-  _resolvedServerCmd = "npx -y shieldcortex";
-  console.log("[cortex-memory] Falling back to npx -y shieldcortex (slow path)");
-  return _resolvedServerCmd;
-}
-
-// ==================== CORTEX MCP HELPER ====================
-
-let _lastCallErrorType = null;
-
-function classifyCallError(err) {
-  if (err.killed || err.code === "ETIMEDOUT" || err.signal === "SIGTERM") return "timeout";
-  if (/ENOENT|not found|command not found/i.test(err.message || "")) return "not-found";
-  if (/mcporter/i.test(err.message || "")) return "mcporter";
-  return "unknown";
-}
-
-/**
- * Call a ShieldCortex MCP tool via mcporter
- * @param {string} tool - Tool name (e.g., "remember", "recall", "get_context")
- * @param {Record<string, string>} args - Tool arguments as key:value pairs
- * @param {object} options - Options { retries: number, timeout: number }
- * @returns {Promise<string|null>} Raw stdout or null on error
- */
-async function callCortex(tool, args = {}, options = { retries: 1, timeout: 15000 }) {
-  const serverCmd = await resolveServerCmd();
-
-  return new Promise((resolve) => {
-    const cmdArgs = [
-      "mcporter", "call", "--stdio",
-      serverCmd,
-      tool,
-    ];
-    for (const [key, value] of Object.entries(args)) {
-      // Escape single quotes by doubling them (FTS5-safe)
-      const safe = String(value).replace(/'/g, "''");
-      cmdArgs.push(`${key}:${safe}`);
-    }
-
-    let attempts = 0;
-    const maxAttempts = (options.retries || 0) + 1;
-
-    function attempt() {
-      attempts++;
-      execFile("npx", cmdArgs, {
-        timeout: options.timeout || 15000,
-        maxBuffer: 1024 * 256,
-      }, (err, stdout) => {
-        if (err) {
-          // Distinguish timeout from other errors
-          const isTimeout = err.killed || err.code === "ETIMEDOUT" || err.signal === "SIGTERM";
-          const errorType = isTimeout ? "TIMEOUT" : "ERROR";
-
-          if (attempts < maxAttempts) {
-            console.warn(`[cortex-memory] ${errorType} on ${tool} (attempt ${attempts}/${maxAttempts}), retrying...`);
-            setTimeout(attempt, 1000); // 1s delay before retry
-            return;
-          }
-
-          // One-time categorised warning per error type (prevents spam)
-          const category = classifyCallError(err);
-          if (category !== _lastCallErrorType) {
-            _lastCallErrorType = category;
-            switch (category) {
-              case "timeout":
-                console.warn("[cortex-memory] ShieldCortex call timed out (15s). Memory may be under heavy load.");
-                break;
-              case "not-found":
-                console.warn("[cortex-memory] ShieldCortex binary not found. Run: npm install -g shieldcortex");
-                break;
-              case "mcporter":
-                console.warn("[cortex-memory] mcporter failed to reach ShieldCortex MCP server. Is it configured?");
-                break;
-              default:
-                console.warn(`[cortex-memory] ShieldCortex call failed: ${err.message}`);
-            }
-          }
-          resolve(null);
-          return;
-        }
-        resolve(stdout?.trim() || null);
-      });
-    }
-
-    attempt();
-  });
+  return runtime.isOpenClawAutoMemoryEnabled(config);
 }
 
 // ==================== NOVELTY / DEDUPE GATE ====================

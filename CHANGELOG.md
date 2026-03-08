@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.4] - 2026-03-08
+
+### Changed
+
+- Refactored the visualization API server into focused route modules for memories, recall, graph, incidents, admin, and system endpoints
+- Extracted memory search/ranking helpers out of the main store to reduce coupling in the memory core
+- Unified the OpenClaw hook and plugin around a shared runtime helper for config loading and Cortex command execution
+- Pruned dashboard standalone publish output further to reduce npm package size
+- Jest runs now use a valid localStorage backing file and suppress only the ESM experimental warning instead of leaking runtime noise
+
+### Fixed
+
+- Full `npm test` output is now clean of the previous localStorage-path and VM Modules warning spam
+- Quarantine tests no longer emit expected maintenance logs during normal test runs
+
 ## [3.0.1] - 2026-03-08
 
 ### Fixed

@@ -2,15 +2,19 @@
  * Quarantine capacity and expiry tests
  */
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { initDatabase, closeDatabase, getDatabase } from '../../database/init.js';
 
 describe('Quarantine Auto-Expire', () => {
+  let consoleErrorSpy: ReturnType<typeof jest.spyOn>;
+
   beforeEach(() => {
     initDatabase(':memory:');
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleErrorSpy.mockRestore();
     closeDatabase();
   });
 
@@ -54,11 +58,15 @@ describe('Quarantine Auto-Expire', () => {
 });
 
 describe('Quarantine Pruning', () => {
+  let consoleErrorSpy: ReturnType<typeof jest.spyOn>;
+
   beforeEach(() => {
     initDatabase(':memory:');
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleErrorSpy.mockRestore();
     closeDatabase();
   });
 
