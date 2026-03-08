@@ -242,6 +242,32 @@ describe('MCP Tool Integration', () => {
     });
   });
 
+  // ── FTS5 Apostrophe Handling ──
+
+  describe('FTS5 apostrophe handling', () => {
+    it('should store and find memories containing apostrophes via FTS5', () => {
+      addMemory({
+        title: "API auth pattern",
+        content: "Don't use basic auth. It's insecure. We've switched to OAuth.",
+        category: 'architecture',
+        project: TEST_PROJECT,
+      });
+
+      // FTS5 porter tokenizer splits "don't" into "don" + "t"
+      // Our escapeFts5Query should handle this correctly
+      const db = getDatabase();
+      const results = db.prepare(`
+        SELECT m.* FROM memories m
+        JOIN memories_fts fts ON m.id = fts.rowid
+        WHERE memories_fts MATCH ?
+        AND m.project = ?
+      `).all('auth', TEST_PROJECT) as { title: string }[];
+
+      expect(results.length).toBe(1);
+      expect(results[0].title).toBe("API auth pattern");
+    });
+  });
+
   // ── Round Trip ──
 
   describe('round trip', () => {

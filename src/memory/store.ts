@@ -111,6 +111,18 @@ function escapeFts5Query(query: string): string {
     .split(/\s+/)
     .filter(term => term.length > 0)
     .map(term => {
+      // Replace apostrophes with spaces — FTS5 porter unicode61 tokenizer treats
+      // apostrophes as word separators during indexing ("don't" → "don" + "t").
+      // We must split the same way so queries match the indexed tokens.
+      if (term.includes("'")) {
+        const parts = term.split("'").filter(p => p.length > 0);
+        // Recursively escape each part and join with spaces
+        return parts.map(p => {
+          if (/[^a-zA-Z0-9_]/.test(p)) return `"${p.replace(/"/g, '""')}"`;
+          return p;
+        }).join(' ');
+      }
+
       // FTS5 boolean operators - quote them to search literally
       const upperTerm = term.toUpperCase();
       if (upperTerm === 'AND' || upperTerm === 'OR' || upperTerm === 'NOT') {
@@ -124,6 +136,7 @@ function escapeFts5Query(query: string): string {
       }
       return term;
     })
+    .filter(Boolean)
     .join(' ');
 }
 
