@@ -24,6 +24,7 @@ import { AgentsView } from '@/components/agents/AgentsView';
 import { SkillsView } from '@/components/skills/SkillsView';
 import { IronDomeView } from '@/components/dome/IronDomeView';
 import MemoryTimeline from '@/components/timeline/MemoryTimeline';
+import { OverviewView } from '@/components/overview/OverviewView';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ShortcutsHelp } from '@/components/ui/ShortcutsHelp';
@@ -61,8 +62,6 @@ export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
-  const [typeFilter, setTypeFilter] = useState<string | undefined>(undefined);
-  const [categoryFilter, setCategoryFilter] = useState<string | undefined>(undefined);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
 
@@ -70,7 +69,21 @@ export default function DashboardPage() {
   const debouncedSearch = useDebouncedValue(searchQuery, 300);
 
   // Zustand store
-  const { viewMode, setViewMode, selectedMemory, setSelectedMemory, selectedAuditEntry, setSelectedAuditEntry, projectFilter, setProjectFilter, addEvent } = useDashboardStore();
+  const {
+    viewMode,
+    setViewMode,
+    selectedMemory,
+    setSelectedMemory,
+    selectedAuditEntry,
+    setSelectedAuditEntry,
+    projectFilter,
+    setProjectFilter,
+    typeFilter,
+    setTypeFilter,
+    categoryFilter,
+    setCategoryFilter,
+    addEvent,
+  } = useDashboardStore();
 
   // Keyboard shortcuts
   const handleFocusSearch = useCallback(() => {
@@ -133,8 +146,8 @@ export default function DashboardPage() {
     query: debouncedSearch || undefined,
     mode: debouncedSearch ? 'search' : 'recent',
     project: projectFilter || undefined,
-    type: typeFilter,
-    category: categoryFilter,
+    type: typeFilter || undefined,
+    category: categoryFilter || undefined,
   });
   const { data: stats, isLoading: _statsLoading } = useStats(projectFilter || undefined);
   const { data: links = [] } = useMemoryLinks(projectFilter || undefined);
@@ -195,7 +208,7 @@ export default function DashboardPage() {
   };
 
   // Views that need memory data vs standalone views
-  const isSecurityView = viewMode === 'shield' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents' || viewMode === 'skills' || viewMode === 'dome';
+  const isSecurityView = viewMode === 'overview' || viewMode === 'shield' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents' || viewMode === 'skills' || viewMode === 'dome';
 
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
@@ -328,7 +341,7 @@ export default function DashboardPage() {
             {['short_term', 'long_term', 'episodic'].map((type) => (
               <button
                 key={type}
-                onClick={() => setTypeFilter(typeFilter === type ? undefined : type)}
+                onClick={() => setTypeFilter(typeFilter === type ? null : type)}
                 className={`px-2 py-1 text-xs rounded-full transition-colors ${
                   typeFilter === type
                     ? 'bg-blue-600 text-white'
@@ -348,7 +361,7 @@ export default function DashboardPage() {
             {['architecture', 'pattern', 'error', 'learning', 'preference', 'context'].map((cat) => (
               <button
                 key={cat}
-                onClick={() => setCategoryFilter(categoryFilter === cat ? undefined : cat)}
+                onClick={() => setCategoryFilter(categoryFilter === cat ? null : cat)}
                 className={`px-2 py-1 text-xs rounded-full transition-colors ${
                   categoryFilter === cat
                     ? 'bg-purple-600 text-white'
@@ -366,8 +379,8 @@ export default function DashboardPage() {
               <div className="w-px h-6 bg-slate-700" />
               <button
                 onClick={() => {
-                  setTypeFilter(undefined);
-                  setCategoryFilter(undefined);
+                  setTypeFilter(null);
+                  setCategoryFilter(null);
                 }}
                 className="px-2 py-1 text-xs text-red-400 hover:text-red-300"
               >
@@ -392,6 +405,12 @@ export default function DashboardPage() {
             transition={{ duration: 0.15 }}
             className="flex-1 relative overflow-hidden"
           >
+            {viewMode === 'overview' && (
+              <OverviewView
+                stats={stats}
+                selectedProject={projectFilter}
+              />
+            )}
             {viewMode === 'shield' && <ShieldOverview />}
             {viewMode === 'audit' && <AuditLogView />}
             {viewMode === 'quarantine' && <QuarantineView />}

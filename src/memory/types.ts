@@ -64,6 +64,29 @@ export interface SearchResult {
   memory: Memory;
   relevanceScore: number;   // Combined search + salience + recency
   contradictions?: { memoryId: number; title: string; score: number }[];
+  explanation?: SearchExplanation;
+}
+
+export interface SearchScoreBreakdown {
+  ftsScore: number;
+  vectorSimilarity: number;
+  vectorBoost: number;
+  decayedScore: number;
+  priorityBoost: number;
+  recencyBoost: number;
+  categoryBoost: number;
+  linkBoost: number;
+  tagBoost: number;
+  activationBoost: number;
+  finalScore: number;
+  matchedTags: string[];
+  matchedCategory: string | null;
+}
+
+export interface SearchExplanation {
+  query: string;
+  reasons: string[];
+  breakdown: SearchScoreBreakdown;
 }
 
 export interface ConsolidationResult {

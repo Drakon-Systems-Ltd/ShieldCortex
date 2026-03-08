@@ -44,11 +44,13 @@ ShieldCortex replaces all of that with one install command.
 Your agent doesn't just store text — it *understands* it.
 
 - 🔍 **Semantic search** — finds memories by meaning using FTS5 + vector embeddings (all-MiniLM-L6-v2), not just keyword matching
+- 🧭 **Recall explanations** — inspect why a memory ranked, including keyword, semantic, recency, tag, and link contributions
 - 🕸️ **Knowledge graph** — entities and relationships extracted automatically from every memory, navigable in the dashboard
 - ⏳ **Natural decay** — old, unaccessed memories fade over time; important ones persist — just like human memory
 - ⚡ **Contradiction detection** — new memories that conflict with existing ones get flagged before they cause confusion
 - 🧹 **Auto-consolidation** — duplicate and overlapping memories merge automatically, keeping your memory store clean
 - 📁 **Project isolation** — memories scoped per project by default, with cross-project queries when you need them
+- 🎞️ **Incident replay** — reconstruct memory and defence timelines from audit, quarantine, and retained event history
 - 🔔 **Webhooks** — POST notifications on memory events, HMAC-SHA256 signed
 - 📅 **Expiry rules** — auto-delete TODOs after 30 days, keep architecture decisions forever
 
@@ -92,6 +94,12 @@ shieldcortex doctor
 ✅ Memories: 245 total (12 STM, 233 LTM)
 ✅ Hooks: 3/3 installed
 ✅ API server: running (port 3001)
+```
+
+Fastest guided setup:
+
+```bash
+shieldcortex quickstart
 ```
 
 ### Python
@@ -228,6 +236,8 @@ Built-in visual dashboard with keyboard shortcuts throughout — press <kbd>?</k
 shieldcortex dashboard
 ```
 
+**Trust Console** — the new default home view. See urgent issues, knowledge coverage, cleanup pressure, and the highest-value next actions in one place.
+
 **Shield Overview** — scan counts, block rates, quarantine queue, threat timeline, and memory health score.
 
 ![Shield Overview](docs/images/dashboard-shield.png)
@@ -237,6 +247,11 @@ shieldcortex dashboard
 **Timeline** — every memory, chronologically. Filter by category, type, or search. Edit memories inline.
 
 **Audit Log** — full forensic log of every memory operation with trust scores and threat reasons.
+
+**New backend APIs for dashboard workflows**
+
+- `GET /api/recall/explain` — explain why memories ranked for a query without mutating salience or links
+- `GET /api/v1/incidents/replay` — reconstruct a best-effort incident timeline from audit, quarantine, and retained event data
 
 ![Audit Log](docs/images/dashboard-audit.png)
 
@@ -265,6 +280,7 @@ shieldcortex dashboard
 
 ```bash
 shieldcortex install              # Set up MCP server + hooks
+shieldcortex quickstart           # Detect the fastest setup path
 shieldcortex doctor               # Health check your installation
 shieldcortex status               # Database and hook status
 shieldcortex scan "text"          # Scan content for threats

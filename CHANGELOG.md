@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0] - 2026-03-08
+
+### Added
+
+- **Trust Console dashboard home** — new default dashboard landing view with urgent actions, memory health, coverage, and free/pro workflow cards
+- **Recall explanations API** — `GET /api/recall/explain` returns score breakdowns and ranking reasons without mutating recall state
+- **Incident replay API** — `GET /api/v1/incidents/replay` reconstructs a best-effort timeline from defence audit, quarantine, and retained events
+- **CLI quickstart** — `shieldcortex quickstart` detects the fastest install/setup path for Claude Code, OpenClaw, Copilot, or security-only usage
+- **Targeted regression coverage** for read-only recall explanations and incident replay query behavior
+
+### Changed
+
+- Query embeddings are now cached in-process to reduce repeated recall latency
+- Recall fallback reuses existing search results instead of duplicating FTS work
+- Test runner now uses a controlled wrapper script for more stable local and CI execution
+- Brain worker timers are cleaned up more defensively on shutdown
+
+### Fixed
+
+- Read-only explanation queries no longer reinforce memories, create co-search links, or enrich content as a side effect
+- Jest test runs no longer emit the prior localstorage-path warning and avoid the previous lingering timer/process cleanup issue
+
 ## [2.20.0] - 2026-03-07
 
 ### Added

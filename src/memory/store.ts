@@ -52,6 +52,7 @@ import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
 import { logAudit } from '../defence/audit/logger.js';
 import { dispatchWebhook } from '../events/webhooks.js';
+import { getCachedQueryEmbedding, findSimilarMemories } from './embedding.js';
 
 // Anti-bloat: Maximum content size per memory (10KB)
 const MAX_CONTENT_SIZE = 10 * 1024;
@@ -180,39 +181,48 @@ function detectGlobalPattern(content: string, category: MemoryCategory, tags: st
 
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX = 20; // max writes per window per source
-
-const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
-let rateLimitCheckCount = 0;
-
-function pruneRateLimitMap(): void {
-  const now = Date.now();
-  for (const [key, entry] of rateLimitMap) {
-    if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
-      rateLimitMap.delete(key);
-    }
-  }
-}
+let rateLimitPruneCount = 0;
 
 function checkRateLimit(source: DefenceSource): boolean {
-  // Prune stale entries every 50 checks
-  if (++rateLimitCheckCount % 50 === 0) {
-    pruneRateLimitMap();
-  }
-
+  const db = getDatabase();
   const key = `${source.type}:${source.identifier}`;
   const now = Date.now();
-  const entry = rateLimitMap.get(key);
 
-  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    rateLimitMap.set(key, { count: 1, windowStart: now });
+  // Prune expired entries every 50 checks
+  if (++rateLimitPruneCount % 50 === 0) {
+    try {
+      db.prepare('DELETE FROM rate_limits WHERE ? - window_start_ms > ?')
+        .run(now, RATE_LIMIT_WINDOW_MS * 2);
+    } catch {
+      // Table may not exist yet in legacy DBs — fall through to allow
+    }
+  }
+
+  try {
+    const row = db.prepare('SELECT write_count, window_start_ms FROM rate_limits WHERE source_key = ?')
+      .get(key) as { write_count: number; window_start_ms: number } | undefined;
+
+    if (!row || now - row.window_start_ms > RATE_LIMIT_WINDOW_MS) {
+      // New window — upsert
+      db.prepare(
+        'INSERT INTO rate_limits (source_key, write_count, window_start_ms) VALUES (?, 1, ?) ON CONFLICT(source_key) DO UPDATE SET write_count = 1, window_start_ms = ?'
+      ).run(key, now, now);
+      return true;
+    }
+
+    // Increment counter
+    const newCount = row.write_count + 1;
+    db.prepare('UPDATE rate_limits SET write_count = ? WHERE source_key = ?')
+      .run(newCount, key);
+
+    if (newCount > RATE_LIMIT_MAX) {
+      return false; // rate limited
+    }
+    return true;
+  } catch {
+    // If rate_limits table doesn't exist (legacy DB), allow the write
     return true;
   }
-
-  entry.count++;
-  if (entry.count > RATE_LIMIT_MAX) {
-    return false; // rate limited
-  }
-  return true;
 }
 
 // ── Read-Time Access Control ──
@@ -498,7 +508,13 @@ export function addMemory(
       }
     })
     .catch(e => {
-      if (e instanceof Error && e.message.includes('Embedding worker unavailable')) {
+      if (
+        e instanceof Error &&
+        (
+          e.message.includes('Embedding worker unavailable') ||
+          e.message.includes('Embeddings disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1')
+        )
+      ) {
         return;
       }
       console.error('[shieldcortex] Failed to generate embedding:', e);
@@ -1060,16 +1076,96 @@ function vectorSearch(
   return results;
 }
 
-/**
- * Search memories using full-text search, vector similarity, and filters
- * Now uses hybrid search combining FTS5 keywords with semantic vector matching
- */
-let searchCount = 0;
+interface SearchExecutionOptions {
+  enableSideEffects: boolean;
+  includeExplanation: boolean;
+}
 
-export async function searchMemories(
+interface SearchScoringContext {
+  db: ReturnType<typeof getDatabase>;
+  config: MemoryConfig;
+  detectedCategory: MemoryCategory | null;
+  queryTags: string[];
+  vectorResults: Map<number, number>;
+  query: string;
+}
+
+function buildSearchExplanation(
+  memory: Memory,
+  context: SearchScoringContext,
+  values: {
+    ftsScore: number;
+    vectorSimilarity: number;
+    vectorBoost: number;
+    decayedScore: number;
+    priorityBoost: number;
+    recencyBoost: number;
+    categoryBoost: number;
+    linkBoost: number;
+    tagBoost: number;
+    activationBoost: number;
+    finalScore: number;
+  },
+): SearchResult['explanation'] {
+  const matchedTags = context.queryTags.filter((queryTag) =>
+    memory.tags.some((memoryTag) => {
+      const lowerMemoryTag = memoryTag.toLowerCase();
+      return lowerMemoryTag.includes(queryTag) || queryTag.includes(lowerMemoryTag);
+    }),
+  );
+
+  const reasons: string[] = [];
+  if (values.vectorSimilarity > 0) {
+    reasons.push(`Semantic similarity ${(values.vectorSimilarity * 100).toFixed(0)}%`);
+  }
+  if (values.ftsScore > 0.3) {
+    reasons.push('Strong keyword match');
+  }
+  if (values.categoryBoost > 0 && context.detectedCategory) {
+    reasons.push(`Matches ${context.detectedCategory} category intent`);
+  }
+  if (matchedTags.length > 0) {
+    reasons.push(`Shared tags: ${matchedTags.slice(0, 3).join(', ')}`);
+  }
+  if (values.recencyBoost > 0) {
+    reasons.push('Recently accessed');
+  }
+  if (values.linkBoost > 0) {
+    reasons.push('Connected to related memories');
+  }
+  if (values.activationBoost > 0) {
+    reasons.push('Activated by recent recall activity');
+  }
+  if (reasons.length === 0) {
+    reasons.push('Ranked by salience and base recall heuristics');
+  }
+
+  return {
+    query: context.query,
+    reasons,
+    breakdown: {
+      ftsScore: values.ftsScore,
+      vectorSimilarity: values.vectorSimilarity,
+      vectorBoost: values.vectorBoost,
+      decayedScore: values.decayedScore,
+      priorityBoost: values.priorityBoost,
+      recencyBoost: values.recencyBoost,
+      categoryBoost: values.categoryBoost,
+      linkBoost: values.linkBoost,
+      tagBoost: values.tagBoost,
+      activationBoost: values.activationBoost,
+      finalScore: values.finalScore,
+      matchedTags,
+      matchedCategory: values.categoryBoost > 0 ? context.detectedCategory : null,
+    },
+  };
+}
+
+async function searchMemoriesInternal(
   options: SearchOptions,
-  config: MemoryConfig = DEFAULT_CONFIG,
-  source?: DefenceSource,
+  config: MemoryConfig,
+  source: DefenceSource | undefined,
+  execution: SearchExecutionOptions,
 ): Promise<SearchResult[]> {
   if (++searchCount % 100 === 0) {
     pruneActivationCache();
@@ -1078,23 +1174,25 @@ export async function searchMemories(
   const limit = options.limit || 20;
   const includeGlobal = options.includeGlobal ?? true;
 
-  // Detect query category for boosting
   const detectedCategory = options.query ? detectQueryCategory(options.query) : null;
   const queryTags = options.query ? extractQueryTags(options.query) : [];
 
-  // SEMANTIC SEARCH: Generate query embedding (may fail on first call while model loads)
   let queryEmbedding: Float32Array | null = null;
-  let vectorResults: Map<number, number> = new Map(); // memoryId -> similarity
+  const vectorResults: Map<number, number> = new Map();
   if (options.query && options.query.trim()) {
     try {
-      queryEmbedding = await generateEmbedding(options.query);
+      queryEmbedding = await getCachedQueryEmbedding(options.query);
+      if (!queryEmbedding) {
+        throw new Error('query embedding unavailable');
+      }
       const vectorHits = vectorSearch(queryEmbedding, limit * 2, options.project, includeGlobal);
       for (const hit of vectorHits) {
         vectorResults.set(hit.memory.id, hit.similarity);
       }
-    } catch (e) {
-      // Vector search unavailable - fall back to FTS only
-      console.log('[shieldcortex] Vector search unavailable, using FTS only');
+    } catch {
+      if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
+        console.log('[shieldcortex] Vector search unavailable, using FTS only');
+      }
     }
   }
 
@@ -1102,8 +1200,6 @@ export async function searchMemories(
   const params: unknown[] = [];
 
   if (options.query && options.query.trim()) {
-    // Use FTS search - escape query to prevent FTS5 syntax errors
-    // FTS5 interprets "word-word" as "column:value", so we quote terms
     const escapedQuery = escapeFts5Query(options.query.trim());
     sql = `
       SELECT m.*, fts.rank
@@ -1113,11 +1209,9 @@ export async function searchMemories(
     `;
     params.push(escapedQuery);
   } else {
-    // No query, just filter
     sql = `SELECT *, 0 as rank FROM memories m WHERE 1=1`;
   }
 
-  // Add filters - include global memories if enabled
   if (options.project) {
     if (includeGlobal) {
       sql += ` AND (m.project = ? OR m.scope = 'global')`;
@@ -1139,8 +1233,6 @@ export async function searchMemories(
     params.push(options.minSalience);
   }
   if (options.tags && options.tags.length > 0) {
-    // Use json_each() for proper JSON array parsing
-    // This avoids false positives from LIKE matching (e.g., "api" matching "api-gateway")
     const tagPlaceholders = options.tags.map(() => '?').join(',');
     sql += ` AND EXISTS (
       SELECT 1 FROM json_each(m.tags)
@@ -1153,116 +1245,113 @@ export async function searchMemories(
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+  const scoringContext: SearchScoringContext = {
+    db,
+    config,
+    detectedCategory,
+    queryTags,
+    vectorResults,
+    query: options.query,
+  };
 
-  // Convert to SearchResult with computed scores
-  const results: SearchResult[] = rows.map(row => {
+  const results: SearchResult[] = rows.map((row) => {
     const memory = rowToMemory(row);
     const decayedScore = calculateDecayedScore(memory, config);
     memory.decayedScore = decayedScore;
 
-    // Improved FTS score normalization (BM25-style)
-    // FTS5 rank is negative, closer to 0 = better match
     const rawRank = row.rank as number;
     const ftsScore = rawRank ? 1 / (1 + Math.abs(rawRank)) : 0.3;
-
-    // Recency boost for recently accessed memories
     const hoursSinceAccess = (Date.now() - new Date(memory.lastAccessed).getTime()) / (1000 * 60 * 60);
     const recencyBoost = hoursSinceAccess < 1 ? 0.1 : (hoursSinceAccess < 24 ? 0.05 : 0);
-
-    // Category match bonus
     const categoryBoost = detectedCategory && memory.category === detectedCategory ? 0.1 : 0;
-
-    // Link boost - memories connected to high-salience memories rank higher
     const linkBoost = calculateLinkBoost(memory.id, db);
-
-    // Partial tag match bonus
     const tagBoost = calculateTagScore(queryTags, memory.tags);
-
-    // ORGANIC FEATURE: Spreading Activation boost (Phase 2)
-    // Recently accessed memories and their linked neighbors get a boost
     const activationBoost = getActivationBoost(memory.id);
-
-    // SEMANTIC SEARCH: Vector similarity boost (Phase 5)
-    // If memory was found by vector search, add similarity as a boost
     const vectorSimilarity = vectorResults.get(memory.id) || 0;
-    const vectorBoost = vectorSimilarity * 0.3; // 30% weight for vector similarity
-
-    // Combined relevance score (adjusted weights to accommodate vector)
+    const vectorBoost = vectorSimilarity * 0.3;
+    const priorityBoost = calculatePriority(memory) * 0.05;
     const relevanceScore = (
-      ftsScore * 0.25 +          // Reduced from 0.3
-      vectorBoost +              // New: 0-0.3 from vector similarity
-      decayedScore * 0.2 +       // Reduced from 0.25
-      calculatePriority(memory) * 0.05 + // Reduced from 0.1
+      ftsScore * 0.25 +
+      vectorBoost +
+      decayedScore * 0.2 +
+      priorityBoost +
       recencyBoost + categoryBoost + linkBoost + tagBoost + activationBoost
     );
 
-    return { memory, relevanceScore };
+    const result: SearchResult = { memory, relevanceScore };
+    if (execution.includeExplanation) {
+      result.explanation = buildSearchExplanation(memory, scoringContext, {
+        ftsScore,
+        vectorSimilarity,
+        vectorBoost,
+        decayedScore,
+        priorityBoost,
+        recencyBoost,
+        categoryBoost,
+        linkBoost,
+        tagBoost,
+        activationBoost,
+        finalScore: relevanceScore,
+      });
+    }
+    return result;
   });
 
-  // Sort by relevance and filter out too-decayed memories
   const sortedResults = results
-    .filter(r => options.includeDecayed || r.memory.decayedScore >= config.salienceThreshold)
+    .filter((result) => options.includeDecayed || result.memory.decayedScore >= config.salienceThreshold)
     .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-  // ORGANIC FEATURE: Reinforce top search results
-  // This closes the feedback loop - memories that appear in searches get a small
-  // salience boost with diminishing returns, so useful memories grow stronger
-  const topResults = sortedResults.slice(0, 5);
-  for (const result of topResults) {
-    reinforceFromSearch(result.memory.id);
-  }
+  if (execution.enableSideEffects) {
+    const topResults = sortedResults.slice(0, 5);
+    for (const result of topResults) {
+      reinforceFromSearch(result.memory.id);
+    }
 
-  // ORGANIC FEATURE: Link co-returned search results (top 5 only)
-  // Memories that frequently appear together in searches become linked,
-  // building the knowledge graph from usage patterns
-  if (topResults.length >= 2) {
-    for (let i = 0; i < topResults.length; i++) {
-      for (let j = i + 1; j < topResults.length; j++) {
-        const idA = topResults[i].memory.id;
-        const idB = topResults[j].memory.id;
-        const existing = db.prepare(
-          'SELECT strength FROM memory_links WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
-        ).get(idA, idB, idB, idA) as any;
+    if (topResults.length >= 2) {
+      for (let i = 0; i < topResults.length; i++) {
+        for (let j = i + 1; j < topResults.length; j++) {
+          const idA = topResults[i].memory.id;
+          const idB = topResults[j].memory.id;
+          const existing = db.prepare(
+            'SELECT strength FROM memory_links WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
+          ).get(idA, idB, idB, idA) as { strength: number } | undefined;
 
-        if (existing) {
-          const newStrength = Math.min(1.0, existing.strength + 0.03);
-          db.prepare(
-            'UPDATE memory_links SET strength = ? WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
-          ).run(newStrength, idA, idB, idB, idA);
-        } else {
-          try {
+          if (existing) {
+            const newStrength = Math.min(1.0, existing.strength + 0.03);
             db.prepare(
-              'INSERT INTO memory_links (source_id, target_id, relationship, strength) VALUES (?, ?, ?, ?)'
-            ).run(idA, idB, 'related', 0.2);
-          } catch (e) {
-            // Only ignore UNIQUE constraint violations (expected for existing links)
-            if (!(e instanceof Error && e.message.includes('UNIQUE constraint'))) {
-              console.warn('[shieldcortex] Unexpected error linking co-returned memories:', e);
+              'UPDATE memory_links SET strength = ? WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
+            ).run(newStrength, idA, idB, idB, idA);
+          } else {
+            try {
+              db.prepare(
+                'INSERT INTO memory_links (source_id, target_id, relationship, strength) VALUES (?, ?, ?, ?)'
+              ).run(idA, idB, 'related', 0.2);
+            } catch (e) {
+              if (!(e instanceof Error && e.message.includes('UNIQUE constraint'))) {
+                console.warn('[shieldcortex] Unexpected error linking co-returned memories:', e);
+              }
             }
           }
         }
       }
     }
-  }
 
-  // ORGANIC FEATURE: Enrich top result with search context
-  // When a search query contains significant new information not already in the
-  // top result, append it as enrichment context so memories accumulate knowledge
-  if (sortedResults.length > 0 && options.query && options.query.length > 30) {
-    const topResult = sortedResults[0];
-    const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-    const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
-    const newWords = [...queryWords].filter(w => !contentWords.has(w));
+    if (sortedResults.length > 0 && options.query && options.query.length > 30) {
+      const topResult = sortedResults[0];
+      const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+      const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
+      const newWords = [...queryWords].filter(w => !contentWords.has(w));
 
-    // Only enrich if query has significant new content (>30% new words)
-    if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
-      try {
-        enrichMemory(topResult.memory.id, options.query, 'search');
-      } catch { /* enrichment is best-effort */ }
+      if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
+        try {
+          enrichMemory(topResult.memory.id, options.query, 'search');
+        } catch {
+          // enrichment is best-effort
+        }
+      }
     }
   }
 
-  // Look up contradictions for top results
   const finalResults = sortedResults.slice(0, limit);
   for (const result of finalResults) {
     const contradictions = db.prepare(`
@@ -1271,17 +1360,19 @@ export async function searchMemories(
       FROM memory_links ml
       WHERE ml.relationship = 'contradicts'
         AND (ml.source_id = ? OR ml.target_id = ?)
-    `).all(result.memory.id, result.memory.id, result.memory.id) as any[];
+    `).all(result.memory.id, result.memory.id, result.memory.id) as Array<{ strength: number; other_id: number }>;
 
     if (contradictions.length > 0) {
-      result.contradictions = contradictions.map(c => {
-        const other = db.prepare('SELECT title FROM memories WHERE id = ?').get(c.other_id) as any;
-        return { memoryId: c.other_id, title: other?.title || 'Unknown', score: c.strength };
+      result.contradictions = contradictions.map((contradiction) => {
+        const other = db.prepare('SELECT title FROM memories WHERE id = ?').get(contradiction.other_id) as { title?: string } | undefined;
+        return { memoryId: contradiction.other_id, title: other?.title || 'Unknown', score: contradiction.strength };
       });
+      if (result.explanation) {
+        result.explanation.reasons.push(`${contradictions.length} contradiction link${contradictions.length === 1 ? '' : 's'} attached`);
+      }
     }
   }
 
-  // ACCESS CONTROL: Filter results by source trust level
   if (source) {
     const db2 = getDatabase();
     return finalResults.filter(result => {
@@ -1303,6 +1394,34 @@ export async function searchMemories(
 }
 
 /**
+ * Search memories using full-text search, vector similarity, and filters
+ * Now uses hybrid search combining FTS5 keywords with semantic vector matching
+ */
+let searchCount = 0;
+
+export async function searchMemories(
+  options: SearchOptions,
+  config: MemoryConfig = DEFAULT_CONFIG,
+  source?: DefenceSource,
+): Promise<SearchResult[]> {
+  return searchMemoriesInternal(options, config, source, {
+    enableSideEffects: true,
+    includeExplanation: false,
+  });
+}
+
+export async function searchMemoriesExplained(
+  options: SearchOptions,
+  config: MemoryConfig = DEFAULT_CONFIG,
+  source?: DefenceSource,
+): Promise<SearchResult[]> {
+  return searchMemoriesInternal(options, config, source, {
+    enableSideEffects: false,
+    includeExplanation: true,
+  });
+}
+
+/**
  * Recall with embedding-based vector similarity fallback.
  *
  * 1. First tries FTS5 search (existing searchMemories)
@@ -1313,23 +1432,31 @@ export async function searchMemories(
  */
 export async function recallWithEmbeddings(
   query: string,
-  options?: { limit?: number; project?: string; threshold?: number },
+  options?: {
+    limit?: number;
+    project?: string;
+    threshold?: number;
+    existingResults?: SearchResult[];
+    queryEmbedding?: Float32Array | null;
+  },
 ): Promise<Memory[]> {
   const limit = options?.limit ?? 15;
   const threshold = options?.threshold ?? 0.3;
 
   // Step 1: Try FTS5 search first
-  let ftsResults: SearchResult[] = [];
-  try {
-    ftsResults = await searchMemories({
-      query,
-      project: options?.project,
-      limit,
-      includeGlobal: true,
-    });
-  } catch (e) {
-    // FTS search failed — continue to embedding fallback
-    console.warn('[shieldcortex] FTS search failed in recallWithEmbeddings:', (e as Error).message);
+  let ftsResults: SearchResult[] = options?.existingResults ?? [];
+  if (ftsResults.length === 0) {
+    try {
+      ftsResults = await searchMemories({
+        query,
+        project: options?.project,
+        limit,
+        includeGlobal: true,
+      });
+    } catch (e) {
+      // FTS search failed — continue to embedding fallback
+      console.warn('[shieldcortex] FTS search failed in recallWithEmbeddings:', (e as Error).message);
+    }
   }
 
   const ftsMemories = ftsResults.map(r => r.memory);
@@ -1341,7 +1468,7 @@ export async function recallWithEmbeddings(
 
   // Step 3: Run embedding similarity search as fallback
   try {
-    const { initEmbeddings, findSimilarMemories } = await import('./embedding.js');
+    const { initEmbeddings } = await import('./embedding.js');
 
     const ready = await initEmbeddings();
     if (!ready) {
@@ -1371,9 +1498,14 @@ export async function recallWithEmbeddings(
       return ftsMemories.slice(0, limit);
     }
 
+    const queryEmbedding = options?.queryEmbedding ?? await getCachedQueryEmbedding(query);
+    if (!queryEmbedding) {
+      return ftsMemories.slice(0, limit);
+    }
+
     // Find similar memories using embeddings
     const remainingSlots = limit - ftsMemories.length;
-    const similar = await findSimilarMemories(query, newCandidates, remainingSlots);
+    const similar = await findSimilarMemories(query, newCandidates, remainingSlots, queryEmbedding);
 
     // Filter by threshold and fetch full Memory objects
     const embeddingMemories: Memory[] = [];

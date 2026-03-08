@@ -47,6 +47,29 @@ export interface AuditStats {
   threatBreakdown: Record<string, number>;
 }
 
+export interface IncidentReplayOptions {
+  startTime?: string;
+  endTime?: string;
+  project?: string;
+  sourceIdentifier?: string;
+  memoryId?: number;
+  limit?: number;
+}
+
+export interface IncidentReplayEntry {
+  timestamp: string;
+  type: 'audit' | 'quarantine' | 'event';
+  eventType: string;
+  severity: 'info' | 'warning' | 'critical';
+  summary: string;
+  details?: string | null;
+  source?: string;
+  memoryId?: number | null;
+  auditId?: number | null;
+  quarantineId?: number | null;
+  metadata?: Record<string, unknown>;
+}
+
 // ── Query Functions ──
 
 /**
@@ -246,4 +269,193 @@ export function queryAgentOperations(
     ORDER BY timestamp DESC
     LIMIT @limit OFFSET @offset
   `).all(params) as AuditEntry[];
+}
+
+function extractReplayMemoryId(data: unknown): number | null {
+  if (!data || typeof data !== 'object') return null;
+  const record = data as Record<string, unknown>;
+  if (typeof record.memoryId === 'number') return record.memoryId;
+  if (record.memory && typeof record.memory === 'object' && record.memory) {
+    const nested = record.memory as Record<string, unknown>;
+    if (typeof nested.id === 'number') return nested.id;
+  }
+  return null;
+}
+
+function extractReplayProject(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
+  const record = data as Record<string, unknown>;
+  if (typeof record.project === 'string') return record.project;
+  if (record.memory && typeof record.memory === 'object' && record.memory) {
+    const nested = record.memory as Record<string, unknown>;
+    if (typeof nested.project === 'string') return nested.project;
+  }
+  return null;
+}
+
+function buildEventSummary(type: string, data: unknown): string {
+  if (!data || typeof data !== 'object') return type;
+  const record = data as Record<string, unknown>;
+
+  switch (type) {
+    case 'memory_created':
+    case 'memory_updated':
+      return `Memory ${type === 'memory_created' ? 'created' : 'updated'}: ${String((record.memory as Record<string, unknown> | undefined)?.title ?? 'Untitled')}`;
+    case 'memory_deleted':
+      return `Memory deleted: ${String(record.title ?? `ID ${record.memoryId ?? 'unknown'}`)}`;
+    case 'memory_accessed':
+      return `Memory accessed: ${String((record.memory as Record<string, unknown> | undefined)?.title ?? `ID ${record.memoryId ?? 'unknown'}`)}`;
+    case 'defence_event':
+      return `Defence event: ${String(record.firewall_result ?? 'UNKNOWN')} from ${String(record.source_type ?? 'unknown')}:${String(record.source_identifier ?? 'unknown')}`;
+    case 'consolidation_complete':
+      return `Consolidation complete: ${String(record.consolidated ?? 0)} promoted, ${String(record.deleted ?? 0)} deleted`;
+    case 'kill_switch_activated':
+      return 'Kill switch activated';
+    case 'kill_switch_deactivated':
+      return 'Kill switch deactivated';
+    default:
+      return type.replace(/_/g, ' ');
+  }
+}
+
+export function queryIncidentReplay(options: IncidentReplayOptions = {}): IncidentReplayEntry[] {
+  const db = getDatabase();
+  const startTime = options.startTime ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const endTime = options.endTime ?? new Date().toISOString();
+  const limit = options.limit ?? 200;
+  const entries: IncidentReplayEntry[] = [];
+
+  const auditConditions = ['timestamp >= @startTime', 'timestamp <= @endTime'];
+  const auditParams: Record<string, unknown> = { startTime, endTime, limit };
+
+  if (options.project) {
+    auditConditions.push('project = @project');
+    auditParams.project = options.project;
+  }
+  if (options.sourceIdentifier) {
+    auditConditions.push('source_identifier = @sourceIdentifier');
+    auditParams.sourceIdentifier = options.sourceIdentifier;
+  }
+  if (options.memoryId !== undefined) {
+    auditConditions.push('memory_id = @memoryId');
+    auditParams.memoryId = options.memoryId;
+  }
+
+  const auditRows = db.prepare(`
+    SELECT *
+    FROM defence_audit
+    WHERE ${auditConditions.join(' AND ')}
+    ORDER BY timestamp DESC
+    LIMIT @limit
+  `).all(auditParams) as AuditEntry[];
+
+  entries.push(...auditRows.map((row) => {
+    const severity: IncidentReplayEntry['severity'] =
+      row.firewall_result === 'BLOCK' ? 'critical' : row.firewall_result === 'QUARANTINE' ? 'warning' : 'info';
+
+    return {
+      timestamp: row.timestamp,
+      type: 'audit' as const,
+      eventType: row.firewall_result.toLowerCase(),
+      severity,
+      summary: `${row.firewall_result} ${row.source_type}:${row.source_identifier}`,
+      details: row.reason,
+      source: `${row.source_type}:${row.source_identifier}`,
+      memoryId: row.memory_id,
+      auditId: row.id,
+      metadata: {
+        threatIndicators: row.threat_indicators,
+        blockedPatterns: row.blocked_patterns,
+        trustScore: row.trust_score,
+        anomalyScore: row.anomaly_score,
+        sensitivityLevel: row.sensitivity_level,
+      },
+    };
+  }));
+
+  const quarantineConditions = ['q.created_at >= @startTime', 'q.created_at <= @endTime'];
+  const quarantineParams: Record<string, unknown> = { startTime, endTime, limit };
+
+  if (options.project) {
+    quarantineConditions.push('q.project = @project');
+    quarantineParams.project = options.project;
+  }
+  if (options.sourceIdentifier) {
+    quarantineConditions.push('q.source_identifier = @sourceIdentifier');
+    quarantineParams.sourceIdentifier = options.sourceIdentifier;
+  }
+  if (options.memoryId !== undefined) {
+    quarantineConditions.push('da.memory_id = @memoryId');
+    quarantineParams.memoryId = options.memoryId;
+  }
+
+  const quarantineRows = db.prepare(`
+    SELECT q.*, da.memory_id
+    FROM quarantine q
+    LEFT JOIN defence_audit da ON da.id = q.audit_id
+    WHERE ${quarantineConditions.join(' AND ')}
+    ORDER BY q.created_at DESC
+    LIMIT @limit
+  `).all(quarantineParams) as Array<Record<string, unknown>>;
+
+  entries.push(...quarantineRows.map((row) => {
+    const severity: IncidentReplayEntry['severity'] = row.status === 'pending' ? 'warning' : 'info';
+
+    return {
+      timestamp: String(row.created_at),
+      type: 'quarantine' as const,
+      eventType: `quarantine_${String(row.status)}`,
+      severity,
+      summary: `Quarantine ${String(row.status)}: ${String(row.original_title ?? 'Untitled')}`,
+      details: String(row.reason ?? ''),
+      source: `${String(row.source_type ?? 'unknown')}:${String(row.source_identifier ?? 'unknown')}`,
+      memoryId: typeof row.memory_id === 'number' ? row.memory_id : null,
+      auditId: typeof row.audit_id === 'number' ? row.audit_id : null,
+      quarantineId: row.id as number,
+      metadata: {
+        reviewedAt: row.reviewed_at ?? null,
+        reviewedBy: row.reviewed_by ?? null,
+        firewallResult: row.firewall_result ?? null,
+        anomalyScore: row.anomaly_score ?? null,
+        threatIndicators: row.threat_indicators ?? '[]',
+      },
+    };
+  }));
+
+  const eventRows = db.prepare(`
+    SELECT id, type, data, timestamp
+    FROM events
+    WHERE timestamp >= @startTime AND timestamp <= @endTime
+    ORDER BY timestamp DESC
+    LIMIT @limit
+  `).all({ startTime, endTime, limit }) as Array<{ id: number; type: string; data: string | null; timestamp: string }>;
+
+  for (const row of eventRows) {
+    const parsed = row.data ? JSON.parse(row.data) : null;
+    const eventMemoryId = extractReplayMemoryId(parsed);
+    const eventProject = extractReplayProject(parsed);
+
+    if (options.memoryId !== undefined && eventMemoryId !== options.memoryId) continue;
+    if (options.project && eventProject && eventProject !== options.project) continue;
+    if (options.sourceIdentifier && row.type !== 'defence_event') continue;
+    if (options.sourceIdentifier && parsed && typeof parsed === 'object') {
+      const record = parsed as Record<string, unknown>;
+      if (record.source_identifier !== options.sourceIdentifier) continue;
+    }
+
+    entries.push({
+      timestamp: row.timestamp,
+      type: 'event',
+      eventType: row.type,
+      severity: row.type.includes('kill_switch') ? 'critical' : row.type === 'defence_event' ? 'warning' : 'info',
+      summary: buildEventSummary(row.type, parsed),
+      details: null,
+      memoryId: eventMemoryId,
+      metadata: parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined,
+    });
+  }
+
+  return entries
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+    .slice(0, limit);
 }

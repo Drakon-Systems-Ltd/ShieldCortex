@@ -19,6 +19,7 @@
  *   shieldcortex audit --markdown        # Audit with Markdown output
  *   shieldcortex audit --ci              # Audit in CI mode (exit code reflects grade)
  *   shieldcortex status                  # Show database and system status
+ *   shieldcortex quickstart              # Detect the fastest setup path
  *   shieldcortex setup                   # Configure Claude for proactive memory use
  *   shieldcortex install                 # Alias for setup
  *   shieldcortex hook pre-compact        # Run pre-compact hook (for settings.json)
@@ -352,6 +353,7 @@ ${bold}COMMANDS${reset}
   ${cyan}dashboard${reset}             Open the local security dashboard
   ${cyan}status${reset}                Show current protection status
   ${cyan}doctor${reset}                Diagnose installation issues
+  ${cyan}quickstart${reset} [target]    Detect the fastest setup path
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
@@ -369,6 +371,7 @@ ${bold}OPTIONS${reset}
   --help, -h           Show this help message
 
 ${bold}EXAMPLES${reset}
+  shieldcortex quickstart
   shieldcortex scan "ignore previous instructions"
   shieldcortex scan-skill ~/.claude/skills/my-skill/SKILL.md
   shieldcortex dashboard
@@ -399,6 +402,13 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'doctor') {
     const { runDoctor } = await import('./cli/doctor.js');
     await runDoctor();
+    return;
+  }
+
+  // Handle "quickstart" subcommand
+  if (process.argv[2] === 'quickstart') {
+    const { handleQuickstartCommand } = await import('./setup/quickstart.js');
+    await handleQuickstartCommand(process.argv[3]);
     return;
   }
 
@@ -662,7 +672,7 @@ ${bold}DOCS${reset}
 
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
-    'doctor', 'setup', 'install', 'migrate', 'uninstall', 'hook',
+    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan',
     'scan-skill', 'scan-skills', 'dashboard', 'api',

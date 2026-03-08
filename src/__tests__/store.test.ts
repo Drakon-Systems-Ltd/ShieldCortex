@@ -482,6 +482,56 @@ describe('Semantic Linking', () => {
   });
 
   describe('Search Reinforcement and Co-Search Linking', () => {
+    it('should explain recall rankings without mutating memory state', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, getMemoryById, searchMemoriesExplained, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let memoryId: number | undefined;
+
+      try {
+        const memory = addMemory({
+          title: 'PostgreSQL architecture decision',
+          content: 'We decided to use PostgreSQL for JSONB support and strong transactional guarantees.',
+          category: 'architecture',
+          tags: ['database', 'postgresql', 'jsonb'],
+          project: 'test-project',
+          type: 'long_term',
+        });
+        memoryId = memory.id;
+
+        const before = getMemoryById(memory.id);
+        expect(before).not.toBeNull();
+
+        const query = 'postgresql jsonb support';
+        const results = await searchMemoriesExplained({
+          query,
+          project: 'test-project',
+          limit: 5,
+        });
+
+        const explained = results.find((result) => result.memory.id === memory.id);
+        expect(explained).toBeDefined();
+        expect(explained!.explanation).toBeDefined();
+        expect(explained!.explanation!.query).toBe(query);
+        expect(explained!.explanation!.reasons.length).toBeGreaterThan(0);
+        expect(explained!.explanation!.breakdown.finalScore).toBeCloseTo(explained!.relevanceScore, 6);
+
+        const after = getMemoryById(memory.id);
+        expect(after).not.toBeNull();
+        expect(after!.accessCount).toBe(before!.accessCount);
+        expect(after!.salience).toBe(before!.salience);
+        expect(after!.lastAccessed.toISOString()).toBe(before!.lastAccessed.toISOString());
+      } finally {
+        if (memoryId) {
+          try { deleteMemory(memoryId); } catch { /* ignore */ }
+        }
+        closeDatabase();
+      }
+    });
+
     // Skip flaky tests that timeout in CI - need investigation
     it.skip('should increase salience after repeated searches', async () => {
       const { initDatabase, closeDatabase } = await import('../database/init.js');

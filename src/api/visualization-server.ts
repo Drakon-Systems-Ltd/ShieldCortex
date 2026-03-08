@@ -16,6 +16,7 @@ import { getDatabase, initDatabase, checkpointWal } from '../database/init.js';
 import { Memory, MemoryConfig, DEFAULT_CONFIG } from '../memory/types.js';
 import {
   searchMemories,
+  searchMemoriesExplained,
   getRecentMemories,
   getHighPriorityMemories,
   getMemoryStats,
@@ -53,7 +54,7 @@ import { getCurrentVersion, getRunningVersion, checkForUpdates, performUpdate, s
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
-import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations } from '../defence/audit/queries.js';
+import { queryAuditLogs, getAuditStats, queryAgentRegistry, queryAgentTimeline, queryAgentOperations, queryIncidentReplay } from '../defence/audit/queries.js';
 import { logAudit } from '../defence/audit/index.js';
 import { getCloudConfig, setCloudConfig, readRawConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode, setDefenceMode, isConfigTampered, getOpenClawMemoryConfig, setOpenClawMemoryConfig, type DefenceMode } from '../cloud/config.js';
 import { getQueueStats } from '../cloud/sync-queue.js';
@@ -334,6 +335,44 @@ export function startVisualizationServer(dbPath?: string): void {
         neverAccessed: { count: neverAccessed.length, items: neverAccessed },
         stale: { count: stale.length, items: stale },
         duplicates: { count: duplicates.length, items: duplicates },
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Explain why memories ranked for a recall query.
+  // Read-only: uses the same scoring logic as search without reinforcement side effects.
+  app.get('/api/recall/explain', requireNotLocked, async (req: Request, res: Response) => {
+    try {
+      const query = typeof req.query.query === 'string' ? req.query.query.trim() : '';
+      if (!query) {
+        return res.status(400).json({ error: 'query is required' });
+      }
+
+      const project = typeof req.query.project === 'string' ? req.query.project : undefined;
+      const type = typeof req.query.type === 'string' ? req.query.type : undefined;
+      const category = typeof req.query.category === 'string' ? req.query.category : undefined;
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 10, 50);
+      const includeDecayed = req.query.includeDecayed === 'true';
+      const includeGlobal = req.query.includeGlobal !== 'false';
+
+      const results = await searchMemoriesExplained({
+        query,
+        project,
+        type: type as Memory['type'] | undefined,
+        category: category as Memory['category'] | undefined,
+        limit,
+        includeDecayed,
+        includeGlobal,
+      });
+
+      res.json({
+        query,
+        project: project ?? null,
+        total: results.length,
+        sideEffects: 'disabled',
+        results,
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -2057,6 +2096,38 @@ export function startVisualizationServer(dbPath?: string): void {
       const project = req.query.project as string | undefined;
       const stats = getAuditStats(timeRange, project);
       res.json(stats);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Incident replay — reconstruct a best-effort timeline from audit, quarantine, and persisted events.
+  app.get('/api/v1/incidents/replay', (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 200, 500);
+      const startTime = typeof req.query.startTime === 'string' ? req.query.startTime : undefined;
+      const endTime = typeof req.query.endTime === 'string' ? req.query.endTime : undefined;
+      const project = typeof req.query.project === 'string' ? req.query.project : undefined;
+      const sourceIdentifier = typeof req.query.sourceIdentifier === 'string' ? req.query.sourceIdentifier : undefined;
+      const memoryId = req.query.memoryId ? parseInt(req.query.memoryId as string, 10) : undefined;
+
+      const events = queryIncidentReplay({
+        startTime,
+        endTime,
+        project,
+        sourceIdentifier,
+        memoryId,
+        limit,
+      });
+
+      res.json({
+        events,
+        total: events.length,
+        coverage: {
+          sources: ['defence_audit', 'quarantine', 'events'],
+          note: 'Replay is best-effort. Durable audit and quarantine history is complete; generic event coverage depends on the retained events table window.',
+        },
+      });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

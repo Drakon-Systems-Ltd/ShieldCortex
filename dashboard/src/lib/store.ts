@@ -19,8 +19,8 @@ interface DashboardState {
   setSelectedAuditEntry: (entry: AuditEntry | null) => void;
 
   // View mode
-  viewMode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline';
-  setViewMode: (mode: 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline') => void;
+  viewMode: 'overview' | 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline';
+  setViewMode: (mode: 'overview' | 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline') => void;
 
   // Filters
   typeFilter: string | null;
@@ -60,7 +60,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   setSelectedAuditEntry: (entry) => set({ selectedAuditEntry: entry }),
 
   // View mode
-  viewMode: 'shield',
+  viewMode: 'overview',
   setViewMode: (mode) => set({ viewMode: mode }),
 
   // Filters

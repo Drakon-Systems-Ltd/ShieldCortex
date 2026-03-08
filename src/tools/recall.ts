@@ -91,6 +91,7 @@ export async function executeRecall(input: RecallInput): Promise<{
               limit: input.limit,
               project: projectFilter,
               threshold: 0.3,
+              existingResults: results,
             });
             // Merge: keep FTS results, add new embedding results
             const existingIds = new Set(memories.map(m => m.id));

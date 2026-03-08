@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "2.20.1",
+  "version": "3.0.0",
   "description": "Persistent brain for AI agents. Knowledge graphs, memory decay, contradiction detection, Iron Dome behaviour protection — plus the only defence pipeline that stops memory poisoning. Works with Claude Code, OpenClaw, LangChain, and any MCP agent.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -38,7 +38,7 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
-    "build": "tsc && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/",
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/",
     "build:dashboard": "cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true)",
     "build:all": "npm run build && npm run build:dashboard",
     "start": "node dist/index.js",
@@ -48,9 +48,9 @@
     "dev:api": "tsx src/index.ts --mode api",
     "dev:dashboard": "tsx src/index.ts --dashboard",
     "watch": "tsc --watch",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
+    "test": "node scripts/run-jest.mjs",
+    "test:watch": "node scripts/run-jest.mjs --watch",
+    "test:coverage": "node scripts/run-jest.mjs --coverage",
     "audit:security": "npm audit --audit-level=moderate",
     "prepublishOnly": "npm run build:all"
   },
@@ -121,9 +121,10 @@
   },
   "files": [
     "dist",
-    "hooks",
-    "plugins",
-    "scripts",
+    "hooks/openclaw",
+    "plugins/openclaw/dist",
+    "scripts/*.mjs",
+    "scripts/*.sh",
     "dashboard/.next/standalone"
   ]
 }

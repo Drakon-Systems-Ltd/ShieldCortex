@@ -46,6 +46,7 @@ import { isFeatureEnabled } from '../license/gate.js';
 export class BrainWorker {
   private lightTimer: NodeJS.Timeout | null = null;
   private mediumTimer: NodeJS.Timeout | null = null;
+  private initialLightTickTimer: NodeJS.Timeout | null = null;
   private isRunning = false;
   private config: WorkerConfig;
 
@@ -90,12 +91,14 @@ export class BrainWorker {
       () => this.lightTick(),
       this.config.lightTickIntervalMs
     );
+    this.lightTimer.unref();
 
     // Medium tick every 30 minutes (by default)
     this.mediumTimer = setInterval(
       () => this.mediumTick(),
       this.config.mediumTickIntervalMs
     );
+    this.mediumTimer.unref();
 
     // Apply cached cloud Iron Dome patterns immediately on start (requires Pro+)
     if (isFeatureEnabled('custom_injection_patterns')) {
@@ -108,11 +111,12 @@ export class BrainWorker {
 
     // Run initial light tick after a short delay (10 seconds)
     // This allows the server to fully initialize first
-    setTimeout(() => {
+    this.initialLightTickTimer = setTimeout(() => {
       if (this.isRunning) {
         this.lightTick();
       }
     }, 10000);
+    this.initialLightTickTimer.unref();
   }
 
   /**
@@ -135,6 +139,11 @@ export class BrainWorker {
     if (this.mediumTimer) {
       clearInterval(this.mediumTimer);
       this.mediumTimer = null;
+    }
+
+    if (this.initialLightTickTimer) {
+      clearTimeout(this.initialLightTickTimer);
+      this.initialLightTickTimer = null;
     }
 
     console.log('[BrainWorker] Stopped');
