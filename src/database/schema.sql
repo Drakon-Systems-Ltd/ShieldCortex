@@ -4,6 +4,7 @@
 -- Main memories table
 CREATE TABLE IF NOT EXISTS memories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uuid TEXT NOT NULL UNIQUE,
   type TEXT NOT NULL CHECK(type IN ('short_term', 'long_term', 'episodic')),
   category TEXT NOT NULL DEFAULT 'note',
   title TEXT NOT NULL,
@@ -15,6 +16,7 @@ CREATE TABLE IF NOT EXISTS memories (
   access_count INTEGER DEFAULT 0,
   last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   metadata TEXT DEFAULT '{}',  -- JSON object
   embedding BLOB,  -- Vector embedding for semantic search
   scope TEXT DEFAULT 'project',  -- Scope: project or global
@@ -60,12 +62,14 @@ END;
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_uuid ON memories(uuid);
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memories_salience ON memories(salience DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_decayed_score ON memories(decayed_score DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
 
 -- Session tracking for consolidation
 CREATE TABLE IF NOT EXISTS sessions (

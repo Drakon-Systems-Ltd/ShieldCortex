@@ -33,6 +33,7 @@
  *   shieldcortex openclaw status         # Check OpenClaw hook status
  *   shieldcortex config --openclaw-auto-memory true   # Enable OpenClaw auto-memory extraction
  *   shieldcortex config --openclaw-auto-memory false  # Disable OpenClaw auto-memory extraction
+ *   shieldcortex cloud sync --full      # Backfill local memories to ShieldCortex Cloud
  *   shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
  *   shieldcortex copilot uninstall       # Remove MCP server configuration
  *   shieldcortex copilot status          # Check MCP server configuration
@@ -355,6 +356,7 @@ ${bold}COMMANDS${reset}
   ${cyan}doctor${reset}                Diagnose installation issues
   ${cyan}quickstart${reset} [target]    Detect the fastest setup path
   ${cyan}config${reset} [options]      Configure cloud sync and settings
+  ${cyan}cloud${reset} sync --full     Backfill local memories to ShieldCortex Cloud
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
@@ -377,6 +379,7 @@ ${bold}EXAMPLES${reset}
   shieldcortex dashboard
   shieldcortex license activate sc_pro_...
   shieldcortex config --cloud-enable --cloud-api-key <key>
+  shieldcortex cloud sync --full
 
 ${bold}DOCS${reset}
   https://shieldcortex.ai/docs
@@ -466,6 +469,13 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'config') {
     const { handleCloudConfig } = await import('./cloud/cli.js');
     handleCloudConfig(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "cloud" subcommand
+  if (process.argv[2] === 'cloud') {
+    const { handleCloudCommand } = await import('./cloud/cli.js');
+    await handleCloudCommand(process.argv.slice(3));
     return;
   }
 
@@ -674,7 +684,7 @@ ${bold}DOCS${reset}
   const knownCommands = new Set([
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'service', 'config', 'status',
-    'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan',
+    'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
     'scan-skill', 'scan-skills', 'dashboard', 'api',
   ]);
   const arg = process.argv[2];

@@ -18,6 +18,7 @@ export type MemoryCategory =
 
 export interface Memory {
   id: number;
+  uuid: string;
   type: MemoryType;
   category: MemoryCategory;
   title: string;
@@ -28,6 +29,7 @@ export interface Memory {
   accessCount: number;
   lastAccessed: Date;
   createdAt: Date;
+  updatedAt: Date;
   decayedScore: number;    // Current score after decay
   metadata: Record<string, unknown>;
   embedding?: Buffer;      // 384-dim float32 vector for semantic search

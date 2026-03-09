@@ -9,6 +9,9 @@ import {
   setOpenClawAutoMemory,
   type DefenceMode,
 } from './config.js';
+import { syncAllMemoriesToCloud } from './memory-sync.js';
+import { isFeatureEnabled } from '../license/gate.js';
+import { initDatabase } from '../database/init.js';
 
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
@@ -152,4 +155,28 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --verify-mode <mode>   Set verify mode (advisory|enforce)');
     console.log('  --verify-timeout <ms>  Set verify timeout in ms (1000-30000)');
   }
+}
+
+export async function handleCloudCommand(args: string[]): Promise<void> {
+  const action = args[0];
+
+  if (action === 'sync' && args.includes('--full')) {
+    const config = getCloudConfig();
+    if (!config.cloudEnabled || !config.cloudApiKey) {
+      console.error('Cloud sync is not configured. Set an API key and enable cloud sync first.');
+      process.exit(1);
+    }
+    if (!isFeatureEnabled('cloud_sync')) {
+      console.error('Cloud memory sync requires a Team or higher licence.');
+      process.exit(1);
+    }
+
+    initDatabase();
+    console.log('Syncing local memories to ShieldCortex Cloud...');
+    const result = await syncAllMemoriesToCloud();
+    console.log(`Finished. ${result.synced}/${result.total} memories synced${result.failed > 0 ? `, ${result.failed} queued for retry` : ''}.`);
+    return;
+  }
+
+  console.log('Usage: shieldcortex cloud sync --full');
 }

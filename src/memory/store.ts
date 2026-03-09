@@ -5,6 +5,7 @@
  * Handles storage, retrieval, and management of memories.
  */
 
+import { randomUUID } from 'crypto';
 import { getDatabase, isDatabaseInitialized } from '../database/init.js';
 import {
   Memory,
@@ -46,6 +47,7 @@ import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
+import { syncMemoryDeleteToCloud, syncMemoryUpsertToCloud } from '../cloud/memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
@@ -165,6 +167,7 @@ function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
 export function rowToMemory(row: Record<string, unknown>): Memory {
   return {
     id: row.id as number,
+    uuid: row.uuid as string,
     type: row.type as MemoryType,
     category: row.category as MemoryCategory,
     title: row.title as string,
@@ -175,6 +178,7 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
     accessCount: row.access_count as number,
     lastAccessed: new Date(row.last_accessed as string),
     createdAt: new Date(row.created_at as string),
+    updatedAt: new Date((row.updated_at as string) ?? (row.created_at as string)),
     decayedScore: (row.decayed_score as number) ?? (row.salience as number),
     metadata: safeJsonParse(row.metadata as string, {}),
     embedding: row.embedding as Buffer | undefined,
@@ -432,8 +436,8 @@ export function addMemory(
   const transferable = input.transferable ?? (scope === 'global' ? 1 : 0);
 
   const stmt = db.prepare(`
-    INSERT INTO memories (type, category, title, content, project, tags, salience, metadata, scope, transferable)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO memories (uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -448,7 +452,9 @@ export function addMemory(
 
   // Transaction: INSERT + defence UPDATE must be atomic to prevent wrong trust scores
   const insertedId = db.transaction(() => {
+    const memoryUuid = randomUUID();
     const result = stmt.run(
+      memoryUuid,
       type,
       category,
       input.title,
@@ -478,6 +484,10 @@ export function addMemory(
 
   // Webhook notification (fire-and-forget)
   dispatchWebhook('memory_created', { id: memory.id, title: memory.title, category: memory.category });
+
+  if (isFeatureEnabled('cloud_sync')) {
+    syncMemoryUpsertToCloud(memory);
+  }
 
   // ORGANIC FEATURE: Auto-link to related memories
   // This builds the knowledge graph automatically as memories are created
@@ -648,7 +658,7 @@ export function updateMemory(
   if (fields.length === 0) return existing;
 
   values.push(id);
-  db.prepare(`UPDATE memories SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  db.prepare(`UPDATE memories SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
 
   const updatedMemory = getMemoryById(id)!;
 
@@ -656,6 +666,10 @@ export function updateMemory(
   emitMemoryUpdated(updatedMemory);
   // Persist event for cross-process IPC (MCP → Dashboard)
   persistEvent('memory_updated', { memory: updatedMemory });
+
+  if (isFeatureEnabled('cloud_sync')) {
+    syncMemoryUpsertToCloud(updatedMemory);
+  }
 
   return updatedMemory;
 }
@@ -689,6 +703,9 @@ export function deleteMemory(id: number, source?: DefenceSource): boolean {
 
   // Emit event for real-time dashboard (in-process)
   if (result.changes > 0 && memory) {
+    if (isFeatureEnabled('cloud_sync')) {
+      syncMemoryDeleteToCloud(memory);
+    }
     emitMemoryDeleted(id, memory.title);
     // Persist event for cross-process IPC (MCP → Dashboard)
     persistEvent('memory_deleted', { memoryId: id, title: memory.title });

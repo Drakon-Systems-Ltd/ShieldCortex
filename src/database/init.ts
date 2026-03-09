@@ -8,6 +8,7 @@ import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
+import { randomUUID } from 'crypto';
 
 const _currentFile = fileURLToPath(import.meta.url);
 const _currentDir = dirname(_currentFile);
@@ -286,6 +287,24 @@ function runMigrations(database: Database.Database): void {
   }
   if (!columnNames.has('source')) {
     database.exec("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'user:direct'");
+  }
+  if (!columnNames.has('uuid')) {
+    database.exec("ALTER TABLE memories ADD COLUMN uuid TEXT");
+  }
+  if (!columnNames.has('updated_at')) {
+    database.exec('ALTER TABLE memories ADD COLUMN updated_at TIMESTAMP');
+  }
+  try {
+    const rowsWithoutUuid = database.prepare('SELECT id FROM memories WHERE uuid IS NULL OR uuid = ?').all('') as { id: number }[];
+    const setUuid = database.prepare('UPDATE memories SET uuid = ? WHERE id = ?');
+    for (const row of rowsWithoutUuid) {
+      setUuid.run(randomUUID(), row.id);
+    }
+    database.exec('UPDATE memories SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL');
+    database.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_uuid ON memories(uuid)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)');
+  } catch {
+    // Safe to ignore on partially migrated databases
   }
 
   // Migration: Defence tables (defence_audit, quarantine, fragmentation_entities)
@@ -736,6 +755,7 @@ function getInlineSchema(): string {
   return `
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      uuid TEXT NOT NULL UNIQUE,
       type TEXT NOT NULL CHECK(type IN ('short_term', 'long_term', 'episodic')),
       category TEXT NOT NULL DEFAULT 'note',
       title TEXT NOT NULL,
@@ -747,6 +767,7 @@ function getInlineSchema(): string {
       access_count INTEGER DEFAULT 0,
       last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       metadata TEXT DEFAULT '{}',
       embedding BLOB,
       scope TEXT DEFAULT 'project',
@@ -784,11 +805,13 @@ function getInlineSchema(): string {
     END;
 
     CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_uuid ON memories(uuid);
     CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
     CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
     CREATE INDEX IF NOT EXISTS idx_memories_salience ON memories(salience DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_decayed_score ON memories(decayed_score DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed DESC);
+    CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
 
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

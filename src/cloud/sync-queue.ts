@@ -7,7 +7,8 @@
  */
 
 import { getDatabase } from '../database/init.js';
-import { getCloudConfig, updateLastSyncAt } from './config.js';
+import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
+import type { SyncedMemoryRecord } from './memory-sync.js';
 
 export interface SyncEntry {
   source_type: string;
@@ -41,7 +42,16 @@ export interface QuarantineSyncEntry {
 
 type QueuePayload =
   | { kind: 'audit'; entry: SyncEntry }
-  | { kind: 'quarantine'; entry: QuarantineSyncEntry };
+  | { kind: 'quarantine'; entry: QuarantineSyncEntry }
+  | {
+      kind: 'memory';
+      entry: {
+        record: SyncedMemoryRecord;
+        device_id: string;
+        device_name: string;
+        platform: string;
+      };
+    };
 
 export interface QueueStats {
   pending: number;
@@ -69,6 +79,21 @@ export function enqueueFailedSync(entry: SyncEntry): void {
  */
 export function enqueueFailedQuarantineSync(entry: QuarantineSyncEntry): void {
   enqueuePayload({ kind: 'quarantine', entry });
+}
+
+/**
+ * Enqueue a failed memory sync entry for later retry.
+ */
+export function enqueueFailedMemorySync(entry: SyncedMemoryRecord): void {
+  enqueuePayload({
+    kind: 'memory',
+    entry: {
+      record: entry,
+      device_id: getDeviceId(),
+      device_name: getDeviceName(),
+      platform: `${process.platform}/${process.arch}`,
+    },
+  });
 }
 
 function enqueuePayload(payload: QueuePayload): void {
@@ -118,6 +143,35 @@ function buildRetryRequest(payloadText: string): { path: string; body: string } 
     return {
       path: '/v1/quarantine/ingest',
       body: JSON.stringify(payload.entry),
+    };
+  }
+
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    'kind' in parsed &&
+    (parsed as { kind: string }).kind === 'memory'
+  ) {
+    const payload = parsed as {
+      kind: 'memory';
+      entry: {
+        record: SyncedMemoryRecord;
+        device_id: string;
+        device_name: string;
+        platform: string;
+      };
+    };
+    return {
+      path: '/v1/sync/memories',
+      body: JSON.stringify({
+        device: {
+          device_id: payload.entry.device_id,
+          device_name: payload.entry.device_name,
+          platform: payload.entry.platform,
+        },
+        memories: [payload.entry.record],
+      }),
     };
   }
 

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Local memory replica sync** — local memories can now be backfilled to ShieldCortex Cloud with `shieldcortex cloud sync --full`, using stable external IDs and the shared cloud retry queue
+
 ## [3.0.4] - 2026-03-08
 
 ### Changed
