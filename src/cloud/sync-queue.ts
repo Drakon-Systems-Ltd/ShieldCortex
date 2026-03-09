@@ -77,6 +77,10 @@ export interface SyncQueueResult {
   permanentlyFailed: number;
 }
 
+export interface ReconcileQueueResult {
+  removed: number;
+}
+
 /**
  * Enqueue a failed sync entry for later retry.
  * INSERT into sync_queue with exponential backoff schedule.
@@ -387,6 +391,38 @@ export function getQueueStats(): QueueStats {
   }
 
   return stats;
+}
+
+export function reconcileSyncQueue(options: {
+  kinds?: Array<'memory' | 'graph' | 'audit' | 'quarantine'>;
+  statuses?: Array<'pending' | 'failed'>;
+  maxCreatedAt?: string | null;
+} = {}): ReconcileQueueResult {
+  const db = getDatabase();
+  const kinds = options.kinds ?? ['memory', 'graph'];
+  const statuses = options.statuses ?? ['pending', 'failed'];
+
+  if (kinds.length === 0 || statuses.length === 0) {
+    return { removed: 0 };
+  }
+
+  const kindPlaceholders = kinds.map(() => '?').join(', ');
+  const statusPlaceholders = statuses.map(() => '?').join(', ');
+  const params: Array<string> = [...statuses, ...kinds];
+
+  let sqlText = `
+    DELETE FROM sync_queue
+    WHERE status IN (${statusPlaceholders})
+      AND json_extract(payload, '$.kind') IN (${kindPlaceholders})
+  `;
+
+  if (options.maxCreatedAt) {
+    sqlText += ' AND created_at <= ?';
+    params.push(options.maxCreatedAt);
+  }
+
+  const result = db.prepare(sqlText).run(...params);
+  return { removed: Number(result.changes ?? 0) };
 }
 
 function getPayloadKind(payloadText: string): 'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown' {

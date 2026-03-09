@@ -26,6 +26,7 @@
  *   shieldcortex hook session-start      # Run session-start hook (for settings.json)
  *   shieldcortex hook session-end        # Run session-end hook (for settings.json)
  *   shieldcortex service install         # Auto-start dashboard on login
+ *   shieldcortex service repair          # Rebuild auto-start service with current install path
  *   shieldcortex service uninstall       # Remove auto-start
  *   shieldcortex service status          # Check service status
  *   shieldcortex openclaw install        # Install OpenClaw hook

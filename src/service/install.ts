@@ -39,6 +39,34 @@ function getServiceConfig(): ServiceConfig {
   };
 }
 
+function inspectServiceEntryPoint(platform: Platform, servicePath: string): { entryPoint: string | null; stale: boolean } {
+  if (!fs.existsSync(servicePath)) {
+    return { entryPoint: null, stale: false };
+  }
+
+  try {
+    const content = fs.readFileSync(servicePath, 'utf-8');
+    let entryPoint: string | null = null;
+
+    if (platform === 'macos') {
+      const matches = [...content.matchAll(/<string>([^<]+)<\/string>/g)].map((match) => match[1]);
+      entryPoint = matches.find((value) => value.endsWith('index.js')) ?? null;
+    } else if (platform === 'linux') {
+      const match = content.match(/ExecStart=\S+\s+(\S+index\.js)/);
+      entryPoint = match?.[1] ?? null;
+    } else {
+      const match = content.match(/Run\s+\"\"[^\"]+\"\"\s+\"\"([^\"]+index\.js)\"\"/);
+      entryPoint = match?.[1] ?? null;
+    }
+
+    const currentEntryPoint = getServiceConfig().entryPoint;
+    const stale = !!entryPoint && (entryPoint.includes('/.npm/_npx/') || entryPoint !== currentEntryPoint);
+    return { entryPoint, stale };
+  } catch {
+    return { entryPoint: null, stale: false };
+  }
+}
+
 function getServicePath(platform: Platform): string {
   switch (platform) {
     case 'macos':
@@ -105,6 +133,11 @@ export async function installService(): Promise<void> {
   console.log(`  Dashboard: http://localhost:3030`);
 }
 
+export async function repairService(): Promise<void> {
+  await uninstallService();
+  await installService();
+}
+
 function cleanLogsDirectory(): void {
   const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
   if (fs.existsSync(logsDir)) {
@@ -150,10 +183,15 @@ export async function serviceStatus(): Promise<void> {
   const platform = detectPlatform();
   const servicePath = getServicePath(platform);
   const installed = fs.existsSync(servicePath);
+  const inspection = inspectServiceEntryPoint(platform, servicePath);
 
   console.log(`Platform:  ${platform}`);
   console.log(`Installed: ${installed ? 'yes' : 'no'}`);
   console.log(`Path:      ${servicePath}`);
+  if (inspection.entryPoint) {
+    console.log(`Entry:     ${inspection.entryPoint}`);
+    console.log(`Healthy:   ${inspection.stale ? 'no (repair recommended)' : 'yes'}`);
+  }
 
   if (!installed) return;
 
@@ -178,12 +216,19 @@ export async function serviceStatus(): Promise<void> {
   } catch {
     console.log('Running:   no');
   }
+
+  if (inspection.stale) {
+    console.log('Repair:    shieldcortex service repair');
+  }
 }
 
 export async function handleServiceCommand(subcommand: string): Promise<void> {
   switch (subcommand) {
     case 'install':
       await installService();
+      break;
+    case 'repair':
+      await repairService();
       break;
     case 'uninstall':
       await uninstallService({ cleanLogs: process.argv.includes('--clean-logs') });
@@ -192,7 +237,7 @@ export async function handleServiceCommand(subcommand: string): Promise<void> {
       await serviceStatus();
       break;
     default:
-      console.log('Usage: shieldcortex service <install|uninstall|status>');
+      console.log('Usage: shieldcortex service <install|repair|uninstall|status>');
       process.exit(1);
   }
 }

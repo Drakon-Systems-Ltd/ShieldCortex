@@ -13,6 +13,7 @@ import { syncAllGraphToCloud } from './graph-sync.js';
 import { syncAllMemoriesToCloud } from './memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { initDatabase } from '../database/init.js';
+import { reconcileSyncQueue } from './sync-queue.js';
 
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
@@ -176,6 +177,14 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
     console.log('Syncing local memories and graph to ShieldCortex Cloud...');
     const memoryResult = await syncAllMemoriesToCloud();
     const graphResult = await syncAllGraphToCloud();
+    let reconciled = 0;
+    if (memoryResult.failed === 0 && graphResult.failedBatches === 0) {
+      reconciled = reconcileSyncQueue({
+        kinds: ['memory', 'graph'],
+        statuses: ['pending', 'failed'],
+        maxCreatedAt: new Date().toISOString(),
+      }).removed;
+    }
     console.log(
       `Finished. ${memoryResult.synced}/${memoryResult.total} memories synced` +
       `${memoryResult.failed > 0 ? `, ${memoryResult.failed} queued for retry` : ''}.`
@@ -184,6 +193,9 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
       `Graph replica: ${graphResult.entities} entities, ${graphResult.triples} relationships, ${graphResult.memoryEntities} memory links` +
       `${graphResult.failedBatches > 0 ? `, ${graphResult.failedBatches} batch${graphResult.failedBatches === 1 ? '' : 'es'} queued for retry` : ''}.`
     );
+    if (reconciled > 0) {
+      console.log(`Reconciled ${reconciled} stale sync queue entr${reconciled === 1 ? 'y' : 'ies'}.`);
+    }
     return;
   }
 
