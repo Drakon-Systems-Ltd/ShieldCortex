@@ -2,6 +2,7 @@
 
 import { AlertTriangle, CheckCircle2, Clock3, RefreshCw, Server } from 'lucide-react';
 import { useCloudSyncStatus } from '../../hooks/useCloudSyncStatus';
+import { useDashboardStore } from '@/lib/store';
 
 function formatTimeAgo(isoString: string): string {
   const diff = Date.now() - new Date(isoString).getTime();
@@ -70,6 +71,7 @@ function statusTone(status: 'healthy' | 'queued' | 'warning' | 'disabled') {
 
 export function CloudSyncStatus() {
   const { data, isLoading } = useCloudSyncStatus();
+  const setViewMode = useDashboardStore((state) => state.setViewMode);
 
   if (isLoading || !data) return null;
 
@@ -163,6 +165,14 @@ export function CloudSyncStatus() {
             </div>
           </div>
         </div>
+      </div>
+      <div className="mt-4 flex justify-end">
+        <button
+          onClick={() => setViewMode('cloud')}
+          className="rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/40 hover:text-white"
+        >
+          Open cloud diagnostics
+        </button>
       </div>
     </div>
   );

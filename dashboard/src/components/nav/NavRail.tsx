@@ -7,10 +7,12 @@ import { useLicenseStatus } from '@/hooks/useLicense';
 import { useActivityTrend } from '@/hooks/useActivityTrend';
 import { Sparkline } from '@/components/nav/Sparkline';
 import { LayoutDashboard, Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch, Zap, Clock } from 'lucide-react';
+import { Cloud } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'overview' as const, label: 'Home', icon: LayoutDashboard },
   { id: 'shield' as const, label: 'Shield', icon: Shield },
+  { id: 'cloud' as const, label: 'Cloud', icon: Cloud },
   { id: 'audit' as const, label: 'Audit', icon: FileText },
   { id: 'quarantine' as const, label: 'Queue', icon: AlertTriangle },
   { id: 'agents' as const, label: 'Agents', icon: Users },

@@ -6,8 +6,11 @@ const API_URL = 'http://localhost:3001';
 interface CloudSyncStatus {
   enabled: boolean;
   apiKeySet: boolean;
+  baseUrl: string;
+  featureEnabled: boolean;
+  requiredTier: 'free' | 'pro' | 'team' | 'enterprise';
   lastSyncAt: string | null;
-  device: { id: string; name: string };
+  device: { id: string; name: string; platform: string };
   queue: {
     pending: number;
     failed: number;

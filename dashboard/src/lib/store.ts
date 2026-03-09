@@ -19,8 +19,8 @@ interface DashboardState {
   setSelectedAuditEntry: (entry: AuditEntry | null) => void;
 
   // View mode
-  viewMode: 'overview' | 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline';
-  setViewMode: (mode: 'overview' | 'shield' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline') => void;
+  viewMode: 'overview' | 'shield' | 'cloud' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline';
+  setViewMode: (mode: 'overview' | 'shield' | 'cloud' | 'audit' | 'quarantine' | 'memories' | 'brain' | 'graph' | 'agents' | 'skills' | 'dome' | 'timeline') => void;
 
   // Filters
   typeFilter: string | null;

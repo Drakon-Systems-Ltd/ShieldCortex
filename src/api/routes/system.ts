@@ -15,6 +15,7 @@ import {
   type DefenceMode,
 } from '../../cloud/config.js';
 import { getQueueStats } from '../../cloud/sync-queue.js';
+import { getRequiredTier, isFeatureEnabled } from '../../license/gate.js';
 import { getControlStatus, isKillSwitchActive, pause, resume } from '../control.js';
 import {
   checkForUpdates,
@@ -166,10 +167,14 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
       res.json({
         enabled: config.cloudEnabled,
         apiKeySet: !!config.cloudApiKey,
+        baseUrl: config.cloudBaseUrl,
+        featureEnabled: isFeatureEnabled('cloud_sync'),
+        requiredTier: getRequiredTier('cloud_sync'),
         lastSyncAt: (typeof raw.lastSyncAt === 'string' ? raw.lastSyncAt : null) as string | null,
         device: {
           id: getDeviceId(),
           name: getDeviceName(),
+          platform: `${process.platform}/${process.arch}`,
         },
         queue: {
           pending: queue.pending,
