@@ -50,6 +50,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { spawn, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
+import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { createServer } from './server.js';
@@ -327,6 +328,30 @@ function startDashboard(): ChildProcess {
   });
 
   return dashboard;
+}
+
+function checkLocalHttp(url: string, expectedStatus: number[] = [200], timeoutMs = 1200): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get(url, { timeout: timeoutMs }, (res) => {
+      res.resume();
+      resolve(Boolean(res.statusCode && expectedStatus.includes(res.statusCode)));
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+
+    req.on('error', () => resolve(false));
+  });
+}
+
+async function isLocalApiRunning(): Promise<boolean> {
+  return checkLocalHttp('http://127.0.0.1:3001/api/health');
+}
+
+async function isLocalDashboardRunning(): Promise<boolean> {
+  return checkLocalHttp('http://127.0.0.1:3030', [200, 307, 308]);
 }
 
 /**
@@ -700,13 +725,36 @@ ${bold}DOCS${reset}
 
   if (mode === 'api') {
     // API mode only - for dashboard visualization
+    if (await isLocalApiRunning()) {
+      console.log('ShieldCortex API is already running at http://localhost:3001');
+      return;
+    }
     console.log('Starting ShieldCortex in API mode...');
     startVisualizationServer(dbPath);
   } else if (mode === 'dashboard') {
     // Dashboard mode - API + Next.js dashboard
     console.log('Starting ShieldCortex with Dashboard...');
-    startVisualizationServer(dbPath);
-    dashboardProcess = startDashboard();
+    const apiRunning = await isLocalApiRunning();
+    const dashboardRunning = await isLocalDashboardRunning();
+
+    if (apiRunning && dashboardRunning) {
+      console.log('ShieldCortex dashboard is already running.');
+      console.log('Dashboard: http://localhost:3030');
+      console.log('API:       http://localhost:3001');
+      return;
+    }
+
+    if (!apiRunning) {
+      startVisualizationServer(dbPath);
+    } else {
+      console.log('Reusing existing local ShieldCortex API on http://localhost:3001');
+    }
+
+    if (!dashboardRunning) {
+      dashboardProcess = startDashboard();
+    } else {
+      console.log('Dashboard UI is already running on http://localhost:3030');
+    }
 
     // Kill dashboard child process on any exit (prevents orphans)
     const killDashboard = () => {
@@ -735,7 +783,11 @@ ${bold}DOCS${reset}
   } else if (mode === 'both') {
     // Both modes - API in background, MCP in foreground
     console.log('Starting ShieldCortex in both modes...');
-    startVisualizationServer(dbPath);
+    if (!(await isLocalApiRunning())) {
+      startVisualizationServer(dbPath);
+    } else {
+      console.log('Reusing existing local ShieldCortex API on http://localhost:3001');
+    }
     await startMcpServer(dbPath);
   } else {
     // MCP mode (default) - for Claude Code integration
