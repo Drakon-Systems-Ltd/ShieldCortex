@@ -5,6 +5,12 @@ interface CloudConfig {
   enabled: boolean;
   apiKeySet: boolean;
   baseUrl: string;
+  syncControls: {
+    projectMode: 'all' | 'include' | 'exclude';
+    projects: string[];
+    contentMode: 'full' | 'metadata';
+    excludeSensitive: boolean;
+  };
   openclawMemory: {
     autoMemory: boolean;
     dedupe: boolean;
@@ -36,6 +42,10 @@ export function useUpdateCloudConfig() {
         cloudApiKey: string;
         cloudEnabled: boolean;
         cloudBaseUrl: string;
+        cloudSyncProjectMode: 'all' | 'include' | 'exclude';
+        cloudSyncProjects: string[];
+        cloudSyncContentMode: 'full' | 'metadata';
+        cloudSyncExcludeSensitive: boolean;
         openclawAutoMemory: boolean;
         openclawAutoMemoryDedupe: boolean;
         openclawAutoMemoryNoveltyThreshold: number;
@@ -52,6 +62,24 @@ export function useUpdateCloudConfig() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cloud-config'] });
+      queryClient.invalidateQueries({ queryKey: ['cloud-sync-status'] });
     },
+  });
+}
+
+export interface CloudProjectSummary {
+  project: string;
+  count: number;
+}
+
+export function useCloudProjects() {
+  return useQuery<{ projects: CloudProjectSummary[] }>({
+    queryKey: ['cloud-projects'],
+    queryFn: async () => {
+      const res = await authFetch(`${API_URL}/api/cloud/projects`);
+      if (!res.ok) throw new Error('Failed to fetch cloud projects');
+      return res.json();
+    },
+    staleTime: 30000,
   });
 }

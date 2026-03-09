@@ -9,6 +9,12 @@ interface CloudSyncStatus {
   baseUrl: string;
   featureEnabled: boolean;
   requiredTier: 'free' | 'pro' | 'team' | 'enterprise';
+  controls: {
+    projectMode: 'all' | 'include' | 'exclude';
+    projects: string[];
+    contentMode: 'full' | 'metadata';
+    excludeSensitive: boolean;
+  };
   lastSyncAt: string | null;
   device: { id: string; name: string; platform: string };
   queue: {

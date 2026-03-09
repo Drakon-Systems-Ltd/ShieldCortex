@@ -1,5 +1,13 @@
 import { getDatabase } from '../database/init.js';
-import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
+import {
+  getCloudConfig,
+  getCloudSyncControls,
+  getDeviceId,
+  getDeviceName,
+  isSensitiveLevel,
+  shouldSyncProject,
+  updateLastSyncAt,
+} from './config.js';
 import { enqueueFailedGraphSync } from './sync-queue.js';
 import type { Memory } from '../memory/types.js';
 
@@ -57,6 +65,26 @@ function entityExternalId(id: number): string {
 
 function tripleExternalId(id: number): string {
   return `triple:${id}`;
+}
+
+function getAllowedMemoryExternalIds(): Set<string> {
+  const db = getDatabase();
+  const controls = getCloudSyncControls();
+  const rows = db.prepare('SELECT uuid, project, sensitivity_level FROM memories').all() as Array<{
+    uuid: string;
+    project: string | null;
+    sensitivity_level: string | null;
+  }>;
+
+  return new Set(
+    rows
+      .filter((row) => {
+        if (!shouldSyncProject(row.project, controls)) return false;
+        if (controls.excludeSensitive && isSensitiveLevel(row.sensitivity_level)) return false;
+        return true;
+      })
+      .map((row) => row.uuid),
+  );
 }
 
 function buildEnvelope(
@@ -155,8 +183,22 @@ function mapMemoryEntityRow(row: Record<string, unknown>): SyncedGraphMemoryEnti
 
 function getMemoryScopedEnvelope(memoryId: number): GraphSyncEnvelope | null {
   const db = getDatabase();
-  const memory = db.prepare('SELECT id, uuid FROM memories WHERE id = ?').get(memoryId) as { id: number; uuid: string } | undefined;
+  const memory = db.prepare('SELECT id, uuid, project, sensitivity_level FROM memories WHERE id = ?').get(memoryId) as {
+    id: number;
+    uuid: string;
+    project: string | null;
+    sensitivity_level: string | null;
+  } | undefined;
   if (!memory) return null;
+
+  const controls = getCloudSyncControls();
+  const memoryAllowed =
+    shouldSyncProject(memory.project, controls) &&
+    !(controls.excludeSensitive && isSensitiveLevel(memory.sensitivity_level));
+
+  if (!memoryAllowed) {
+    return buildEnvelope([], [], [], [memory.uuid]);
+  }
 
   const entityRows = db.prepare(`
     SELECT DISTINCT e.*
@@ -224,6 +266,7 @@ export async function syncAllGraphToCloud(): Promise<{
   failedBatches: number;
 }> {
   const db = getDatabase();
+  const allowedMemoryExternalIds = getAllowedMemoryExternalIds();
 
   const entityRows = db.prepare('SELECT * FROM entities ORDER BY id ASC').all() as Record<string, unknown>[];
   const tripleRows = db.prepare(`
@@ -239,9 +282,24 @@ export async function syncAllGraphToCloud(): Promise<{
     ORDER BY me.memory_id ASC, me.entity_id ASC
   `).all() as Record<string, unknown>[];
 
-  const entities = entityRows.map(mapEntityRow);
-  const triples = tripleRows.map(mapTripleRow);
-  const memoryEntities = memoryEntityRows.map(mapMemoryEntityRow);
+  const filteredMemoryEntityRows = memoryEntityRows.filter((row) => allowedMemoryExternalIds.has(row.memory_uuid as string));
+  const allowedEntityIds = new Set(filteredMemoryEntityRows.map((row) => row.entity_id as number));
+  const filteredTripleRows = tripleRows.filter((row) => {
+    const sourceMemoryUuid = row.source_memory_uuid as string | null;
+    if (sourceMemoryUuid && !allowedMemoryExternalIds.has(sourceMemoryUuid)) return false;
+    const subjectId = row.subject_id as number;
+    const objectId = row.object_id as number;
+    return allowedEntityIds.has(subjectId) || allowedEntityIds.has(objectId);
+  });
+  for (const row of filteredTripleRows) {
+    allowedEntityIds.add(row.subject_id as number);
+    allowedEntityIds.add(row.object_id as number);
+  }
+  const filteredEntityRows = entityRows.filter((row) => allowedEntityIds.has(row.id as number));
+
+  const entities = filteredEntityRows.map(mapEntityRow);
+  const triples = filteredTripleRows.map(mapTripleRow);
+  const memoryEntities = filteredMemoryEntityRows.map(mapMemoryEntityRow);
 
   const batchSize = 200;
   const totalBatches = Math.max(

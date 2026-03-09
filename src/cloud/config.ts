@@ -9,11 +9,24 @@ export interface CloudConfig {
   cloudEnabled: boolean;
 }
 
+export interface CloudSyncControls {
+  projectMode: 'all' | 'include' | 'exclude';
+  projects: string[];
+  contentMode: 'full' | 'metadata';
+  excludeSensitive: boolean;
+}
+
 const CONFIG_DIR = join(homedir(), '.shieldcortex');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 const SIG_FILE = join(CONFIG_DIR, '.config-sig');
 const INTEGRITY_KEY_FILE = join(CONFIG_DIR, '.integrity-key');
 const DEFAULT_BASE_URL = 'https://api.shieldcortex.ai';
+const DEFAULT_SYNC_CONTROLS: CloudSyncControls = {
+  projectMode: 'all',
+  projects: [],
+  contentMode: 'full',
+  excludeSensitive: false,
+};
 
 // Cache to avoid repeated file reads
 let cachedConfig: CloudConfig | null = null;
@@ -119,6 +132,57 @@ export function setCloudConfig(updates: Partial<CloudConfig>): void {
 /** Reset the in-memory cache (useful for testing) */
 export function clearCloudConfigCache(): void {
   cachedConfig = null;
+}
+
+function normalizeProjectList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(
+    value
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+export function getCloudSyncControls(): CloudSyncControls {
+  const raw = readRawConfig();
+  const projectMode = raw.cloudSyncProjectMode;
+  const contentMode = raw.cloudSyncContentMode;
+
+  return {
+    projectMode:
+      projectMode === 'include' || projectMode === 'exclude'
+        ? projectMode
+        : DEFAULT_SYNC_CONTROLS.projectMode,
+    projects: normalizeProjectList(raw.cloudSyncProjects),
+    contentMode: contentMode === 'metadata' ? 'metadata' : DEFAULT_SYNC_CONTROLS.contentMode,
+    excludeSensitive:
+      typeof raw.cloudSyncExcludeSensitive === 'boolean'
+        ? raw.cloudSyncExcludeSensitive
+        : DEFAULT_SYNC_CONTROLS.excludeSensitive,
+  };
+}
+
+export function setCloudSyncControls(updates: Partial<CloudSyncControls>): void {
+  const raw = readRawConfig();
+  if (updates.projectMode !== undefined) raw.cloudSyncProjectMode = updates.projectMode;
+  if (updates.projects !== undefined) raw.cloudSyncProjects = normalizeProjectList(updates.projects);
+  if (updates.contentMode !== undefined) raw.cloudSyncContentMode = updates.contentMode;
+  if (updates.excludeSensitive !== undefined) raw.cloudSyncExcludeSensitive = updates.excludeSensitive;
+  writeRawConfig(raw);
+}
+
+export function shouldSyncProject(project: string | null | undefined, controls: CloudSyncControls = getCloudSyncControls()): boolean {
+  const normalized = (project ?? '').trim();
+  if (controls.projectMode === 'all') return true;
+  const included = controls.projects.includes(normalized);
+  return controls.projectMode === 'include' ? included : !included;
+}
+
+export function isSensitiveLevel(level: string | null | undefined): boolean {
+  if (!level) return false;
+  const normalized = level.trim().toUpperCase();
+  return normalized.length > 0 && normalized !== 'PUBLIC' && normalized !== 'INTERNAL';
 }
 
 // ── Trusted Skills ──────────────────────────────────────

@@ -1,7 +1,8 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Cloud, Database, GitBranch, KeyRound, RefreshCw, Server, ShieldAlert } from 'lucide-react';
-import { useCloudStatus } from '@/hooks/useCloudStatus';
+import { useCloudProjects, useCloudStatus, useUpdateCloudConfig } from '@/hooks/useCloudStatus';
 import { useCloudSyncStatus } from '@/hooks/useCloudSyncStatus';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_BG, TIER_COLOURS, TIER_LABELS } from '@/lib/license';
@@ -135,6 +136,165 @@ function QueueKindCard({
   );
 }
 
+function SyncControlsCard() {
+  const { data: cloudConfig } = useCloudStatus();
+  const { data: projectsData } = useCloudProjects();
+  const updateCloudConfig = useUpdateCloudConfig();
+  const [projectMode, setProjectMode] = useState<'all' | 'include' | 'exclude'>('all');
+  const [contentMode, setContentMode] = useState<'full' | 'metadata'>('full');
+  const [excludeSensitive, setExcludeSensitive] = useState(false);
+  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!cloudConfig) return;
+    setProjectMode(cloudConfig.syncControls.projectMode);
+    setContentMode(cloudConfig.syncControls.contentMode);
+    setExcludeSensitive(cloudConfig.syncControls.excludeSensitive);
+    setSelectedProjects(cloudConfig.syncControls.projects);
+  }, [cloudConfig]);
+
+  const projects = projectsData?.projects ?? [];
+
+  function toggleProject(project: string) {
+    setSelectedProjects((current) =>
+      current.includes(project)
+        ? current.filter((entry) => entry !== project)
+        : [...current, project].sort((a, b) => a.localeCompare(b)),
+    );
+  }
+
+  async function saveControls() {
+    await updateCloudConfig.mutateAsync({
+      cloudSyncProjectMode: projectMode,
+      cloudSyncProjects: selectedProjects,
+      cloudSyncContentMode: contentMode,
+      cloudSyncExcludeSensitive: excludeSensitive,
+    });
+  }
+
+  return (
+    <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Sync Controls</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Decide what leaves this device before it hits the cloud replica.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void saveControls()}
+          disabled={updateCloudConfig.isPending}
+          className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {updateCloudConfig.isPending ? 'Saving...' : 'Save controls'}
+        </button>
+      </div>
+
+      <div className="mt-5 grid gap-4">
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Content mode</div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            <label className={`rounded-lg border p-3 text-sm ${contentMode === 'full' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 text-slate-300'}`}>
+              <input
+                type="radio"
+                className="mr-2"
+                checked={contentMode === 'full'}
+                onChange={() => setContentMode('full')}
+              />
+              Full content
+              <div className="mt-1 text-xs text-slate-400">Titles and memory bodies replicate to cloud.</div>
+            </label>
+            <label className={`rounded-lg border p-3 text-sm ${contentMode === 'metadata' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 text-slate-300'}`}>
+              <input
+                type="radio"
+                className="mr-2"
+                checked={contentMode === 'metadata'}
+                onChange={() => setContentMode('metadata')}
+              />
+              Metadata only
+              <div className="mt-1 text-xs text-slate-400">Projects, tags, salience, and graph remain; body content is redacted.</div>
+            </label>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Project scope</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {(['all', 'include', 'exclude'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setProjectMode(mode)}
+                className={`rounded-full border px-3 py-1.5 text-xs font-medium uppercase tracking-wide ${
+                  projectMode === mode
+                    ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
+                    : 'border-slate-700 bg-slate-900/60 text-slate-300'
+                }`}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-400">
+            {projectMode === 'all'
+              ? 'All local projects are eligible for sync.'
+              : projectMode === 'include'
+                ? 'Only the selected projects will sync.'
+                : 'Selected projects stay local-only.'}
+          </p>
+          <div className="mt-3 max-h-48 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+            {projects.length === 0 ? (
+              <div className="text-xs text-slate-500">No named projects found in local memory yet.</div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {projects.map((project) => {
+                  const selected = selectedProjects.includes(project.project);
+                  return (
+                    <button
+                      key={project.project}
+                      type="button"
+                      onClick={() => toggleProject(project.project)}
+                      className={`rounded-full border px-3 py-1.5 text-xs ${
+                        selected
+                          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
+                          : 'border-slate-700 bg-slate-950/60 text-slate-300'
+                      }`}
+                    >
+                      {project.project} <span className="text-slate-500">({project.count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-200">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={excludeSensitive}
+            onChange={(event) => setExcludeSensitive(event.target.checked)}
+          />
+          <div>
+            <div className="font-medium text-white">Exclude sensitive memories</div>
+            <div className="mt-1 text-xs text-slate-400">
+              Skip memories whose sensitivity level is higher than INTERNAL when syncing to cloud.
+            </div>
+          </div>
+        </label>
+
+        {updateCloudConfig.isError && (
+          <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+            {(updateCloudConfig.error as Error).message}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function CloudSyncDiagnosticsView() {
   const { data: sync, isLoading: syncLoading } = useCloudSyncStatus();
   const { data: cloudConfig, isLoading: configLoading } = useCloudStatus();
@@ -258,6 +418,8 @@ export function CloudSyncDiagnosticsView() {
           </section>
 
           <div className="flex flex-col gap-6">
+            <SyncControlsCard />
+
             <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
               <h2 className="text-lg font-semibold text-white">Configuration</h2>
               <div className="mt-4 space-y-3 text-sm">
@@ -276,6 +438,15 @@ export function CloudSyncDiagnosticsView() {
                     <span className="font-medium text-white">
                       {sync.featureEnabled ? 'Team cloud sync enabled' : `Requires ${TIER_LABELS[sync.requiredTier]} tier`}
                     </span>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Current sync policy</div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
+                    <span>Projects: {sync.controls.projectMode}</span>
+                    <span>Content: {sync.controls.contentMode}</span>
+                    <span>Sensitive filter: {sync.controls.excludeSensitive ? 'Enabled' : 'Off'}</span>
+                    <span>Selected projects: {sync.controls.projects.length}</span>
                   </div>
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">

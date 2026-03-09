@@ -1,5 +1,13 @@
 import { getDatabase } from '../database/init.js';
-import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
+import {
+  getCloudConfig,
+  getCloudSyncControls,
+  getDeviceId,
+  getDeviceName,
+  isSensitiveLevel,
+  shouldSyncProject,
+  updateLastSyncAt,
+} from './config.js';
 import { enqueueFailedMemorySync } from './sync-queue.js';
 import type { Memory } from '../memory/types.js';
 
@@ -76,6 +84,41 @@ function buildEnvelope(records: SyncedMemoryRecord[]): MemorySyncEnvelope {
   };
 }
 
+function shouldSyncRecord(record: Pick<SyncedMemoryRecord, 'project' | 'sensitivity_level'>): boolean {
+  const controls = getCloudSyncControls();
+  if (!shouldSyncProject(record.project, controls)) return false;
+  if (controls.excludeSensitive && isSensitiveLevel(record.sensitivity_level)) return false;
+  return true;
+}
+
+function applyContentMode(record: SyncedMemoryRecord): SyncedMemoryRecord {
+  const controls = getCloudSyncControls();
+  if (controls.contentMode !== 'metadata') return record;
+
+  return {
+    ...record,
+    title: `[Metadata only] ${record.category}`,
+    content: `[ShieldCortex] Memory content redacted by local sync policy.`,
+    metadata: {
+      ...record.metadata,
+      _shieldcortex_sync: {
+        ...(typeof record.metadata?._shieldcortex_sync === 'object' && record.metadata._shieldcortex_sync !== null
+          ? record.metadata._shieldcortex_sync as Record<string, unknown>
+          : {}),
+        content_redacted: true,
+        mode: 'metadata',
+      },
+    },
+  };
+}
+
+function hydrateMemoryRecord(memoryId: number): SyncedMemoryRecord | null {
+  const db = getDatabase();
+  const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(memoryId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return rowToSyncRecord(row);
+}
+
 async function postEnvelope(envelope: MemorySyncEnvelope): Promise<boolean> {
   const config = getCloudConfig();
   if (!config.cloudEnabled || !config.cloudApiKey || envelope.memories.length === 0) {
@@ -113,34 +156,18 @@ export function syncMemoryUpsertToCloud(memory: Memory): void {
   const config = getCloudConfig();
   if (!config.cloudEnabled || !config.cloudApiKey) return;
 
-  const record: SyncedMemoryRecord = {
-    external_id: memory.uuid,
-    local_id: memory.id,
-    type: memory.type,
-    category: memory.category,
-    title: memory.title,
-    content: memory.content,
-    project: memory.project ?? null,
-    tags: memory.tags,
-    salience: memory.salience,
-    scope: memory.scope,
-    transferable: memory.transferable,
-    trust_score: null,
-    sensitivity_level: null,
-    source: null,
-    metadata: memory.metadata,
-    created_at: memory.createdAt.toISOString(),
-    updated_at: memory.updatedAt.toISOString(),
-    deleted_at: null,
-  };
+  const record = hydrateMemoryRecord(memory.id);
+  if (!record) return;
 
-  const envelope = buildEnvelope([record]);
+  if (!shouldSyncRecord(record)) return;
+
+  const envelope = buildEnvelope([applyContentMode(record)]);
   postEnvelope(envelope).then((ok) => {
     if (!ok) {
-      enqueueFailedMemorySync(record);
+      enqueueFailedMemorySync(envelope.memories[0]);
     }
   }).catch(() => {
-    enqueueFailedMemorySync(record);
+    enqueueFailedMemorySync(envelope.memories[0]);
   });
 }
 
@@ -182,7 +209,7 @@ export function syncMemoryDeleteToCloud(memory: Memory): void {
 export async function syncAllMemoriesToCloud(): Promise<{ total: number; synced: number; failed: number }> {
   const db = getDatabase();
   const rows = db.prepare('SELECT * FROM memories ORDER BY id ASC').all() as Record<string, unknown>[];
-  const records = rows.map(rowToSyncRecord);
+  const records = rows.map(rowToSyncRecord).filter(shouldSyncRecord).map(applyContentMode);
 
   let synced = 0;
   let failed = 0;

@@ -3,6 +3,7 @@ import { WebSocket } from 'ws';
 import type { MemoryEvent } from '../events.js';
 import {
   getCloudConfig,
+  getCloudSyncControls,
   getDeviceId,
   getDeviceName,
   getDefenceMode,
@@ -10,11 +11,13 @@ import {
   isConfigTampered,
   readRawConfig,
   setCloudConfig,
+  setCloudSyncControls,
   setDefenceMode,
   setOpenClawMemoryConfig,
   type DefenceMode,
 } from '../../cloud/config.js';
 import { getQueueStats } from '../../cloud/sync-queue.js';
+import { getDatabase } from '../../database/init.js';
 import { getRequiredTier, isFeatureEnabled } from '../../license/gate.js';
 import { getControlStatus, isKillSwitchActive, pause, resume } from '../control.js';
 import {
@@ -72,6 +75,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         enabled: config.cloudEnabled,
         apiKeySet: !!config.cloudApiKey,
         baseUrl: config.cloudBaseUrl,
+        syncControls: getCloudSyncControls(),
         openclawMemory: getOpenClawMemoryConfig(),
       });
     } catch (error) {
@@ -85,6 +89,10 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         cloudApiKey,
         cloudEnabled,
         cloudBaseUrl,
+        cloudSyncProjectMode,
+        cloudSyncProjects,
+        cloudSyncContentMode,
+        cloudSyncExcludeSensitive,
         openclawAutoMemory,
         openclawAutoMemoryDedupe,
         openclawAutoMemoryNoveltyThreshold,
@@ -109,11 +117,45 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
       ) {
         return res.status(400).json({ error: 'openclawAutoMemoryMaxRecent must be a number' });
       }
+      if (
+        cloudSyncProjectMode !== undefined &&
+        cloudSyncProjectMode !== 'all' &&
+        cloudSyncProjectMode !== 'include' &&
+        cloudSyncProjectMode !== 'exclude'
+      ) {
+        return res.status(400).json({ error: 'cloudSyncProjectMode must be all, include, or exclude' });
+      }
+      if (
+        cloudSyncContentMode !== undefined &&
+        cloudSyncContentMode !== 'full' &&
+        cloudSyncContentMode !== 'metadata'
+      ) {
+        return res.status(400).json({ error: 'cloudSyncContentMode must be full or metadata' });
+      }
+      if (
+        cloudSyncExcludeSensitive !== undefined &&
+        typeof cloudSyncExcludeSensitive !== 'boolean'
+      ) {
+        return res.status(400).json({ error: 'cloudSyncExcludeSensitive must be a boolean' });
+      }
+      if (
+        cloudSyncProjects !== undefined &&
+        (!Array.isArray(cloudSyncProjects) || cloudSyncProjects.some((value) => typeof value !== 'string'))
+      ) {
+        return res.status(400).json({ error: 'cloudSyncProjects must be an array of strings' });
+      }
 
       setCloudConfig({
         ...(cloudApiKey !== undefined && { cloudApiKey }),
         ...(cloudEnabled !== undefined && { cloudEnabled }),
         ...(cloudBaseUrl !== undefined && { cloudBaseUrl }),
+      });
+
+      setCloudSyncControls({
+        ...(cloudSyncProjectMode !== undefined && { projectMode: cloudSyncProjectMode }),
+        ...(cloudSyncProjects !== undefined && { projects: cloudSyncProjects }),
+        ...(cloudSyncContentMode !== undefined && { contentMode: cloudSyncContentMode }),
+        ...(cloudSyncExcludeSensitive !== undefined && { excludeSensitive: cloudSyncExcludeSensitive }),
       });
 
       setOpenClawMemoryConfig({
@@ -129,6 +171,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         enabled: updated.cloudEnabled,
         apiKeySet: !!updated.cloudApiKey,
         baseUrl: updated.cloudBaseUrl,
+        syncControls: getCloudSyncControls(),
         openclawMemory: getOpenClawMemoryConfig(),
       });
     } catch (error) {
@@ -170,6 +213,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         baseUrl: config.cloudBaseUrl,
         featureEnabled: isFeatureEnabled('cloud_sync'),
         requiredTier: getRequiredTier('cloud_sync'),
+        controls: getCloudSyncControls(),
         lastSyncAt: (typeof raw.lastSyncAt === 'string' ? raw.lastSyncAt : null) as string | null,
         device: {
           id: getDeviceId(),
@@ -186,6 +230,28 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
           lastError: queue.lastError,
           lastErrorKind: queue.lastErrorKind,
         },
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.get('/api/cloud/projects', (_req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const rows = db.prepare(`
+        SELECT project, COUNT(*) as count
+        FROM memories
+        WHERE project IS NOT NULL AND TRIM(project) != ''
+        GROUP BY project
+        ORDER BY count DESC, project ASC
+      `).all() as Array<{ project: string; count: number }>;
+
+      res.json({
+        projects: rows.map((row) => ({
+          project: row.project,
+          count: Number(row.count ?? 0),
+        })),
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
