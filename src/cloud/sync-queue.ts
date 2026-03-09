@@ -9,6 +9,7 @@
 import { getDatabase } from '../database/init.js';
 import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
 import type { SyncedMemoryRecord } from './memory-sync.js';
+import type { GraphSyncEnvelope } from './graph-sync.js';
 
 export interface SyncEntry {
   source_type: string;
@@ -43,6 +44,7 @@ export interface QuarantineSyncEntry {
 type QueuePayload =
   | { kind: 'audit'; entry: SyncEntry }
   | { kind: 'quarantine'; entry: QuarantineSyncEntry }
+  | { kind: 'graph'; entry: GraphSyncEnvelope }
   | {
       kind: 'memory';
       entry: {
@@ -57,7 +59,7 @@ export interface QueueStats {
   pending: number;
   failed: number;
   synced: number;
-  byKind: Record<'audit' | 'quarantine' | 'memory' | 'unknown', {
+  byKind: Record<'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown', {
     pending: number;
     failed: number;
     synced: number;
@@ -65,7 +67,7 @@ export interface QueueStats {
   oldestPendingAt: string | null;
   nextRetryAt: string | null;
   lastError: string | null;
-  lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'unknown' | null;
+  lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown' | null;
 }
 
 export interface SyncQueueResult {
@@ -103,6 +105,10 @@ export function enqueueFailedMemorySync(entry: SyncedMemoryRecord): void {
       platform: `${process.platform}/${process.arch}`,
     },
   });
+}
+
+export function enqueueFailedGraphSync(entry: GraphSyncEnvelope): void {
+  enqueuePayload({ kind: 'graph', entry });
 }
 
 function enqueuePayload(payload: QueuePayload): void {
@@ -181,6 +187,20 @@ function buildRetryRequest(payloadText: string): { path: string; body: string } 
         },
         memories: [payload.entry.record],
       }),
+    };
+  }
+
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    'kind' in parsed &&
+    (parsed as { kind: string }).kind === 'graph'
+  ) {
+    const payload = parsed as { kind: 'graph'; entry: GraphSyncEnvelope };
+    return {
+      path: '/v1/sync/graph',
+      body: JSON.stringify(payload.entry),
     };
   }
 
@@ -327,6 +347,7 @@ export function getQueueStats(): QueueStats {
       audit: { pending: 0, failed: 0, synced: 0 },
       quarantine: { pending: 0, failed: 0, synced: 0 },
       memory: { pending: 0, failed: 0, synced: 0 },
+      graph: { pending: 0, failed: 0, synced: 0 },
       unknown: { pending: 0, failed: 0, synced: 0 },
     },
     oldestPendingAt: null,
@@ -368,13 +389,13 @@ export function getQueueStats(): QueueStats {
   return stats;
 }
 
-function getPayloadKind(payloadText: string): 'audit' | 'quarantine' | 'memory' | 'unknown' {
+function getPayloadKind(payloadText: string): 'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown' {
   try {
     const parsed = JSON.parse(payloadText) as unknown;
 
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'kind' in parsed) {
       const kind = (parsed as { kind?: string }).kind;
-      if (kind === 'audit' || kind === 'quarantine' || kind === 'memory') return kind;
+      if (kind === 'audit' || kind === 'quarantine' || kind === 'memory' || kind === 'graph') return kind;
     }
 
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {

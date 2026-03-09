@@ -12,7 +12,7 @@ interface CloudSyncStatus {
     pending: number;
     failed: number;
     synced: number;
-    byKind: Record<'audit' | 'quarantine' | 'memory' | 'unknown', {
+    byKind: Record<'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown', {
       pending: number;
       failed: number;
       synced: number;
@@ -20,7 +20,7 @@ interface CloudSyncStatus {
     oldestPendingAt: string | null;
     nextRetryAt: string | null;
     lastError: string | null;
-    lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'unknown' | null;
+    lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown' | null;
   };
 }
 

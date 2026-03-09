@@ -9,6 +9,7 @@ import {
   setOpenClawAutoMemory,
   type DefenceMode,
 } from './config.js';
+import { syncAllGraphToCloud } from './graph-sync.js';
 import { syncAllMemoriesToCloud } from './memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { initDatabase } from '../database/init.js';
@@ -172,9 +173,17 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
     }
 
     initDatabase();
-    console.log('Syncing local memories to ShieldCortex Cloud...');
-    const result = await syncAllMemoriesToCloud();
-    console.log(`Finished. ${result.synced}/${result.total} memories synced${result.failed > 0 ? `, ${result.failed} queued for retry` : ''}.`);
+    console.log('Syncing local memories and graph to ShieldCortex Cloud...');
+    const memoryResult = await syncAllMemoriesToCloud();
+    const graphResult = await syncAllGraphToCloud();
+    console.log(
+      `Finished. ${memoryResult.synced}/${memoryResult.total} memories synced` +
+      `${memoryResult.failed > 0 ? `, ${memoryResult.failed} queued for retry` : ''}.`
+    );
+    console.log(
+      `Graph replica: ${graphResult.entities} entities, ${graphResult.triples} relationships, ${graphResult.memoryEntities} memory links` +
+      `${graphResult.failedBatches > 0 ? `, ${graphResult.failedBatches} batch${graphResult.failedBatches === 1 ? '' : 'es'} queued for retry` : ''}.`
+    );
     return;
   }
 

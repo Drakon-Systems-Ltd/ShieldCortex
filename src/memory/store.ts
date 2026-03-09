@@ -47,6 +47,7 @@ import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
+import { syncGraphDeleteForMemoryToCloud, syncGraphForMemoryToCloud } from '../cloud/graph-sync.js';
 import { syncMemoryDeleteToCloud, syncMemoryUpsertToCloud } from '../cloud/memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
@@ -506,6 +507,9 @@ export function addMemory(
     const extraction = extractFromMemory(input.title, truncationResult.content, category);
     if (extraction.entities.length > 0) {
       processExtractionResult(extraction, memory.id);
+      if (isFeatureEnabled('cloud_sync')) {
+        syncGraphForMemoryToCloud(memory.id);
+      }
     }
   } catch (e) {
     console.error('[shieldcortex] Entity extraction failed:', e);
@@ -669,6 +673,7 @@ export function updateMemory(
 
   if (isFeatureEnabled('cloud_sync')) {
     syncMemoryUpsertToCloud(updatedMemory);
+    syncGraphForMemoryToCloud(updatedMemory.id);
   }
 
   return updatedMemory;
@@ -705,6 +710,7 @@ export function deleteMemory(id: number, source?: DefenceSource): boolean {
   if (result.changes > 0 && memory) {
     if (isFeatureEnabled('cloud_sync')) {
       syncMemoryDeleteToCloud(memory);
+      syncGraphDeleteForMemoryToCloud(memory);
     }
     emitMemoryDeleted(id, memory.title);
     // Persist event for cross-process IPC (MCP → Dashboard)

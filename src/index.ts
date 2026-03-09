@@ -33,7 +33,7 @@
  *   shieldcortex openclaw status         # Check OpenClaw hook status
  *   shieldcortex config --openclaw-auto-memory true   # Enable OpenClaw auto-memory extraction
  *   shieldcortex config --openclaw-auto-memory false  # Disable OpenClaw auto-memory extraction
- *   shieldcortex cloud sync --full      # Backfill local memories to ShieldCortex Cloud
+ *   shieldcortex cloud sync --full      # Backfill local memories + graph to ShieldCortex Cloud
  *   shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
  *   shieldcortex copilot uninstall       # Remove MCP server configuration
  *   shieldcortex copilot status          # Check MCP server configuration
@@ -356,7 +356,7 @@ ${bold}COMMANDS${reset}
   ${cyan}doctor${reset}                Diagnose installation issues
   ${cyan}quickstart${reset} [target]    Detect the fastest setup path
   ${cyan}config${reset} [options]      Configure cloud sync and settings
-  ${cyan}cloud${reset} sync --full     Backfill local memories to ShieldCortex Cloud
+  ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
