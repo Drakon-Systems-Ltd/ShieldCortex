@@ -7,7 +7,21 @@ interface CloudSyncStatus {
   enabled: boolean;
   apiKeySet: boolean;
   lastSyncAt: string | null;
-  queue: { pending: number; failed: number };
+  device: { id: string; name: string };
+  queue: {
+    pending: number;
+    failed: number;
+    synced: number;
+    byKind: Record<'audit' | 'quarantine' | 'memory' | 'unknown', {
+      pending: number;
+      failed: number;
+      synced: number;
+    }>;
+    oldestPendingAt: string | null;
+    nextRetryAt: string | null;
+    lastError: string | null;
+    lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'unknown' | null;
+  };
 }
 
 export function useCloudSyncStatus() {

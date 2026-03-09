@@ -3,6 +3,8 @@ import { WebSocket } from 'ws';
 import type { MemoryEvent } from '../events.js';
 import {
   getCloudConfig,
+  getDeviceId,
+  getDeviceName,
   getDefenceMode,
   getOpenClawMemoryConfig,
   isConfigTampered,
@@ -165,9 +167,19 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         enabled: config.cloudEnabled,
         apiKeySet: !!config.cloudApiKey,
         lastSyncAt: (typeof raw.lastSyncAt === 'string' ? raw.lastSyncAt : null) as string | null,
+        device: {
+          id: getDeviceId(),
+          name: getDeviceName(),
+        },
         queue: {
           pending: queue.pending,
           failed: queue.failed,
+          synced: queue.synced,
+          byKind: queue.byKind,
+          oldestPendingAt: queue.oldestPendingAt,
+          nextRetryAt: queue.nextRetryAt,
+          lastError: queue.lastError,
+          lastErrorKind: queue.lastErrorKind,
         },
       });
     } catch (error) {

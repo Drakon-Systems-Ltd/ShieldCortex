@@ -57,6 +57,15 @@ export interface QueueStats {
   pending: number;
   failed: number;
   synced: number;
+  byKind: Record<'audit' | 'quarantine' | 'memory' | 'unknown', {
+    pending: number;
+    failed: number;
+    synced: number;
+  }>;
+  oldestPendingAt: string | null;
+  nextRetryAt: string | null;
+  lastError: string | null;
+  lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'unknown' | null;
 }
 
 export interface SyncQueueResult {
@@ -299,19 +308,83 @@ export function getQueueStats(): QueueStats {
   const db = getDatabase();
 
   const rows = db.prepare(`
-    SELECT status, COUNT(*) as count
+    SELECT id, payload, status, next_retry_at, last_error, created_at
     FROM sync_queue
-    GROUP BY status
-  `).all() as Array<{ status: string; count: number }>;
+  `).all() as Array<{
+    id: number;
+    payload: string;
+    status: string;
+    next_retry_at: string | null;
+    last_error: string | null;
+    created_at: string | null;
+  }>;
 
-  const stats: QueueStats = { pending: 0, failed: 0, synced: 0 };
+  const stats: QueueStats = {
+    pending: 0,
+    failed: 0,
+    synced: 0,
+    byKind: {
+      audit: { pending: 0, failed: 0, synced: 0 },
+      quarantine: { pending: 0, failed: 0, synced: 0 },
+      memory: { pending: 0, failed: 0, synced: 0 },
+      unknown: { pending: 0, failed: 0, synced: 0 },
+    },
+    oldestPendingAt: null,
+    nextRetryAt: null,
+    lastError: null,
+    lastErrorKind: null,
+  };
+
+  let newestErrorRowId = -1;
   for (const row of rows) {
-    if (row.status === 'pending') stats.pending = row.count;
-    else if (row.status === 'failed') stats.failed = row.count;
-    else if (row.status === 'synced') stats.synced = row.count;
+    const kind = getPayloadKind(row.payload);
+    if (row.status === 'pending') stats.pending++;
+    else if (row.status === 'failed') stats.failed++;
+    else if (row.status === 'synced') stats.synced++;
+
+    if (row.status === 'pending' || row.status === 'failed' || row.status === 'synced') {
+      stats.byKind[kind][row.status]++;
+    }
+
+    if (row.status === 'pending' && row.created_at) {
+      if (!stats.oldestPendingAt || row.created_at < stats.oldestPendingAt) {
+        stats.oldestPendingAt = row.created_at;
+      }
+    }
+
+    if (row.status === 'pending' && row.next_retry_at) {
+      if (!stats.nextRetryAt || row.next_retry_at < stats.nextRetryAt) {
+        stats.nextRetryAt = row.next_retry_at;
+      }
+    }
+
+    if (row.last_error && row.id > newestErrorRowId) {
+      newestErrorRowId = row.id;
+      stats.lastError = row.last_error;
+      stats.lastErrorKind = kind;
+    }
   }
 
   return stats;
+}
+
+function getPayloadKind(payloadText: string): 'audit' | 'quarantine' | 'memory' | 'unknown' {
+  try {
+    const parsed = JSON.parse(payloadText) as unknown;
+
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'kind' in parsed) {
+      const kind = (parsed as { kind?: string }).kind;
+      if (kind === 'audit' || kind === 'quarantine' || kind === 'memory') return kind;
+    }
+
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return 'audit';
+    }
+  } catch {
+    // ignore malformed payloads
+  }
+
+  return 'unknown';
 }
 
 /**
