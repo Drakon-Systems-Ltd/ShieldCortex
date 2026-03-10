@@ -105,7 +105,7 @@ export function mergeEntities(keepId: number, removeId: number): void {
   })();
 }
 
-export function processExtractionResult(result: ExtractionResult, memoryId: number): void {
+function applyExtractionResult(result: ExtractionResult, memoryId: number): void {
   const db = getDatabase();
   const nameToId = new Map<string, number>();
 
@@ -138,4 +138,92 @@ export function processExtractionResult(result: ExtractionResult, memoryId: numb
   for (const id of uniqueIds) {
     updateCount.run(id);
   }
+}
+
+function pruneOrphanEntities(candidateIds: number[]): number {
+  if (candidateIds.length === 0) return 0;
+
+  const db = getDatabase();
+  const placeholders = candidateIds.map(() => '?').join(', ');
+  const orphanRows = db.prepare(`
+    SELECT e.id
+    FROM entities e
+    WHERE e.id IN (${placeholders})
+      AND NOT EXISTS (SELECT 1 FROM memory_entities me WHERE me.entity_id = e.id)
+      AND NOT EXISTS (SELECT 1 FROM triples t WHERE t.subject_id = e.id OR t.object_id = e.id)
+  `).all(...candidateIds) as Array<{ id: number }>;
+
+  if (orphanRows.length === 0) return 0;
+
+  const orphanIds = orphanRows.map((row) => row.id);
+  const orphanPlaceholders = orphanIds.map(() => '?').join(', ');
+  db.prepare(`DELETE FROM entities WHERE id IN (${orphanPlaceholders})`).run(...orphanIds);
+  return orphanIds.length;
+}
+
+function clearMemoryGraphSlice(memoryId: number): {
+  removedEntityLinks: number;
+  removedTriples: number;
+  orphanEntitiesPruned: number;
+} {
+  const db = getDatabase();
+  const linkedEntityRows = db.prepare(`
+    SELECT DISTINCT entity_id
+    FROM memory_entities
+    WHERE memory_id = ?
+  `).all(memoryId) as Array<{ entity_id: number }>;
+  const linkedEntityIds = linkedEntityRows.map((row) => row.entity_id);
+
+  const removedTriples = Number(
+    db.prepare('DELETE FROM triples WHERE source_memory_id = ?').run(memoryId).changes ?? 0,
+  );
+  const removedEntityLinks = Number(
+    db.prepare('DELETE FROM memory_entities WHERE memory_id = ?').run(memoryId).changes ?? 0,
+  );
+
+  if (linkedEntityIds.length > 0) {
+    const placeholders = linkedEntityIds.map(() => '?').join(', ');
+    db.prepare(`
+      UPDATE entities
+      SET memory_count = CASE WHEN memory_count > 0 THEN memory_count - 1 ELSE 0 END
+      WHERE id IN (${placeholders})
+    `).run(...linkedEntityIds);
+  }
+
+  const orphanEntitiesPruned = pruneOrphanEntities(linkedEntityIds);
+
+  return {
+    removedEntityLinks,
+    removedTriples,
+    orphanEntitiesPruned,
+  };
+}
+
+export function removeMemoryGraph(memoryId: number): {
+  removedEntityLinks: number;
+  removedTriples: number;
+  orphanEntitiesPruned: number;
+} {
+  const db = getDatabase();
+  return db.transaction(() => clearMemoryGraphSlice(memoryId))();
+}
+
+export function replaceMemoryGraph(memoryId: number, result: ExtractionResult): {
+  removedEntityLinks: number;
+  removedTriples: number;
+  orphanEntitiesPruned: number;
+} {
+  const db = getDatabase();
+  return db.transaction(() => {
+    const cleared = clearMemoryGraphSlice(memoryId);
+    if (result.entities.length > 0) {
+      applyExtractionResult(result, memoryId);
+    }
+    return cleared;
+  })();
+}
+
+export function processExtractionResult(result: ExtractionResult, memoryId: number): void {
+  const db = getDatabase();
+  db.transaction(() => applyExtractionResult(result, memoryId))();
 }

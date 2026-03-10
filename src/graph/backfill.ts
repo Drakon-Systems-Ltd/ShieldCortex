@@ -1,9 +1,9 @@
 import { getDatabase } from '../database/init.js';
 import { extractFromMemory } from './extract.js';
-import { processExtractionResult } from './resolve.js';
+import { replaceMemoryGraph } from './resolve.js';
 
 /** Bump this when extract.ts logic changes to force re-extraction */
-const EXTRACTION_VERSION = 2;
+const EXTRACTION_VERSION = 3;
 
 export interface BackfillResult {
   entities: number;
@@ -51,9 +51,7 @@ export function backfillGraph(options?: { force?: boolean }): BackfillResult {
   for (const mem of memories) {
     try {
       const extraction = extractFromMemory(mem.title, mem.content, mem.category);
-      if (extraction.entities.length > 0) {
-        processExtractionResult(extraction, mem.id);
-      }
+      replaceMemoryGraph(mem.id, extraction);
       // Mark this memory as extracted at the current version
       if (updateVersion) {
         updateVersion.run(EXTRACTION_VERSION, mem.id);

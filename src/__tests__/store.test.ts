@@ -682,6 +682,133 @@ describe('Semantic Linking', () => {
     });
   });
 
+  describe('Graph hygiene on memory changes', () => {
+    it('should replace the local graph slice when a memory is updated', async () => {
+      const { initDatabase, closeDatabase, getDatabase } = await import('../database/init.js');
+      const { addMemory, updateMemory, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+      const db = getDatabase();
+
+      let memoryId: number | undefined;
+      try {
+        const memory = addMemory({
+          title: 'React database stack',
+          content: 'React uses PostgreSQL for the main dashboard.',
+          category: 'architecture',
+          project: 'test-project',
+          type: 'long_term',
+        });
+        memoryId = memory.id;
+
+        let entityNames = (db.prepare('SELECT name FROM entities ORDER BY name ASC').all() as Array<{ name: string }>).map((row) => row.name);
+        expect(entityNames).toEqual(expect.arrayContaining(['PostgreSQL', 'React']));
+
+        updateMemory(memory.id, {
+          title: 'Express cache stack',
+          content: 'Express uses Redis for the API cache.',
+        });
+
+        entityNames = (db.prepare('SELECT name FROM entities ORDER BY name ASC').all() as Array<{ name: string }>).map((row) => row.name);
+        expect(entityNames).toEqual(expect.arrayContaining(['Express', 'Redis']));
+        expect(entityNames).not.toContain('React');
+        expect(entityNames).not.toContain('PostgreSQL');
+
+        const triples = db.prepare(`
+          SELECT s.name as subject_name, t.predicate, o.name as object_name
+          FROM triples t
+          JOIN entities s ON s.id = t.subject_id
+          JOIN entities o ON o.id = t.object_id
+          WHERE t.source_memory_id = ?
+        `).all(memory.id) as Array<{ subject_name: string; predicate: string; object_name: string }>;
+
+        expect(triples.some((triple) =>
+          triple.subject_name === 'Express' &&
+          triple.predicate === 'uses' &&
+          triple.object_name === 'Redis',
+        )).toBe(true);
+        expect(triples.some((triple) => triple.subject_name === 'React' || triple.object_name === 'PostgreSQL')).toBe(false);
+      } finally {
+        if (memoryId) {
+          try { deleteMemory(memoryId); } catch { /* ignore */ }
+        }
+        closeDatabase();
+      }
+    });
+
+    it('should remove local graph residue when deleting a memory', async () => {
+      const { initDatabase, closeDatabase, getDatabase } = await import('../database/init.js');
+      const { addMemory, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+      const db = getDatabase();
+
+      const memory = addMemory({
+        title: 'React database stack',
+        content: 'React uses PostgreSQL for the main dashboard.',
+        category: 'architecture',
+        project: 'test-project',
+        type: 'long_term',
+      });
+
+      expect(deleteMemory(memory.id)).toBe(true);
+
+      const entityCount = (db.prepare('SELECT COUNT(*) as count FROM entities').get() as { count: number }).count;
+      const tripleCount = (db.prepare('SELECT COUNT(*) as count FROM triples').get() as { count: number }).count;
+      const linkCount = (db.prepare('SELECT COUNT(*) as count FROM memory_entities').get() as { count: number }).count;
+
+      expect(entityCount).toBe(0);
+      expect(tripleCount).toBe(0);
+      expect(linkCount).toBe(0);
+
+      closeDatabase();
+    });
+
+    it('should let graph backfill clear stale slices for memories that no longer extract entities', async () => {
+      const { initDatabase, closeDatabase, getDatabase } = await import('../database/init.js');
+      const { addMemory, deleteMemory } = await import('../memory/store.js');
+      const { backfillGraph } = await import('../graph/backfill.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+      const db = getDatabase();
+
+      let memoryId: number | undefined;
+      try {
+        const memory = addMemory({
+          title: 'React database stack',
+          content: 'React uses PostgreSQL for the main dashboard.',
+          category: 'architecture',
+          project: 'test-project',
+          type: 'long_term',
+        });
+        memoryId = memory.id;
+
+        db.prepare(`
+          UPDATE memories
+          SET title = ?, content = ?
+          WHERE id = ?
+        `).run('Plain note', 'Nothing structured remains here.', memory.id);
+
+        backfillGraph({ force: true });
+
+        const entityCount = (db.prepare('SELECT COUNT(*) as count FROM entities').get() as { count: number }).count;
+        const tripleCount = (db.prepare('SELECT COUNT(*) as count FROM triples').get() as { count: number }).count;
+        const linkCount = (db.prepare('SELECT COUNT(*) as count FROM memory_entities').get() as { count: number }).count;
+        expect(entityCount).toBe(0);
+        expect(tripleCount).toBe(0);
+        expect(linkCount).toBe(0);
+      } finally {
+        if (memoryId) {
+          try { deleteMemory(memoryId); } catch { /* ignore */ }
+        }
+        closeDatabase();
+      }
+    });
+  });
+
   describe('enrichMemory', () => {
     it('should enrich a memory with new related context', async () => {
       const { initDatabase, closeDatabase } = await import('../database/init.js');

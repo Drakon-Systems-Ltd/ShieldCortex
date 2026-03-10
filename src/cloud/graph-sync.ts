@@ -69,12 +69,20 @@ function tripleExternalId(id: number): string {
 
 function getAllowedMemoryExternalIds(): Set<string> {
   const db = getDatabase();
-  const controls = getCloudSyncControls();
   const rows = db.prepare('SELECT uuid, project, sensitivity_level FROM memories').all() as Array<{
     uuid: string;
     project: string | null;
     sensitivity_level: string | null;
   }>;
+  return buildAllowedMemoryExternalIdSet(rows);
+}
+
+function buildAllowedMemoryExternalIdSet(rows: Array<{
+  uuid: string;
+  project: string | null;
+  sensitivity_level: string | null;
+}>): Set<string> {
+  const controls = getCloudSyncControls();
 
   return new Set(
     rows
@@ -266,7 +274,12 @@ export async function syncAllGraphToCloud(): Promise<{
   failedBatches: number;
 }> {
   const db = getDatabase();
-  const allowedMemoryExternalIds = getAllowedMemoryExternalIds();
+  const memoryRows = db.prepare('SELECT uuid, project, sensitivity_level FROM memories ORDER BY id ASC').all() as Array<{
+    uuid: string;
+    project: string | null;
+    sensitivity_level: string | null;
+  }>;
+  const allowedMemoryExternalIds = buildAllowedMemoryExternalIdSet(memoryRows);
 
   const entityRows = db.prepare('SELECT * FROM entities ORDER BY id ASC').all() as Record<string, unknown>[];
   const tripleRows = db.prepare(`
@@ -300,17 +313,42 @@ export async function syncAllGraphToCloud(): Promise<{
   const entities = filteredEntityRows.map(mapEntityRow);
   const triples = filteredTripleRows.map(mapTripleRow);
   const memoryEntities = filteredMemoryEntityRows.map(mapMemoryEntityRow);
+  const activeGraphMemoryExternalIds = new Set<string>([
+    ...filteredMemoryEntityRows.map((row) => row.memory_uuid as string),
+    ...filteredTripleRows
+      .map((row) => row.source_memory_uuid as string | null)
+      .filter((value): value is string => Boolean(value)),
+  ]);
+  const pruneMemoryExternalIds = memoryRows
+    .map((row) => row.uuid)
+    .filter((uuid) => !activeGraphMemoryExternalIds.has(uuid));
 
   const batchSize = 200;
+  let syncedBatches = 0;
+  let failedBatches = 0;
+
+  for (let pruneIndex = 0; pruneIndex < pruneMemoryExternalIds.length; pruneIndex += batchSize) {
+    const pruneEnvelope = buildEnvelope(
+      [],
+      [],
+      [],
+      pruneMemoryExternalIds.slice(pruneIndex, pruneIndex + batchSize),
+    );
+    const ok = await postGraphEnvelope(pruneEnvelope);
+    if (ok) {
+      syncedBatches++;
+    } else {
+      failedBatches++;
+      enqueueFailedGraphSync(pruneEnvelope);
+    }
+  }
+
   const totalBatches = Math.max(
     Math.ceil(entities.length / batchSize),
     Math.ceil(triples.length / batchSize),
     Math.ceil(memoryEntities.length / batchSize),
     1,
   );
-
-  let syncedBatches = 0;
-  let failedBatches = 0;
 
   for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
     const envelope = buildEnvelope(

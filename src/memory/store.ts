@@ -44,7 +44,7 @@ import {
 import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
-import { processExtractionResult } from '../graph/resolve.js';
+import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { syncGraphDeleteForMemoryToCloud, syncGraphForMemoryToCloud } from '../cloud/graph-sync.js';
@@ -666,6 +666,24 @@ export function updateMemory(
 
   const updatedMemory = getMemoryById(id)!;
 
+  const shouldRefreshGraph =
+    updates.title !== undefined ||
+    updates.content !== undefined ||
+    updates.category !== undefined;
+
+  if (shouldRefreshGraph) {
+    try {
+      const extraction = extractFromMemory(
+        updatedMemory.title,
+        updatedMemory.content,
+        updatedMemory.category,
+      );
+      replaceMemoryGraph(updatedMemory.id, extraction);
+    } catch (e) {
+      console.error('[shieldcortex] Entity extraction refresh failed:', e);
+    }
+  }
+
   // Emit event for real-time dashboard (in-process)
   emitMemoryUpdated(updatedMemory);
   // Persist event for cross-process IPC (MCP → Dashboard)
@@ -703,6 +721,14 @@ export function deleteMemory(id: number, source?: DefenceSource): boolean {
 
   // Get memory before deletion for event
   const memory = getMemoryById(id);
+
+  if (memory) {
+    try {
+      removeMemoryGraph(id);
+    } catch (e) {
+      console.error('[shieldcortex] Graph cleanup before delete failed:', e);
+    }
+  }
 
   const result = db.prepare('DELETE FROM memories WHERE id = ?').run(id);
 
