@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Cloud, Database, GitBranch, KeyRound, RefreshCw, Server, ShieldAlert } from 'lucide-react';
 import { useCloudProjects, useCloudStatus, useUpdateCloudConfig } from '@/hooks/useCloudStatus';
 import { useCloudSyncStatus } from '@/hooks/useCloudSyncStatus';
@@ -140,36 +140,43 @@ function SyncControlsCard() {
   const { data: cloudConfig } = useCloudStatus();
   const { data: projectsData } = useCloudProjects();
   const updateCloudConfig = useUpdateCloudConfig();
-  const [projectMode, setProjectMode] = useState<'all' | 'include' | 'exclude'>('all');
-  const [contentMode, setContentMode] = useState<'full' | 'metadata'>('full');
-  const [excludeSensitive, setExcludeSensitive] = useState(false);
-  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
-
-  useEffect(() => {
-    if (!cloudConfig) return;
-    setProjectMode(cloudConfig.syncControls.projectMode);
-    setContentMode(cloudConfig.syncControls.contentMode);
-    setExcludeSensitive(cloudConfig.syncControls.excludeSensitive);
-    setSelectedProjects(cloudConfig.syncControls.projects);
-  }, [cloudConfig]);
+  const [draftControls, setDraftControls] = useState<{
+    projectMode: 'all' | 'include' | 'exclude';
+    projects: string[];
+    contentMode: 'full' | 'metadata';
+    excludeSensitive: boolean;
+  } | null>(null);
 
   const projects = projectsData?.projects ?? [];
+  const controls = draftControls ?? cloudConfig?.syncControls ?? {
+    projectMode: 'all' as const,
+    projects: [],
+    contentMode: 'full' as const,
+    excludeSensitive: false,
+  };
 
   function toggleProject(project: string) {
-    setSelectedProjects((current) =>
-      current.includes(project)
-        ? current.filter((entry) => entry !== project)
-        : [...current, project].sort((a, b) => a.localeCompare(b)),
-    );
+    setDraftControls((current) => {
+      const base = current ?? controls;
+      const projects = base.projects.includes(project)
+        ? base.projects.filter((entry) => entry !== project)
+        : [...base.projects, project].sort((a, b) => a.localeCompare(b));
+
+      return {
+        ...base,
+        projects,
+      };
+    });
   }
 
   async function saveControls() {
     await updateCloudConfig.mutateAsync({
-      cloudSyncProjectMode: projectMode,
-      cloudSyncProjects: selectedProjects,
-      cloudSyncContentMode: contentMode,
-      cloudSyncExcludeSensitive: excludeSensitive,
+      cloudSyncProjectMode: controls.projectMode,
+      cloudSyncProjects: controls.projects,
+      cloudSyncContentMode: controls.contentMode,
+      cloudSyncExcludeSensitive: controls.excludeSensitive,
     });
+    setDraftControls(null);
   }
 
   return (
@@ -195,22 +202,22 @@ function SyncControlsCard() {
         <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
           <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Content mode</div>
           <div className="mt-3 grid gap-2 md:grid-cols-2">
-            <label className={`rounded-lg border p-3 text-sm ${contentMode === 'full' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 text-slate-300'}`}>
+            <label className={`rounded-lg border p-3 text-sm ${controls.contentMode === 'full' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 text-slate-300'}`}>
               <input
                 type="radio"
                 className="mr-2"
-                checked={contentMode === 'full'}
-                onChange={() => setContentMode('full')}
+                checked={controls.contentMode === 'full'}
+                onChange={() => setDraftControls((current) => ({ ...(current ?? controls), contentMode: 'full' }))}
               />
               Full content
               <div className="mt-1 text-xs text-slate-400">Titles and memory bodies replicate to cloud.</div>
             </label>
-            <label className={`rounded-lg border p-3 text-sm ${contentMode === 'metadata' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 text-slate-300'}`}>
+            <label className={`rounded-lg border p-3 text-sm ${controls.contentMode === 'metadata' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 text-slate-300'}`}>
               <input
                 type="radio"
                 className="mr-2"
-                checked={contentMode === 'metadata'}
-                onChange={() => setContentMode('metadata')}
+                checked={controls.contentMode === 'metadata'}
+                onChange={() => setDraftControls((current) => ({ ...(current ?? controls), contentMode: 'metadata' }))}
               />
               Metadata only
               <div className="mt-1 text-xs text-slate-400">Projects, tags, salience, and graph remain; body content is redacted.</div>
@@ -225,9 +232,9 @@ function SyncControlsCard() {
               <button
                 key={mode}
                 type="button"
-                onClick={() => setProjectMode(mode)}
+                onClick={() => setDraftControls((current) => ({ ...(current ?? controls), projectMode: mode }))}
                 className={`rounded-full border px-3 py-1.5 text-xs font-medium uppercase tracking-wide ${
-                  projectMode === mode
+                  controls.projectMode === mode
                     ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
                     : 'border-slate-700 bg-slate-900/60 text-slate-300'
                 }`}
@@ -237,9 +244,9 @@ function SyncControlsCard() {
             ))}
           </div>
           <p className="mt-3 text-xs text-slate-400">
-            {projectMode === 'all'
+            {controls.projectMode === 'all'
               ? 'All local projects are eligible for sync.'
-              : projectMode === 'include'
+              : controls.projectMode === 'include'
                 ? 'Only the selected projects will sync.'
                 : 'Selected projects stay local-only.'}
           </p>
@@ -249,7 +256,7 @@ function SyncControlsCard() {
             ) : (
               <div className="flex flex-wrap gap-2">
                 {projects.map((project) => {
-                  const selected = selectedProjects.includes(project.project);
+                  const selected = controls.projects.includes(project.project);
                   return (
                     <button
                       key={project.project}
@@ -274,8 +281,13 @@ function SyncControlsCard() {
           <input
             type="checkbox"
             className="mt-0.5"
-            checked={excludeSensitive}
-            onChange={(event) => setExcludeSensitive(event.target.checked)}
+            checked={controls.excludeSensitive}
+            onChange={(event) =>
+              setDraftControls((current) => ({
+                ...(current ?? controls),
+                excludeSensitive: event.target.checked,
+              }))
+            }
           />
           <div>
             <div className="font-medium text-white">Exclude sensitive memories</div>
