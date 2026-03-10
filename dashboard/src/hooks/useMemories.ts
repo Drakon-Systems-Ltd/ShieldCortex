@@ -28,6 +28,35 @@ interface PaginatedMemoriesResponse {
   pagination: PaginationInfo;
 }
 
+export interface OpenClawSessionSummary {
+  sessionId: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  saved: number;
+  skipped: number;
+  threats: number;
+  blocked: number;
+  quarantined: number;
+  autoExtracted: number;
+  keywordTriggered: number;
+  pinned: number;
+  suppressed: number;
+  hooks: string[];
+  models: string[];
+  agentIds: string[];
+  previews: string[];
+  events: Array<{
+    ts: string;
+    type: 'memory' | 'threat' | 'blocked' | 'quarantine';
+    hook?: string;
+    model?: string;
+    preview?: string;
+    count?: number;
+    skipped?: number;
+  }>;
+  memories: Memory[];
+}
+
 // Fetch memories with pagination support
 async function fetchMemories(options?: {
   project?: string;
@@ -79,6 +108,15 @@ export interface ProjectInfo {
 async function fetchProjects(): Promise<{ projects: ProjectInfo[] }> {
   const response = await authFetch(`${API_BASE}/api/projects`);
   if (!response.ok) throw new Error('Failed to fetch projects');
+  return response.json();
+}
+
+async function fetchOpenClawSessions(): Promise<{
+  summary: { sessions: number; saved: number; skipped: number; threats: number };
+  sessions: OpenClawSessionSummary[];
+}> {
+  const response = await authFetch(`${API_BASE}/api/capture/openclaw/sessions`);
+  if (!response.ok) throw new Error('Failed to fetch OpenClaw sessions');
   return response.json();
 }
 
@@ -154,6 +192,14 @@ export function useProjects() {
     queryKey: ['projects'],
     queryFn: fetchProjects,
     refetchInterval: 60000, // Refresh project list every minute
+  });
+}
+
+export function useOpenClawSessions() {
+  return useQuery({
+    queryKey: ['openclaw-sessions'],
+    queryFn: fetchOpenClawSessions,
+    staleTime: 30_000,
   });
 }
 
@@ -427,6 +473,10 @@ export interface QualityData {
   neverAccessed: { count: number; items: Array<Record<string, unknown>> };
   stale: { count: number; items: Array<Record<string, unknown>> };
   duplicates: { count: number; items: Array<Record<string, unknown>> };
+  lowTrust: { count: number; items: Array<Record<string, unknown>> };
+  noisyAutoExtracted: { count: number; items: Array<Record<string, unknown>> };
+  projectless: { count: number; items: Array<Record<string, unknown>> };
+  status: Record<string, number>;
 }
 
 async function fetchQuality(project?: string): Promise<QualityData> {
@@ -496,7 +546,18 @@ async function promoteMemory(id: number): Promise<Memory> {
 }
 
 // Edit memory
-async function editMemory(id: number, updates: { title?: string; content?: string; tags?: string[]; category?: string }): Promise<Memory> {
+async function editMemory(id: number, updates: {
+  title?: string;
+  content?: string;
+  tags?: string[];
+  category?: string;
+  status?: string;
+  pinned?: boolean;
+  reviewedBy?: string | null;
+  cloudExcluded?: boolean;
+  scope?: 'project' | 'global';
+  project?: string | null;
+}): Promise<Memory> {
   const response = await authFetch(`${API_BASE}/api/memories/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -582,7 +643,18 @@ export function usePromoteMemory() {
 export function useEditMemory() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, updates }: { id: number; updates: { title?: string; content?: string; tags?: string[]; category?: string } }) =>
+    mutationFn: ({ id, updates }: { id: number; updates: {
+      title?: string;
+      content?: string;
+      tags?: string[];
+      category?: string;
+      status?: string;
+      pinned?: boolean;
+      reviewedBy?: string | null;
+      cloudExcluded?: boolean;
+      scope?: 'project' | 'global';
+      project?: string | null;
+    } }) =>
       editMemory(id, updates),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['memories'] });

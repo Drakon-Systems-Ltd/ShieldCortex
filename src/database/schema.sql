@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS memories (
   trust_score REAL DEFAULT 1.0,
   sensitivity_level TEXT DEFAULT 'INTERNAL',
   source TEXT DEFAULT 'user:direct',
+  status TEXT DEFAULT 'active' CHECK(status IN ('active', 'archived', 'suppressed', 'canonical')),
+  pinned INTEGER DEFAULT 0,
+  reviewed_at TIMESTAMP,
+  reviewed_by TEXT,
+  source_kind TEXT DEFAULT 'user',
+  capture_method TEXT DEFAULT 'manual',
+  cloud_excluded INTEGER DEFAULT 0,
 
   -- Index for common queries
   CONSTRAINT valid_category CHECK(category IN (
@@ -70,6 +77,9 @@ CREATE INDEX IF NOT EXISTS idx_memories_decayed_score ON memories(decayed_score 
 CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_source_kind ON memories(source_kind);
 
 -- Session tracking for consolidation
 CREATE TABLE IF NOT EXISTS sessions (

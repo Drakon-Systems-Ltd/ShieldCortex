@@ -33,6 +33,13 @@ export const rememberSchema = z.object({
     type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
   }).optional().describe('Source of this memory for trust scoring (agents should pass this)'),
+  sourceType: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']).optional()
+    .describe('Flat source type for integrations that cannot pass nested objects'),
+  sourceIdentifier: z.string().optional()
+    .describe('Flat source identifier for integrations that cannot pass nested objects'),
+  sessionId: z.string().optional().describe('Optional integration session identifier'),
+  agentId: z.string().optional().describe('Optional integration agent identifier'),
+  workspaceDir: z.string().optional().describe('Optional workspace/source path'),
 });
 
 export type RememberInput = z.infer<typeof rememberSchema>;
@@ -79,6 +86,16 @@ export async function executeRemember(input: RememberInput): Promise<{
 
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
+    const derivedSource = input.source ?? (
+      input.sourceType && input.sourceIdentifier
+        ? { type: input.sourceType, identifier: input.sourceIdentifier }
+        : undefined
+    );
+    const metadata = {
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+      ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
+    };
 
     // Map importance to salience override
     let salienceOverride: number | undefined;
@@ -126,7 +143,8 @@ export async function executeRemember(input: RememberInput): Promise<{
       salience: salienceOverride,
       scope: input.scope,
       transferable: input.transferable,
-    }, undefined, input.source ?? { type: 'cli', identifier: 'mcp' });
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+    }, undefined, derivedSource ?? { type: 'cli', identifier: 'mcp' });
 
     // Auto-detect and create relationships with existing memories
     let linksCreated = 0;

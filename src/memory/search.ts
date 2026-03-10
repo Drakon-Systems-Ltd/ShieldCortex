@@ -27,6 +27,7 @@ export interface SearchScoreValues {
   linkBoost: number;
   tagBoost: number;
   activationBoost: number;
+  contradictionPenalty: number;
   finalScore: number;
 }
 
@@ -185,6 +186,9 @@ export function buildSearchExplanation(
   if (values.activationBoost > 0) {
     reasons.push('Activated by recent recall activity');
   }
+  if (values.contradictionPenalty > 0) {
+    reasons.push('Contradiction risk reduced its rank');
+  }
   if (reasons.length === 0) {
     reasons.push('Ranked by salience and base recall heuristics');
   }
@@ -203,6 +207,7 @@ export function buildSearchExplanation(
       linkBoost: values.linkBoost,
       tagBoost: values.tagBoost,
       activationBoost: values.activationBoost,
+      contradictionPenalty: values.contradictionPenalty,
       finalScore: values.finalScore,
       matchedTags,
       matchedCategory: values.categoryBoost > 0 ? context.detectedCategory : null,

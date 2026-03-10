@@ -3,6 +3,9 @@
  */
 
 export type MemoryType = 'short_term' | 'long_term' | 'episodic';
+export type MemoryStatus = 'active' | 'archived' | 'suppressed' | 'canonical';
+export type MemorySourceKind = 'user' | 'cli' | 'hook' | 'plugin' | 'agent' | 'import' | 'cloud' | 'api' | 'system';
+export type MemoryCaptureMethod = 'manual' | 'hook' | 'plugin' | 'import' | 'cloud' | 'api' | 'auto' | 'review';
 
 export type MemoryCategory =
   | 'architecture'    // System design decisions
@@ -35,6 +38,16 @@ export interface Memory {
   embedding?: Buffer;      // 384-dim float32 vector for semantic search
   scope: 'project' | 'global';  // Memory visibility scope
   transferable: boolean;   // Can be shared across projects
+  status: MemoryStatus;
+  pinned: boolean;
+  reviewedAt: Date | null;
+  reviewedBy: string | null;
+  sourceKind: MemorySourceKind;
+  captureMethod: MemoryCaptureMethod;
+  trustScore: number;
+  sensitivityLevel: string;
+  source: string | null;
+  cloudExcluded: boolean;
 }
 
 export interface MemoryInput {
@@ -48,6 +61,15 @@ export interface MemoryInput {
   metadata?: Record<string, unknown>;
   scope?: 'project' | 'global';  // Default: 'project'
   transferable?: boolean;        // Default: false
+  status?: MemoryStatus;
+  pinned?: boolean;
+  reviewedBy?: string | null;
+  sourceKind?: MemorySourceKind;
+  captureMethod?: MemoryCaptureMethod;
+  trustScore?: number;
+  sensitivityLevel?: string;
+  source?: string | null;
+  cloudExcluded?: boolean;
 }
 
 export interface SearchOptions {
@@ -60,6 +82,8 @@ export interface SearchOptions {
   limit?: number;
   includeDecayed?: boolean;  // Include memories below decay threshold
   includeGlobal?: boolean;   // Include global-scoped memories (default: true)
+  includeArchived?: boolean;
+  includeSuppressed?: boolean;
 }
 
 export interface SearchResult {
@@ -67,6 +91,7 @@ export interface SearchResult {
   relevanceScore: number;   // Combined search + salience + recency
   contradictions?: { memoryId: number; title: string; score: number }[];
   explanation?: SearchExplanation;
+  recallEligibility?: RecallEligibility;
 }
 
 export interface SearchScoreBreakdown {
@@ -80,15 +105,22 @@ export interface SearchScoreBreakdown {
   linkBoost: number;
   tagBoost: number;
   activationBoost: number;
+  contradictionPenalty: number;
   finalScore: number;
   matchedTags: string[];
   matchedCategory: string | null;
+}
+
+export interface RecallEligibility {
+  eligible: boolean;
+  reasons: string[];
 }
 
 export interface SearchExplanation {
   query: string;
   reasons: string[];
   breakdown: SearchScoreBreakdown;
+  eligibility?: RecallEligibility;
 }
 
 export interface ConsolidationResult {

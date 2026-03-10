@@ -810,6 +810,69 @@ describe('Semantic Linking', () => {
   });
 
   describe('enrichMemory', () => {
+    it('should exclude archived and suppressed memories from normal recall', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, updateMemory, deleteMemory, searchMemories, searchMemoriesExplained } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let activeId: number | undefined;
+      let archivedId: number | undefined;
+      let suppressedId: number | undefined;
+      try {
+        const active = addMemory({
+          title: 'Postgres architecture',
+          content: 'We chose PostgreSQL for the reporting backend.',
+          category: 'architecture',
+          project: 'test-project',
+          type: 'long_term',
+        });
+        const archived = addMemory({
+          title: 'Legacy Postgres architecture',
+          content: 'We used PostgreSQL for an old backend decision.',
+          category: 'architecture',
+          project: 'test-project',
+          type: 'long_term',
+        });
+        const suppressed = addMemory({
+          title: 'Noisy Postgres note',
+          content: 'PostgreSQL backend chatter mentioned transient setup details.',
+          category: 'note',
+          project: 'test-project',
+          type: 'short_term',
+        });
+        activeId = active.id;
+        archivedId = archived.id;
+        suppressedId = suppressed.id;
+
+        updateMemory(archived.id, { status: 'archived', reviewedBy: 'test' });
+        updateMemory(suppressed.id, { status: 'suppressed', reviewedBy: 'test' });
+
+        const normal = await searchMemories({ query: 'PostgreSQL backend', project: 'test-project', limit: 10 });
+        expect(normal.some((result) => result.memory.id === active.id)).toBe(true);
+        expect(normal.some((result) => result.memory.id === archived.id)).toBe(false);
+        expect(normal.some((result) => result.memory.id === suppressed.id)).toBe(false);
+
+        const explained = await searchMemoriesExplained({
+          query: 'PostgreSQL backend',
+          project: 'test-project',
+          includeArchived: true,
+          includeSuppressed: true,
+          limit: 10,
+        });
+        const archivedResult = explained.find((result) => result.memory.id === archived.id);
+        const suppressedResult = explained.find((result) => result.memory.id === suppressed.id);
+        expect(archivedResult?.recallEligibility?.eligible).toBe(false);
+        expect(suppressedResult?.recallEligibility?.eligible).toBe(false);
+      } finally {
+        if (activeId) { try { deleteMemory(activeId); } catch { /* ignore */ } }
+        if (archivedId) { try { deleteMemory(archivedId); } catch { /* ignore */ } }
+        if (suppressedId) { try { deleteMemory(suppressedId); } catch { /* ignore */ } }
+        closeDatabase();
+      }
+    });
+
     it('should enrich a memory with new related context', async () => {
       const { initDatabase, closeDatabase } = await import('../database/init.js');
       const { addMemory, enrichMemory, getMemoryById, deleteMemory } = await import('../memory/store.js');

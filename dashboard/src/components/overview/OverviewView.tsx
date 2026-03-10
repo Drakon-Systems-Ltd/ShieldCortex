@@ -210,8 +210,8 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         title: `${contradictionCount} contradiction${contradictionCount === 1 ? '' : 's'} in memory`,
         detail: 'Conflicting facts reduce recall trust and are worth resolving before they become reinforced.',
         tone: contradictionCount > 5 ? 'critical' : 'warning',
-        cta: 'Inspect memory quality',
-        onClick: () => openView('memories'),
+        cta: 'Open review workflow',
+        onClick: () => openView('review'),
       });
     }
 
@@ -220,8 +220,8 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         title: 'Memory cleanup work is available',
         detail: `${staleCount} stale, ${duplicateCount} duplicate, ${neverAccessedCount} never-accessed memories are reducing signal quality.`,
         tone: staleCount + duplicateCount > 10 ? 'warning' : 'healthy',
-        cta: 'Open cleanup view',
-        onClick: () => openView('memories'),
+        cta: 'Open review workflow',
+        onClick: () => openView('review'),
       });
     }
 
@@ -251,16 +251,16 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
 
   const freeWorkflows = [
     {
-      title: 'Review incoming risk',
-      detail: 'Use quarantine and audit together to see what got blocked, what got held, and which sources are noisy.',
-      cta: 'Open Security',
-      target: 'shield' as const,
+      title: 'Debug recall behavior',
+      detail: 'Run a query, inspect ranking factors, and compare expected memories against the returned set.',
+      cta: 'Open Recall',
+      target: 'recall' as const,
     },
     {
       title: 'Clean low-signal memory',
-      detail: 'Find stale, duplicate, and never-accessed memories before they degrade recall quality.',
-      cta: 'Open Memories',
-      target: 'memories' as const,
+      detail: 'Find stale, contradictory, low-trust, and never-used memories before they degrade recall quality.',
+      cta: 'Open Review',
+      target: 'review' as const,
     },
     {
       title: 'Explore the knowledge map',

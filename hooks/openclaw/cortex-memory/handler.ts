@@ -400,6 +400,9 @@ async function onSessionEnd(event) {
       scope: "global",
       importance: "high",
       tags: "auto-extracted,openclaw-hook",
+      sourceType: "hook",
+      sourceIdentifier: "openclaw-session-end",
+      workspaceDir: context.workspaceDir || "",
     });
     if (result) {
       saved++;
@@ -468,6 +471,9 @@ async function onSessionStop(event) {
       scope: "global",
       importance: "high",
       tags: "auto-extracted,openclaw-hook,session-stop",
+      sourceType: "hook",
+      sourceIdentifier: "openclaw-session-stop",
+      workspaceDir: context.workspaceDir || "",
     });
     if (result) {
       saved++;
@@ -611,6 +617,8 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
     scope: "global",
     importance: matchedTrigger.importance,
     tags: `keyword-trigger,openclaw-hook,trigger:${matchedTrigger.phrase.replace(/\s+/g, "-")}`,
+    sourceType: "hook",
+    sourceIdentifier: `openclaw-keyword:${matchedTrigger.phrase.replace(/\s+/g, "-")}`,
   });
 
   if (result) {

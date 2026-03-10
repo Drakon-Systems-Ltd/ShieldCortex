@@ -18,6 +18,8 @@ import { MemoriesView } from '@/components/memories/MemoriesView';
 import { NavRail } from '@/components/nav/NavRail';
 import { ShieldOverview } from '@/components/shield/ShieldOverview';
 import { CloudSyncDiagnosticsView } from '@/components/cloud/CloudSyncDiagnosticsView';
+import { RecallWorkspace } from '@/components/recall/RecallWorkspace';
+import { ReviewQueueView } from '@/components/review/ReviewQueueView';
 import { AuditLogView } from '@/components/audit/AuditLogView';
 import { AuditDetailPanel } from '@/components/audit/AuditDetailPanel';
 import { QuarantineView } from '@/components/quarantine/QuarantineView';
@@ -209,7 +211,7 @@ export default function DashboardPage() {
   };
 
   // Views that need memory data vs standalone views
-  const isSecurityView = viewMode === 'overview' || viewMode === 'shield' || viewMode === 'cloud' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents' || viewMode === 'skills' || viewMode === 'dome';
+  const isSecurityView = viewMode === 'overview' || viewMode === 'recall' || viewMode === 'review' || viewMode === 'shield' || viewMode === 'cloud' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents' || viewMode === 'skills' || viewMode === 'dome';
 
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
@@ -412,6 +414,8 @@ export default function DashboardPage() {
                 selectedProject={projectFilter}
               />
             )}
+            {viewMode === 'recall' && <RecallWorkspace />}
+            {viewMode === 'review' && <ReviewQueueView />}
             {viewMode === 'shield' && <ShieldOverview />}
             {viewMode === 'cloud' && <CloudSyncDiagnosticsView />}
             {viewMode === 'audit' && <AuditLogView />}

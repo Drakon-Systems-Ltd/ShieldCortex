@@ -12,6 +12,9 @@ import {
   MemoryInput,
   MemoryType,
   MemoryCategory,
+  MemoryStatus,
+  MemorySourceKind,
+  MemoryCaptureMethod,
   SearchOptions,
   SearchResult,
   MemoryConfig,
@@ -162,6 +165,39 @@ function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
   catch { return fallback; }
 }
 
+function inferSourceDetails(input: MemoryInput, source?: DefenceSource): {
+  sourceKind: MemorySourceKind;
+  captureMethod: MemoryCaptureMethod;
+  sourceValue: string | null;
+} {
+  const tags = (input.tags ?? []).map((tag) => tag.toLowerCase());
+
+  if (tags.includes('openclaw-hook')) {
+    return { sourceKind: 'hook', captureMethod: tags.includes('auto-extracted') ? 'auto' : 'hook', sourceValue: 'hook:openclaw' };
+  }
+  if (tags.includes('realtime-plugin') || tags.includes('llm-output')) {
+    return { sourceKind: 'plugin', captureMethod: tags.includes('auto-extracted') ? 'auto' : 'plugin', sourceValue: 'agent:openclaw-plugin' };
+  }
+  if (source?.type === 'hook') {
+    return { sourceKind: 'hook', captureMethod: 'hook', sourceValue: `${source.type}:${source.identifier}` };
+  }
+  if (source?.type === 'agent') {
+    return { sourceKind: 'agent', captureMethod: 'plugin', sourceValue: `${source.type}:${source.identifier}` };
+  }
+  if (source?.type === 'api') {
+    return { sourceKind: 'api', captureMethod: 'api', sourceValue: `${source.type}:${source.identifier}` };
+  }
+  if (source?.type === 'cli') {
+    return { sourceKind: 'cli', captureMethod: 'manual', sourceValue: `${source.type}:${source.identifier}` };
+  }
+
+  return {
+    sourceKind: input.sourceKind ?? 'user',
+    captureMethod: input.captureMethod ?? (tags.includes('auto-extracted') ? 'auto' : 'manual'),
+    sourceValue: input.source ?? (source ? `${source.type}:${source.identifier}` : 'user:direct'),
+  };
+}
+
 /**
  * Convert database row to Memory object
  */
@@ -185,6 +221,16 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
     embedding: row.embedding as Buffer | undefined,
     scope: (row.scope as 'project' | 'global') ?? 'project',
     transferable: Boolean(row.transferable),
+    status: ((row.status as MemoryStatus | undefined) ?? 'active'),
+    pinned: Boolean(row.pinned),
+    reviewedAt: row.reviewed_at ? new Date(row.reviewed_at as string) : null,
+    reviewedBy: (row.reviewed_by as string | null) ?? null,
+    sourceKind: ((row.source_kind as MemorySourceKind | undefined) ?? 'user'),
+    captureMethod: ((row.capture_method as MemoryCaptureMethod | undefined) ?? 'manual'),
+    trustScore: Number(row.trust_score ?? 1),
+    sensitivityLevel: (row.sensitivity_level as string | undefined) ?? 'INTERNAL',
+    source: (row.source as string | null) ?? null,
+    cloudExcluded: Boolean(row.cloud_excluded),
   };
 }
 
@@ -435,10 +481,17 @@ export function addMemory(
   const scope = input.scope ??
     (detectGlobalPattern(input.content, category, tags) ? 'global' : 'project');
   const transferable = input.transferable ?? (scope === 'global' ? 1 : 0);
+  const sourceDetails = inferSourceDetails({ ...input, tags }, source);
+  const status = input.status ?? 'active';
+  const pinned = input.pinned ? 1 : 0;
+  const cloudExcluded = input.cloudExcluded ? 1 : 0;
 
   const stmt = db.prepare(`
-    INSERT INTO memories (uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    INSERT INTO memories (
+      uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable,
+      status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, cloud_excluded, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -465,12 +518,22 @@ export function addMemory(
       salience,
       JSON.stringify(input.metadata || {}),
       scope,
-      transferable
+      transferable,
+      status,
+      pinned,
+      input.reviewedBy ? new Date().toISOString() : null,
+      input.reviewedBy ?? null,
+      sourceDetails.sourceKind,
+      sourceDetails.captureMethod,
+      cloudExcluded
     );
 
     if (defenceResult) {
       db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ? WHERE id = ?`)
-        .run(defenceResult.trust.score, defenceResult.sensitivity.level, `${source!.type}:${source!.identifier}`, result.lastInsertRowid);
+        .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, result.lastInsertRowid);
+    } else {
+      db.prepare(`UPDATE memories SET source = ?, trust_score = COALESCE(trust_score, ?), sensitivity_level = COALESCE(sensitivity_level, ?) WHERE id = ?`)
+        .run(sourceDetails.sourceValue, input.trustScore ?? 1.0, input.sensitivityLevel ?? 'INTERNAL', result.lastInsertRowid);
     }
 
     return result.lastInsertRowid as number;
@@ -559,31 +622,33 @@ export function addMemory(
 
   // Anti-bloat: Check if limits exceeded and trigger async cleanup
   // We use setImmediate to not block the insert response
-  setImmediate(() => {
-    try {
-      if (!isDatabaseInitialized()) {
-        return;
+  if (process.env.NODE_ENV !== 'test') {
+    setImmediate(() => {
+      try {
+        if (!isDatabaseInitialized()) {
+          return;
+        }
+        const stats = getMemoryStats();
+        if (
+          stats.shortTerm > config.maxShortTermMemories ||
+          stats.longTerm > config.maxLongTermMemories
+        ) {
+          // Import dynamically to avoid circular dependency
+          import('./consolidate.js').then(({ enforceMemoryLimits }) => {
+            if (typeof enforceMemoryLimits === 'function') {
+              enforceMemoryLimits(config);
+            }
+          }).catch((e) => {
+            // Log but don't fail - consolidation will happen on next scheduled run
+            console.warn('[shieldcortex] Async cleanup import failed:', e instanceof Error ? e.message : e);
+          });
+        }
+      } catch (e) {
+        // Log unexpected errors in async cleanup
+        console.warn('[shieldcortex] Async cleanup check failed:', e instanceof Error ? e.message : e);
       }
-      const stats = getMemoryStats();
-      if (
-        stats.shortTerm > config.maxShortTermMemories ||
-        stats.longTerm > config.maxLongTermMemories
-      ) {
-        // Import dynamically to avoid circular dependency
-        import('./consolidate.js').then(({ enforceMemoryLimits }) => {
-          if (typeof enforceMemoryLimits === 'function') {
-            enforceMemoryLimits(config);
-          }
-        }).catch((e) => {
-          // Log but don't fail - consolidation will happen on next scheduled run
-          console.warn('[shieldcortex] Async cleanup import failed:', e instanceof Error ? e.message : e);
-        });
-      }
-    } catch (e) {
-      // Log unexpected errors in async cleanup
-      console.warn('[shieldcortex] Async cleanup check failed:', e instanceof Error ? e.message : e);
-    }
-  });
+    });
+  }
 
   return memory;
 }
@@ -657,6 +722,44 @@ export function updateMemory(
   if (updates.metadata !== undefined) {
     fields.push('metadata = ?');
     values.push(JSON.stringify(updates.metadata));
+  }
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if (updates.pinned !== undefined) {
+    fields.push('pinned = ?');
+    values.push(updates.pinned ? 1 : 0);
+  }
+  if (updates.reviewedBy !== undefined) {
+    fields.push('reviewed_by = ?');
+    values.push(updates.reviewedBy);
+    fields.push('reviewed_at = ?');
+    values.push(updates.reviewedBy ? new Date().toISOString() : null);
+  }
+  if (updates.sourceKind !== undefined) {
+    fields.push('source_kind = ?');
+    values.push(updates.sourceKind);
+  }
+  if (updates.captureMethod !== undefined) {
+    fields.push('capture_method = ?');
+    values.push(updates.captureMethod);
+  }
+  if (updates.trustScore !== undefined) {
+    fields.push('trust_score = ?');
+    values.push(updates.trustScore);
+  }
+  if (updates.sensitivityLevel !== undefined) {
+    fields.push('sensitivity_level = ?');
+    values.push(updates.sensitivityLevel);
+  }
+  if (updates.source !== undefined) {
+    fields.push('source = ?');
+    values.push(updates.source);
+  }
+  if (updates.cloudExcluded !== undefined) {
+    fields.push('cloud_excluded = ?');
+    values.push(updates.cloudExcluded ? 1 : 0);
   }
 
   if (fields.length === 0) return existing;
@@ -1077,6 +1180,12 @@ async function searchMemoriesInternal(
     sql += ' AND m.type = ?';
     params.push(options.type);
   }
+  if (!options.includeArchived) {
+    sql += ` AND m.status != 'archived'`;
+  }
+  if (!options.includeSuppressed) {
+    sql += ` AND m.status != 'suppressed'`;
+  }
   if (options.minSalience) {
     sql += ' AND m.salience >= ?';
     params.push(options.minSalience);
@@ -1119,15 +1228,33 @@ async function searchMemoriesInternal(
     const vectorSimilarity = vectorResults.get(memory.id) || 0;
     const vectorBoost = vectorSimilarity * 0.3;
     const priorityBoost = calculatePriority(memory) * 0.05;
+    const contradictionCount = (db.prepare(
+      `SELECT COUNT(*) as count FROM memory_links WHERE relationship = 'contradicts' AND (source_id = ? OR target_id = ?)`
+    ).get(memory.id, memory.id) as { count: number }).count;
+    const contradictionPenalty = Math.min(0.12, contradictionCount * 0.03);
+    const eligibilityReasons: string[] = [];
+    if (memory.status === 'archived') eligibilityReasons.push('Archived memories are excluded from normal recall');
+    if (memory.status === 'suppressed') eligibilityReasons.push('Suppressed memories are excluded from normal recall');
+    if (memory.cloudExcluded) eligibilityReasons.push('Excluded from cloud sync');
+    if (memory.trustScore < 0.7) eligibilityReasons.push(`Low trust source (${memory.trustScore.toFixed(2)})`);
+    if (contradictionCount > 0) eligibilityReasons.push(`${contradictionCount} contradiction link${contradictionCount === 1 ? '' : 's'} attached`);
     const relevanceScore = (
       ftsScore * 0.25 +
       vectorBoost +
       decayedScore * 0.2 +
       priorityBoost +
-      recencyBoost + categoryBoost + linkBoost + tagBoost + activationBoost
+      recencyBoost + categoryBoost + linkBoost + tagBoost + activationBoost -
+      contradictionPenalty
     );
 
-    const result: SearchResult = { memory, relevanceScore };
+    const result: SearchResult = {
+      memory,
+      relevanceScore,
+      recallEligibility: {
+        eligible: eligibilityReasons.length === 0,
+        reasons: eligibilityReasons,
+      },
+    };
     if (execution.includeExplanation) {
       result.explanation = buildSearchExplanation(memory, scoringContext, {
         ftsScore,
@@ -1140,8 +1267,12 @@ async function searchMemoriesInternal(
         linkBoost,
         tagBoost,
         activationBoost,
+        contradictionPenalty,
         finalScore: relevanceScore,
       });
+      if (result.explanation) {
+        result.explanation.eligibility = result.recallEligibility;
+      }
     }
     return result;
   });

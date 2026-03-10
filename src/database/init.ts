@@ -288,6 +288,27 @@ function runMigrations(database: Database.Database): void {
   if (!columnNames.has('source')) {
     database.exec("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'user:direct'");
   }
+  if (!columnNames.has('status')) {
+    database.exec("ALTER TABLE memories ADD COLUMN status TEXT DEFAULT 'active'");
+  }
+  if (!columnNames.has('pinned')) {
+    database.exec('ALTER TABLE memories ADD COLUMN pinned INTEGER DEFAULT 0');
+  }
+  if (!columnNames.has('reviewed_at')) {
+    database.exec('ALTER TABLE memories ADD COLUMN reviewed_at TIMESTAMP');
+  }
+  if (!columnNames.has('reviewed_by')) {
+    database.exec('ALTER TABLE memories ADD COLUMN reviewed_by TEXT');
+  }
+  if (!columnNames.has('source_kind')) {
+    database.exec("ALTER TABLE memories ADD COLUMN source_kind TEXT DEFAULT 'user'");
+  }
+  if (!columnNames.has('capture_method')) {
+    database.exec("ALTER TABLE memories ADD COLUMN capture_method TEXT DEFAULT 'manual'");
+  }
+  if (!columnNames.has('cloud_excluded')) {
+    database.exec('ALTER TABLE memories ADD COLUMN cloud_excluded INTEGER DEFAULT 0');
+  }
   if (!columnNames.has('uuid')) {
     database.exec("ALTER TABLE memories ADD COLUMN uuid TEXT");
   }
@@ -301,8 +322,16 @@ function runMigrations(database: Database.Database): void {
       setUuid.run(randomUUID(), row.id);
     }
     database.exec('UPDATE memories SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL');
+    database.exec("UPDATE memories SET status = COALESCE(status, 'active') WHERE status IS NULL OR status = ''");
+    database.exec('UPDATE memories SET pinned = COALESCE(pinned, 0) WHERE pinned IS NULL');
+    database.exec("UPDATE memories SET source_kind = CASE WHEN source LIKE 'hook:%' THEN 'hook' WHEN source LIKE 'api:%' THEN 'api' WHEN source LIKE 'agent:%' THEN 'agent' WHEN source LIKE 'cli:%' THEN 'cli' ELSE COALESCE(source_kind, 'user') END WHERE source_kind IS NULL OR source_kind = ''");
+    database.exec("UPDATE memories SET capture_method = CASE WHEN tags LIKE '%auto-extracted%' THEN 'auto' WHEN source_kind = 'hook' THEN 'hook' WHEN source_kind = 'api' THEN 'api' WHEN source_kind = 'agent' THEN 'plugin' WHEN source_kind = 'cli' THEN 'manual' ELSE COALESCE(capture_method, 'manual') END WHERE capture_method IS NULL OR capture_method = ''");
+    database.exec('UPDATE memories SET cloud_excluded = COALESCE(cloud_excluded, 0) WHERE cloud_excluded IS NULL');
     database.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_uuid ON memories(uuid)');
     database.exec('CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned DESC)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_source_kind ON memories(source_kind)');
   } catch {
     // Safe to ignore on partially migrated databases
   }

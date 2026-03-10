@@ -74,6 +74,41 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
         >
           {memory.type.replace('_', '-')}
         </span>
+        {memory.status && memory.status !== 'active' && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-amber-500/15 text-amber-300">
+            {memory.status}
+          </span>
+        )}
+        {memory.pinned && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-emerald-500/15 text-emerald-300">
+            pinned
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+        {memory.sourceKind && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+            {memory.sourceKind}
+          </span>
+        )}
+        {memory.captureMethod && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+            {memory.captureMethod}
+          </span>
+        )}
+        {typeof memory.trustScore === 'number' && (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+            memory.trustScore < 0.7 ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'
+          }`}>
+            trust {memory.trustScore.toFixed(2)}
+          </span>
+        )}
+        {memory.cloudExcluded && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+            cloud excluded
+          </span>
+        )}
       </div>
 
       {/* Content preview */}

@@ -4,6 +4,9 @@
  */
 
 export type MemoryType = 'short_term' | 'long_term' | 'episodic';
+export type MemoryStatus = 'active' | 'archived' | 'suppressed' | 'canonical';
+export type MemorySourceKind = 'user' | 'cli' | 'hook' | 'plugin' | 'agent' | 'import' | 'cloud' | 'api' | 'system';
+export type MemoryCaptureMethod = 'manual' | 'hook' | 'plugin' | 'import' | 'cloud' | 'api' | 'auto' | 'review';
 
 export type MemoryCategory =
   | 'architecture'
@@ -19,6 +22,7 @@ export type MemoryCategory =
 
 export interface Memory {
   id: number;
+  uuid?: string;
   type: MemoryType;
   category: MemoryCategory;
   title: string;
@@ -29,8 +33,21 @@ export interface Memory {
   accessCount: number;
   lastAccessed: string;
   createdAt: string;
+  updatedAt?: string;
   decayedScore?: number;
   metadata?: Record<string, unknown>;
+  status?: MemoryStatus;
+  pinned?: boolean;
+  reviewedAt?: string | null;
+  reviewedBy?: string | null;
+  sourceKind?: MemorySourceKind;
+  captureMethod?: MemoryCaptureMethod;
+  trustScore?: number;
+  sensitivityLevel?: string;
+  source?: string | null;
+  scope?: 'project' | 'global';
+  transferable?: boolean;
+  cloudExcluded?: boolean;
 }
 
 export interface MemoryLink {

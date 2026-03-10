@@ -69,10 +69,11 @@ function tripleExternalId(id: number): string {
 
 function getAllowedMemoryExternalIds(): Set<string> {
   const db = getDatabase();
-  const rows = db.prepare('SELECT uuid, project, sensitivity_level FROM memories').all() as Array<{
+  const rows = db.prepare('SELECT uuid, project, sensitivity_level, cloud_excluded FROM memories').all() as Array<{
     uuid: string;
     project: string | null;
     sensitivity_level: string | null;
+    cloud_excluded: number | null;
   }>;
   return buildAllowedMemoryExternalIdSet(rows);
 }
@@ -81,12 +82,14 @@ function buildAllowedMemoryExternalIdSet(rows: Array<{
   uuid: string;
   project: string | null;
   sensitivity_level: string | null;
+  cloud_excluded?: number | null;
 }>): Set<string> {
   const controls = getCloudSyncControls();
 
   return new Set(
     rows
       .filter((row) => {
+        if (row.cloud_excluded) return false;
         if (!shouldSyncProject(row.project, controls)) return false;
         if (controls.excludeSensitive && isSensitiveLevel(row.sensitivity_level)) return false;
         return true;
@@ -191,16 +194,18 @@ function mapMemoryEntityRow(row: Record<string, unknown>): SyncedGraphMemoryEnti
 
 function getMemoryScopedEnvelope(memoryId: number): GraphSyncEnvelope | null {
   const db = getDatabase();
-  const memory = db.prepare('SELECT id, uuid, project, sensitivity_level FROM memories WHERE id = ?').get(memoryId) as {
+  const memory = db.prepare('SELECT id, uuid, project, sensitivity_level, cloud_excluded FROM memories WHERE id = ?').get(memoryId) as {
     id: number;
     uuid: string;
     project: string | null;
     sensitivity_level: string | null;
+    cloud_excluded: number | null;
   } | undefined;
   if (!memory) return null;
 
   const controls = getCloudSyncControls();
   const memoryAllowed =
+    !memory.cloud_excluded &&
     shouldSyncProject(memory.project, controls) &&
     !(controls.excludeSensitive && isSensitiveLevel(memory.sensitivity_level));
 

@@ -27,6 +27,7 @@ export interface SyncedMemoryRecord {
   sensitivity_level: string | null;
   source: string | null;
   metadata: Record<string, unknown>;
+  cloud_excluded?: boolean;
   created_at: string;
   updated_at: string;
   deleted_at?: string | null;
@@ -67,6 +68,7 @@ function rowToSyncRecord(row: Record<string, unknown>): SyncedMemoryRecord {
     sensitivity_level: (row.sensitivity_level as string | null) ?? null,
     source: (row.source as string | null) ?? null,
     metadata: safeJsonParse(row.metadata as string, {}),
+    cloud_excluded: Boolean(row.cloud_excluded),
     created_at: new Date((row.created_at as string) ?? Date.now()).toISOString(),
     updated_at: new Date((row.updated_at as string) ?? (row.created_at as string) ?? Date.now()).toISOString(),
     deleted_at: null,
@@ -84,7 +86,8 @@ function buildEnvelope(records: SyncedMemoryRecord[]): MemorySyncEnvelope {
   };
 }
 
-function shouldSyncRecord(record: Pick<SyncedMemoryRecord, 'project' | 'sensitivity_level'>): boolean {
+function shouldSyncRecord(record: Pick<SyncedMemoryRecord, 'project' | 'sensitivity_level' | 'cloud_excluded'>): boolean {
+  if (record.cloud_excluded) return false;
   const controls = getCloudSyncControls();
   if (!shouldSyncProject(record.project, controls)) return false;
   if (controls.excludeSensitive && isSensitiveLevel(record.sensitivity_level)) return false;

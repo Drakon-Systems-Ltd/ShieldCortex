@@ -387,6 +387,8 @@ function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
           title: mem.title, content: mem.content, category: mem.category,
           project: ctx.agentId || "openclaw", scope: "global",
           importance: "normal", tags: "auto-extracted,realtime-plugin,llm-output",
+          sourceType: "agent", sourceIdentifier: `openclaw-plugin:${event.sessionId}`,
+          sessionId: event.sessionId, agentId: ctx.agentId || "openclaw", workspaceDir: ctx.workspaceDir || "",
         });
         if (r) {
           saved++;

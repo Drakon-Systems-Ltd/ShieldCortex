@@ -1,4 +1,7 @@
 import type { Express, Request, Response } from 'express';
+import { homedir } from 'os';
+import { join } from 'path';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { getDatabase } from '../../database/init.js';
 import { Memory } from '../../memory/types.js';
 import {
@@ -29,6 +32,207 @@ import { emitConsolidation } from '../events.js';
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
 
 export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware): void {
+  app.get('/api/capture/openclaw/sessions', requireNotLocked, (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
+      const auditDir = join(homedir(), '.shieldcortex', 'audit');
+      const db = getDatabase();
+
+      const rows = db.prepare(`
+        SELECT * FROM memories
+        WHERE source_kind IN ('hook', 'plugin') OR source LIKE 'hook:openclaw%' OR source LIKE 'agent:openclaw-plugin%'
+        ORDER BY updated_at DESC
+        LIMIT 500
+      `).all() as Record<string, unknown>[];
+      const openClawMemories = rows.map(rowToMemory);
+
+      const sessionMap = new Map<string, {
+        sessionId: string;
+        firstSeenAt: string;
+        lastSeenAt: string;
+        storedMemoryCount: number;
+        loggedSaved: number;
+        skipped: number;
+        threats: number;
+        blocked: number;
+        quarantined: number;
+        autoExtracted: number;
+        keywordTriggered: number;
+        pinned: number;
+        suppressed: number;
+        hooks: Set<string>;
+        models: Set<string>;
+        agentIds: Set<string>;
+        memoryIds: Set<number>;
+        previews: string[];
+        events: Array<{
+          ts: string;
+          type: 'memory' | 'threat' | 'blocked' | 'quarantine';
+          hook?: string;
+          model?: string;
+          preview?: string;
+          count?: number;
+          skipped?: number;
+        }>;
+      }>();
+
+      const getSession = (sessionId: string) => {
+        let session = sessionMap.get(sessionId);
+        if (!session) {
+          session = {
+            sessionId,
+            firstSeenAt: new Date().toISOString(),
+            lastSeenAt: new Date(0).toISOString(),
+            storedMemoryCount: 0,
+            loggedSaved: 0,
+            skipped: 0,
+            threats: 0,
+            blocked: 0,
+            quarantined: 0,
+            autoExtracted: 0,
+            keywordTriggered: 0,
+            pinned: 0,
+            suppressed: 0,
+            hooks: new Set<string>(),
+            models: new Set<string>(),
+            agentIds: new Set<string>(),
+            memoryIds: new Set<number>(),
+            previews: [],
+            events: [],
+          };
+          sessionMap.set(sessionId, session);
+        }
+        return session;
+      };
+
+      for (const memory of openClawMemories) {
+        const sessionId = typeof memory.metadata?.sessionId === 'string'
+          ? memory.metadata.sessionId
+          : memory.source?.startsWith('agent:openclaw-plugin:')
+            ? memory.source.slice('agent:openclaw-plugin:'.length)
+            : null;
+        if (!sessionId) continue;
+        const session = getSession(sessionId);
+        const createdAt = memory.createdAt.toISOString();
+        if (createdAt < session.firstSeenAt) session.firstSeenAt = createdAt;
+        if (createdAt > session.lastSeenAt) session.lastSeenAt = createdAt;
+        session.storedMemoryCount += 1;
+        session.memoryIds.add(memory.id);
+        if (typeof memory.metadata?.agentId === 'string') session.agentIds.add(memory.metadata.agentId);
+        if (memory.captureMethod === 'auto' || memory.captureMethod === 'plugin' || memory.captureMethod === 'hook') {
+          session.autoExtracted += 1;
+        }
+        if (typeof memory.metadata?.trigger === 'string' || memory.tags.includes('keyword_trigger')) {
+          session.keywordTriggered += 1;
+        }
+        if (memory.pinned) session.pinned += 1;
+        if (memory.status === 'suppressed') session.suppressed += 1;
+      }
+
+      if (existsSync(auditDir)) {
+        const files = readdirSync(auditDir)
+          .filter((file) => /^realtime-\d{4}-\d{2}-\d{2}\.jsonl$/.test(file))
+          .sort()
+          .slice(-14);
+
+        for (const file of files) {
+          const raw = readFileSync(join(auditDir, file), 'utf-8');
+          for (const line of raw.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const entry = JSON.parse(line) as Record<string, unknown>;
+              const sessionId = typeof entry.sessionId === 'string' ? entry.sessionId : null;
+              if (!sessionId) continue;
+              const session = getSession(sessionId);
+              const ts = typeof entry.ts === 'string' ? entry.ts : new Date().toISOString();
+              if (ts < session.firstSeenAt) session.firstSeenAt = ts;
+              if (ts > session.lastSeenAt) session.lastSeenAt = ts;
+              if (typeof entry.hook === 'string') session.hooks.add(entry.hook);
+              if (typeof entry.model === 'string') session.models.add(entry.model);
+              if (entry.type === 'memory') {
+                const count = Number(entry.count ?? 0);
+                const skipped = Number(entry.skipped ?? 0);
+                session.loggedSaved += count;
+                session.skipped += skipped;
+                session.events.push({
+                  ts,
+                  type: 'memory',
+                  hook: typeof entry.hook === 'string' ? entry.hook : undefined,
+                  model: typeof entry.model === 'string' ? entry.model : undefined,
+                  preview: typeof entry.preview === 'string' ? entry.preview : undefined,
+                  count,
+                  skipped,
+                });
+                if (typeof entry.preview === 'string' && session.previews.length < 6) {
+                  session.previews.push(entry.preview);
+                }
+              }
+              if (entry.type === 'threat') {
+                session.threats += 1;
+                const preview = typeof entry.preview === 'string' ? entry.preview : undefined;
+                const lower = preview?.toLowerCase() ?? '';
+                if (lower.includes('quarantine')) session.quarantined += 1;
+                if (lower.includes('block')) session.blocked += 1;
+                session.events.push({
+                  ts,
+                  type: lower.includes('quarantine') ? 'quarantine' : lower.includes('block') ? 'blocked' : 'threat',
+                  hook: typeof entry.hook === 'string' ? entry.hook : undefined,
+                  model: typeof entry.model === 'string' ? entry.model : undefined,
+                  preview,
+                });
+                if (preview && session.previews.length < 6) {
+                  session.previews.push(preview);
+                }
+              }
+            } catch {
+              // ignore malformed lines
+            }
+          }
+        }
+      }
+
+      const sessions = Array.from(sessionMap.values())
+        .map((session) => ({
+          sessionId: session.sessionId,
+          firstSeenAt: session.firstSeenAt,
+          lastSeenAt: session.lastSeenAt,
+          saved: Math.max(session.storedMemoryCount, session.loggedSaved),
+          skipped: session.skipped,
+          threats: session.threats,
+          blocked: session.blocked,
+          quarantined: session.quarantined,
+          autoExtracted: session.autoExtracted,
+          keywordTriggered: session.keywordTriggered,
+          pinned: session.pinned,
+          suppressed: session.suppressed,
+          hooks: Array.from(session.hooks),
+          models: Array.from(session.models),
+          agentIds: Array.from(session.agentIds),
+          previews: session.previews,
+          events: session.events
+            .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
+            .slice(0, 24),
+          memories: openClawMemories
+            .filter((memory) => session.memoryIds.has(memory.id))
+            .sort((a, b) => new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime())
+            .slice(0, 12),
+        }))
+        .sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime())
+        .slice(0, limit);
+
+      const summary = {
+        sessions: sessions.length,
+        saved: sessions.reduce((sum, session) => sum + session.saved, 0),
+        skipped: sessions.reduce((sum, session) => sum + session.skipped, 0),
+        threats: sessions.reduce((sum, session) => sum + session.threats, 0),
+      };
+
+      res.json({ summary, sessions });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   app.get('/api/memories', requireNotLocked, async (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
@@ -145,10 +349,144 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
         LIMIT 50
       `).all(...params) as Array<Record<string, unknown>>;
 
+      const lowTrust = db.prepare(`
+        SELECT id, title, category, project, trust_score, source_kind, capture_method
+        FROM memories WHERE trust_score < 0.7 ${projectFilter}
+        ORDER BY trust_score ASC, updated_at DESC LIMIT 50
+      `).all(...params) as Array<Record<string, unknown>>;
+
+      const noisyAutoExtracted = db.prepare(`
+        SELECT id, title, category, project, source_kind, capture_method, tags, trust_score
+        FROM memories
+        WHERE (capture_method = 'auto' OR tags LIKE '%auto-extracted%') ${projectFilter}
+        ORDER BY updated_at DESC LIMIT 50
+      `).all(...params) as Array<Record<string, unknown>>;
+
+      const projectless = db.prepare(`
+        SELECT id, title, category, scope, source_kind, capture_method
+        FROM memories
+        WHERE (project IS NULL OR project = '') AND scope != 'global'
+        ORDER BY updated_at DESC LIMIT 50
+      `).all() as Array<Record<string, unknown>>;
+
+      const statusCounts = db.prepare(`
+        SELECT status, COUNT(*) as count
+        FROM memories
+        ${project ? 'WHERE project = ?' : ''}
+        GROUP BY status
+      `).all(...params) as Array<{ status: string; count: number }>;
+
       res.json({
         neverAccessed: { count: neverAccessed.length, items: neverAccessed },
         stale: { count: stale.length, items: stale },
         duplicates: { count: duplicates.length, items: duplicates },
+        lowTrust: { count: lowTrust.length, items: lowTrust },
+        noisyAutoExtracted: { count: noisyAutoExtracted.length, items: noisyAutoExtracted },
+        projectless: { count: projectless.length, items: projectless },
+        status: statusCounts.reduce<Record<string, number>>((acc, row) => {
+          acc[row.status] = row.count;
+          return acc;
+        }, {}),
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.get('/api/review/queue', requireNotLocked, (req: Request, res: Response) => {
+    try {
+      const project = typeof req.query.project === 'string' ? req.query.project : undefined;
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
+      const db = getDatabase();
+      const projectFilter = project ? 'AND project = ?' : '';
+      const params = project ? [project] : [];
+
+      const stale = db.prepare(`
+        SELECT * FROM memories
+        WHERE decayed_score < 0.3 ${projectFilter}
+        AND last_accessed < datetime('now', '-30 days')
+        ORDER BY decayed_score ASC LIMIT ?
+      `).all(...params, limit) as Record<string, unknown>[];
+
+      const neverUsed = db.prepare(`
+        SELECT * FROM memories
+        WHERE access_count = 0 ${projectFilter}
+        AND created_at < datetime('now', '-1 day')
+        ORDER BY created_at DESC LIMIT ?
+      `).all(...params, limit) as Record<string, unknown>[];
+
+      const lowTrust = db.prepare(`
+        SELECT * FROM memories
+        WHERE trust_score < 0.7 ${projectFilter}
+        ORDER BY trust_score ASC, updated_at DESC LIMIT ?
+      `).all(...params, limit) as Record<string, unknown>[];
+
+      const noisyAutoExtracted = db.prepare(`
+        SELECT * FROM memories
+        WHERE (capture_method = 'auto' OR tags LIKE '%auto-extracted%') ${projectFilter}
+        ORDER BY updated_at DESC LIMIT ?
+      `).all(...params, limit) as Record<string, unknown>[];
+
+      const projectless = db.prepare(`
+        SELECT * FROM memories
+        WHERE (project IS NULL OR project = '') AND scope != 'global'
+        ORDER BY updated_at DESC LIMIT ?
+      `).all(limit) as Record<string, unknown>[];
+
+      const openClawSummary = db.prepare(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN capture_method = 'auto' THEN 1 ELSE 0 END) as auto_count,
+          SUM(CASE WHEN tags LIKE '%keyword-trigger%' THEN 1 ELSE 0 END) as keyword_count,
+          SUM(CASE WHEN status = 'suppressed' THEN 1 ELSE 0 END) as suppressed_count,
+          SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) as pinned_count
+        FROM memories
+        WHERE (source_kind IN ('hook', 'plugin') OR tags LIKE '%openclaw%')
+        ${project ? 'AND project = ?' : ''}
+      `).get(...params) as {
+        total: number;
+        auto_count: number;
+        keyword_count: number;
+        suppressed_count: number;
+        pinned_count: number;
+      };
+
+      const contradictions = detectContradictions({
+        project,
+        minScore: 0.4,
+        limit,
+      });
+
+      res.json({
+        summary: {
+          stale: stale.length,
+          neverUsed: neverUsed.length,
+          lowTrust: lowTrust.length,
+          noisyAutoExtracted: noisyAutoExtracted.length,
+          projectless: projectless.length,
+          contradictions: contradictions.length,
+        },
+        openClaw: {
+          total: openClawSummary.total ?? 0,
+          autoExtracted: openClawSummary.auto_count ?? 0,
+          keywordTriggered: openClawSummary.keyword_count ?? 0,
+          suppressed: openClawSummary.suppressed_count ?? 0,
+          pinned: openClawSummary.pinned_count ?? 0,
+        },
+        sections: {
+          stale: stale.map(rowToMemory),
+          neverUsed: neverUsed.map(rowToMemory),
+          lowTrust: lowTrust.map(rowToMemory),
+          noisyAutoExtracted: noisyAutoExtracted.map(rowToMemory),
+          projectless: projectless.map(rowToMemory),
+          contradictions: contradictions.map((item) => ({
+            memoryA: item.memoryA,
+            memoryB: item.memoryB,
+            score: item.score,
+            reason: item.reason,
+            sharedTopics: item.sharedTopics,
+          })),
+        },
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -656,7 +994,7 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
   app.patch('/api/memories/:id', requireNotLocked, (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
-      const { title, content, category, tags, importance } = req.body;
+      const { title, content, category, tags, importance, status, pinned, reviewedBy, cloudExcluded, scope, project } = req.body;
 
       if (title !== undefined && (typeof title !== 'string' || title.trim().length === 0)) {
         return res.status(400).json({ error: 'Title must be a non-empty string' });
@@ -674,6 +1012,24 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
       if (importance !== undefined && (typeof importance !== 'number' || importance < 0 || importance > 1)) {
         return res.status(400).json({ error: 'Importance must be a number between 0 and 1' });
       }
+      if (status !== undefined && !['active', 'archived', 'suppressed', 'canonical'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid review status' });
+      }
+      if (pinned !== undefined && typeof pinned !== 'boolean') {
+        return res.status(400).json({ error: 'Pinned must be boolean' });
+      }
+      if (cloudExcluded !== undefined && typeof cloudExcluded !== 'boolean') {
+        return res.status(400).json({ error: 'cloudExcluded must be boolean' });
+      }
+      if (reviewedBy !== undefined && reviewedBy !== null && typeof reviewedBy !== 'string') {
+        return res.status(400).json({ error: 'reviewedBy must be string or null' });
+      }
+      if (scope !== undefined && !['project', 'global'].includes(scope)) {
+        return res.status(400).json({ error: 'scope must be project or global' });
+      }
+      if (project !== undefined && project !== null && typeof project !== 'string') {
+        return res.status(400).json({ error: 'project must be string or null' });
+      }
 
       const updates: Record<string, unknown> = {};
       if (title !== undefined) updates.title = title.trim();
@@ -681,7 +1037,58 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
       if (category !== undefined) updates.category = category;
       if (tags !== undefined) updates.tags = tags;
       if (importance !== undefined) updates.salience = importance;
+      if (status !== undefined) updates.status = status;
+      if (pinned !== undefined) updates.pinned = pinned;
+      if (reviewedBy !== undefined) updates.reviewedBy = reviewedBy;
+      if (cloudExcluded !== undefined) updates.cloudExcluded = cloudExcluded;
+      if (scope !== undefined) updates.scope = scope;
+      if (project !== undefined) updates.project = project;
 
+      const updated = updateMemory(id, updates);
+      if (!updated) {
+        return res.status(404).json({ error: 'Memory not found' });
+      }
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.patch('/api/memories/:id/review', requireNotLocked, (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { action, reviewedBy, project, scope } = req.body as {
+        action?: string;
+        reviewedBy?: string;
+        project?: string | null;
+        scope?: 'project' | 'global';
+      };
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid memory ID' });
+      }
+
+      const reviewActor = typeof reviewedBy === 'string' && reviewedBy.trim() ? reviewedBy.trim() : 'dashboard';
+      const actionMap: Record<string, Record<string, unknown>> = {
+        archive: { status: 'archived', reviewedBy: reviewActor },
+        suppress: { status: 'suppressed', reviewedBy: reviewActor },
+        restore: { status: 'active', reviewedBy: reviewActor },
+        pin: { pinned: true, reviewedBy: reviewActor },
+        unpin: { pinned: false, reviewedBy: reviewActor },
+        canonicalize: { status: 'canonical', pinned: true, reviewedBy: reviewActor },
+        excludeCloud: { cloudExcluded: true, reviewedBy: reviewActor },
+        includeCloud: { cloudExcluded: false, reviewedBy: reviewActor },
+        rescopeProject: { scope: 'project', project: project ?? null, reviewedBy: reviewActor },
+        rescopeGlobal: { scope: 'global', project: null, reviewedBy: reviewActor },
+      };
+
+      if (!action || !actionMap[action]) {
+        return res.status(400).json({ error: 'Unsupported review action' });
+      }
+
+      const updates = {
+        ...actionMap[action],
+        ...(scope ? { scope } : {}),
+      };
       const updated = updateMemory(id, updates);
       if (!updated) {
         return res.status(404).json({ error: 'Memory not found' });

@@ -6,22 +6,24 @@ import { useAuditStats } from '@/hooks/useDefence';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { useActivityTrend } from '@/hooks/useActivityTrend';
 import { Sparkline } from '@/components/nav/Sparkline';
-import { LayoutDashboard, Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch, Zap, Clock } from 'lucide-react';
+import { LayoutDashboard, Shield, FileText, AlertTriangle, Database, Brain, GitBranch, Users, FileSearch, Zap, Clock, Search, Inbox } from 'lucide-react';
 import { Cloud } from 'lucide-react';
 
 const NAV_ITEMS = [
   { id: 'overview' as const, label: 'Home', icon: LayoutDashboard },
+  { id: 'recall' as const, label: 'Recall', icon: Search },
+  { id: 'review' as const, label: 'Review', icon: Inbox },
   { id: 'shield' as const, label: 'Shield', icon: Shield },
+  { id: 'graph' as const, label: 'Graph', icon: GitBranch },
   { id: 'cloud' as const, label: 'Cloud', icon: Cloud },
   { id: 'audit' as const, label: 'Audit', icon: FileText },
+  { id: 'memories' as const, label: 'Capture', icon: Database },
   { id: 'quarantine' as const, label: 'Queue', icon: AlertTriangle },
   { id: 'agents' as const, label: 'Agents', icon: Users },
   { id: 'skills' as const, label: 'Skills', icon: FileSearch },
   { id: 'dome' as const, label: 'Dome', icon: Zap },
-  { id: 'memories' as const, label: 'Memories', icon: Database },
   { id: 'timeline' as const, label: 'Timeline', icon: Clock },
   { id: 'brain' as const, label: 'Brain', icon: Brain },
-  { id: 'graph' as const, label: 'Graph', icon: GitBranch },
 ];
 
 // Tabs that contain Pro-gated panels

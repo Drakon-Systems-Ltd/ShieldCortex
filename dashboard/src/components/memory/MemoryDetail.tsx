@@ -199,12 +199,12 @@ export function MemoryDetail({
     return related.sort((a, b) => b.strength - a.strength);
   }, [memory.id, links, memories]);
 
-  const formatDate = (dateStr: string) => {
+  const formatDate = (dateStr: string | Date) => {
     const date = new Date(dateStr);
     return date.toLocaleString();
   };
 
-  const timeSince = (dateStr: string) => {
+  const timeSince = (dateStr: string | Date) => {
     const date = new Date(dateStr);
     const now = new Date();
     const hours = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60));
@@ -421,6 +421,64 @@ export function MemoryDetail({
               <span className="text-sm text-white">
                 {formatDate(memory.createdAt)}
               </span>
+            </div>
+          </div>
+        )}
+
+        {!isEditing && (
+          <div className="grid gap-3 md:grid-cols-1">
+            <div className="rounded-lg bg-slate-800 p-3 space-y-2">
+              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Provenance</h4>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Source kind</span>
+                <span className="text-white">{memory.sourceKind || 'user'}</span>
+              </div>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Capture</span>
+                <span className="text-white">{memory.captureMethod || 'manual'}</span>
+              </div>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Trust</span>
+                <span className="text-white">{(memory.trustScore ?? 1).toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Origin</span>
+                <span className="truncate text-right text-slate-300">{memory.source || 'user:direct'}</span>
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-slate-800 p-3 space-y-2">
+              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Review state</h4>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Status</span>
+                <span className="text-white">{memory.status || 'active'}</span>
+              </div>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Pinned</span>
+                <span className="text-white">{memory.pinned ? 'Yes' : 'No'}</span>
+              </div>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Reviewed</span>
+                <span className="text-white">
+                  {memory.reviewedAt ? `${timeSince(memory.reviewedAt)} by ${memory.reviewedBy || 'operator'}` : 'Not reviewed'}
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-slate-800 p-3 space-y-2">
+              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Sync state</h4>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Scope</span>
+                <span className="text-white">{memory.scope || 'project'}</span>
+              </div>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Cloud</span>
+                <span className="text-white">{memory.cloudExcluded ? 'Excluded' : 'Eligible'}</span>
+              </div>
+              <div className="flex justify-between gap-3 text-sm">
+                <span className="text-slate-400">Sensitivity</span>
+                <span className="text-white">{memory.sensitivityLevel || 'INTERNAL'}</span>
+              </div>
             </div>
           </div>
         )}
