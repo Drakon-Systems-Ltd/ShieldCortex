@@ -45,7 +45,8 @@ Your agent doesn't just store text — it *understands* it.
 
 - 🔍 **Semantic search** — finds memories by meaning using FTS5 + vector embeddings (all-MiniLM-L6-v2), not just keyword matching
 - 🧭 **Recall explanations** — inspect why a memory ranked, including keyword, semantic, recency, tag, and link contributions
-- 🕸️ **Knowledge graph** — entities and relationships extracted automatically from every memory, navigable in the dashboard
+- 🕸️ **Knowledge graph** — entities and relationships extracted automatically from every memory, with readable `Read`, `Map`, and `Bloom` exploration modes in the dashboard
+- ☁️ **Cloud replica sync** — opt-in local-to-cloud replication for memories and graph data, with queue diagnostics and per-project sync controls
 - ⏳ **Natural decay** — old, unaccessed memories fade over time; important ones persist — just like human memory
 - ⚡ **Contradiction detection** — new memories that conflict with existing ones get flagged before they cause confusion
 - 🧹 **Auto-consolidation** — duplicate and overlapping memories merge automatically, keeping your memory store clean
@@ -242,7 +243,9 @@ shieldcortex dashboard
 
 ![Shield Overview](docs/images/dashboard-shield.png)
 
-**Knowledge Graph** — ego-centric entity navigation. Focus on one entity, see its neighbours and relationships. Click to explore.
+**Knowledge Graph** — focus on one entity at a time, then switch between `Read` for relationship statements, `Map` for a cleaner graph canvas, and `Bloom` for an organic branch view.
+
+**Cloud Diagnostics** — inspect local-to-cloud queue health, retry pressure, sync policy, device identity, and Team-gated cloud replica controls from the local dashboard.
 
 **Timeline** — every memory, chronologically. Filter by category, type, or search. Edit memories inline.
 

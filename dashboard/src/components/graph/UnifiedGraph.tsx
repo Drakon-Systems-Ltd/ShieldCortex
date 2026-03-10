@@ -8,9 +8,9 @@
  * Search to jump to any entity. Back button for navigation history.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type MutableRefObject, type ReactElement, type WheelEvent } from 'react';
 import dynamic from 'next/dynamic';
-import { Search, X, ArrowLeft, Globe, ChevronRight } from 'lucide-react';
+import { Search, X, ArrowLeft, Globe, ChevronRight, Network, ListTree, Sparkles } from 'lucide-react';
 import type {
   ForceGraphMethods,
   ForceGraphProps,
@@ -108,12 +108,52 @@ interface GraphNode {
   memoryCount: number;
   isFocal: boolean;
   val: number;
+  x?: number;
+  y?: number;
+  fx?: number;
+  fy?: number;
+  labelDirection?: 'left' | 'right' | 'center';
 }
 
 interface GraphLink {
   source: number;
   target: number;
   predicate: string;
+}
+
+type DisplayMode = 'outline' | 'map' | 'fractal';
+
+interface BloomNode {
+  id: number;
+  name: string;
+  entityType: string;
+  memoryCount: number;
+  x: number;
+  y: number;
+  radius: number;
+}
+
+interface BloomBranch {
+  key: string;
+  label: string;
+  color: string;
+  petalPath: string;
+  stemPath: string;
+  labelX: number;
+  labelY: number;
+  nodeStems: Array<{ key: string; path: string }>;
+  nodes: BloomNode[];
+}
+
+interface BloomLayout {
+  width: number;
+  height: number;
+  centerX: number;
+  centerY: number;
+  focalRadius: number;
+  focalGlowRadius: number;
+  branches: BloomBranch[];
+  crossLinks: Array<{ key: string; path: string; color: string }>;
 }
 
 type ForceGraphRef = ForceGraphMethods<NodeObject<GraphNode>, LinkObject<GraphNode, GraphLink>>;
@@ -124,11 +164,19 @@ type ForceGraphComponent = (props: ForceGraphComponentProps) => ReactElement;
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false }) as unknown as ForceGraphComponent;
 
+function polarToCartesian(centerX: number, centerY: number, radius: number, angle: number) {
+  return {
+    x: centerX + Math.cos(angle) * radius,
+    y: centerY + Math.sin(angle) * radius,
+  };
+}
+
 // ── Component ──────────────────────────────────────────────
 
 export default function UnifiedGraph() {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<ForceGraphRef | undefined>(undefined);
+  const bloomDragRef = useRef<{ startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
   // Navigation state
@@ -143,6 +191,8 @@ export default function UnifiedGraph() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Entity[]>([]);
   const [showSearch, setShowSearch] = useState(false);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('outline');
+  const [bloomViewport, setBloomViewport] = useState({ scale: 1, offsetX: 0, offsetY: 0 });
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -220,6 +270,11 @@ export default function UnifiedGraph() {
     return () => clearTimeout(timer);
   }, [neighbourhood]);
 
+  useEffect(() => {
+    setBloomViewport({ scale: 1, offsetX: 0, offsetY: 0 });
+    bloomDragRef.current = null;
+  }, [displayMode, focalId]);
+
   const goBack = useCallback(() => {
     setHistory(h => {
       if (h.length === 0) return h;
@@ -227,6 +282,53 @@ export default function UnifiedGraph() {
       setFocalId(prev);
       return h.slice(0, -1);
     });
+  }, []);
+
+  const handleBloomWheel = useCallback((event: WheelEvent<SVGSVGElement>) => {
+    event.preventDefault();
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointerX = event.clientX - rect.left;
+    const pointerY = event.clientY - rect.top;
+
+    setBloomViewport((current) => {
+      const zoomFactor = event.deltaY < 0 ? 1.12 : 0.9;
+      const nextScale = Math.min(2.6, Math.max(0.65, current.scale * zoomFactor));
+      if (Math.abs(nextScale - current.scale) < 0.0001) return current;
+
+      const nextOffsetX = pointerX - ((pointerX - current.offsetX) * nextScale) / current.scale;
+      const nextOffsetY = pointerY - ((pointerY - current.offsetY) * nextScale) / current.scale;
+
+      return {
+        scale: nextScale,
+        offsetX: nextOffsetX,
+        offsetY: nextOffsetY,
+      };
+    });
+  }, []);
+
+  const handleBloomMouseDown = useCallback((event: MouseEvent<SVGSVGElement>) => {
+    bloomDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: bloomViewport.offsetX,
+      offsetY: bloomViewport.offsetY,
+    };
+  }, [bloomViewport.offsetX, bloomViewport.offsetY]);
+
+  const handleBloomMouseMove = useCallback((event: MouseEvent<SVGSVGElement>) => {
+    const drag = bloomDragRef.current;
+    if (!drag) return;
+
+    setBloomViewport((current) => ({
+      ...current,
+      offsetX: drag.offsetX + (event.clientX - drag.startX),
+      offsetY: drag.offsetY + (event.clientY - drag.startY),
+    }));
+  }, []);
+
+  const endBloomDrag = useCallback(() => {
+    bloomDragRef.current = null;
   }, []);
 
   // ── Search ────────────────────────────────────────────────
@@ -253,29 +355,126 @@ export default function UnifiedGraph() {
   const graphData = useMemo<GraphData<GraphNode, GraphLink>>(() => {
     if (!neighbourhood) return { nodes: [], links: [] };
 
-    const allEntities = [neighbourhood.focal, ...neighbourhood.neighbours];
-    const maxCount = Math.max(1, ...allEntities.map(e => e.memoryCount));
-    const nodeIds = new Set(allEntities.map(e => e.id));
-
-    const nodes: GraphNode[] = allEntities.map(e => {
-      const isFocal = e.id === neighbourhood.focal.id;
-      const ratio = e.memoryCount / maxCount;
+    const neighbourMeta = neighbourhood.neighbours.map((entity) => {
+      const relatedTriples = neighbourhood.triples.filter((triple) =>
+        triple.subject_id === entity.id || triple.object_id === entity.id,
+      );
+      const meaningfulTriples = relatedTriples.filter((triple) => triple.predicate !== 'related_to');
+      const strongestPredicate = meaningfulTriples[0]?.predicate ?? relatedTriples[0]?.predicate ?? 'related_to';
+      const score = entity.memoryCount * 10 + meaningfulTriples.length * 50 + relatedTriples.length;
       return {
-        id: e.id,
-        name: e.name,
-        entityType: e.type,
-        memoryCount: e.memoryCount,
-        isFocal,
-        val: isFocal ? 25 : 6 + Math.pow(ratio, 0.5) * 14,
+        entity,
+        strongestPredicate,
+        hasMeaningfulLink: meaningfulTriples.length > 0,
+        score,
       };
     });
 
+    const prioritizedNeighbours = [
+      ...neighbourMeta
+        .filter((item) => item.hasMeaningfulLink)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10),
+      ...neighbourMeta
+        .filter((item) => !item.hasMeaningfulLink)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 6),
+    ];
+
+    const visibleNeighbourIds = new Set(prioritizedNeighbours.map((item) => item.entity.id));
+    const visibleEntities = [neighbourhood.focal, ...neighbourhood.neighbours.filter((entity) => visibleNeighbourIds.has(entity.id))];
+    const maxCount = Math.max(1, ...visibleEntities.map((entity) => entity.memoryCount));
+    const nodeIds = new Set(visibleEntities.map((entity) => entity.id));
+
+    const positionedNodes = new Map<number, GraphNode>();
+    positionedNodes.set(neighbourhood.focal.id, {
+      id: neighbourhood.focal.id,
+      name: neighbourhood.focal.name,
+      entityType: neighbourhood.focal.type,
+      memoryCount: neighbourhood.focal.memoryCount,
+      isFocal: true,
+      val: 28,
+      x: 0,
+      y: 0,
+      fx: 0,
+      fy: 0,
+      labelDirection: 'center',
+    });
+
+    const setNode = (item: typeof prioritizedNeighbours[number], x: number, y: number) => {
+      const ratio = item.entity.memoryCount / maxCount;
+      positionedNodes.set(item.entity.id, {
+        id: item.entity.id,
+        name: item.entity.name,
+        entityType: item.entity.type,
+        memoryCount: item.entity.memoryCount,
+        isFocal: false,
+        val: 7 + Math.pow(ratio, 0.6) * 14,
+        x,
+        y,
+        fx: x,
+        fy: y,
+        labelDirection: Math.abs(x) < 40 ? 'center' : (x > 0 ? 'right' : 'left'),
+      });
+    };
+
+    if (displayMode === 'fractal') {
+      const branchGroups = [...prioritizedNeighbours.reduce((map, item) => {
+        const key = item.hasMeaningfulLink ? item.strongestPredicate : `ambient:${item.entity.type}`;
+        if (!map.has(key)) {
+          map.set(key, []);
+        }
+        map.get(key)!.push(item);
+        return map;
+      }, new Map<string, typeof prioritizedNeighbours>()).entries()]
+        .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+
+      branchGroups.forEach(([, items], branchIndex) => {
+        const baseAngle = -Math.PI / 2 + (branchIndex / Math.max(branchGroups.length, 1)) * Math.PI * 2;
+        items
+          .sort((a, b) => b.score - a.score)
+          .forEach((item, itemIndex) => {
+            const wave = itemIndex === 0 ? 0 : (Math.ceil(itemIndex / 2) * 0.18) * (itemIndex % 2 === 0 ? -1 : 1);
+            const branchAngle = baseAngle + wave;
+            const radius = 165 + itemIndex * 78;
+            const curl = (itemIndex % 3 === 0 ? 1 : -1) * (12 + itemIndex * 4);
+            const x = Math.cos(branchAngle) * radius + Math.cos(branchAngle + Math.PI / 2) * curl;
+            const y = Math.sin(branchAngle) * radius + Math.sin(branchAngle + Math.PI / 2) * curl;
+            setNode(item, x, y);
+          });
+      });
+    } else {
+      const innerRing = prioritizedNeighbours.filter((item) => item.hasMeaningfulLink);
+      const outerRing = prioritizedNeighbours.filter((item) => !item.hasMeaningfulLink);
+
+      const placeRing = (
+        ring: typeof prioritizedNeighbours,
+        radiusX: number,
+        radiusY: number,
+      ) => {
+        ring.forEach((item, index) => {
+          const angle = ring.length === 1
+            ? -Math.PI / 2
+            : -Math.PI / 2 + (index / ring.length) * Math.PI * 2;
+          const x = Math.cos(angle) * radiusX;
+          const y = Math.sin(angle) * radiusY;
+          setNode(item, x, y);
+        });
+      };
+
+      placeRing(innerRing, 250, 180);
+      placeRing(outerRing, 360, 255);
+    }
+
+    const nodes = [...positionedNodes.values()];
+
     const links: GraphLink[] = neighbourhood.triples
-      .filter(t => nodeIds.has(t.subject_id) && nodeIds.has(t.object_id))
-      .map(t => ({
-        source: t.subject_id,
-        target: t.object_id,
-        predicate: t.predicate,
+      .filter((triple) => nodeIds.has(triple.subject_id) && nodeIds.has(triple.object_id))
+      .filter((triple) => triple.predicate !== 'related_to' || triple.subject_id === neighbourhood.focal.id || triple.object_id === neighbourhood.focal.id)
+      .map((triple) => ({
+        source: triple.subject_id,
+        target: triple.object_id,
+        predicate: triple.predicate,
       }));
 
     // Deduplicate links (same source-target pair)
@@ -289,18 +488,18 @@ export default function UnifiedGraph() {
     });
 
     return { nodes, links: uniqueLinks };
-  }, [neighbourhood]);
+  }, [displayMode, neighbourhood]);
 
   // ── Force config ──────────────────────────────────────────
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg || graphData.nodes.length === 0) return;
 
-    fg.d3Force('charge')?.strength(-300);
+    fg.d3Force('charge')?.strength(0);
+    fg.d3Force('center', null);
     fg.d3Force('link')?.distance((link: GraphLink) => {
-      return link.predicate === 'related_to' ? 120 : 90;
+      return link.predicate === 'related_to' ? 160 : 120;
     });
-    fg.d3ReheatSimulation();
   }, [graphData]);
 
   // ── Canvas render: nodes ──────────────────────────────────
@@ -340,19 +539,31 @@ export default function UnifiedGraph() {
         ? Math.max(14, 16 / globalScale)
         : Math.max(11, 13 / globalScale);
       ctx.font = `${node.isFocal ? 'bold ' : ''}${fontSize}px Sans-Serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
+      const labelDirection = node.labelDirection ?? 'center';
+      const isLeft = labelDirection === 'left';
+      const isRight = labelDirection === 'right';
+      const labelX = isLeft ? x - radius - 10 : isRight ? x + radius + 10 : x;
+      const labelY = labelDirection === 'center' ? y + radius + 6 : y - fontSize / 2;
+      ctx.textAlign = isLeft ? 'right' : isRight ? 'left' : 'center';
+      ctx.textBaseline = labelDirection === 'center' ? 'top' : 'middle';
 
       const textWidth = ctx.measureText(label).width;
-      const textY = y + radius + 4;
       const padding = 3;
+      const textBoxX = isLeft
+        ? labelX - textWidth - padding
+        : isRight
+          ? labelX - padding
+          : labelX - textWidth / 2 - padding;
+      const textBoxY = labelDirection === 'center'
+        ? labelY - padding
+        : labelY - fontSize / 2 - padding;
 
       // Label background
       ctx.fillStyle = 'rgba(2, 6, 23, 0.9)';
       ctx.beginPath();
       ctx.roundRect(
-        x - textWidth / 2 - padding,
-        textY - padding,
+        textBoxX,
+        textBoxY,
         textWidth + padding * 2,
         fontSize + padding * 2,
         3,
@@ -360,7 +571,7 @@ export default function UnifiedGraph() {
       ctx.fill();
 
       ctx.fillStyle = node.isFocal ? '#ffffff' : '#cbd5e1';
-      ctx.fillText(label, x, textY);
+      ctx.fillText(label, labelX, labelY);
 
       // Memory count badge
       if (node.memoryCount > 1) {
@@ -394,20 +605,28 @@ export default function UnifiedGraph() {
 
       const isRelatedTo = link.predicate === 'related_to';
 
-      // Line
+      const isFractal = displayMode === 'fractal';
+      const midX = (source.x + target.x) / 2;
+      const midY = (source.y + target.y) / 2;
+      const controlStrength = isFractal ? 0.14 : 0;
+      const controlX = midX + (midX * controlStrength);
+      const controlY = midY + (midY * controlStrength);
+
       ctx.beginPath();
       ctx.moveTo(source.x, source.y);
-      ctx.lineTo(target.x, target.y);
+      if (isFractal) {
+        ctx.quadraticCurveTo(controlX, controlY, target.x, target.y);
+      } else {
+        ctx.lineTo(target.x, target.y);
+      }
       ctx.strokeStyle = PREDICATE_COLORS[link.predicate] || '#475569';
-      ctx.lineWidth = isRelatedTo ? 0.8 : 2;
-      ctx.globalAlpha = isRelatedTo ? 0.2 : 0.7;
+      ctx.lineWidth = isRelatedTo ? (isFractal ? 0.7 : 0.8) : (isFractal ? 1.7 : 2);
+      ctx.globalAlpha = isRelatedTo ? (isFractal ? 0.12 : 0.2) : (isFractal ? 0.62 : 0.7);
       ctx.stroke();
       ctx.globalAlpha = 1;
 
       // Edge label (only for meaningful predicates, when zoomed enough)
       if (!isRelatedTo && globalScale > 0.8) {
-        const midX = (source.x + target.x) / 2;
-        const midY = (source.y + target.y) / 2;
         const label = PREDICATE_LABELS[link.predicate] || link.predicate;
         const fontSize = Math.max(8, 10 / globalScale);
         ctx.font = `${fontSize}px Sans-Serif`;
@@ -426,7 +645,7 @@ export default function UnifiedGraph() {
         ctx.globalAlpha = 1;
       }
     },
-    [],
+    [displayMode],
   );
 
   const nodeLabel = useCallback(
@@ -440,6 +659,202 @@ export default function UnifiedGraph() {
     if (node.isFocal) return;
     navigateTo(node.id);
   }, [navigateTo]);
+
+  // ── Render helpers ────────────────────────────────────────
+  const focal = neighbourhood?.focal;
+  const neighbours = neighbourhood?.neighbours || [];
+  const relationshipRows = useMemo(() => {
+    if (!neighbourhood) return [];
+
+    return neighbourhood.triples
+      .map((triple) => {
+        const outgoing = triple.subject_id === neighbourhood.focal.id;
+        const neighbourId = outgoing ? triple.object_id : triple.subject_id;
+        const neighbour = neighbourhood.neighbours.find((candidate) => candidate.id === neighbourId);
+        if (!neighbour) return null;
+
+        return {
+          key: triple.id,
+          direction: outgoing ? 'out' : 'in',
+          predicate: triple.predicate,
+          sentence: outgoing
+            ? `${neighbourhood.focal.name} ${PREDICATE_LABELS[triple.predicate] || triple.predicate} ${neighbour.name}`
+            : `${neighbour.name} ${PREDICATE_LABELS[triple.predicate] || triple.predicate} ${neighbourhood.focal.name}`,
+          neighbour,
+        };
+      })
+      .filter((row): row is {
+        key: number;
+        direction: 'out' | 'in';
+        predicate: string;
+        sentence: string;
+        neighbour: Entity;
+      } => Boolean(row))
+      .sort((a, b) => {
+        if (a.predicate === 'related_to' && b.predicate !== 'related_to') return 1;
+        if (a.predicate !== 'related_to' && b.predicate === 'related_to') return -1;
+        return b.neighbour.memoryCount - a.neighbour.memoryCount;
+      });
+  }, [neighbourhood]);
+
+  const bloomLayout = useMemo<BloomLayout | null>(() => {
+    if (!neighbourhood || dimensions.width <= 0 || dimensions.height <= 0) return null;
+
+    const width = Math.max(dimensions.width, 900);
+    const height = Math.max(dimensions.height, 620);
+    const centerX = width * 0.5;
+    const centerY = height * 0.72;
+
+    const neighbourMeta = neighbourhood.neighbours.map((entity) => {
+      const relatedTriples = neighbourhood.triples.filter((triple) =>
+        triple.subject_id === entity.id || triple.object_id === entity.id,
+      );
+      const meaningfulTriples = relatedTriples.filter((triple) => triple.predicate !== 'related_to');
+      const strongestPredicate = meaningfulTriples[0]?.predicate ?? relatedTriples[0]?.predicate ?? entity.type;
+      const score = entity.memoryCount * 10 + meaningfulTriples.length * 48 + relatedTriples.length;
+      return {
+        entity,
+        strongestPredicate,
+        score,
+      };
+    });
+
+    const prioritized = neighbourMeta
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 16);
+
+    const grouped = prioritized.reduce((map, item) => {
+      const key = item.strongestPredicate;
+      if (!map.has(key)) {
+        map.set(key, []);
+      }
+      map.get(key)!.push(item);
+      return map;
+    }, new Map<string, typeof prioritized>());
+
+    const branchEntries = [...grouped.entries()]
+      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+      .slice(0, 6);
+
+    const maxCount = Math.max(1, neighbourhood.focal.memoryCount, ...prioritized.map((item) => item.entity.memoryCount));
+    const branches: BloomBranch[] = branchEntries.map(([key, items], branchIndex) => {
+      const color = PREDICATE_COLORS[key] || ENTITY_COLORS[items[0]?.entity.type || 'tool'] || DEFAULT_COLOR;
+      const angle = branchEntries.length === 1
+        ? -Math.PI / 2
+        : (-Math.PI * 0.88) + (branchIndex / (branchEntries.length - 1)) * (Math.PI * 0.76);
+      const petalLength = 210 + items.length * 18;
+      const petalWidth = Math.min(0.24, 0.1 + items.length * 0.015);
+
+      const startLeft = polarToCartesian(centerX, centerY, 44, angle - 0.08);
+      const startRight = polarToCartesian(centerX, centerY, 44, angle + 0.08);
+      const leftMid = polarToCartesian(centerX, centerY, petalLength * 0.62, angle - petalWidth);
+      const rightMid = polarToCartesian(centerX, centerY, petalLength * 0.62, angle + petalWidth);
+      const tip = polarToCartesian(centerX, centerY, petalLength, angle);
+      const stemControl = polarToCartesian(centerX, centerY, petalLength * 0.42, angle);
+      const branchAnchor = polarToCartesian(centerX, centerY, petalLength * 0.35, angle);
+
+      const nodes: BloomNode[] = items.map((item, itemIndex) => {
+        const ratio = item.entity.memoryCount / maxCount;
+        const branchOffset = itemIndex === 0
+          ? 0
+          : Math.ceil(itemIndex / 2) * 0.13 * (itemIndex % 2 === 0 ? -1 : 1);
+        const radius = 118 + itemIndex * 50;
+        const bloomAngle = angle + branchOffset;
+        const sway = 8 + itemIndex * 3;
+        const anchor = polarToCartesian(centerX, centerY, radius, bloomAngle);
+        const drift = polarToCartesian(0, 0, sway, bloomAngle + Math.PI / 2);
+        return {
+          id: item.entity.id,
+          name: item.entity.name,
+          entityType: item.entity.type,
+          memoryCount: item.entity.memoryCount,
+          x: anchor.x + drift.x,
+          y: anchor.y + drift.y,
+          radius: 8 + Math.pow(ratio, 0.55) * 12,
+        };
+      });
+
+      const nodeStems = nodes.map((node, nodeIndex) => {
+        const split = polarToCartesian(
+          branchAnchor.x,
+          branchAnchor.y,
+          18 + nodeIndex * 8,
+          angle + (nodeIndex === 0 ? 0 : (nodeIndex % 2 === 0 ? -0.18 : 0.18)),
+        );
+        return {
+          key: `${key}-${node.id}`,
+          path: `M ${branchAnchor.x} ${branchAnchor.y} Q ${split.x} ${split.y} ${node.x} ${node.y}`,
+        };
+      });
+
+      return {
+        key,
+        label: PREDICATE_LABELS[key] || key.replace(/_/g, ' '),
+        color,
+        petalPath: [
+          `M ${startLeft.x} ${startLeft.y}`,
+          `Q ${leftMid.x} ${leftMid.y} ${tip.x} ${tip.y}`,
+          `Q ${rightMid.x} ${rightMid.y} ${startRight.x} ${startRight.y}`,
+          `Q ${centerX} ${centerY} ${startLeft.x} ${startLeft.y}`,
+          'Z',
+        ].join(' '),
+        stemPath: [
+          `M ${centerX} ${centerY}`,
+          `Q ${stemControl.x} ${stemControl.y} ${tip.x} ${tip.y}`,
+        ].join(' '),
+        labelX: tip.x,
+        labelY: tip.y - 10,
+        nodeStems,
+        nodes,
+      };
+    });
+
+    const nodeLookup = new Map<number, BloomNode>();
+    branches.forEach((branch) => {
+      branch.nodes.forEach((node) => nodeLookup.set(node.id, node));
+    });
+
+    const visibleNodeIds = new Set(nodeLookup.keys());
+    const crossLinks = neighbourhood.triples
+      .filter((triple) =>
+        visibleNodeIds.has(triple.subject_id) &&
+        visibleNodeIds.has(triple.object_id) &&
+        triple.subject_id !== neighbourhood.focal.id &&
+        triple.object_id !== neighbourhood.focal.id &&
+        triple.predicate !== 'related_to',
+      )
+      .slice(0, 10)
+      .map((triple) => {
+        const source = nodeLookup.get(triple.subject_id)!;
+        const target = nodeLookup.get(triple.object_id)!;
+        const control = polarToCartesian(
+          centerX,
+          centerY,
+          Math.max(
+            Math.hypot(source.x - centerX, source.y - centerY),
+            Math.hypot(target.x - centerX, target.y - centerY),
+          ) + 55,
+          Math.atan2((source.y + target.y) / 2 - centerY, (source.x + target.x) / 2 - centerX),
+        );
+
+        return {
+          key: `${triple.id}`,
+          color: PREDICATE_COLORS[triple.predicate] || DEFAULT_COLOR,
+          path: `M ${source.x} ${source.y} Q ${control.x} ${control.y} ${target.x} ${target.y}`,
+        };
+      });
+
+    return {
+      width,
+      height,
+      centerX,
+      centerY,
+      focalRadius: 30,
+      focalGlowRadius: 46,
+      branches,
+      crossLinks,
+    };
+  }, [dimensions.height, dimensions.width, neighbourhood]);
 
   // ── Empty state ───────────────────────────────────────────
   if (!loading && topEntities.length === 0 && !focalId) {
@@ -456,10 +871,6 @@ export default function UnifiedGraph() {
       </div>
     );
   }
-
-  // ── Render ────────────────────────────────────────────────
-  const focal = neighbourhood?.focal;
-  const neighbours = neighbourhood?.neighbours || [];
 
   // Group neighbours by predicate for the sidebar
   const neighboursByRelation = (() => {
@@ -522,6 +933,45 @@ export default function UnifiedGraph() {
         )}
 
         <div className="flex-1" />
+
+        <div className="flex items-center rounded-lg border border-slate-700 bg-slate-900/80 p-0.5">
+          <button
+            onClick={() => setDisplayMode('outline')}
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+              displayMode === 'outline'
+                ? 'bg-cyan-500/15 text-cyan-300'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            title="Readable relationship outline"
+          >
+            <ListTree size={12} />
+            Read
+          </button>
+          <button
+            onClick={() => setDisplayMode('map')}
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+              displayMode === 'map'
+                ? 'bg-cyan-500/15 text-cyan-300'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            title="Graph canvas"
+          >
+            <Network size={12} />
+            Map
+          </button>
+          <button
+            onClick={() => setDisplayMode('fractal')}
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+              displayMode === 'fractal'
+                ? 'bg-cyan-500/15 text-cyan-300'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            title="Fractal bloom layout"
+          >
+            <Sparkles size={12} />
+            Bloom
+          </button>
+        </div>
 
         {/* Search */}
         <div className="relative">
@@ -682,38 +1132,373 @@ export default function UnifiedGraph() {
           )}
         </div>
 
-        {/* Graph canvas */}
-        <div ref={containerRef} className="flex-1 min-h-0 relative">
-          {loading && (
-            <div className="absolute inset-0 flex items-center justify-center z-10">
-              <div className="text-slate-400 animate-pulse text-sm">Loading...</div>
+        {displayMode === 'outline' ? (
+          <div className="flex-1 min-h-0 overflow-y-auto bg-slate-950/20">
+            {loading && (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-slate-400 animate-pulse text-sm">Loading...</div>
+              </div>
+            )}
+            {error && (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-red-400 text-sm">Error: {error}</div>
+              </div>
+            )}
+            {!loading && !error && focal && (
+              <div className="mx-auto flex max-w-6xl flex-col gap-4 p-4">
+                <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+                  <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.28em] text-slate-600">Focused Entity</div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <div
+                            className="h-3 w-3 rounded-full"
+                            style={{ backgroundColor: ENTITY_COLORS[focal.type] || DEFAULT_COLOR }}
+                          />
+                          <h2 className="text-2xl font-semibold text-white">{focal.name}</h2>
+                          <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-400">
+                            {focal.type}
+                          </span>
+                        </div>
+                        {focal.aliases.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-1">
+                            {focal.aliases.slice(0, 8).map((alias) => (
+                              <span key={alias} className="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300">
+                                {alias}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-right">
+                        <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-600">Memories</div>
+                          <div className="mt-1 text-xl font-semibold text-white">{focal.memoryCount}</div>
+                        </div>
+                        <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2">
+                          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-600">Direct Links</div>
+                          <div className="mt-1 text-xl font-semibold text-white">{relationshipRows.length}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="text-[10px] uppercase tracking-[0.28em] text-slate-600">How To Read This</div>
+                    <div className="mt-3 space-y-3 text-sm text-slate-300">
+                      <p>This view turns the graph into readable statements and evidence instead of relying on overlapping labels.</p>
+                      <p>Click any related entity to recenter the graph. Use <span className="font-medium text-cyan-300">Map</span> when you want spatial context, and <span className="font-medium text-cyan-300">Read</span> when you want meaning.</p>
+                    </div>
+                  </section>
+                </div>
+
+                <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+                  <section className="rounded-2xl border border-slate-800 bg-slate-900/30 p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.28em] text-slate-600">Relationship Outline</div>
+                        <div className="mt-1 text-sm text-slate-400">Readable connections grouped by meaning instead of force layout.</div>
+                      </div>
+                      <div className="text-xs text-slate-500">{relationshipRows.length} statements</div>
+                    </div>
+
+                    <div className="mt-4 space-y-4">
+                      {neighboursByRelation.length > 0 ? neighboursByRelation.map((group) => {
+                        const rows = relationshipRows.filter(
+                          (row) => row.predicate === group.predicate && row.direction === group.direction,
+                        );
+                        return (
+                          <div key={`${group.predicate}-${group.direction}`} className="rounded-xl border border-slate-800 bg-slate-950/40">
+                            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+                              <div className="text-sm font-medium" style={{ color: PREDICATE_COLORS[group.predicate] || '#94a3b8' }}>
+                                {group.direction === 'out' ? `${focal.name} ${PREDICATE_LABELS[group.predicate] || group.predicate}...` : `... ${PREDICATE_LABELS[group.predicate] || group.predicate} ${focal.name}`}
+                              </div>
+                              <div className="text-xs text-slate-500">{rows.length}</div>
+                            </div>
+                            <div className="divide-y divide-slate-800/80">
+                              {rows.map((row) => (
+                                <button
+                                  key={row.key}
+                                  onClick={() => navigateTo(row.neighbour.id)}
+                                  className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-900/60"
+                                >
+                                  <div
+                                    className="h-2.5 w-2.5 rounded-full shrink-0"
+                                    style={{ backgroundColor: ENTITY_COLORS[row.neighbour.type] || DEFAULT_COLOR }}
+                                  />
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-sm text-white">{row.sentence}</div>
+                                    <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
+                                      <span>{row.neighbour.type}</span>
+                                      <span>&middot;</span>
+                                      <span>{row.neighbour.memoryCount} memories</span>
+                                    </div>
+                                  </div>
+                                  <ChevronRight size={14} className="shrink-0 text-slate-600" />
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      }) : (
+                        <div className="rounded-xl border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-500">
+                          No direct relationships for this entity yet.
+                        </div>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="rounded-2xl border border-slate-800 bg-slate-900/30 p-4">
+                    <div className="text-[10px] uppercase tracking-[0.28em] text-slate-600">Evidence Memories</div>
+                    <div className="mt-1 text-sm text-slate-400">The actual memories backing this node and its relationships.</div>
+                    <div className="mt-4 space-y-3">
+                      {memories.length > 0 ? memories.map((memory) => (
+                        <div key={memory.id} className="rounded-xl border border-slate-800 bg-slate-950/50 px-4 py-3">
+                          <div className="truncate text-sm font-medium text-white">{memory.title}</div>
+                          <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-500">
+                            <span className="rounded-full border border-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                              {memory.category}
+                            </span>
+                            <span>{new Date(memory.created_at).toLocaleDateString()}</span>
+                            <span className="ml-auto">salience {Math.round(memory.salience * 100)}%</span>
+                          </div>
+                        </div>
+                      )) : (
+                        <div className="rounded-xl border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-500">
+                          No linked memories found.
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : displayMode === 'fractal' ? (
+          <div
+            ref={containerRef}
+            className="relative flex-1 min-h-0 overflow-hidden bg-[radial-gradient(circle_at_center,rgba(34,211,238,0.08),rgba(2,6,23,0.02)_28%,rgba(2,6,23,0)_56%)]"
+          >
+            <div className="absolute right-4 top-4 z-20 flex items-center gap-2">
+              <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-400">
+                Wheel to zoom • drag to pan
+              </div>
+              <button
+                onClick={() => setBloomViewport({ scale: 1, offsetX: 0, offsetY: 0 })}
+                className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-300 transition-colors hover:border-slate-600 hover:text-white"
+              >
+                Reset view
+              </button>
             </div>
-          )}
-          {error && (
-            <div className="absolute inset-0 flex items-center justify-center z-10">
-              <div className="text-red-400 text-sm">Error: {error}</div>
-            </div>
-          )}
-          {!loading && !error && graphData.nodes.length > 0 && dimensions.width > 0 && (
-            <ForceGraph2D
-              ref={graphRef}
-              graphData={graphData}
-              width={dimensions.width}
-              height={dimensions.height}
-              backgroundColor="rgba(0,0,0,0)"
-              nodeCanvasObject={nodeCanvasObject}
-              nodeLabel={nodeLabel}
-              onNodeClick={handleNodeClick}
-              linkCanvasObject={linkCanvasObject}
-              linkDirectionalArrowLength={6}
-              linkDirectionalArrowRelPos={0.85}
-              d3AlphaDecay={0.05}
-              d3VelocityDecay={0.3}
-              warmupTicks={80}
-              cooldownTicks={150}
-            />
-          )}
-        </div>
+            {loading && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-slate-400 animate-pulse text-sm">Loading...</div>
+              </div>
+            )}
+            {error && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-red-400 text-sm">Error: {error}</div>
+              </div>
+            )}
+            {!loading && !error && bloomLayout && focal && (
+              <svg
+                width={dimensions.width}
+                height={dimensions.height}
+                viewBox={`0 0 ${bloomLayout.width} ${bloomLayout.height}`}
+                className={`h-full w-full ${bloomDragRef.current ? 'cursor-grabbing' : 'cursor-grab'}`}
+                onWheel={handleBloomWheel}
+                onMouseDown={handleBloomMouseDown}
+                onMouseMove={handleBloomMouseMove}
+                onMouseUp={endBloomDrag}
+                onMouseLeave={endBloomDrag}
+              >
+                <defs>
+                  <filter id="bloom-glow" x="-40%" y="-40%" width="180%" height="180%">
+                    <feGaussianBlur stdDeviation="14" result="blur" />
+                    <feColorMatrix
+                      in="blur"
+                      type="matrix"
+                      values="1 0 0 0 0
+                              0 1 0 0 0
+                              0 0 1 0 0
+                              0 0 0 18 -8"
+                    />
+                  </filter>
+                </defs>
+
+                <g transform={`translate(${bloomViewport.offsetX} ${bloomViewport.offsetY}) scale(${bloomViewport.scale})`}>
+                {bloomLayout.branches.map((branch, branchIndex) => (
+                  <g key={branch.key}>
+                    <path d={branch.petalPath} fill={`${branch.color}0a`} stroke="none" />
+                    <path d={branch.stemPath} fill="none" stroke={`${branch.color}66`} strokeWidth={2} strokeLinecap="round" />
+                    {branch.nodeStems.map((stem) => (
+                      <path
+                        key={stem.key}
+                        d={stem.path}
+                        fill="none"
+                        stroke={`${branch.color}52`}
+                        strokeWidth={1.2}
+                        strokeLinecap="round"
+                      />
+                    ))}
+                    <circle cx={branch.labelX} cy={branch.labelY + 8} r={22} fill={`${branch.color}0d`} />
+                    <text
+                      x={branch.labelX}
+                      y={branch.labelY}
+                      textAnchor="middle"
+                      className="fill-slate-400 text-[11px] uppercase tracking-[0.22em]"
+                    >
+                      {branch.label}
+                    </text>
+                    <animateTransform
+                      attributeName="transform"
+                      type="rotate"
+                      values={`0 ${bloomLayout.centerX} ${bloomLayout.centerY}; ${branchIndex % 2 === 0 ? 1.2 : -1.2} ${bloomLayout.centerX} ${bloomLayout.centerY}; 0 ${bloomLayout.centerX} ${bloomLayout.centerY}`}
+                      dur={`${16 + branchIndex * 2}s`}
+                      begin={`${branchIndex * -1.4}s`}
+                      repeatCount="indefinite"
+                    />
+                  </g>
+                ))}
+
+                {bloomLayout.crossLinks.map((link) => (
+                  <path
+                    key={link.key}
+                    d={link.path}
+                    fill="none"
+                    stroke={`${link.color}66`}
+                    strokeWidth={1.3}
+                    strokeDasharray="5 6"
+                    opacity={0.65}
+                  />
+                ))}
+
+                <circle
+                  cx={bloomLayout.centerX}
+                  cy={bloomLayout.centerY}
+                  r={bloomLayout.focalGlowRadius}
+                  fill={ENTITY_COLORS[focal.type] || DEFAULT_COLOR}
+                  opacity={0.14}
+                  filter="url(#bloom-glow)"
+                />
+                <circle
+                  cx={bloomLayout.centerX}
+                  cy={bloomLayout.centerY}
+                  r={bloomLayout.focalRadius + 8}
+                  fill="none"
+                  stroke={`${ENTITY_COLORS[focal.type] || DEFAULT_COLOR}55`}
+                  strokeWidth={1.5}
+                />
+                <circle
+                  cx={bloomLayout.centerX}
+                  cy={bloomLayout.centerY}
+                  r={bloomLayout.focalRadius}
+                  fill={ENTITY_COLORS[focal.type] || DEFAULT_COLOR}
+                  stroke="#ffffff"
+                  strokeWidth={2.5}
+                />
+                <text
+                  x={bloomLayout.centerX}
+                  y={bloomLayout.centerY + bloomLayout.focalRadius + 26}
+                  textAnchor="middle"
+                  className="fill-white text-[16px] font-semibold"
+                >
+                  {focal.name}
+                </text>
+
+                {bloomLayout.branches.flatMap((branch) => branch.nodes).map((node, nodeIndex) => (
+                  <g
+                    key={node.id}
+                    onClick={() => navigateTo(node.id)}
+                    className="cursor-pointer"
+                  >
+                    <animateTransform
+                      attributeName="transform"
+                      type="translate"
+                      values={`0 0; ${(node.id % 7) - 3} ${((node.id % 5) - 2) * 1.4}; 0 0`}
+                      dur={`${6 + (nodeIndex % 5)}s`}
+                      begin={`${(nodeIndex % 6) * -0.8}s`}
+                      repeatCount="indefinite"
+                    />
+                    <circle
+                      cx={node.x}
+                      cy={node.y}
+                      r={node.radius + 5}
+                      fill={ENTITY_COLORS[node.entityType] || DEFAULT_COLOR}
+                      opacity={0.1}
+                    />
+                    <circle
+                      cx={node.x}
+                      cy={node.y}
+                      r={node.radius}
+                      fill={ENTITY_COLORS[node.entityType] || DEFAULT_COLOR}
+                      opacity={0.95}
+                    />
+                    <rect
+                      x={node.x - 14}
+                      y={node.y - node.radius - 18}
+                      rx={8}
+                      width={28}
+                      height={16}
+                      fill={`${ENTITY_COLORS[node.entityType] || DEFAULT_COLOR}dd`}
+                    />
+                    <text
+                      x={node.x}
+                      y={node.y - node.radius - 7}
+                      textAnchor="middle"
+                      className="fill-slate-950 text-[10px] font-semibold"
+                    >
+                      {node.memoryCount}
+                    </text>
+                    <text
+                      x={node.x}
+                      y={node.y + node.radius + 18}
+                      textAnchor="middle"
+                      className="fill-slate-200 text-[12px]"
+                    >
+                      {node.name}
+                    </text>
+                  </g>
+                ))}
+                </g>
+              </svg>
+            )}
+          </div>
+        ) : (
+          <div ref={containerRef} className="flex-1 min-h-0 relative">
+            {loading && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-slate-400 animate-pulse text-sm">Loading...</div>
+              </div>
+            )}
+            {error && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-red-400 text-sm">Error: {error}</div>
+              </div>
+            )}
+            {!loading && !error && graphData.nodes.length > 0 && dimensions.width > 0 && (
+              <ForceGraph2D
+                ref={graphRef}
+                graphData={graphData}
+                width={dimensions.width}
+                height={dimensions.height}
+                backgroundColor="rgba(0,0,0,0)"
+                nodeCanvasObject={nodeCanvasObject}
+                nodeLabel={nodeLabel}
+                onNodeClick={handleNodeClick}
+                linkCanvasObject={linkCanvasObject}
+                linkDirectionalArrowLength={6}
+                linkDirectionalArrowRelPos={0.85}
+                d3AlphaDecay={0.05}
+                d3VelocityDecay={0.3}
+                warmupTicks={80}
+                cooldownTicks={150}
+              />
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

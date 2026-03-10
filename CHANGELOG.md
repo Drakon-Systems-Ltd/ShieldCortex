@@ -4,9 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-03-10
+
 ### Added
 
-- **Local memory replica sync** — local memories can now be backfilled to ShieldCortex Cloud with `shieldcortex cloud sync --full`, using stable external IDs and the shared cloud retry queue
+- **Readable graph modes** — the dashboard graph now supports `Read`, `Map`, and `Bloom` views so users can switch between relationship statements, a cleaner canvas map, and an organic branch layout
+- **Local cloud diagnostics** — new Cloud dashboard view shows queue pressure, sync lag, licence gating, device identity, and current sync policy in one place
+- **Cloud sync controls** — local devices can now choose all/include/exclude project scope, `full` vs `metadata` sync mode, and sensitive-memory exclusion before data is replicated
+- **Local-to-cloud graph replication** — full sync now includes entities, triples, and memory-entity links alongside replicated memories
+
+### Changed
+
+- Full graph sync is now authoritative per memory slice and prunes stale replicated graph slices during cloud backfill
+- Dashboard graph exploration is more navigable, with readable relationship outlines and less cluttered focus-on-one-entity layouts
+
+### Fixed
+
+- Graph slices are now replaced on memory updates, cleared on delete, and cleaned during forced backfill so stale entities and triples do not linger locally
+- Cloud diagnostics no longer crash when older or partial API responses omit nested sync-control fields
 
 ## [3.0.4] - 2026-03-08
 

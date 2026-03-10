@@ -160,9 +160,9 @@ describe('Defence Pipeline', () => {
     const content = 'npm install lodash /tmp/project';
     const db = getDatabase();
     const insert = db.prepare(
-      "INSERT INTO memories (type, category, title, content, project, tags) VALUES (?, ?, ?, ?, ?, ?)"
+      "INSERT INTO memories (uuid, type, category, title, content, project, tags) VALUES (?, ?, ?, ?, ?, ?, ?)"
     );
-    const row = insert.run('long_term', 'note', 'seed', 'seed', 'test-project', '[]');
+    const row = insert.run(crypto.randomUUID(), 'long_term', 'note', 'seed', 'seed', 'test-project', '[]');
     const memoryId = Number(row.lastInsertRowid);
     storeFragmentationData(memoryId, `${title}\n${content}`);
 
