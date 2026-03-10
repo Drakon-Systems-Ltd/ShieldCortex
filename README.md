@@ -45,6 +45,8 @@ Your agent doesn't just store text — it *understands* it.
 
 - 🔍 **Semantic search** — finds memories by meaning using FTS5 + vector embeddings (all-MiniLM-L6-v2), not just keyword matching
 - 🧭 **Recall explanations** — inspect why a memory ranked, including keyword, semantic, recency, tag, and link contributions
+- 🎯 **Recall workspace** — test what an agent would retrieve, compare expected memories, and debug misses before they turn into bad answers
+- 🗂️ **Review queue** — suppress, archive, pin, or canonicalize stale, contradictory, low-trust, or noisy auto-extracted memories
 - 🕸️ **Knowledge graph** — entities and relationships extracted automatically from every memory, with readable `Read`, `Map`, and `Bloom` exploration modes in the dashboard
 - ☁️ **Cloud replica sync** — opt-in local-to-cloud replication for memories and graph data, with queue diagnostics and per-project sync controls
 - ⏳ **Natural decay** — old, unaccessed memories fade over time; important ones persist — just like human memory
@@ -227,6 +229,14 @@ Scans every prompt and response as they flow through OpenClaw:
 
 OpenClaw handles agent orchestration. ShieldCortex handles what the agent *remembers* and keeps it safe. Together, your agents get persistent, searchable, secure memory without building any of it yourself.
 
+**New in the local dashboard:** OpenClaw activity is no longer just a background hook. The Capture workflow includes a dedicated session view with:
+
+- per-session saved/skipped/threat counts
+- linked memories produced by that session
+- session event trail from realtime audit logs
+- direct review actions like pin, suppress, archive, and canonicalize
+- clearer provenance so operators can tell what came from the hook, plugin, or manual capture path
+
 <br>
 
 ## 📊 Dashboard
@@ -238,6 +248,12 @@ shieldcortex dashboard
 ```
 
 **Trust Console** — the new default home view. See urgent issues, knowledge coverage, cleanup pressure, and the highest-value next actions in one place.
+
+**Recall Workspace** — enter a query, inspect ranked memories, see why they scored the way they did, compare an expected memory, and catch likely misses before they erode agent trust.
+
+**Review Queue** — triage stale, low-trust, contradictory, projectless, and noisy auto-extracted memories with direct actions for suppressing, archiving, pinning, or marking canonical.
+
+**Capture Workflow** — inspect recent memory capture activity, OpenClaw session evidence, and source trust so you can decide what should shape future recall.
 
 **Shield Overview** — scan counts, block rates, quarantine queue, threat timeline, and memory health score.
 

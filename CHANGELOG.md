@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-03-10
+
+### Added
+
+- **Recall Workspace** — a new local dashboard workflow for testing recall queries, inspecting why memories ranked, comparing expected memories, and spotting likely misses before they become trust issues
+- **Review Queue** — a new local review workflow for stale, never-used, contradictory, low-trust, noisy auto-extracted, and projectless memories with direct suppress/archive/pin/canonicalize actions
+- **Capture workflow** — the local Memories area now behaves like an operator-facing capture surface, combining stored memories, source trust, and OpenClaw activity instead of just a generic card grid
+- **OpenClaw Session View** — recent OpenClaw sessions now open into a full local session inspector with event trail, security signals, linked memories, and direct keep/discard review actions
+- **Memory provenance metadata** — memories now track status, pinned state, review timestamps, source kind, capture method, trust score, and cloud exclusion intent
+
+### Changed
+
+- Local dashboard information architecture now foregrounds `Recall`, `Review`, and `Capture` workflows instead of treating the graph as the main way to understand memory
+- Memory detail panels now surface provenance, review state, and sync intent alongside the existing content and relationship detail
+- OpenClaw hook/plugin writes now pass flatter source and session attribution into the remember pipeline so stored memories can be traced back to their origin more reliably
+- Cloud memory and graph sync now respect per-memory cloud exclusion state coming from the new review workflow
+- Recall explanation responses now include stronger eligibility context and contradiction-aware ranking feedback
+
+### Fixed
+
+- Normal recall now excludes archived and suppressed memories by default so review actions actually change what the agent can retrieve
+- OpenClaw session capture reporting no longer inflates saved counts by double-counting stored memories and audit log totals
+- The new capture workflow is safer against partial or older session payloads because the dashboard hook and API now share a richer typed session shape
+
 ## [3.1.0] - 2026-03-10
 
 ### Added
