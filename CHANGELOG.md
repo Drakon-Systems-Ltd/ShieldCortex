@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-03-11
+
+### Changed
+
+- Tightened the public package positioning around one clearer wedge: trustworthy AI agent memory with inspectable recall and built-in security
+- Reworked `shieldcortex quickstart` copy to guide users by job-to-be-done and ecosystem path instead of just listing install commands
+- Added dedicated quickstart docs for Claude Code, OpenClaw, LangChain JS, and MCP agents to reduce time-to-value from the README and npm page
+
+### Docs
+
+- README now leads with adoption-focused messaging: remember the right things, inspect recall, and stop poisoned memory from spreading
+- Added ecosystem-specific quickstarts under `docs/quickstarts/` for Claude Code, OpenClaw, LangChain JS, and generic MCP setups
+
 ## [3.2.0] - 2026-03-10
 
 ### Added

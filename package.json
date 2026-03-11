@@ -1,7 +1,7 @@
 {
   "name": "shieldcortex",
-  "version": "3.2.0",
-  "description": "Persistent brain for AI agents. Knowledge graphs, memory decay, contradiction detection, Iron Dome behaviour protection — plus the only defence pipeline that stops memory poisoning. Works with Claude Code, OpenClaw, LangChain, and any MCP agent.",
+  "version": "3.2.1",
+  "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

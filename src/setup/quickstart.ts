@@ -61,31 +61,38 @@ function printAutoGuide(): void {
   lines.push('');
   lines.push('ShieldCortex Quickstart');
   lines.push('────────────────────────────────────────────────────');
+  lines.push('Goal: give your agent memory you can inspect and security you can trust.');
   lines.push(`Detected: Claude=${env.claude ? 'yes' : 'no'} · OpenClaw=${env.openclaw ? 'yes' : 'no'} · Copilot/Cursor=${env.copilot ? 'yes' : 'no'}`);
+  lines.push('');
+  lines.push('Best paths:');
   lines.push('');
 
   if (env.claude) {
-    lines.push('Best next step for persistent memory in Claude Code:');
+    lines.push('Claude Code');
+    lines.push('  Make recall and review available in Claude sessions:');
     lines.push('  shieldcortex quickstart claude');
     lines.push('');
   }
 
   if (env.openclaw) {
-    lines.push('Best next step for OpenClaw hook + realtime plugin:');
+    lines.push('OpenClaw');
+    lines.push('  Install the hook + realtime plugin for session capture and defence:');
     lines.push('  shieldcortex quickstart openclaw');
     lines.push('');
   }
 
   if (env.copilot) {
-    lines.push('Best next step for VS Code / Cursor MCP wiring:');
+    lines.push('VS Code / Cursor');
+    lines.push('  Wire ShieldCortex in as an MCP memory + security layer:');
     lines.push('  shieldcortex quickstart copilot');
     lines.push('');
   }
 
-  lines.push('Security-only workflow:');
+  lines.push('Security-only');
+  lines.push('  Scan prompts, tools, and environments without adopting memory first:');
   lines.push('  shieldcortex quickstart security');
   lines.push('');
-  lines.push('You can also run one of these directly:');
+  lines.push('Direct commands:');
   lines.push('  shieldcortex setup');
   lines.push('  shieldcortex openclaw install');
   lines.push('  shieldcortex copilot install');
@@ -105,7 +112,7 @@ ShieldCortex Security Quickstart
 2. Audit your local agent environment:
    shieldcortex audit
 
-3. Open the dashboard for quarantine, audit, and graph visibility:
+3. Open the dashboard for quarantine, recall review, and sync visibility:
    shieldcortex dashboard
 `);
 }

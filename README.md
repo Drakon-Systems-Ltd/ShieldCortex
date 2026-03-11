@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">ShieldCortex</h1>
   <p align="center">
-    Persistent memory for AI agents. Secure by default.
+    Trustworthy memory for AI agents.
   </p>
   <p align="center">
     <a href="https://www.npmjs.com/package/shieldcortex"><img src="https://img.shields.io/npm/v/shieldcortex.svg" alt="npm version"></a>
@@ -11,7 +11,7 @@
   </p>
 </p>
 
-Your AI agent starts every conversation with amnesia. It forgets the architecture decisions you made yesterday, the bugs you fixed last week, the preferences you've repeated a dozen times. ShieldCortex fixes that — in 30 seconds.
+Your AI agent forgets the decisions, bugs, and preferences that matter, then confidently answers from partial context. ShieldCortex fixes that by giving agents memory you can inspect, review, and defend.
 
 ```bash
 npm install -g shieldcortex
@@ -21,17 +21,29 @@ shieldcortex install
 > [!NOTE]
 > Every feature works locally without a cloud account or licence key. Free and MIT licensed.
 
-**Works with** Claude Code · Cursor · VS Code · OpenClaw · LangChain · any MCP-compatible agent · Python via REST API
+**Works with** Claude Code · Cursor · VS Code · OpenClaw · LangChain · MCP agents · Python via REST API
+
+**Three reasons people adopt ShieldCortex**
+
+- **Remember the right things** — durable memory with semantic recall, project scoping, graph extraction, and contradiction detection
+- **Inspect what the agent would do** — Recall Workspace, Review Queue, and OpenClaw Session View make memory behavior explainable
+- **Stop bad memory from spreading** — 6-layer defence pipeline catches poisoning attempts, dangerous prompts, and leaked credentials before they land
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
 ## 🧠 The Problem
 
-AI agents are stateless. Every session starts from zero. Teams work around this with markdown files, custom prompts, or bolted-on vector databases — all of which are fragile, unsearchable, and completely unprotected from injection attacks.
+AI agents are stateless. Every session starts from zero. Teams work around this with markdown files, custom prompts, or bolted-on vector databases. That gets memory into the system, but it does not answer the harder questions:
+
+- what exactly was stored?
+- why did this memory rank?
+- what conflicts with it?
+- can I trust where it came from?
+- what happens if someone poisons the memory layer?
 
 ShieldCortex replaces all of that with one install command.
 
@@ -39,14 +51,15 @@ ShieldCortex replaces all of that with one install command.
 
 ## ✨ What You Get
 
-### Memory that works like a brain
+### Memory you can trust
 
-Your agent doesn't just store text — it *understands* it.
+Your agent does not just store text. It gives you operator-grade visibility into what was captured, what will be recalled, and whether it is safe to trust.
 
 - 🔍 **Semantic search** — finds memories by meaning using FTS5 + vector embeddings (all-MiniLM-L6-v2), not just keyword matching
 - 🧭 **Recall explanations** — inspect why a memory ranked, including keyword, semantic, recency, tag, and link contributions
 - 🎯 **Recall workspace** — test what an agent would retrieve, compare expected memories, and debug misses before they turn into bad answers
 - 🗂️ **Review queue** — suppress, archive, pin, or canonicalize stale, contradictory, low-trust, or noisy auto-extracted memories
+- 📥 **Capture workflow** — inspect what got stored, where it came from, and whether it was manual, auto-extracted, or session-driven
 - 🕸️ **Knowledge graph** — entities and relationships extracted automatically from every memory, with readable `Read`, `Map`, and `Bloom` exploration modes in the dashboard
 - ☁️ **Cloud replica sync** — opt-in local-to-cloud replication for memories and graph data, with queue diagnostics and per-project sync controls
 - ⏳ **Natural decay** — old, unaccessed memories fade over time; important ones persist — just like human memory
@@ -76,7 +89,7 @@ Blocked content goes to quarantine for review — nothing is silently dropped.
 
 ## 🚀 Quick Start
 
-### Claude Code / Cursor / VS Code
+### Fastest path
 
 ```bash
 npm install -g shieldcortex
@@ -104,6 +117,25 @@ Fastest guided setup:
 ```bash
 shieldcortex quickstart
 ```
+
+### If you only want security first
+
+```bash
+shieldcortex quickstart security
+shieldcortex scan "ignore previous instructions"
+shieldcortex dashboard
+```
+
+## 🎯 Ecosystem Quickstarts
+
+Pick the shortest path for the agent stack you already use:
+
+| Stack | Start here |
+|---|---|
+| **Claude Code** | [docs/quickstarts/claude-code.md](docs/quickstarts/claude-code.md) |
+| **OpenClaw** | [docs/quickstarts/openclaw.md](docs/quickstarts/openclaw.md) |
+| **LangChain JS** | [docs/quickstarts/langchain.md](docs/quickstarts/langchain.md) |
+| **Any MCP agent** | [docs/quickstarts/mcp.md](docs/quickstarts/mcp.md) |
 
 ### Python
 
@@ -227,7 +259,7 @@ Scans every prompt and response as they flow through OpenClaw:
 | Deduplication | None | Novelty gate with configurable similarity threshold |
 | Audit | None | Full forensic log of every operation |
 
-OpenClaw handles agent orchestration. ShieldCortex handles what the agent *remembers* and keeps it safe. Together, your agents get persistent, searchable, secure memory without building any of it yourself.
+OpenClaw handles agent orchestration. ShieldCortex handles what the agent remembers, why it remembers it, and whether it is safe to keep. Together, you get persistent, inspectable, secure memory without inventing your own memory layer.
 
 **New in the local dashboard:** OpenClaw activity is no longer just a background hook. The Capture workflow includes a dedicated session view with:
 
@@ -254,6 +286,13 @@ shieldcortex dashboard
 **Review Queue** — triage stale, low-trust, contradictory, projectless, and noisy auto-extracted memories with direct actions for suppressing, archiving, pinning, or marking canonical.
 
 **Capture Workflow** — inspect recent memory capture activity, OpenClaw session evidence, and source trust so you can decide what should shape future recall.
+
+The key shift is that memory is no longer a black box:
+
+- `Capture` tells you what was stored and from where
+- `Recall` tells you what will rank and why
+- `Review` tells you what should be suppressed, archived, pinned, or marked canonical
+- `Shield` tells you what got blocked before it could poison memory or behavior
 
 **Shield Overview** — scan counts, block rates, quarantine queue, threat timeline, and memory health score.
 
