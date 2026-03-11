@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.2] - 2026-03-11
+
+### Added
+
+- **Headless worker mode** — `shieldcortex --mode worker` now runs a persistent background worker for cloud heartbeats, retry processing, and graph maintenance without requiring the local dashboard
+- **Server-first service install** — `shieldcortex service install --headless` now gives always-on Linux boxes a better default path for staying online in ShieldCortex Cloud
+
+### Changed
+
+- Linux service install now defaults to headless worker mode when no display session is present, which fits cloud/server hosts better than dashboard auto-start
+- Service status now reports the installed mode so it is clearer whether a device is running dashboard, API, or worker service
+
+### Fixed
+
+- Headless ShieldCortex services now stay alive correctly even though the brain-worker timers are intentionally `unref()`'d
+- The cloud Devices page is clearer about what “online” means: recent ShieldCortex heartbeat, not just machine uptime
+
 ## [3.2.1] - 2026-03-11
 
 ### Changed

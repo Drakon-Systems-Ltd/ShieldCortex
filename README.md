@@ -118,6 +118,17 @@ Fastest guided setup:
 shieldcortex quickstart
 ```
 
+### Always-on servers and cloud boxes
+
+If you want a device to stay online in ShieldCortex Cloud, the machine needs a persistent ShieldCortex heartbeat, not just power.
+
+```bash
+shieldcortex service install --headless
+shieldcortex service status
+```
+
+This installs the background worker that keeps cloud heartbeat, sync retries, and graph maintenance active on headless Linux servers.
+
 ### If you only want security first
 
 ```bash

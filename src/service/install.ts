@@ -1,5 +1,5 @@
 /**
- * Cross-platform service installer for ShieldCortex dashboard auto-start.
+ * Cross-platform service installer for persistent ShieldCortex background service.
  *
  * Supports:
  *  - macOS: LaunchAgent plist
@@ -12,12 +12,16 @@ import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { launchdPlist, systemdUnit, windowsVbs, type ServiceConfig } from './templates.js';
+import { launchdPlist, systemdUnit, windowsVbs, type ServiceConfig, type ServiceMode } from './templates.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 type Platform = 'macos' | 'linux' | 'windows';
+
+interface ServiceOptions {
+  mode?: ServiceMode;
+}
 
 function detectPlatform(): Platform {
   switch (process.platform) {
@@ -27,7 +31,14 @@ function detectPlatform(): Platform {
   }
 }
 
-function getServiceConfig(): ServiceConfig {
+function detectDefaultServiceMode(platform: Platform): ServiceMode {
+  if (platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    return 'worker';
+  }
+  return 'dashboard';
+}
+
+function getServiceConfig(mode: ServiceMode): ServiceConfig {
   const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
@@ -36,34 +47,41 @@ function getServiceConfig(): ServiceConfig {
     nodeBinDir: path.dirname(process.execPath),
     entryPoint: path.resolve(__dirname, '..', 'index.js'),
     logsDir,
+    mode,
   };
 }
 
-function inspectServiceEntryPoint(platform: Platform, servicePath: string): { entryPoint: string | null; stale: boolean } {
+function inspectServiceEntryPoint(platform: Platform, servicePath: string): { entryPoint: string | null; stale: boolean; mode: ServiceMode | null } {
   if (!fs.existsSync(servicePath)) {
-    return { entryPoint: null, stale: false };
+    return { entryPoint: null, stale: false, mode: null };
   }
 
   try {
     const content = fs.readFileSync(servicePath, 'utf-8');
     let entryPoint: string | null = null;
+    let mode: ServiceMode | null = null;
 
     if (platform === 'macos') {
       const matches = [...content.matchAll(/<string>([^<]+)<\/string>/g)].map((match) => match[1]);
       entryPoint = matches.find((value) => value.endsWith('index.js')) ?? null;
+      mode = (matches.find((value) => value === 'dashboard' || value === 'api' || value === 'worker') as ServiceMode | undefined) ?? null;
     } else if (platform === 'linux') {
       const match = content.match(/ExecStart=\S+\s+(\S+index\.js)/);
       entryPoint = match?.[1] ?? null;
+      const modeMatch = content.match(/ExecStart=\S+\s+\S+index\.js\s+--mode\s+(dashboard|api|worker)/);
+      mode = (modeMatch?.[1] as ServiceMode | undefined) ?? null;
     } else {
       const match = content.match(/Run\s+\"\"[^\"]+\"\"\s+\"\"([^\"]+index\.js)\"\"/);
       entryPoint = match?.[1] ?? null;
+      const modeMatch = content.match(/--mode\s+(dashboard|api|worker)/);
+      mode = (modeMatch?.[1] as ServiceMode | undefined) ?? null;
     }
 
-    const currentEntryPoint = getServiceConfig().entryPoint;
+    const currentEntryPoint = getServiceConfig(detectDefaultServiceMode(platform)).entryPoint;
     const stale = !!entryPoint && (entryPoint.includes('/.npm/_npx/') || entryPoint !== currentEntryPoint);
-    return { entryPoint, stale };
+    return { entryPoint, stale, mode };
   } catch {
-    return { entryPoint: null, stale: false };
+    return { entryPoint: null, stale: false, mode: null };
   }
 }
 
@@ -80,15 +98,36 @@ function getServicePath(platform: Platform): string {
   }
 }
 
-export async function installService(): Promise<void> {
+function summarizeServiceMode(mode: ServiceMode): string {
+  switch (mode) {
+    case 'worker':
+      return 'headless worker (recommended for servers and always-on cloud devices)';
+    case 'api':
+      return 'API service';
+    default:
+      return 'dashboard + API';
+  }
+}
+
+function tryEnableLinuxLinger(): void {
+  const username = process.env.USER || os.userInfo().username;
+  try {
+    execSync(`loginctl enable-linger "${username}"`, { stdio: 'ignore' });
+    console.log('Enabled systemd linger for persistent background service.');
+  } catch {
+    console.log('Note: systemd linger was not enabled automatically.');
+    console.log(`      On headless Linux servers, run: sudo loginctl enable-linger ${username}`);
+  }
+}
+
+export async function installService(options: ServiceOptions = {}): Promise<void> {
   const platform = detectPlatform();
-  const config = getServiceConfig();
+  const mode = options.mode ?? detectDefaultServiceMode(platform);
+  const config = getServiceConfig(mode);
   const servicePath = getServicePath(platform);
 
-  // Ensure parent directory exists
   fs.mkdirSync(path.dirname(servicePath), { recursive: true });
 
-  // Generate and write service file
   let content: string;
   switch (platform) {
     case 'macos':
@@ -105,7 +144,6 @@ export async function installService(): Promise<void> {
   fs.writeFileSync(servicePath, content, 'utf-8');
   console.log(`Service file written to: ${servicePath}`);
 
-  // Enable and start the service
   try {
     switch (platform) {
       case 'macos':
@@ -115,6 +153,9 @@ export async function installService(): Promise<void> {
       case 'linux':
         execSync('systemctl --user daemon-reload', { stdio: 'inherit' });
         execSync('systemctl --user enable --now shieldcortex-dashboard.service', { stdio: 'inherit' });
+        if (mode === 'worker' || mode === 'api') {
+          tryEnableLinuxLinger();
+        }
         console.log('Service enabled via systemd.');
         break;
       case 'windows':
@@ -128,14 +169,21 @@ export async function installService(): Promise<void> {
     return;
   }
 
-  console.log('\nShieldCortex dashboard will now auto-start on login.');
-  console.log(`  API:       http://localhost:3001`);
-  console.log(`  Dashboard: http://localhost:3030`);
+  console.log(`\nShieldCortex ${summarizeServiceMode(mode)} will now auto-start.`);
+  if (mode === 'dashboard') {
+    console.log('  API:       http://localhost:3001');
+    console.log('  Dashboard: http://localhost:3030');
+  } else if (mode === 'api') {
+    console.log('  API:       http://localhost:3001');
+  } else {
+    console.log('  Heartbeat: keeps the device online in ShieldCortex Cloud');
+    console.log('  Sync:      processes background memory/graph sync retries');
+  }
 }
 
-export async function repairService(): Promise<void> {
+export async function repairService(options: ServiceOptions = {}): Promise<void> {
   await uninstallService();
-  await installService();
+  await installService(options);
 }
 
 function cleanLogsDirectory(): void {
@@ -164,7 +212,6 @@ export async function uninstallService(options?: { cleanLogs?: boolean }): Promi
         execSync('systemctl --user disable --now shieldcortex-dashboard.service', { stdio: 'inherit' });
         break;
       case 'windows':
-        // Just delete the file — no daemon to stop
         break;
     }
   } catch {
@@ -190,12 +237,12 @@ export async function serviceStatus(): Promise<void> {
   console.log(`Path:      ${servicePath}`);
   if (inspection.entryPoint) {
     console.log(`Entry:     ${inspection.entryPoint}`);
+    console.log(`Mode:      ${inspection.mode ?? 'unknown'}`);
     console.log(`Healthy:   ${inspection.stale ? 'no (repair recommended)' : 'yes'}`);
   }
 
   if (!installed) return;
 
-  // Check if running
   try {
     switch (platform) {
       case 'macos': {
@@ -222,13 +269,20 @@ export async function serviceStatus(): Promise<void> {
   }
 }
 
-export async function handleServiceCommand(subcommand: string): Promise<void> {
+function parseServiceModeArgs(args: string[]): ServiceMode | undefined {
+  if (args.includes('--dashboard')) return 'dashboard';
+  if (args.includes('--api')) return 'api';
+  if (args.includes('--headless') || args.includes('--worker')) return 'worker';
+  return undefined;
+}
+
+export async function handleServiceCommand(subcommand: string, args: string[] = []): Promise<void> {
   switch (subcommand) {
     case 'install':
-      await installService();
+      await installService({ mode: parseServiceModeArgs(args) });
       break;
     case 'repair':
-      await repairService();
+      await repairService({ mode: parseServiceModeArgs(args) });
       break;
     case 'uninstall':
       await uninstallService({ cleanLogs: process.argv.includes('--clean-logs') });
@@ -237,7 +291,7 @@ export async function handleServiceCommand(subcommand: string): Promise<void> {
       await serviceStatus();
       break;
     default:
-      console.log('Usage: shieldcortex service <install|repair|uninstall|status>');
+      console.log('Usage: shieldcortex service <install|repair|uninstall|status> [--dashboard|--api|--headless]');
       process.exit(1);
   }
 }

@@ -11,6 +11,7 @@
  *   shieldcortex --mode mcp              # Start MCP server
  *   shieldcortex --mode api              # Start visualization API server
  *   shieldcortex --mode both             # Start both servers
+ *   shieldcortex --mode worker           # Start headless background worker
  *   shieldcortex --dashboard             # Start API + Dashboard (admin panel)
  *   shieldcortex --db /path/to.db        # Custom database path
  *   shieldcortex scan "text"             # Quick content scan (no MCP/ML)
@@ -25,9 +26,10 @@
  *   shieldcortex hook pre-compact        # Run pre-compact hook (for settings.json)
  *   shieldcortex hook session-start      # Run session-start hook (for settings.json)
  *   shieldcortex hook session-end        # Run session-end hook (for settings.json)
- *   shieldcortex service install         # Auto-start dashboard on login
- *   shieldcortex service repair          # Rebuild auto-start service with current install path
- *   shieldcortex service uninstall       # Remove auto-start
+ *   shieldcortex service install         # Install persistent ShieldCortex service
+ *   shieldcortex service install --headless  # Recommended for always-on servers
+ *   shieldcortex service repair          # Rebuild persistent service with current install path
+ *   shieldcortex service uninstall       # Remove persistent service
  *   shieldcortex service status          # Check service status
  *   shieldcortex openclaw install        # Install OpenClaw hook
  *   shieldcortex openclaw uninstall      # Remove OpenClaw hook
@@ -98,7 +100,7 @@ function checkVersionStaleness(): void {
   }
 }
 
-type ServerMode = 'mcp' | 'api' | 'both' | 'dashboard';
+type ServerMode = 'mcp' | 'api' | 'both' | 'dashboard' | 'worker';
 
 interface Args {
   dbPath?: string;
@@ -122,12 +124,16 @@ function parseArgs(): Args {
       result.mode = 'dashboard';
     } else if (args[i] === '--mode' && args[i + 1]) {
       const mode = args[i + 1].toLowerCase();
-      if (mode === 'mcp' || mode === 'api' || mode === 'both' || mode === 'dashboard') {
+      if (mode === 'mcp' || mode === 'api' || mode === 'both' || mode === 'dashboard' || mode === 'worker') {
         result.mode = mode as ServerMode;
       }
       i++;
     }
   }
+
+  if (args[0] === 'dashboard') result.mode = 'dashboard';
+  if (args[0] === 'api') result.mode = 'api';
+  if (args[0] === 'worker') result.mode = 'worker';
 
   return result;
 }
@@ -331,6 +337,39 @@ function startDashboard(): ChildProcess {
   return dashboard;
 }
 
+async function startWorkerMode(dbPath?: string): Promise<void> {
+  const { initDatabase } = await import('./database/init.js');
+  const { startDefaultWorker } = await import('./worker/brain-worker.js');
+
+  initDatabase(dbPath);
+  startDefaultWorker();
+
+  console.log(`
+╔══════════════════════════════════════════════════════════════╗
+║             ShieldCortex Worker Service                     ║
+╠══════════════════════════════════════════════════════════════╣
+║  Running headless background worker                         ║
+║  Heartbeats keep this device online in ShieldCortex Cloud   ║
+║  Sync retries and graph maintenance remain active           ║
+╚══════════════════════════════════════════════════════════════╝
+  `);
+
+  const keepAlive = setInterval(() => {
+    // Intentionally empty. BrainWorker timers are unref()'d, so the service
+    // needs one referenced timer to remain alive as a daemon.
+  }, 60 * 60 * 1000);
+
+  const shutdown = (signal: string) => {
+    console.log(`\nReceived ${signal}, stopping ShieldCortex worker...`);
+    clearInterval(keepAlive);
+    stopDefaultWorker();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
 function checkLocalHttp(url: string, expectedStatus: number[] = [200], timeoutMs = 1200): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.get(url, { timeout: timeoutMs }, (res) => {
@@ -378,6 +417,7 @@ ${bold}COMMANDS${reset}
   ${cyan}scan-skill${reset} <path>     Scan an agent instruction file for threats
   ${cyan}scan-skills${reset}           Scan all installed skills/hooks
   ${cyan}dashboard${reset}             Open the local security dashboard
+  ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
   ${cyan}doctor${reset}                Diagnose installation issues
   ${cyan}quickstart${reset} [target]    Detect the fastest setup path
@@ -403,6 +443,7 @@ ${bold}EXAMPLES${reset}
   shieldcortex scan "ignore previous instructions"
   shieldcortex scan-skill ~/.claude/skills/my-skill/SKILL.md
   shieldcortex dashboard
+  shieldcortex worker
   shieldcortex license activate sc_pro_...
   shieldcortex config --cloud-enable --cloud-api-key <key>
   shieldcortex cloud sync --full
@@ -487,7 +528,7 @@ ${bold}DOCS${reset}
 
   // Handle "service" subcommand before normal mode parsing
   if (process.argv[2] === 'service') {
-    await handleServiceCommand(process.argv[3] || '');
+    await handleServiceCommand(process.argv[3] || '', process.argv.slice(4));
     return;
   }
 
@@ -711,7 +752,7 @@ ${bold}DOCS${reset}
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
-    'scan-skill', 'scan-skills', 'dashboard', 'api',
+    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
@@ -790,6 +831,9 @@ ${bold}DOCS${reset}
       console.log('Reusing existing local ShieldCortex API on http://localhost:3001');
     }
     await startMcpServer(dbPath);
+  } else if (mode === 'worker') {
+    console.log('Starting ShieldCortex in headless worker mode...');
+    await startWorkerMode(dbPath);
   } else {
     // MCP mode (default) - for Claude Code integration
     await startMcpServer(dbPath);

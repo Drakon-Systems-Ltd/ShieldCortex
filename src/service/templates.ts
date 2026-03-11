@@ -1,12 +1,26 @@
 /**
- * Platform-specific service file templates for auto-starting ShieldCortex dashboard.
+ * Platform-specific service file templates for auto-starting ShieldCortex.
  */
+
+export type ServiceMode = 'dashboard' | 'api' | 'worker';
 
 export interface ServiceConfig {
   nodePath: string;
   nodeBinDir: string;
   entryPoint: string;
   logsDir: string;
+  mode: ServiceMode;
+}
+
+function modeLabel(mode: ServiceMode): string {
+  switch (mode) {
+    case 'worker':
+      return 'Worker';
+    case 'api':
+      return 'API';
+    default:
+      return 'Dashboard';
+  }
 }
 
 export function launchdPlist(config: ServiceConfig): string {
@@ -21,7 +35,7 @@ export function launchdPlist(config: ServiceConfig): string {
     <string>${config.nodePath}</string>
     <string>${config.entryPoint}</string>
     <string>--mode</string>
-    <string>dashboard</string>
+    <string>${config.mode}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -42,12 +56,12 @@ export function launchdPlist(config: ServiceConfig): string {
 
 export function systemdUnit(config: ServiceConfig): string {
   return `[Unit]
-Description=ShieldCortex Dashboard
+Description=ShieldCortex ${modeLabel(config.mode)}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${config.nodePath} ${config.entryPoint} --mode dashboard
+ExecStart=${config.nodePath} ${config.entryPoint} --mode ${config.mode}
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:${config.logsDir}/dashboard-stdout.log
@@ -63,5 +77,5 @@ export function windowsVbs(config: ServiceConfig): string {
   const nodePath = config.nodePath.replace(/\//g, '\\');
   const entryPoint = config.entryPoint.replace(/\//g, '\\');
   return `Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """${nodePath}"" ""${entryPoint}"" --mode dashboard", 0, False`;
+WshShell.Run """${nodePath}"" ""${entryPoint}"" --mode ${config.mode}", 0, False`;
 }
