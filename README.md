@@ -31,7 +31,7 @@ shieldcortex install
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -129,6 +129,52 @@ shieldcortex service status
 
 This installs the background worker that keeps cloud heartbeat, sync retries, and graph maintenance active on headless Linux servers.
 
+## ☁️ Connect Servers to Cloud
+
+If you want Linux servers or always-on boxes to appear as online devices in ShieldCortex Cloud, you need four things on each machine:
+
+1. the latest CLI
+2. a Team licence
+3. a cloud API key with sync access
+4. the persistent headless worker service
+
+Exact flow:
+
+```bash
+npm install -g shieldcortex@latest
+shieldcortex license activate <team-key>
+shieldcortex config --cloud-api-key <cloud-api-key>
+shieldcortex config --cloud-enable
+shieldcortex service install --headless
+```
+
+Verify:
+
+```bash
+shieldcortex --version
+shieldcortex license status
+shieldcortex config --cloud-status
+shieldcortex service status
+```
+
+Expected result:
+
+- `Tier: Team` or higher
+- `Cloud Enabled: Yes`
+- API key present
+- `Mode: worker`
+- `Running: yes`
+
+Important:
+
+- In ShieldCortex Cloud, **Online means a recent ShieldCortex heartbeat**, not just that the machine is powered on.
+- If a server is on but still shows `Offline`, the usual causes are missing cloud config, missing Team licence, or an old service install.
+- On headless Linux systems, you may also need:
+
+```bash
+sudo loginctl enable-linger <user>
+```
+
 ### If you only want security first
 
 ```bash
@@ -147,6 +193,7 @@ Pick the shortest path for the agent stack you already use:
 | **OpenClaw** | [docs/quickstarts/openclaw.md](docs/quickstarts/openclaw.md) |
 | **LangChain JS** | [docs/quickstarts/langchain.md](docs/quickstarts/langchain.md) |
 | **Any MCP agent** | [docs/quickstarts/mcp.md](docs/quickstarts/mcp.md) |
+| **Headless servers / cloud boxes** | [docs/quickstarts/cloud-servers.md](docs/quickstarts/cloud-servers.md) |
 
 ### Python
 

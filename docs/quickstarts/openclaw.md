@@ -27,6 +27,19 @@ In the dashboard, use:
 - `Recall` to inspect what would rank
 - `Review` to discard noisy auto-extracted memories
 
+## If OpenClaw runs on a remote server
+
+If your OpenClaw box should appear in ShieldCortex Cloud as an online device, also connect the machine itself:
+
+```bash
+shieldcortex license activate <team-key>
+shieldcortex config --cloud-api-key <cloud-api-key>
+shieldcortex config --cloud-enable
+shieldcortex service install --headless
+```
+
+See [cloud-servers.md](cloud-servers.md) for the full server checklist.
+
 ## Recommended default
 
 Keep OpenClaw auto-memory in complement mode unless you explicitly want dual storage:
@@ -36,4 +49,3 @@ shieldcortex config --openclaw-auto-memory false
 ```
 
 This keeps ShieldCortex focused on durable decisions, fixes, patterns, and preferences rather than transient chat noise.
-

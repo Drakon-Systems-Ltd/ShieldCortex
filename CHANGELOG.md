@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.3] - 2026-03-11
+
+### Docs
+
+- Added a dedicated cloud-server quickstart for always-on Linux boxes and remote hosts
+- Clarified the exact server-to-cloud onboarding flow in the README:
+  - activate Team licence
+  - set cloud API key
+  - enable cloud sync
+  - install the headless worker service
+- Updated MCP and OpenClaw quickstarts to point server users to the cloud-server guide
+
+### Changed
+
+- Public docs now explain that ShieldCortex Cloud `Online` means a recent ShieldCortex heartbeat, not just machine uptime
+
 ## [3.2.2] - 2026-03-11
 
 ### Added
