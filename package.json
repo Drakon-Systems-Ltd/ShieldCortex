@@ -38,7 +38,7 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
-    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/",
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true }); fs.rmSync('plugins/openclaw/dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && tsc -p tsconfig.openclaw-plugin.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/",
     "build:dashboard": "cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true) && cd .. && node scripts/prune-dashboard-standalone.mjs",
     "build:all": "npm run build && npm run build:dashboard",
     "start": "node dist/index.js",

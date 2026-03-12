@@ -4,27 +4,124 @@
  * Hooks into llm_input/llm_output for real-time defence scanning
  * and optional memory extraction. All operations are fire-and-forget.
  */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
-import { createOpenClawRuntime } from "../../../hooks/openclaw/cortex-memory/runtime.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+let runtimePromise = null;
+function addRuntimeCandidate(candidates, packageRoot) {
+    const runtimePath = path.join(packageRoot, "hooks", "openclaw", "cortex-memory", "runtime.mjs");
+    if (existsSync(runtimePath)) {
+        candidates.add(pathToFileURL(runtimePath).href);
+    }
+}
+function addAncestorCandidates(candidates, startPath) {
+    let current = path.resolve(startPath);
+    let previous = "";
+    for (let i = 0; i < 6 && current !== previous; i++) {
+        addRuntimeCandidate(candidates, current);
+        previous = current;
+        current = path.dirname(current);
+    }
+}
+function collectRuntimeCandidates() {
+    const candidates = new Set();
+    // 1. Relative path (works when running from within npm package tree)
+    candidates.add(new URL("../../hooks/openclaw/cortex-memory/runtime.mjs", import.meta.url).href);
+    // 2. Environment variable override
+    if (process.env.SHIELDCORTEX_ROOT) {
+        addRuntimeCandidate(candidates, process.env.SHIELDCORTEX_ROOT);
+    }
+    // 3. Walk up from current file location
+    addAncestorCandidates(candidates, path.dirname(fileURLToPath(import.meta.url)));
+    // 4. Find via shieldcortex binary
+    try {
+        const bin = execFileSync("which", ["shieldcortex"], {
+            encoding: "utf-8",
+            timeout: 3000,
+        }).trim();
+        if (bin)
+            addAncestorCandidates(candidates, realpathSync(bin));
+    }
+    catch { }
+    // 5. npm global root
+    try {
+        const npmRoot = execFileSync("npm", ["root", "-g"], {
+            encoding: "utf-8",
+            timeout: 3000,
+        }).trim();
+        if (npmRoot)
+            addRuntimeCandidate(candidates, path.join(npmRoot, "shieldcortex"));
+    }
+    catch { }
+    // 6. npm prefix
+    try {
+        const prefix = execFileSync("npm", ["config", "get", "prefix"], {
+            encoding: "utf-8",
+            timeout: 3000,
+        }).trim();
+        if (prefix)
+            addRuntimeCandidate(candidates, path.join(prefix, "lib", "node_modules", "shieldcortex"));
+    }
+    catch { }
+    // 7. Common global install paths
+    for (const root of [
+        "/usr/lib/node_modules/shieldcortex",
+        "/usr/local/lib/node_modules/shieldcortex",
+        "/opt/homebrew/lib/node_modules/shieldcortex",
+        path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex"),
+    ]) {
+        addRuntimeCandidate(candidates, root);
+    }
+    return [...candidates];
+}
+async function getRuntime() {
+    if (!runtimePromise) {
+        runtimePromise = (async () => {
+            const tried = [];
+            let lastError = null;
+            for (const candidate of collectRuntimeCandidates()) {
+                tried.push(candidate);
+                try {
+                    const mod = await import(candidate);
+                    if (typeof mod.createOpenClawRuntime === "function") {
+                        return mod.createOpenClawRuntime({ logPrefix: "[shieldcortex]" });
+                    }
+                }
+                catch (error) {
+                    lastError = error;
+                }
+            }
+            const detail = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error");
+            throw new Error(`Could not load OpenClaw runtime. Tried: ${tried.join(", ")}. Last error: ${detail}`);
+        })();
+    }
+    return runtimePromise;
+}
 let _config = null;
-const runtime = createOpenClawRuntime({ logPrefix: "[shieldcortex]" });
+let _version = "0.0.0";
+try {
+    const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf-8"));
+    _version = pkg.version;
+}
+catch { /* fallback */ }
 async function loadConfig() {
     if (_config)
         return _config;
-    _config = await runtime.loadShieldConfig();
+    _config = await (await getRuntime()).loadShieldConfig();
     return _config;
 }
 function isAutoMemoryEnabled(config) {
-    return runtime.isOpenClawAutoMemoryEnabled(config);
+    return config.openclawAutoMemory === true;
 }
 function isAutoMemoryDedupeEnabled(config) {
     return config.openclawAutoMemoryDedupe !== false;
 }
-function callCortex(tool, args = {}) {
-    return runtime.callCortex(tool, args);
+async function callCortex(tool, args = {}) {
+    return (await getRuntime()).callCortex(tool, args);
 }
 // ==================== DEFENCE PIPELINE ====================
 let _pipeline = null;
@@ -42,48 +139,16 @@ async function getPipeline() {
 }
 // ==================== CONTENT PATTERNS ====================
 const PATTERNS = {
-    architecture: [
-        /\b(?:architecture|designed|structured)\b.*?(?:uses?|is|with)\b/i,
-        /\b(?:decided?\s+to|going\s+with|chose)\b/i,
-        /\b(?:set\s+up|configured|installed|deployed|migrated)\b/i,
-        /\b(?:runs?\s+on|hosted\s+(?:on|at)|lives?\s+at|stored\s+(?:in|at))\b/i,
-        /\b(?:API|endpoint|webhook|token|credential)\s+(?:is|at|for|uses?)\b/i,
-        /\b(?:cron|scheduled|automated)\s+(?:job|task|to)\b/i,
-    ],
-    error: [
-        /\b(?:fixed|resolved|solved)\s+(?:by|with|using)\b/i,
-        /\b(?:solution|fix|root\s*cause)\s+(?:was|is)\b/i,
-        /\b(?:bug|issue|error|broken|failing)\s+(?:in|with|because|due)\b/i,
-        /\b(?:workaround|patched|hotfix)\b/i,
-        /\bthe\s+(?:problem|issue)\s+(?:was|is|turned\s+out)\b/i,
-    ],
-    learning: [
-        /\b(?:learned|discovered|turns?\s+out|figured\s+out|realized)\b/i,
-        /\b(?:gotcha|caveat|heads?\s*up|watch\s+out|be\s+careful)\b/i,
-        /\b(?:the\s+trick\s+is|key\s+thing|note\s+that)\b/i,
-        /\b(?:doesn.t\s+work|won.t\s+work|can.t\s+be|not\s+supported)\b/i,
-        /\b(?:needs?\s+to\s+be|must\s+be|has\s+to\s+be|requires?)\b/i,
-    ],
+    architecture: [/\b(?:architecture|designed|structured)\b.*?(?:uses?|is|with)\b/i, /\b(?:decided?\s+to|going\s+with|chose)\b/i],
+    error: [/\b(?:fixed|resolved|solved)\s+(?:by|with|using)\b/i, /\b(?:solution|fix|root\s*cause)\s+(?:was|is)\b/i],
+    learning: [/\b(?:learned|discovered|turns?\s+out|figured\s+out|realized)\b/i],
     preference: [
-        /\b(?:always|never|prefer|should\s+always)\b/i,
-        /\b(?:michael\s+(?:wants?|likes?|prefers?|said|asked))\b/i,
-        /\b(?:we\s+(?:use|prefer|go\s+with|stick\s+with))\b/i,
-        /\b(?:don.t\s+use|avoid\s+using|instead\s+of)\b/i,
+        /\b(?:I|we|you\s+should)\s+(?:always|never)\b/i,
+        /\b(?:always\s+use|never\s+use|never\s+commit)\b/i,
+        /\bprefer(?:\s+to)?\s+\w+/i,
+        /\bshould\s+always\b/i,
     ],
-    context: [
-        /\b(?:password|login|account|credentials?)\s+(?:is|are|for|in|at|stored)\b/i,
-        /\b(?:1password|1P)\s+(?:item|vault|field)\b/i,
-        /\b(?:script|command)\s+(?:is|at|for|to)\b/i,
-        /\b(?:price|cost|budget|£|\$)\s*\d/i,
-        /\b(?:birthday|anniversary|reminder)\b/i,
-        /\b(?:contact|phone|email|address)\s+(?:is|for)\b/i,
-    ],
-    note: [
-        /\b(?:important|remember|key\s+point)\s*:/i,
-        /\b(?:summary|verdict|bottom\s+line|tldr|tl;dr)\s*:/i,
-        /\b(?:status|result|outcome)\s*:/i,
-        /\b(?:todo|action\s+item|next\s+step|follow\s*up)\b/i,
-    ],
+    note: [/\b(?:important|remember|key\s+point)\s*:/i],
 };
 function extractMemories(texts) {
     const out = [];
@@ -96,14 +161,14 @@ function extractMemories(texts) {
                 const title = text.slice(0, 80).replace(/["\n]/g, " ").trim();
                 if (!seen.has(title)) {
                     seen.add(title);
-                    out.push({ title, content: text.slice(0, 1000), category: cat });
+                    out.push({ title, content: text.slice(0, 500), category: cat });
                 }
                 break;
             }
-            if (out.length >= 5)
+            if (out.length >= 3)
                 break;
         }
-        if (out.length >= 5)
+        if (out.length >= 3)
             break;
     }
     return out;
@@ -314,6 +379,21 @@ function handleLlmInput(event, ctx) {
         }
     })();
 }
+// Skip text blocks that are ShieldCortex/OpenClaw tool-result pass-throughs
+function isToolResultContent(text) {
+    // ShieldCortex recall returns "Found N memories:" header
+    if (/^Found \d+ memor(?:y|ies):/m.test(text))
+        return true;
+    // ShieldCortex get_context returns structured context blocks
+    if (/^## (?:Architecture|Patterns|Preferences|Errors|Context)/m.test(text))
+        return true;
+    // OpenClaw tool-result wrapper markers
+    if (/^\[tool_result\b/i.test(text.trim()))
+        return true;
+    if (/^<tool_result\b/i.test(text.trim()))
+        return true;
+    return false;
+}
 function handleLlmOutput(event, ctx) {
     // Fire and forget
     (async () => {
@@ -321,7 +401,9 @@ function handleLlmOutput(event, ctx) {
             const config = await loadConfig();
             if (!isAutoMemoryEnabled(config))
                 return;
-            const texts = event.assistantTexts.filter(t => t && t.length >= 30);
+            const texts = event.assistantTexts
+                .filter(t => t && t.length >= 30)
+                .filter(t => !isToolResultContent(t));
             if (!texts.length)
                 return;
             const memories = extractMemories(texts);
@@ -339,7 +421,9 @@ function handleLlmOutput(event, ctx) {
                 const r = await callCortex("remember", {
                     title: mem.title, content: mem.content, category: mem.category,
                     project: ctx.agentId || "openclaw", scope: "global",
-                    importance: "normal",
+                    importance: "normal", tags: "auto-extracted,realtime-plugin,llm-output",
+                    sourceType: "agent", sourceIdentifier: `openclaw-plugin:${event.sessionId}`,
+                    sessionId: event.sessionId, agentId: ctx.agentId || "openclaw", workspaceDir: ctx.workspaceDir || "",
                 });
                 if (r) {
                     saved++;
@@ -362,14 +446,17 @@ export default {
     id: "shieldcortex-realtime",
     name: "ShieldCortex Real-time Scanner",
     description: "Real-time defence scanning on LLM inputs with optional memory extraction from outputs",
-    version: "__SHIELDCORTEX_VERSION__",
+    version: _version,
     register(api) {
         api.on("llm_input", handleLlmInput);
         api.on("llm_output", handleLlmOutput);
-        import("shieldcortex").then((mod) => {
+        // Fire-and-forget: init database for local audit logging
+        import("shieldcortex")
+            .then((mod) => {
             mod.initDatabase();
             api.logger.info("[shieldcortex] Audit database initialized");
-        }).catch((e) => api.logger.info("[shieldcortex] DB init deferred: " + (e instanceof Error ? e.message : String(e))));
+        })
+            .catch((e) => api.logger.info("[shieldcortex] DB init deferred: " + (e instanceof Error ? e.message : String(e))));
         api.logger.info("[shieldcortex] Real-time scanning plugin registered (llm_input + llm_output)");
     },
 };

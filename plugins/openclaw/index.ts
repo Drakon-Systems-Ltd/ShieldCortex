@@ -5,14 +5,122 @@
  * and optional memory extraction. All operations are fire-and-forget.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
-import { createOpenClawRuntime } from "../../hooks/openclaw/cortex-memory/runtime.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-// ==================== TYPES (inline to avoid import issues) ====================
+// ==================== RESILIENT RUNTIME LOADER ====================
+// Resolves runtime.mjs from multiple locations so the plugin works both
+// inside the npm package tree AND when copied to ~/.openclaw/extensions/
+
+type OpenClawRuntime = {
+  callCortex: (tool: string, args?: Record<string, string>) => Promise<string | null>;
+  isOpenClawAutoMemoryEnabled: (config: any) => boolean;
+  loadShieldConfig: () => Promise<any>;
+};
+
+let runtimePromise: Promise<OpenClawRuntime> | null = null;
+
+function addRuntimeCandidate(candidates: Set<string>, packageRoot: string) {
+  const runtimePath = path.join(packageRoot, "hooks", "openclaw", "cortex-memory", "runtime.mjs");
+  if (existsSync(runtimePath)) {
+    candidates.add(pathToFileURL(runtimePath).href);
+  }
+}
+
+function addAncestorCandidates(candidates: Set<string>, startPath: string) {
+  let current = path.resolve(startPath);
+  let previous = "";
+  for (let i = 0; i < 6 && current !== previous; i++) {
+    addRuntimeCandidate(candidates, current);
+    previous = current;
+    current = path.dirname(current);
+  }
+}
+
+function collectRuntimeCandidates(): string[] {
+  const candidates = new Set<string>();
+
+  // 1. Relative path (works when running from within npm package tree)
+  candidates.add(new URL("../../hooks/openclaw/cortex-memory/runtime.mjs", import.meta.url).href);
+
+  // 2. Environment variable override
+  if (process.env.SHIELDCORTEX_ROOT) {
+    addRuntimeCandidate(candidates, process.env.SHIELDCORTEX_ROOT);
+  }
+
+  // 3. Walk up from current file location
+  addAncestorCandidates(candidates, path.dirname(fileURLToPath(import.meta.url)));
+
+  // 4. Find via shieldcortex binary
+  try {
+    const bin = execFileSync("which", ["shieldcortex"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    }).trim();
+    if (bin) addAncestorCandidates(candidates, realpathSync(bin));
+  } catch {}
+
+  // 5. npm global root
+  try {
+    const npmRoot = execFileSync("npm", ["root", "-g"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    }).trim();
+    if (npmRoot) addRuntimeCandidate(candidates, path.join(npmRoot, "shieldcortex"));
+  } catch {}
+
+  // 6. npm prefix
+  try {
+    const prefix = execFileSync("npm", ["config", "get", "prefix"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    }).trim();
+    if (prefix) addRuntimeCandidate(candidates, path.join(prefix, "lib", "node_modules", "shieldcortex"));
+  } catch {}
+
+  // 7. Common global install paths
+  for (const root of [
+    "/usr/lib/node_modules/shieldcortex",
+    "/usr/local/lib/node_modules/shieldcortex",
+    "/opt/homebrew/lib/node_modules/shieldcortex",
+    path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex"),
+  ]) {
+    addRuntimeCandidate(candidates, root);
+  }
+
+  return [...candidates];
+}
+
+async function getRuntime(): Promise<OpenClawRuntime> {
+  if (!runtimePromise) {
+    runtimePromise = (async () => {
+      const tried: string[] = [];
+      let lastError: unknown = null;
+
+      for (const candidate of collectRuntimeCandidates()) {
+        tried.push(candidate);
+        try {
+          const mod = await import(candidate);
+          if (typeof mod.createOpenClawRuntime === "function") {
+            return mod.createOpenClawRuntime({ logPrefix: "[shieldcortex]" }) as OpenClawRuntime;
+          }
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      const detail = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error");
+      throw new Error(`Could not load OpenClaw runtime. Tried: ${tried.join(", ")}. Last error: ${detail}`);
+    })();
+  }
+
+  return runtimePromise;
+}
 
 type LlmInputEvent = {
   runId: string; sessionId: string; provider: string; model: string;
@@ -46,7 +154,6 @@ interface SCConfig {
 }
 let _config: SCConfig | null = null;
 let _version = "0.0.0";
-const runtime = createOpenClawRuntime({ logPrefix: "[shieldcortex]" });
 try {
   const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf-8"));
   _version = pkg.version;
@@ -54,20 +161,20 @@ try {
 
 async function loadConfig(): Promise<SCConfig> {
   if (_config) return _config;
-  _config = await runtime.loadShieldConfig() as SCConfig;
+  _config = await (await getRuntime()).loadShieldConfig() as SCConfig;
   return _config;
 }
 
 function isAutoMemoryEnabled(config: SCConfig): boolean {
-  return runtime.isOpenClawAutoMemoryEnabled(config);
+  return config.openclawAutoMemory === true;
 }
 
 function isAutoMemoryDedupeEnabled(config: SCConfig): boolean {
   return config.openclawAutoMemoryDedupe !== false;
 }
 
-function callCortex(tool: string, args: Record<string, string> = {}): Promise<string | null> {
-  return runtime.callCortex(tool, args);
+async function callCortex(tool: string, args: Record<string, string> = {}): Promise<string | null> {
+  return (await getRuntime()).callCortex(tool, args);
 }
 
 // ==================== DEFENCE PIPELINE ====================
