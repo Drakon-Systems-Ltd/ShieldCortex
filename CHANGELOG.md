@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-03-12
+
+### Added
+
+- **Interactive quickstart detection** — `shieldcortex quickstart` now offers to install into detected Claude Code, OpenClaw, Copilot/Cursor, and Codex environments when run in an interactive terminal
+
+### Changed
+
+- Added `shieldcortex quickstart --yes` / `--install-detected` for non-interactive all-detected setup
+- Kept npm install non-destructive: integrations are still only configured after explicit confirmation or an explicit quickstart flag
+
 ## [3.4.0] - 2026-03-12
 
 ### Added
