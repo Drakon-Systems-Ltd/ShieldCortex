@@ -12,14 +12,16 @@ import path from 'path';
 import { setupClaudeMd } from './claude-md.js';
 import { handleOpenClawCommand } from './openclaw.js';
 import { handleCopilotCommand } from './copilot.js';
+import { handleCodexCommand } from './codex.js';
 
-type QuickstartTarget = 'claude' | 'openclaw' | 'copilot' | 'security';
+type QuickstartTarget = 'claude' | 'openclaw' | 'copilot' | 'codex' | 'security';
 
 interface DetectionResult {
   claude: boolean;
   openclaw: boolean;
   copilot: boolean;
   cursor: boolean;
+  codex: boolean;
 }
 
 function detectEnvironment(): DetectionResult {
@@ -33,6 +35,7 @@ function detectEnvironment(): DetectionResult {
   const openclaw = fs.existsSync(path.join(home, '.openclaw'));
 
   const cursor = fs.existsSync(path.join(home, '.cursor'));
+  const codex = fs.existsSync(path.join(home, '.codex'));
 
   const vscodeDirs = platform === 'darwin'
     ? [
@@ -51,7 +54,7 @@ function detectEnvironment(): DetectionResult {
 
   const copilot = cursor || vscodeDirs.some((dir) => fs.existsSync(dir));
 
-  return { claude, openclaw, copilot, cursor };
+  return { claude, openclaw, copilot, cursor, codex };
 }
 
 function printAutoGuide(): void {
@@ -62,7 +65,7 @@ function printAutoGuide(): void {
   lines.push('ShieldCortex Quickstart');
   lines.push('────────────────────────────────────────────────────');
   lines.push('Goal: give your agent memory you can inspect and security you can trust.');
-  lines.push(`Detected: Claude=${env.claude ? 'yes' : 'no'} · OpenClaw=${env.openclaw ? 'yes' : 'no'} · Copilot/Cursor=${env.copilot ? 'yes' : 'no'}`);
+  lines.push(`Detected: Claude=${env.claude ? 'yes' : 'no'} · OpenClaw=${env.openclaw ? 'yes' : 'no'} · Codex=${env.codex ? 'yes' : 'no'} · Copilot/Cursor=${env.copilot ? 'yes' : 'no'}`);
   lines.push('');
   lines.push('Best paths:');
   lines.push('');
@@ -88,6 +91,13 @@ function printAutoGuide(): void {
     lines.push('');
   }
 
+  if (env.codex) {
+    lines.push('Codex CLI / VS Code');
+    lines.push('  Register ShieldCortex once for Codex MCP in the CLI and IDE extension:');
+    lines.push('  shieldcortex quickstart codex');
+    lines.push('');
+  }
+
   lines.push('Security-only');
   lines.push('  Scan prompts, tools, and environments without adopting memory first:');
   lines.push('  shieldcortex quickstart security');
@@ -96,6 +106,7 @@ function printAutoGuide(): void {
   lines.push('  shieldcortex setup');
   lines.push('  shieldcortex openclaw install');
   lines.push('  shieldcortex copilot install');
+  lines.push('  shieldcortex codex install');
   lines.push('  shieldcortex dashboard');
   lines.push('');
 
@@ -133,11 +144,14 @@ export async function handleQuickstartCommand(target?: string): Promise<void> {
     case 'copilot':
       await handleCopilotCommand('install');
       return;
+    case 'codex':
+      await handleCodexCommand('install');
+      return;
     case 'security':
       printSecurityGuide();
       return;
     default:
-      console.error('Usage: shieldcortex quickstart [claude|openclaw|copilot|security]');
+      console.error('Usage: shieldcortex quickstart [claude|openclaw|copilot|codex|security]');
       process.exit(1);
   }
 }

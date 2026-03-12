@@ -40,6 +40,9 @@
  *   shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
  *   shieldcortex copilot uninstall       # Remove MCP server configuration
  *   shieldcortex copilot status          # Check MCP server configuration
+ *   shieldcortex codex install           # Configure MCP server for Codex CLI + VS Code extension
+ *   shieldcortex codex uninstall         # Remove Codex MCP configuration
+ *   shieldcortex codex status            # Check Codex MCP configuration
  *   shieldcortex license activate <key>  # Activate a licence key
  *   shieldcortex license status          # Show current licence tier and features
  *   shieldcortex license deactivate      # Remove licence
@@ -63,6 +66,7 @@ import { setupClaudeMd } from './setup/claude-md.js';
 import { handleHookCommand } from './setup/hooks.js';
 import { handleOpenClawCommand } from './setup/openclaw.js';
 import { handleCopilotCommand } from './setup/copilot.js';
+import { handleCodexCommand } from './setup/codex.js';
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { disposeModel, preloadModel } from './embeddings/index.js';
@@ -430,6 +434,7 @@ ${bold}COMMANDS${reset}
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
   ${cyan}copilot${reset} <action>      Set up VS Code / Cursor MCP integration
+  ${cyan}codex${reset} <action>        Set up Codex CLI / VS Code MCP integration
   ${cyan}graph${reset} backfill        Backfill knowledge graph from memories
   ${cyan}hook${reset} <action>         Manage hooks (start, stop, status)
   ${cyan}service${reset} <action>      Manage background service
@@ -523,6 +528,12 @@ ${bold}DOCS${reset}
   // Handle "copilot" subcommand (VS Code + Cursor MCP setup)
   if (process.argv[2] === 'copilot') {
     await handleCopilotCommand(process.argv[3] || '');
+    return;
+  }
+
+  // Handle "codex" subcommand (Codex CLI + VS Code MCP setup)
+  if (process.argv[2] === 'codex') {
+    await handleCodexCommand(process.argv[3] || '');
     return;
   }
 
@@ -750,7 +761,7 @@ ${bold}DOCS${reset}
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
-    'openclaw', 'clawdbot', 'copilot', 'service', 'config', 'status',
+    'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker',
   ]);

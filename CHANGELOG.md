@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-03-12
+
+### Added
+
+- **Codex integration** — added `shieldcortex codex install|uninstall|status` so ShieldCortex can register itself directly into Codex MCP config
+- **Codex quickstart** — added dedicated Codex setup docs covering Codex CLI and the Codex VS Code extension from one shared config file
+
+### Changed
+
+- `shieldcortex quickstart` now detects Codex and recommends the Codex MCP install path when `~/.codex` is present
+- Trust/source inference now recognises Codex CLI and Codex VS Code environments for better provenance and security scoring
+- MCP config auditing now scans Codex MCP configuration from `~/.codex/config.toml`
+- README and npm metadata now treat Codex as a first-class supported integration
+
 ## [3.2.3] - 2026-03-11
 
 ### Docs

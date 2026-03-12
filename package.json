@@ -1,7 +1,7 @@
 {
   "name": "shieldcortex",
-  "version": "3.2.3",
-  "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, OpenClaw, LangChain, and MCP agents.",
+  "version": "3.3.0",
+  "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -63,6 +63,8 @@
     "memory-decay",
     "context-persistence",
     "claude-code-memory",
+    "codex",
+    "codex-vscode",
     "claude-memory",
     "openclaw",
     "semantic-search",

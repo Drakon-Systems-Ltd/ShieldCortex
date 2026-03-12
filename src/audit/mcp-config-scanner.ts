@@ -82,7 +82,35 @@ function getConfigLocations(): ConfigLocation[] {
     { path: join(cwd, '.cursor', 'mcp.json'), name: 'Cursor (project)' },
     // Windsurf
     { path: join(home, '.windsurf', 'mcp.json'), name: 'Windsurf (global)' },
+    // Codex
+    { path: join(home, '.codex', 'config.toml'), name: 'Codex (global)' },
   ];
+}
+
+function parseTomlMcpServers(content: string): Record<string, unknown> {
+  const servers: Record<string, unknown> = {};
+  const sectionPattern = /^\[mcp_servers\.([^\]]+)\]\s*$/gm;
+  const matches = [...content.matchAll(sectionPattern)];
+
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i];
+    const serverName = match[1];
+    const sectionStart = match.index! + match[0].length;
+    const sectionEnd = i + 1 < matches.length ? matches[i + 1].index! : content.length;
+    const body = content.slice(sectionStart, sectionEnd);
+
+    const commandMatch = body.match(/^\s*command\s*=\s*"([^"]+)"/m);
+    const argsMatch = body.match(/^\s*args\s*=\s*\[([\s\S]*?)\]/m);
+    const envMatch = body.match(/^\s*env\s*=\s*\{([\s\S]*?)\}/m);
+
+    servers[serverName] = {
+      command: commandMatch?.[1],
+      args: argsMatch?.[1] ?? '',
+      env: envMatch?.[1] ?? '',
+    };
+  }
+
+  return servers;
 }
 
 /**
@@ -98,23 +126,28 @@ function scanConfigFile(location: ConfigLocation): AuditFinding[] {
     return findings;
   }
 
-  let config: Record<string, unknown>;
-  try {
-    config = JSON.parse(content);
-  } catch {
-    findings.push({
-      scanner: 'mcp-config',
-      severity: 'medium',
-      title: 'Malformed MCP config',
-      description: `${location.name} MCP config file contains invalid JSON — may have been tampered with.`,
-      filePath: location.path,
-      learnMoreUrl: LEARN_MORE,
-    });
-    return findings;
-  }
+  let servers: Record<string, unknown> = {};
+  if (location.path.endsWith('.toml')) {
+    servers = parseTomlMcpServers(content);
+  } else {
+    let config: Record<string, unknown>;
+    try {
+      config = JSON.parse(content);
+    } catch {
+      findings.push({
+        scanner: 'mcp-config',
+        severity: 'medium',
+        title: 'Malformed MCP config',
+        description: `${location.name} MCP config file contains invalid JSON — may have been tampered with.`,
+        filePath: location.path,
+        learnMoreUrl: LEARN_MORE,
+      });
+      return findings;
+    }
 
-  // Extract servers from various config formats
-  const servers = extractServers(config);
+    // Extract servers from various config formats
+    servers = extractServers(config);
+  }
 
   for (const [serverName, serverConfig] of Object.entries(servers)) {
     const configStr = JSON.stringify(serverConfig);

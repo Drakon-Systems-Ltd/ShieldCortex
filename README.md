@@ -21,7 +21,7 @@ shieldcortex install
 > [!NOTE]
 > Every feature works locally without a cloud account or licence key. Free and MIT licensed.
 
-**Works with** Claude Code · Cursor · VS Code · OpenClaw · LangChain · MCP agents · Python via REST API
+**Works with** Claude Code · Codex CLI / VS Code · Cursor · VS Code · OpenClaw · LangChain · MCP agents · Python via REST API
 
 **Three reasons people adopt ShieldCortex**
 
@@ -190,6 +190,7 @@ Pick the shortest path for the agent stack you already use:
 | Stack | Start here |
 |---|---|
 | **Claude Code** | [docs/quickstarts/claude-code.md](docs/quickstarts/claude-code.md) |
+| **Codex CLI / VS Code** | [docs/quickstarts/codex.md](docs/quickstarts/codex.md) |
 | **OpenClaw** | [docs/quickstarts/openclaw.md](docs/quickstarts/openclaw.md) |
 | **LangChain JS** | [docs/quickstarts/langchain.md](docs/quickstarts/langchain.md) |
 | **Any MCP agent** | [docs/quickstarts/mcp.md](docs/quickstarts/mcp.md) |
@@ -378,6 +379,7 @@ The key shift is that memory is no longer a black box:
 | Platform | Setup |
 |---|---|
 | **Claude Code** | `shieldcortex install` |
+| **Codex CLI / VS Code** | `shieldcortex codex install` |
 | **Cursor** | `shieldcortex install` |
 | **VS Code** (Copilot) | `shieldcortex install` |
 | **OpenClaw** | `shieldcortex openclaw install` — [details above](#-openclaw-integration) |
@@ -406,6 +408,7 @@ shieldcortex iron-dome activate   # Enable behaviour controls
 shieldcortex iron-dome status     # Check Iron Dome status
 shieldcortex openclaw install     # Connect to OpenClaw
 shieldcortex openclaw status      # Check OpenClaw hook status
+shieldcortex codex install        # Connect Codex CLI / VS Code
 shieldcortex config --key value   # Update configuration
 ```
 

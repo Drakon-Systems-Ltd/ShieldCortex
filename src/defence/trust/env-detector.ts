@@ -13,7 +13,13 @@ import type { DefenceSource } from '../types.js';
 
 export interface EnvDetectionResult {
   source: DefenceSource;
-  method: 'env:CLAUDE_CODE_ENTRYPOINT' | 'env:CLAUDE_AGENT_CONTEXT' | 'env:SHIELDCORTEX_AGENT_SOURCE' | 'default';
+  method:
+    | 'env:CLAUDE_CODE_ENTRYPOINT'
+    | 'env:CLAUDE_AGENT_CONTEXT'
+    | 'env:CODEX_INTERNAL_ORIGINATOR_OVERRIDE'
+    | 'env:CODEX_THREAD_ID'
+    | 'env:SHIELDCORTEX_AGENT_SOURCE'
+    | 'default';
   confidence: 'high' | 'medium' | 'low';
 }
 
@@ -24,8 +30,9 @@ export interface EnvDetectionResult {
  * 1. SHIELDCORTEX_AGENT_SOURCE — explicit override (e.g. "agent:user-spawned>task-1")
  * 2. CLAUDE_CODE_ENTRYPOINT=subagent — Claude Code sub-agent
  * 3. CLAUDE_AGENT_CONTEXT — generic agent context marker
- * 4. CLAUDE_CODE_ENTRYPOINT present (any value) — direct Claude Code CLI
- * 5. No recognised env vars → agent:unknown (trust ~0.3, treated as untrusted agent)
+ * 4. Codex origin / thread vars — Codex CLI or VS Code extension
+ * 5. CLAUDE_CODE_ENTRYPOINT present (any value) — direct Claude Code CLI
+ * 6. No recognised env vars → agent:unknown (trust ~0.3, treated as untrusted agent)
  */
 export function inferSourceFromEnvironment(): EnvDetectionResult {
   // 1. Explicit ShieldCortex source override (for integrators)
@@ -64,7 +71,26 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
     };
   }
 
-  // 4. Direct Claude Code CLI (entrypoint present but not subagent)
+  // 4. Codex CLI / IDE extension
+  const codexOrigin = process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE;
+  if (codexOrigin) {
+    const identifier = codexOrigin === 'codex_vscode' ? 'codex-vscode' : `codex:${codexOrigin}`;
+    return {
+      source: { type: 'cli', identifier },
+      method: 'env:CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
+      confidence: 'high',
+    };
+  }
+
+  if (process.env.CODEX_THREAD_ID || process.env.CODEX_CI) {
+    return {
+      source: { type: 'cli', identifier: process.env.CODEX_THREAD_ID ? 'codex-cli' : 'codex-ci' },
+      method: 'env:CODEX_THREAD_ID',
+      confidence: 'medium',
+    };
+  }
+
+  // 5. Direct Claude Code CLI (entrypoint present but not subagent)
   if (process.env.CLAUDE_CODE_ENTRYPOINT) {
     return {
       source: { type: 'cli', identifier: 'mcp' },
@@ -73,7 +99,7 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
     };
   }
 
-  // 5. No recognised env vars — unknown caller (use 'agent' type for lower trust)
+  // 6. No recognised env vars — unknown caller (use 'agent' type for lower trust)
   return {
     source: { type: 'agent', identifier: 'unknown' },
     method: 'default',
