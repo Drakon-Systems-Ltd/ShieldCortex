@@ -17,6 +17,15 @@ const __dirname = path.dirname(__filename);
 const SERVER_NAME = 'shieldcortex-memory';
 const MCP_ENTRY = path.resolve(__dirname, '..', 'index.js');
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+interface TomlSection {
+  header: string | null;
+  lines: string[];
+}
+
 function getCodexConfigPath(): string {
   return path.join(os.homedir(), '.codex', 'config.toml');
 }
@@ -46,38 +55,77 @@ function buildServerBlock(): string {
   ].join('\n');
 }
 
+function parseSections(content: string): TomlSection[] {
+  const lines = content.split(/\r?\n/);
+  const sections: TomlSection[] = [];
+  let current: TomlSection = { header: null, lines: [] };
+
+  for (const line of lines) {
+    const headerMatch = line.match(/^\[([^\]]+)\]\s*$/);
+    if (headerMatch) {
+      sections.push(current);
+      current = { header: headerMatch[1], lines: [line] };
+      continue;
+    }
+    current.lines.push(line);
+  }
+
+  sections.push(current);
+  return sections;
+}
+
+function normalizeContent(content: string): string {
+  const trimmed = content.replace(/\n{3,}/g, '\n\n').trimEnd();
+  return trimmed.length > 0 ? `${trimmed}\n` : '';
+}
+
 function hasServerBlock(content: string): boolean {
-  return new RegExp(`^\\[mcp_servers\\.${SERVER_NAME}\\]`, 'm').test(content);
+  return new RegExp(`^\\[mcp_servers\\.${escapeRegExp(SERVER_NAME)}\\]\\r?$`, 'm').test(content);
 }
 
 function upsertServerBlock(content: string): { content: string; changed: boolean } {
-  const block = buildServerBlock();
-  const sectionPattern = new RegExp(`^\\[mcp_servers\\.${SERVER_NAME}\\]\\n[\\s\\S]*?(?=^\\[|\\Z)`, 'm');
+  const block = buildServerBlock().trimEnd();
+  const sections = parseSections(content);
+  const output: string[] = [];
+  let insertionIndex = -1;
+  let found = false;
 
-  if (sectionPattern.test(content)) {
-    const nextContent = content.replace(sectionPattern, block);
-    return { content: nextContent, changed: nextContent !== content };
+  for (const section of sections) {
+    if (section.header === `mcp_servers.${SERVER_NAME}`) {
+      if (insertionIndex === -1) insertionIndex = output.length;
+      found = true;
+      continue;
+    }
+    const rendered = section.lines.join('\n').trimEnd();
+    if (rendered.length > 0) output.push(rendered);
   }
 
-  const trimmed = content.trimEnd();
-  return {
-    content: trimmed.length > 0 ? `${trimmed}\n\n${block}` : block,
-    changed: true,
-  };
+  if (insertionIndex === -1) insertionIndex = output.length;
+  output.splice(insertionIndex, 0, block);
+
+  const normalized = normalizeContent(output.join('\n\n'));
+  if (found) {
+    return { content: normalized, changed: normalized !== content };
+  }
+
+  return { content: normalized, changed: normalized !== content };
 }
 
 function removeServerBlock(content: string): { content: string; changed: boolean } {
-  const sectionPattern = new RegExp(`^\\[mcp_servers\\.${SERVER_NAME}\\]\\n[\\s\\S]*?(?=^\\[|\\Z)`, 'm');
-  if (!sectionPattern.test(content)) {
+  const sections = parseSections(content);
+  const filtered = sections.filter((section) => section.header !== `mcp_servers.${SERVER_NAME}`);
+  if (filtered.length === sections.length) {
     return { content, changed: false };
   }
 
-  const nextContent = content
-    .replace(sectionPattern, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trimEnd();
+  const normalized = normalizeContent(
+    filtered
+      .map((section) => section.lines.join('\n').trimEnd())
+      .filter(Boolean)
+      .join('\n\n'),
+  );
 
-  return { content: nextContent.length > 0 ? `${nextContent}\n` : '', changed: true };
+  return { content: normalized, changed: true };
 }
 
 export async function installCodex(): Promise<void> {

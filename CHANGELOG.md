@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.3.1] - 2026-03-12
+
+### Fixed
+
+- **Codex installer dedupe** — repeat `shieldcortex codex install` runs now replace the existing Codex MCP block cleanly instead of risking duplicate `[mcp_servers.shieldcortex-memory]` sections in `~/.codex/config.toml`
+- Codex MCP block matching now handles shared config files more robustly, including CRLF-safe section matching
 ## [3.3.0] - 2026-03-12
 
 ### Added
