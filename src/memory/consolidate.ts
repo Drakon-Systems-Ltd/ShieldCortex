@@ -26,6 +26,7 @@ import {
   getMemoryStats,
   updateDecayScores,
   addMemory,
+  rowToMemory,
 } from './store.js';
 import {
   calculateDecayedScore,
@@ -239,6 +240,92 @@ function sharedWordCount(a: string, b: string): number {
   return count;
 }
 
+export interface DuplicateMemoryPair {
+  memoryA: Memory;
+  memoryB: Memory;
+  recommendedKeepId: number;
+  similarity: string;
+  titleSimilarity: number;
+  contentOverlap: number;
+  sharedWords: number;
+}
+
+export function findDuplicateMemoryPairs(options?: {
+  project?: string;
+  limit?: number;
+}): DuplicateMemoryPair[] {
+  const db = getDatabase();
+  const limit = options?.limit ?? 20;
+  const rows = options?.project
+    ? db.prepare(
+      "SELECT * FROM memories WHERE type = 'long_term' AND project = ? ORDER BY created_at ASC",
+    ).all(options.project) as Record<string, unknown>[]
+    : db.prepare(
+      "SELECT * FROM memories WHERE type = 'long_term' ORDER BY created_at ASC",
+    ).all() as Record<string, unknown>[];
+
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const mem of rows) {
+    const cat = (mem.category as string) || 'note';
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat)!.push(mem);
+  }
+
+  const pairs: DuplicateMemoryPair[] = [];
+  const seen = new Set<string>();
+
+  for (const [, group] of groups) {
+    if (group.length < 2) continue;
+
+    for (let i = 0; i < group.length && pairs.length < limit; i++) {
+      const memA = group[i];
+      for (let j = i + 1; j < group.length && pairs.length < limit; j++) {
+        const memB = group[j];
+        const idA = memA.id as number;
+        const idB = memB.id as number;
+        const pairKey = `${Math.min(idA, idB)}:${Math.max(idA, idB)}`;
+        if (seen.has(pairKey)) continue;
+
+        const titleA = (memA.title as string) || '';
+        const titleB = (memB.title as string) || '';
+        const contentA = (memA.content as string) || '';
+        const contentB = (memB.content as string) || '';
+
+        const titleSimilarity = levenshteinSimilarity(titleA.toLowerCase(), titleB.toLowerCase());
+        const sharedWords = sharedWordCount(titleA, titleB);
+        const titlesMatch = titleSimilarity > 0.7 || sharedWords >= 3 || titleA.toLowerCase() === titleB.toLowerCase();
+        if (!titlesMatch) continue;
+
+        const contentOverlap = wordOverlap(contentA, contentB);
+        if (contentOverlap <= 0.5) continue;
+
+        const salienceA = (memA.salience as number) || 0;
+        const salienceB = (memB.salience as number) || 0;
+        const createdA = new Date((memA.created_at as string) || 0).getTime();
+        const createdB = new Date((memB.created_at as string) || 0).getTime();
+        const recommendedKeepId =
+          salienceA > salienceB || (salienceA === salienceB && createdA >= createdB)
+            ? idA
+            : idB;
+
+        pairs.push({
+          memoryA: rowToMemory(memA),
+          memoryB: rowToMemory(memB),
+          recommendedKeepId,
+          similarity: `title=${titleSimilarity.toFixed(2)}, content=${contentOverlap.toFixed(2)}`,
+          titleSimilarity,
+          contentOverlap,
+          sharedWords,
+        });
+
+        seen.add(pairKey);
+      }
+    }
+  }
+
+  return pairs;
+}
+
 /**
  * Find memories with very similar titles/content and merge them.
  * Keeps the newer one, appends unique content from the older one.
@@ -252,95 +339,37 @@ export function deduplicateMemories(options?: { dryRun?: boolean }): {
   return withTransaction(() => {
     const db = getDatabase();
     const pairs: Array<{ kept: number; removed: number; similarity: string }> = [];
-
-    // Query all LTM memories
-    const ltmMemories = db.prepare(
-      "SELECT * FROM memories WHERE type = 'long_term' ORDER BY created_at ASC"
-    ).all() as Record<string, unknown>[];
-
-    // Group by category
-    const groups = new Map<string, Record<string, unknown>[]>();
-    for (const mem of ltmMemories) {
-      const cat = (mem.category as string) || 'note';
-      if (!groups.has(cat)) groups.set(cat, []);
-      groups.get(cat)!.push(mem);
-    }
-
     const removed = new Set<number>();
 
-    for (const [, group] of groups) {
-      if (group.length < 2) continue;
+    for (const pair of findDuplicateMemoryPairs()) {
+      if (removed.has(pair.memoryA.id) || removed.has(pair.memoryB.id)) continue;
+      const removedId = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB.id : pair.memoryA.id;
 
-      for (let i = 0; i < group.length; i++) {
-        const memA = group[i];
-        if (removed.has(memA.id as number)) continue;
+      if (!dryRun) {
+        const kept = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
+        const discarded = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
+        const keptSentences = new Set(
+          kept.content.split(/[.!?\n]+/).map(s => s.trim().toLowerCase()).filter(s => s.length > 0)
+        );
+        const uniqueSentences = discarded.content
+          .split(/[.!?\n]+/)
+          .map(s => s.trim())
+          .filter(s => s.length > 0 && !keptSentences.has(s.toLowerCase()));
 
-        for (let j = i + 1; j < group.length; j++) {
-          const memB = group[j];
-          if (removed.has(memB.id as number)) continue;
-
-          const titleA = (memA.title as string) || '';
-          const titleB = (memB.title as string) || '';
-          const contentA = (memA.content as string) || '';
-          const contentB = (memB.content as string) || '';
-
-          // Check title similarity: Levenshtein > 0.7 OR 3+ shared words
-          const titleSim = levenshteinSimilarity(titleA.toLowerCase(), titleB.toLowerCase());
-          const titleSharedWords = sharedWordCount(titleA, titleB);
-          const titlesMatch = titleSim > 0.7 || titleSharedWords >= 3;
-
-          if (!titlesMatch) continue;
-
-          // Check content overlap > 50%
-          const contentOverlap = wordOverlap(contentA, contentB);
-          if (contentOverlap <= 0.5) continue;
-
-          // They are duplicates — keep the one with higher salience (or newer if equal)
-          const salienceA = (memA.salience as number) || 0;
-          const salienceB = (memB.salience as number) || 0;
-          const createdA = new Date((memA.created_at as string) || 0).getTime();
-          const createdB = new Date((memB.created_at as string) || 0).getTime();
-
-          let kept: Record<string, unknown>;
-          let discarded: Record<string, unknown>;
-          if (salienceA > salienceB || (salienceA === salienceB && createdA >= createdB)) {
-            kept = memA;
-            discarded = memB;
-          } else {
-            kept = memB;
-            discarded = memA;
-          }
-
-          const similarity = `title=${titleSim.toFixed(2)}, content=${contentOverlap.toFixed(2)}`;
-
-          if (!dryRun) {
-            // Append unique sentences from discarded to kept
-            const keptContent = (kept.content as string) || '';
-            const discardedContent = (discarded.content as string) || '';
-            const keptSentences = new Set(
-              keptContent.split(/[.!?\n]+/).map(s => s.trim().toLowerCase()).filter(s => s.length > 0)
-            );
-            const uniqueSentences = discardedContent
-              .split(/[.!?\n]+/)
-              .map(s => s.trim())
-              .filter(s => s.length > 0 && !keptSentences.has(s.toLowerCase()));
-
-            if (uniqueSentences.length > 0) {
-              const mergedContent = keptContent + '\n\nMerged from duplicate:\n' + uniqueSentences.join('. ') + '.';
-              db.prepare('UPDATE memories SET content = ? WHERE id = ?').run(mergedContent, kept.id as number);
-            }
-
-            deleteMemory(discarded.id as number);
-          }
-
-          removed.add(discarded.id as number);
-          pairs.push({
-            kept: kept.id as number,
-            removed: discarded.id as number,
-            similarity,
-          });
+        if (uniqueSentences.length > 0) {
+          const mergedContent = kept.content + '\n\nMerged from duplicate:\n' + uniqueSentences.join('. ') + '.';
+          db.prepare('UPDATE memories SET content = ? WHERE id = ?').run(mergedContent, kept.id);
         }
+
+        deleteMemory(removedId);
       }
+
+      removed.add(removedId);
+      pairs.push({
+        kept: pair.recommendedKeepId,
+        removed: removedId,
+        similarity: pair.similarity,
+      });
     }
 
     return { merged: pairs.length, pairs };

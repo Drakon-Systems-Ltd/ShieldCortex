@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { getDatabase, isDatabaseInitialized } from '../database/init.js';
+import { getDatabase, isDatabaseInitialized, withTransaction } from '../database/init.js';
 import {
   Memory,
   MemoryInput,
@@ -798,6 +798,147 @@ export function updateMemory(
   }
 
   return updatedMemory;
+}
+
+function uniqueSentencesFrom(source: string, existing: string): string[] {
+  const existingSentences = new Set(
+    existing
+      .split(/[.!?\n]+/)
+      .map((sentence) => sentence.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  return source
+    .split(/[.!?\n]+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0 && !existingSentences.has(sentence.toLowerCase()));
+}
+
+export function mergeMemories(
+  keptId: number,
+  removedId: number,
+  options?: { reviewedBy?: string | null },
+): Memory | null {
+  if (keptId === removedId) return getMemoryById(keptId);
+
+  return withTransaction(() => {
+    const db = getDatabase();
+    const kept = getMemoryById(keptId);
+    const removed = getMemoryById(removedId);
+
+    if (!kept || !removed) return null;
+
+    const mergedSnippets = uniqueSentencesFrom(removed.content, kept.content);
+    const mergedContent = mergedSnippets.length > 0
+      ? `${kept.content}\n\nMerged from duplicate (${removed.title}):\n${mergedSnippets.join('. ')}.`
+      : kept.content;
+
+    const mergedTags = Array.from(new Set([...(kept.tags ?? []), ...(removed.tags ?? [])]));
+    const mergedFrom = Array.isArray(kept.metadata?.mergedFrom)
+      ? [...kept.metadata.mergedFrom as unknown[]]
+      : [];
+    mergedFrom.push({
+      id: removed.id,
+      uuid: removed.uuid,
+      title: removed.title,
+      mergedAt: new Date().toISOString(),
+    });
+
+    const mergedMetadata = {
+      ...kept.metadata,
+      mergedFrom,
+      mergedFromCount: mergedFrom.length,
+    };
+
+    const mergedStatus: MemoryStatus =
+      kept.status === 'canonical' || removed.status === 'canonical'
+        ? 'canonical'
+        : kept.status === 'active' || removed.status === 'active'
+          ? 'active'
+          : kept.status;
+
+    const mergedPinned = kept.pinned || removed.pinned || mergedStatus === 'canonical';
+    const mergedCloudExcluded = kept.cloudExcluded || removed.cloudExcluded;
+    const mergedScope = kept.scope === 'global' || removed.scope === 'global' ? 'global' : 'project';
+    const mergedProject = kept.project ?? removed.project ?? null;
+    const mergedTransferable = kept.transferable || removed.transferable;
+    const mergedSalience = Math.max(kept.salience, removed.salience);
+    const mergedTrustScore = Math.max(kept.trustScore ?? 0, removed.trustScore ?? 0);
+    const mergedAccessCount = kept.accessCount + removed.accessCount;
+    const mergedLastAccessed = new Date(
+      Math.max(new Date(kept.lastAccessed).getTime(), new Date(removed.lastAccessed).getTime()),
+    ).toISOString();
+    const mergedReviewedBy = options?.reviewedBy ?? kept.reviewedBy ?? 'review-merge';
+    const mergedSensitivity = kept.sensitivityLevel === 'SECRET' || removed.sensitivityLevel === 'SECRET'
+      ? 'SECRET'
+      : kept.sensitivityLevel === 'CONFIDENTIAL' || removed.sensitivityLevel === 'CONFIDENTIAL'
+        ? 'CONFIDENTIAL'
+        : kept.sensitivityLevel ?? removed.sensitivityLevel ?? 'INTERNAL';
+
+    db.prepare(`
+      UPDATE memories
+      SET content = ?,
+          tags = ?,
+          salience = ?,
+          project = ?,
+          metadata = ?,
+          scope = ?,
+          transferable = ?,
+          status = ?,
+          pinned = ?,
+          reviewed_by = ?,
+          reviewed_at = ?,
+          trust_score = ?,
+          sensitivity_level = ?,
+          cloud_excluded = ?,
+          access_count = ?,
+          last_accessed = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      mergedContent,
+      JSON.stringify(mergedTags),
+      mergedSalience,
+      mergedProject,
+      JSON.stringify(mergedMetadata),
+      mergedScope,
+      mergedTransferable ? 1 : 0,
+      mergedStatus,
+      mergedPinned ? 1 : 0,
+      mergedReviewedBy,
+      new Date().toISOString(),
+      mergedTrustScore,
+      mergedSensitivity,
+      mergedCloudExcluded ? 1 : 0,
+      mergedAccessCount,
+      mergedLastAccessed,
+      kept.id,
+    );
+
+    const updatedMemory = getMemoryById(kept.id)!;
+
+    try {
+      const extraction = extractFromMemory(
+        updatedMemory.title,
+        updatedMemory.content,
+        updatedMemory.category,
+      );
+      replaceMemoryGraph(updatedMemory.id, extraction);
+    } catch (e) {
+      console.error('[shieldcortex] Entity extraction refresh failed after merge:', e);
+    }
+
+    emitMemoryUpdated(updatedMemory);
+    persistEvent('memory_updated', { memory: updatedMemory, mergedFromId: removed.id });
+
+    if (isFeatureEnabled('cloud_sync')) {
+      syncMemoryUpsertToCloud(updatedMemory);
+      syncGraphForMemoryToCloud(updatedMemory.id);
+    }
+
+    deleteMemory(removed.id);
+    return updatedMemory;
+  });
 }
 
 /**

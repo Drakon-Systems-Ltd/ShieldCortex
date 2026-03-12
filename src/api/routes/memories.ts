@@ -14,6 +14,7 @@ import {
   deleteMemory,
   accessMemory,
   updateMemory,
+  mergeMemories,
   promoteMemory,
   createMemoryLink,
   rowToMemory,
@@ -22,6 +23,7 @@ import {
 import { calculateDecayedScore } from '../../memory/decay.js';
 import {
   consolidate,
+  findDuplicateMemoryPairs,
   formatContextSummary,
   generateContextSummary,
 } from '../../memory/consolidate.js';
@@ -456,6 +458,7 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
         minScore: 0.4,
         limit,
       });
+      const duplicates = findDuplicateMemoryPairs({ project, limit });
 
       res.json({
         summary: {
@@ -465,6 +468,7 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
           noisyAutoExtracted: noisyAutoExtracted.length,
           projectless: projectless.length,
           contradictions: contradictions.length,
+          duplicates: duplicates.length,
         },
         openClaw: {
           total: openClawSummary.total ?? 0,
@@ -479,6 +483,7 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
           lowTrust: lowTrust.map(rowToMemory),
           noisyAutoExtracted: noisyAutoExtracted.map(rowToMemory),
           projectless: projectless.map(rowToMemory),
+          duplicates,
           contradictions: contradictions.map((item) => ({
             memoryA: item.memoryA,
             memoryB: item.memoryB,
@@ -488,6 +493,33 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
           })),
         },
       });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/memories/merge', requireNotLocked, (req: Request, res: Response) => {
+    try {
+      const { keptId, removedId, reviewedBy } = req.body as {
+        keptId?: number;
+        removedId?: number;
+        reviewedBy?: string;
+      };
+
+      if (!Number.isInteger(keptId) || !Number.isInteger(removedId)) {
+        return res.status(400).json({ error: 'keptId and removedId are required integers' });
+      }
+
+      if (keptId === removedId) {
+        return res.status(400).json({ error: 'keptId and removedId must be different' });
+      }
+
+      const merged = mergeMemories(keptId as number, removedId as number, { reviewedBy });
+      if (!merged) {
+        return res.status(404).json({ error: 'Unable to merge memories' });
+      }
+
+      res.json(merged);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

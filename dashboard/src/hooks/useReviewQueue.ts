@@ -21,6 +21,15 @@ export interface ReviewQueueResponse {
     lowTrust: Memory[];
     noisyAutoExtracted: Memory[];
     projectless: Memory[];
+    duplicates: Array<{
+      memoryA: Memory;
+      memoryB: Memory;
+      recommendedKeepId: number;
+      similarity: string;
+      titleSimilarity: number;
+      contentOverlap: number;
+      sharedWords: number;
+    }>;
     contradictions: Array<{
       memoryA: Memory;
       memoryB: Memory;
@@ -54,6 +63,20 @@ async function patchReviewAction(input: {
   return response.json();
 }
 
+async function mergeMemories(input: {
+  keptId: number;
+  removedId: number;
+  reviewedBy?: string;
+}) {
+  const response = await authFetch(`${API_BASE}/api/memories/merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error('Failed to merge memories');
+  return response.json();
+}
+
 export function useReviewQueue(project?: string | null) {
   return useQuery({
     queryKey: ['review-queue', project],
@@ -72,6 +95,21 @@ export function useReviewAction() {
       queryClient.invalidateQueries({ queryKey: ['quality'] });
       queryClient.invalidateQueries({ queryKey: ['contradictions'] });
       queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
+export function useMergeMemories() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: mergeMemories,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['review-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['quality'] });
+      queryClient.invalidateQueries({ queryKey: ['contradictions'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+      queryClient.invalidateQueries({ queryKey: ['graph'] });
     },
   });
 }

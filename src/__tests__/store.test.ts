@@ -810,6 +810,52 @@ describe('Semantic Linking', () => {
   });
 
   describe('enrichMemory', () => {
+    it('should merge duplicate memories into the chosen survivor', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, mergeMemories, getMemoryById, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let keepId: number | undefined;
+      let removeId: number | undefined;
+      try {
+        const keep = addMemory({
+          title: 'React frontend stack',
+          content: 'React uses Next.js for the app shell. Styled with CSS modules.',
+          category: 'architecture',
+          tags: ['react', 'frontend'],
+          project: 'test-project',
+          type: 'long_term',
+        });
+        const remove = addMemory({
+          title: 'React frontend stack',
+          content: 'React uses Next.js for the app shell. Deployed behind Fly.io.',
+          category: 'architecture',
+          tags: ['react', 'deploy'],
+          project: 'test-project',
+          type: 'long_term',
+        });
+        keepId = keep.id;
+        removeId = remove.id;
+
+        const merged = mergeMemories(keep.id, remove.id, { reviewedBy: 'test-suite' });
+        expect(merged).toBeDefined();
+        expect(merged!.id).toBe(keep.id);
+        expect(merged!.content).toContain('Styled with CSS modules');
+        expect(merged!.content).toContain('Deployed behind Fly');
+        expect(merged!.content).toContain('io');
+        expect(merged!.tags).toEqual(expect.arrayContaining(['react', 'frontend', 'deploy']));
+        expect(merged!.reviewedBy).toBe('test-suite');
+        expect((merged!.metadata?.mergedFrom as Array<{ id: number; title: string }>)?.some((item) => item.id === remove.id)).toBe(true);
+        expect(getMemoryById(remove.id)).toBeNull();
+      } finally {
+        if (keepId) { try { deleteMemory(keepId); } catch { /* ignore */ } }
+        if (removeId) { try { deleteMemory(removeId); } catch { /* ignore */ } }
+        closeDatabase();
+      }
+    });
+
     it('should exclude archived and suppressed memories from normal recall', async () => {
       const { initDatabase, closeDatabase } = await import('../database/init.js');
       const { addMemory, updateMemory, deleteMemory, searchMemories, searchMemoriesExplained } = await import('../memory/store.js');

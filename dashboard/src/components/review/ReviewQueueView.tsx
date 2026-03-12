@@ -1,7 +1,7 @@
 'use client';
 
 import { Archive, CloudOff, Pin, ShieldAlert, Sparkles, Layers } from 'lucide-react';
-import { useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
+import { useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
 import { useDashboardStore } from '@/lib/store';
 import type { Memory } from '@/types/memory';
 
@@ -86,6 +86,7 @@ function MemorySection({
 export function ReviewQueueView() {
   const { projectFilter, setSelectedMemory, setViewMode } = useDashboardStore();
   const { data, isLoading } = useReviewQueue(projectFilter);
+  const mergeMutation = useMergeMemories();
 
   const openMemory = (memory: Memory) => {
     setSelectedMemory(memory);
@@ -137,6 +138,50 @@ export function ReviewQueueView() {
           <MemorySection title="Stale" detail="Useful once, maybe. Worth archiving or refreshing now." items={data?.sections.stale ?? []} onOpen={openMemory} />
           <MemorySection title="Never used" detail="Stored but never recalled. High count usually means capture is too noisy." items={data?.sections.neverUsed ?? []} onOpen={openMemory} />
           <MemorySection title="Projectless" detail="These memories have no useful project scope and are likely to leak into the wrong context." items={data?.sections.projectless ?? []} onOpen={openMemory} />
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+            <div className="flex items-center gap-2">
+              <Layers size={16} className="text-cyan-300" />
+              <h3 className="text-lg font-semibold text-white">Duplicate candidates</h3>
+            </div>
+            <p className="mt-1 text-sm text-slate-400">One click keeps the recommended memory, merges unique content, and removes the duplicate.</p>
+            <div className="mt-4 space-y-3">
+              {(data?.sections.duplicates ?? []).slice(0, 8).map((pair) => {
+                const keep = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
+                const remove = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
+                return (
+                  <div key={`${pair.memoryA.id}-${pair.memoryB.id}`} className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-medium text-white">{pair.memoryA.title}</div>
+                        <div className="mt-1 text-xs text-slate-500">paired with {pair.memoryB.title}</div>
+                        <div className="mt-2 text-xs text-slate-400">{pair.similarity} · shared title words {pair.sharedWords}</div>
+                      </div>
+                      <div className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+                        Keep {keep.id}
+                      </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button onClick={() => openMemory(pair.memoryA)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect A</button>
+                      <button onClick={() => openMemory(pair.memoryB)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect B</button>
+                      <button
+                        onClick={() => mergeMutation.mutate({ keptId: keep.id, removedId: remove.id, reviewedBy: 'dashboard-merge' })}
+                        className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10"
+                      >
+                        Merge into recommended
+                      </button>
+                      <button
+                        onClick={() => mergeMutation.mutate({ keptId: remove.id, removedId: keep.id, reviewedBy: 'dashboard-merge' })}
+                        className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+                      >
+                        Keep other instead
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              {!data?.sections.duplicates?.length && <div className="text-sm text-slate-400">No duplicate candidates detected.</div>}
+            </div>
+          </section>
 
           <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex items-center gap-2">
