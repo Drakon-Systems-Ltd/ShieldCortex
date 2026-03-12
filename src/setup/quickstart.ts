@@ -9,12 +9,14 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import readline from 'readline/promises';
 import { setupClaudeMd } from './claude-md.js';
 import { handleOpenClawCommand } from './openclaw.js';
 import { handleCopilotCommand } from './copilot.js';
 import { handleCodexCommand } from './codex.js';
 
 type QuickstartTarget = 'claude' | 'openclaw' | 'copilot' | 'codex' | 'security';
+type DetectedInstaller = QuickstartTarget;
 
 interface DetectionResult {
   claude: boolean;
@@ -128,13 +130,39 @@ ShieldCortex Security Quickstart
 `);
 }
 
-export async function handleQuickstartCommand(target?: string): Promise<void> {
-  if (!target) {
-    printAutoGuide();
-    return;
-  }
+function isInteractiveTerminal(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
 
-  switch (target.toLowerCase() as QuickstartTarget) {
+async function promptYesNo(question: string, defaultYes = true): Promise<boolean> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  try {
+    const suffix = defaultYes ? ' [Y/n] ' : ' [y/N] ';
+    const answer = (await rl.question(`${question}${suffix}`)).trim().toLowerCase();
+    if (!answer) return defaultYes;
+    if (answer === 'y' || answer === 'yes') return true;
+    if (answer === 'n' || answer === 'no') return false;
+    return defaultYes;
+  } finally {
+    rl.close();
+  }
+}
+
+function detectedInstallers(env: DetectionResult): Array<{ target: DetectedInstaller; label: string }> {
+  const installers: Array<{ target: DetectedInstaller; label: string }> = [];
+  if (env.claude) installers.push({ target: 'claude', label: 'Claude Code' });
+  if (env.openclaw) installers.push({ target: 'openclaw', label: 'OpenClaw' });
+  if (env.copilot) installers.push({ target: 'copilot', label: env.cursor ? 'VS Code / Cursor' : 'VS Code' });
+  if (env.codex) installers.push({ target: 'codex', label: 'Codex CLI / VS Code' });
+  return installers;
+}
+
+async function runQuickstartTarget(target: QuickstartTarget): Promise<void> {
+  switch (target) {
     case 'claude':
       await setupClaudeMd({ stopHook: false });
       return;
@@ -150,8 +178,70 @@ export async function handleQuickstartCommand(target?: string): Promise<void> {
     case 'security':
       printSecurityGuide();
       return;
+  }
+}
+
+async function promptDetectedInstalls(autoApprove = false): Promise<void> {
+  const env = detectEnvironment();
+  const installers = detectedInstallers(env);
+
+  if (installers.length === 0) {
+    return;
+  }
+
+  console.log('Detected integrations can be installed now from this machine.');
+  console.log('ShieldCortex will only change configs after explicit confirmation.');
+  console.log('');
+
+  if (!autoApprove && !isInteractiveTerminal()) {
+    return;
+  }
+
+  if (!autoApprove) {
+    const installAny = await promptYesNo('Install ShieldCortex into detected environments now?', true);
+    if (!installAny) {
+      console.log('Skipped automatic install prompts. Run `shieldcortex quickstart <target>` any time.');
+      return;
+    }
+  }
+
+  for (const installer of installers) {
+    const approved = autoApprove
+      ? true
+      : await promptYesNo(`Install ShieldCortex for ${installer.label}?`, true);
+    if (!approved) continue;
+
+    console.log('');
+    await runQuickstartTarget(installer.target);
+    console.log('');
+  }
+}
+
+export async function handleQuickstartCommand(target?: string): Promise<void> {
+  if (!target) {
+    printAutoGuide();
+    await promptDetectedInstalls(false);
+    return;
+  }
+
+  const normalized = target.toLowerCase();
+
+  if (normalized === '--yes' || normalized === '--install-detected') {
+    printAutoGuide();
+    await promptDetectedInstalls(true);
+    return;
+  }
+
+  switch (normalized as QuickstartTarget) {
+    case 'claude':
+    case 'openclaw':
+    case 'copilot':
+    case 'codex':
+    case 'security':
+      await runQuickstartTarget(normalized as QuickstartTarget);
+      return;
     default:
-      console.error('Usage: shieldcortex quickstart [claude|openclaw|copilot|codex|security]');
+      console.error('Usage: shieldcortex quickstart [claude|openclaw|copilot|codex|security|--yes|--install-detected]');
       process.exit(1);
   }
 }

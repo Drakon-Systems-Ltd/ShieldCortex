@@ -20,7 +20,8 @@
  *   shieldcortex audit --markdown        # Audit with Markdown output
  *   shieldcortex audit --ci              # Audit in CI mode (exit code reflects grade)
  *   shieldcortex status                  # Show database and system status
- *   shieldcortex quickstart              # Detect the fastest setup path
+ *   shieldcortex quickstart              # Detect integrations and offer guided install
+ *   shieldcortex quickstart --yes        # Install across all detected integrations
  *   shieldcortex setup                   # Configure Claude for proactive memory use
  *   shieldcortex install                 # Alias for setup
  *   shieldcortex hook pre-compact        # Run pre-compact hook (for settings.json)
@@ -424,7 +425,7 @@ ${bold}COMMANDS${reset}
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
   ${cyan}doctor${reset}                Diagnose installation issues
-  ${cyan}quickstart${reset} [target]    Detect the fastest setup path
+  ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
