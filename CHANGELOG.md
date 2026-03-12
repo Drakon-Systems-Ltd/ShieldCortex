@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-03-12
+
+### Added
+
+- **Duplicate merge workflow** — Review Queue now surfaces duplicate memory candidates with a recommended survivor and one-click merge actions
+- **Memory merge API** — added a dedicated merge route so the dashboard can merge duplicate memories intentionally instead of relying only on background dedupe
+
+### Changed
+
+- Duplicate detection is now exposed as a first-class review signal, not just a background consolidation behavior
+- Merge actions preserve unique content, combine tags, keep the stronger survivor, and refresh graph/cloud sync state for the merged memory
+
 ## [3.3.1] - 2026-03-12
 
 ### Fixed
