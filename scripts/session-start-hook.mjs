@@ -144,7 +144,7 @@ function formatContext(memories, project) {
 
 /**
  * Quick check of project instruction files for obviously suspicious content.
- * This is a lightweight inline check — for full scanning use `npx shieldcortex scan-skills`.
+ * This is a lightweight inline check — for full scanning use `shieldcortex scan-skills`.
  */
 function checkProjectInstructionFiles(cwd) {
   const warnings = [];
@@ -272,7 +272,7 @@ ${proactiveInstructions}
         for (const w of skillWarnings) {
           console.log(`  - ${w}`);
         }
-        console.log(`Run \`npx shieldcortex scan-skills\` for a full report.\n`);
+        console.log(`Run \`shieldcortex scan-skills\` for a full report.\n`);
         console.error(`[shieldcortex] WARNING: ${skillWarnings.length} suspicious file(s) detected`);
       }
     } catch {

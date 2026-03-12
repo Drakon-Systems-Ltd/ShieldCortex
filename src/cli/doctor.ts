@@ -200,7 +200,7 @@ async function checkHooks(): Promise<CheckResult> {
       label: 'Hooks',
       status: 'warn',
       message: 'settings.json not found',
-      fix: 'Run `npx shieldcortex install` to configure hooks',
+      fix: 'Run `shieldcortex install` to configure hooks',
     };
   }
 
@@ -238,7 +238,7 @@ async function checkHooks(): Promise<CheckResult> {
         label: 'Hooks',
         status: 'warn',
         message: `${installed}/${hookNames.length} installed — missing: ${missing.join(', ')}`,
-        fix: 'Run `npx shieldcortex install` to configure hooks',
+        fix: 'Run `shieldcortex install` to configure hooks',
       };
     }
   } catch (err: unknown) {

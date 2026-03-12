@@ -11,7 +11,8 @@ I got tired of it. So I built something.
 If you're running [OpenClaw](https://github.com/openclaw/openclaw) (or its predecessors Clawdbot/Moltbot), here's all you need:
 
 ```bash
-sudo npx shieldcortex openclaw install
+npm install -g shieldcortex
+sudo shieldcortex openclaw install
 ```
 
 Restart OpenClaw. Done.
@@ -115,19 +116,19 @@ That's it. No Docker. No external services. No API keys.
 
 ```bash
 # Install the hook
-sudo npx shieldcortex openclaw install
+sudo shieldcortex openclaw install
 
 # Check OpenClaw integration status
-npx shieldcortex openclaw status
+shieldcortex openclaw status
 
 # Uninstall if needed
-sudo npx shieldcortex openclaw uninstall
+sudo shieldcortex openclaw uninstall
 ```
 
 ## Beyond OpenClaw
 
 Not using OpenClaw? ShieldCortex also works with:
-- **Claude Code** — `npx shieldcortex setup` (native MCP server)
+- **Claude Code** — `shieldcortex setup` (native MCP server)
 - **LangChain JS** — Import as a memory provider
 - **Any MCP-compatible agent** — Via the MCP protocol
 - **REST API** — For Python agents (CrewAI, AutoGPT, etc.)
@@ -136,9 +137,9 @@ Not using OpenClaw? ShieldCortex also works with:
 
 ```bash
 npm install -g shieldcortex
-npx shieldcortex openclaw install
+shieldcortex openclaw install
 # restart openclaw
-npx shieldcortex openclaw status
+shieldcortex openclaw status
 ```
 
 Then in your next session, say "remember this: testing ShieldCortex memory" and watch it save.

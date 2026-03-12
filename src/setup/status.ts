@@ -134,7 +134,7 @@ export async function handleStatusCommand(): Promise<void> {
 
   ⚠️  No database found at: ${dbPath}
 
-  Run 'npx shieldcortex setup' to get started.
+  Run 'shieldcortex setup' to get started.
 `);
     return;
   }

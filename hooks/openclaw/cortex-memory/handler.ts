@@ -515,7 +515,7 @@ async function onBootstrap(event) {
       context.bootstrapFiles.push({
         name: "SHIELDCORTEX_WARNINGS.md",
         path: path.join(wsDir, "SHIELDCORTEX_WARNINGS.md"),
-        content: `# ShieldCortex Security Warning\n\nThe following installed hooks have been flagged as potentially unsafe:\n\n${warnings}\n\nConsider running: \`npx shieldcortex scan-skills\` for a detailed report.`,
+        content: `# ShieldCortex Security Warning\n\nThe following installed hooks have been flagged as potentially unsafe:\n\n${warnings}\n\nConsider running: \`shieldcortex scan-skills\` for a detailed report.`,
       });
       console.log(`[cortex-memory] WARNING: ${threats.length} hook(s) flagged as potentially unsafe`);
     }

@@ -64,7 +64,7 @@ After `shieldcortex openclaw install`, the hook activates on next restart:
 
 Enable auto-memory:
 ```bash
-npx shieldcortex config --openclaw-auto-memory
+shieldcortex config --openclaw-auto-memory
 ```
 
 ### CLI Commands

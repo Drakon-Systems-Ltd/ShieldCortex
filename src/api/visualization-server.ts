@@ -834,7 +834,7 @@ export function startVisualizationServer(dbPath?: string): void {
       console.error(`Another ShieldCortex instance may be running.\n`);
       console.error(`  To fix:`);
       console.error(`    1. Kill the existing process: lsof -ti :${PORT} | xargs kill`);
-      console.error(`    2. Or choose a different port: PORT=3002 npx shieldcortex --mode api\n`);
+      console.error(`    2. Or choose a different port: PORT=3002 shieldcortex --mode api\n`);
     } else {
       console.error(`[ShieldCortex] Server error: ${err.message}`);
     }

@@ -1,5 +1,5 @@
 /**
- * `npx shieldcortex doctor` — diagnostic checks for Cortex installation health.
+ * `shieldcortex doctor` — diagnostic checks for Cortex installation health.
  */
 
 import fs from 'fs';
@@ -73,14 +73,14 @@ function checkDatabase(): void {
 function checkClaudeMd(): void {
   const claudeMdPath = path.join(os.homedir(), '.claude', 'CLAUDE.md');
   if (!fs.existsSync(claudeMdPath)) {
-    add('WARN', 'CLAUDE.md not found — run `npx shieldcortex setup`');
+    add('WARN', 'CLAUDE.md not found — run `shieldcortex setup`');
     return;
   }
   const content = fs.readFileSync(claudeMdPath, 'utf-8');
   if (content.includes('# ShieldCortex')) {
     add('PASS', 'CLAUDE.md: Cortex instructions present');
   } else {
-    add('WARN', 'CLAUDE.md: Cortex instructions not found — run `npx shieldcortex setup`');
+    add('WARN', 'CLAUDE.md: Cortex instructions not found — run `shieldcortex setup`');
   }
 }
 
@@ -138,9 +138,9 @@ function checkOpenClawHooks(): void {
 
   if (legacyHookDir) {
     if (newHookDir) {
-      add('WARN', 'OpenClaw hook: found in BOTH ~/.clawdbot/ and ~/.openclaw/ — remove legacy with `npx shieldcortex migrate`');
+      add('WARN', 'OpenClaw hook: found in BOTH ~/.clawdbot/ and ~/.openclaw/ — remove legacy with `shieldcortex migrate`');
     } else {
-      add('FAIL', 'OpenClaw hook: only in legacy ~/.clawdbot/hooks/ — run `npx shieldcortex migrate` to fix');
+      add('FAIL', 'OpenClaw hook: only in legacy ~/.clawdbot/hooks/ — run `shieldcortex migrate` to fix');
     }
     return;
   }
@@ -152,7 +152,7 @@ function checkOpenClawHooks(): void {
     if (fs.existsSync(hookMd) && fs.existsSync(handler)) {
       add('PASS', `OpenClaw hook: installed at ${newHookDir.replace(home, '~')}/`);
     } else {
-      add('FAIL', 'OpenClaw hook: directory exists but files missing — reinstall with `npx shieldcortex openclaw install`');
+      add('FAIL', 'OpenClaw hook: directory exists but files missing — reinstall with `shieldcortex openclaw install`');
     }
     return;
   }
@@ -160,7 +160,7 @@ function checkOpenClawHooks(): void {
   // Check if OpenClaw is even installed
   const openclawDir = path.join(home, '.openclaw');
   if (fs.existsSync(openclawDir)) {
-    add('WARN', 'OpenClaw detected but cortex-memory hook not installed — run `npx shieldcortex openclaw install`');
+    add('WARN', 'OpenClaw detected but cortex-memory hook not installed — run `shieldcortex openclaw install`');
   }
   // If no .openclaw dir, user probably isn't using OpenClaw — skip silently
 }

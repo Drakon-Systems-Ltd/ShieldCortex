@@ -11,14 +11,14 @@ This lets OpenClaw keep its native memory behavior while ShieldCortex adds secur
 
 ```bash
 npm install -g shieldcortex
-npx shieldcortex openclaw install
+shieldcortex openclaw install
 openclaw gateway restart
 ```
 
 Check status:
 
 ```bash
-npx shieldcortex openclaw status
+shieldcortex openclaw status
 ```
 
 ## What gets installed
@@ -51,17 +51,17 @@ This avoids duplicate/noisy writes for users who already rely on OpenClaw memory
 CLI:
 
 ```bash
-npx shieldcortex config --openclaw-auto-memory true
+shieldcortex config --openclaw-auto-memory true
 ```
 
 Disable:
 
 ```bash
-npx shieldcortex config --openclaw-auto-memory false
+shieldcortex config --openclaw-auto-memory false
 ```
 
 Dashboard:
-- Start dashboard with `npx shieldcortex --dashboard`
+- Start dashboard with `shieldcortex --dashboard`
 - Open `Shield Overview -> OpenClaw Memory`
 - Toggle auto-memory and dedupe settings
 
@@ -107,9 +107,9 @@ which openclaw
 ```
 
 Hook/plugin not active after install:
-1. Run `npx shieldcortex openclaw status`
+1. Run `shieldcortex openclaw status`
 2. Restart OpenClaw gateway
-3. Reinstall with `npx shieldcortex openclaw install`
+3. Reinstall with `shieldcortex openclaw install`
 
 Auto-memory not saving:
 1. Confirm `openclawAutoMemory` is enabled
@@ -119,7 +119,7 @@ Auto-memory not saving:
 ## Uninstall
 
 ```bash
-npx shieldcortex openclaw uninstall
+shieldcortex openclaw uninstall
 ```
 
 ## Related

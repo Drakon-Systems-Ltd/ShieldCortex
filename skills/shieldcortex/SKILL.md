@@ -194,7 +194,7 @@ Built-in backends: `MarkdownMemoryBackend`, `OpenClawMarkdownBackend`. Implement
 When using the OpenClaw hook, auto-memory extraction is off by default. Enable it to automatically extract memories from session output:
 
 ```bash
-npx shieldcortex config --openclaw-auto-memory
+shieldcortex config --openclaw-auto-memory
 ```
 
 When enabled, the system deduplicates against recent memories to avoid storing duplicates. Configure with:

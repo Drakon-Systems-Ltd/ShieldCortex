@@ -140,7 +140,7 @@ export function handleCloudConfig(args: string[]): void {
   }
 
   if (!changed) {
-    console.log('Usage: npx shieldcortex config [options]');
+    console.log('Usage: shieldcortex config [options]');
     console.log('');
     console.log('Options:');
     console.log('  --mode <mode>          Set defence mode (strict|balanced|permissive)');

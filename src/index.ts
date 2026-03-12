@@ -613,7 +613,7 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'scan') {
     const text = process.argv[3];
     if (!text) {
-      console.error('Usage: npx shieldcortex scan "text to analyse"');
+      console.error('Usage: shieldcortex scan "text to analyse"');
       console.error('  Runs the defence pipeline (firewall + trust + sensitivity).');
       console.error('  No MCP server or ML model required — works on ARM64.');
       process.exit(1);
@@ -669,7 +669,7 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'scan-skill') {
     const filePath = process.argv[3];
     if (!filePath) {
-      console.error('Usage: npx shieldcortex scan-skill <path>');
+      console.error('Usage: shieldcortex scan-skill <path>');
       console.error('  Scans an agent instruction file for threats.');
       console.error('  Supports: SKILL.md, HOOK.md, handler.js, .cursorrules,');
       console.error('  .windsurfrules, .clinerules, CLAUDE.md, copilot-instructions.md,');

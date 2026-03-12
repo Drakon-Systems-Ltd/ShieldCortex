@@ -55,7 +55,7 @@ export async function requireConfirmation(action: string): Promise<boolean> {
   if (!process.stdin.isTTY) {
     console.error(`\nUninstall blocked: no interactive terminal detected.`);
     console.error(`Use --confirm flag for non-interactive uninstall:`);
-    console.error(`  npx shieldcortex ${action} --confirm\n`);
+    console.error(`  shieldcortex ${action} --confirm\n`);
     return false;
   }
 
