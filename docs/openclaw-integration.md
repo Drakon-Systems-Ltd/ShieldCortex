@@ -15,6 +15,19 @@ shieldcortex openclaw install
 openclaw gateway restart
 ```
 
+If install fails with `permission denied`, use one of these:
+
+```bash
+sudo "$(command -v shieldcortex)" openclaw install
+```
+
+Or fix ownership so future installs work without `sudo`:
+
+```bash
+sudo chown -R "$USER":"$USER" ~/.openclaw ~/.claude
+shieldcortex openclaw install
+```
+
 Check status:
 
 ```bash
@@ -110,6 +123,11 @@ Hook/plugin not active after install:
 1. Run `shieldcortex openclaw status`
 2. Restart OpenClaw gateway
 3. Reinstall with `shieldcortex openclaw install`
+
+Permission denied during install:
+1. Check where the binary lives with `command -v shieldcortex`
+2. Run `sudo "$(command -v shieldcortex)" openclaw install`
+3. Or fix directory ownership with `sudo chown -R "$USER":"$USER" ~/.openclaw ~/.claude`
 
 Auto-memory not saving:
 1. Confirm `openclawAutoMemory` is enabled

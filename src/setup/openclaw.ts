@@ -391,7 +391,10 @@ export async function installOpenClawHook(): Promise<void> {
 
   if (installed === 0) {
     console.error('Could not install to any hook directory (permission denied).');
-    console.log('Try running with sudo, or fix permissions on your hooks directories.');
+    console.log('Try one of these:');
+    console.log('  sudo "$(command -v shieldcortex)" openclaw install');
+    console.log('  sudo chown -R "$USER":"$USER" ~/.openclaw ~/.claude');
+    console.log('  shieldcortex openclaw install');
     process.exit(1);
   }
 

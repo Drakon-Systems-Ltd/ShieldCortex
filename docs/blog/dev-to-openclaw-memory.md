@@ -12,7 +12,13 @@ If you're running [OpenClaw](https://github.com/openclaw/openclaw) (or its prede
 
 ```bash
 npm install -g shieldcortex
-sudo shieldcortex openclaw install
+shieldcortex openclaw install
+```
+
+If the hook directories are root-owned and install fails with `permission denied`, run:
+
+```bash
+sudo "$(command -v shieldcortex)" openclaw install
 ```
 
 Restart OpenClaw. Done.
@@ -116,13 +122,20 @@ That's it. No Docker. No external services. No API keys.
 
 ```bash
 # Install the hook
-sudo shieldcortex openclaw install
+shieldcortex openclaw install
 
 # Check OpenClaw integration status
 shieldcortex openclaw status
 
 # Uninstall if needed
-sudo shieldcortex openclaw uninstall
+shieldcortex openclaw uninstall
+```
+
+If install or uninstall fails with `permission denied`, use:
+
+```bash
+sudo "$(command -v shieldcortex)" openclaw install
+sudo "$(command -v shieldcortex)" openclaw uninstall
 ```
 
 ## Beyond OpenClaw

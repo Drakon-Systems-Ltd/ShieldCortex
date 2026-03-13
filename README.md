@@ -283,6 +283,19 @@ ShieldCortex is a first-class citizen in [OpenClaw](https://github.com/openclaw)
 shieldcortex openclaw install
 ```
 
+If the install fails with `permission denied`, use:
+
+```bash
+sudo "$(command -v shieldcortex)" openclaw install
+```
+
+Or fix ownership and retry without `sudo`:
+
+```bash
+sudo chown -R "$USER":"$USER" ~/.openclaw ~/.claude
+shieldcortex openclaw install
+```
+
 This installs **two components** that work together:
 
 ### Hook — Session Lifecycle Memory
