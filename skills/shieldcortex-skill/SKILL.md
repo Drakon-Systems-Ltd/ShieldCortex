@@ -2,6 +2,14 @@
 
 Give your AI agent a brain that persists between sessions — and protect it from memory poisoning attacks.
 
+## Safety & Scope
+
+- This skill is documentation for a local tool. It does not auto-install packages, auto-run shell commands, or grant itself filesystem/network access.
+- Installation commands below are manual setup steps for the user to run explicitly outside the skill when they choose to enable ShieldCortex.
+- Local memory mode does not require credentials. An API key is only needed if the user explicitly enables ShieldCortex Cloud.
+- File scanning should be limited to paths the user names or consents to. Do not scan unrelated skills, prompts, repos, or home-directory files by default.
+- `shieldcortex install` and `shieldcortex openclaw install` write local MCP or hook configuration files for the selected agent environment. They are setup commands, not background deployment or remote access.
+
 ## Description
 
 ShieldCortex is a complete memory system with built-in security. It gives AI agents persistent, intelligent memory with semantic search, knowledge graphs, decay-based forgetting, and contradiction detection. Every memory write passes through a 6-layer defence pipeline that blocks prompt injection, credential leaks, and poisoning attacks. Iron Dome adds behavioural protection with action gates, security profiles, and full audit trails.
@@ -28,7 +36,9 @@ ShieldCortex is a complete memory system with built-in security. It gives AI age
 - Node.js >= 18
 - npm or pnpm (or pip for Python)
 
-## Install
+## Manual Setup
+
+Run these only if the user explicitly wants ShieldCortex installed in their environment.
 
 ```bash
 npm install -g shieldcortex
@@ -51,6 +61,8 @@ For Claude Code / VS Code / Cursor MCP integration:
 ```bash
 shieldcortex install
 ```
+
+`shieldcortex install` configures local MCP settings such as `~/.codex/config.toml`, `~/.claude.json`, or project MCP config files, depending on the target integration.
 
 ## Quick Start
 
@@ -78,9 +90,6 @@ shieldcortex scan "some text to check"
 
 # Full security audit of your agent environment
 shieldcortex audit
-
-# Scan all installed skills/instruction files for hidden threats
-shieldcortex scan-skills
 
 # Scan a single skill file
 shieldcortex scan-skill ./path/to/SKILL.md
@@ -190,6 +199,8 @@ const bridge = new ShieldCortexGuardedMemoryBridge({
 
 Built-in backends: `MarkdownMemoryBackend`, `OpenClawMarkdownBackend`. Implement the backend interface for custom storage.
 
+ShieldCortex does not discover or connect to third-party backends on its own. The host application must explicitly provide the backend object and any credentials it uses.
+
 ## ShieldCortex Cloud (Optional)
 
 Sync audit data to a team dashboard for cross-project visibility:
@@ -199,6 +210,7 @@ shieldcortex config set-api-key <your-key>
 ```
 
 Free local package is unlimited. Cloud adds team dashboards, audit aggregation, and alerts.
+No cloud credentials are required unless the user opts into this feature.
 
 ## Links
 

@@ -4,7 +4,7 @@ description: Persistent memory system with security for AI agents. Remembers dec
 license: MIT
 metadata:
   author: Drakon Systems
-  version: 2.17.0
+  version: 3.4.2
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome]
@@ -13,6 +13,14 @@ metadata:
 # ShieldCortex — Persistent Memory & Security for AI Agents
 
 Give your agent a brain that persists between sessions and protect it from memory poisoning attacks.
+
+## Safety & Scope
+
+- This skill documents a local memory/security tool. It does not auto-install packages or silently execute shell commands.
+- Any install command shown here is a manual setup step for the user to approve and run explicitly.
+- Local ShieldCortex usage does not require credentials. API keys are optional and only needed for ShieldCortex Cloud.
+- Only scan instruction files or other prompts when the user has named the path or clearly asked for that review.
+- `shieldcortex install` writes local MCP configuration; it does not deploy a remote service or request background privileges.
 
 ## When to Use This Skill
 
@@ -26,7 +34,7 @@ Give your agent a brain that persists between sessions and protect it from memor
 
 ## Setup
 
-Install the npm package globally, then configure the MCP server:
+Install the npm package globally, then configure the MCP server, only when the user explicitly wants ShieldCortex enabled:
 
 ```bash
 npm install -g shieldcortex
@@ -154,6 +162,7 @@ await bridge.write({ title: 'Decision', content: 'Use PostgreSQL' });
 ```
 
 Built-in backends: `MarkdownMemoryBackend`, `OpenClawMarkdownBackend`. Implement the backend interface for custom storage.
+ShieldCortex does not auto-discover remote backends or obtain their credentials; the host application must wire that in explicitly.
 
 ## Project Scoping
 

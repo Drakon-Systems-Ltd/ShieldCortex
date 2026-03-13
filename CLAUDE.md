@@ -64,7 +64,12 @@ clawhub publish ./skills/shieldcortex-skill \
 
 If `clawhub` CLI isn't authenticated: `clawhub login --token <token>` (token from ClawHub Settings → API tokens, account: jarvis-drakon).
 
-**The ClawHub skill SKILL.md lives at:** The workspace skill folder that was published. If the SKILL.md needs updating, update it and re-publish with the new version.
+**Important:** there are two skill files in this repo:
+
+- `skills/shieldcortex-skill/SKILL.md` = ClawHub/published marketplace skill
+- `skills/shieldcortex/SKILL.md` = local agent-skill variant with frontmatter and tool workflow guidance
+
+If messaging, safety wording, or install guidance changes, update both formats. See [`skills/README.md`](skills/README.md).
 
 ### Quick one-liner for releases:
 ```bash
@@ -78,6 +83,12 @@ npm run build && npm publish && git tag v$(node -p "require('./package.json').ve
 - **SKILL.md location:** `skills/shieldcortex-skill/SKILL.md` (in this repo)
 - **Install:** `clawhub install shieldcortex`
 - Users install the skill to get the SKILL.md that teaches their agent how to use ShieldCortex
+
+## Local Skill Variant
+
+- **Path:** `skills/shieldcortex/SKILL.md`
+- **Purpose:** local agent-skill format with frontmatter and explicit tool workflow instructions
+- **Do not publish this file to ClawHub directly**
 
 ## Dev.to Articles
 
