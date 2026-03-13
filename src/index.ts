@@ -32,7 +32,7 @@
  *   shieldcortex service repair          # Rebuild persistent service with current install path
  *   shieldcortex service uninstall       # Remove persistent service
  *   shieldcortex service status          # Check service status
- *   shieldcortex openclaw install        # Install OpenClaw hook
+ *   shieldcortex openclaw install        # Install OpenClaw hook/plugin (compatibility wrapper)
  *   shieldcortex openclaw uninstall      # Remove OpenClaw hook
  *   shieldcortex openclaw status         # Check OpenClaw hook status
  *   shieldcortex config --openclaw-auto-memory true   # Enable OpenClaw auto-memory extraction

@@ -343,7 +343,8 @@ export async function installOpenClawHook(): Promise<void> {
     console.error(`  OpenClaw binary found: ${isOpenClawInstalled()}`);
     console.error('');
     console.error('If OpenClaw is installed, try running directly:');
-    console.error('  shieldcortex openclaw install');
+    console.error('  openclaw hooks install shieldcortex');
+    console.error('  openclaw plugins install shieldcortex');
     console.error('');
     console.error('Or install OpenClaw first:');
     console.error('  npm install -g openclaw');
@@ -408,6 +409,10 @@ export async function installOpenClawHook(): Promise<void> {
   if (pluginInstalled) {
     console.log('  • shieldcortex-realtime plugin (real-time LLM input scanning + optional output extraction)');
   }
+  console.log('');
+  console.log('Native OpenClaw install is also supported:');
+  console.log('  openclaw hooks install shieldcortex');
+  console.log('  openclaw plugins install shieldcortex');
   console.log('');
   console.log('Restart your agent to activate.');
 }

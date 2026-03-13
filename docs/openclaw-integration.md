@@ -9,13 +9,25 @@ This lets OpenClaw keep its native memory behavior while ShieldCortex adds secur
 
 ## Install
 
+### Native OpenClaw install (preferred)
+
+```bash
+openclaw hooks install shieldcortex
+openclaw plugins install shieldcortex
+openclaw gateway restart
+```
+
+This uses OpenClaw's native npm hook-pack and plugin-pack install flow.
+
+### ShieldCortex wrapper (compatibility path)
+
 ```bash
 npm install -g shieldcortex
 shieldcortex openclaw install
 openclaw gateway restart
 ```
 
-If install fails with `permission denied`, use one of these:
+If the wrapper install fails with `permission denied`, use one of these:
 
 ```bash
 sudo "$(command -v shieldcortex)" openclaw install
@@ -36,7 +48,7 @@ shieldcortex openclaw status
 
 ## What gets installed
 
-`shieldcortex openclaw install` installs both components:
+The native OpenClaw commands above install both components separately. The `shieldcortex openclaw install` wrapper also installs both components:
 
 1. `cortex-memory` hook
 - Path: `~/.openclaw/hooks/internal/cortex-memory/` (or `~/.openclaw/hooks/cortex-memory/` on some installs)
@@ -122,7 +134,7 @@ which openclaw
 Hook/plugin not active after install:
 1. Run `shieldcortex openclaw status`
 2. Restart OpenClaw gateway
-3. Reinstall with `shieldcortex openclaw install`
+3. Reinstall with `openclaw hooks install shieldcortex` and `openclaw plugins install shieldcortex`
 
 Permission denied during install:
 1. Check where the binary lives with `command -v shieldcortex`

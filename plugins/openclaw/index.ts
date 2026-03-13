@@ -177,17 +177,29 @@ async function callCortex(tool: string, args: Record<string, string> = {}): Prom
   return (await getRuntime()).callCortex(tool, args);
 }
 
-// ==================== DEFENCE PIPELINE ====================
+// ==================== REMOTE SCANNING ====================
 
-let _pipeline: ((content: string, title: string, source: any, config?: any, project?: string) => any) | null = null;
+async function scanRealtimeContent(text: string): Promise<{ clean: boolean; summary: string }> {
+  const response = await callCortex("scan_tool_response", {
+    toolName: "openclaw-realtime",
+    content: text,
+    mode: "advisory",
+  });
 
-async function getPipeline() {
-  if (_pipeline) return _pipeline;
-  try {
-    const mod = await import("shieldcortex/defence");
-    _pipeline = mod.runDefencePipeline;
-    return _pipeline;
-  } catch { return null; }
+  if (!response) {
+    return { clean: true, summary: "scan unavailable" };
+  }
+
+  const cleanMatch = response.match(/\*\*Clean:\*\*\s*(Yes|No)/i);
+  const riskMatch = response.match(/\*\*Risk Level:\*\*\s*([A-Za-z]+)/i);
+  const detectionsMatch = response.match(/\*\*Detections:\*\*\s*(\d+)/i);
+
+  const clean = cleanMatch ? /yes/i.test(cleanMatch[1]) : true;
+  const risk = riskMatch?.[1] ?? "unknown";
+  const detections = detectionsMatch?.[1];
+  const summary = detections ? `${risk} (${detections} detections)` : risk;
+
+  return { clean, summary };
 }
 
 // ==================== CONTENT PATTERNS ====================
@@ -428,20 +440,17 @@ function handleLlmInput(event: LlmInputEvent, ctx: AgentCtx): void {
   // Fire and forget
   (async () => {
     try {
-      const pipeline = await getPipeline();
-      if (!pipeline) return;
-
       // Only scan user content, skip system/boot/heartbeat prompts
       const userTexts = extractUserContent(event.historyMessages).slice(-5);
       const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t));
       for (const text of texts) {
         if (!text || text.length < 10) continue;
-        const result = pipeline(text, "llm_input", { type: "plugin", identifier: "openclaw-realtime", name: "openclaw-realtime", trust: "medium" });
-        if (result && !result.allowed) {
-          console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.reason}`);
+        const result = await scanRealtimeContent(text);
+        if (!result.clean) {
+          console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary}`);
           const entry = {
             type: "threat", hook: "llm_input", sessionId: event.sessionId,
-            model: event.model, reason: result.reason,
+            model: event.model, reason: result.summary,
             preview: text.slice(0, 100), ts: new Date().toISOString(),
           };
           auditLog(entry);
@@ -524,13 +533,6 @@ export default {
   register(api: PluginApi) {
     api.on("llm_input", handleLlmInput);
     api.on("llm_output", handleLlmOutput);
-    // Fire-and-forget: init database for local audit logging
-    import("shieldcortex")
-      .then((mod) => {
-        mod.initDatabase();
-        api.logger.info("[shieldcortex] Audit database initialized");
-      })
-      .catch((e) => api.logger.info("[shieldcortex] DB init deferred: " + (e instanceof Error ? e.message : String(e))));
     api.logger.info("[shieldcortex] Real-time scanning plugin registered (llm_input + llm_output)");
   },
 };

@@ -11,11 +11,18 @@ I got tired of it. So I built something.
 If you're running [OpenClaw](https://github.com/openclaw/openclaw) (or its predecessors Clawdbot/Moltbot), here's all you need:
 
 ```bash
+openclaw hooks install shieldcortex
+openclaw plugins install shieldcortex
+```
+
+Or use the ShieldCortex compatibility wrapper:
+
+```bash
 npm install -g shieldcortex
 shieldcortex openclaw install
 ```
 
-If the hook directories are root-owned and install fails with `permission denied`, run:
+If the wrapper install fails with `permission denied`, run:
 
 ```bash
 sudo "$(command -v shieldcortex)" openclaw install
@@ -122,7 +129,8 @@ That's it. No Docker. No external services. No API keys.
 
 ```bash
 # Install the hook
-shieldcortex openclaw install
+openclaw hooks install shieldcortex
+openclaw plugins install shieldcortex
 
 # Check OpenClaw integration status
 shieldcortex openclaw status
@@ -131,7 +139,13 @@ shieldcortex openclaw status
 shieldcortex openclaw uninstall
 ```
 
-If install or uninstall fails with `permission denied`, use:
+If you prefer the compatibility wrapper instead of the native OpenClaw commands:
+
+```bash
+shieldcortex openclaw install
+```
+
+If the wrapper install or uninstall fails with `permission denied`, use:
 
 ```bash
 sudo "$(command -v shieldcortex)" openclaw install
@@ -149,8 +163,8 @@ Not using OpenClaw? ShieldCortex also works with:
 ## Try It
 
 ```bash
-npm install -g shieldcortex
-shieldcortex openclaw install
+openclaw hooks install shieldcortex
+openclaw plugins install shieldcortex
 # restart openclaw
 shieldcortex openclaw status
 ```

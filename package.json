@@ -89,6 +89,14 @@
     "type": "git",
     "url": "git+https://github.com/Drakon-Systems-Ltd/ShieldCortex.git"
   },
+  "openclaw": {
+    "hooks": [
+      "./hooks/openclaw/cortex-memory"
+    ],
+    "extensions": [
+      "./plugins/openclaw/dist/index.js"
+    ]
+  },
   "homepage": "https://github.com/Drakon-Systems-Ltd/ShieldCortex#readme",
   "bugs": {
     "url": "https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues"

@@ -152,7 +152,7 @@ function checkOpenClawHooks(): void {
     if (fs.existsSync(hookMd) && fs.existsSync(handler)) {
       add('PASS', `OpenClaw hook: installed at ${newHookDir.replace(home, '~')}/`);
     } else {
-      add('FAIL', 'OpenClaw hook: directory exists but files missing — reinstall with `shieldcortex openclaw install`');
+      add('FAIL', 'OpenClaw hook: directory exists but files missing — reinstall with `openclaw hooks install shieldcortex` or `shieldcortex openclaw install`');
     }
     return;
   }
@@ -160,7 +160,7 @@ function checkOpenClawHooks(): void {
   // Check if OpenClaw is even installed
   const openclawDir = path.join(home, '.openclaw');
   if (fs.existsSync(openclawDir)) {
-    add('WARN', 'OpenClaw detected but cortex-memory hook not installed — run `shieldcortex openclaw install`');
+    add('WARN', 'OpenClaw detected but cortex-memory hook not installed — run `openclaw hooks install shieldcortex` or `shieldcortex openclaw install`');
   }
   // If no .openclaw dir, user probably isn't using OpenClaw — skip silently
 }

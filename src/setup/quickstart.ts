@@ -106,7 +106,9 @@ function printAutoGuide(): void {
   lines.push('');
   lines.push('Direct commands:');
   lines.push('  shieldcortex setup');
-  lines.push('  shieldcortex openclaw install');
+  lines.push('  openclaw hooks install shieldcortex');
+  lines.push('  openclaw plugins install shieldcortex');
+  lines.push('  # or compatibility wrapper: shieldcortex openclaw install');
   lines.push('  shieldcortex copilot install');
   lines.push('  shieldcortex codex install');
   lines.push('  shieldcortex dashboard');

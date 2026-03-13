@@ -154,7 +154,9 @@ Stars don't transfer on rename/move. The 46 stars on claude-cortex are used for 
 
 - [ ] `npx shieldcortex scan "text"` — must work as CLI
 - [ ] `npx shieldcortex status` — must show DB stats
-- [ ] `npx shieldcortex openclaw install` — must install hook to `~/.openclaw/hooks/`
+- [ ] `openclaw hooks install shieldcortex` — native hook-pack install must work
+- [ ] `openclaw plugins install shieldcortex` — native plugin-pack install must work
+- [ ] `npx shieldcortex openclaw install` — compatibility wrapper must still work
 - [ ] `import('shieldcortex')` — must return exports, not crash
 - [ ] `import('shieldcortex/defence')` — must export defence pipeline
 - [ ] `import('shieldcortex/lib')` — must export all APIs

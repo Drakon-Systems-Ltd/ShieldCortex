@@ -11,15 +11,23 @@ Real-time defence scanning and memory extraction for OpenClaw v2026.2.15+.
 
 ## Installation
 
-### Automatic (recommended)
+### Native OpenClaw install (recommended)
+
+```bash
+openclaw plugins install shieldcortex
+openclaw hooks install shieldcortex
+openclaw gateway restart
+```
+
+This installs the plugin through OpenClaw's native package flow. The extra `hooks install` command adds the companion session hook.
+
+### ShieldCortex wrapper (compatibility path)
 
 ```bash
 npm install -g shieldcortex
 shieldcortex openclaw install
 openclaw gateway restart
 ```
-
-The plugin is copied to `~/.openclaw/extensions/shieldcortex-realtime/` where OpenClaw discovers it automatically.
 
 ### Manual
 
@@ -36,7 +44,7 @@ Find the package root with `npm root -g` (global) or `npm root` (local).
 ## Requirements
 
 - OpenClaw v2026.2.15+ (needs `llm_input`/`llm_output` plugin hooks)
-- ShieldCortex installed globally (`npm i -g shieldcortex`) or at `~/ShieldCortex/`
+- ShieldCortex available globally (`npm i -g shieldcortex`) or via `npx -y shieldcortex`
 - `mcporter` available via npx (for memory saves)
 
 ## Auto-Memory
