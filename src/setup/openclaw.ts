@@ -231,6 +231,10 @@ function removeLegacyHookVariants(hooksDir: string): string[] {
   return removed;
 }
 
+function detectLegacyHookVariants(hooksDir: string): string[] {
+  return legacyHookDirs(hooksDir).filter(dir => fs.existsSync(dir));
+}
+
 // ==================== Cleanup Legacy Plugin ====================
 
 /**
@@ -425,14 +429,20 @@ export async function installOpenClawHook(): Promise<void> {
 
   // Install to ALL detected hook directories
   let installed = 0;
+  let migratedLegacy = 0;
   for (const hooksDir of hooksDirs) {
     const destDir = preferredHookDir(hooksDir);
     try {
+      const legacyDirsBeforeInstall = detectLegacyHookVariants(hooksDir);
       copyHookFiles(HOOK_SOURCE, destDir);
 
       console.log(`Installed cortex-memory hook to ${destDir}`);
+      if (legacyDirsBeforeInstall.length > 0) {
+        console.log(`Detected legacy OpenClaw hook layout in ${hooksDir} — migrating to ${destDir}`);
+      }
       for (const removedDir of removeLegacyHookVariants(hooksDir)) {
         console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
+        migratedLegacy++;
       }
       installed++;
     } catch (err) {
@@ -458,6 +468,10 @@ export async function installOpenClawHook(): Promise<void> {
   const pluginInstalled = installPlugin();
 
   console.log('');
+  if (migratedLegacy > 0) {
+    console.log(`Legacy OpenClaw hook cleanup completed (${migratedLegacy} old path${migratedLegacy === 1 ? '' : 's'} removed).`);
+    console.log('');
+  }
   console.log('What was installed:');
   console.log('  • cortex-memory hook (memory injection + "remember this:" trigger)');
   console.log('    Auto-save is optional: shieldcortex config --openclaw-auto-memory true');

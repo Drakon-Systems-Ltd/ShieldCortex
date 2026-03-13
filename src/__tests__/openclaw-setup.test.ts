@@ -63,6 +63,7 @@ describe('OpenClaw setup', () => {
     expect(fs.existsSync(path.join(preferredHookDir(), 'HOOK.md'))).toBe(true);
     expect(fs.existsSync(path.join(preferredHookDir(), 'handler.ts'))).toBe(true);
     expect(fs.existsSync(legacyHookDir())).toBe(false);
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Detected legacy OpenClaw hook layout'));
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Removed legacy cortex-memory hook'));
   });
 
