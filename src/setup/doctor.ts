@@ -129,15 +129,14 @@ function checkOpenClawHooks(): void {
     path.join(home, '.clawdbot', 'hooks', 'cortex-memory'),
     path.join(home, '.clawdbot', 'hooks', 'internal', 'cortex-memory'),
   ];
-  const newHookDirs = [
-    path.join(home, '.openclaw', 'hooks', 'cortex-memory'),
-    path.join(home, '.openclaw', 'hooks', 'internal', 'cortex-memory'),
-  ];
   const legacyHookDir = legacyHookDirs.find(d => fs.existsSync(d)) || null;
-  const newHookDir = newHookDirs.find(d => fs.existsSync(d)) || null;
+  const preferredHookDir = path.join(home, '.openclaw', 'hooks', 'cortex-memory');
+  const legacyOpenClawHookDir = path.join(home, '.openclaw', 'hooks', 'internal', 'cortex-memory');
+  const preferredHookExists = fs.existsSync(preferredHookDir);
+  const legacyOpenClawHookExists = fs.existsSync(legacyOpenClawHookDir);
 
   if (legacyHookDir) {
-    if (newHookDir) {
+    if (preferredHookExists || legacyOpenClawHookExists) {
       add('WARN', 'OpenClaw hook: found in BOTH ~/.clawdbot/ and ~/.openclaw/ — remove legacy with `shieldcortex migrate`');
     } else {
       add('FAIL', 'OpenClaw hook: only in legacy ~/.clawdbot/hooks/ — run `shieldcortex migrate` to fix');
@@ -145,12 +144,21 @@ function checkOpenClawHooks(): void {
     return;
   }
 
-  if (newHookDir) {
+  if (legacyOpenClawHookExists && !preferredHookExists) {
+    add('WARN', 'OpenClaw hook: only legacy ~/.openclaw/hooks/internal/cortex-memory found — run `shieldcortex openclaw install` to migrate');
+    return;
+  }
+
+  if (preferredHookExists) {
     // Verify hook files are intact
-    const hookMd = path.join(newHookDir, 'HOOK.md');
-    const handler = path.join(newHookDir, 'handler.ts');
+    const hookMd = path.join(preferredHookDir, 'HOOK.md');
+    const handler = path.join(preferredHookDir, 'handler.ts');
     if (fs.existsSync(hookMd) && fs.existsSync(handler)) {
-      add('PASS', `OpenClaw hook: installed at ${newHookDir.replace(home, '~')}/`);
+      if (legacyOpenClawHookExists) {
+        add('WARN', 'OpenClaw hook: installed in preferred path, but legacy duplicate exists in ~/.openclaw/hooks/internal/ — rerun `shieldcortex openclaw install` to clean up');
+      } else {
+        add('PASS', `OpenClaw hook: installed at ${preferredHookDir.replace(home, '~')}/`);
+      }
     } else {
       add('FAIL', 'OpenClaw hook: directory exists but files missing — reinstall with `openclaw hooks install shieldcortex` or `shieldcortex openclaw install`');
     }

@@ -27,6 +27,9 @@ shieldcortex openclaw install
 openclaw gateway restart
 ```
 
+The wrapper also migrates older hook installs out of
+`~/.openclaw/hooks/internal/cortex-memory` and removes duplicate legacy copies.
+
 If the wrapper install fails with `permission denied`, use one of these:
 
 ```bash
@@ -51,7 +54,7 @@ shieldcortex openclaw status
 The native OpenClaw commands above install both components separately. The `shieldcortex openclaw install` wrapper also installs both components:
 
 1. `cortex-memory` hook
-- Path: `~/.openclaw/hooks/internal/cortex-memory/` (or `~/.openclaw/hooks/cortex-memory/` on some installs)
+- Path: `~/.openclaw/hooks/cortex-memory/`
 - Handles session bootstrap context injection + explicit keyword saves
 
 2. `shieldcortex-realtime` plugin
@@ -135,6 +138,7 @@ Hook/plugin not active after install:
 1. Run `shieldcortex openclaw status`
 2. Restart OpenClaw gateway
 3. Reinstall with `openclaw hooks install shieldcortex` and `openclaw plugins install shieldcortex`
+4. If `status` shows a legacy `internal/cortex-memory` path, rerun `shieldcortex openclaw install` once to migrate and clean up duplicates
 
 Permission denied during install:
 1. Check where the binary lives with `command -v shieldcortex`

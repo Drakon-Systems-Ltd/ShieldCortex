@@ -24,6 +24,7 @@ const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOO
 // Plugin compiled output in plugins/openclaw/dist/ relative to project root
 const PLUGIN_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'dist');
 const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
+const HOOK_FILES = ['HOOK.md', 'handler.ts'] as const;
 
 /**
  * Resolve the real user's home directory.
@@ -165,6 +166,69 @@ export function findAllHooksDirs(): string[] {
   }
 
   return dirs;
+}
+
+function preferredHookDir(hooksDir: string): string {
+  return path.join(hooksDir, HOOK_NAME);
+}
+
+function legacyHookDirs(hooksDir: string): string[] {
+  return [path.join(hooksDir, 'internal', HOOK_NAME)];
+}
+
+function hasRequiredHookFiles(dir: string): boolean {
+  return HOOK_FILES.every(file => fs.existsSync(path.join(dir, file)));
+}
+
+function copyHookFiles(sourceDir: string, destDir: string): void {
+  fs.mkdirSync(destDir, { recursive: true });
+
+  for (const file of HOOK_FILES) {
+    const src = path.join(sourceDir, file);
+    const dest = path.join(destDir, file);
+    fs.copyFileSync(src, dest);
+
+    try {
+      fs.accessSync(dest, fs.constants.R_OK);
+    } catch {
+      console.error(`  Warning: ${dest} was copied but is not readable`);
+    }
+  }
+}
+
+function removeHookDir(dir: string): boolean {
+  if (!fs.existsSync(dir)) return false;
+  fs.rmSync(dir, { recursive: true, force: true });
+  return true;
+}
+
+function cleanupLegacyHookParents(hooksDir: string): void {
+  const internalDir = path.join(hooksDir, 'internal');
+  if (!fs.existsSync(internalDir)) return;
+
+  try {
+    if (fs.readdirSync(internalDir).length === 0) {
+      fs.rmdirSync(internalDir);
+    }
+  } catch {
+    // Best-effort cleanup only
+  }
+}
+
+function removeLegacyHookVariants(hooksDir: string): string[] {
+  const removed: string[] = [];
+
+  for (const legacyDir of legacyHookDirs(hooksDir)) {
+    if (removeHookDir(legacyDir)) {
+      removed.push(legacyDir);
+    }
+  }
+
+  if (removed.length > 0) {
+    cleanupLegacyHookParents(hooksDir);
+  }
+
+  return removed;
 }
 
 // ==================== Cleanup Legacy Plugin ====================
@@ -362,23 +426,14 @@ export async function installOpenClawHook(): Promise<void> {
   // Install to ALL detected hook directories
   let installed = 0;
   for (const hooksDir of hooksDirs) {
-    const destDir = path.join(hooksDir, HOOK_NAME);
+    const destDir = preferredHookDir(hooksDir);
     try {
-      fs.mkdirSync(destDir, { recursive: true });
-
-      for (const file of ['HOOK.md', 'handler.ts']) {
-        const src = path.join(HOOK_SOURCE, file);
-        const dest = path.join(destDir, file);
-        fs.copyFileSync(src, dest);
-
-        try {
-          fs.accessSync(dest, fs.constants.R_OK);
-        } catch {
-          console.error(`  Warning: ${dest} was copied but is not readable`);
-        }
-      }
+      copyHookFiles(HOOK_SOURCE, destDir);
 
       console.log(`Installed cortex-memory hook to ${destDir}`);
+      for (const removedDir of removeLegacyHookVariants(hooksDir)) {
+        console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
+      }
       installed++;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
@@ -428,10 +483,14 @@ export async function uninstallOpenClawHook(): Promise<void> {
   let removed = 0;
 
   for (const hooksDir of hooksDirs) {
-    const destDir = path.join(hooksDir, HOOK_NAME);
-    if (fs.existsSync(destDir)) {
-      fs.rmSync(destDir, { recursive: true });
+    const destDir = preferredHookDir(hooksDir);
+    if (removeHookDir(destDir)) {
       console.log(`Removed cortex-memory hook from ${destDir}`);
+      removed++;
+    }
+
+    for (const removedDir of removeLegacyHookVariants(hooksDir)) {
+      console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
       removed++;
     }
   }
@@ -459,10 +518,19 @@ export async function openClawHookStatus(): Promise<void> {
   console.log('');
 
   for (const hooksDir of hooksDirs) {
-    const destDir = path.join(hooksDir, HOOK_NAME);
-    const installed = fs.existsSync(destDir);
+    const destDir = preferredHookDir(hooksDir);
+    const installed = hasRequiredHookFiles(destDir);
+    const legacyDirs = legacyHookDirs(hooksDir).filter(dir => fs.existsSync(dir));
+
     console.log(`  ${hooksDir}`);
     console.log(`    cortex-memory: ${installed ? 'installed' : 'not installed'}`);
+    if (legacyDirs.length > 0) {
+      if (installed) {
+        console.log(`    legacy duplicates: ${legacyDirs.map(dir => path.relative(hooksDir, dir)).join(', ')} — rerun \`shieldcortex openclaw install\` to clean up`);
+      } else {
+        console.log(`    legacy install: ${legacyDirs.map(dir => path.relative(hooksDir, dir)).join(', ')} — rerun \`shieldcortex openclaw install\` to migrate`);
+      }
+    }
   }
 
   console.log('');

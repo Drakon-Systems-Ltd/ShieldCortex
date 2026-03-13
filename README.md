@@ -290,6 +290,9 @@ Or use the ShieldCortex compatibility wrapper:
 shieldcortex openclaw install
 ```
 
+The wrapper also normalizes older hook installs by moving/removing legacy
+`~/.openclaw/hooks/internal/cortex-memory` copies.
+
 If the wrapper install fails with `permission denied`, use:
 
 ```bash
