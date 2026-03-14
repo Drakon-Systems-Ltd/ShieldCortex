@@ -13,11 +13,13 @@ This lets OpenClaw keep its native memory behavior while ShieldCortex adds secur
 
 ```bash
 openclaw hooks install shieldcortex
-openclaw plugins install shieldcortex
+openclaw plugins install @drakon-systems/shieldcortex-realtime
 openclaw gateway restart
 ```
 
-This uses OpenClaw's native npm hook-pack and plugin-pack install flow.
+This uses OpenClaw's native npm hook-pack and plugin-pack install flow. The
+hook comes from `shieldcortex`; the real-time plugin comes from the standalone
+`@drakon-systems/shieldcortex-realtime` package.
 
 ### ShieldCortex wrapper (compatibility path)
 
@@ -51,7 +53,9 @@ shieldcortex openclaw status
 
 ## What gets installed
 
-The native OpenClaw commands above install both components separately. The `shieldcortex openclaw install` wrapper also installs both components:
+The native OpenClaw commands above install both components separately. Existing
+wrapper-based installs can keep using `shieldcortex openclaw install`. The
+wrapper also installs both components:
 
 1. `cortex-memory` hook
 - Path: `~/.openclaw/hooks/cortex-memory/`
@@ -137,7 +141,7 @@ which openclaw
 Hook/plugin not active after install:
 1. Run `shieldcortex openclaw status`
 2. Restart OpenClaw gateway
-3. Reinstall with `openclaw hooks install shieldcortex` and `openclaw plugins install shieldcortex`
+3. Reinstall with `openclaw hooks install shieldcortex` and `openclaw plugins install @drakon-systems/shieldcortex-realtime`
 4. If `status` shows a legacy `internal/cortex-memory` path, rerun `shieldcortex openclaw install` once to migrate and clean up duplicates
 
 Permission denied during install:

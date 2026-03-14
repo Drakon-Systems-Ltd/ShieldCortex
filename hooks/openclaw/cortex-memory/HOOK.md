@@ -117,13 +117,13 @@ openclaw hooks install shieldcortex
 Optional companion real-time plugin:
 
 ```bash
-openclaw plugins install shieldcortex
+openclaw plugins install @drakon-systems/shieldcortex-realtime
 ```
 
 ## Uninstall
 
 ```bash
-npx shieldcortex openclaw uninstall
+shieldcortex openclaw uninstall
 ```
 
 Or disable without removing:

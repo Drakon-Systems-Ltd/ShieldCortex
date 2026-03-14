@@ -12,7 +12,7 @@ If you're running [OpenClaw](https://github.com/openclaw/openclaw) (or its prede
 
 ```bash
 openclaw hooks install shieldcortex
-openclaw plugins install shieldcortex
+openclaw plugins install @drakon-systems/shieldcortex-realtime
 ```
 
 Or use the ShieldCortex compatibility wrapper:
@@ -36,7 +36,9 @@ Your agent now has persistent memory context that survives restarts, semantic se
 
 ## What Just Happened?
 
-That command installs both a **hook** and a **real-time plugin**. Together they do three things:
+Those commands install both a **hook** and a **real-time plugin**. The hook
+comes from `shieldcortex`; the real-time plugin comes from
+`@drakon-systems/shieldcortex-realtime`. Together they do three things:
 
 ### 1. Auto-Extracts Important Content (Optional)
 
@@ -130,7 +132,7 @@ That's it. No Docker. No external services. No API keys.
 ```bash
 # Install the hook
 openclaw hooks install shieldcortex
-openclaw plugins install shieldcortex
+openclaw plugins install @drakon-systems/shieldcortex-realtime
 
 # Check OpenClaw integration status
 shieldcortex openclaw status
@@ -164,7 +166,7 @@ Not using OpenClaw? ShieldCortex also works with:
 
 ```bash
 openclaw hooks install shieldcortex
-openclaw plugins install shieldcortex
+openclaw plugins install @drakon-systems/shieldcortex-realtime
 # restart openclaw
 shieldcortex openclaw status
 ```

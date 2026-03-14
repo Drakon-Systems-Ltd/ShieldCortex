@@ -412,7 +412,7 @@ export async function installOpenClawHook(): Promise<void> {
     console.error('');
     console.error('If OpenClaw is installed, try running directly:');
     console.error('  openclaw hooks install shieldcortex');
-    console.error('  openclaw plugins install shieldcortex');
+    console.error('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
     console.error('');
     console.error('Or install OpenClaw first:');
     console.error('  npm install -g openclaw');
@@ -481,7 +481,7 @@ export async function installOpenClawHook(): Promise<void> {
   console.log('');
   console.log('Native OpenClaw install is also supported:');
   console.log('  openclaw hooks install shieldcortex');
-  console.log('  openclaw plugins install shieldcortex');
+  console.log('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
   console.log('');
   console.log('Restart your agent to activate.');
 }
