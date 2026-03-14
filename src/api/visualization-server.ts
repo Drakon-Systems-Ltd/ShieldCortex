@@ -45,6 +45,7 @@ import { registerIncidentRoutes } from './routes/incidents.js';
 import { registerMemoryRoutes } from './routes/memories.js';
 import { registerRecallRoutes } from './routes/recall.js';
 import { registerSystemRoutes } from './routes/system.js';
+import { createIronDomeRouteGuard } from './iron-dome-route-guard.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -167,6 +168,15 @@ export function startVisualizationServer(dbPath?: string): void {
     });
   }
 
+  function classifySqlAction(req: Request): string {
+    const query = typeof req.body?.query === 'string' ? req.body.query.trim().toUpperCase() : '';
+    if (!query) return 'database_migrate';
+    if (query.startsWith('SELECT') || query.startsWith('PRAGMA')) return 'run_report';
+    if (/\bDELETE\b/.test(query)) return 'delete';
+    if (/\bDROP\b|\bTRUNCATE\b|\bPURGE\b/.test(query)) return 'destroy';
+    return 'database_migrate';
+  }
+
   // ============================================
   // REST API ENDPOINTS
   // ============================================
@@ -183,9 +193,16 @@ export function startVisualizationServer(dbPath?: string): void {
     res.json({ total, byFeature: { ...gatedCounters } });
   });
 
-  registerMemoryRoutes(app, requireNotLocked);
+  registerMemoryRoutes(app, {
+    requireNotLocked,
+    requireIronDomeAction: createIronDomeRouteGuard,
+  });
   registerRecallRoutes(app, requireNotLocked);
-  registerSystemRoutes(app, { broadcast, clients });
+  registerSystemRoutes(app, {
+    broadcast,
+    clients,
+    requireIronDomeAction: createIronDomeRouteGuard,
+  });
 
   // ============================================
   // INSIGHTS ENDPOINTS
@@ -198,7 +215,12 @@ export function startVisualizationServer(dbPath?: string): void {
   // ============================================
 
   // Execute SQL query (with safety restrictions)
-  app.post('/api/sql', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/sql', requireNotLocked, createIronDomeRouteGuard({
+    action: classifySqlAction,
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:sql-console',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const { query, allowWrite } = req.body;
 
@@ -362,7 +384,12 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Trust a skill file
-  app.post('/api/skills/trust', (req: Request, res: Response) => {
+  app.post('/api/skills/trust', createIronDomeRouteGuard({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:skill-trust',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const { path: filePath } = req.body;
       if (!filePath || typeof filePath !== 'string') {
@@ -376,7 +403,12 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Untrust a skill file
-  app.delete('/api/skills/trust', (req: Request, res: Response) => {
+  app.delete('/api/skills/trust', createIronDomeRouteGuard({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:skill-untrust',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const { path: filePath } = req.body;
       if (!filePath || typeof filePath !== 'string') {
@@ -390,7 +422,11 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Delete a skill file (security: only allows known skill locations)
-  app.delete('/api/skills/file', (req: Request, res: Response) => {
+  app.delete('/api/skills/file', createIronDomeRouteGuard({
+    action: 'delete_file',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:skill-delete',
+  }), (req: Request, res: Response) => {
     try {
       const { path: filePath } = req.body;
       if (!filePath || typeof filePath !== 'string') {
@@ -620,7 +656,12 @@ export function startVisualizationServer(dbPath?: string): void {
 
   const brainWorker = new BrainWorker();
   registerIncidentRoutes(app);
-  registerAdminRoutes(app, { brainWorker, requireNotLocked, requireProFeature });
+  registerAdminRoutes(app, {
+    brainWorker,
+    requireNotLocked,
+    requireProFeature,
+    requireIronDomeAction: createIronDomeRouteGuard,
+  });
 
   // ============================================
   // WEBSOCKET SERVER

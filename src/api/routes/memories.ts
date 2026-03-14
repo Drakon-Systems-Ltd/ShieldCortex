@@ -30,10 +30,18 @@ import {
 import { getActivationStats, getActiveMemories } from '../../memory/activation.js';
 import { detectContradictions, getContradictionsFor } from '../../memory/contradiction.js';
 import { emitConsolidation } from '../events.js';
+import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
 
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
 
-export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware): void {
+interface MemoryRouteDeps {
+  requireNotLocked: Middleware;
+  requireIronDomeAction: (options: IronDomeRouteGuardOptions) => IronDomeMiddleware;
+}
+
+export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void {
+  const { requireNotLocked, requireIronDomeAction } = deps;
+
   app.get('/api/capture/openclaw/sessions', requireNotLocked, (req: Request, res: Response) => {
     try {
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
@@ -498,7 +506,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/memories/merge', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/memories/merge', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:memory-merge',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const { keptId, removedId, reviewedBy } = req.body as {
         keptId?: number;
@@ -541,7 +554,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/memories', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/memories', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:memory-create',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const { title, content, type, category, project, tags, salience } = req.body;
 
@@ -572,7 +590,11 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.delete('/api/memories/:id', requireNotLocked, (req: Request, res: Response) => {
+  app.delete('/api/memories/:id', requireNotLocked, requireIronDomeAction({
+    action: 'delete',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-delete:${req.params.id ?? 'unknown'}`,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const success = deleteMemory(id);
@@ -778,7 +800,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/memories/:id/enrich', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/memories/:id/enrich', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-enrich:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       if (Number.isNaN(id)) {
@@ -870,7 +897,11 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/consolidate', requireNotLocked, (_req: Request, res: Response) => {
+  app.post('/api/consolidate', requireNotLocked, requireIronDomeAction({
+    action: 'delete',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:consolidate',
+  }), (_req: Request, res: Response) => {
     try {
       const result = consolidate();
       emitConsolidation(result);
@@ -982,7 +1013,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/memories/:id/boost', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/memories/:id/boost', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-boost:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const memory = getMemoryById(id);
@@ -996,7 +1032,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/memories/:id/demote', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/memories/:id/demote', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-demote:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const memory = getMemoryById(id);
@@ -1010,7 +1051,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/memories/:id/promote', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/memories/:id/promote', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-promote:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const memory = promoteMemory(id);
@@ -1023,7 +1069,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.patch('/api/memories/:id', requireNotLocked, (req: Request, res: Response) => {
+  app.patch('/api/memories/:id', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-update:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const { title, content, category, tags, importance, status, pinned, reviewedBy, cloudExcluded, scope, project } = req.body;
@@ -1086,7 +1137,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.patch('/api/memories/:id/review', requireNotLocked, (req: Request, res: Response) => {
+  app.patch('/api/memories/:id/review', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-review:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const { action, reviewedBy, project, scope } = req.body as {
@@ -1131,7 +1187,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/memories/:id/quarantine', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/memories/:id/quarantine', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:memory-quarantine:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const memory = getMemoryById(id);
@@ -1160,7 +1221,12 @@ export function registerMemoryRoutes(app: Express, requireNotLocked: Middleware)
     }
   });
 
-  app.post('/api/links', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/links', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:memory-link-create',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const { sourceId, targetId, relationship, strength } = req.body;
       if (!sourceId || !targetId || !relationship) {

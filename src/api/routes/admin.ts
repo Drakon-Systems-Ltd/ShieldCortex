@@ -7,6 +7,7 @@ import { listFeatures } from '../../license/gate.js';
 import type { GatedFeature } from '../../license/gate.js';
 import { validateOnceNow } from '../../license/validate.js';
 import type { BrainWorker } from '../../worker/brain-worker.js';
+import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
 
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
 type FeatureMiddlewareFactory = (feature: GatedFeature) => Middleware;
@@ -15,10 +16,11 @@ interface AdminRouteDeps {
   brainWorker: BrainWorker;
   requireNotLocked: Middleware;
   requireProFeature: FeatureMiddlewareFactory;
+  requireIronDomeAction: (options: IronDomeRouteGuardOptions) => IronDomeMiddleware;
 }
 
 export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
-  const { brainWorker, requireNotLocked, requireProFeature } = deps;
+  const { brainWorker, requireNotLocked, requireProFeature, requireIronDomeAction } = deps;
 
   app.get('/api/v1/audit', (req: Request, res: Response) => {
     try {
@@ -109,7 +111,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/v1/quarantine/:id/approve', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/v1/quarantine/:id/approve', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:quarantine-approve:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const id = parseInt(req.params.id as string, 10);
@@ -126,7 +133,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/v1/quarantine/:id/reject', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/v1/quarantine/:id/reject', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: (req: Request) => `dashboard:quarantine-reject:${req.params.id ?? 'unknown'}`,
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const id = parseInt(req.params.id as string, 10);
@@ -143,7 +155,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/v1/quarantine/bulk-approve', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/v1/quarantine/bulk-approve', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:quarantine-bulk-approve',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const ids: number[] = req.body?.ids;
@@ -167,7 +184,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/v1/quarantine/bulk-reject', requireNotLocked, (req: Request, res: Response) => {
+  app.post('/api/v1/quarantine/bulk-reject', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:quarantine-bulk-reject',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const db = getDatabase();
       const ids: number[] = req.body?.ids;
@@ -191,7 +213,11 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/quarantine/sync-to-cloud', requireNotLocked, async (_req: Request, res: Response) => {
+  app.post('/api/quarantine/sync-to-cloud', requireNotLocked, requireIronDomeAction({
+    action: 'export_data',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:quarantine-sync',
+  }), async (_req: Request, res: Response) => {
     try {
       const config = getCloudConfig();
       if (!config.cloudEnabled || !config.cloudApiKey) {
@@ -259,7 +285,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/worker/trigger-light', requireNotLocked, async (_req: Request, res: Response) => {
+  app.post('/api/worker/trigger-light', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:worker-trigger-light',
+    enforceAmber: true,
+  }), async (_req: Request, res: Response) => {
     try {
       const result = await brainWorker.triggerLightTick();
       res.json({ success: true, ...result, timestamp: result.timestamp.toISOString() });
@@ -268,7 +299,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/worker/trigger-medium', requireNotLocked, async (_req: Request, res: Response) => {
+  app.post('/api/worker/trigger-medium', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:worker-trigger-medium',
+    enforceAmber: true,
+  }), async (_req: Request, res: Response) => {
     try {
       const result = await brainWorker.triggerMediumTick();
       res.json({ success: true, ...result, timestamp: result.timestamp.toISOString() });
@@ -294,7 +330,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/license/activate', async (req: Request, res: Response) => {
+  app.post('/api/license/activate', requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:license-activate',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
     try {
       const { key } = req.body;
       if (!key || typeof key !== 'string') {
@@ -318,7 +359,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/license/deactivate', (_req: Request, res: Response) => {
+  app.post('/api/license/deactivate', requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:license-deactivate',
+    enforceAmber: true,
+  }), (_req: Request, res: Response) => {
     try {
       deactivateLicense();
       res.json({ success: true, tier: 'free', features: listFeatures() });
@@ -337,7 +383,11 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/firewall-rules', requireProFeature('custom_firewall_rules'), async (req: Request, res: Response) => {
+  app.post('/api/firewall-rules', requireProFeature('custom_firewall_rules'), requireIronDomeAction({
+    action: 'modify_firewall',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:firewall-rule-create',
+  }), async (req: Request, res: Response) => {
     try {
       const { createFirewallRule } = await import('../../defence/custom-rules/store.js');
       const { name, priority, condition_type, condition_value, action } = req.body;
@@ -352,7 +402,11 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.patch('/api/firewall-rules/:id', requireProFeature('custom_firewall_rules'), async (req: Request, res: Response) => {
+  app.patch('/api/firewall-rules/:id', requireProFeature('custom_firewall_rules'), requireIronDomeAction({
+    action: 'modify_firewall',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:firewall-rule-update',
+  }), async (req: Request, res: Response) => {
     try {
       const { updateFirewallRule } = await import('../../defence/custom-rules/store.js');
       const rule = updateFirewallRule(Number(req.params.id), req.body);
@@ -363,7 +417,11 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.delete('/api/firewall-rules/:id', requireProFeature('custom_firewall_rules'), async (req: Request, res: Response) => {
+  app.delete('/api/firewall-rules/:id', requireProFeature('custom_firewall_rules'), requireIronDomeAction({
+    action: 'modify_firewall',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:firewall-rule-delete',
+  }), async (req: Request, res: Response) => {
     try {
       const { deleteFirewallRule } = await import('../../defence/custom-rules/store.js');
       const deleted = deleteFirewallRule(Number(req.params.id));
@@ -384,7 +442,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/patterns', requireProFeature('custom_injection_patterns'), async (req: Request, res: Response) => {
+  app.post('/api/patterns', requireProFeature('custom_injection_patterns'), requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:pattern-create',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
     try {
       const { createCustomPattern, validateRegex } = await import('../../defence/custom-patterns/store.js');
       const { name, category, severity, regex, description } = req.body;
@@ -410,7 +473,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.delete('/api/patterns/:id', requireProFeature('custom_injection_patterns'), async (req: Request, res: Response) => {
+  app.delete('/api/patterns/:id', requireProFeature('custom_injection_patterns'), requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:pattern-delete',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
     try {
       const { deleteCustomPattern } = await import('../../defence/custom-patterns/store.js');
       const deleted = deleteCustomPattern(Number(req.params.id));
@@ -442,7 +510,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.post('/api/iron-dome/policies', requireProFeature('custom_iron_dome_policies'), async (req: Request, res: Response) => {
+  app.post('/api/iron-dome/policies', requireProFeature('custom_iron_dome_policies'), requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:iron-dome-policy-create',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
     try {
       const { createIronDomePolicy } = await import('../../defence/iron-dome/custom-policies.js');
       const { name, description, config } = req.body;
@@ -454,7 +527,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.delete('/api/iron-dome/policies/:id', requireProFeature('custom_iron_dome_policies'), async (req: Request, res: Response) => {
+  app.delete('/api/iron-dome/policies/:id', requireProFeature('custom_iron_dome_policies'), requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:iron-dome-policy-delete',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
     try {
       const { deleteIronDomePolicy } = await import('../../defence/iron-dome/custom-policies.js');
       const deleted = deleteIronDomePolicy(Number(req.params.id));
@@ -465,7 +543,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     }
   });
 
-  app.put('/api/iron-dome/policies/:id/activate', requireProFeature('custom_iron_dome_policies'), async (req: Request, res: Response) => {
+  app.put('/api/iron-dome/policies/:id/activate', requireProFeature('custom_iron_dome_policies'), requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:iron-dome-policy-activate',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
     try {
       const { activateIronDomePolicy } = await import('../../defence/iron-dome/custom-policies.js');
       const policy = activateIronDomePolicy(Number(req.params.id));

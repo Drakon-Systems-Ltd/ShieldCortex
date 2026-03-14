@@ -27,14 +27,16 @@ import {
   performUpdate,
   scheduleRestart,
 } from '../version.js';
+import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
 
 interface SystemRouteDeps {
   broadcast: (event: MemoryEvent) => void;
   clients: Set<WebSocket>;
+  requireIronDomeAction: (options: IronDomeRouteGuardOptions) => IronDomeMiddleware;
 }
 
 export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void {
-  const { broadcast, clients } = deps;
+  const { broadcast, clients, requireIronDomeAction } = deps;
 
   app.get('/api/control/status', (_req: Request, res: Response) => {
     try {
@@ -83,7 +85,12 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
     }
   });
 
-  app.post('/api/cloud/config', (req: Request, res: Response) => {
+  app.post('/api/cloud/config', requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:cloud-config',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const {
         cloudApiKey,
@@ -187,7 +194,12 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
     }
   });
 
-  app.post('/api/defence/config', (req: Request, res: Response) => {
+  app.post('/api/defence/config', requireIronDomeAction({
+    action: 'modify_config',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:defence-config',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
     try {
       const { mode } = req.body;
       const validModes: DefenceMode[] = ['strict', 'balanced', 'permissive'];
@@ -277,7 +289,12 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
     }
   });
 
-  app.post('/api/version/update', async (_req: Request, res: Response) => {
+  app.post('/api/version/update', requireIronDomeAction({
+    action: 'update_package',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:version-update',
+    enforceAmber: true,
+  }), async (_req: Request, res: Response) => {
     try {
       broadcast({
         type: 'update_started',
@@ -299,7 +316,12 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
     }
   });
 
-  app.post('/api/version/restart', (_req: Request, res: Response) => {
+  app.post('/api/version/restart', requireIronDomeAction({
+    action: 'restart_service',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:version-restart',
+    enforceAmber: true,
+  }), (_req: Request, res: Response) => {
     try {
       broadcast({
         type: 'server_restarting',
