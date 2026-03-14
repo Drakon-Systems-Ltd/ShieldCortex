@@ -33,6 +33,10 @@ function formatTimeUntil(isoString: string): string {
   return `in ${days}d`;
 }
 
+function isCloudSyncStale(lastSyncAt: string | null): boolean {
+  return lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() > 24 * 60 * 60 * 1000 : false;
+}
+
 function StatusBanner() {
   const { data: sync, isLoading } = useCloudSyncStatus();
   const { data: license } = useLicenseStatus();
@@ -43,17 +47,25 @@ function StatusBanner() {
   let title = 'Cloud sync disabled';
   let detail = 'Enable cloud sync and activate a Team licence to start replicating local data.';
   let Icon = Cloud;
+  const stale = isCloudSyncStale(sync.lastSyncAt);
 
   if (sync.enabled && sync.apiKeySet && !sync.featureEnabled) {
     tone = 'border-amber-500/30 bg-amber-500/10 text-amber-200';
     title = 'Cloud configured but licence locked';
     detail = `Cloud sync requires the ${TIER_LABELS[sync.requiredTier]} tier. Current tier: ${TIER_LABELS[license?.tier ?? 'free']}.`;
     Icon = KeyRound;
-  } else if (sync.enabled && sync.apiKeySet && sync.queue.failed > 0) {
+  } else if (sync.enabled && sync.apiKeySet && sync.queue.pending > 0 && sync.queue.failed > 0) {
     tone = 'border-red-500/30 bg-red-500/10 text-red-200';
     title = 'Cloud sync needs attention';
     detail = sync.queue.lastError ?? 'One or more queued sync jobs are failing.';
     Icon = ShieldAlert;
+  } else if (sync.enabled && sync.apiKeySet && sync.queue.failed > 0) {
+    tone = stale ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-amber-500/30 bg-amber-500/10 text-amber-200';
+    title = stale ? 'Cloud sync has unresolved failures' : 'Cloud sync healthy, with failed history';
+    detail = sync.queue.lastError
+      ? `${sync.queue.lastError}${sync.queue.latestFailureAt ? ` Last failure ${formatTimeAgo(sync.queue.latestFailureAt)}.` : ''}`
+      : `${sync.queue.failed} failed job${sync.queue.failed === 1 ? '' : 's'} remain in queue history.`;
+    Icon = stale ? ShieldAlert : AlertTriangle;
   } else if (sync.enabled && sync.apiKeySet && sync.queue.pending > 0) {
     tone = 'border-amber-500/30 bg-amber-500/10 text-amber-200';
     title = 'Cloud sync is catching up';
@@ -415,9 +427,9 @@ export function CloudSyncDiagnosticsView() {
                     <td className="px-4 py-3 text-slate-400">Confirms whether failures are retrying normally or the queue is stuck.</td>
                   </tr>
                   <tr>
-                    <td className="px-4 py-3">Failed jobs</td>
+                    <td className="px-4 py-3">Failed jobs in history</td>
                     <td className="px-4 py-3">{sync.queue.failed}</td>
-                    <td className="px-4 py-3 text-slate-400">A non-zero count usually means auth, network, or schema mismatch problems.</td>
+                    <td className="px-4 py-3 text-slate-400">These are retained dead-letter records. A non-zero count matters most when pending retries or stale sync accompany them.</td>
                   </tr>
                   <tr>
                     <td className="px-4 py-3">Latest memory sync</td>
@@ -478,11 +490,16 @@ export function CloudSyncDiagnosticsView() {
               <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
                 {sync.queue.lastError ? (
                   <>
-                    <div className="flex items-center gap-2 text-sm font-medium text-red-300">
+                    <div className={`flex items-center gap-2 text-sm font-medium ${sync.queue.pending > 0 ? 'text-red-300' : 'text-amber-300'}`}>
                       <AlertTriangle size={16} />
                       {sync.queue.lastErrorKind ? `${sync.queue.lastErrorKind} queue` : 'Unknown queue'}
                     </div>
                     <p className="mt-2 text-sm text-slate-300">{sync.queue.lastError}</p>
+                    {sync.queue.latestFailureAt && (
+                      <div className="mt-2 text-xs text-slate-500">
+                        Recorded {formatTimeAgo(sync.queue.latestFailureAt)}
+                      </div>
+                    )}
                     {sync.queue.nextRetryAt && (
                       <div className="mt-3 inline-flex items-center gap-1 rounded-full bg-slate-900 px-2 py-1 text-xs text-slate-400">
                         <Clock3 size={12} />

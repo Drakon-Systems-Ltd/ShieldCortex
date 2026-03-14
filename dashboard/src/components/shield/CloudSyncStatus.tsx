@@ -36,6 +36,10 @@ function formatTimeUntil(isoString: string): string {
   return `in ${days}d`;
 }
 
+function isCloudSyncStale(lastSyncAt: string | null): boolean {
+  return lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() > 24 * 60 * 60 * 1000 : false;
+}
+
 function statusTone(status: 'healthy' | 'queued' | 'warning' | 'disabled') {
   switch (status) {
     case 'healthy':
@@ -83,12 +87,18 @@ export function CloudSyncStatus() {
   let detail = 'Enable cloud sync with a Team+ key to replicate memories.';
 
   if (enabled && apiKeySet) {
-    const stale = lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() > 24 * 60 * 60 * 1000 : false;
+    const stale = isCloudSyncStale(lastSyncAt);
 
-    if (memoryQueue.failed > 0 || queue.failed > 0) {
+    if (queue.pending > 0 && (memoryQueue.failed > 0 || queue.failed > 0)) {
       status = 'warning';
       label = 'Cloud sync needs attention';
       detail = queue.lastError ?? 'One or more sync jobs failed and need retry.';
+    } else if (queue.failed > 0) {
+      status = stale ? 'warning' : 'queued';
+      label = stale ? 'Cloud sync has unresolved failures' : 'Cloud sync healthy, with failed history';
+      detail = queue.lastError
+        ? `${queue.lastError}${queue.latestFailureAt ? ` • last failure ${formatTimeAgo(queue.latestFailureAt)}` : ''}`
+        : `${queue.failed} failed job${queue.failed === 1 ? '' : 's'} remain in history.`;
     } else if (memoryQueue.pending > 0 || queue.pending > 0) {
       status = 'queued';
       label = memoryQueue.pending > 0 ? 'Memory sync queued' : 'Cloud sync queued';

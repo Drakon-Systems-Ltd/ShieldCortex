@@ -68,6 +68,7 @@ export interface QueueStats {
   nextRetryAt: string | null;
   lastError: string | null;
   lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown' | null;
+  latestFailureAt: string | null;
 }
 
 export interface SyncQueueResult {
@@ -239,6 +240,21 @@ function markRetryOrFailed(
   return false;
 }
 
+function formatQueueError(err: unknown): string {
+  const name = err instanceof Error ? err.name : '';
+  const message = err instanceof Error ? err.message : String(err ?? '');
+
+  if (name === 'AbortError' || message === 'This operation was aborted') {
+    return 'Cloud request timed out after 10 seconds';
+  }
+
+  if (!message || message === '[object Object]') {
+    return 'Unknown cloud sync error';
+  }
+
+  return message;
+}
+
 /**
  * Process pending items in the retry queue.
  * SELECT pending WHERE next_retry_at <= now, retry each (up to 10 per tick).
@@ -315,7 +331,7 @@ export async function processRetryQueue(): Promise<SyncQueueResult> {
         else result.failed++;
       }
     } catch (err) {
-      const errorMsg = (err as Error).message || 'Unknown error';
+      const errorMsg = formatQueueError(err);
       const permanent = markRetryOrFailed(row.id, row.attempts, newAttempts, row.max_attempts, errorMsg);
       if (permanent) result.permanentlyFailed++;
       else result.failed++;
@@ -358,6 +374,7 @@ export function getQueueStats(): QueueStats {
     nextRetryAt: null,
     lastError: null,
     lastErrorKind: null,
+    latestFailureAt: null,
   };
 
   let newestErrorRowId = -1;
@@ -385,8 +402,14 @@ export function getQueueStats(): QueueStats {
 
     if (row.last_error && row.id > newestErrorRowId) {
       newestErrorRowId = row.id;
-      stats.lastError = row.last_error;
+      stats.lastError = formatQueueError(new Error(row.last_error));
       stats.lastErrorKind = kind;
+    }
+
+    if (row.status === 'failed') {
+      if (!stats.latestFailureAt || (row.created_at && row.created_at > stats.latestFailureAt)) {
+        stats.latestFailureAt = row.created_at ?? stats.latestFailureAt;
+      }
     }
   }
 

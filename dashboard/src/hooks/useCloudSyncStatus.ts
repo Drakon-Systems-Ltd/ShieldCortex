@@ -30,6 +30,7 @@ interface CloudSyncStatus {
     nextRetryAt: string | null;
     lastError: string | null;
     lastErrorKind: 'audit' | 'quarantine' | 'memory' | 'graph' | 'unknown' | null;
+    latestFailureAt: string | null;
   };
 }
 
@@ -127,6 +128,8 @@ function normalizeCloudSyncStatus(raw: Partial<CloudSyncStatus> & Record<string,
         queue.lastErrorKind === 'unknown'
           ? queue.lastErrorKind
           : null,
+      latestFailureAt:
+        typeof queue.latestFailureAt === 'string' || queue.latestFailureAt === null ? (queue.latestFailureAt ?? null) : null,
     },
   };
 }

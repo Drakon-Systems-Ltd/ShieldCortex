@@ -229,6 +229,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
           nextRetryAt: queue.nextRetryAt,
           lastError: queue.lastError,
           lastErrorKind: queue.lastErrorKind,
+          latestFailureAt: queue.latestFailureAt,
         },
       });
     } catch (error) {
