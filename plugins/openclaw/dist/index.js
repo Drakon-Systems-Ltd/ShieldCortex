@@ -101,17 +101,141 @@ async function getRuntime() {
     }
     return runtimePromise;
 }
+const PLUGIN_ID = "shieldcortex-realtime";
+const PLUGIN_PACKAGE_NAME = "@drakon-systems/shieldcortex-realtime";
+const PLUGIN_CONFIG_UI_HINTS = {
+    binaryPath: {
+        label: "ShieldCortex Binary Path",
+        help: "Optional absolute path to the shieldcortex CLI when it is not on PATH.",
+        placeholder: "/usr/local/bin/shieldcortex",
+        advanced: true,
+    },
+    cloudApiKey: {
+        label: "Cloud API Key",
+        help: "Optional ShieldCortex Cloud API key used for realtime threat forwarding.",
+        sensitive: true,
+        placeholder: "sc_...",
+    },
+    cloudBaseUrl: {
+        label: "Cloud Base URL",
+        help: "Override the ShieldCortex Cloud API base URL if you use a self-hosted or staging endpoint.",
+        placeholder: "https://api.shieldcortex.ai",
+        advanced: true,
+    },
+    openclawAutoMemory: {
+        label: "Auto Memory Extraction",
+        help: "Extract high-signal decisions and learnings from LLM output into ShieldCortex memory.",
+    },
+    openclawAutoMemoryDedupe: {
+        label: "Dedupe Auto Memory",
+        help: "Skip near-duplicate memories before they are written to ShieldCortex.",
+        advanced: true,
+    },
+    openclawAutoMemoryNoveltyThreshold: {
+        label: "Novelty Threshold",
+        help: "Similarity threshold for duplicate suppression. Higher values keep more memories.",
+        advanced: true,
+    },
+    openclawAutoMemoryMaxRecent: {
+        label: "Recent Memory Cache Size",
+        help: "How many recent extracted memories to keep in the dedupe cache.",
+        advanced: true,
+    },
+};
+const PLUGIN_CONFIG_JSON_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+        enabled: { type: "boolean" },
+        binaryPath: { type: "string" },
+        cloudApiKey: { type: "string" },
+        cloudBaseUrl: { type: "string" },
+        openclawAutoMemory: { type: "boolean" },
+        openclawAutoMemoryDedupe: { type: "boolean" },
+        openclawAutoMemoryNoveltyThreshold: { type: "number", minimum: 0.6, maximum: 0.99 },
+        openclawAutoMemoryMaxRecent: { type: "integer", minimum: 50, maximum: 1000 },
+    },
+};
 let _config = null;
+let _configOverride = null;
 let _version = "0.0.0";
 try {
-    const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf-8"));
-    _version = pkg.version;
+    for (const packageUrl of [
+        new URL("./package.json", import.meta.url),
+        new URL("../../package.json", import.meta.url),
+    ]) {
+        try {
+            const pkg = JSON.parse(readFileSync(packageUrl, "utf-8"));
+            if (typeof pkg.version === "string" && pkg.version.trim()) {
+                _version = pkg.version;
+                break;
+            }
+        }
+        catch {
+            // try the next candidate
+        }
+    }
 }
 catch { /* fallback */ }
+function normaliseConfig(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+        return {};
+    const value = raw;
+    const config = {};
+    if (typeof value.cloudApiKey === "string" && value.cloudApiKey.trim()) {
+        config.cloudApiKey = value.cloudApiKey.trim();
+    }
+    if (typeof value.cloudBaseUrl === "string" && value.cloudBaseUrl.trim()) {
+        config.cloudBaseUrl = value.cloudBaseUrl.trim();
+    }
+    if (typeof value.binaryPath === "string" && value.binaryPath.trim()) {
+        config.binaryPath = value.binaryPath.trim();
+    }
+    if (typeof value.openclawAutoMemory === "boolean") {
+        config.openclawAutoMemory = value.openclawAutoMemory;
+    }
+    if (typeof value.openclawAutoMemoryDedupe === "boolean") {
+        config.openclawAutoMemoryDedupe = value.openclawAutoMemoryDedupe;
+    }
+    if (typeof value.openclawAutoMemoryNoveltyThreshold === "number" && !Number.isNaN(value.openclawAutoMemoryNoveltyThreshold)) {
+        config.openclawAutoMemoryNoveltyThreshold = clamp(value.openclawAutoMemoryNoveltyThreshold, 0.6, 0.99);
+    }
+    if (typeof value.openclawAutoMemoryMaxRecent === "number" && !Number.isNaN(value.openclawAutoMemoryMaxRecent)) {
+        config.openclawAutoMemoryMaxRecent = Math.floor(clamp(value.openclawAutoMemoryMaxRecent, 50, 1000));
+    }
+    return config;
+}
+function extractPluginConfig(rootConfig) {
+    if (!rootConfig || typeof rootConfig !== "object" || Array.isArray(rootConfig))
+        return {};
+    const entries = rootConfig.plugins?.entries;
+    const pluginConfig = entries?.[PLUGIN_ID]?.config ??
+        entries?.[PLUGIN_PACKAGE_NAME]?.config;
+    return normaliseConfig(pluginConfig);
+}
+function applyPluginConfigOverride(api) {
+    const runtimeConfig = typeof api.runtime?.config?.loadConfig === "function"
+        ? api.runtime.config.loadConfig()
+        : api.config;
+    const pluginConfig = extractPluginConfig(runtimeConfig);
+    if (Object.keys(pluginConfig).length === 0)
+        return;
+    _configOverride = {
+        ...(_configOverride ?? {}),
+        ...pluginConfig,
+    };
+    if (_config) {
+        _config = { ..._config, ...pluginConfig };
+    }
+}
 async function loadConfig() {
     if (_config)
         return _config;
-    _config = await (await getRuntime()).loadShieldConfig();
+    const shieldConfig = normaliseConfig(await (await getRuntime()).loadShieldConfig());
+    _config = {
+        ...shieldConfig,
+        ...(_configOverride ?? {}),
+    };
     return _config;
 }
 function isAutoMemoryEnabled(config) {
@@ -213,7 +337,7 @@ async function cloudSync(threat) {
     if (!cfg.cloudApiKey)
         return;
     try {
-        await fetch(`${cfg.cloudEndpoint || "https://api.shieldcortex.ai"}/v1/threats`, {
+        await fetch(`${cfg.cloudBaseUrl || "https://api.shieldcortex.ai"}/v1/threats`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.cloudApiKey}` },
             body: JSON.stringify(threat),
@@ -445,11 +569,19 @@ function handleLlmOutput(event, ctx) {
 }
 // ==================== PLUGIN EXPORT ====================
 export default {
-    id: "shieldcortex-realtime",
+    id: PLUGIN_ID,
     name: "ShieldCortex Real-time Scanner",
     description: "Real-time defence scanning on LLM inputs with optional memory extraction from outputs",
     version: _version,
+    configSchema: {
+        parse(value) {
+            return normaliseConfig(value);
+        },
+        uiHints: PLUGIN_CONFIG_UI_HINTS,
+        jsonSchema: PLUGIN_CONFIG_JSON_SCHEMA,
+    },
     register(api) {
+        applyPluginConfigOverride(api);
         api.on("llm_input", handleLlmInput);
         api.on("llm_output", handleLlmOutput);
         api.logger.info("[shieldcortex] Real-time scanning plugin registered (llm_input + llm_output)");

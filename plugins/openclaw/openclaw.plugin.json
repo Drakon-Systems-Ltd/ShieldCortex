@@ -1,10 +1,79 @@
 {
   "id": "shieldcortex-realtime",
+  "version": "3.4.4",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input and memory extraction on LLM output.",
+  "uiHints": {
+    "binaryPath": {
+      "label": "ShieldCortex Binary Path",
+      "help": "Optional absolute path to the shieldcortex CLI when it is not on PATH.",
+      "placeholder": "/usr/local/bin/shieldcortex",
+      "advanced": true
+    },
+    "cloudApiKey": {
+      "label": "Cloud API Key",
+      "help": "Optional ShieldCortex Cloud API key used for realtime threat forwarding.",
+      "placeholder": "sc_...",
+      "sensitive": true
+    },
+    "cloudBaseUrl": {
+      "label": "Cloud Base URL",
+      "help": "Override the ShieldCortex Cloud API base URL if you use a self-hosted or staging endpoint.",
+      "placeholder": "https://api.shieldcortex.ai",
+      "advanced": true
+    },
+    "openclawAutoMemory": {
+      "label": "Auto Memory Extraction",
+      "help": "Extract high-signal decisions and learnings from LLM output into ShieldCortex memory."
+    },
+    "openclawAutoMemoryDedupe": {
+      "label": "Dedupe Auto Memory",
+      "help": "Skip near-duplicate memories before they are written to ShieldCortex.",
+      "advanced": true
+    },
+    "openclawAutoMemoryNoveltyThreshold": {
+      "label": "Novelty Threshold",
+      "help": "Similarity threshold for duplicate suppression. Higher values keep more memories.",
+      "advanced": true
+    },
+    "openclawAutoMemoryMaxRecent": {
+      "label": "Recent Memory Cache Size",
+      "help": "How many recent extracted memories to keep in the dedupe cache.",
+      "advanced": true
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "enabled": {
+        "type": "boolean"
+      },
+      "binaryPath": {
+        "type": "string"
+      },
+      "cloudApiKey": {
+        "type": "string"
+      },
+      "cloudBaseUrl": {
+        "type": "string"
+      },
+      "openclawAutoMemory": {
+        "type": "boolean"
+      },
+      "openclawAutoMemoryDedupe": {
+        "type": "boolean"
+      },
+      "openclawAutoMemoryNoveltyThreshold": {
+        "type": "number",
+        "minimum": 0.6,
+        "maximum": 0.99
+      },
+      "openclawAutoMemoryMaxRecent": {
+        "type": "integer",
+        "minimum": 50,
+        "maximum": 1000
+      }
+    }
   }
 }

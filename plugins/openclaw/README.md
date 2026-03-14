@@ -1,91 +1,114 @@
-# ShieldCortex Real-time Scanner — OpenClaw Plugin
+# @drakon-systems/shieldcortex-realtime
 
-Real-time defence scanning and memory extraction for OpenClaw v2026.2.15+.
+OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory extraction.
 
 ## What it does
 
 | Hook | Action |
 |------|--------|
-| `llm_input` | Scans prompts + history through ShieldCortex defence pipeline. Logs threats, writes audit log, optionally syncs to cloud. **Fire-and-forget.** |
-| `llm_output` | Memory extraction from assistant responses (enabled by default). Saves to ShieldCortex memory via mcporter with novelty/dedupe filtering to reduce noise. Disable with `shieldcortex config --openclaw-auto-memory false`. **Fire-and-forget.** |
+| `llm_input` | Scans prompts and history through the ShieldCortex defence pipeline. Threats are logged to audit and can forward to ShieldCortex Cloud. |
+| `llm_output` | Extracts high-signal memories from assistant replies and writes them into ShieldCortex with novelty filtering and dedupe. |
+
+The plugin is intentionally fire-and-forget: it should not stall the OpenClaw turn loop if ShieldCortex is unavailable.
 
 ## Installation
 
-### Native OpenClaw install (recommended)
+### 1. Install ShieldCortex
 
-```bash
-openclaw plugins install shieldcortex
-openclaw hooks install shieldcortex
-openclaw gateway restart
-```
-
-This installs the plugin through OpenClaw's native package flow. The extra `hooks install` command adds the companion session hook.
-
-### ShieldCortex wrapper (compatibility path)
+This plugin resolves the main `shieldcortex` package at runtime, so the CLI must also be installed somewhere the machine can reach.
 
 ```bash
 npm install -g shieldcortex
-shieldcortex openclaw install
+```
+
+If `shieldcortex` is not on `PATH`, set `binaryPath` in the plugin config.
+
+### 2. Install the plugin
+
+```bash
+openclaw plugins install @drakon-systems/shieldcortex-realtime
+```
+
+If you also want the companion session hook, install it from the main package:
+
+```bash
+openclaw hooks install shieldcortex
+```
+
+Restart OpenClaw after installing:
+
+```bash
 openclaw gateway restart
 ```
 
-### Manual
+### Local development
 
-If you need to install manually, copy the compiled plugin files:
-
-```bash
-mkdir -p ~/.openclaw/extensions/shieldcortex-realtime
-cp node_modules/shieldcortex/plugins/openclaw/dist/* ~/.openclaw/extensions/shieldcortex-realtime/
-openclaw gateway restart
-```
-
-Find the package root with `npm root -g` (global) or `npm root` (local).
-
-## Requirements
-
-- OpenClaw v2026.2.15+ (needs `llm_input`/`llm_output` plugin hooks)
-- ShieldCortex available globally (`npm i -g shieldcortex`) or via `npx -y shieldcortex`
-- `mcporter` available via npx (for memory saves)
-
-## Auto-Memory
-
-Auto-memory extraction is on by default. ShieldCortex complements your existing memory system with built-in deduplication to avoid noise.
-
-Disable it:
+From the monorepo root, you can link the working plugin directory directly:
 
 ```bash
-shieldcortex config --openclaw-auto-memory false
+openclaw plugins install --link /path/to/ShieldCortex/plugins/openclaw
 ```
 
-Re-enable it:
+## Configuration
 
-```bash
-shieldcortex config --openclaw-auto-memory true
-```
+The plugin reads config from `plugins.entries.shieldcortex-realtime.config` in your OpenClaw config and merges it over `~/.shieldcortex/config.json`.
 
-Or set directly in `~/.shieldcortex/config.json`:
+Example:
 
 ```json
 {
-  "openclawAutoMemory": true
+  "plugins": {
+    "entries": {
+      "shieldcortex-realtime": {
+        "enabled": true,
+        "config": {
+          "binaryPath": "/usr/local/bin/shieldcortex",
+          "openclawAutoMemory": true,
+          "openclawAutoMemoryDedupe": true,
+          "openclawAutoMemoryNoveltyThreshold": 0.88,
+          "openclawAutoMemoryMaxRecent": 300
+        }
+      }
+    }
+  }
 }
 ```
 
-Novelty filtering is enabled by default when auto-memory is on. Optional tuning keys:
+Supported plugin config keys:
+
+- `binaryPath`: absolute path to the `shieldcortex` binary
+- `cloudApiKey`: optional ShieldCortex Cloud API key for realtime threat forwarding
+- `cloudBaseUrl`: optional API base URL override
+- `openclawAutoMemory`: enable or disable output memory extraction
+- `openclawAutoMemoryDedupe`: enable or disable duplicate suppression
+- `openclawAutoMemoryNoveltyThreshold`: dedupe similarity threshold, `0.6` to `0.99`
+- `openclawAutoMemoryMaxRecent`: dedupe cache size, `50` to `1000`
+
+## Auto-memory
+
+Auto-memory extraction is enabled when `openclawAutoMemory` is `true`. It complements your existing memory setup with deduplication to avoid noisy repeats.
+
+You can manage the same settings through ShieldCortex itself:
+
+```bash
+shieldcortex config --openclaw-auto-memory true
+shieldcortex config --openclaw-auto-memory false
+```
+
+Or by editing `~/.shieldcortex/config.json`:
 
 ```json
 {
+  "openclawAutoMemory": true,
   "openclawAutoMemoryDedupe": true,
   "openclawAutoMemoryNoveltyThreshold": 0.88,
   "openclawAutoMemoryMaxRecent": 300
 }
 ```
 
-You can also manage these settings from the local dashboard in `Shield Overview -> OpenClaw Memory`.
+## Cloud forwarding
 
-## Cloud Sync (optional)
-
-Add your API key to `~/.shieldcortex/config.json`:
+Threat forwarding is optional. Configure it in ShieldCortex:
 
 ```json
 {
@@ -94,8 +117,14 @@ Add your API key to `~/.shieldcortex/config.json`:
 }
 ```
 
-Threat detections will POST to the cloud endpoint. Fails silently if not configured.
+Or in the plugin entry config if you want plugin-specific overrides.
 
-## Audit Logs
+## Audit logs
 
-Written to `~/.shieldcortex/audit/realtime-YYYY-MM-DD.jsonl` — one JSON object per line.
+Realtime events are written to:
+
+```text
+~/.shieldcortex/audit/realtime-YYYY-MM-DD.jsonl
+```
+
+Each line is a JSON object with input-scan, threat, and output-memory activity.
