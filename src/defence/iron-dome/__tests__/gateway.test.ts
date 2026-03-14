@@ -13,7 +13,7 @@ describe('Gateway', () => {
     activeConfig = {
       ...DEFAULT_IRON_DOME_CONFIG,
       enabled: true,
-      trustedChannels: ['terminal', 'cli', 'telegram'],
+      trustedChannels: ['terminal', 'cli', 'dashboard', 'telegram'],
     };
   });
 
@@ -21,6 +21,7 @@ describe('Gateway', () => {
     const { isChannelTrusted } = await import('../gateway.js');
     expect(isChannelTrusted('terminal', activeConfig)).toBe(true);
     expect(isChannelTrusted('cli', activeConfig)).toBe(true);
+    expect(isChannelTrusted('dashboard', activeConfig)).toBe(true);
     expect(isChannelTrusted('telegram', activeConfig)).toBe(true);
   });
 

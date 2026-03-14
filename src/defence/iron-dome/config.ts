@@ -53,7 +53,7 @@ export interface IronDomeConfig {
 
 export const DEFAULT_IRON_DOME_CONFIG: IronDomeConfig = {
   enabled: false,
-  trustedChannels: ['terminal', 'cli'],
+  trustedChannels: ['terminal', 'cli', 'dashboard'],
   killPhrase: 'cortex halt',
   requireApproval: ['send_email', 'delete_file', 'api_call', 'purchase', 'transfer_funds'],
   autoApprove: ['read_file', 'search', 'calculate', 'format'],
@@ -87,7 +87,7 @@ export const DEFAULT_IRON_DOME_CONFIG: IronDomeConfig = {
 
 export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'enabled'>> = {
   school: {
-    trustedChannels: ['terminal', 'cli'],
+    trustedChannels: ['terminal', 'cli', 'dashboard'],
     killPhrase: 'cortex halt',
     requireApproval: [
       'send_email', 'delete_file', 'api_call', 'export_data',
@@ -130,7 +130,7 @@ export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'e
   },
 
   enterprise: {
-    trustedChannels: ['terminal', 'cli', 'slack'],
+    trustedChannels: ['terminal', 'cli', 'dashboard', 'slack'],
     killPhrase: 'cortex halt',
     requireApproval: [
       'send_email', 'delete_file', 'api_call', 'purchase',
@@ -172,7 +172,7 @@ export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'e
   },
 
   personal: {
-    trustedChannels: ['terminal', 'cli', 'telegram', 'email'],
+    trustedChannels: ['terminal', 'cli', 'dashboard', 'telegram', 'email'],
     killPhrase: 'cortex halt',
     requireApproval: [
       'send_email', 'purchase', 'transfer_funds', 'delete_file',
@@ -207,7 +207,7 @@ export const IRON_DOME_PROFILES: Record<IronDomeProfile, Omit<IronDomeConfig, 'e
   },
 
   paranoid: {
-    trustedChannels: ['terminal'],
+    trustedChannels: ['terminal', 'dashboard'],
     killPhrase: 'cortex halt',
     requireApproval: [
       'send_email', 'delete_file', 'api_call', 'purchase',
