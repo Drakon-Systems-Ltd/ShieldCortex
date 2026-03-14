@@ -273,6 +273,12 @@ shieldcortex iron-dome activate --profile enterprise
 - 🚨 **Kill switch** — emergency shutdown of all agent actions, immediate effect
 - 📋 **Full audit trail** — every action check logged for forensic review
 
+The local authenticated dashboard is treated as a trusted channel in built-in
+Iron Dome profiles, but dashboard write actions still go through the same
+announcement and confirmation tiers as CLI or MCP actions. High-risk REST
+mutations like config changes, SQL writes, quarantine review, and memory
+deletes are no longer advisory-only.
+
 <br>
 
 ## 🐾 OpenClaw Integration

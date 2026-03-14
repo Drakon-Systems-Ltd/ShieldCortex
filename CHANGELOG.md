@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.4] - 2026-03-14
+
+### Changed
+
+- Iron Dome now treats the authenticated local dashboard as a trusted channel in built-in profiles instead of blocking dashboard mutations at the gateway by default
+- Dashboard REST mutation routes now enforce Iron Dome action gates and announcement/confirmation tiers for config changes, SQL writes, quarantine review, and memory management actions
+
+### Docs
+
+- README and CLI help now explain that dashboard actions are trusted but still gated by Iron Dome confirmation policy
+
 ## [3.4.1] - 2026-03-12
 
 ### Added

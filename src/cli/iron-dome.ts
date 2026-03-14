@@ -103,6 +103,9 @@ ${bold}Profiles:${reset}
   enterprise   Financial protection, compliance
   personal     Lighter touch for personal use
   paranoid     Everything requires approval
+
+${bold}Trusted local channels:${reset}
+  terminal, cli, dashboard
 `);
 }
 
