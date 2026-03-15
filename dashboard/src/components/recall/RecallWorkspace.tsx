@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Search, ShieldAlert, Sparkles, Waypoints } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -13,13 +13,11 @@ export function RecallWorkspace() {
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [expectedSearch, setExpectedSearch] = useState('');
   const [expectedId, setExpectedId] = useState<number | null>(null);
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    return JSON.parse(window.localStorage.getItem('shieldcortex:recall-history') ?? '[]');
+  });
   const historyMutation = useRecallHistory();
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    setHistory(JSON.parse(window.localStorage.getItem('shieldcortex:recall-history') ?? '[]'));
-  }, []);
 
   const explainQuery = useMemo(
     () => submittedQuery.trim()

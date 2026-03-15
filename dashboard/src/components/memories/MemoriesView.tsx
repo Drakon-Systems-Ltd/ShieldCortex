@@ -45,7 +45,10 @@ export function MemoriesView({ memories, selectedMemory, onSelectMemory }: Memor
   const { data: openClawData } = useOpenClawSessions();
   const reviewAction = useReviewAction();
 
-  const openClawSessions = openClawData?.sessions ?? [];
+  const openClawSessions = useMemo(
+    () => openClawData?.sessions ?? [],
+    [openClawData?.sessions]
+  );
 
   useEffect(() => {
     if (!openClawSessions.length) {
