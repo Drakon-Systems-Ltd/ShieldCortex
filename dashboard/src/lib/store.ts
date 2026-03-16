@@ -30,6 +30,10 @@ interface DashboardState {
   setCategoryFilter: (category: string | null) => void;
   setProjectFilter: (project: string | null) => void;
 
+  // Review workflow focus
+  reviewFocus: 'lowTrust' | 'noisyAutoExtracted' | 'stale' | 'neverUsed' | 'projectless' | 'duplicates' | 'contradictions' | null;
+  setReviewFocus: (focus: 'lowTrust' | 'noisyAutoExtracted' | 'stale' | 'neverUsed' | 'projectless' | 'duplicates' | 'contradictions' | null) => void;
+
   // Recent events (for activity feed)
   recentEvents: MemoryEvent[];
   addEvent: (event: MemoryEvent) => void;
@@ -70,6 +74,10 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   setTypeFilter: (type) => set({ typeFilter: type }),
   setCategoryFilter: (category) => set({ categoryFilter: category }),
   setProjectFilter: (project) => set({ projectFilter: project }),
+
+  // Review focus
+  reviewFocus: null,
+  setReviewFocus: (focus) => set({ reviewFocus: focus }),
 
   // Recent events
   recentEvents: [],

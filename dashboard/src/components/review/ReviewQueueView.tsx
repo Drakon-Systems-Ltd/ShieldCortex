@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useMemo, useRef } from 'react';
 import { Archive, CloudOff, Pin, ShieldAlert, Sparkles, Layers } from 'lucide-react';
 import { useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
 import { useDashboardStore } from '@/lib/store';
@@ -84,13 +85,200 @@ function MemorySection({
 }
 
 export function ReviewQueueView() {
-  const { projectFilter, setSelectedMemory, setViewMode } = useDashboardStore();
+  const { projectFilter, reviewFocus, setReviewFocus, setSelectedMemory, setViewMode } = useDashboardStore();
   const { data, isLoading } = useReviewQueue(projectFilter);
   const mergeMutation = useMergeMemories();
+  const reviewAction = useReviewAction();
+
+  const sectionRefs = {
+    lowTrust: useRef<HTMLElement | null>(null),
+    noisyAutoExtracted: useRef<HTMLElement | null>(null),
+    stale: useRef<HTMLElement | null>(null),
+    neverUsed: useRef<HTMLElement | null>(null),
+    projectless: useRef<HTMLElement | null>(null),
+    duplicates: useRef<HTMLElement | null>(null),
+    contradictions: useRef<HTMLElement | null>(null),
+  };
 
   const openMemory = (memory: Memory) => {
     setSelectedMemory(memory);
     setViewMode('memories');
+  };
+
+  useEffect(() => {
+    if (!reviewFocus) return;
+    const target = sectionRefs[reviewFocus].current;
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [reviewFocus]);
+
+  const resolveContradiction = async (keep: Memory, suppress: Memory) => {
+    await reviewAction.mutateAsync({ id: keep.id, action: 'canonicalize', reviewedBy: 'dashboard-review' });
+    await reviewAction.mutateAsync({ id: suppress.id, action: 'suppress', reviewedBy: 'dashboard-review' });
+  };
+
+  const sectionOrder = useMemo(() => {
+    const defaultOrder: Array<'lowTrust' | 'noisyAutoExtracted' | 'stale' | 'neverUsed' | 'projectless' | 'duplicates' | 'contradictions'> = [
+      'lowTrust',
+      'noisyAutoExtracted',
+      'stale',
+      'neverUsed',
+      'projectless',
+      'duplicates',
+      'contradictions',
+    ];
+    if (!reviewFocus) return defaultOrder;
+    return [reviewFocus, ...defaultOrder.filter((section) => section !== reviewFocus)];
+  }, [reviewFocus]);
+
+  const sectionCounts = {
+    lowTrust: data?.sections.lowTrust.length ?? 0,
+    noisyAutoExtracted: data?.sections.noisyAutoExtracted.length ?? 0,
+    stale: data?.sections.stale.length ?? 0,
+    neverUsed: data?.sections.neverUsed.length ?? 0,
+    projectless: data?.sections.projectless.length ?? 0,
+    duplicates: data?.sections.duplicates.length ?? 0,
+    contradictions: data?.sections.contradictions.length ?? 0,
+  };
+
+  const sections = {
+    lowTrust: (
+      <section ref={(node) => { sectionRefs.lowTrust.current = node; }} className="scroll-mt-6">
+        <MemorySection title="Low trust" detail="These memories came from weaker or noisier sources." items={data?.sections.lowTrust ?? []} onOpen={openMemory} />
+      </section>
+    ),
+    noisyAutoExtracted: (
+      <section ref={(node) => { sectionRefs.noisyAutoExtracted.current = node; }} className="scroll-mt-6">
+        <MemorySection title="Noisy auto-extracted" detail="Auto capture is useful, but not every extraction deserves to stay hot." items={data?.sections.noisyAutoExtracted ?? []} onOpen={openMemory} />
+      </section>
+    ),
+    stale: (
+      <section ref={(node) => { sectionRefs.stale.current = node; }} className="scroll-mt-6">
+        <MemorySection title="Stale" detail="Useful once, maybe. Worth archiving or refreshing now." items={data?.sections.stale ?? []} onOpen={openMemory} />
+      </section>
+    ),
+    neverUsed: (
+      <section ref={(node) => { sectionRefs.neverUsed.current = node; }} className="scroll-mt-6">
+        <MemorySection title="Never used" detail="Stored but never recalled. High count usually means capture is too noisy." items={data?.sections.neverUsed ?? []} onOpen={openMemory} />
+      </section>
+    ),
+    projectless: (
+      <section ref={(node) => { sectionRefs.projectless.current = node; }} className="scroll-mt-6">
+        <MemorySection title="Projectless" detail="These memories have no useful project scope and are likely to leak into the wrong context." items={data?.sections.projectless ?? []} onOpen={openMemory} />
+      </section>
+    ),
+    duplicates: (
+      <section ref={(node) => { sectionRefs.duplicates.current = node; }} className="scroll-mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+        <div className="flex items-center gap-2">
+          <Layers size={16} className="text-cyan-300" />
+          <h3 className="text-lg font-semibold text-white">Duplicate candidates</h3>
+        </div>
+        <p className="mt-1 text-sm text-slate-400">One click keeps the recommended memory, merges unique content, and removes the duplicate.</p>
+        <div className="mt-4 space-y-3">
+          {(data?.sections.duplicates ?? []).slice(0, 8).map((pair) => {
+            const keep = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
+            const remove = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
+            return (
+              <div key={`${pair.memoryA.id}-${pair.memoryB.id}`} className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-medium text-white">{pair.memoryA.title}</div>
+                    <div className="mt-1 text-xs text-slate-500">paired with {pair.memoryB.title}</div>
+                    <div className="mt-2 text-xs text-slate-400">{pair.similarity} · shared title words {pair.sharedWords}</div>
+                  </div>
+                  <div className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+                    Keep {keep.id}
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button onClick={() => openMemory(pair.memoryA)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect A</button>
+                  <button onClick={() => openMemory(pair.memoryB)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect B</button>
+                  <button
+                    onClick={() => mergeMutation.mutate({ keptId: keep.id, removedId: remove.id, reviewedBy: 'dashboard-merge' })}
+                    className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10"
+                  >
+                    Merge into recommended
+                  </button>
+                  <button
+                    onClick={() => mergeMutation.mutate({ keptId: remove.id, removedId: keep.id, reviewedBy: 'dashboard-merge' })}
+                    className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+                  >
+                    Keep other instead
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {!data?.sections.duplicates?.length && <div className="text-sm text-slate-400">No duplicate candidates detected.</div>}
+        </div>
+      </section>
+    ),
+    contradictions: (
+      <section ref={(node) => { sectionRefs.contradictions.current = node; }} className="scroll-mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+        <div className="flex items-center gap-2">
+          <ShieldAlert size={16} className="text-amber-300" />
+          <h3 className="text-lg font-semibold text-white">Contradiction clusters</h3>
+        </div>
+        <p className="mt-1 text-sm text-slate-400">Compare both sides, keep the stronger memory hot, and suppress the one you no longer want shaping recall.</p>
+        <div className="mt-4 space-y-4">
+          {(data?.sections.contradictions ?? []).slice(0, 8).map((item) => (
+            <div key={`${item.memoryA.id}-${item.memoryB.id}`} className="rounded-xl border border-amber-500/20 bg-slate-950/60 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Contradiction score</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{Math.round(item.score * 100)}%</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Shared topics</div>
+                  <div className="mt-1 text-sm text-slate-300">{item.sharedTopics.length ? item.sharedTopics.join(' · ') : 'No obvious shared topic'}</div>
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-sm text-slate-300">
+                {item.reason}
+              </div>
+
+              <div className="mt-4 grid gap-4 xl:grid-cols-2">
+                {[item.memoryA, item.memoryB].map((memory, index) => {
+                  const other = index === 0 ? item.memoryB : item.memoryA;
+                  return (
+                    <div key={memory.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{index === 0 ? 'Option A' : 'Option B'}</div>
+                          <div className="mt-1 text-base font-medium text-white">{memory.title}</div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            {memory.category} · {memory.captureMethod || 'manual'} · trust {(memory.trustScore ?? 1).toFixed(2)}
+                          </div>
+                        </div>
+                        <div className="rounded-lg bg-slate-800 px-3 py-2 text-right">
+                          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">State</div>
+                          <div className="text-sm text-slate-100">{memory.status || 'active'}</div>
+                        </div>
+                      </div>
+                      <div className="mt-3 line-clamp-4 text-sm text-slate-400">{memory.content}</div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <button onClick={() => openMemory(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect</button>
+                        <button onClick={() => reviewAction.mutate({ id: memory.id, action: memory.pinned ? 'unpin' : 'pin', reviewedBy: 'dashboard-review' })} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">
+                          {memory.pinned ? 'Unpin' : 'Pin'}
+                        </button>
+                        <button onClick={() => resolveContradiction(memory, other)} className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10">
+                          Keep this, suppress other
+                        </button>
+                        <button onClick={() => reviewAction.mutate({ id: memory.id, action: 'suppress', reviewedBy: 'dashboard-review' })} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10">
+                          Suppress this one
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          {!data?.sections.contradictions?.length && <div className="text-sm text-slate-400">No contradiction clusters detected.</div>}
+        </div>
+      </section>
+    ),
   };
 
   return (
@@ -128,82 +316,48 @@ export function ReviewQueueView() {
               <div><div className="text-xs text-slate-500">Pinned</div><div className="text-xl font-semibold text-white">{data?.openClaw.pinned ?? 0}</div></div>
             </div>
           </div>
+
+          <div className="mt-6 flex flex-wrap gap-2">
+            {[
+              ['contradictions', 'Contradictions'],
+              ['duplicates', 'Duplicates'],
+              ['stale', 'Stale'],
+              ['neverUsed', 'Never used'],
+              ['lowTrust', 'Low trust'],
+              ['noisyAutoExtracted', 'Noisy auto'],
+              ['projectless', 'Projectless'],
+            ].map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setReviewFocus(key as typeof reviewFocus)}
+                className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                  reviewFocus === key
+                    ? 'border-cyan-400/50 bg-cyan-500/10 text-cyan-200'
+                    : 'border-slate-700 bg-slate-950/60 text-slate-300 hover:border-slate-500'
+                }`}
+              >
+                {label} ({sectionCounts[key as keyof typeof sectionCounts]})
+              </button>
+            ))}
+            {reviewFocus && (
+              <button
+                onClick={() => setReviewFocus(null)}
+                className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+              >
+                Clear focus
+              </button>
+            )}
+          </div>
         </section>
 
         {isLoading && <div className="text-sm text-slate-400">Loading review queue…</div>}
 
         <div className="grid gap-6 xl:grid-cols-2">
-          <MemorySection title="Low trust" detail="These memories came from weaker or noisier sources." items={data?.sections.lowTrust ?? []} onOpen={openMemory} />
-          <MemorySection title="Noisy auto-extracted" detail="Auto capture is useful, but not every extraction deserves to stay hot." items={data?.sections.noisyAutoExtracted ?? []} onOpen={openMemory} />
-          <MemorySection title="Stale" detail="Useful once, maybe. Worth archiving or refreshing now." items={data?.sections.stale ?? []} onOpen={openMemory} />
-          <MemorySection title="Never used" detail="Stored but never recalled. High count usually means capture is too noisy." items={data?.sections.neverUsed ?? []} onOpen={openMemory} />
-          <MemorySection title="Projectless" detail="These memories have no useful project scope and are likely to leak into the wrong context." items={data?.sections.projectless ?? []} onOpen={openMemory} />
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-            <div className="flex items-center gap-2">
-              <Layers size={16} className="text-cyan-300" />
-              <h3 className="text-lg font-semibold text-white">Duplicate candidates</h3>
+          {sectionOrder.map((sectionKey) => (
+            <div key={sectionKey} className={reviewFocus === sectionKey ? 'ring-1 ring-cyan-400/40 rounded-2xl' : ''}>
+              {sections[sectionKey]}
             </div>
-            <p className="mt-1 text-sm text-slate-400">One click keeps the recommended memory, merges unique content, and removes the duplicate.</p>
-            <div className="mt-4 space-y-3">
-              {(data?.sections.duplicates ?? []).slice(0, 8).map((pair) => {
-                const keep = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
-                const remove = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
-                return (
-                  <div key={`${pair.memoryA.id}-${pair.memoryB.id}`} className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <div className="text-sm font-medium text-white">{pair.memoryA.title}</div>
-                        <div className="mt-1 text-xs text-slate-500">paired with {pair.memoryB.title}</div>
-                        <div className="mt-2 text-xs text-slate-400">{pair.similarity} · shared title words {pair.sharedWords}</div>
-                      </div>
-                      <div className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
-                        Keep {keep.id}
-                      </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <button onClick={() => openMemory(pair.memoryA)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect A</button>
-                      <button onClick={() => openMemory(pair.memoryB)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect B</button>
-                      <button
-                        onClick={() => mergeMutation.mutate({ keptId: keep.id, removedId: remove.id, reviewedBy: 'dashboard-merge' })}
-                        className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10"
-                      >
-                        Merge into recommended
-                      </button>
-                      <button
-                        onClick={() => mergeMutation.mutate({ keptId: remove.id, removedId: keep.id, reviewedBy: 'dashboard-merge' })}
-                        className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
-                      >
-                        Keep other instead
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-              {!data?.sections.duplicates?.length && <div className="text-sm text-slate-400">No duplicate candidates detected.</div>}
-            </div>
-          </section>
-
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-            <div className="flex items-center gap-2">
-              <ShieldAlert size={16} className="text-amber-300" />
-              <h3 className="text-lg font-semibold text-white">Contradiction clusters</h3>
-            </div>
-            <div className="mt-4 space-y-3">
-              {(data?.sections.contradictions ?? []).slice(0, 8).map((item) => (
-                <div key={`${item.memoryA.id}-${item.memoryB.id}`} className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                  <div className="text-sm font-medium text-white">{item.memoryA.title}</div>
-                  <div className="mt-1 text-xs text-slate-500">conflicts with</div>
-                  <div className="mt-1 text-sm font-medium text-white">{item.memoryB.title}</div>
-                  <div className="mt-2 text-xs text-slate-400">{item.reason}</div>
-                  <div className="mt-3 flex gap-2">
-                    <button onClick={() => openMemory(item.memoryA)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect A</button>
-                    <button onClick={() => openMemory(item.memoryB)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect B</button>
-                  </div>
-                </div>
-              ))}
-              {!data?.sections.contradictions?.length && <div className="text-sm text-slate-400">No contradiction clusters detected.</div>}
-            </div>
-          </section>
+          ))}
         </div>
       </div>
     </div>

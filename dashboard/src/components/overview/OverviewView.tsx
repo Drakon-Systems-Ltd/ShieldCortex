@@ -151,6 +151,7 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
     setCategoryFilter,
     setTypeFilter,
     setSelectedMemory,
+    setReviewFocus,
   } = useDashboardStore();
   const { data: auditStats } = useAuditStats('24h', selectedProject || undefined);
   const { data: quarantineData } = useQuarantine('pending', 10, selectedProject || undefined);
@@ -185,6 +186,12 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
     setViewMode(target);
   }, [setSelectedMemory, setViewMode]);
 
+  const openReview = useCallback((focus: 'lowTrust' | 'noisyAutoExtracted' | 'stale' | 'neverUsed' | 'projectless' | 'duplicates' | 'contradictions') => {
+    setSelectedMemory(null);
+    setReviewFocus(focus);
+    setViewMode('review');
+  }, [setReviewFocus, setSelectedMemory, setViewMode]);
+
   const openMemories = useCallback((filters?: { category?: string | null; type?: string | null }) => {
     setCategoryFilter(filters?.category ?? null);
     setTypeFilter(filters?.type ?? null);
@@ -201,7 +208,10 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         detail: 'Review blocked or quarantined writes before they pile up into silent operator debt.',
         tone: pendingQuarantine > 10 ? 'critical' : 'warning',
         cta: 'Open review queue',
-        onClick: () => openView('quarantine'),
+        onClick: () => {
+          setReviewFocus(null);
+          openView('quarantine');
+        },
       });
     }
 
@@ -210,8 +220,8 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         title: `${contradictionCount} contradiction${contradictionCount === 1 ? '' : 's'} in memory`,
         detail: 'Conflicting facts reduce recall trust and are worth resolving before they become reinforced.',
         tone: contradictionCount > 5 ? 'critical' : 'warning',
-        cta: 'Open review workflow',
-        onClick: () => openView('review'),
+        cta: 'Resolve contradictions',
+        onClick: () => openReview('contradictions'),
       });
     }
 
@@ -220,8 +230,8 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         title: 'Memory cleanup work is available',
         detail: `${staleCount} stale, ${duplicateCount} duplicate, ${neverAccessedCount} never-accessed memories are reducing signal quality.`,
         tone: staleCount + duplicateCount > 10 ? 'warning' : 'healthy',
-        cta: 'Open review workflow',
-        onClick: () => openView('review'),
+        cta: duplicateCount > 0 ? 'Merge duplicates' : staleCount > 0 ? 'Review stale memories' : 'Review unused memories',
+        onClick: () => openReview(duplicateCount > 0 ? 'duplicates' : staleCount > 0 ? 'stale' : 'neverUsed'),
       });
     }
 
@@ -247,7 +257,7 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
     }
 
     return actions.slice(0, 4);
-  }, [pendingQuarantine, contradictionCount, staleCount, neverAccessedCount, duplicateCount, thinCategories, openMemories, openView]);
+  }, [pendingQuarantine, contradictionCount, staleCount, neverAccessedCount, duplicateCount, thinCategories, openMemories, openReview, openView, setReviewFocus]);
 
   const freeWorkflows = [
     {

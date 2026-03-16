@@ -444,45 +444,44 @@ export function MemoriesView({
             {sorted.length} record{sorted.length === 1 ? '' : 's'}
           </div>
         </div>
-        <div className={`grid gap-4 ${selectedMemory ? 'xl:grid-cols-[minmax(0,1fr)_360px]' : ''} items-start`}>
-          <div
-            className={
-              viewStyle === 'grid'
-                ? 'grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-3'
-                : 'flex flex-col gap-3 max-w-2xl'
-            }
-          >
-            {sorted.map((memory) => (
-              <MemoryCard
-                key={memory.id}
-                memory={memory}
-                isSelected={selectedMemory?.id === memory.id}
-                onSelect={onSelectMemory}
-                isChecked={bulkMode ? checked.has(memory.id) : undefined}
-                onCheck={bulkMode ? handleCheck : undefined}
-              />
-            ))}
-          </div>
-
-          {selectedMemory && (
-            <div className="xl:sticky xl:top-4">
-              <div className="mb-2 px-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                Selected memory
-              </div>
-              <div className="max-h-[calc(100vh-7rem)] overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/40">
-                <MemoryDetail
-                  memory={selectedMemory}
-                  links={links}
-                  memories={memories}
-                  onClose={() => onSelectMemory(null)}
-                  onReinforce={onReinforce}
-                  onSelectMemory={onSelectMemoryById}
-                  isReinforcing={isReinforcing}
-                  reinforceSuccess={reinforceSuccess}
-                />
+        {selectedMemory && (
+          <div className="mb-4 rounded-xl border border-cyan-500/20 bg-slate-900/50">
+            <div className="border-b border-slate-800 px-4 py-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300">Selected memory</div>
+              <div className="mt-1 text-sm text-slate-400">
+                Review the chosen memory in context, then keep scrolling through the captured records below.
               </div>
             </div>
-          )}
+            <MemoryDetail
+              memory={selectedMemory}
+              links={links}
+              memories={memories}
+              onClose={() => onSelectMemory(null)}
+              onReinforce={onReinforce}
+              onSelectMemory={onSelectMemoryById}
+              isReinforcing={isReinforcing}
+              reinforceSuccess={reinforceSuccess}
+            />
+          </div>
+        )}
+
+        <div
+          className={
+            viewStyle === 'grid'
+              ? 'grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3'
+              : 'flex max-w-2xl flex-col gap-3'
+          }
+        >
+          {sorted.map((memory) => (
+            <MemoryCard
+              key={memory.id}
+              memory={memory}
+              isSelected={selectedMemory?.id === memory.id}
+              onSelect={onSelectMemory}
+              isChecked={bulkMode ? checked.has(memory.id) : undefined}
+              onCheck={bulkMode ? handleCheck : undefined}
+            />
+          ))}
         </div>
       </div>
     </div>

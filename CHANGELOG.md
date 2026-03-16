@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.8] - 2026-03-16
+
+### Fixed
+
+- **Review workflow routing** — Home `Urgent actions` now opens the relevant review section directly instead of dumping operators into a contextless page
+- **Contradiction resolution UX** — the Review Queue now lets operators compare contradictory memories side by side, inspect both, pin, suppress, and resolve a contradiction by keeping one and suppressing the other
+- **Capture workspace layout** — selected captured memories now render in page flow instead of a detached sticky side panel, so the session view and captured record list behave like one scrollable workspace
+
 ## [3.4.7] - 2026-03-16
 
 ### Fixed
