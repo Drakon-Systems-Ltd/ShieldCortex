@@ -53,6 +53,28 @@ export type { IronDomeAuditEvent } from './audit.js';
 // In-memory config (persisted to SQLite iron_dome_config table)
 let activeConfig: IronDomeConfig = { ...DEFAULT_IRON_DOME_CONFIG };
 
+function normalizeTrustedChannels(channels: string[] | undefined): string[] {
+  const normalized = new Set(
+    Array.isArray(channels)
+      ? channels
+          .filter((channel): channel is string => typeof channel === 'string' && channel.trim().length > 0)
+          .map((channel) => channel.toLowerCase())
+      : [],
+  );
+
+  // The local dashboard must always be able to manage Iron Dome itself.
+  normalized.add('dashboard');
+
+  return Array.from(normalized);
+}
+
+function normalizeConfig(config: IronDomeConfig): IronDomeConfig {
+  return {
+    ...config,
+    trustedChannels: normalizeTrustedChannels(config.trustedChannels),
+  };
+}
+
 /**
  * Ensure the iron_dome_config table exists.
  */
@@ -80,12 +102,13 @@ function loadConfig(): IronDomeConfig {
     const db = getDatabase();
     const row = db.prepare('SELECT value FROM iron_dome_config WHERE key = ?').get('config') as { value: string } | undefined;
     if (row) {
-      activeConfig = JSON.parse(row.value);
+      activeConfig = normalizeConfig(JSON.parse(row.value));
       return activeConfig;
     }
   } catch {
     // Fall through to default
   }
+  activeConfig = normalizeConfig(activeConfig);
   return activeConfig;
 }
 
@@ -95,12 +118,14 @@ function loadConfig(): IronDomeConfig {
 function saveConfig(config: IronDomeConfig): void {
   try {
     ensureTable();
+    const normalized = normalizeConfig(config);
     const db = getDatabase();
     db.prepare(`
       INSERT INTO iron_dome_config (key, value, updated_at)
       VALUES ('config', ?, datetime('now'))
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(JSON.stringify(config));
+    `).run(JSON.stringify(normalized));
+    activeConfig = normalized;
   } catch (err) {
     console.error('[iron-dome] Failed to save config:', err);
   }
@@ -124,7 +149,6 @@ export function activateIronDome(profile?: IronDomeProfile): IronDomeConfig {
     };
   }
 
-  activeConfig = config;
   saveConfig(config);
 
   logIronDomeAudit({
@@ -140,7 +164,7 @@ export function activateIronDome(profile?: IronDomeProfile): IronDomeConfig {
  * Deactivate Iron Dome.
  */
 export function deactivateIronDome(): void {
-  activeConfig = { ...DEFAULT_IRON_DOME_CONFIG, enabled: false };
+  activeConfig = normalizeConfig({ ...DEFAULT_IRON_DOME_CONFIG, enabled: false });
   saveConfig(activeConfig);
 
   logIronDomeAudit({
@@ -206,7 +230,7 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
 
   // Custom policies require a Pro licence — return local config
   // (which uses built-in profiles) unchanged for free users
-  if (!isFeatureEnabled('custom_iron_dome_policies')) return localConfig;
+  if (!isFeatureEnabled('custom_iron_dome_policies')) return normalizeConfig(localConfig);
 
   // Check for active local custom policy (takes precedence over cloud)
   if (isDatabaseInitialized()) {
@@ -224,7 +248,7 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
         };
         // Apply policy config overrides
         if (policyConfig.trustedChannels && Array.isArray(policyConfig.trustedChannels)) {
-          merged.trustedChannels = policyConfig.trustedChannels;
+          merged.trustedChannels = normalizeTrustedChannels(policyConfig.trustedChannels);
         }
         if (typeof policyConfig.killPhrase === 'string') {
           merged.killPhrase = policyConfig.killPhrase;
@@ -244,7 +268,7 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
         if (policyConfig.confirmationProtocol && typeof policyConfig.confirmationProtocol === 'object') {
           merged.confirmationProtocol = { ...merged.confirmationProtocol, ...policyConfig.confirmationProtocol };
         }
-        return merged;
+        return normalizeConfig(merged);
       }
     } catch {
       // Custom policies store not available — fall through to cloud
@@ -252,12 +276,12 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
   }
 
   const cache = getCloudIronDomeCache();
-  if (!cache?.policy) return localConfig;
+  if (!cache?.policy) return normalizeConfig(localConfig);
 
   const cloudPolicy: CloudPolicy = cache.policy;
   const profileKey = cloudPolicy.base_profile as IronDomeProfile;
   const baseProfile = IRON_DOME_PROFILES[profileKey];
-  if (!baseProfile) return localConfig;
+  if (!baseProfile) return normalizeConfig(localConfig);
 
   // Start with the cloud base profile
   const merged: IronDomeConfig = {
@@ -268,7 +292,7 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
   // Apply config_overrides from cloud policy
   const overrides = cloudPolicy.config_overrides;
   if (overrides.trustedChannels && Array.isArray(overrides.trustedChannels)) {
-    merged.trustedChannels = overrides.trustedChannels as string[];
+    merged.trustedChannels = normalizeTrustedChannels(overrides.trustedChannels as string[]);
   }
   if (typeof overrides.killPhrase === 'string') {
     merged.killPhrase = overrides.killPhrase;
@@ -305,7 +329,7 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
     };
   }
 
-  return merged;
+  return normalizeConfig(merged);
 }
 
 // ── Confirmation Override Management ──

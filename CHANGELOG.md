@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.7] - 2026-03-16
+
+### Fixed
+
+- **Iron Dome dashboard self-lockout** — persisted Iron Dome configs now always normalize `dashboard` back into `trustedChannels`, so an old or malformed local policy cannot block the local dashboard from managing its own config
+- Added regression coverage for persisted Iron Dome configs that omit `dashboard`, ensuring both stored status and effective policy repair the channel automatically on load
+- Existing installs recover cleanly on the next config load/save instead of continuing to emit false `dashboard is not in trusted channels list` gateway blocks
 ## [3.4.6] - 2026-03-16
 
 ### Fixed
