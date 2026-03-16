@@ -81,6 +81,13 @@ export function CloudSyncStatus() {
 
   const { enabled, apiKeySet, lastSyncAt, queue, device } = data;
   const memoryQueue = queue.byKind.memory;
+  const graphQueue = queue.byKind.graph;
+  const replicationPending = memoryQueue.pending + graphQueue.pending;
+  const replicationFailed = memoryQueue.failed + graphQueue.failed;
+  const auxiliaryFailed =
+    queue.byKind.audit.failed +
+    queue.byKind.quarantine.failed +
+    queue.byKind.unknown.failed;
 
   let status: 'healthy' | 'queued' | 'warning' | 'disabled' = 'disabled';
   let label = 'Cloud sync disabled';
@@ -89,19 +96,19 @@ export function CloudSyncStatus() {
   if (enabled && apiKeySet) {
     const stale = isCloudSyncStale(lastSyncAt);
 
-    if (queue.pending > 0 && (memoryQueue.failed > 0 || queue.failed > 0)) {
+    if (replicationPending > 0 && replicationFailed > 0) {
       status = 'warning';
       label = 'Cloud sync needs attention';
       detail = queue.lastError ?? 'One or more sync jobs failed and need retry.';
-    } else if (queue.failed > 0) {
+    } else if (replicationFailed > 0) {
       status = stale ? 'warning' : 'queued';
       label = stale ? 'Cloud sync has unresolved failures' : 'Cloud sync healthy, with failed history';
       detail = queue.lastError
         ? `${queue.lastError}${queue.latestFailureAt ? ` • last failure ${formatTimeAgo(queue.latestFailureAt)}` : ''}`
-        : `${queue.failed} failed job${queue.failed === 1 ? '' : 's'} remain in history.`;
-    } else if (memoryQueue.pending > 0 || queue.pending > 0) {
+        : `${replicationFailed} failed replication job${replicationFailed === 1 ? '' : 's'} remain in history.`;
+    } else if (replicationPending > 0) {
       status = 'queued';
-      label = memoryQueue.pending > 0 ? 'Memory sync queued' : 'Cloud sync queued';
+      label = 'Cloud sync queued';
       detail = queue.nextRetryAt
         ? `Next retry ${formatTimeUntil(queue.nextRetryAt)}`
         : 'Waiting to flush queued sync jobs.';
@@ -113,6 +120,9 @@ export function CloudSyncStatus() {
       status = 'healthy';
       label = 'Cloud sync healthy';
       detail = lastSyncAt ? `Last successful sync ${formatTimeAgo(lastSyncAt)}` : 'Connected and ready to sync.';
+      if (auxiliaryFailed > 0) {
+        detail += ` Auxiliary audit/quarantine history: ${auxiliaryFailed} failed job${auxiliaryFailed === 1 ? '' : 's'}.`;
+      }
     }
   }
 
@@ -154,11 +164,11 @@ export function CloudSyncStatus() {
             <div className="text-[11px] text-slate-500">pending writes</div>
           </div>
           <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-            <div className="text-slate-500">Failed jobs</div>
-            <div className={`mt-1 text-lg font-semibold ${queue.failed > 0 ? 'text-red-300' : 'text-white'}`}>
-              {queue.failed}
+            <div className="text-slate-500">Replication failures</div>
+            <div className={`mt-1 text-lg font-semibold ${replicationFailed > 0 ? 'text-red-300' : 'text-white'}`}>
+              {replicationFailed}
             </div>
-            <div className="text-[11px] text-slate-500">all payload kinds</div>
+            <div className="text-[11px] text-slate-500">memory + graph only</div>
           </div>
           <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
             <div className="text-slate-500">Replicated</div>

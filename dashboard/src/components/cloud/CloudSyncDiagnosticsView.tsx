@@ -48,25 +48,31 @@ function StatusBanner() {
   let detail = 'Enable cloud sync and activate a Team licence to start replicating local data.';
   let Icon = Cloud;
   const stale = isCloudSyncStale(sync.lastSyncAt);
+  const replicationPending = sync.queue.byKind.memory.pending + sync.queue.byKind.graph.pending;
+  const replicationFailed = sync.queue.byKind.memory.failed + sync.queue.byKind.graph.failed;
+  const auxiliaryFailed =
+    sync.queue.byKind.audit.failed +
+    sync.queue.byKind.quarantine.failed +
+    sync.queue.byKind.unknown.failed;
 
   if (sync.enabled && sync.apiKeySet && !sync.featureEnabled) {
     tone = 'border-amber-500/30 bg-amber-500/10 text-amber-200';
     title = 'Cloud configured but licence locked';
     detail = `Cloud sync requires the ${TIER_LABELS[sync.requiredTier]} tier. Current tier: ${TIER_LABELS[license?.tier ?? 'free']}.`;
     Icon = KeyRound;
-  } else if (sync.enabled && sync.apiKeySet && sync.queue.pending > 0 && sync.queue.failed > 0) {
+  } else if (sync.enabled && sync.apiKeySet && replicationPending > 0 && replicationFailed > 0) {
     tone = 'border-red-500/30 bg-red-500/10 text-red-200';
     title = 'Cloud sync needs attention';
     detail = sync.queue.lastError ?? 'One or more queued sync jobs are failing.';
     Icon = ShieldAlert;
-  } else if (sync.enabled && sync.apiKeySet && sync.queue.failed > 0) {
+  } else if (sync.enabled && sync.apiKeySet && replicationFailed > 0) {
     tone = stale ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-amber-500/30 bg-amber-500/10 text-amber-200';
     title = stale ? 'Cloud sync has unresolved failures' : 'Cloud sync healthy, with failed history';
     detail = sync.queue.lastError
       ? `${sync.queue.lastError}${sync.queue.latestFailureAt ? ` Last failure ${formatTimeAgo(sync.queue.latestFailureAt)}.` : ''}`
-      : `${sync.queue.failed} failed job${sync.queue.failed === 1 ? '' : 's'} remain in queue history.`;
+      : `${replicationFailed} failed replication job${replicationFailed === 1 ? '' : 's'} remain in queue history.`;
     Icon = stale ? ShieldAlert : AlertTriangle;
-  } else if (sync.enabled && sync.apiKeySet && sync.queue.pending > 0) {
+  } else if (sync.enabled && sync.apiKeySet && replicationPending > 0) {
     tone = 'border-amber-500/30 bg-amber-500/10 text-amber-200';
     title = 'Cloud sync is catching up';
     detail = sync.queue.nextRetryAt
@@ -77,6 +83,9 @@ function StatusBanner() {
     tone = 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200';
     title = 'Cloud sync healthy';
     detail = sync.lastSyncAt ? `Last successful sync ${formatTimeAgo(sync.lastSyncAt)}.` : 'Connected and ready to sync.';
+    if (auxiliaryFailed > 0) {
+      detail += ` Auxiliary audit/quarantine history: ${auxiliaryFailed} failed job${auxiliaryFailed === 1 ? '' : 's'}.`;
+    }
     Icon = CheckCircle2;
   }
 
@@ -337,6 +346,11 @@ export function CloudSyncDiagnosticsView() {
   const tier = license.tier;
   const memoryQueue = sync.queue.byKind.memory;
   const graphQueue = sync.queue.byKind.graph;
+  const replicationFailed = memoryQueue.failed + graphQueue.failed;
+  const auxiliaryFailed =
+    sync.queue.byKind.audit.failed +
+    sync.queue.byKind.quarantine.failed +
+    sync.queue.byKind.unknown.failed;
   const lastSyncLabel = sync.lastSyncAt ? formatTimeAgo(sync.lastSyncAt) : 'Never';
 
   return (
@@ -428,8 +442,13 @@ export function CloudSyncDiagnosticsView() {
                   </tr>
                   <tr>
                     <td className="px-4 py-3">Failed jobs in history</td>
-                    <td className="px-4 py-3">{sync.queue.failed}</td>
-                    <td className="px-4 py-3 text-slate-400">These are retained dead-letter records. A non-zero count matters most when pending retries or stale sync accompany them.</td>
+                    <td className="px-4 py-3">{replicationFailed}</td>
+                    <td className="px-4 py-3 text-slate-400">These are retained replication dead-letter records for memory and graph sync.</td>
+                  </tr>
+                  <tr>
+                    <td className="px-4 py-3">Auxiliary failed history</td>
+                    <td className="px-4 py-3">{auxiliaryFailed}</td>
+                    <td className="px-4 py-3 text-slate-400">Audit and quarantine retry history is shown here for debugging, but it does not mean memory replication is currently blocked.</td>
                   </tr>
                   <tr>
                     <td className="px-4 py-3">Latest memory sync</td>

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.6] - 2026-03-16
+
+### Fixed
+
+- **Cloud diagnostics now report real replication health** — the local Cloud page no longer treats stale `audit` or `quarantine` retry history as if memory/cloud replication is currently broken
+- Status banners and summary cards now prioritise `memory` and `graph` replication failures, while auxiliary sync history remains visible as debugging context instead of a false “cloud sync failed” state
+
 ## [3.4.5] - 2026-03-16
 
 ### Fixed
