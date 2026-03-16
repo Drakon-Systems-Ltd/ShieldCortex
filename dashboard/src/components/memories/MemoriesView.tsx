@@ -3,10 +3,11 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { authFetch } from '@/lib/auth';
-import { Memory } from '@/types/memory';
+import { Memory, MemoryLink } from '@/types/memory';
 import { useOpenClawSessions } from '@/hooks/useMemories';
 import { useReviewAction } from '@/hooks/useReviewQueue';
 import { MemoryCard } from './MemoryCard';
+import { MemoryDetail } from '@/components/memory/MemoryDetail';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -17,6 +18,11 @@ interface MemoriesViewProps {
   memories: Memory[];
   selectedMemory: Memory | null;
   onSelectMemory: (m: Memory | null) => void;
+  links?: MemoryLink[];
+  onReinforce?: (id: number) => void;
+  onSelectMemoryById?: (id: number) => void;
+  isReinforcing?: boolean;
+  reinforceSuccess?: boolean;
 }
 
 function formatDateTime(value: string): string {
@@ -34,7 +40,16 @@ function relativeTime(value: string): string {
   return `${days}d ago`;
 }
 
-export function MemoriesView({ memories, selectedMemory, onSelectMemory }: MemoriesViewProps) {
+export function MemoriesView({
+  memories,
+  selectedMemory,
+  onSelectMemory,
+  links = [],
+  onReinforce,
+  onSelectMemoryById,
+  isReinforcing = false,
+  reinforceSuccess = false,
+}: MemoriesViewProps) {
   const [sortKey, setSortKey] = useState<SortKey>('salience');
   const [viewStyle, setViewStyle] = useState<ViewStyle>('grid');
   const [bulkMode, setBulkMode] = useState(false);
@@ -122,9 +137,9 @@ export function MemoriesView({ memories, selectedMemory, onSelectMemory }: Memor
   }, [queryClient, reviewAction]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="pb-6">
       {/* Toolbar */}
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-slate-800 shrink-0">
+      <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-2">
         <span className="text-xs text-slate-400">{memories.length} memories</span>
 
         <div className="w-px h-5 bg-slate-700" />
@@ -417,24 +432,57 @@ export function MemoriesView({ memories, selectedMemory, onSelectMemory }: Memor
       </div>
 
       {/* Card grid */}
-      <div className="flex-1 overflow-y-auto p-4">
-        <div
-          className={
-            viewStyle === 'grid'
-              ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
-              : 'flex flex-col gap-3 max-w-2xl'
-          }
-        >
-          {sorted.map((memory) => (
-            <MemoryCard
-              key={memory.id}
-              memory={memory}
-              isSelected={selectedMemory?.id === memory.id}
-              onSelect={onSelectMemory}
-              isChecked={bulkMode ? checked.has(memory.id) : undefined}
-              onCheck={bulkMode ? handleCheck : undefined}
-            />
-          ))}
+      <div className="p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Captured memories</div>
+            <div className="mt-1 text-sm text-slate-400">
+              Inspect the actual memory records that came out of capture, not just the session summary.
+            </div>
+          </div>
+          <div className="text-xs text-slate-500">
+            {sorted.length} record{sorted.length === 1 ? '' : 's'}
+          </div>
+        </div>
+        <div className={`grid gap-4 ${selectedMemory ? 'xl:grid-cols-[minmax(0,1fr)_360px]' : ''} items-start`}>
+          <div
+            className={
+              viewStyle === 'grid'
+                ? 'grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-3'
+                : 'flex flex-col gap-3 max-w-2xl'
+            }
+          >
+            {sorted.map((memory) => (
+              <MemoryCard
+                key={memory.id}
+                memory={memory}
+                isSelected={selectedMemory?.id === memory.id}
+                onSelect={onSelectMemory}
+                isChecked={bulkMode ? checked.has(memory.id) : undefined}
+                onCheck={bulkMode ? handleCheck : undefined}
+              />
+            ))}
+          </div>
+
+          {selectedMemory && (
+            <div className="xl:sticky xl:top-4">
+              <div className="mb-2 px-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                Selected memory
+              </div>
+              <div className="max-h-[calc(100vh-7rem)] overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/40">
+                <MemoryDetail
+                  memory={selectedMemory}
+                  links={links}
+                  memories={memories}
+                  onClose={() => onSelectMemory(null)}
+                  onReinforce={onReinforce}
+                  onSelectMemory={onSelectMemoryById}
+                  isReinforcing={isReinforcing}
+                  reinforceSuccess={reinforceSuccess}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

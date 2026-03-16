@@ -138,6 +138,51 @@ function runIntegrityCheck(database: Database.Database): string {
   }
 }
 
+function isLikelyFtsIntegrityIssue(integrityResult: string): boolean {
+  const normalized = integrityResult.toLowerCase();
+  return (
+    normalized.includes('memories_fts') ||
+    normalized.includes('fts5') ||
+    normalized.includes('inverted index') ||
+    normalized.includes('fts')
+  );
+}
+
+function attemptFtsRecovery(database: Database.Database): boolean {
+  try {
+    const ftsTable = database.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'"
+    ).get() as { name?: string } | undefined;
+
+    if (!ftsTable?.name) {
+      return false;
+    }
+
+    // Ensure the primary memories table is still readable before attempting
+    // an FTS-only recovery path.
+    database.prepare('SELECT id FROM memories LIMIT 1').all();
+
+    database.exec(`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`);
+
+    const postRepairIntegrity = runIntegrityCheck(database);
+    if (postRepairIntegrity === 'ok') {
+      console.log('[database] Successfully rebuilt memories_fts after integrity failure.');
+      return true;
+    }
+
+    console.warn(`[database] FTS rebuild did not fully repair integrity: ${postRepairIntegrity}`);
+    return false;
+  } catch (error) {
+    console.warn(`[database] FTS rebuild failed: ${error}`);
+    return false;
+  }
+}
+
+export const __databaseTestUtils = {
+  isLikelyFtsIntegrityIssue,
+  attemptFtsRecovery,
+};
+
 /**
  * Initialize the database connection
  */
@@ -180,21 +225,25 @@ export function initDatabase(dbPath?: string): Database.Database {
     if (integrityResult !== 'ok') {
       console.warn(`[database] WARNING: Database integrity check failed: ${integrityResult}`);
 
-      // Close the corrupt connection before attempting recovery
-      database.close();
-
-      // Attempt dump/reimport recovery
-      const recovered = attemptDumpRecovery(expandedPath);
-      if (recovered) {
-        database = recovered;
+      if (isLikelyFtsIntegrityIssue(integrityResult) && attemptFtsRecovery(database)) {
+        console.warn('[database] Preserved memory rows by repairing the FTS index in place.');
       } else {
-        // Recovery failed — backup and create fresh
-        if (existsSync(expandedPath)) {
-          const backupPath = backupCorruptDatabase(expandedPath);
-          console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
+        // Close the corrupt connection before attempting recovery
+        database.close();
+
+        // Attempt dump/reimport recovery
+        const recovered = attemptDumpRecovery(expandedPath);
+        if (recovered) {
+          database = recovered;
+        } else {
+          // Recovery failed — backup and create fresh
+          if (existsSync(expandedPath)) {
+            const backupPath = backupCorruptDatabase(expandedPath);
+            console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
+          }
+          console.error('[database] Creating fresh database...');
+          database = new Database(expandedPath);
         }
-        console.error('[database] Creating fresh database...');
-        database = new Database(expandedPath);
       }
     }
   }

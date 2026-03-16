@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.5] - 2026-03-16
+
+### Fixed
+
+- **FTS recovery on startup** — ShieldCortex now attempts an in-place `memories_fts` rebuild when the database integrity failure is limited to the full-text index, instead of incorrectly treating the whole memory store as lost and recreating an empty DB
+- Added regression coverage for FTS-only corruption detection and recovery so startup preserves memory rows during searchable-index repair
+- **Capture page layout** — the local Capture workflow now uses normal page flow and an in-page sticky detail panel instead of a detached drawer plus nested scroll regions
+- Workflow pages now avoid trapping content inside competing scroll containers, which makes `Capture` and `Memories` materially more usable with large memory sets
+
 ## [3.4.4] - 2026-03-14
 
 ### Changed
