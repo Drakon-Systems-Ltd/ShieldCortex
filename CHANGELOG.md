@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.16] - 2026-03-17
+
+### Fixed
+
+- **Capture workflow now matches Review semantics** — OpenClaw session records no longer show a fake `State` box, action labels now reflect real review transitions like restore/archive/discard, and the selected memory panel stays in sync after capture-originated review actions
+- **Workflow audit cleanup** — the remaining high-traffic dashboard workflow pages now use dynamic review-signal chips instead of placeholder-looking state labels, reducing the number of surfaces that implied actions had not actually taken effect
+
 ## [3.4.15] - 2026-03-17
 
 ### Fixed

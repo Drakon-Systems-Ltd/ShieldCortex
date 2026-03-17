@@ -40,6 +40,30 @@ function relativeTime(value: string): string {
   return `${days}d ago`;
 }
 
+function reviewChips(memory: Memory) {
+  const chips = [
+    memory.pinned ? { label: 'Pinned', tone: 'emerald' as const } : null,
+    memory.status === 'canonical' ? { label: 'Canonical', tone: 'emerald' as const } : null,
+    memory.status === 'suppressed' ? { label: 'Suppressed', tone: 'amber' as const } : null,
+    memory.status === 'archived' ? { label: 'Archived', tone: 'slate' as const } : null,
+    memory.cloudExcluded ? { label: 'Cloud excluded', tone: 'cyan' as const } : null,
+    memory.scope === 'global' ? { label: 'Global', tone: 'violet' as const } : null,
+  ].filter(Boolean) as Array<{ label: string; tone: 'emerald' | 'amber' | 'slate' | 'cyan' | 'violet' }>;
+
+  return chips.length > 0 ? chips : [{ label: 'Ready for recall', tone: 'slate' as const }];
+}
+
+function toneClass(tone: 'emerald' | 'amber' | 'slate' | 'cyan' | 'violet') {
+  const classes: Record<string, string> = {
+    emerald: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
+    amber: 'border-amber-500/30 bg-amber-500/10 text-amber-200',
+    slate: 'border-slate-700 bg-slate-800/80 text-slate-300',
+    cyan: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200',
+    violet: 'border-violet-500/30 bg-violet-500/10 text-violet-200',
+  };
+  return classes[tone];
+}
+
 export function MemoriesView({
   memories,
   selectedMemory,
@@ -123,9 +147,12 @@ export function MemoriesView({
 
   const runReviewAction = useCallback((memory: Memory, action: string) => {
     reviewAction.mutate(
-      { id: memory.id, action, reviewedBy: 'capture-session' },
+      { id: memory.id, action, reviewedBy: 'capture-session', project: memory.project ?? null, scope: memory.scope },
       {
-        onSuccess: async () => {
+        onSuccess: async (updated) => {
+          if (selectedMemory?.id === memory.id) {
+            onSelectMemory(updated);
+          }
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: ['memories'] }),
             queryClient.invalidateQueries({ queryKey: ['openclaw-sessions'] }),
@@ -134,7 +161,7 @@ export function MemoriesView({
         },
       }
     );
-  }, [queryClient, reviewAction]);
+  }, [onSelectMemory, queryClient, reviewAction, selectedMemory]);
 
   return (
     <div className="h-full overflow-y-auto bg-slate-950 pb-6">
@@ -354,21 +381,40 @@ export function MemoriesView({
                                 <div className="mt-1 text-xs text-slate-500">
                                   {memory.category} · {memory.captureMethod || 'manual'} · trust {(memory.trustScore ?? 1).toFixed(2)}
                                 </div>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {reviewChips(memory).map((chip) => (
+                                    <span key={chip.label} className={`rounded-full border px-2.5 py-1 text-[11px] ${toneClass(chip.tone)}`}>
+                                      {chip.label}
+                                    </span>
+                                  ))}
+                                </div>
                                 <div className="mt-2 line-clamp-2 text-sm text-slate-400">{memory.content}</div>
                               </div>
                               <div className="rounded-lg bg-slate-800 px-3 py-2 text-right">
-                                <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">State</div>
-                                <div className="text-sm text-slate-100">{memory.status || 'active'}</div>
+                                <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Next move</div>
+                                <div className="text-sm text-slate-100">
+                                  {memory.status === 'canonical'
+                                    ? 'Keep hot'
+                                    : memory.status === 'suppressed'
+                                      ? 'Restore or leave suppressed'
+                                      : memory.status === 'archived'
+                                        ? 'Restore or leave archived'
+                                        : 'Review or keep'}
+                                </div>
                               </div>
                             </div>
                             <div className="mt-3 flex flex-wrap gap-2">
                               <button onClick={() => onSelectMemory(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect</button>
-                              <button onClick={() => runReviewAction(memory, memory.pinned ? 'unpin' : 'pin')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">
+                              <button disabled={reviewAction.isPending} onClick={() => runReviewAction(memory, memory.pinned ? 'unpin' : 'pin')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
                                 {memory.pinned ? 'Unpin' : 'Pin'}
                               </button>
-                              <button onClick={() => runReviewAction(memory, 'suppress')} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10">Discard</button>
-                              <button onClick={() => runReviewAction(memory, 'archive')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Archive</button>
-                              <button onClick={() => runReviewAction(memory, 'canonicalize')} className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10">Keep as canonical</button>
+                              <button disabled={reviewAction.isPending} onClick={() => runReviewAction(memory, memory.status === 'suppressed' ? 'restore' : 'suppress')} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-50">
+                                {memory.status === 'suppressed' ? 'Restore' : 'Discard'}
+                              </button>
+                              <button disabled={reviewAction.isPending} onClick={() => runReviewAction(memory, memory.status === 'archived' ? 'restore' : 'archive')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
+                                {memory.status === 'archived' ? 'Restore' : 'Archive'}
+                              </button>
+                              <button disabled={reviewAction.isPending} onClick={() => runReviewAction(memory, 'canonicalize')} className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">Keep as canonical</button>
                             </div>
                           </div>
                         )) : (
