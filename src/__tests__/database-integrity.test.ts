@@ -2,7 +2,7 @@ import { jest } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
+import { homedir, tmpdir } from 'os';
 import { __databaseTestUtils } from '../database/init.js';
 
 describe('database integrity recovery', () => {
@@ -97,6 +97,60 @@ describe('database integrity recovery', () => {
       expect(__databaseTestUtils.verifyOnDiskIntegrity(dbPath)).toBe('ok');
 
       rmSync(tempDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('backup inspection', () => {
+    it('finds healthy rotated backups with row counts', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+      const backupPath = `${dbPath}.corrupt.2026-03-17T13-37-02-151Z`;
+      const db = new Database(backupPath);
+
+      db.exec(`
+        CREATE TABLE memories (
+          id INTEGER PRIMARY KEY,
+          uuid TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          content TEXT NOT NULL
+        );
+        INSERT INTO memories (uuid, title, content) VALUES ('u1', 'Recovered', 'Healthy backup');
+      `);
+      db.close();
+
+      const backups = __databaseTestUtils.listHealthyBackups(dbPath);
+
+      expect(backups).toHaveLength(1);
+      expect(backups[0]?.path).toBe(backupPath);
+      expect(backups[0]?.count).toBe(1);
+
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('runtime safety guard', () => {
+    it('blocks project-checkout runtimes from using the default managed database path', () => {
+      const originalArgv = [...process.argv];
+
+      process.argv = ['/usr/bin/node', '/Users/michael/Development/ShieldCortex-Project/ShieldCortex/dist/index.js'];
+
+      expect(() => {
+        __databaseTestUtils.enforceSafeRuntimePath(join(homedir(), '.shieldcortex', 'memories.db'), false);
+      }).toThrow(/Refusing to open/);
+
+      process.argv = originalArgv;
+    });
+
+    it('allows explicit database paths even from a project checkout', () => {
+      const originalArgv = [...process.argv];
+
+      process.argv = ['/usr/bin/node', '/Users/michael/Development/ShieldCortex-Project/ShieldCortex/dist/index.js'];
+
+      expect(() => {
+        __databaseTestUtils.enforceSafeRuntimePath('/tmp/shieldcortex-test.db', true);
+      }).not.toThrow();
+
+      process.argv = originalArgv;
     });
   });
 });

@@ -3,8 +3,8 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync } from 'fs';
+import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
@@ -16,6 +16,7 @@ const _currentDir = dirname(_currentFile);
 let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
 let lockFilePath: string | null = null;
+let lockFileFd: number | null = null;
 
 // Anti-bloat: Database size limits
 const MAX_DB_SIZE = 100 * 1024 * 1024; // 100MB hard limit
@@ -46,6 +47,204 @@ function getDefaultDbPath(): string {
   }
   // Fall back to legacy path for existing users
   return legacyPath;
+}
+
+type RuntimeKind = 'installed' | 'npx-cache' | 'project-checkout' | 'unknown';
+
+interface RuntimeInfo {
+  kind: RuntimeKind;
+  entryPath: string;
+}
+
+interface DatabaseInspection {
+  integrity: string;
+  count: number | null;
+}
+
+interface BackupCandidate {
+  path: string;
+  count: number;
+  mtimeMs: number;
+}
+
+function resolveRuntimeInfo(): RuntimeInfo {
+  let entryPath = process.argv[1] ?? '';
+  try {
+    if (entryPath) {
+      entryPath = realpathSync(entryPath);
+    }
+  } catch {
+    // Fall back to the raw argv path.
+  }
+
+  if (entryPath.includes('/.npm/_npx/')) {
+    return { kind: 'npx-cache', entryPath };
+  }
+  if (entryPath.includes('/node_modules/shieldcortex/')) {
+    return { kind: 'installed', entryPath };
+  }
+  if (entryPath.includes('/ShieldCortex/') || entryPath.includes('\\ShieldCortex\\')) {
+    return { kind: 'project-checkout', entryPath };
+  }
+  return { kind: 'unknown', entryPath };
+}
+
+function enforceSafeRuntimePath(expandedPath: string, explicitDbPath: boolean): void {
+  if (explicitDbPath || process.env.SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME === '1') {
+    return;
+  }
+
+  const defaultPath = expandPath(getDefaultDbPath());
+  if (expandedPath !== defaultPath) {
+    return;
+  }
+
+  const runtime = resolveRuntimeInfo();
+  if (runtime.kind === 'npx-cache' || runtime.kind === 'project-checkout') {
+    throw new Error(
+      `[database] Refusing to open ${defaultPath} from ${runtime.kind === 'npx-cache' ? 'an npx cache' : 'a project checkout'}.\n` +
+      `Use the installed CLI (\`shieldcortex\`), pass \`--db\` to use a separate database, or set SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME=1 if you really mean to do this.\n` +
+      `Runtime path: ${runtime.entryPath}`
+    );
+  }
+}
+
+function inspectDatabaseFile(dbPath: string): DatabaseInspection {
+  let inspectionDb: Database.Database | null = null;
+  try {
+    inspectionDb = new Database(dbPath, {
+      readonly: true,
+      fileMustExist: true,
+    });
+    const integrity = runIntegrityCheck(inspectionDb);
+    let count: number | null = null;
+    try {
+      count = (inspectionDb.prepare('SELECT COUNT(*) AS count FROM memories').get() as { count: number }).count;
+    } catch {
+      count = null;
+    }
+    return { integrity, count };
+  } catch (error) {
+    return { integrity: `inspect threw: ${error}`, count: null };
+  } finally {
+    try {
+      inspectionDb?.close();
+    } catch {
+      // Best-effort close.
+    }
+  }
+}
+
+function listHealthyBackups(dbPath: string): BackupCandidate[] {
+  const dir = dirname(dbPath);
+  const prefix = `${basename(dbPath)}.corrupt.`;
+
+  return readdirSync(dir)
+    .filter((name) => name.startsWith(prefix) && !name.endsWith('-wal') && !name.endsWith('-shm'))
+    .map((name) => join(dir, name))
+    .map((backupPath) => {
+      const inspection = inspectDatabaseFile(backupPath);
+      const stats = statSync(backupPath);
+      return {
+        path: backupPath,
+        integrity: inspection.integrity,
+        count: inspection.count,
+        mtimeMs: stats.mtimeMs,
+      };
+    })
+    .filter((candidate): candidate is BackupCandidate & { integrity: string } => candidate.integrity === 'ok' && typeof candidate.count === 'number' && candidate.count > 0)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .map(({ path, count, mtimeMs }) => ({ path, count, mtimeMs }));
+}
+
+function stashLiveDatabase(dbPath: string, suffix: string): void {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const stashPath = `${dbPath}.${suffix}.${timestamp}`;
+
+  if (existsSync(dbPath)) {
+    try {
+      renameSync(dbPath, stashPath);
+    } catch {
+      try {
+        copyFileSync(dbPath, stashPath);
+        unlinkSync(dbPath);
+      } catch {
+        // Last resort: leave the original in place.
+      }
+    }
+  }
+
+  for (const ext of ['-wal', '-shm']) {
+    const liveSidecar = dbPath + ext;
+    if (existsSync(liveSidecar)) {
+      try {
+        renameSync(liveSidecar, stashPath + ext);
+      } catch {
+        try {
+          unlinkSync(liveSidecar);
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
+    }
+  }
+}
+
+function restoreBackupAsLive(dbPath: string, backupPath: string, reason: string): void {
+  stashLiveDatabase(dbPath, reason);
+  copyFileSync(backupPath, dbPath);
+}
+
+function acquireStartupLock(dbPath: string): void {
+  lockFilePath = `${dbPath}.lock`;
+  const runtime = resolveRuntimeInfo();
+  const payload = JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    entryPath: runtime.entryPath,
+  }, null, 2);
+
+  const tryOpen = () => {
+    lockFileFd = openSync(lockFilePath as string, 'wx');
+    writeFileSync(lockFileFd, payload, 'utf-8');
+  };
+
+  try {
+    tryOpen();
+    return;
+  } catch {
+    let activeProcessError: Error | null = null;
+    try {
+      const existing = JSON.parse(readFileSync(lockFilePath as string, 'utf-8')) as { pid?: number; entryPath?: string };
+      if (typeof existing.pid === 'number') {
+        try {
+          process.kill(existing.pid, 0);
+          activeProcessError = new Error(
+            `[database] Refusing startup because ShieldCortex PID ${existing.pid} is already using ${dbPath}` +
+            (existing.entryPath ? ` (${existing.entryPath})` : '')
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+            activeProcessError = error as Error;
+          }
+        }
+      }
+    } catch {
+      // Stale or unreadable lock file — remove and retry.
+    }
+
+    if (activeProcessError) {
+      throw activeProcessError;
+    }
+
+    try {
+      unlinkSync(lockFilePath as string);
+    } catch {
+      // Best-effort stale lock cleanup.
+    }
+
+    tryOpen();
+  }
 }
 
 /**
@@ -179,28 +378,17 @@ function attemptFtsRecovery(database: Database.Database): boolean {
 }
 
 function verifyOnDiskIntegrity(dbPath: string): string {
-  let verificationDb: Database.Database | null = null;
-  try {
-    verificationDb = new Database(dbPath, {
-      readonly: true,
-      fileMustExist: true,
-    });
-    return runIntegrityCheck(verificationDb);
-  } catch (error) {
-    return `fresh integrity check threw: ${error}`;
-  } finally {
-    try {
-      verificationDb?.close();
-    } catch {
-      // Best-effort close for verification handles.
-    }
-  }
+  return inspectDatabaseFile(dbPath).integrity;
 }
 
 export const __databaseTestUtils = {
   isLikelyFtsIntegrityIssue,
   attemptFtsRecovery,
   verifyOnDiskIntegrity,
+  inspectDatabaseFile,
+  listHealthyBackups,
+  resolveRuntimeInfo,
+  enforceSafeRuntimePath,
 };
 
 /**
@@ -209,11 +397,13 @@ export const __databaseTestUtils = {
 export function initDatabase(dbPath?: string): Database.Database {
   // Use auto-detected path if not specified
   const resolvedPath = dbPath || getDefaultDbPath();
+  const explicitDbPath = Boolean(dbPath);
   if (db) {
     return db;
   }
 
   const expandedPath = expandPath(resolvedPath);
+  enforceSafeRuntimePath(expandedPath, explicitDbPath);
   const dir = dirname(expandedPath);
 
   // Create directory if it doesn't exist
@@ -223,6 +413,11 @@ export function initDatabase(dbPath?: string): Database.Database {
 
   // Store path for size monitoring
   currentDbPath = expandedPath;
+  acquireStartupLock(expandedPath);
+
+  console.log(`[database] Startup runtime=${resolveRuntimeInfo().kind} db=${expandedPath} wal=${existsSync(expandedPath + '-wal')} shm=${existsSync(expandedPath + '-shm')}`);
+
+  const healthyBackups = listHealthyBackups(expandedPath);
 
   // Wrap the initial open in try/catch to handle corrupt files gracefully
   let database: Database.Database;
@@ -230,13 +425,19 @@ export function initDatabase(dbPath?: string): Database.Database {
     database = new Database(expandedPath);
   } catch (openError) {
     // Database file is corrupt or not a valid SQLite database
-    console.error('❌ Database file is corrupt or not a valid SQLite database.');
+    console.error(`❌ Database open failed for ${expandedPath}: ${openError}`);
 
-    const backupPath = backupCorruptDatabase(expandedPath);
-    console.error(`   Backed up to ${backupPath}`);
-    console.error('   Creating fresh database...');
-
-    database = new Database(expandedPath);
+    const latestHealthyBackup = healthyBackups[0];
+    if (latestHealthyBackup) {
+      console.error(`[database] Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
+      restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'failed-open');
+      database = new Database(expandedPath);
+    } else {
+      const backupPath = backupCorruptDatabase(expandedPath);
+      console.error(`   Backed up to ${backupPath}`);
+      console.error('   Creating fresh database...');
+      database = new Database(expandedPath);
+    }
   }
 
   // Integrity check on existing databases (skip for newly created files)
@@ -256,7 +457,7 @@ export function initDatabase(dbPath?: string): Database.Database {
         } else {
           console.warn(`[database] Fresh integrity check also failed: ${freshIntegrityResult}`);
 
-        // Close the corrupt connection before attempting recovery
+          // Close the corrupt connection before attempting recovery
           database.close();
 
           // Attempt dump/reimport recovery
@@ -264,17 +465,41 @@ export function initDatabase(dbPath?: string): Database.Database {
           if (recovered) {
             database = recovered;
           } else {
-            // Recovery failed — backup and create fresh
-            if (existsSync(expandedPath)) {
-              const backupPath = backupCorruptDatabase(expandedPath);
-              console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
+            const latestHealthyBackup = healthyBackups[0];
+            if (latestHealthyBackup) {
+              console.error(`[database] Recovery failed. Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
+              restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'recovery-failed');
+              database = new Database(expandedPath);
+            } else {
+              // Recovery failed — backup and create fresh
+              if (existsSync(expandedPath)) {
+                const backupPath = backupCorruptDatabase(expandedPath);
+                console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
+              }
+              console.error('[database] Creating fresh database...');
+              database = new Database(expandedPath);
             }
-            console.error('[database] Creating fresh database...');
-            database = new Database(expandedPath);
           }
         }
       }
     }
+  }
+
+  const currentInspection = inspectDatabaseFile(expandedPath);
+  const latestHealthyBackup = healthyBackups[0];
+  const liveStats = existsSync(expandedPath) ? statSync(expandedPath) : null;
+  if (
+    currentInspection.integrity === 'ok'
+    && currentInspection.count === 0
+    && latestHealthyBackup
+    && latestHealthyBackup.count >= 100
+    && liveStats
+    && (liveStats.mtimeMs - latestHealthyBackup.mtimeMs) < (24 * 60 * 60 * 1000)
+  ) {
+    console.error(`[database] Empty live database detected alongside a recent healthy backup (${latestHealthyBackup.count} memories). Restoring ${latestHealthyBackup.path}`);
+    database.close();
+    restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'empty-live');
+    database = new Database(expandedPath);
   }
 
   db = database;
@@ -287,15 +512,6 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.pragma('busy_timeout = 10000');
   // Auto-checkpoint every 100 pages (~400KB) to prevent WAL bloat
   db.pragma('wal_autocheckpoint = 100');
-
-  // Create lock file to help detect concurrent instances
-  lockFilePath = expandedPath + '.lock';
-  const pid = process.pid;
-  try {
-    writeFileSync(lockFilePath, `${pid}\n${new Date().toISOString()}`);
-  } catch {
-    // Non-fatal - lock file is advisory
-  }
 
   // Register cleanup handlers for graceful shutdown
   registerShutdownHandlers();
@@ -674,16 +890,24 @@ export function closeDatabase(): void {
     db.close();
     db = null;
     currentDbPath = null;
+  }
 
-    // Remove lock file
-    if (lockFilePath && existsSync(lockFilePath)) {
-      try {
-        unlinkSync(lockFilePath);
-      } catch {
-        // Non-fatal
-      }
-      lockFilePath = null;
+  if (lockFileFd !== null) {
+    try {
+      closeSync(lockFileFd);
+    } catch {
+      // Best-effort close.
     }
+    lockFileFd = null;
+  }
+
+  if (lockFilePath && existsSync(lockFilePath)) {
+    try {
+      unlinkSync(lockFilePath);
+    } catch {
+      // Non-fatal
+    }
+    lockFilePath = null;
   }
 }
 

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.14] - 2026-03-17
+
+### Fixed
+
+- **Startup safety hardening** — ShieldCortex now takes an exclusive startup lock on the managed database, refuses to let `npx` caches or project-checkout builds touch the real `~/.shieldcortex/memories.db` by default, and logs the runtime path plus WAL/SHM state at startup for easier forensics
+- **Healthy backup restore preference** — when recovery is needed, ShieldCortex now prefers the latest healthy rotated backup over creating a fresh empty database, and it auto-heals the specific “empty live DB beside a recent healthy backup” state that caused repeated apparent memory loss
+
 ## [3.4.13] - 2026-03-17
 
 ### Fixed
