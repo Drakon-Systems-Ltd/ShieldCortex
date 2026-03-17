@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.17] - 2026-03-17
+
+### Fixed
+
+- **Recall stays inside the workflow now** — ranked results can be inspected in an in-page side panel instead of forcing operators into the generic Memories screen, so comparing ranks, misses, and contradictions no longer breaks context
+- **Workflow audit pass on remaining local pages** — Overview urgent actions, Quarantine, Audit, Shield, and Cloud config/sync controls were checked for dead placeholder actions; the remaining obvious generic-jump path was removed from Recall
 ## [3.4.16] - 2026-03-17
 
 ### Fixed

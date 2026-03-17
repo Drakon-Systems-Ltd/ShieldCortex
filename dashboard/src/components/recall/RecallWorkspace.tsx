@@ -4,8 +4,9 @@ import { useMemo, useState } from 'react';
 import { Search, ShieldAlert, Sparkles, Waypoints } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { useMemoryCandidates, useRecallExplain, useRecallHistory } from '@/hooks/useRecallWorkspace';
+import { useMemoryCandidates, useRecallExplain, useRecallHistory, type RecallExplanationResult } from '@/hooks/useRecallWorkspace';
 import { useDashboardStore } from '@/lib/store';
+import { MemoryDetail } from '@/components/memory/MemoryDetail';
 
 export function RecallWorkspace() {
   const { projectFilter, setSelectedMemory, setViewMode } = useDashboardStore();
@@ -13,6 +14,7 @@ export function RecallWorkspace() {
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [expectedSearch, setExpectedSearch] = useState('');
   const [expectedId, setExpectedId] = useState<number | null>(null);
+  const [selectedRecallMemory, setSelectedRecallMemory] = useState<RecallExplanationResult['memory'] | null>(null);
   const [history, setHistory] = useState<string[]>(() => {
     if (typeof window === 'undefined') return [];
     return JSON.parse(window.localStorage.getItem('shieldcortex:recall-history') ?? '[]');
@@ -119,7 +121,7 @@ export function RecallWorkspace() {
           </div>
         </section>
 
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.9fr)]">
+        <div className={`grid gap-6 ${selectedRecallMemory ? '2xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)_420px]' : 'xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.9fr)]'}`}>
           <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="flex items-center justify-between">
               <div>
@@ -131,13 +133,13 @@ export function RecallWorkspace() {
 
             <div className="mt-4 space-y-3">
               {data?.results.map((result, index) => (
-                <button
+                <div
                   key={result.memory.id}
-                  onClick={() => {
-                    setSelectedMemory(result.memory);
-                    setViewMode('memories');
-                  }}
-                  className="block w-full rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-left hover:border-slate-600"
+                  className={`rounded-xl border bg-slate-950/70 p-4 text-left ${
+                    selectedRecallMemory?.id === result.memory.id
+                      ? 'border-cyan-500/40'
+                      : 'border-slate-800'
+                  }`}
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -163,7 +165,24 @@ export function RecallWorkspace() {
                       {result.contradictions.length} contradiction link{result.contradictions.length === 1 ? '' : 's'}
                     </div>
                   )}
-                </button>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      onClick={() => setSelectedRecallMemory(result.memory)}
+                      className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+                    >
+                      Inspect in panel
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedMemory(result.memory);
+                        setViewMode('memories');
+                      }}
+                      className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                    >
+                      Open in memories
+                    </button>
+                  </div>
+                </div>
               ))}
               {!isLoading && !data?.results.length && submittedQuery && (
                 <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-6 text-sm text-slate-400">
@@ -216,6 +235,33 @@ export function RecallWorkspace() {
               </div>
             </div>
           </section>
+
+          {selectedRecallMemory && (
+            <aside className="2xl:sticky 2xl:top-6 2xl:self-start">
+              <div className="rounded-2xl border border-cyan-500/20 bg-slate-900/70">
+                <div className="border-b border-slate-800 px-4 py-3">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300">Selected recall memory</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    Inspect the selected result here while you keep comparing ranks, misses, and contradictions.
+                  </div>
+                </div>
+                <div className="2xl:max-h-[calc(100vh-8rem)] 2xl:overflow-y-auto">
+                  <MemoryDetail
+                    memory={selectedRecallMemory}
+                    onClose={() => setSelectedRecallMemory(null)}
+                  />
+                </div>
+                <div className="border-t border-slate-800 px-4 py-3">
+                  <button
+                    onClick={() => setSelectedRecallMemory(null)}
+                    className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+                  >
+                    Close panel
+                  </button>
+                </div>
+              </div>
+            </aside>
+          )}
         </div>
       </div>
     </div>
