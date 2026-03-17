@@ -66,7 +66,13 @@ export function createIronDomeRouteGuard(options: IronDomeRouteGuardOptions): Mi
 
     const confirmation = classifyAction(action, config);
     const requiresConfirmation = confirmation.tier === 'red';
-    const requiresAnnouncement = confirmation.tier === 'amber' && options.enforceAmber;
+    const dashboardAnnouncementSatisfied = options.channel === 'dashboard';
+    const requestAnnouncementSatisfied = typeof req.get === 'function'
+      && req.get('x-iron-dome-announced') === '1';
+    const requiresAnnouncement = confirmation.tier === 'amber'
+      && options.enforceAmber
+      && !dashboardAnnouncementSatisfied
+      && !requestAnnouncementSatisfied;
 
     if (requiresConfirmation || requiresAnnouncement) {
       return res.status(409).json({

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.13] - 2026-03-17
+
+### Fixed
+
+- **Dashboard review actions no longer leak Iron Dome internals** — clicking keep/suppress/archive/merge in the local dashboard now satisfies the AMBER “announcement” requirement automatically, instead of throwing the internal message `Action requires announcement before execution` back at operators
+- Added regression coverage so dashboard-originated AMBER actions pass, while non-dashboard channels still require an explicit acknowledgement signal when `enforceAmber` is enabled
+
 ## [3.4.12] - 2026-03-17
 
 ### Fixed
