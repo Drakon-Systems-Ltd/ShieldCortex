@@ -1,4 +1,8 @@
 import { jest } from '@jest/globals';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { __databaseTestUtils } from '../database/init.js';
 
 describe('database integrity recovery', () => {
@@ -70,6 +74,29 @@ describe('database integrity recovery', () => {
 
       expect(recovered).toBe(false);
       expect(exec).toHaveBeenCalledWith(`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`);
+    });
+  });
+
+  describe('verifyOnDiskIntegrity', () => {
+    it('returns ok for a healthy on-disk database', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+      const db = new Database(dbPath);
+
+      db.exec(`
+        CREATE TABLE memories (
+          id INTEGER PRIMARY KEY,
+          uuid TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          content TEXT NOT NULL
+        );
+        INSERT INTO memories (uuid, title, content) VALUES ('u1', 'Test', 'Healthy');
+      `);
+      db.close();
+
+      expect(__databaseTestUtils.verifyOnDiskIntegrity(dbPath)).toBe('ok');
+
+      rmSync(tempDir, { recursive: true, force: true });
     });
   });
 });

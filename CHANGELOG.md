@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.11] - 2026-03-17
+
+### Fixed
+
+- **Startup integrity fallback hardening** — before rotating a “corrupt” memory database into backup and creating a fresh empty store, ShieldCortex now reopens the on-disk DB through a fresh read-only connection and only performs destructive recovery if that second integrity check also fails
+
 ## [3.4.10] - 2026-03-17
 
 ### Fixed

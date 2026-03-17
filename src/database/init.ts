@@ -178,9 +178,29 @@ function attemptFtsRecovery(database: Database.Database): boolean {
   }
 }
 
+function verifyOnDiskIntegrity(dbPath: string): string {
+  let verificationDb: Database.Database | null = null;
+  try {
+    verificationDb = new Database(dbPath, {
+      readonly: true,
+      fileMustExist: true,
+    });
+    return runIntegrityCheck(verificationDb);
+  } catch (error) {
+    return `fresh integrity check threw: ${error}`;
+  } finally {
+    try {
+      verificationDb?.close();
+    } catch {
+      // Best-effort close for verification handles.
+    }
+  }
+}
+
 export const __databaseTestUtils = {
   isLikelyFtsIntegrityIssue,
   attemptFtsRecovery,
+  verifyOnDiskIntegrity,
 };
 
 /**
@@ -228,21 +248,30 @@ export function initDatabase(dbPath?: string): Database.Database {
       if (isLikelyFtsIntegrityIssue(integrityResult) && attemptFtsRecovery(database)) {
         console.warn('[database] Preserved memory rows by repairing the FTS index in place.');
       } else {
-        // Close the corrupt connection before attempting recovery
-        database.close();
-
-        // Attempt dump/reimport recovery
-        const recovered = attemptDumpRecovery(expandedPath);
-        if (recovered) {
-          database = recovered;
-        } else {
-          // Recovery failed — backup and create fresh
-          if (existsSync(expandedPath)) {
-            const backupPath = backupCorruptDatabase(expandedPath);
-            console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
-          }
-          console.error('[database] Creating fresh database...');
+        const freshIntegrityResult = verifyOnDiskIntegrity(expandedPath);
+        if (freshIntegrityResult === 'ok') {
+          console.warn('[database] Integrity failure was transient. Reopening the on-disk database without destructive recovery.');
+          database.close();
           database = new Database(expandedPath);
+        } else {
+          console.warn(`[database] Fresh integrity check also failed: ${freshIntegrityResult}`);
+
+        // Close the corrupt connection before attempting recovery
+          database.close();
+
+          // Attempt dump/reimport recovery
+          const recovered = attemptDumpRecovery(expandedPath);
+          if (recovered) {
+            database = recovered;
+          } else {
+            // Recovery failed — backup and create fresh
+            if (existsSync(expandedPath)) {
+              const backupPath = backupCorruptDatabase(expandedPath);
+              console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
+            }
+            console.error('[database] Creating fresh database...');
+            database = new Database(expandedPath);
+          }
         }
       }
     }
