@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.10] - 2026-03-17
+
+### Fixed
+
+- **Capture detail panel flow** — selected captured memories now stay in an in-page side panel beside the captured record list on desktop, so operators can click through records and keep the chosen memory visible without being sent back to the top of the page
+
 ## [3.4.9] - 2026-03-17
 
 ### Fixed
