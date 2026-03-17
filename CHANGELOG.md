@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.12] - 2026-03-17
+
+### Fixed
+
+- **Review workflow actionability** — review actions now surface real success/error feedback instead of behaving like dead controls, and the Review queue no longer throws operators out to the generic memories page when they inspect an item
+- **Inline review inspection** — selected review items now stay visible in an in-page side panel beside contradictions, duplicates, and cleanup sections so operators can click through the queue without losing context
+
 ## [3.4.11] - 2026-03-17
 
 ### Fixed

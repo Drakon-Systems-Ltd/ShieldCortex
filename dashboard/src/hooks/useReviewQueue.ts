@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { authFetch } from '@/lib/auth';
+import { authFetch, readApiError } from '@/lib/auth';
 import type { Memory } from '@/types/memory';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -43,7 +43,9 @@ export interface ReviewQueueResponse {
 async function fetchReviewQueue(project?: string | null): Promise<ReviewQueueResponse> {
   const params = project ? `?project=${encodeURIComponent(project)}` : '';
   const response = await authFetch(`${API_BASE}/api/review/queue${params}`);
-  if (!response.ok) throw new Error('Failed to fetch review queue');
+  if (!response.ok) {
+    throw new Error(await readApiError(response, 'Failed to fetch review queue'));
+  }
   return response.json();
 }
 
@@ -59,7 +61,9 @@ async function patchReviewAction(input: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
-  if (!response.ok) throw new Error('Failed to update review state');
+  if (!response.ok) {
+    throw new Error(await readApiError(response, 'Failed to update review state'));
+  }
   return response.json();
 }
 
@@ -73,7 +77,9 @@ async function mergeMemories(input: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
-  if (!response.ok) throw new Error('Failed to merge memories');
+  if (!response.ok) {
+    throw new Error(await readApiError(response, 'Failed to merge memories'));
+  }
   return response.json();
 }
 

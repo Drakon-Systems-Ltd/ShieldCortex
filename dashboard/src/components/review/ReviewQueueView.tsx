@@ -1,41 +1,40 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, CloudOff, Pin, ShieldAlert, Sparkles, Layers } from 'lucide-react';
 import { useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
 import { useDashboardStore } from '@/lib/store';
 import type { Memory } from '@/types/memory';
+import { MemoryDetail } from '@/components/memory/MemoryDetail';
 
 function ReviewActionBar({
   memory,
   onOpen,
+  onAct,
+  busy,
 }: {
   memory: Memory;
   onOpen: (memory: Memory) => void;
+  onAct: (memory: Memory, action: string) => void | Promise<void>;
+  busy: boolean;
 }) {
-  const reviewAction = useReviewAction();
-
-  const act = (action: string) => {
-    reviewAction.mutate({ id: memory.id, action, reviewedBy: 'dashboard' });
-  };
-
   return (
     <div className="mt-3 flex flex-wrap gap-2">
-      <button onClick={() => onOpen(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect</button>
-      <button onClick={() => act(memory.pinned ? 'unpin' : 'pin')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">
+      <button onClick={() => onOpen(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect here</button>
+      <button disabled={busy} onClick={() => onAct(memory, memory.pinned ? 'unpin' : 'pin')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
         <Pin className="mr-1 inline h-3 w-3" />{memory.pinned ? 'Unpin' : 'Pin'}
       </button>
-      <button onClick={() => act('suppress')} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10">Suppress</button>
-      <button onClick={() => act('archive')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">
+      <button disabled={busy} onClick={() => onAct(memory, 'suppress')} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-50">Suppress</button>
+      <button disabled={busy} onClick={() => onAct(memory, 'archive')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
         <Archive className="mr-1 inline h-3 w-3" />Archive
       </button>
-      <button onClick={() => act(memory.cloudExcluded ? 'includeCloud' : 'excludeCloud')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">
+      <button disabled={busy} onClick={() => onAct(memory, memory.cloudExcluded ? 'includeCloud' : 'excludeCloud')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
         <CloudOff className="mr-1 inline h-3 w-3" />{memory.cloudExcluded ? 'Include cloud' : 'Exclude cloud'}
       </button>
-      <button onClick={() => act(memory.scope === 'global' ? 'rescopeProject' : 'rescopeGlobal')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">
+      <button disabled={busy} onClick={() => onAct(memory, memory.scope === 'global' ? 'rescopeProject' : 'rescopeGlobal')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
         {memory.scope === 'global' ? 'Project scope' : 'Make global'}
       </button>
-      <button onClick={() => act('canonicalize')} className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10">Canonical</button>
+      <button disabled={busy} onClick={() => onAct(memory, 'canonicalize')} className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">Canonical</button>
     </div>
   );
 }
@@ -45,11 +44,15 @@ function MemorySection({
   detail,
   items,
   onOpen,
+  onAct,
+  busy,
 }: {
   title: string;
   detail: string;
   items: Memory[];
   onOpen: (memory: Memory) => void;
+  onAct: (memory: Memory, action: string) => void | Promise<void>;
+  busy: boolean;
 }) {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
@@ -75,7 +78,7 @@ function MemorySection({
                 <div className="text-sm text-slate-100">{memory.status || 'active'}</div>
               </div>
             </div>
-            <ReviewActionBar memory={memory} onOpen={onOpen} />
+            <ReviewActionBar memory={memory} onOpen={onOpen} onAct={onAct} busy={busy} />
           </div>
         ))}
         {!items.length && <div className="text-sm text-slate-400">Nothing to review here.</div>}
@@ -85,10 +88,11 @@ function MemorySection({
 }
 
 export function ReviewQueueView() {
-  const { projectFilter, reviewFocus, setReviewFocus, setSelectedMemory, setViewMode } = useDashboardStore();
+  const { projectFilter, reviewFocus, setReviewFocus, selectedMemory, setSelectedMemory } = useDashboardStore();
   const { data, isLoading } = useReviewQueue(projectFilter);
   const mergeMutation = useMergeMemories();
   const reviewAction = useReviewAction();
+  const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
 
   const sectionRefs = {
     lowTrust: useRef<HTMLElement | null>(null),
@@ -102,7 +106,6 @@ export function ReviewQueueView() {
 
   const openMemory = (memory: Memory) => {
     setSelectedMemory(memory);
-    setViewMode('memories');
   };
 
   useEffect(() => {
@@ -112,9 +115,48 @@ export function ReviewQueueView() {
     target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [reviewFocus]);
 
+  const runReviewAction = async (memory: Memory, action: string) => {
+    try {
+      setFeedback(null);
+      await reviewAction.mutateAsync({ id: memory.id, action, reviewedBy: 'dashboard-review' });
+      const verbs: Record<string, string> = {
+        pin: 'Pinned',
+        unpin: 'Unpinned',
+        suppress: 'Suppressed',
+        archive: 'Archived',
+        includeCloud: 'Included in cloud sync',
+        excludeCloud: 'Excluded from cloud sync',
+        rescopeProject: 'Moved to project scope',
+        rescopeGlobal: 'Moved to global scope',
+        canonicalize: 'Marked canonical',
+      };
+      setFeedback({ kind: 'success', message: `${verbs[action] ?? 'Updated'}: ${memory.title}` });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: error instanceof Error ? error.message : `Failed to update ${memory.title}` });
+    }
+  };
+
+  const runMerge = async (kept: Memory, removed: Memory) => {
+    try {
+      setFeedback(null);
+      await mergeMutation.mutateAsync({ keptId: kept.id, removedId: removed.id, reviewedBy: 'dashboard-merge' });
+      setSelectedMemory(kept);
+      setFeedback({ kind: 'success', message: `Merged duplicate into "${kept.title}"` });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: error instanceof Error ? error.message : 'Failed to merge duplicate memories' });
+    }
+  };
+
   const resolveContradiction = async (keep: Memory, suppress: Memory) => {
-    await reviewAction.mutateAsync({ id: keep.id, action: 'canonicalize', reviewedBy: 'dashboard-review' });
-    await reviewAction.mutateAsync({ id: suppress.id, action: 'suppress', reviewedBy: 'dashboard-review' });
+    try {
+      setFeedback(null);
+      await reviewAction.mutateAsync({ id: keep.id, action: 'canonicalize', reviewedBy: 'dashboard-review' });
+      await reviewAction.mutateAsync({ id: suppress.id, action: 'suppress', reviewedBy: 'dashboard-review' });
+      setSelectedMemory(keep);
+      setFeedback({ kind: 'success', message: `Kept "${keep.title}" and suppressed "${suppress.title}"` });
+    } catch (error) {
+      setFeedback({ kind: 'error', message: error instanceof Error ? error.message : 'Failed to resolve contradiction' });
+    }
   };
 
   const sectionOrder = useMemo(() => {
@@ -144,27 +186,27 @@ export function ReviewQueueView() {
   const sections = {
     lowTrust: (
       <section ref={(node) => { sectionRefs.lowTrust.current = node; }} className="scroll-mt-6">
-        <MemorySection title="Low trust" detail="These memories came from weaker or noisier sources." items={data?.sections.lowTrust ?? []} onOpen={openMemory} />
+        <MemorySection title="Low trust" detail="These memories came from weaker or noisier sources." items={data?.sections.lowTrust ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     noisyAutoExtracted: (
       <section ref={(node) => { sectionRefs.noisyAutoExtracted.current = node; }} className="scroll-mt-6">
-        <MemorySection title="Noisy auto-extracted" detail="Auto capture is useful, but not every extraction deserves to stay hot." items={data?.sections.noisyAutoExtracted ?? []} onOpen={openMemory} />
+        <MemorySection title="Noisy auto-extracted" detail="Auto capture is useful, but not every extraction deserves to stay hot." items={data?.sections.noisyAutoExtracted ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     stale: (
       <section ref={(node) => { sectionRefs.stale.current = node; }} className="scroll-mt-6">
-        <MemorySection title="Stale" detail="Useful once, maybe. Worth archiving or refreshing now." items={data?.sections.stale ?? []} onOpen={openMemory} />
+        <MemorySection title="Stale" detail="Useful once, maybe. Worth archiving or refreshing now." items={data?.sections.stale ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     neverUsed: (
       <section ref={(node) => { sectionRefs.neverUsed.current = node; }} className="scroll-mt-6">
-        <MemorySection title="Never used" detail="Stored but never recalled. High count usually means capture is too noisy." items={data?.sections.neverUsed ?? []} onOpen={openMemory} />
+        <MemorySection title="Never used" detail="Stored but never recalled. High count usually means capture is too noisy." items={data?.sections.neverUsed ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     projectless: (
       <section ref={(node) => { sectionRefs.projectless.current = node; }} className="scroll-mt-6">
-        <MemorySection title="Projectless" detail="These memories have no useful project scope and are likely to leak into the wrong context." items={data?.sections.projectless ?? []} onOpen={openMemory} />
+        <MemorySection title="Projectless" detail="These memories have no useful project scope and are likely to leak into the wrong context." items={data?.sections.projectless ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     duplicates: (
@@ -194,14 +236,16 @@ export function ReviewQueueView() {
                   <button onClick={() => openMemory(pair.memoryA)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect A</button>
                   <button onClick={() => openMemory(pair.memoryB)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect B</button>
                   <button
-                    onClick={() => mergeMutation.mutate({ keptId: keep.id, removedId: remove.id, reviewedBy: 'dashboard-merge' })}
-                    className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10"
+                    onClick={() => runMerge(keep, remove)}
+                    disabled={reviewAction.isPending || mergeMutation.isPending}
+                    className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
                   >
                     Merge into recommended
                   </button>
                   <button
-                    onClick={() => mergeMutation.mutate({ keptId: remove.id, removedId: keep.id, reviewedBy: 'dashboard-merge' })}
-                    className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+                    onClick={() => runMerge(remove, keep)}
+                    disabled={reviewAction.isPending || mergeMutation.isPending}
+                    className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50"
                   >
                     Keep other instead
                   </button>
@@ -259,13 +303,13 @@ export function ReviewQueueView() {
                       <div className="mt-3 line-clamp-4 text-sm text-slate-400">{memory.content}</div>
                       <div className="mt-4 flex flex-wrap gap-2">
                         <button onClick={() => openMemory(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect</button>
-                        <button onClick={() => reviewAction.mutate({ id: memory.id, action: memory.pinned ? 'unpin' : 'pin', reviewedBy: 'dashboard-review' })} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">
+                        <button disabled={reviewAction.isPending || mergeMutation.isPending} onClick={() => runReviewAction(memory, memory.pinned ? 'unpin' : 'pin')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
                           {memory.pinned ? 'Unpin' : 'Pin'}
                         </button>
-                        <button onClick={() => resolveContradiction(memory, other)} className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10">
+                        <button disabled={reviewAction.isPending || mergeMutation.isPending} onClick={() => resolveContradiction(memory, other)} className="rounded-lg border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">
                           Keep this, suppress other
                         </button>
-                        <button onClick={() => reviewAction.mutate({ id: memory.id, action: 'suppress', reviewedBy: 'dashboard-review' })} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10">
+                        <button disabled={reviewAction.isPending || mergeMutation.isPending} onClick={() => runReviewAction(memory, 'suppress')} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-50">
                           Suppress this one
                         </button>
                       </div>
@@ -283,7 +327,7 @@ export function ReviewQueueView() {
 
   return (
     <div className="h-full overflow-y-auto bg-slate-950">
-      <div className="mx-auto max-w-6xl px-6 py-6 space-y-6">
+      <div className="mx-auto max-w-[1440px] px-6 py-6 space-y-6">
         <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
           <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-amber-300">
             <Layers size={12} />
@@ -352,12 +396,51 @@ export function ReviewQueueView() {
 
         {isLoading && <div className="text-sm text-slate-400">Loading review queue…</div>}
 
-        <div className="grid gap-6 xl:grid-cols-2">
-          {sectionOrder.map((sectionKey) => (
-            <div key={sectionKey} className={reviewFocus === sectionKey ? 'ring-1 ring-cyan-400/40 rounded-2xl' : ''}>
-              {sections[sectionKey]}
-            </div>
-          ))}
+        {feedback && (
+          <div className={`rounded-2xl border px-4 py-3 text-sm ${
+            feedback.kind === 'error'
+              ? 'border-red-500/30 bg-red-500/10 text-red-200'
+              : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+          }`}>
+            {feedback.message}
+          </div>
+        )}
+
+        <div className={selectedMemory ? 'grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px] xl:items-start' : ''}>
+          <div className="grid gap-6 xl:grid-cols-2">
+            {sectionOrder.map((sectionKey) => (
+              <div key={sectionKey} className={reviewFocus === sectionKey ? 'ring-1 ring-cyan-400/40 rounded-2xl' : ''}>
+                {sections[sectionKey]}
+              </div>
+            ))}
+          </div>
+
+          {selectedMemory && (
+            <aside className="xl:sticky xl:top-6 xl:self-start">
+              <div className="rounded-2xl border border-cyan-500/20 bg-slate-900/70">
+                <div className="border-b border-slate-800 px-4 py-3">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-300">Selected memory</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    Inspect the memory here while you keep resolving duplicates and contradictions in the review queue.
+                  </div>
+                </div>
+                <div className="xl:max-h-[calc(100vh-8rem)] xl:overflow-y-auto">
+                  <MemoryDetail
+                    memory={selectedMemory}
+                    onClose={() => setSelectedMemory(null)}
+                  />
+                </div>
+                <div className="border-t border-slate-800 px-4 py-3">
+                  <button
+                    onClick={() => setSelectedMemory(null)}
+                    className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+                  >
+                    Close panel
+                  </button>
+                </div>
+              </div>
+            </aside>
+          )}
         </div>
       </div>
     </div>
