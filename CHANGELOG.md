@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.15] - 2026-03-17
+
+### Fixed
+
+- **Review queue actions now line up with actual memory state** — review mutations now update the visible queue immediately, selected review items stay in sync after pin/suppress/archive/canonicalize, and rescoping a memory now really persists `scope` instead of silently doing nothing
+- **Resolved items stop leaking back into review** — the backend review queue, contradiction detector, and duplicate detector now exclude archived/suppressed memories, so resolved contradiction and duplicate cards stop pretending they still need action
+- **Review cards no longer fake a hardcoded `State active` box** — the queue now shows dynamic review signals such as pinned/canonical/cloud-excluded/reviewed/global, plus clearer “next move” messaging on each card
+
 ## [3.4.14] - 2026-03-17
 
 ### Fixed

@@ -919,6 +919,40 @@ describe('Semantic Linking', () => {
       }
     });
 
+    it('should persist scope changes during review actions', async () => {
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory, updateMemory, getMemoryById, deleteMemory } = await import('../memory/store.js');
+
+      closeDatabase();
+      initDatabase(':memory:');
+
+      let memoryId: number | undefined;
+      try {
+        const memory = addMemory({
+          title: 'Project-scoped setup note',
+          content: 'This memory should become global during review.',
+          category: 'context',
+          project: 'test-project',
+          type: 'long_term',
+        });
+        memoryId = memory.id;
+
+        const updated = updateMemory(memory.id, {
+          scope: 'global',
+          project: null,
+          reviewedBy: 'test-review',
+        });
+
+        expect(updated?.scope).toBe('global');
+        expect(updated?.project ?? null).toBeNull();
+        expect(updated?.reviewedBy).toBe('test-review');
+        expect(getMemoryById(memory.id)?.scope).toBe('global');
+      } finally {
+        if (memoryId) { try { deleteMemory(memoryId); } catch { /* ignore */ } }
+        closeDatabase();
+      }
+    });
+
     it('should enrich a memory with new related context', async () => {
       const { initDatabase, closeDatabase } = await import('../database/init.js');
       const { addMemory, enrichMemory, getMemoryById, deleteMemory } = await import('../memory/store.js');

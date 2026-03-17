@@ -413,33 +413,38 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
 
       const stale = db.prepare(`
         SELECT * FROM memories
-        WHERE decayed_score < 0.3 ${projectFilter}
+        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND decayed_score < 0.3 ${projectFilter}
         AND last_accessed < datetime('now', '-30 days')
         ORDER BY decayed_score ASC LIMIT ?
       `).all(...params, limit) as Record<string, unknown>[];
 
       const neverUsed = db.prepare(`
         SELECT * FROM memories
-        WHERE access_count = 0 ${projectFilter}
+        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND access_count = 0 ${projectFilter}
         AND created_at < datetime('now', '-1 day')
         ORDER BY created_at DESC LIMIT ?
       `).all(...params, limit) as Record<string, unknown>[];
 
       const lowTrust = db.prepare(`
         SELECT * FROM memories
-        WHERE trust_score < 0.7 ${projectFilter}
+        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND trust_score < 0.7 ${projectFilter}
         ORDER BY trust_score ASC, updated_at DESC LIMIT ?
       `).all(...params, limit) as Record<string, unknown>[];
 
       const noisyAutoExtracted = db.prepare(`
         SELECT * FROM memories
-        WHERE (capture_method = 'auto' OR tags LIKE '%auto-extracted%') ${projectFilter}
+        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND (capture_method = 'auto' OR tags LIKE '%auto-extracted%') ${projectFilter}
         ORDER BY updated_at DESC LIMIT ?
       `).all(...params, limit) as Record<string, unknown>[];
 
       const projectless = db.prepare(`
         SELECT * FROM memories
-        WHERE (project IS NULL OR project = '') AND scope != 'global'
+        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND (project IS NULL OR project = '') AND scope != 'global'
         ORDER BY updated_at DESC LIMIT ?
       `).all(limit) as Record<string, unknown>[];
 

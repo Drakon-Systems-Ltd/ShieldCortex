@@ -258,10 +258,10 @@ export function findDuplicateMemoryPairs(options?: {
   const limit = options?.limit ?? 20;
   const rows = options?.project
     ? db.prepare(
-      "SELECT * FROM memories WHERE type = 'long_term' AND project = ? ORDER BY created_at ASC",
+      "SELECT * FROM memories WHERE type = 'long_term' AND project = ? AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed') ORDER BY created_at ASC",
     ).all(options.project) as Record<string, unknown>[]
     : db.prepare(
-      "SELECT * FROM memories WHERE type = 'long_term' ORDER BY created_at ASC",
+      "SELECT * FROM memories WHERE type = 'long_term' AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed') ORDER BY created_at ASC",
     ).all() as Record<string, unknown>[];
 
   const groups = new Map<string, Record<string, unknown>[]>();

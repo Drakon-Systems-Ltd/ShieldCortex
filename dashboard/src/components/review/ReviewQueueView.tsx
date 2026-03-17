@@ -1,11 +1,58 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, CloudOff, Pin, ShieldAlert, Sparkles, Layers } from 'lucide-react';
+import { Archive, CloudOff, Pin, ShieldAlert, Sparkles, Layers, CheckCircle2 } from 'lucide-react';
 import { useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
 import { useDashboardStore } from '@/lib/store';
 import type { Memory } from '@/types/memory';
 import { MemoryDetail } from '@/components/memory/MemoryDetail';
+
+function timeSince(value?: string | null) {
+  if (!value) return null;
+  const diffMs = Date.now() - new Date(value).getTime();
+  const hours = Math.floor(diffMs / (1000 * 60 * 60));
+  if (hours < 1) return 'just now';
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return `${Math.floor(days / 7)}w ago`;
+}
+
+function ReviewSignals({ memory }: { memory: Memory }) {
+  const status = memory.status ?? 'active';
+  const reviewed = timeSince(memory.reviewedAt);
+  const chips = [
+    memory.pinned ? { label: 'Pinned', tone: 'emerald' as const } : null,
+    status === 'canonical' ? { label: 'Canonical', tone: 'emerald' as const } : null,
+    status === 'suppressed' ? { label: 'Suppressed', tone: 'amber' as const } : null,
+    status === 'archived' ? { label: 'Archived', tone: 'slate' as const } : null,
+    memory.cloudExcluded ? { label: 'Cloud excluded', tone: 'cyan' as const } : null,
+    memory.scope === 'global' ? { label: 'Global', tone: 'violet' as const } : null,
+    reviewed ? { label: `Reviewed ${reviewed}`, tone: 'slate' as const } : null,
+  ].filter(Boolean) as Array<{ label: string; tone: 'emerald' | 'amber' | 'slate' | 'cyan' | 'violet' }>;
+
+  const toneClass: Record<string, string> = {
+    emerald: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
+    amber: 'border-amber-500/30 bg-amber-500/10 text-amber-200',
+    slate: 'border-slate-700 bg-slate-800/80 text-slate-300',
+    cyan: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200',
+    violet: 'border-violet-500/30 bg-violet-500/10 text-violet-200',
+  };
+
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {chips.length > 0 ? chips.map((chip) => (
+        <span key={chip.label} className={`rounded-full border px-2.5 py-1 text-[11px] ${toneClass[chip.tone]}`}>
+          {chip.label}
+        </span>
+      )) : (
+        <span className="rounded-full border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-[11px] text-slate-300">
+          Ready for recall
+        </span>
+      )}
+    </div>
+  );
+}
 
 function ReviewActionBar({
   memory,
@@ -20,13 +67,13 @@ function ReviewActionBar({
 }) {
   return (
     <div className="mt-3 flex flex-wrap gap-2">
-      <button onClick={() => onOpen(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect here</button>
+      <button onClick={() => onOpen(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect in panel</button>
       <button disabled={busy} onClick={() => onAct(memory, memory.pinned ? 'unpin' : 'pin')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
         <Pin className="mr-1 inline h-3 w-3" />{memory.pinned ? 'Unpin' : 'Pin'}
       </button>
       <button disabled={busy} onClick={() => onAct(memory, 'suppress')} className="rounded-lg border border-amber-500/40 px-3 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-50">Suppress</button>
-      <button disabled={busy} onClick={() => onAct(memory, 'archive')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
-        <Archive className="mr-1 inline h-3 w-3" />Archive
+      <button disabled={busy} onClick={() => onAct(memory, memory.status === 'archived' || memory.status === 'suppressed' ? 'restore' : 'archive')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
+        <Archive className="mr-1 inline h-3 w-3" />{memory.status === 'archived' || memory.status === 'suppressed' ? 'Restore' : 'Archive'}
       </button>
       <button disabled={busy} onClick={() => onAct(memory, memory.cloudExcluded ? 'includeCloud' : 'excludeCloud')} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50">
         <CloudOff className="mr-1 inline h-3 w-3" />{memory.cloudExcluded ? 'Include cloud' : 'Exclude cloud'}
@@ -72,10 +119,19 @@ function MemorySection({
                 <div className="mt-1 text-xs text-slate-500">
                   {memory.category} · {memory.captureMethod || 'manual'} · trust {(memory.trustScore ?? 1).toFixed(2)}
                 </div>
+                <ReviewSignals memory={memory} />
               </div>
               <div className="rounded-lg bg-slate-800 px-3 py-2 text-right">
-                <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">State</div>
-                <div className="text-sm text-slate-100">{memory.status || 'active'}</div>
+                <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Next move</div>
+                <div className="text-sm text-slate-100">
+                  {memory.status === 'canonical'
+                    ? 'Keep hot'
+                    : memory.status === 'archived'
+                      ? 'Restore or leave archived'
+                      : memory.status === 'suppressed'
+                        ? 'Restore or leave suppressed'
+                        : 'Review or keep'}
+                </div>
               </div>
             </div>
             <ReviewActionBar memory={memory} onOpen={onOpen} onAct={onAct} busy={busy} />
@@ -118,7 +174,10 @@ export function ReviewQueueView() {
   const runReviewAction = async (memory: Memory, action: string) => {
     try {
       setFeedback(null);
-      await reviewAction.mutateAsync({ id: memory.id, action, reviewedBy: 'dashboard-review' });
+      const updated = await reviewAction.mutateAsync({ id: memory.id, action, reviewedBy: 'dashboard-review', project: memory.project ?? null, scope: memory.scope });
+      if (selectedMemory?.id === updated.id || selectedMemory?.id === memory.id) {
+        setSelectedMemory(updated);
+      }
       const verbs: Record<string, string> = {
         pin: 'Pinned',
         unpin: 'Unpinned',
@@ -130,7 +189,7 @@ export function ReviewQueueView() {
         rescopeGlobal: 'Moved to global scope',
         canonicalize: 'Marked canonical',
       };
-      setFeedback({ kind: 'success', message: `${verbs[action] ?? 'Updated'}: ${memory.title}` });
+      setFeedback({ kind: 'success', message: `${verbs[action] ?? 'Updated'}: ${updated.title}` });
     } catch (error) {
       setFeedback({ kind: 'error', message: error instanceof Error ? error.message : `Failed to update ${memory.title}` });
     }
@@ -218,8 +277,8 @@ export function ReviewQueueView() {
         <p className="mt-1 text-sm text-slate-400">One click keeps the recommended memory, merges unique content, and removes the duplicate.</p>
         <div className="mt-4 space-y-3">
           {(data?.sections.duplicates ?? []).slice(0, 8).map((pair) => {
-            const keep = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
-            const remove = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
+      const keep = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
+      const remove = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
             return (
               <div key={`${pair.memoryA.id}-${pair.memoryB.id}`} className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
                 <div className="flex items-start justify-between gap-4">
@@ -295,11 +354,11 @@ export function ReviewQueueView() {
                             {memory.category} · {memory.captureMethod || 'manual'} · trust {(memory.trustScore ?? 1).toFixed(2)}
                           </div>
                         </div>
-                        <div className="rounded-lg bg-slate-800 px-3 py-2 text-right">
-                          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">State</div>
-                          <div className="text-sm text-slate-100">{memory.status || 'active'}</div>
+                        <div className="rounded-lg bg-slate-800 px-3 py-2 text-right text-sm text-slate-100">
+                          {(memory.trustScore ?? 1).toFixed(2)} trust
                         </div>
                       </div>
+                      <ReviewSignals memory={memory} />
                       <div className="mt-3 line-clamp-4 text-sm text-slate-400">{memory.content}</div>
                       <div className="mt-4 flex flex-wrap gap-2">
                         <button onClick={() => openMemory(memory)} className="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500">Inspect</button>
@@ -402,7 +461,10 @@ export function ReviewQueueView() {
               ? 'border-red-500/30 bg-red-500/10 text-red-200'
               : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
           }`}>
-            {feedback.message}
+            <div className="flex items-start gap-2">
+              {feedback.kind === 'success' && <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />}
+              <span>{feedback.message}</span>
+            </div>
           </div>
         )}
 

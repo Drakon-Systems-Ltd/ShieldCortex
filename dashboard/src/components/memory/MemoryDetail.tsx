@@ -216,6 +216,17 @@ export function MemoryDetail({
     return `${Math.floor(days / 7)}w ago`;
   };
 
+  const reviewStatusLabel =
+    memory.status === 'canonical'
+      ? 'Canonical'
+      : memory.status === 'archived'
+        ? 'Archived'
+        : memory.status === 'suppressed'
+          ? 'Suppressed'
+          : memory.pinned
+            ? 'Pinned and active'
+            : 'Active';
+
   return (
     <Card className={`bg-slate-900 border-slate-700 overflow-auto transition-all duration-300 ${showSuccessFlash ? 'ring-2 ring-green-500 ring-opacity-75' : ''} ${showSaveSuccess ? 'ring-2 ring-emerald-500 ring-opacity-75' : ''}`}>
       <CardHeader className="border-b border-slate-700 pb-3">
@@ -451,7 +462,7 @@ export function MemoryDetail({
               <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Review state</h4>
               <div className="flex justify-between gap-3 text-sm">
                 <span className="text-slate-400">Status</span>
-                <span className="text-white">{memory.status || 'active'}</span>
+                <span className="text-white">{reviewStatusLabel}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
                 <span className="text-slate-400">Pinned</span>

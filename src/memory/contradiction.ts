@@ -258,7 +258,9 @@ export function detectContradictions(
     SUBSTR(content, 1, 500) as content,
     project, tags, salience, access_count, last_accessed,
     created_at, decayed_score, metadata, scope, transferable
-    FROM memories WHERE 1=1`;
+    FROM memories
+    WHERE 1=1
+      AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed')`;
   const params: unknown[] = [];
 
   if (project) {

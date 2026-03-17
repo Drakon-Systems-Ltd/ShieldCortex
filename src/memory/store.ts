@@ -711,6 +711,14 @@ export function updateMemory(
     fields.push('project = ?');
     values.push(updates.project);
   }
+  if (updates.scope !== undefined) {
+    fields.push('scope = ?');
+    values.push(updates.scope);
+  }
+  if (updates.transferable !== undefined) {
+    fields.push('transferable = ?');
+    values.push(updates.transferable ? 1 : 0);
+  }
   if (updates.tags !== undefined) {
     fields.push('tags = ?');
     values.push(JSON.stringify(updates.tags));
