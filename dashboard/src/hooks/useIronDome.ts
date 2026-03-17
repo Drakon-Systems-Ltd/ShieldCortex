@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { authFetch } from '@/lib/auth';
+import { authFetch, readApiError } from '@/lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -53,7 +53,7 @@ export interface IronDomeAuditLog {
 
 async function fetchIronDomeStatus(): Promise<IronDomeStatus> {
   const res = await authFetch(`${API_BASE}/api/iron-dome/status`);
-  if (!res.ok) throw new Error('Failed to fetch Iron Dome status');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch Iron Dome status'));
   return res.json();
 }
 
@@ -63,7 +63,7 @@ async function activateIronDome(profile?: IronDomeProfile): Promise<{ success: b
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profile }),
   });
-  if (!res.ok) throw new Error('Failed to activate Iron Dome');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to activate Iron Dome'));
   return res.json();
 }
 
@@ -71,7 +71,7 @@ async function deactivateIronDome(): Promise<{ success: boolean }> {
   const res = await authFetch(`${API_BASE}/api/iron-dome/deactivate`, {
     method: 'POST',
   });
-  if (!res.ok) throw new Error('Failed to deactivate Iron Dome');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to deactivate Iron Dome'));
   return res.json();
 }
 
@@ -81,7 +81,7 @@ async function scanForInjection(text: string): Promise<InjectionScanResult> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
   });
-  if (!res.ok) throw new Error('Failed to scan text');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to scan text'));
   return res.json();
 }
 
@@ -89,7 +89,7 @@ async function emergencyStop(): Promise<{ stopped: boolean; message: string }> {
   const res = await authFetch(`${API_BASE}/api/iron-dome/emergency-stop`, {
     method: 'POST',
   });
-  if (!res.ok) throw new Error('Failed to trigger emergency stop');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to trigger emergency stop'));
   return res.json();
 }
 
@@ -99,7 +99,7 @@ async function resumeOperations(reason?: string): Promise<{ resumed: boolean; me
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason: reason || 'Resumed via dashboard' }),
   });
-  if (!res.ok) throw new Error('Failed to resume operations');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to resume operations'));
   return res.json();
 }
 
@@ -120,7 +120,7 @@ export interface ControlStatus {
 
 async function fetchControlStatus(): Promise<ControlStatus> {
   const res = await authFetch(`${API_BASE}/api/control/status`);
-  if (!res.ok) throw new Error('Failed to fetch control status');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch control status'));
   return res.json();
 }
 
@@ -128,7 +128,7 @@ async function fetchIronDomeAudit(limit?: number): Promise<{ logs: IronDomeAudit
   const params = new URLSearchParams();
   if (limit) params.set('limit', limit.toString());
   const res = await authFetch(`${API_BASE}/api/iron-dome/audit?${params}`);
-  if (!res.ok) throw new Error('Failed to fetch Iron Dome audit');
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch Iron Dome audit'));
   return res.json();
 }
 

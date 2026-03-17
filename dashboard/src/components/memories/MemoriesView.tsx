@@ -137,7 +137,7 @@ export function MemoriesView({
   }, [queryClient, reviewAction]);
 
   return (
-    <div className="pb-6">
+    <div className="h-full overflow-y-auto bg-slate-950 pb-6">
       {/* Toolbar */}
       <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-2">
         <span className="text-xs text-slate-400">{memories.length} memories</span>

@@ -81,7 +81,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
   }, [entry]);
 
   return (
-    <Card className="bg-slate-900 border-slate-700 h-full overflow-auto">
+    <Card className="bg-slate-900 border-slate-700 overflow-hidden">
       <CardHeader className="border-b border-slate-700 pb-3">
         <div className="flex items-start justify-between gap-2">
           {/* Result badge */}

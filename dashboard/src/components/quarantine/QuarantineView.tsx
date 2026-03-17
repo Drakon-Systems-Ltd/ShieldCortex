@@ -30,7 +30,7 @@ function ConfirmationDialog({
         </p>
         <p className="text-xs text-slate-500 mb-4">
           {action === 'approve'
-            ? 'This will store the memory in the database.'
+            ? 'This will approve the item and promote it into memory.'
             : 'This will permanently discard the memory.'}
         </p>
 
@@ -92,6 +92,12 @@ export function QuarantineView() {
   } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkConfirm, setBulkConfirm] = useState<'approve' | 'reject' | null>(null);
+  const mutationError =
+    (approveMutation.error as Error | null)?.message ||
+    (rejectMutation.error as Error | null)?.message ||
+    (bulkApproveMutation.error as Error | null)?.message ||
+    (bulkRejectMutation.error as Error | null)?.message ||
+    null;
 
   const items = data?.items ?? [];
   const pendingItems = items.filter(i => i.status === 'pending');
@@ -138,7 +144,7 @@ export function QuarantineView() {
   };
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div className="h-full overflow-y-auto bg-slate-950">
       {/* Confirmation dialog */}
       {confirmAction && (
         <ConfirmationDialog
@@ -158,7 +164,7 @@ export function QuarantineView() {
             </h3>
             <p className="text-xs text-slate-400 mb-4">
               {bulkConfirm === 'approve'
-                ? 'This will store all selected memories in the database.'
+                ? 'This will approve all selected items and promote them into memory.'
                 : 'This will permanently discard all selected memories.'}
             </p>
             <div className="flex gap-2 justify-end">
@@ -183,8 +189,9 @@ export function QuarantineView() {
         </div>
       )}
 
+      <div className="mx-auto max-w-6xl space-y-6 p-6">
       {/* Header */}
-      <div className="p-4 border-b border-slate-800 shrink-0">
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-white">Quarantine Review</h2>
           <div className="flex gap-1 bg-slate-800 rounded-lg p-0.5">
@@ -233,14 +240,20 @@ export function QuarantineView() {
         )}
       </div>
 
+      {mutationError && (
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+          {mutationError}
+        </div>
+      )}
+
       {/* Items */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div>
         {isLoading ? (
-          <div className="flex items-center justify-center h-32">
+          <div className="flex items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/70 h-32">
             <div className="text-xs text-slate-500 animate-pulse">Loading quarantine items...</div>
           </div>
         ) : items.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-32 text-slate-500">
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/70 h-32 text-slate-500">
             <AlertTriangle size={24} className="mb-2 text-slate-600" />
             <span className="text-xs">No {statusFilter} items</span>
           </div>
@@ -286,7 +299,7 @@ export function QuarantineView() {
                   </div>
 
                   {/* Content preview */}
-                  <div className="bg-slate-800/50 rounded-lg p-3 mb-3 text-xs text-slate-300 max-h-24 overflow-y-auto whitespace-pre-wrap">
+                  <div className="bg-slate-800/50 rounded-lg p-3 mb-3 text-xs text-slate-300 whitespace-pre-wrap break-words">
                     {item.content?.slice(0, 500) || 'No content'}
                   </div>
 
@@ -306,12 +319,14 @@ export function QuarantineView() {
                     <div className="flex gap-2">
                       <button
                         onClick={() => setConfirmAction({ action: 'approve', item })}
+                        disabled={approveMutation.isPending || bulkApproveMutation.isPending}
                         className="flex items-center gap-1 px-3 py-1.5 text-xs bg-green-600/10 text-green-400 rounded-lg hover:bg-green-600/20 transition-colors"
                       >
                         <Check size={12} /> Approve
                       </button>
                       <button
                         onClick={() => setConfirmAction({ action: 'reject', item })}
+                        disabled={rejectMutation.isPending || bulkRejectMutation.isPending}
                         className="flex items-center gap-1 px-3 py-1.5 text-xs bg-red-600/10 text-red-400 rounded-lg hover:bg-red-600/20 transition-colors"
                       >
                         <X size={12} /> Reject
@@ -330,6 +345,7 @@ export function QuarantineView() {
             })}
           </div>
         )}
+      </div>
       </div>
     </div>
   );

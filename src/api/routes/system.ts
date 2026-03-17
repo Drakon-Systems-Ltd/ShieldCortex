@@ -92,6 +92,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
+      const existingConfig = getCloudConfig();
       const {
         cloudApiKey,
         cloudEnabled,
@@ -106,6 +107,15 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         openclawAutoMemoryMaxRecent,
       } = req.body;
 
+      if (cloudApiKey !== undefined && typeof cloudApiKey !== 'string') {
+        return res.status(400).json({ error: 'cloudApiKey must be a string' });
+      }
+      if (cloudEnabled !== undefined && typeof cloudEnabled !== 'boolean') {
+        return res.status(400).json({ error: 'cloudEnabled must be a boolean' });
+      }
+      if (cloudBaseUrl !== undefined && typeof cloudBaseUrl !== 'string') {
+        return res.status(400).json({ error: 'cloudBaseUrl must be a string' });
+      }
       if (openclawAutoMemory !== undefined && typeof openclawAutoMemory !== 'boolean') {
         return res.status(400).json({ error: 'openclawAutoMemory must be a boolean' });
       }
@@ -152,15 +162,45 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         return res.status(400).json({ error: 'cloudSyncProjects must be an array of strings' });
       }
 
+      const normalizedApiKey =
+        cloudApiKey !== undefined
+          ? cloudApiKey.trim()
+          : existingConfig.cloudApiKey;
+      const normalizedBaseUrl =
+        cloudBaseUrl !== undefined
+          ? cloudBaseUrl.trim()
+          : existingConfig.cloudBaseUrl;
+      let normalizedProjects: string[] | undefined;
+      if (cloudSyncProjects !== undefined) {
+        const projectValues = cloudSyncProjects as string[];
+        normalizedProjects = Array.from(
+          new Set(
+            projectValues
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0),
+          ),
+        ).sort((a, b) => a.localeCompare(b));
+      }
+
+      if (cloudEnabled === true && !normalizedApiKey) {
+        return res.status(400).json({ error: 'Cloud API key required before enabling cloud sync' });
+      }
+
+      try {
+        new URL(normalizedBaseUrl);
+      } catch {
+        return res.status(400).json({ error: 'cloudBaseUrl must be a valid absolute URL' });
+      }
+
       setCloudConfig({
-        ...(cloudApiKey !== undefined && { cloudApiKey }),
+        ...(cloudApiKey !== undefined && { cloudApiKey: normalizedApiKey }),
         ...(cloudEnabled !== undefined && { cloudEnabled }),
-        ...(cloudBaseUrl !== undefined && { cloudBaseUrl }),
+        ...(cloudBaseUrl !== undefined && { cloudBaseUrl: normalizedBaseUrl }),
       });
 
       setCloudSyncControls({
         ...(cloudSyncProjectMode !== undefined && { projectMode: cloudSyncProjectMode }),
-        ...(cloudSyncProjects !== undefined && { projects: cloudSyncProjects }),
+        ...(normalizedProjects !== undefined && { projects: normalizedProjects }),
         ...(cloudSyncContentMode !== undefined && { contentMode: cloudSyncContentMode }),
         ...(cloudSyncExcludeSensitive !== undefined && { excludeSensitive: cloudSyncExcludeSensitive }),
       });

@@ -2,6 +2,12 @@ import type { Express, Request, Response } from 'express';
 import { getDatabase } from '../../database/init.js';
 import { getCloudConfig, getDeviceId, getDeviceName } from '../../cloud/config.js';
 import { queryAgentOperations, queryAgentRegistry, queryAgentTimeline, queryAuditLogs, getAuditStats } from '../../defence/audit/queries.js';
+import {
+  approveQuarantineItem,
+  approveQuarantineItems,
+  rejectQuarantineItem,
+  rejectQuarantineItems,
+} from '../../defence/quarantine/review.js';
 import { getLicense, activateLicense, deactivateLicense } from '../../license/store.js';
 import { listFeatures } from '../../license/gate.js';
 import type { GatedFeature } from '../../license/gate.js';
@@ -118,16 +124,13 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
-      const db = getDatabase();
       const id = parseInt(req.params.id as string, 10);
       const reviewedBy = req.body?.reviewedBy ?? 'api';
-      const result = db.prepare(
-        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?',
-      ).run('approved', new Date().toISOString(), reviewedBy, id, 'pending');
-      if (result.changes === 0) {
+      const result = approveQuarantineItem(id, reviewedBy);
+      if (!result) {
         return res.status(404).json({ error: 'Quarantine entry not found or already reviewed' });
       }
-      res.json({ success: true, id, status: 'approved' });
+      res.json({ success: true, ...result });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -140,16 +143,13 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
-      const db = getDatabase();
       const id = parseInt(req.params.id as string, 10);
       const reviewedBy = req.body?.reviewedBy ?? 'api';
-      const result = db.prepare(
-        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?',
-      ).run('rejected', new Date().toISOString(), reviewedBy, id, 'pending');
-      if (result.changes === 0) {
+      const result = rejectQuarantineItem(id, reviewedBy);
+      if (!result) {
         return res.status(404).json({ error: 'Quarantine entry not found or already reviewed' });
       }
-      res.json({ success: true, id, status: 'rejected' });
+      res.json({ success: true, ...result });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -162,23 +162,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
-      const db = getDatabase();
       const ids: number[] = req.body?.ids;
       if (!Array.isArray(ids) || ids.length === 0) {
         return res.status(400).json({ error: 'ids must be a non-empty array of numbers' });
       }
       const reviewedBy = req.body?.reviewedBy ?? 'dashboard';
-      const now = new Date().toISOString();
-      const stmt = db.prepare(
-        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?',
-      );
-      let updated = 0;
-      db.transaction(() => {
-        for (const id of ids) {
-          updated += stmt.run('approved', now, reviewedBy, id, 'pending').changes;
-        }
-      })();
-      res.json({ success: true, updated, total: ids.length });
+      res.json(approveQuarantineItems(ids, reviewedBy));
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -191,23 +180,12 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
-      const db = getDatabase();
       const ids: number[] = req.body?.ids;
       if (!Array.isArray(ids) || ids.length === 0) {
         return res.status(400).json({ error: 'ids must be a non-empty array of numbers' });
       }
       const reviewedBy = req.body?.reviewedBy ?? 'dashboard';
-      const now = new Date().toISOString();
-      const stmt = db.prepare(
-        'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?',
-      );
-      let updated = 0;
-      db.transaction(() => {
-        for (const id of ids) {
-          updated += stmt.run('rejected', now, reviewedBy, id, 'pending').changes;
-        }
-      })();
-      res.json({ success: true, updated, total: ids.length });
+      res.json(rejectQuarantineItems(ids, reviewedBy));
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

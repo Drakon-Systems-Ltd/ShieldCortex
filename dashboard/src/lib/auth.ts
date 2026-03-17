@@ -50,6 +50,36 @@ export async function authFetch(url: string, options?: RequestInit): Promise<Res
   return fetch(url, { ...options, headers });
 }
 
+/**
+ * Best-effort error extraction for API responses.
+ * Keeps operator-facing errors specific instead of collapsing everything into
+ * generic "failed" messages when the backend already explained the problem.
+ */
+export async function readApiError(response: Response, fallback: string): Promise<string> {
+  const contentType = response.headers.get('content-type') ?? '';
+
+  if (contentType.includes('application/json')) {
+    const body = await response.json().catch(() => null) as
+      | { error?: unknown; message?: unknown; code?: unknown }
+      | null;
+
+    if (typeof body?.error === 'string' && body.error.trim()) {
+      return body.error;
+    }
+
+    if (typeof body?.message === 'string' && body.message.trim()) {
+      return body.message;
+    }
+
+    if (typeof body?.code === 'string' && body.code.trim()) {
+      return `${fallback} (${body.code})`;
+    }
+  }
+
+  const text = await response.text().catch(() => '');
+  return text.trim() || fallback;
+}
+
 // ── Feature gating helpers ────────────────────────────────
 
 /**

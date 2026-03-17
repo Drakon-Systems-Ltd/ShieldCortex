@@ -766,33 +766,26 @@ but you can use this tool to check for new contradictions at any time.`,
       const text = items.length === 0 ? 'No items in quarantine.' : (items as any[]).map((q: any) => `[${q.id}] ${q.original_title || 'Untitled'} | source: ${q.source_type}:${q.source_identifier} | reason: ${q.reason}`).join('\n');
       return { content: [{ type: 'text', text }] };
     } else if (args.action === 'approve' && args.quarantineId) {
-      db.prepare('UPDATE quarantine SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('approved', args.notes || 'mcp', args.quarantineId);
-      const q = db.prepare('SELECT * FROM quarantine WHERE id = ?').get(args.quarantineId) as any;
-      if (q) {
-        const { addMemory: add } = await import('./memory/store.js');
-        try { add({ title: q.original_title, content: q.original_content, project: q.project }); } catch { /* may fail defence */ }
+      const { approveQuarantineItem } = await import('./defence/quarantine/review.js');
+      const result = approveQuarantineItem(args.quarantineId, args.notes || 'mcp');
+      if (!result) {
+        return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} was not pending or no longer exists.` }] };
       }
-      return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} approved.` }] };
+      return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} approved${result.memoryId ? ` and promoted to memory ${result.memoryId}` : ''}.` }] };
     } else if (args.action === 'reject' && args.quarantineId) {
-      db.prepare('UPDATE quarantine SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('rejected', args.notes || 'mcp', args.quarantineId);
+      const { rejectQuarantineItem } = await import('./defence/quarantine/review.js');
+      const result = rejectQuarantineItem(args.quarantineId, args.notes || 'mcp');
+      if (!result) {
+        return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} was not pending or no longer exists.` }] };
+      }
       return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} rejected.` }] };
     } else if (args.action === 'approve_by_source' && args.sourceIdentifier) {
-      const items = db.prepare('SELECT id FROM quarantine WHERE status = ? AND source_identifier = ?').all('pending', args.sourceIdentifier) as { id: number }[];
-      if (items.length === 0) {
+      const { approveQuarantineItemsBySource } = await import('./defence/quarantine/review.js');
+      const result = approveQuarantineItemsBySource(args.sourceIdentifier, args.notes || 'batch-approve');
+      if (result.total === 0) {
         return { content: [{ type: 'text', text: `No pending quarantine items from source "${args.sourceIdentifier}".` }] };
       }
-      db.prepare('UPDATE quarantine SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE status = ? AND source_identifier = ?')
-        .run('approved', args.notes || 'batch-approve', 'pending', args.sourceIdentifier);
-      // Promote each to memory
-      const { addMemory: add } = await import('./memory/store.js');
-      let promoted = 0;
-      for (const item of items) {
-        const q = db.prepare('SELECT * FROM quarantine WHERE id = ?').get(item.id) as any;
-        if (q) {
-          try { add({ title: q.original_title, content: q.original_content, project: q.project }); promoted++; } catch { /* may fail defence */ }
-        }
-      }
-      return { content: [{ type: 'text', text: `Batch approved ${items.length} items from "${args.sourceIdentifier}" (${promoted} promoted to memory).` }] };
+      return { content: [{ type: 'text', text: `Batch approved ${result.updated} of ${result.total} items from "${args.sourceIdentifier}" (${result.promoted} promoted to memory).` }] };
     }
     return { content: [{ type: 'text', text: 'Invalid action or missing required parameters.' }] };
   }));

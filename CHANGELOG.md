@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.9] - 2026-03-17
+
+### Fixed
+
+- **Quarantine approval now actually restores memories** — approving quarantined items from the dashboard now promotes them into the memory store instead of only flipping review status, and the relevant memory/review/capture views refresh immediately
+- **Dashboard trust-channel hardening** — Iron Dome now treats the local dashboard as trusted at the gateway even if a persisted config is malformed, and it self-heals stored configs that omit `dashboard`
+- **Cloud config mutation validation** — local cloud settings now reject invalid payloads earlier, surface real API error messages in the dashboard, and refuse enabling cloud sync without a valid API key and base URL
+- **Dashboard shell/layout hardening** — the remaining detached global memory drawer path was removed, audit/quarantine views stay in page flow, and embedded memory detail panels no longer fight the page scroll model
+
 ## [3.4.8] - 2026-03-16
 
 ### Fixed

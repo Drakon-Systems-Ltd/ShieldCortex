@@ -102,7 +102,16 @@ function loadConfig(): IronDomeConfig {
     const db = getDatabase();
     const row = db.prepare('SELECT value FROM iron_dome_config WHERE key = ?').get('config') as { value: string } | undefined;
     if (row) {
-      activeConfig = normalizeConfig(JSON.parse(row.value));
+      const parsed = JSON.parse(row.value) as IronDomeConfig;
+      const normalized = normalizeConfig(parsed);
+      if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
+        db.prepare(`
+          UPDATE iron_dome_config
+             SET value = ?, updated_at = datetime('now')
+           WHERE key = 'config'
+        `).run(JSON.stringify(normalized));
+      }
+      activeConfig = normalized;
       return activeConfig;
     }
   } catch {

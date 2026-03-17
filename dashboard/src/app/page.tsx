@@ -13,7 +13,6 @@ import { useDashboardStore } from '@/lib/store';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useSuggestions } from '@/hooks/useSuggestions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
-import { MemoryDetail } from '@/components/memory/MemoryDetail';
 import { MemoriesView } from '@/components/memories/MemoriesView';
 import { NavRail } from '@/components/nav/NavRail';
 import { ShieldOverview } from '@/components/shield/ShieldOverview';
@@ -21,7 +20,6 @@ import { CloudSyncDiagnosticsView } from '@/components/cloud/CloudSyncDiagnostic
 import { RecallWorkspace } from '@/components/recall/RecallWorkspace';
 import { ReviewQueueView } from '@/components/review/ReviewQueueView';
 import { AuditLogView } from '@/components/audit/AuditLogView';
-import { AuditDetailPanel } from '@/components/audit/AuditDetailPanel';
 import { QuarantineView } from '@/components/quarantine/QuarantineView';
 import { AgentsView } from '@/components/agents/AgentsView';
 import { SkillsView } from '@/components/skills/SkillsView';
@@ -77,7 +75,6 @@ export default function DashboardPage() {
     setViewMode,
     selectedMemory,
     setSelectedMemory,
-    selectedAuditEntry,
     setSelectedAuditEntry,
     projectFilter,
     setProjectFilter,
@@ -209,14 +206,6 @@ export default function DashboardPage() {
   const _handleConsolidate = () => {
     consolidateMutation.mutate();
   };
-
-  const isFixedCanvasView =
-    viewMode === 'brain' ||
-    viewMode === 'graph' ||
-    viewMode === 'timeline';
-
-  // Views that need memory data vs standalone views
-  const isSecurityView = viewMode === 'overview' || viewMode === 'recall' || viewMode === 'review' || viewMode === 'shield' || viewMode === 'cloud' || viewMode === 'audit' || viewMode === 'quarantine' || viewMode === 'agents' || viewMode === 'skills' || viewMode === 'dome';
 
   return (
     <div className="h-screen w-screen bg-slate-950 text-white overflow-hidden flex flex-col">
@@ -400,7 +389,7 @@ export default function DashboardPage() {
       )}
 
       {/* Main Content */}
-      <div className={`flex-1 flex ${isFixedCanvasView ? 'overflow-hidden' : 'overflow-y-auto overflow-x-hidden'}`}>
+      <div className="flex-1 flex overflow-hidden">
         <NavRail />
 
         {/* Active View */}
@@ -411,7 +400,7 @@ export default function DashboardPage() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className={`flex-1 relative ${isFixedCanvasView ? 'overflow-hidden' : 'overflow-visible min-h-full'}`}
+            className="flex-1 relative overflow-hidden"
           >
             {viewMode === 'overview' && (
               <OverviewView
@@ -452,37 +441,6 @@ export default function DashboardPage() {
             )}
           </motion.div>
         </AnimatePresence>
-
-        {/* Right Detail Panel (not for brain view — it has its own inspector) */}
-        {selectedMemory && !isSecurityView && viewMode !== 'brain' && viewMode !== 'graph' && viewMode !== 'timeline' && viewMode !== 'memories' && (
-          <div className="w-80 border-l border-slate-800 overflow-y-auto shrink-0">
-            <MemoryDetail
-              memory={selectedMemory}
-              links={links}
-              memories={memories}
-              onClose={() => setSelectedMemory(null)}
-              onReinforce={handleReinforce}
-              onSelectMemory={handleSelectMemoryById}
-              isReinforcing={accessMutation.isPending}
-              reinforceSuccess={accessMutation.isSuccess}
-            />
-          </div>
-        )}
-
-        {/* Audit Detail Panel */}
-        {selectedAuditEntry && viewMode === 'audit' && (
-          <div className="w-80 border-l border-slate-800 overflow-y-auto shrink-0">
-            <AuditDetailPanel
-              entry={selectedAuditEntry}
-              onClose={() => setSelectedAuditEntry(null)}
-              onViewMemory={(memoryId) => {
-                setSelectedAuditEntry(null);
-                handleSelectMemoryById(memoryId);
-                useDashboardStore.getState().setViewMode('memories');
-              }}
-            />
-          </div>
-        )}
       </div>
 
       {/* Keyboard shortcuts help overlay */}

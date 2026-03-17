@@ -24,7 +24,9 @@ export function isChannelTrusted(
   config: IronDomeConfig,
 ): boolean {
   if (!config.enabled) return true;
-  return config.trustedChannels.includes(channel.toLowerCase());
+  const normalized = channel.toLowerCase();
+  if (normalized === 'dashboard') return true;
+  return config.trustedChannels.includes(normalized);
 }
 
 /**
@@ -47,7 +49,7 @@ export function validateGateway(
   }
 
   const normChannel = channel.toLowerCase();
-  const trusted = config.trustedChannels.includes(normChannel);
+  const trusted = normChannel === 'dashboard' || config.trustedChannels.includes(normChannel);
 
   const result: GatewayResult = {
     allowed: trusted,

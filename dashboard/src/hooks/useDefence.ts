@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { authFetch } from '@/lib/auth';
+import { authFetch, readApiError } from '@/lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -68,7 +68,7 @@ async function fetchAuditLogs(options?: {
   if (options?.limit) params.set('limit', options.limit.toString());
 
   const response = await authFetch(`${API_BASE}/api/v1/audit?${params}`);
-  if (!response.ok) throw new Error('Failed to fetch audit logs');
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to fetch audit logs'));
   return response.json();
 }
 
@@ -76,7 +76,7 @@ async function fetchAuditStats(timeRange: '24h' | '7d' | '30d', project?: string
   const params = new URLSearchParams({ timeRange });
   if (project) params.set('project', project);
   const response = await authFetch(`${API_BASE}/api/v1/audit/stats?${params}`);
-  if (!response.ok) throw new Error('Failed to fetch audit stats');
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to fetch audit stats'));
   return response.json();
 }
 
@@ -84,7 +84,7 @@ async function fetchQuarantine(status: string = 'pending', limit: number = 50, p
   const params = new URLSearchParams({ status, limit: limit.toString() });
   if (project) params.set('project', project);
   const response = await authFetch(`${API_BASE}/api/v1/quarantine?${params}`);
-  if (!response.ok) throw new Error('Failed to fetch quarantine');
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to fetch quarantine'));
   return response.json();
 }
 
@@ -94,7 +94,7 @@ async function approveQuarantine(id: number): Promise<{ success: boolean; id: nu
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reviewedBy: 'dashboard' }),
   });
-  if (!response.ok) throw new Error('Failed to approve');
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to approve quarantined item'));
   return response.json();
 }
 
@@ -104,7 +104,7 @@ async function rejectQuarantine(id: number, notes?: string): Promise<{ success: 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reviewedBy: 'dashboard', notes }),
   });
-  if (!response.ok) throw new Error('Failed to reject');
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to reject quarantined item'));
   return response.json();
 }
 
@@ -114,7 +114,7 @@ async function bulkApproveQuarantine(ids: number[]): Promise<{ success: boolean;
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids, reviewedBy: 'dashboard' }),
   });
-  if (!response.ok) throw new Error('Failed to bulk approve');
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to bulk approve quarantined items'));
   return response.json();
 }
 
@@ -124,7 +124,7 @@ async function bulkRejectQuarantine(ids: number[]): Promise<{ success: boolean; 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids, reviewedBy: 'dashboard' }),
   });
-  if (!response.ok) throw new Error('Failed to bulk reject');
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to bulk reject quarantined items'));
   return response.json();
 }
 
@@ -171,6 +171,11 @@ export function useApproveQuarantine() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quarantine'] });
       queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+      queryClient.invalidateQueries({ queryKey: ['review-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['openclaw-sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['quality'] });
     },
   });
 }
@@ -182,6 +187,7 @@ export function useRejectQuarantine() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quarantine'] });
       queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['review-queue'] });
     },
   });
 }
@@ -193,6 +199,11 @@ export function useBulkApproveQuarantine() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quarantine'] });
       queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+      queryClient.invalidateQueries({ queryKey: ['review-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['openclaw-sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['quality'] });
     },
   });
 }
@@ -204,6 +215,7 @@ export function useBulkRejectQuarantine() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['quarantine'] });
       queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['review-queue'] });
     },
   });
 }
@@ -215,19 +227,26 @@ export type DefenceMode = 'strict' | 'balanced' | 'permissive';
 export function useDefenceConfig() {
   return useQuery<{ mode: DefenceMode; tampered: boolean }>({
     queryKey: ['defence-config'],
-    queryFn: () => authFetch(`${API_BASE}/api/defence/config`).then(r => r.json()),
+    queryFn: async () => {
+      const response = await authFetch(`${API_BASE}/api/defence/config`);
+      if (!response.ok) throw new Error(await readApiError(response, 'Failed to fetch defence config'));
+      return response.json();
+    },
   });
 }
 
 export function useSetDefenceMode() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (mode: DefenceMode) =>
-      authFetch(`${API_BASE}/api/defence/config`, {
+    mutationFn: async (mode: DefenceMode) => {
+      const response = await authFetch(`${API_BASE}/api/defence/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),
-      }).then(r => r.json()),
+      });
+      if (!response.ok) throw new Error(await readApiError(response, 'Failed to update defence mode'));
+      return response.json();
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['defence-config'] });
     },

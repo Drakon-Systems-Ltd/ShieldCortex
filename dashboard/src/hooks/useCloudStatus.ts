@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { authFetch } from '@/lib/auth';
+import { authFetch, readApiError } from '@/lib/auth';
 
 interface CloudConfig {
   enabled: boolean;
@@ -87,7 +87,7 @@ export function useCloudStatus() {
     queryKey: ['cloud-config'],
     queryFn: async () => {
       const res = await authFetch(`${API_URL}/api/cloud/config`);
-      if (!res.ok) throw new Error('Failed to fetch cloud config');
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch cloud config'));
       return normalizeCloudConfig(await res.json());
     },
     refetchInterval: 30000, // Refresh every 30s
@@ -118,7 +118,7 @@ export function useUpdateCloudConfig() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
       });
-      if (!res.ok) throw new Error('Failed to update cloud config');
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to update cloud config'));
       return res.json();
     },
     onSuccess: () => {
@@ -138,7 +138,7 @@ export function useCloudProjects() {
     queryKey: ['cloud-projects'],
     queryFn: async () => {
       const res = await authFetch(`${API_URL}/api/cloud/projects`);
-      if (!res.ok) throw new Error('Failed to fetch cloud projects');
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch cloud projects'));
       return res.json();
     },
     staleTime: 30000,
