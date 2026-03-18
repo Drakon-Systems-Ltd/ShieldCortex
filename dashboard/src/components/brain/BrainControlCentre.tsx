@@ -8,6 +8,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import { Brain, PanelBottomOpen, ShieldAlert } from 'lucide-react';
 import { Memory, MemoryLink, MemoryStats } from '@/types/memory';
 import { useDashboardStore } from '@/lib/store';
 import {
@@ -51,7 +52,7 @@ export function BrainControlCentre({
   } = useDashboardStore();
 
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
-  const [feedCollapsed, setFeedCollapsed] = useState(false);
+  const [feedCollapsed, setFeedCollapsed] = useState(true);
 
   // Data hooks
   const { data: contradictionsData } = useContradictions(projectFilter || undefined);
@@ -176,6 +177,50 @@ export function BrainControlCentre({
 
   return (
     <div className="w-full h-full flex flex-col bg-slate-950 relative">
+      <section className="shrink-0 border-b border-slate-800 bg-slate-900/60 px-6 py-4">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="max-w-3xl">
+            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-cyan-300">
+              <Brain size={12} />
+              Brain workspace
+            </div>
+            <h2 className="mt-3 text-2xl font-semibold text-white">Explore structure without drowning in every signal at once.</h2>
+            <p className="mt-2 text-sm text-slate-400">
+              The Brain view is best used to inspect one cluster at a time. Start with the selected memory, then expand into links, contradictions, and recent activity only when you need them.
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3 xl:w-[420px]">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Focus</div>
+              <div className="mt-2 text-sm font-medium text-white">{selectedMemory ? selectedMemory.title : 'Nothing selected'}</div>
+              <div className="mt-1 text-xs text-slate-400">{selectedMemory ? `${selectedMemory.category} · ${(selectedMemory.trustScore ?? 1).toFixed(2)} trust` : 'Click a node to inspect it.'}</div>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Pressure</div>
+              <div className="mt-2 text-sm font-medium text-white">{contradictionCount} contradictions</div>
+              <div className="mt-1 text-xs text-slate-400">{quarantineCount} quarantined items need review.</div>
+            </div>
+            <button
+              onClick={() => setFeedCollapsed(!feedCollapsed)}
+              className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-left transition-colors hover:border-slate-600"
+            >
+              <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                <PanelBottomOpen size={12} />
+                Activity feed
+              </div>
+              <div className="mt-2 text-sm font-medium text-white">{feedCollapsed ? 'Show recent activity' : 'Hide recent activity'}</div>
+              <div className="mt-1 text-xs text-slate-400">Keep the canvas calmer unless you are tracing events.</div>
+            </button>
+          </div>
+        </div>
+        {categoryFilter && (
+          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs text-amber-200">
+            <ShieldAlert size={12} />
+            Category focus: {categoryFilter}
+          </div>
+        )}
+      </section>
+
       {/* Top Stats Bar */}
       <TopStatsBar
         stats={stats ?? { total: 0, shortTerm: 0, longTerm: 0, episodic: 0, byCategory: {}, averageSalience: 0 }}

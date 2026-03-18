@@ -3,7 +3,7 @@ import { authFetch, readApiError } from '@/lib/auth';
 
 const API_URL = 'http://localhost:3001';
 
-interface CloudSyncStatus {
+export interface CloudSyncStatus {
   enabled: boolean;
   apiKeySet: boolean;
   baseUrl: string;

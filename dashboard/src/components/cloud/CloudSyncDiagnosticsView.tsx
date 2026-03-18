@@ -2,8 +2,8 @@
 
 import { useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Cloud, Database, GitBranch, KeyRound, RefreshCw, Server, ShieldAlert } from 'lucide-react';
-import { useCloudProjects, useCloudStatus, useUpdateCloudConfig } from '@/hooks/useCloudStatus';
-import { useCloudSyncStatus } from '@/hooks/useCloudSyncStatus';
+import { useCloudProjects, useCloudStatus, useUpdateCloudConfig, type CloudConfig } from '@/hooks/useCloudStatus';
+import { useCloudSyncStatus, type CloudSyncStatus } from '@/hooks/useCloudSyncStatus';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_BG, TIER_COLOURS, TIER_LABELS } from '@/lib/license';
 
@@ -328,6 +328,48 @@ function SyncControlsCard() {
   );
 }
 
+function CompactPolicySummary({
+  sync,
+  cloudConfig,
+}: {
+  sync: CloudSyncStatus;
+  cloudConfig: CloudConfig;
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+      <h2 className="text-lg font-semibold text-white">Current policy</h2>
+      <p className="mt-1 text-sm text-slate-400">
+        The snapshot below is the current cloud posture. Edit it in Sync Controls when you need to change what leaves this device.
+      </p>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Sync scope</div>
+          <div className="mt-2 text-sm font-medium text-white">{sync.controls.projectMode}</div>
+          <div className="mt-1 text-xs text-slate-400">{sync.controls.projects.length} selected project{sync.controls.projects.length === 1 ? '' : 's'}</div>
+        </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Content mode</div>
+          <div className="mt-2 text-sm font-medium text-white">{sync.controls.contentMode === 'metadata' ? 'Metadata only' : 'Full content'}</div>
+          <div className="mt-1 text-xs text-slate-400">Sensitive filter {sync.controls.excludeSensitive ? 'enabled' : 'off'}</div>
+        </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Cloud endpoint</div>
+          <div className="mt-2 text-sm font-medium text-white">{sync.baseUrl}</div>
+        </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">OpenClaw complement</div>
+          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
+            <span>Auto-memory: {cloudConfig.openclawMemory.autoMemory ? 'On' : 'Off'}</span>
+            <span>Dedupe: {cloudConfig.openclawMemory.dedupe ? 'On' : 'Off'}</span>
+            <span>Novelty: {cloudConfig.openclawMemory.noveltyThreshold}</span>
+            <span>Recent window: {cloudConfig.openclawMemory.maxRecent}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function CloudSyncDiagnosticsView() {
   const { data: sync, isLoading: syncLoading } = useCloudSyncStatus();
   const { data: cloudConfig, isLoading: configLoading } = useCloudStatus();
@@ -352,6 +394,11 @@ export function CloudSyncDiagnosticsView() {
     sync.queue.byKind.quarantine.failed +
     sync.queue.byKind.unknown.failed;
   const lastSyncLabel = sync.lastSyncAt ? formatTimeAgo(sync.lastSyncAt) : 'Never';
+  const replicationHealth = replicationFailed > 0
+    ? 'Needs review'
+    : memoryQueue.pending + graphQueue.pending > 0
+      ? 'Catching up'
+      : 'Healthy';
 
   return (
     <div className="h-full overflow-y-auto bg-slate-950">
@@ -360,7 +407,7 @@ export function CloudSyncDiagnosticsView() {
           <div>
             <h1 className="text-2xl font-semibold text-white">Cloud Diagnostics</h1>
             <p className="mt-1 text-sm text-slate-400">
-              Inspect local-to-cloud replication health, queue pressure, device identity, and Team licence gating.
+              See whether replication is healthy first. Then tune policy and inspect the deeper transport details only when you actually need them.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -375,7 +422,13 @@ export function CloudSyncDiagnosticsView() {
 
         <StatusBanner />
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <StatCard
+            label="Replication"
+            value={replicationHealth}
+            detail={`${replicationFailed} failed · ${memoryQueue.pending + graphQueue.pending} pending`}
+            icon={RefreshCw}
+          />
           <StatCard
             label="Device"
             value={sync.device.name}
@@ -406,9 +459,9 @@ export function CloudSyncDiagnosticsView() {
           <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold text-white">Queue Breakdown</h2>
+                <h2 className="text-lg font-semibold text-white">Replication</h2>
                 <p className="mt-1 text-sm text-slate-400">
-                  Pending and failed sync jobs by payload type. This is the fastest way to spot whether memories or graph slices are backing up.
+                  Focus on memory and graph first. Audit and quarantine transport history is still available, but it should not dominate the page when replication itself is healthy.
                 </p>
               </div>
             </div>
@@ -420,89 +473,54 @@ export function CloudSyncDiagnosticsView() {
               <QueueKindCard label="Quarantine" {...sync.queue.byKind.quarantine} />
             </div>
 
-            <div className="mt-5 overflow-hidden rounded-xl border border-slate-800">
-              <table className="min-w-full divide-y divide-slate-800 text-sm">
-                <thead className="bg-slate-950/70 text-slate-400">
-                  <tr>
-                    <th className="px-4 py-3 text-left font-medium">Signal</th>
-                    <th className="px-4 py-3 text-left font-medium">Current value</th>
-                    <th className="px-4 py-3 text-left font-medium">Why it matters</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800 bg-slate-900/40 text-slate-200">
-                  <tr>
-                    <td className="px-4 py-3">Oldest queued job</td>
-                    <td className="px-4 py-3">{sync.queue.oldestPendingAt ? formatTimeAgo(sync.queue.oldestPendingAt) : 'None queued'}</td>
-                    <td className="px-4 py-3 text-slate-400">If this stays old while pending grows, the local worker is falling behind.</td>
-                  </tr>
-                  <tr>
-                    <td className="px-4 py-3">Next retry</td>
-                    <td className="px-4 py-3">{sync.queue.nextRetryAt ? formatTimeUntil(sync.queue.nextRetryAt) : 'Idle'}</td>
-                    <td className="px-4 py-3 text-slate-400">Confirms whether failures are retrying normally or the queue is stuck.</td>
-                  </tr>
-                  <tr>
-                    <td className="px-4 py-3">Failed jobs in history</td>
-                    <td className="px-4 py-3">{replicationFailed}</td>
-                    <td className="px-4 py-3 text-slate-400">These are retained replication dead-letter records for memory and graph sync.</td>
-                  </tr>
-                  <tr>
-                    <td className="px-4 py-3">Auxiliary failed history</td>
-                    <td className="px-4 py-3">{auxiliaryFailed}</td>
-                    <td className="px-4 py-3 text-slate-400">Audit and quarantine retry history is shown here for debugging, but it does not mean memory replication is currently blocked.</td>
-                  </tr>
-                  <tr>
-                    <td className="px-4 py-3">Latest memory sync</td>
-                    <td className="px-4 py-3">{sync.lastSyncAt ? formatTimeAgo(sync.lastSyncAt) : 'Not recorded'}</td>
-                    <td className="px-4 py-3 text-slate-400">This is the best quick indicator for whether cloud replication is actually current.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+            <details className="mt-5 rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+              <summary className="cursor-pointer list-none text-sm font-medium text-slate-200">
+                Advanced transport signals
+              </summary>
+              <div className="mt-4 overflow-hidden rounded-xl border border-slate-800">
+                <table className="min-w-full divide-y divide-slate-800 text-sm">
+                  <thead className="bg-slate-950/70 text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3 text-left font-medium">Signal</th>
+                      <th className="px-4 py-3 text-left font-medium">Current value</th>
+                      <th className="px-4 py-3 text-left font-medium">Why it matters</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 bg-slate-900/40 text-slate-200">
+                    <tr>
+                      <td className="px-4 py-3">Oldest queued job</td>
+                      <td className="px-4 py-3">{sync.queue.oldestPendingAt ? formatTimeAgo(sync.queue.oldestPendingAt) : 'None queued'}</td>
+                      <td className="px-4 py-3 text-slate-400">If this stays old while pending grows, the local worker is falling behind.</td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-3">Next retry</td>
+                      <td className="px-4 py-3">{sync.queue.nextRetryAt ? formatTimeUntil(sync.queue.nextRetryAt) : 'Idle'}</td>
+                      <td className="px-4 py-3 text-slate-400">Confirms whether failures are retrying normally or the queue is stuck.</td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-3">Failed jobs in history</td>
+                      <td className="px-4 py-3">{replicationFailed}</td>
+                      <td className="px-4 py-3 text-slate-400">These are retained replication dead-letter records for memory and graph sync.</td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-3">Auxiliary failed history</td>
+                      <td className="px-4 py-3">{auxiliaryFailed}</td>
+                      <td className="px-4 py-3 text-slate-400">Audit and quarantine retry history is shown here for debugging, but it does not mean memory replication is currently blocked.</td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-3">Latest memory sync</td>
+                      <td className="px-4 py-3">{sync.lastSyncAt ? formatTimeAgo(sync.lastSyncAt) : 'Not recorded'}</td>
+                      <td className="px-4 py-3 text-slate-400">This is the best quick indicator for whether cloud replication is actually current.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
           </section>
 
           <div className="flex flex-col gap-6">
             <SyncControlsCard />
-
-            <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-              <h2 className="text-lg font-semibold text-white">Configuration</h2>
-              <div className="mt-4 space-y-3 text-sm">
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Cloud endpoint</div>
-                  <div className="mt-2 font-medium text-white">{sync.baseUrl}</div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Feature gate</div>
-                  <div className="mt-2 flex items-center gap-2">
-                    {sync.featureEnabled ? (
-                      <CheckCircle2 size={16} className="text-emerald-400" />
-                    ) : (
-                      <AlertTriangle size={16} className="text-amber-400" />
-                    )}
-                    <span className="font-medium text-white">
-                      {sync.featureEnabled ? 'Team cloud sync enabled' : `Requires ${TIER_LABELS[sync.requiredTier]} tier`}
-                    </span>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Current sync policy</div>
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
-                    <span>Projects: {sync.controls.projectMode}</span>
-                    <span>Content: {sync.controls.contentMode}</span>
-                    <span>Sensitive filter: {sync.controls.excludeSensitive ? 'Enabled' : 'Off'}</span>
-                    <span>Selected projects: {sync.controls.projects.length}</span>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">OpenClaw complement</div>
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
-                    <span>Auto-memory: {cloudConfig.openclawMemory.autoMemory ? 'On' : 'Off'}</span>
-                    <span>Dedupe: {cloudConfig.openclawMemory.dedupe ? 'On' : 'Off'}</span>
-                    <span>Novelty threshold: {cloudConfig.openclawMemory.noveltyThreshold}</span>
-                    <span>Recent window: {cloudConfig.openclawMemory.maxRecent}</span>
-                  </div>
-                </div>
-              </div>
-            </section>
+            <CompactPolicySummary sync={sync} cloudConfig={cloudConfig} />
 
             <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
               <h2 className="text-lg font-semibold text-white">Last actionable error</h2>

@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.18] - 2026-03-18
+
+### Fixed
+
+- **Shield page product cleanup** — the local Shield workspace now separates immediate review work, system status, policy tuning, and advanced controls into clearer sections instead of presenting every defence card at the same priority
+- **Cloud page product cleanup** — local Cloud diagnostics now foreground replication health and policy, while transport-level debug signals are moved into a secondary advanced section so the page reads operationally instead of like a raw dump
+- **Brain page product cleanup** — the Brain workspace now starts from a calmer shell with recent activity collapsed by default and a clearer focus/pressure summary before the full visual workspace
+
 ## [3.4.17] - 2026-03-17
 
 ### Fixed

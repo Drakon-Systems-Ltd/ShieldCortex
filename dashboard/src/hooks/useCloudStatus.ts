@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { authFetch, readApiError } from '@/lib/auth';
 
-interface CloudConfig {
+export interface CloudConfig {
   enabled: boolean;
   apiKeySet: boolean;
   baseUrl: string;
