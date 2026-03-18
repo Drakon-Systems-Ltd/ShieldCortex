@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.19] - 2026-03-18
+
+### Fixed
+
+- **Graph page cleanup** — local Graph now keeps `Read` as the obvious primary path, moves `Map` and `Bloom` behind an explicit visual explorer, and reduces first-paint clutter with a simpler evidence-oriented sidebar
+- **Cloud density cleanup** — local Cloud now treats memory/graph replication as the main signal and moves audit/quarantine transport history into the advanced section where it belongs
+- **Shield density cleanup** — local Shield no longer expands advanced review controls by default, so the first screen stays focused on decisions and system status instead of specialist tools
+
 ## [3.4.18] - 2026-03-18
 
 ### Fixed

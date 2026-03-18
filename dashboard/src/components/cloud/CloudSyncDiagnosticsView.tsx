@@ -466,17 +466,19 @@ export function CloudSyncDiagnosticsView() {
               </div>
             </div>
 
-            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-4">
+            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
               <QueueKindCard label="Memory" {...memoryQueue} />
               <QueueKindCard label="Graph" {...graphQueue} />
-              <QueueKindCard label="Audit" {...sync.queue.byKind.audit} />
-              <QueueKindCard label="Quarantine" {...sync.queue.byKind.quarantine} />
             </div>
 
             <details className="mt-5 rounded-xl border border-slate-800 bg-slate-950/30 p-4">
               <summary className="cursor-pointer list-none text-sm font-medium text-slate-200">
                 Advanced transport signals
               </summary>
+              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                <QueueKindCard label="Audit" {...sync.queue.byKind.audit} />
+                <QueueKindCard label="Quarantine" {...sync.queue.byKind.quarantine} />
+              </div>
               <div className="mt-4 overflow-hidden rounded-xl border border-slate-800">
                 <table className="min-w-full divide-y divide-slate-800 text-sm">
                   <thead className="bg-slate-950/70 text-slate-400">

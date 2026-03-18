@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type MutableRefObject, type ReactElement, type WheelEvent } from 'react';
 import dynamic from 'next/dynamic';
-import { Search, X, ArrowLeft, Globe, ChevronRight, Network, ListTree, Sparkles } from 'lucide-react';
+import { Search, X, ArrowLeft, Globe, ChevronRight, Network, ListTree, Sparkles, PanelsTopLeft } from 'lucide-react';
 import type {
   ForceGraphMethods,
   ForceGraphProps,
@@ -192,6 +192,7 @@ export default function UnifiedGraph() {
   const [searchResults, setSearchResults] = useState<Entity[]>([]);
   const [showSearch, setShowSearch] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>('outline');
+  const [showVisualModes, setShowVisualModes] = useState(false);
   const [bloomViewport, setBloomViewport] = useState({ scale: 1, offsetX: 0, offsetY: 0 });
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -947,30 +948,57 @@ export default function UnifiedGraph() {
             <ListTree size={12} />
             Read
           </button>
+        </div>
+
+        <div className="relative">
           <button
-            onClick={() => setDisplayMode('map')}
-            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
-              displayMode === 'map'
-                ? 'bg-cyan-500/15 text-cyan-300'
-                : 'text-slate-400 hover:text-slate-200'
+            onClick={() => setShowVisualModes((current) => !current)}
+            className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors ${
+              displayMode === 'outline'
+                ? 'border-slate-700 bg-slate-900/80 text-slate-400 hover:text-slate-200'
+                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200'
             }`}
-            title="Graph canvas"
+            title="Visual graph modes"
           >
-            <Network size={12} />
-            Map
+            <PanelsTopLeft size={12} />
+            Visual
           </button>
-          <button
-            onClick={() => setDisplayMode('fractal')}
-            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
-              displayMode === 'fractal'
-                ? 'bg-cyan-500/15 text-cyan-300'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-            title="Fractal bloom layout"
-          >
-            <Sparkles size={12} />
-            Bloom
-          </button>
+
+          {showVisualModes && (
+            <div className="absolute right-0 top-full z-30 mt-2 w-64 rounded-xl border border-slate-700 bg-slate-900/95 p-2 shadow-xl">
+              <div className="px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-500">Visual explorer</div>
+              <button
+                onClick={() => {
+                  setDisplayMode('map');
+                  setShowVisualModes(false);
+                }}
+                className={`mt-1 flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                  displayMode === 'map' ? 'bg-cyan-500/10 text-cyan-200' : 'text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                <Network size={14} className="mt-0.5 shrink-0" />
+                <div>
+                  <div className="font-medium">Map</div>
+                  <div className="text-xs text-slate-500">Spatial context for the current neighbourhood.</div>
+                </div>
+              </button>
+              <button
+                onClick={() => {
+                  setDisplayMode('fractal');
+                  setShowVisualModes(false);
+                }}
+                className={`mt-1 flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                  displayMode === 'fractal' ? 'bg-cyan-500/10 text-cyan-200' : 'text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                <Sparkles size={14} className="mt-0.5 shrink-0" />
+                <div>
+                  <div className="font-medium">Bloom</div>
+                  <div className="text-xs text-slate-500">Expressive view for pattern-shape exploration.</div>
+                </div>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Search */}
@@ -1078,6 +1106,12 @@ export default function UnifiedGraph() {
 
           {/* Relationships list */}
           <div className="flex-1 overflow-y-auto">
+            <div className="px-3 py-3 border-b border-slate-800/80 bg-slate-950/30">
+              <div className="text-[10px] uppercase tracking-wider text-slate-600">Quick guide</div>
+              <div className="mt-2 text-xs leading-5 text-slate-400">
+                Start in <span className="text-cyan-300">Read</span>. Use the relationship groups below to recenter on nearby entities. Open the visual explorer only when you need spatial context.
+              </div>
+            </div>
             {neighboursByRelation.length > 0 ? (
               neighboursByRelation.map(group => (
                 <div key={`${group.predicate}-${group.direction}`} className="border-b border-slate-800/50">
@@ -1111,25 +1145,14 @@ export default function UnifiedGraph() {
             )}
           </div>
 
-          {/* Memories panel */}
-          {memories.length > 0 && (
-            <div className="border-t border-slate-800 max-h-[200px] overflow-y-auto">
-              <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-slate-600 sticky top-0 bg-slate-900/80 backdrop-blur-sm">
-                Memories ({memories.length})
-              </div>
-              {memories.slice(0, 15).map(m => (
-                <div key={m.id} className="px-3 py-1.5 border-b border-slate-800/30">
-                  <div className="text-xs text-slate-300 truncate">{m.title}</div>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[10px] text-slate-500">{m.category}</span>
-                    <span className="text-[10px] text-slate-600 ml-auto">
-                      {new Date(m.created_at).toLocaleDateString()}
-                    </span>
-                  </div>
-                </div>
-              ))}
+          <div className="border-t border-slate-800 bg-slate-950/30 px-3 py-3">
+            <div className="text-[10px] uppercase tracking-wider text-slate-600">Evidence</div>
+            <div className="mt-2 text-xs text-slate-400">
+              {memories.length > 0
+                ? `${memories.length} linked memories support the current entity. Open Read to inspect them.`
+                : 'No linked memories surfaced for this entity yet.'}
             </div>
-          )}
+          </div>
         </div>
 
         {displayMode === 'outline' ? (
@@ -1281,6 +1304,12 @@ export default function UnifiedGraph() {
             ref={containerRef}
             className="relative flex-1 min-h-0 overflow-hidden bg-[radial-gradient(circle_at_center,rgba(34,211,238,0.08),rgba(2,6,23,0.02)_28%,rgba(2,6,23,0)_56%)]"
           >
+            <div className="absolute left-4 top-4 z-20 max-w-sm rounded-2xl border border-slate-800 bg-slate-950/80 p-4 backdrop-blur-sm">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Bloom view</div>
+              <div className="mt-2 text-sm text-slate-300">
+                This is for shape and cluster reading, not evidence review. Return to <span className="text-cyan-300">Read</span> when you need exact relationships and supporting memories.
+              </div>
+            </div>
             <div className="absolute right-4 top-4 z-20 flex items-center gap-2">
               <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-400">
                 Wheel to zoom • drag to pan
@@ -1468,6 +1497,12 @@ export default function UnifiedGraph() {
           </div>
         ) : (
           <div ref={containerRef} className="flex-1 min-h-0 relative">
+            <div className="absolute left-4 top-4 z-20 max-w-sm rounded-2xl border border-slate-800 bg-slate-950/80 p-4 backdrop-blur-sm">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Map view</div>
+              <div className="mt-2 text-sm text-slate-300">
+                Use the canvas for spatial context, then switch back to <span className="text-cyan-300">Read</span> to inspect grouped statements and evidence.
+              </div>
+            </div>
             {loading && (
               <div className="absolute inset-0 flex items-center justify-center z-10">
                 <div className="text-slate-400 animate-pulse text-sm">Loading...</div>

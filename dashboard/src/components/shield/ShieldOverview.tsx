@@ -100,13 +100,13 @@ export function ShieldOverview() {
         </section>
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_1fr]">
-          <details className="group rounded-2xl border border-slate-800 bg-slate-900/60 p-5" open>
+          <details className="group rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
             <summary className="flex cursor-pointer list-none items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-white">Advanced review</h3>
                 <p className="mt-1 text-sm text-slate-400">Use these when you are inspecting instructions, hardening policies, or debugging low-level behaviour.</p>
               </div>
-              <span className="text-xs text-cyan-300 group-open:text-cyan-200">Expanded</span>
+              <span className="text-xs text-slate-400 group-open:text-cyan-300">Expand</span>
             </summary>
             <div className="mt-4 space-y-4">
               <SkillScannerCard />
