@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.20] - 2026-03-18
+
+### Fixed
+
+- **Shield action flow cleanup** — the local Shield page now exposes direct operator actions for quarantine, audit, cloud, and brain views from the section headers instead of making operators infer the next move from dense cards
+- **Cloud control clarity cleanup** — project selection now stays tucked behind an explicit chooser when scope is include/exclude, and the controls foreground the current policy summary instead of showing every project selector all the time
+- **Graph interaction cleanup** — local Graph reduces left-rail noise by collapsing jump lists, keeps Read clearly primary, and treats the visual graph modes as secondary exploratory tools
+
 ## [3.4.19] - 2026-03-18
 
 ### Fixed

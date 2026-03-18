@@ -175,6 +175,7 @@ function SyncControlsCard() {
     contentMode: 'full' as const,
     excludeSensitive: false,
   };
+  const showProjectSelection = controls.projectMode !== 'all';
 
   function toggleProject(project: string) {
     setDraftControls((current) => {
@@ -222,6 +223,14 @@ function SyncControlsCard() {
       <div className="mt-5 grid gap-4">
         <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
           <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Content mode</div>
+          <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400">
+            <span className="rounded-full border border-slate-800 bg-slate-900/60 px-2.5 py-1">
+              {controls.contentMode === 'metadata' ? 'Metadata only' : 'Full content'}
+            </span>
+            <span className="rounded-full border border-slate-800 bg-slate-900/60 px-2.5 py-1">
+              Sensitive filter {controls.excludeSensitive ? 'on' : 'off'}
+            </span>
+          </div>
           <div className="mt-3 grid gap-2 md:grid-cols-2">
             <label className={`rounded-lg border p-3 text-sm ${controls.contentMode === 'full' ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 text-slate-300'}`}>
               <input
@@ -271,31 +280,38 @@ function SyncControlsCard() {
                 ? 'Only the selected projects will sync.'
                 : 'Selected projects stay local-only.'}
           </p>
-          <div className="mt-3 max-h-48 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/40 p-3">
-            {projects.length === 0 ? (
-              <div className="text-xs text-slate-500">No named projects found in local memory yet.</div>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {projects.map((project) => {
-                  const selected = controls.projects.includes(project.project);
-                  return (
-                    <button
-                      key={project.project}
-                      type="button"
-                      onClick={() => toggleProject(project.project)}
-                      className={`rounded-full border px-3 py-1.5 text-xs ${
-                        selected
-                          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
-                          : 'border-slate-700 bg-slate-950/60 text-slate-300'
-                      }`}
-                    >
-                      {project.project} <span className="text-slate-500">({project.count})</span>
-                    </button>
-                  );
-                })}
+          {showProjectSelection && (
+            <details className="mt-3 rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+              <summary className="cursor-pointer list-none text-sm font-medium text-slate-200">
+                Choose projects {controls.projects.length > 0 ? `(${controls.projects.length} selected)` : ''}
+              </summary>
+              <div className="mt-3 max-h-48 overflow-y-auto">
+                {projects.length === 0 ? (
+                  <div className="text-xs text-slate-500">No named projects found in local memory yet.</div>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {projects.map((project) => {
+                      const selected = controls.projects.includes(project.project);
+                      return (
+                        <button
+                          key={project.project}
+                          type="button"
+                          onClick={() => toggleProject(project.project)}
+                          className={`rounded-full border px-3 py-1.5 text-xs ${
+                            selected
+                              ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
+                              : 'border-slate-700 bg-slate-950/60 text-slate-300'
+                          }`}
+                        >
+                          {project.project} <span className="text-slate-500">({project.count})</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </details>
+          )}
         </div>
 
         <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-200">

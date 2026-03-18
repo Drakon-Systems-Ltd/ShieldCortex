@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Brain, Cloud, ShieldAlert, SlidersHorizontal } from 'lucide-react';
+import { useDashboardStore } from '@/lib/store';
 import { PipelineStatus } from './PipelineStatus';
 import { QuarantinePreview } from './QuarantinePreview';
 import { ThreatTimeline } from './ThreatTimeline';
@@ -17,6 +18,7 @@ import { CustomFirewallRulesPanel } from './CustomFirewallRulesPanel';
 
 export function ShieldOverview() {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
+  const setViewMode = useDashboardStore((state) => state.setViewMode);
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -53,9 +55,25 @@ export function ShieldOverview() {
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.05fr_0.95fr]">
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
-              <ShieldAlert size={12} />
-              Act Now
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                <ShieldAlert size={12} />
+                Act Now
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => setViewMode('quarantine')}
+                  className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/15"
+                >
+                  Review quarantine
+                </button>
+                <button
+                  onClick={() => setViewMode('audit')}
+                  className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/30 hover:text-white"
+                >
+                  Open audit
+                </button>
+              </div>
             </div>
             <div className="grid grid-cols-1 gap-4">
               <QuarantinePreview />
@@ -64,9 +82,17 @@ export function ShieldOverview() {
           </div>
 
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
-              <Cloud size={12} />
-              System Status
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                <Cloud size={12} />
+                System Status
+              </div>
+              <button
+                onClick={() => setViewMode('cloud')}
+                className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/30 hover:text-white"
+              >
+                Open cloud
+              </button>
             </div>
             <div className="grid grid-cols-1 gap-4">
               <CloudSyncStatus />
@@ -88,9 +114,17 @@ export function ShieldOverview() {
           </div>
 
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
-              <Brain size={12} />
-              Memory Pressure
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                <Brain size={12} />
+                Memory Pressure
+              </div>
+              <button
+                onClick={() => setViewMode('brain')}
+                className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/30 hover:text-white"
+              >
+                Open brain
+              </button>
             </div>
             <div className="space-y-4">
               <HealthScore />

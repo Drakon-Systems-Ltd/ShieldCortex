@@ -1080,29 +1080,36 @@ export default function UnifiedGraph() {
         {/* Left sidebar */}
         <div className="w-[240px] shrink-0 border-r border-slate-800 bg-slate-900/30 flex flex-col overflow-hidden">
           {/* Top entities quick-nav */}
-          <div className="p-3 border-b border-slate-800">
-            <div className="text-[10px] uppercase tracking-wider text-slate-600 mb-2">Top Entities</div>
-            <div className="flex flex-wrap gap-1">
-              {topEntities.slice(0, 12).map(e => (
-                <button
-                  key={e.id}
-                  onClick={() => navigateTo(e.id)}
-                  className={`flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border transition-colors ${
-                    focalId === e.id
-                      ? 'border-transparent text-white'
-                      : 'border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-600'
-                  }`}
-                  style={focalId === e.id ? { backgroundColor: (ENTITY_COLORS[e.type] || DEFAULT_COLOR) + '40', color: ENTITY_COLORS[e.type] } : {}}
-                >
-                  <div
-                    className="w-1.5 h-1.5 rounded-full"
-                    style={{ backgroundColor: ENTITY_COLORS[e.type] || DEFAULT_COLOR }}
-                  />
-                  {e.name}
-                </button>
-              ))}
+          <details className="border-b border-slate-800">
+            <summary className="cursor-pointer list-none px-3 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-[10px] uppercase tracking-wider text-slate-600">Top Entities</div>
+                <div className="text-[11px] text-slate-500">Jump list</div>
+              </div>
+            </summary>
+            <div className="px-3 pb-3">
+              <div className="flex flex-wrap gap-1">
+                {topEntities.slice(0, 12).map(e => (
+                  <button
+                    key={e.id}
+                    onClick={() => navigateTo(e.id)}
+                    className={`flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border transition-colors ${
+                      focalId === e.id
+                        ? 'border-transparent text-white'
+                        : 'border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-600'
+                    }`}
+                    style={focalId === e.id ? { backgroundColor: (ENTITY_COLORS[e.type] || DEFAULT_COLOR) + '40', color: ENTITY_COLORS[e.type] } : {}}
+                  >
+                    <div
+                      className="w-1.5 h-1.5 rounded-full"
+                      style={{ backgroundColor: ENTITY_COLORS[e.type] || DEFAULT_COLOR }}
+                    />
+                    {e.name}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          </details>
 
           {/* Relationships list */}
           <div className="flex-1 overflow-y-auto">
