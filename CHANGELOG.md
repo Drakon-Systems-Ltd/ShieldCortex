@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.21] - 2026-03-18
+
+### Fixed
+
+- **Recall cleanup** — the Recall workspace now keeps the ranked recall set primary, moves expected-memory selection and likely misses into secondary disclosure, and makes the current run clearer at a glance
+- **Audit cleanup** — the Audit page now starts with result counts and operator controls instead of only a raw event table, while export is moved behind explicit disclosure
+- **Brain workflow cleanup** — the Brain page no longer reserves space for an empty inspector, keeps the category rail hidden until requested, and moves the dense metric strip behind a secondary disclosure
+
 ## [3.4.20] - 2026-03-18
 
 ### Fixed

@@ -53,6 +53,7 @@ export function BrainControlCentre({
 
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const [feedCollapsed, setFeedCollapsed] = useState(true);
+  const [showCategorySidebar, setShowCategorySidebar] = useState(false);
 
   // Data hooks
   const { data: contradictionsData } = useContradictions(projectFilter || undefined);
@@ -189,7 +190,7 @@ export function BrainControlCentre({
               The Brain view is best used to inspect one cluster at a time. Start with the selected memory, then expand into links, contradictions, and recent activity only when you need them.
             </p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-3 xl:w-[420px]">
+          <div className="grid gap-3 sm:grid-cols-3 xl:w-[520px]">
             <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
               <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Focus</div>
               <div className="mt-2 text-sm font-medium text-white">{selectedMemory ? selectedMemory.title : 'Nothing selected'}</div>
@@ -211,6 +212,14 @@ export function BrainControlCentre({
               <div className="mt-2 text-sm font-medium text-white">{feedCollapsed ? 'Show recent activity' : 'Hide recent activity'}</div>
               <div className="mt-1 text-xs text-slate-400">Keep the canvas calmer unless you are tracing events.</div>
             </button>
+            <button
+              onClick={() => setShowCategorySidebar(!showCategorySidebar)}
+              className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-left transition-colors hover:border-slate-600"
+            >
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Categories</div>
+              <div className="mt-2 text-sm font-medium text-white">{showCategorySidebar ? 'Hide category rail' : 'Show category rail'}</div>
+              <div className="mt-1 text-xs text-slate-400">Open the category map only when you are narrowing the canvas.</div>
+            </button>
           </div>
         </div>
         {categoryFilter && (
@@ -221,28 +230,34 @@ export function BrainControlCentre({
         )}
       </section>
 
-      {/* Top Stats Bar */}
-      <TopStatsBar
-        stats={stats ?? { total: 0, shortTerm: 0, longTerm: 0, episodic: 0, byCategory: {}, averageSalience: 0 }}
-        contradictionCount={contradictionCount}
-        quarantineCount={quarantineCount}
-        lastConsolidation={lastConsolidation}
-        workerStatus={mappedWorkerStatus}
-        onClickContradictions={handleClickContradictions}
-      />
+      <details className="border-b border-slate-800 bg-slate-900/30">
+        <summary className="cursor-pointer list-none px-6 py-3 text-sm font-medium text-slate-200">
+          Brain metrics
+        </summary>
+        <TopStatsBar
+          stats={stats ?? { total: 0, shortTerm: 0, longTerm: 0, episodic: 0, byCategory: {}, averageSalience: 0 }}
+          contradictionCount={contradictionCount}
+          quarantineCount={quarantineCount}
+          lastConsolidation={lastConsolidation}
+          workerStatus={mappedWorkerStatus}
+          onClickContradictions={handleClickContradictions}
+        />
+      </details>
 
       {/* Main content area: sidebar + brain + inspector */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* Left: Category Health Sidebar */}
-        <CategoryHealthSidebar
-          stats={stats ?? { total: 0, shortTerm: 0, longTerm: 0, episodic: 0, byCategory: {}, averageSalience: 0 }}
-          memories={memories}
-          onCategoryClick={setCategoryFilter}
-          activeCategory={categoryFilter}
-          onConsolidate={handleConsolidate}
-          isConsolidating={consolidateMutation.isPending}
-          workerStatus={mappedWorkerStatus}
-        />
+        {showCategorySidebar && (
+          <CategoryHealthSidebar
+            stats={stats ?? { total: 0, shortTerm: 0, longTerm: 0, episodic: 0, byCategory: {}, averageSalience: 0 }}
+            memories={memories}
+            onCategoryClick={setCategoryFilter}
+            activeCategory={categoryFilter}
+            onConsolidate={handleConsolidate}
+            isConsolidating={consolidateMutation.isPending}
+            workerStatus={mappedWorkerStatus}
+          />
+        )}
 
         {/* Centre: 3D Brain + Activity Feed */}
         <div className="flex-1 flex flex-col relative">
@@ -266,18 +281,20 @@ export function BrainControlCentre({
         </div>
 
         {/* Right: Memory Inspector */}
-        <MemoryInspector
-          memory={selectedMemory}
-          links={selectedMemoryLinks}
-          onClose={() => setSelectedMemory(null)}
-          onBoost={handleBoost}
-          onDemote={handleDemote}
-          onPromote={handlePromote}
-          onDelete={handleDelete}
-          onQuarantine={handleQuarantine}
-          onEdit={handleEdit}
-          onNavigateToMemory={handleNavigateToMemory}
-        />
+        {selectedMemory && (
+          <MemoryInspector
+            memory={selectedMemory}
+            links={selectedMemoryLinks}
+            onClose={() => setSelectedMemory(null)}
+            onBoost={handleBoost}
+            onDemote={handleDemote}
+            onPromote={handlePromote}
+            onDelete={handleDelete}
+            onQuarantine={handleQuarantine}
+            onEdit={handleEdit}
+            onNavigateToMemory={handleNavigateToMemory}
+          />
+        )}
       </div>
 
     </div>

@@ -45,6 +45,15 @@ export function RecallWorkspace() {
                 Run a recall query, inspect ranking factors, see contradiction pressure, and compare an expected memory against the returned set.
               </p>
             </div>
+            <div className="hidden min-w-[220px] rounded-xl border border-slate-800 bg-slate-950/60 p-4 lg:block">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Current run</div>
+              <div className="mt-2 text-sm text-white">{submittedQuery || 'No query yet'}</div>
+              <div className="mt-2 text-xs text-slate-400">
+                {data
+                  ? `${data.total} recalled · ${data.misses?.length ?? 0} likely misses`
+                  : 'Run a recall query first, then inspect the ranked set before opening the deeper debugger sections.'}
+              </div>
+            </div>
           </div>
 
           <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
@@ -90,8 +99,10 @@ export function RecallWorkspace() {
               )}
             </form>
 
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-              <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Expected memory</div>
+            <details className="rounded-xl border border-slate-800 bg-slate-950/60 p-4" open={Boolean(expectedId)}>
+              <summary className="cursor-pointer list-none text-xs uppercase tracking-[0.18em] text-slate-500">
+                Expected memory debugger
+              </summary>
               <Input
                 value={expectedSearch}
                 onChange={(e) => setExpectedSearch(e.target.value)}
@@ -117,7 +128,7 @@ export function RecallWorkspace() {
                   </button>
                 ))}
               </div>
-            </div>
+            </details>
           </div>
         </section>
 
@@ -196,7 +207,7 @@ export function RecallWorkspace() {
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
               <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
                 <Waypoints size={13} />
-                Expected memory debugger
+                Comparison summary
               </div>
               {data?.expectedMemory ? (
                 <div className="mt-4 space-y-3 text-sm text-slate-300">
@@ -213,12 +224,14 @@ export function RecallWorkspace() {
                   </div>
                 </div>
               ) : (
-                <div className="mt-4 text-sm text-slate-400">Pick an expected memory to compare it against the ranked result set.</div>
+                <div className="mt-4 text-sm text-slate-400">Pick an expected memory only when you need to debug why something obvious did not rank where you expected.</div>
               )}
             </div>
 
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-              <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Likely misses</div>
+            <details className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+              <summary className="cursor-pointer list-none text-xs uppercase tracking-[0.18em] text-slate-500">
+                Likely misses {data?.misses?.length ? `(${data.misses.length})` : ''}
+              </summary>
               <div className="mt-4 space-y-3">
                 {(data?.misses ?? []).map((miss) => (
                   <div key={miss.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
@@ -233,7 +246,7 @@ export function RecallWorkspace() {
                   <div className="text-sm text-slate-400">No notable misses for this query.</div>
                 )}
               </div>
-            </div>
+            </details>
           </section>
 
           {selectedRecallMemory && (

@@ -36,6 +36,9 @@ export function AuditLogView() {
   });
 
   const logs = useMemo(() => data?.logs ?? [], [data?.logs]);
+  const blockedCount = logs.filter((log) => log.firewall_result === 'BLOCK').length;
+  const quarantinedCount = logs.filter((log) => log.firewall_result === 'QUARANTINE').length;
+  const allowedCount = logs.filter((log) => log.firewall_result === 'ALLOW').length;
 
   // Keyboard navigation: Escape closes, Up/Down navigates
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -67,8 +70,13 @@ export function AuditLogView() {
     <div className="h-full overflow-y-auto bg-slate-950">
       <div className="mx-auto max-w-7xl space-y-6 p-6">
         <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold text-white">Audit Log</h2>
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between mb-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Audit Log</h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Start with the result counts and pick a row only when you need the deeper payload. Export stays available, but it should not dominate the first screen.
+              </p>
+            </div>
             <div className="flex gap-1 bg-slate-800 rounded-lg p-0.5">
               {(['24h', '7d', '30d'] as const).map((range) => (
                 <button
@@ -81,6 +89,25 @@ export function AuditLogView() {
                   {range}
                 </button>
               ))}
+            </div>
+          </div>
+
+          <div className="mb-4 grid gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Entries</div>
+              <div className="mt-1 text-xl font-semibold text-white">{logs.length}</div>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Allowed</div>
+              <div className="mt-1 text-xl font-semibold text-emerald-300">{allowedCount}</div>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Blocked</div>
+              <div className="mt-1 text-xl font-semibold text-red-300">{blockedCount}</div>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Quarantined</div>
+              <div className="mt-1 text-xl font-semibold text-amber-300">{quarantinedCount}</div>
             </div>
           </div>
 
@@ -109,9 +136,12 @@ export function AuditLogView() {
               <option value="cli">CLI</option>
             </select>
 
-            <span className="text-xs text-slate-500 self-center ml-auto">
-              {logs.length} entries
-            </span>
+            <button
+              onClick={() => setSelectedAuditEntry(null)}
+              className="ml-auto rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs text-slate-300 transition-colors hover:border-slate-500 hover:text-white"
+            >
+              Clear selection
+            </button>
           </div>
         </section>
 
@@ -189,9 +219,14 @@ export function AuditLogView() {
           )}
         </div>
 
-        <div>
-          <AuditExportPanel />
-        </div>
+        <details className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+          <summary className="cursor-pointer list-none text-sm font-medium text-slate-200">
+            Export audit trail
+          </summary>
+          <div className="mt-4">
+            <AuditExportPanel />
+          </div>
+        </details>
       </div>
     </div>
   );
