@@ -28,6 +28,8 @@ const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
 const HOOK_FILES = ['HOOK.md', 'handler.ts'] as const;
 const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL';
 
+type PluginInstallMode = 'native-package' | 'native-link' | 'trusted-local-copy' | 'untrusted-local-copy' | 'skipped';
+
 /**
  * Resolve the real user's home directory.
  *
@@ -301,9 +303,9 @@ function trustLocalPlugin(indexPath: string): boolean {
   }
 }
 
-function tryNativeOpenClawPluginInstall(): boolean {
-  if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return false;
-  if (!isOpenClawInstalled()) return false;
+function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
+  if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
+  if (!isOpenClawInstalled()) return null;
 
   const env = { ...process.env, HOME: resolveUserHome() };
   const attempts: Array<{ args: string[]; label: string }> = [
@@ -320,11 +322,11 @@ function tryNativeOpenClawPluginInstall(): boolean {
 
     if (result.status === 0) {
       console.log(`Installed real-time plugin via OpenClaw ${attempt.label}.`);
-      return true;
+      return attempt.label === 'package install' ? 'native-package' : 'native-link';
     }
   }
 
-  return false;
+  return null;
 }
 
 // ==================== Plugin (Extensions Directory) ====================
@@ -354,18 +356,19 @@ function findExtensionsDir(): string | null {
  * Copy the real-time plugin to ~/.openclaw/extensions/shieldcortex-realtime/
  * so OpenClaw discovers it via the global extensions directory.
  */
-function installPlugin(): boolean {
-  if (tryNativeOpenClawPluginInstall()) {
-    return true;
+function installPlugin(): PluginInstallMode {
+  const nativeInstall = tryNativeOpenClawPluginInstall();
+  if (nativeInstall) {
+    return nativeInstall;
   }
 
   if (!fs.existsSync(PLUGIN_SOURCE)) {
     console.warn('  Warning: Plugin source not found, skipping plugin install');
-    return false;
+    return 'skipped';
   }
 
   const extensionsDir = findExtensionsDir();
-  if (!extensionsDir) return false;
+  if (!extensionsDir) return 'skipped';
 
   const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
   try {
@@ -418,12 +421,13 @@ function installPlugin(): boolean {
 
     if (trustLocalPlugin(indexDest)) {
       console.log('Trusted local OpenClaw plugin path via plugins.allow');
+      console.log(`Installed real-time plugin to ${destDir}`);
+      return 'trusted-local-copy';
     } else {
       console.warn('  Warning: Could not pin copied plugin path in OpenClaw plugins.allow');
+      console.log(`Installed real-time plugin to ${destDir}`);
+      return 'untrusted-local-copy';
     }
-
-    console.log(`Installed real-time plugin to ${destDir}`);
-    return true;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'EACCES' || code === 'EPERM') {
@@ -431,7 +435,7 @@ function installPlugin(): boolean {
     } else {
       console.warn(`  Warning: Could not install plugin: ${(err as Error).message}`);
     }
-    return false;
+    return 'skipped';
   }
 }
 
@@ -477,6 +481,23 @@ function pluginStatus(): { installed: boolean; path?: string } {
     return { installed: true, path: destDir };
   }
   return { installed: false };
+}
+
+function localPluginTrustStatus(pluginPath: string | undefined): 'trusted' | 'untrusted' | 'unknown' {
+  if (!pluginPath) return 'unknown';
+  const indexPath = path.join(pluginPath, 'index.js');
+  const configPath = openClawConfigPath();
+  if (!fs.existsSync(configPath)) return 'unknown';
+
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (Array.isArray(config.plugins?.allow) && config.plugins.allow.includes(indexPath)) {
+      return 'trusted';
+    }
+    return 'untrusted';
+  } catch {
+    return 'unknown';
+  }
 }
 
 // ==================== Commands ====================
@@ -549,7 +570,7 @@ export async function installOpenClawHook(): Promise<void> {
   }
 
   // Install the real-time plugin to the extensions directory
-  const pluginInstalled = installPlugin();
+  const pluginInstallMode = installPlugin();
 
   console.log('');
   if (migratedLegacy > 0) {
@@ -559,8 +580,17 @@ export async function installOpenClawHook(): Promise<void> {
   console.log('What was installed:');
   console.log('  • cortex-memory hook (memory injection + "remember this:" trigger)');
   console.log('    Auto-save is optional: shieldcortex config --openclaw-auto-memory true');
-  if (pluginInstalled) {
+  if (pluginInstallMode !== 'skipped') {
     console.log('  • shieldcortex-realtime plugin (real-time LLM input scanning + optional output extraction)');
+    if (pluginInstallMode === 'native-package') {
+      console.log('    Installed through native OpenClaw package records.');
+    } else if (pluginInstallMode === 'native-link') {
+      console.log('    Installed through native OpenClaw linked plugin records.');
+    } else if (pluginInstallMode === 'trusted-local-copy') {
+      console.log('    Installed as a local fallback and trusted via plugins.allow.');
+    } else if (pluginInstallMode === 'untrusted-local-copy') {
+      console.log('    Installed as a local fallback, but trust pinning failed.');
+    }
   }
   console.log('');
   console.log('Native OpenClaw install is also supported:');
@@ -633,7 +663,19 @@ export async function openClawHookStatus(): Promise<void> {
 
   console.log('');
   const plugin = pluginStatus();
-  console.log(`  Real-time plugin: ${plugin.installed ? `installed (${plugin.path})` : 'not installed'}`);
+  if (!plugin.installed) {
+    console.log('  Real-time plugin: not installed');
+    return;
+  }
+
+  const trust = localPluginTrustStatus(plugin.path);
+  const trustSuffix =
+    trust === 'trusted'
+      ? 'trusted via plugins.allow'
+      : trust === 'untrusted'
+        ? 'local install not yet trusted'
+        : 'native or unknown trust source';
+  console.log(`  Real-time plugin: installed (${plugin.path}) — ${trustSuffix}`);
 }
 
 export async function handleOpenClawCommand(subcommand: string): Promise<void> {

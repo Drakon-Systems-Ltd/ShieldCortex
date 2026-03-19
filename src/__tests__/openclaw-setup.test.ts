@@ -112,4 +112,15 @@ describe('OpenClaw setup', () => {
     );
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Trusted local OpenClaw plugin path via plugins.allow'));
   });
+
+  it('reports trusted local fallback clearly in status output', async () => {
+    fs.writeFileSync(openClawConfigPath(), JSON.stringify({}, null, 2) + '\n', 'utf-8');
+
+    await installOpenClawHook();
+    logSpy.mockClear();
+
+    await openClawHookStatus();
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('trusted via plugins.allow'));
+  });
 });

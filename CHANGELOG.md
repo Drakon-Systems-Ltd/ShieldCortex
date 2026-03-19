@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.23] - 2026-03-19
+
+### Fixed
+
+- **OpenClaw installer output clarity** — `shieldcortex openclaw install` now explicitly says whether the realtime plugin was installed through native OpenClaw package records, native linked records, or the trusted local fallback path
+- **Status clarity for plugin trust** — `shieldcortex openclaw status` now tells operators when a copied local plugin is trusted via `plugins.allow`, instead of only saying “installed”
+
 ## [3.4.22] - 2026-03-19
 
 ### Fixed
