@@ -7,6 +7,7 @@ import { installOpenClawHook, openClawHookStatus, uninstallOpenClawHook } from '
 describe('OpenClaw setup', () => {
   const originalHome = process.env.HOME;
   const originalUserProfile = process.env.USERPROFILE;
+  const originalSkipNative = process.env.SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL;
   let tempHome: string;
   let homedirSpy: jest.SpiedFunction<typeof os.homedir>;
   let logSpy: jest.SpiedFunction<typeof console.log>;
@@ -18,6 +19,7 @@ describe('OpenClaw setup', () => {
     process.env.HOME = tempHome;
     process.env.USERPROFILE = tempHome;
     delete process.env.SUDO_USER;
+    process.env.SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL = '1';
 
     fs.mkdirSync(path.join(tempHome, '.openclaw', 'hooks', 'internal', 'cortex-memory'), { recursive: true });
     fs.mkdirSync(path.join(tempHome, '.openclaw', 'extensions'), { recursive: true });
@@ -43,6 +45,11 @@ describe('OpenClaw setup', () => {
     } else {
       process.env.USERPROFILE = originalUserProfile;
     }
+    if (originalSkipNative === undefined) {
+      delete process.env.SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL;
+    } else {
+      process.env.SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL = originalSkipNative;
+    }
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
@@ -52,6 +59,10 @@ describe('OpenClaw setup', () => {
 
   function legacyHookDir(): string {
     return path.join(tempHome, '.openclaw', 'hooks', 'internal', 'cortex-memory');
+  }
+
+  function openClawConfigPath(): string {
+    return path.join(tempHome, '.openclaw', 'openclaw.json');
   }
 
   it('migrates legacy internal hook installs to the preferred path', async () => {
@@ -88,5 +99,17 @@ describe('OpenClaw setup', () => {
 
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('legacy install: internal/cortex-memory'));
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('rerun `shieldcortex openclaw install` to migrate'));
+  });
+
+  it('pins the copied realtime plugin path into plugins.allow on fallback install', async () => {
+    fs.writeFileSync(openClawConfigPath(), JSON.stringify({}, null, 2) + '\n', 'utf-8');
+
+    await installOpenClawHook();
+
+    const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
+    expect(config.plugins.allow).toContain(
+      path.join(tempHome, '.openclaw', 'extensions', 'shieldcortex-realtime', 'index.js'),
+    );
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Trusted local OpenClaw plugin path via plugins.allow'));
   });
 });

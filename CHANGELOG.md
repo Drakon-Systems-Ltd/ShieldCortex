@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.22] - 2026-03-19
+
+### Fixed
+
+- **OpenClaw installer provenance** — `shieldcortex openclaw install` now prefers native OpenClaw plugin installation when available, instead of only copying a local plugin into `~/.openclaw/extensions`
+- **Fallback install trust pinning** — when the installer must fall back to a copied local plugin, it now automatically pins the copied `shieldcortex-realtime` path into `plugins.allow` so OpenClaw stops warning that the plugin is untracked local code
+- Added regression coverage for the fallback installer path so copied realtime plugins remain trusted by default
+
 ## [3.4.21] - 2026-03-18
 
 ### Fixed

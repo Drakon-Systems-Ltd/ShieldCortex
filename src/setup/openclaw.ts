@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,8 +23,10 @@ const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOO
 
 // Plugin compiled output in plugins/openclaw/dist/ relative to project root
 const PLUGIN_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'dist');
+const PLUGIN_PACKAGE_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw');
 const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
 const HOOK_FILES = ['HOOK.md', 'handler.ts'] as const;
+const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL';
 
 /**
  * Resolve the real user's home directory.
@@ -263,6 +265,68 @@ function cleanupLegacyPlugin(): void {
   }
 }
 
+function openClawConfigPath(): string {
+  return path.join(resolveUserHome(), '.openclaw', 'openclaw.json');
+}
+
+function trustLocalPlugin(indexPath: string): boolean {
+  const configPath = openClawConfigPath();
+  const configDir = path.dirname(configPath);
+
+  try {
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
+    }
+
+    const raw = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf-8') : '{}';
+    const config = JSON.parse(raw);
+    const plugins = typeof config.plugins === 'object' && config.plugins !== null ? config.plugins : {};
+    const allow = Array.isArray((plugins as { allow?: unknown }).allow)
+      ? ((plugins as { allow?: string[] }).allow ?? [])
+      : [];
+
+    if (!allow.includes(indexPath)) {
+      allow.push(indexPath);
+    }
+
+    config.plugins = {
+      ...plugins,
+      allow,
+    };
+
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function tryNativeOpenClawPluginInstall(): boolean {
+  if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return false;
+  if (!isOpenClawInstalled()) return false;
+
+  const env = { ...process.env, HOME: resolveUserHome() };
+  const attempts: Array<{ args: string[]; label: string }> = [
+    { args: ['plugins', 'install', '@drakon-systems/shieldcortex-realtime'], label: 'package install' },
+    { args: ['plugins', 'install', '--link', PLUGIN_PACKAGE_SOURCE], label: 'linked install' },
+  ];
+
+  for (const attempt of attempts) {
+    const result = spawnSync('openclaw', attempt.args, {
+      env,
+      encoding: 'utf-8',
+      timeout: 30000,
+    });
+
+    if (result.status === 0) {
+      console.log(`Installed real-time plugin via OpenClaw ${attempt.label}.`);
+      return true;
+    }
+  }
+
+  return false;
+}
+
 // ==================== Plugin (Extensions Directory) ====================
 
 /**
@@ -291,6 +355,10 @@ function findExtensionsDir(): string | null {
  * so OpenClaw discovers it via the global extensions directory.
  */
 function installPlugin(): boolean {
+  if (tryNativeOpenClawPluginInstall()) {
+    return true;
+  }
+
   if (!fs.existsSync(PLUGIN_SOURCE)) {
     console.warn('  Warning: Plugin source not found, skipping plugin install');
     return false;
@@ -348,6 +416,12 @@ function installPlugin(): boolean {
       console.warn(`  Warning: ${indexDest} copied but not readable`);
     }
 
+    if (trustLocalPlugin(indexDest)) {
+      console.log('Trusted local OpenClaw plugin path via plugins.allow');
+    } else {
+      console.warn('  Warning: Could not pin copied plugin path in OpenClaw plugins.allow');
+    }
+
     console.log(`Installed real-time plugin to ${destDir}`);
     return true;
   } catch (err) {
@@ -369,9 +443,19 @@ function uninstallPlugin(): boolean {
   if (!extensionsDir) return false;
 
   const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
+  const indexPath = path.join(destDir, 'index.js');
   if (!fs.existsSync(destDir)) return false;
 
   try {
+    const configPath = openClawConfigPath();
+    if (fs.existsSync(configPath)) {
+      const raw = fs.readFileSync(configPath, 'utf-8');
+      const config = JSON.parse(raw);
+      if (Array.isArray(config.plugins?.allow)) {
+        config.plugins.allow = config.plugins.allow.filter((entry: string) => entry !== indexPath);
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+      }
+    }
     fs.rmSync(destDir, { recursive: true });
     console.log(`Removed real-time plugin from ${destDir}`);
     return true;
