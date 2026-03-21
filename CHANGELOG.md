@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.27] - 2026-03-21
+
+### Fixed
+
+- **macOS service status accuracy** — `shieldcortex service status` now inspects the active LaunchAgent correctly, so a running dashboard/worker no longer shows up as `Running: no`
+
 ## [3.4.26] - 2026-03-21
 
 ### Added

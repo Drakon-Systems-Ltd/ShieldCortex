@@ -246,9 +246,12 @@ export async function serviceStatus(): Promise<void> {
   try {
     switch (platform) {
       case 'macos': {
-        const out = execSync('launchctl list com.shieldcortex.dashboard 2>&1', { encoding: 'utf-8' });
-        const pidMatch = out.match(/"PID"\s*=\s*(\d+)/);
-        console.log(`Running:   ${pidMatch ? `yes (PID ${pidMatch[1]})` : 'no'}`);
+        const uid = process.getuid?.();
+        const domain = typeof uid === 'number' ? `gui/${uid}/com.shieldcortex.dashboard` : 'gui/501/com.shieldcortex.dashboard';
+        const out = execSync(`launchctl print ${domain} 2>&1`, { encoding: 'utf-8' });
+        const pidMatch = out.match(/\bpid\s*=\s*(\d+)/i);
+        const running = /\bstate\s*=\s*running\b/i.test(out) || Boolean(pidMatch);
+        console.log(`Running:   ${running ? `yes${pidMatch ? ` (PID ${pidMatch[1]})` : ''}` : 'no'}`);
         break;
       }
       case 'linux': {
