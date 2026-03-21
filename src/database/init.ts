@@ -214,9 +214,11 @@ function acquireStartupLock(dbPath: string): void {
     return;
   } catch {
     let activeProcessError: Error | null = null;
+    let existingPid: number | null = null;
     try {
       const existing = JSON.parse(readFileSync(lockFilePath as string, 'utf-8')) as { pid?: number; entryPath?: string };
       if (typeof existing.pid === 'number') {
+        existingPid = existing.pid;
         try {
           process.kill(existing.pid, 0);
           activeProcessError = new Error(
@@ -234,7 +236,13 @@ function acquireStartupLock(dbPath: string): void {
     }
 
     if (activeProcessError) {
-      throw activeProcessError;
+      console.error(
+        `[database] Another ShieldCortex process (PID ${existingPid ?? 'unknown'}) is using ${dbPath} — ` +
+        `continuing anyway (SQLite WAL handles concurrency)`
+      );
+      lockFilePath = null;
+      lockFileFd = null;
+      return;
     }
 
     try {
@@ -389,6 +397,7 @@ export const __databaseTestUtils = {
   listHealthyBackups,
   resolveRuntimeInfo,
   enforceSafeRuntimePath,
+  acquireStartupLock,
 };
 
 /**
@@ -883,7 +892,7 @@ export function closeDatabase(): void {
   if (db) {
     try {
       // Checkpoint WAL before closing to flush all changes
-      db.pragma('wal_checkpoint(TRUNCATE)');
+      db.pragma('wal_checkpoint(PASSIVE)');
     } catch {
       // Ignore checkpoint errors on close
     }
@@ -996,6 +1005,7 @@ export function repairDatabase(): { status: 'ok' | 'repaired' | 'recreated'; mes
 let shutdownRegistered = false;
 function registerShutdownHandlers(): void {
   if (shutdownRegistered) return;
+  if (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID) return;
   shutdownRegistered = true;
 
   const cleanup = () => {

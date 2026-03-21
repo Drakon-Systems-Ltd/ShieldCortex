@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'fs';
+import { copyFileSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { homedir, tmpdir } from 'os';
 import { __databaseTestUtils } from '../database/init.js';
@@ -124,6 +124,144 @@ describe('database integrity recovery', () => {
       expect(backups[0]?.path).toBe(backupPath);
       expect(backups[0]?.count).toBe(1);
 
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('startup recovery', () => {
+    beforeEach(() => {
+      jest.resetModules();
+      jest.unstable_mockModule('../cloud/memory-sync.js', () => ({
+        syncMemoryUpsertToCloud: jest.fn(),
+        syncMemoryDeleteToCloud: jest.fn(),
+        syncAllMemoriesToCloud: jest.fn(),
+      }));
+      jest.unstable_mockModule('../cloud/graph-sync.js', () => ({
+        syncGraphForMemoryToCloud: jest.fn(),
+        syncGraphDeleteForMemoryToCloud: jest.fn(),
+        syncAllGraphToCloud: jest.fn(),
+      }));
+      jest.unstable_mockModule('../cloud/quarantine-sync.js', () => ({
+        syncQuarantineToCloud: jest.fn(),
+      }));
+    });
+
+    afterEach(async () => {
+      const { closeDatabase } = await import('../database/init.js');
+      closeDatabase();
+    });
+
+    it('restores a recent healthy backup when the live database is empty', async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+      const backupPath = `${dbPath}.corrupt.2026-03-20T09-15-00-000Z`;
+
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory } = await import('../memory/store.js');
+
+      initDatabase(dbPath);
+      closeDatabase();
+      copyFileSync(dbPath, backupPath);
+
+      const backupDb = new Database(backupPath);
+      backupDb.prepare('DELETE FROM memories').run();
+      backupDb.close();
+
+      initDatabase(backupPath);
+      for (let i = 0; i < 120; i += 1) {
+        addMemory({
+          title: `Recovered ${i}`,
+          content: `Healthy backup row ${i}`,
+          project: 'ShieldCortex-Project',
+        });
+      }
+      closeDatabase();
+
+      const liveDb = new Database(dbPath);
+      liveDb.prepare('DELETE FROM memories').run();
+      liveDb.close();
+
+      const now = Date.now();
+      const recent = new Date(now - (60 * 60 * 1000));
+      // Match mtimes so startup sees the backup as recent enough to restore.
+      const { utimesSync } = await import('fs');
+      utimesSync(dbPath, recent, recent);
+      utimesSync(backupPath, recent, recent);
+
+      const recovered = initDatabase(dbPath);
+      const count = (recovered.prepare('SELECT COUNT(*) AS count FROM memories').get() as { count: number }).count;
+
+      expect(count).toBe(120);
+
+      closeDatabase();
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('ignores a stale startup lock file and reclaims the database safely', async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+      const { initDatabase, closeDatabase } = await import('../database/init.js');
+      const { addMemory } = await import('../memory/store.js');
+
+      initDatabase(dbPath);
+      addMemory({
+        title: 'Healthy',
+        content: 'Lock test',
+        project: 'ShieldCortex-Project',
+      });
+      closeDatabase();
+
+      const lockPath = `${dbPath}.lock`;
+      const { writeFileSync, existsSync } = await import('fs');
+      writeFileSync(lockPath, JSON.stringify({ pid: 999999, entryPath: '/tmp/old-runner.js' }), 'utf-8');
+
+      const opened = initDatabase(dbPath);
+      const count = (opened.prepare('SELECT COUNT(*) AS count FROM memories').get() as { count: number }).count;
+
+      expect(count).toBe(1);
+      expect(existsSync(lockPath)).toBe(true);
+
+      closeDatabase();
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('treats a live startup lock as advisory so concurrent sessions can continue', async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+      const lockPath = `${dbPath}.lock`;
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const { writeFileSync, existsSync } = await import('fs');
+      const { closeDatabase } = await import('../database/init.js');
+
+      const db = new Database(dbPath);
+      db.exec(`
+        CREATE TABLE memories (
+          id INTEGER PRIMARY KEY,
+          uuid TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          content TEXT NOT NULL
+        );
+      `);
+      db.close();
+
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ pid: process.pid, entryPath: '/tmp/other-shieldcortex.js' }),
+        'utf-8',
+      );
+
+      expect(() => {
+        __databaseTestUtils.acquireStartupLock(dbPath);
+      }).not.toThrow();
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('continuing anyway (SQLite WAL handles concurrency)'),
+      );
+
+      closeDatabase();
+      expect(existsSync(lockPath)).toBe(true);
+
+      errorSpy.mockRestore();
       rmSync(tempDir, { recursive: true, force: true });
     });
   });

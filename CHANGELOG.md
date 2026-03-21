@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.24] - 2026-03-21
+
+### Fixed
+
+- **Claude Code multi-session startup** — the startup lock is now advisory when another live ShieldCortex process already owns the managed database, so concurrent Claude Code MCP sessions can keep using the same WAL-backed store instead of failing on second startup
+- **Safer multi-process shutdown** — close-time WAL checkpointing now uses `PASSIVE` instead of `TRUNCATE`, which avoids demanding exclusive access when more than one installed ShieldCortex process is attached to the database
+- **Reliability regression coverage** — added direct route-level tests for cloud config mutations and review actions, startup recovery tests for recent healthy backup restore and stale/live lock handling, and stabilized the OpenClaw installer suite so installer trust behavior stays covered
+
 ## [3.4.23] - 2026-03-19
 
 ### Fixed

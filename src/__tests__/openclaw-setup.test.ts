@@ -2,7 +2,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { installOpenClawHook, openClawHookStatus, uninstallOpenClawHook } from '../setup/openclaw.js';
 
 describe('OpenClaw setup', () => {
   const originalHome = process.env.HOME;
@@ -15,6 +14,7 @@ describe('OpenClaw setup', () => {
   let errorSpy: jest.SpiedFunction<typeof console.error>;
 
   beforeEach(() => {
+    jest.resetModules();
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-openclaw-'));
     process.env.HOME = tempHome;
     process.env.USERPROFILE = tempHome;
@@ -65,7 +65,12 @@ describe('OpenClaw setup', () => {
     return path.join(tempHome, '.openclaw', 'openclaw.json');
   }
 
+  async function loadOpenClawModule() {
+    return import('../setup/openclaw.js');
+  }
+
   it('migrates legacy internal hook installs to the preferred path', async () => {
+    const { installOpenClawHook } = await loadOpenClawModule();
     fs.writeFileSync(path.join(legacyHookDir(), 'HOOK.md'), '# legacy hook\n', 'utf-8');
     fs.writeFileSync(path.join(legacyHookDir(), 'handler.ts'), '// legacy handler\n', 'utf-8');
 
@@ -79,6 +84,7 @@ describe('OpenClaw setup', () => {
   });
 
   it('removes both preferred and legacy hook locations on uninstall', async () => {
+    const { uninstallOpenClawHook } = await loadOpenClawModule();
     fs.mkdirSync(preferredHookDir(), { recursive: true });
     fs.writeFileSync(path.join(preferredHookDir(), 'HOOK.md'), '# new hook\n', 'utf-8');
     fs.writeFileSync(path.join(preferredHookDir(), 'handler.ts'), '// new handler\n', 'utf-8');
@@ -92,6 +98,7 @@ describe('OpenClaw setup', () => {
   });
 
   it('reports legacy-only installs as migration-needed in status output', async () => {
+    const { openClawHookStatus } = await loadOpenClawModule();
     fs.writeFileSync(path.join(legacyHookDir(), 'HOOK.md'), '# legacy hook\n', 'utf-8');
     fs.writeFileSync(path.join(legacyHookDir(), 'handler.ts'), '// legacy handler\n', 'utf-8');
 
@@ -102,6 +109,7 @@ describe('OpenClaw setup', () => {
   });
 
   it('pins the copied realtime plugin path into plugins.allow on fallback install', async () => {
+    const { installOpenClawHook } = await loadOpenClawModule();
     fs.writeFileSync(openClawConfigPath(), JSON.stringify({}, null, 2) + '\n', 'utf-8');
 
     await installOpenClawHook();
@@ -114,6 +122,7 @@ describe('OpenClaw setup', () => {
   });
 
   it('reports trusted local fallback clearly in status output', async () => {
+    const { installOpenClawHook, openClawHookStatus } = await loadOpenClawModule();
     fs.writeFileSync(openClawConfigPath(), JSON.stringify({}, null, 2) + '\n', 'utf-8');
 
     await installOpenClawHook();
