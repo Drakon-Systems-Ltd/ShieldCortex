@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.25] - 2026-03-21
+
+### Fixed
+
+- **Review queue dashboard lint** — `ReviewQueueView` now uses stable section IDs instead of brittle ref mutation, which fixes the React/TypeScript lint failures on the dashboard build and keeps focused review sections scrollable without callback-ref churn
+
 ## [3.4.24] - 2026-03-21
 
 ### Fixed

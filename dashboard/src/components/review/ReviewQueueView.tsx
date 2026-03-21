@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Archive, CloudOff, Pin, ShieldAlert, Sparkles, Layers, CheckCircle2 } from 'lucide-react';
 import { useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
 import { useDashboardStore } from '@/lib/store';
@@ -143,6 +143,25 @@ function MemorySection({
   );
 }
 
+type ReviewSectionKey =
+  | 'lowTrust'
+  | 'noisyAutoExtracted'
+  | 'stale'
+  | 'neverUsed'
+  | 'projectless'
+  | 'duplicates'
+  | 'contradictions';
+
+const REVIEW_SECTION_IDS: Record<ReviewSectionKey, string> = {
+  lowTrust: 'review-section-lowTrust',
+  noisyAutoExtracted: 'review-section-noisyAutoExtracted',
+  stale: 'review-section-stale',
+  neverUsed: 'review-section-neverUsed',
+  projectless: 'review-section-projectless',
+  duplicates: 'review-section-duplicates',
+  contradictions: 'review-section-contradictions',
+};
+
 export function ReviewQueueView() {
   const { projectFilter, reviewFocus, setReviewFocus, selectedMemory, setSelectedMemory } = useDashboardStore();
   const { data, isLoading } = useReviewQueue(projectFilter);
@@ -150,23 +169,13 @@ export function ReviewQueueView() {
   const reviewAction = useReviewAction();
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
 
-  const sectionRefs = {
-    lowTrust: useRef<HTMLElement | null>(null),
-    noisyAutoExtracted: useRef<HTMLElement | null>(null),
-    stale: useRef<HTMLElement | null>(null),
-    neverUsed: useRef<HTMLElement | null>(null),
-    projectless: useRef<HTMLElement | null>(null),
-    duplicates: useRef<HTMLElement | null>(null),
-    contradictions: useRef<HTMLElement | null>(null),
-  };
-
   const openMemory = (memory: Memory) => {
     setSelectedMemory(memory);
   };
 
   useEffect(() => {
     if (!reviewFocus) return;
-    const target = sectionRefs[reviewFocus].current;
+    const target = document.getElementById(REVIEW_SECTION_IDS[reviewFocus]);
     if (!target) return;
     target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [reviewFocus]);
@@ -219,7 +228,7 @@ export function ReviewQueueView() {
   };
 
   const sectionOrder = useMemo(() => {
-    const defaultOrder: Array<'lowTrust' | 'noisyAutoExtracted' | 'stale' | 'neverUsed' | 'projectless' | 'duplicates' | 'contradictions'> = [
+    const defaultOrder: ReviewSectionKey[] = [
       'lowTrust',
       'noisyAutoExtracted',
       'stale',
@@ -244,32 +253,32 @@ export function ReviewQueueView() {
 
   const sections = {
     lowTrust: (
-      <section ref={(node) => { sectionRefs.lowTrust.current = node; }} className="scroll-mt-6">
+      <section id={REVIEW_SECTION_IDS.lowTrust} className="scroll-mt-6">
         <MemorySection title="Low trust" detail="These memories came from weaker or noisier sources." items={data?.sections.lowTrust ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     noisyAutoExtracted: (
-      <section ref={(node) => { sectionRefs.noisyAutoExtracted.current = node; }} className="scroll-mt-6">
+      <section id={REVIEW_SECTION_IDS.noisyAutoExtracted} className="scroll-mt-6">
         <MemorySection title="Noisy auto-extracted" detail="Auto capture is useful, but not every extraction deserves to stay hot." items={data?.sections.noisyAutoExtracted ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     stale: (
-      <section ref={(node) => { sectionRefs.stale.current = node; }} className="scroll-mt-6">
+      <section id={REVIEW_SECTION_IDS.stale} className="scroll-mt-6">
         <MemorySection title="Stale" detail="Useful once, maybe. Worth archiving or refreshing now." items={data?.sections.stale ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     neverUsed: (
-      <section ref={(node) => { sectionRefs.neverUsed.current = node; }} className="scroll-mt-6">
+      <section id={REVIEW_SECTION_IDS.neverUsed} className="scroll-mt-6">
         <MemorySection title="Never used" detail="Stored but never recalled. High count usually means capture is too noisy." items={data?.sections.neverUsed ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     projectless: (
-      <section ref={(node) => { sectionRefs.projectless.current = node; }} className="scroll-mt-6">
+      <section id={REVIEW_SECTION_IDS.projectless} className="scroll-mt-6">
         <MemorySection title="Projectless" detail="These memories have no useful project scope and are likely to leak into the wrong context." items={data?.sections.projectless ?? []} onOpen={openMemory} onAct={runReviewAction} busy={reviewAction.isPending || mergeMutation.isPending} />
       </section>
     ),
     duplicates: (
-      <section ref={(node) => { sectionRefs.duplicates.current = node; }} className="scroll-mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+      <section id={REVIEW_SECTION_IDS.duplicates} className="scroll-mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
         <div className="flex items-center gap-2">
           <Layers size={16} className="text-cyan-300" />
           <h3 className="text-lg font-semibold text-white">Duplicate candidates</h3>
@@ -317,7 +326,7 @@ export function ReviewQueueView() {
       </section>
     ),
     contradictions: (
-      <section ref={(node) => { sectionRefs.contradictions.current = node; }} className="scroll-mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+      <section id={REVIEW_SECTION_IDS.contradictions} className="scroll-mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
         <div className="flex items-center gap-2">
           <ShieldAlert size={16} className="text-amber-300" />
           <h3 className="text-lg font-semibold text-white">Contradiction clusters</h3>
