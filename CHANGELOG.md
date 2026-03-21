@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.26] - 2026-03-21
+
+### Added
+
+- **Editable Iron Dome kill phrase** — operators can now update the local Iron Dome emergency kill phrase directly from the dashboard instead of being stuck with the default phrase
+
+### Fixed
+
+- **Iron Dome config mutation path** — added a dedicated local API route and dashboard mutation flow for updating editable Iron Dome configuration fields without resetting the active profile
+
 ## [3.4.25] - 2026-03-21
 
 ### Fixed

@@ -75,6 +75,16 @@ async function deactivateIronDome(): Promise<{ success: boolean }> {
   return res.json();
 }
 
+async function updateIronDomeConfig(config: Partial<Pick<IronDomeConfig, 'killPhrase' | 'trustedChannels'>>): Promise<{ success: boolean; config: IronDomeConfig }> {
+  const res = await authFetch(`${API_BASE}/api/iron-dome/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, 'Failed to update Iron Dome configuration'));
+  return res.json();
+}
+
 async function scanForInjection(text: string): Promise<InjectionScanResult> {
   const res = await authFetch(`${API_BASE}/api/iron-dome/scan`, {
     method: 'POST',
@@ -160,6 +170,17 @@ export function useDeactivateIronDome() {
     mutationFn: deactivateIronDome,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['iron-dome-status'] });
+    },
+  });
+}
+
+export function useUpdateIronDomeConfig() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (config: Partial<Pick<IronDomeConfig, 'killPhrase' | 'trustedChannels'>>) => updateIronDomeConfig(config),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['iron-dome-status'] });
+      queryClient.invalidateQueries({ queryKey: ['iron-dome-audit'] });
     },
   });
 }

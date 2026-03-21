@@ -34,7 +34,7 @@ import { queryAgentOperations } from '../defence/audit/queries.js';
 import { logAudit } from '../defence/audit/index.js';
 import { getCloudConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode } from '../cloud/config.js';
 import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
-import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection, logIronDomeAudit } from '../defence/iron-dome/index.js';
+import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection, logIronDomeAudit, updateIronDomeConfig } from '../defence/iron-dome/index.js';
 import type { IronDomeProfile } from '../defence/iron-dome/index.js';
 import { requireFeature, FeatureGatedError } from '../license/gate.js';
 import type { GatedFeature } from '../license/gate.js';
@@ -501,6 +501,33 @@ export function startVisualizationServer(dbPath?: string): void {
     try {
       deactivateIronDome();
       res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/iron-dome/config', (req: Request, res: Response) => {
+    try {
+      const { killPhrase, trustedChannels } = req.body ?? {};
+
+      if (killPhrase !== undefined) {
+        if (typeof killPhrase !== 'string' || killPhrase.trim().length < 3 || killPhrase.trim().length > 80) {
+          return res.status(400).json({ error: 'killPhrase must be a string between 3 and 80 characters' });
+        }
+      }
+
+      if (trustedChannels !== undefined) {
+        if (!Array.isArray(trustedChannels) || trustedChannels.some((value) => typeof value !== 'string')) {
+          return res.status(400).json({ error: 'trustedChannels must be an array of strings' });
+        }
+      }
+
+      const config = updateIronDomeConfig({
+        ...(killPhrase !== undefined ? { killPhrase } : {}),
+        ...(trustedChannels !== undefined ? { trustedChannels } : {}),
+      });
+
+      res.json({ success: true, config });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

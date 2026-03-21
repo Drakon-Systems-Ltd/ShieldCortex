@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Shield,
   Loader2,
@@ -21,6 +21,7 @@ import {
   useIronDomeStatus,
   useActivateIronDome,
   useDeactivateIronDome,
+  useUpdateIronDomeConfig,
   useIronDomeScan,
   useIronDomeAudit,
   useEmergencyStop,
@@ -69,6 +70,7 @@ export function IronDomeView() {
   const { data: auditData } = useIronDomeAudit(50);
   const activateMutation = useActivateIronDome();
   const deactivateMutation = useDeactivateIronDome();
+  const updateConfigMutation = useUpdateIronDomeConfig();
   const scanMutation = useIronDomeScan();
 
   const emergencyStopMutation = useEmergencyStop();
@@ -78,12 +80,17 @@ export function IronDomeView() {
   const [scanText, setScanText] = useState('');
   const [scanResult, setScanResult] = useState<InjectionScanResult | null>(null);
   const [resumeReason, setResumeReason] = useState('');
+  const [killPhraseDraft, setKillPhraseDraft] = useState('');
 
   const isActive = status?.enabled ?? false;
   const isKillSwitchActive = controlStatus?.killSwitchActive ?? false;
   const killSwitchMeta = controlStatus?.killSwitchMeta ?? null;
   const activeProfile = status?.profile;
   const config = status?.config;
+
+  useEffect(() => {
+    setKillPhraseDraft(config?.killPhrase ?? '');
+  }, [config?.killPhrase]);
 
   const handleActivate = (profile: IronDomeProfile) => {
     activateMutation.mutate(profile);
@@ -104,6 +111,7 @@ export function IronDomeView() {
   const logs = auditData?.logs ?? [];
   const blockCount = logs.filter((l: IronDomeAuditLog) => l.firewall_result === 'BLOCK').length;
   const allowCount = logs.filter((l: IronDomeAuditLog) => l.firewall_result === 'ALLOW').length;
+  const killPhraseDirty = Boolean(config) && killPhraseDraft.trim() !== (config?.killPhrase ?? '');
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -195,7 +203,7 @@ export function IronDomeView() {
       </div>
 
       {/* Config summary (when active) */}
-      {isActive && config && (
+      {config && (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6">
           <h3 className="text-sm font-medium text-slate-300 mb-3">Active Configuration</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
@@ -221,9 +229,27 @@ export function IronDomeView() {
             </div>
             <div>
               <div className="text-[10px] text-slate-500 uppercase mb-1">Kill Phrase</div>
-              <span className="px-1.5 py-0.5 bg-slate-800 rounded text-slate-400 font-mono">
-                {config.killPhrase}
-              </span>
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={killPhraseDraft}
+                  onChange={(e) => setKillPhraseDraft(e.target.value)}
+                  placeholder="Set emergency stop phrase"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-red-500"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => updateConfigMutation.mutate({ killPhrase: killPhraseDraft.trim() })}
+                    disabled={updateConfigMutation.isPending || !killPhraseDraft.trim() || !killPhraseDirty}
+                    className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-50 text-[11px] font-medium text-white transition-colors"
+                  >
+                    {updateConfigMutation.isPending ? 'Saving…' : 'Save phrase'}
+                  </button>
+                  <span className="text-[10px] text-slate-500">
+                    {isActive ? 'Say this in a conversation to trigger lockdown.' : 'This will apply the next time Iron Dome is active.'}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         </div>

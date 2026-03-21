@@ -184,6 +184,35 @@ export function deactivateIronDome(): void {
 }
 
 /**
+ * Update editable Iron Dome configuration fields without resetting the full profile.
+ */
+export function updateIronDomeConfig(
+  overrides: Partial<Pick<IronDomeConfig, 'killPhrase' | 'trustedChannels'>>,
+): IronDomeConfig {
+  const current = loadConfig();
+  const next: IronDomeConfig = {
+    ...current,
+    ...(typeof overrides.killPhrase === 'string' ? { killPhrase: overrides.killPhrase.trim() || current.killPhrase } : {}),
+    ...(Array.isArray(overrides.trustedChannels) ? { trustedChannels: overrides.trustedChannels } : {}),
+  };
+
+  saveConfig(next);
+
+  logIronDomeAudit({
+    action: 'config_update',
+    allowed: true,
+    reason: `Updated Iron Dome config fields: ${
+      [
+        typeof overrides.killPhrase === 'string' ? 'killPhrase' : null,
+        Array.isArray(overrides.trustedChannels) ? 'trustedChannels' : null,
+      ].filter(Boolean).join(', ') || 'none'
+    }`,
+  });
+
+  return getIronDomeStatus().config;
+}
+
+/**
  * Check input for the kill phrase and trigger emergency stop if detected.
  * Activates full kill switch lockdown — blocks ALL agent operations
  * (not just memory writes). Iron Dome stays active to keep protecting.
