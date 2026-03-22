@@ -58,7 +58,7 @@ describe('formatStatsBanner', () => {
 
   it('formats large numbers with commas', () => {
     const banner = formatStatsBanner(makeStats({ totalScans: 1247, memoriesProtected: 1185, threatsBlocked: 47 }));
-    expect(banner).toContain('1,247'); // or 1,185
+    expect(banner).toContain('1,185'); // memoriesProtected (totalScans only shown when no other stats)
     expect(banner).toMatch(/1,\d{3}/);
   });
 
