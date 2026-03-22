@@ -2,6 +2,8 @@
 
 Use ShieldCortex when you want an MCP-compatible memory and security layer that works across agents, not just one editor.
 
+Fresh installs with no paid licence automatically get a 14-day Pro trial. That covers Pro-gated local features; Team or higher is still required if you want cloud sync and shared cloud workflows.
+
 ## Install
 
 ```bash

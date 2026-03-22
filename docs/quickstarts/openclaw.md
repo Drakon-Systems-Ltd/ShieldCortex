@@ -2,6 +2,8 @@
 
 Use ShieldCortex with OpenClaw when you want session capture, realtime defence scanning, and a second memory layer you can review.
 
+If this is a fresh machine with no paid licence, ShieldCortex will also start a 14-day Pro trial automatically on first run. That trial covers Pro-gated local features. Cloud sync for this OpenClaw box still requires Team or higher.
+
 ## Install
 
 ```bash

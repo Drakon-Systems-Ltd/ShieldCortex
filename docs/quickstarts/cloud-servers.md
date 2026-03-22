@@ -9,10 +9,13 @@ The important distinction is:
 
 ## What you need on each server
 
-1. ShieldCortex `3.2.2` or newer
+1. ShieldCortex `3.4.29` or newer
 2. a Team or higher licence key
-3. a cloud API key
+3. a cloud API key with sync access
 4. the persistent headless worker service
+
+> [!IMPORTANT]
+> The automatic 14-day Pro trial does **not** unlock cloud sync. Servers still need a Team or higher licence to appear in ShieldCortex Cloud and stay online there.
 
 ## Install
 
@@ -51,6 +54,8 @@ You want to see:
 - API key present
 - `Mode: worker`
 - `Running: yes`
+
+If you manage keys in ShieldCortex Cloud, remember that keys are scope-based. A valid Team licence is necessary but not sufficient on its own if the selected key cannot access the required cloud surfaces.
 
 ## Linux note
 

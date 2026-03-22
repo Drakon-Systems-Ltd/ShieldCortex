@@ -2,6 +2,8 @@
 
 Use ShieldCortex as an MCP memory and security layer for Codex CLI and the Codex VS Code extension.
 
+Fresh installs with no paid licence automatically get a 14-day Pro trial. That unlocks Pro-gated local features, but optional cloud sync and shared cloud workflows still require Team or higher.
+
 ## Install
 
 ```bash

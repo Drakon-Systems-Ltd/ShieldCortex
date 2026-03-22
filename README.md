@@ -19,7 +19,7 @@ shieldcortex install
 ```
 
 > [!NOTE]
-> Every feature works locally without a cloud account or licence key. Free and MIT licensed.
+> ShieldCortex is MIT licensed and free for core local use. On first install, machines with no paid licence also get a 14-day Pro trial automatically. Team or higher is still required for cloud sync and multi-device cloud workflows.
 
 **Works with** Claude Code · Codex CLI / VS Code · Cursor · VS Code · OpenClaw · LangChain · MCP agents · Python via REST API
 
@@ -31,7 +31,7 @@ shieldcortex install
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -118,6 +118,27 @@ Fastest guided setup:
 shieldcortex quickstart
 ```
 
+## 💳 Licensing and Trial
+
+ShieldCortex has three distinct states:
+
+- **Free + MIT local core** — local memory, recall, review, dashboard, Iron Dome, and OpenClaw/Codex integrations all work without a cloud account
+- **14-day Pro trial** — automatically starts on first install when no paid licence exists, unlocking Pro-gated local features
+- **Team / Enterprise cloud** — required for cloud sync, shared cloud review, multi-device visibility, and team workflows
+
+Check the current state at any time:
+
+```bash
+shieldcortex license status
+```
+
+Important:
+
+- the first-run trial is automatic; there is no signup step for it
+- an active paid licence always overrides the trial
+- cloud sync remains Team-gated even while the local Pro trial is active
+- cloud API keys are scope-based, so cloud features may still require the right key scopes in addition to the right licence tier
+
 ### Always-on servers and cloud boxes
 
 If you want a device to stay online in ShieldCortex Cloud, the machine needs a persistent ShieldCortex heartbeat, not just power.
@@ -134,8 +155,8 @@ This installs the background worker that keeps cloud heartbeat, sync retries, an
 If you want Linux servers or always-on boxes to appear as online devices in ShieldCortex Cloud, you need four things on each machine:
 
 1. the latest CLI
-2. a Team licence
-3. a cloud API key with sync access
+2. a Team or higher licence
+3. a cloud API key with the scopes needed for sync
 4. the persistent headless worker service
 
 Exact flow:
@@ -489,9 +510,11 @@ Full reference: [docs/configuration.md](docs/configuration.md)
 
 ## 💚 Free and Open Source
 
-ShieldCortex is **MIT licensed** and **free for unlimited local use**. Everything on this page works without a licence key, cloud account, or credit card.
+ShieldCortex is **MIT licensed** and **free for core unlimited local use**.
 
-[ShieldCortex Cloud](https://shieldcortex.ai/pricing) optionally adds custom injection patterns, cloud audit sync, multi-device visibility, and team management.
+If no paid licence is present, ShieldCortex also starts a **14-day Pro trial** automatically on first install. That trial unlocks Pro-gated local features, but **cloud sync and shared cloud workflows still require Team or higher**.
+
+[ShieldCortex Cloud](https://shieldcortex.ai/pricing) adds Team-gated cloud sync, shared review, Replay, Verify, Device Doctor, key scopes, and multi-device visibility.
 
 ---
 
