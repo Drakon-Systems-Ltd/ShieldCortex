@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">ShieldCortex</h1>
   <p align="center">
-    Trustworthy memory for AI agents.
+    Memory security for AI agents.
   </p>
   <p align="center">
     <a href="https://www.npmjs.com/package/shieldcortex"><img src="https://img.shields.io/npm/v/shieldcortex.svg" alt="npm version"></a>
@@ -11,7 +11,7 @@
   </p>
 </p>
 
-Your AI agent forgets the decisions, bugs, and preferences that matter, then confidently answers from partial context. ShieldCortex fixes that by giving agents memory you can inspect, review, and defend.
+Your AI agent forgets useful context, stores untrusted context, and then confidently builds on both. ShieldCortex fixes that by giving agents memory you can inspect, review, and defend before it poisons future decisions.
 
 ```bash
 npm install -g shieldcortex
@@ -23,11 +23,11 @@ shieldcortex install
 
 **Works with** Claude Code · Codex CLI / VS Code · Cursor · VS Code · OpenClaw · LangChain · MCP agents · Python via REST API
 
-**Three reasons people adopt ShieldCortex**
+**Why teams adopt ShieldCortex**
 
-- **Remember the right things** — durable memory with semantic recall, project scoping, graph extraction, and contradiction detection
-- **Inspect what the agent would do** — Recall Workspace, Review Queue, and OpenClaw Session View make memory behavior explainable
-- **Stop bad memory from spreading** — 6-layer defence pipeline catches poisoning attempts, dangerous prompts, and leaked credentials before they land
+- **Stop bad memory before it spreads** — the 6-layer defence pipeline catches poisoning attempts, dangerous prompts, and leaked credentials before they land in durable memory
+- **See exactly what the agent stored and would recall** — Capture, Recall, and Review turn memory from a black box into an inspectable workflow
+- **Keep operator control when things go wrong** — contradictions, low-trust memories, duplicates, and risky agent behavior can be reviewed, suppressed, archived, pinned, or blocked
 
 ---
 
@@ -46,6 +46,21 @@ AI agents are stateless. Every session starts from zero. Teams work around this 
 - what happens if someone poisons the memory layer?
 
 ShieldCortex replaces all of that with one install command.
+
+## 🔒 What ShieldCortex Is Best At
+
+ShieldCortex is strongest when you need an AI agent to keep useful memory **without letting untrusted memory become future truth**.
+
+The core workflow is:
+
+- **Capture** — inspect what the agent tried to store, where it came from, and whether it was manual, auto-extracted, or session-driven
+- **Recall** — inspect what would rank for a query, why it ranked, and what is missing
+- **Review** — suppress, archive, pin, canonicalize, or merge memory before it quietly shapes future output
+- **Protect** — scan memory writes, detect prompt injection and credential leakage, and gate risky behavior with Iron Dome
+
+That is the real product:
+
+**persistent memory for AI agents, with built-in poisoning defence and operator review**
 
 <br>
 
@@ -70,7 +85,7 @@ Your agent does not just store text. It gives you operator-grade visibility into
 - 🔔 **Webhooks** — POST notifications on memory events, HMAC-SHA256 signed
 - 📅 **Expiry rules** — auto-delete TODOs after 30 days, keep architecture decisions forever
 
-### Security that's invisible until it matters
+### Security that shows up exactly when it matters
 
 Every memory write passes through 6 defence layers before it's stored:
 
