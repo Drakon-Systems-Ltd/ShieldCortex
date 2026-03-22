@@ -42,6 +42,35 @@ interface MemoryRouteDeps {
 export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void {
   const { requireNotLocked, requireIronDomeAction } = deps;
 
+  function deriveLocalOpenClawSessionId(memory: Memory): string | null {
+    if (typeof memory.metadata?.sessionId === 'string' && memory.metadata.sessionId.length > 0) {
+      return memory.metadata.sessionId;
+    }
+
+    if (memory.source?.startsWith('agent:openclaw-plugin:')) {
+      return memory.source.slice('agent:openclaw-plugin:'.length);
+    }
+
+    const tagSet = new Set(memory.tags.map((tag) => tag.toLowerCase()));
+    const looksOpenClaw =
+      memory.sourceKind === 'hook'
+      || memory.sourceKind === 'plugin'
+      || memory.source?.includes('openclaw') === true
+      || tagSet.has('session-end')
+      || tagSet.has('session-stop')
+      || tagSet.has('keyword-trigger')
+      || tagSet.has('openclaw-hook')
+      || tagSet.has('llm-output')
+      || tagSet.has('realtime-plugin')
+      || memory.project === 'openclaw';
+
+    if (!looksOpenClaw) return null;
+
+    const createdAt = memory.createdAt.toISOString().slice(0, 10);
+    const projectBucket = memory.project?.trim() ? memory.project.trim() : 'unscoped';
+    return `legacy-openclaw:${projectBucket}:${createdAt}`;
+  }
+
   app.get('/api/capture/openclaw/sessions', requireNotLocked, (req: Request, res: Response) => {
     try {
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
@@ -116,11 +145,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       };
 
       for (const memory of openClawMemories) {
-        const sessionId = typeof memory.metadata?.sessionId === 'string'
-          ? memory.metadata.sessionId
-          : memory.source?.startsWith('agent:openclaw-plugin:')
-            ? memory.source.slice('agent:openclaw-plugin:'.length)
-            : null;
+        const sessionId = deriveLocalOpenClawSessionId(memory);
         if (!sessionId) continue;
         const session = getSession(sessionId);
         const createdAt = memory.createdAt.toISOString();

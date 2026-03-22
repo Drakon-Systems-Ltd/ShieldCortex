@@ -627,8 +627,49 @@ function runMigrations(database: Database.Database): void {
     database.exec('UPDATE memories SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL');
     database.exec("UPDATE memories SET status = COALESCE(status, 'active') WHERE status IS NULL OR status = ''");
     database.exec('UPDATE memories SET pinned = COALESCE(pinned, 0) WHERE pinned IS NULL');
+    database.exec(`
+      UPDATE memories
+      SET source = CASE
+        WHEN source = 'user:direct' AND tags LIKE '%session-end%' THEN 'hook:openclaw-session-end'
+        WHEN source = 'user:direct' AND tags LIKE '%session-stop%' THEN 'hook:openclaw-session-stop'
+        WHEN source = 'user:direct' AND tags LIKE '%keyword-trigger%' THEN 'hook:openclaw-keyword'
+        WHEN source IS NULL AND tags LIKE '%llm-output%' THEN 'agent:openclaw-plugin'
+        ELSE source
+      END
+      WHERE
+        (source = 'user:direct' OR source IS NULL)
+        AND (
+          tags LIKE '%session-end%'
+          OR tags LIKE '%session-stop%'
+          OR tags LIKE '%keyword-trigger%'
+          OR tags LIKE '%llm-output%'
+          OR tags LIKE '%realtime-plugin%'
+          OR tags LIKE '%openclaw-hook%'
+        )
+    `);
     database.exec("UPDATE memories SET source_kind = CASE WHEN source LIKE 'hook:%' THEN 'hook' WHEN source LIKE 'api:%' THEN 'api' WHEN source LIKE 'agent:%' THEN 'agent' WHEN source LIKE 'cli:%' THEN 'cli' ELSE COALESCE(source_kind, 'user') END WHERE source_kind IS NULL OR source_kind = ''");
     database.exec("UPDATE memories SET capture_method = CASE WHEN tags LIKE '%auto-extracted%' THEN 'auto' WHEN source_kind = 'hook' THEN 'hook' WHEN source_kind = 'api' THEN 'api' WHEN source_kind = 'agent' THEN 'plugin' WHEN source_kind = 'cli' THEN 'manual' ELSE COALESCE(capture_method, 'manual') END WHERE capture_method IS NULL OR capture_method = ''");
+    database.exec(`
+      UPDATE memories
+      SET source_kind = CASE
+        WHEN tags LIKE '%session-end%' OR tags LIKE '%session-stop%' OR tags LIKE '%keyword-trigger%' OR tags LIKE '%openclaw-hook%' THEN 'hook'
+        WHEN tags LIKE '%llm-output%' OR tags LIKE '%realtime-plugin%' THEN 'agent'
+        ELSE source_kind
+      END,
+      capture_method = CASE
+        WHEN tags LIKE '%session-end%' OR tags LIKE '%session-stop%' OR tags LIKE '%openclaw-hook%' THEN 'auto'
+        WHEN tags LIKE '%keyword-trigger%' THEN 'hook'
+        WHEN tags LIKE '%llm-output%' OR tags LIKE '%realtime-plugin%' THEN 'auto'
+        ELSE capture_method
+      END
+      WHERE
+        tags LIKE '%session-end%'
+        OR tags LIKE '%session-stop%'
+        OR tags LIKE '%keyword-trigger%'
+        OR tags LIKE '%openclaw-hook%'
+        OR tags LIKE '%llm-output%'
+        OR tags LIKE '%realtime-plugin%'
+    `);
     database.exec('UPDATE memories SET cloud_excluded = COALESCE(cloud_excluded, 0) WHERE cloud_excluded IS NULL');
     database.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_uuid ON memories(uuid)');
     database.exec('CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)');

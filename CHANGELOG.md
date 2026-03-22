@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.28] - 2026-03-22
+
+### Fixed
+
+- **OpenClaw provenance persistence** — OpenClaw hook/plugin memories now preserve `sourceType` and `sourceIdentifier` in stored metadata so ShieldCortex can keep real capture provenance instead of flattening them into generic manual rows
+- **OpenClaw source inference** — the local memory store now recognises `session-end`, `session-stop`, `keyword-trigger`, and realtime plugin tags as OpenClaw evidence when deriving source and capture method
+- **Legacy OpenClaw backfill** — startup migrations now repair older OpenClaw auto-extracted rows that were previously left as `user:direct`, so local/cloud capture views can recover them without requiring users to recreate the memories
+- **Local capture legacy session grouping** — the local Capture API now derives stable fallback session ids for older OpenClaw rows that never stored an explicit `sessionId`
+
 ## [3.4.27] - 2026-03-21
 
 ### Fixed

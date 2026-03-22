@@ -171,6 +171,24 @@ function inferSourceDetails(input: MemoryInput, source?: DefenceSource): {
   sourceValue: string | null;
 } {
   const tags = (input.tags ?? []).map((tag) => tag.toLowerCase());
+  const metadata = input.metadata ?? {};
+  const metadataSourceType = typeof metadata.sourceType === 'string' ? metadata.sourceType : null;
+  const metadataSourceIdentifier = typeof metadata.sourceIdentifier === 'string' ? metadata.sourceIdentifier : null;
+
+  if ((tags.includes('session-end') || tags.includes('session-stop') || tags.includes('keyword-trigger')) && metadataSourceType === 'hook') {
+    return {
+      sourceKind: 'hook',
+      captureMethod: tags.includes('auto-extracted') ? 'auto' : 'hook',
+      sourceValue: `hook:${metadataSourceIdentifier ?? 'openclaw'}`,
+    };
+  }
+  if ((tags.includes('realtime-plugin') || tags.includes('llm-output')) && metadataSourceType === 'agent') {
+    return {
+      sourceKind: 'agent',
+      captureMethod: tags.includes('auto-extracted') ? 'auto' : 'plugin',
+      sourceValue: `agent:${metadataSourceIdentifier ?? 'openclaw-plugin'}`,
+    };
+  }
 
   if (tags.includes('openclaw-hook')) {
     return { sourceKind: 'hook', captureMethod: tags.includes('auto-extracted') ? 'auto' : 'hook', sourceValue: 'hook:openclaw' };

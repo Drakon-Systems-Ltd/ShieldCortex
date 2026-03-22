@@ -95,6 +95,8 @@ export async function executeRemember(input: RememberInput): Promise<{
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       ...(input.agentId ? { agentId: input.agentId } : {}),
       ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
+      ...(derivedSource?.type ? { sourceType: derivedSource.type } : {}),
+      ...(derivedSource?.identifier ? { sourceIdentifier: derivedSource.identifier } : {}),
     };
 
     // Map importance to salience override
