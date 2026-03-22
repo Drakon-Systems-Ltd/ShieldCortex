@@ -399,10 +399,31 @@ function findExtensionsDir(): string | null {
  * Copy the real-time plugin to ~/.openclaw/extensions/shieldcortex-realtime/
  * so OpenClaw discovers it via the global extensions directory.
  */
+function isPluginInLoadPaths(): boolean {
+  const configPath = openClawConfigPath();
+  if (!fs.existsSync(configPath)) return false;
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const paths: unknown[] = config.plugins?.load?.paths ?? [];
+    return paths.some(
+      (p) => typeof p === 'string' && p.includes(PLUGIN_DIR_NAME),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function installPlugin(): PluginInstallMode {
   const nativeInstall = tryNativeOpenClawPluginInstall();
   if (nativeInstall) {
     return nativeInstall;
+  }
+
+  // Native install (--link) registers via load.paths — skip the extensions
+  // copy to avoid duplicate plugin ID warnings.
+  if (isPluginInLoadPaths()) {
+    console.log('Plugin already registered via load.paths, skipping extensions copy.');
+    return 'native-link';
   }
 
   if (!fs.existsSync(PLUGIN_SOURCE)) {
