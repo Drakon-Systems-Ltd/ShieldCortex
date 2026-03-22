@@ -108,17 +108,18 @@ describe('OpenClaw setup', () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('rerun `shieldcortex openclaw install` to migrate'));
   });
 
-  it('pins the copied realtime plugin path into plugins.allow on fallback install', async () => {
+  it('registers plugin ID in plugins.allow and installs on fallback install', async () => {
     const { installOpenClawHook } = await loadOpenClawModule();
     fs.writeFileSync(openClawConfigPath(), JSON.stringify({}, null, 2) + '\n', 'utf-8');
 
     await installOpenClawHook();
 
     const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
-    expect(config.plugins.allow).toContain(
-      path.join(tempHome, '.openclaw', 'extensions', 'shieldcortex-realtime', 'index.js'),
-    );
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Trusted local OpenClaw plugin path via plugins.allow'));
+    expect(config.plugins.allow).toContain('shieldcortex-realtime');
+    expect(config.plugins.installs['shieldcortex-realtime']).toBeDefined();
+    expect(config.plugins.installs['shieldcortex-realtime'].source).toBe('local');
+    expect(config.plugins.entries['shieldcortex-realtime']).toEqual({ enabled: true });
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Registered plugin in OpenClaw config'));
   });
 
   it('reports trusted local fallback clearly in status output', async () => {
