@@ -254,14 +254,31 @@ function cleanupLegacyPlugin(): void {
   try {
     const raw = fs.readFileSync(configPath, 'utf-8');
     const config = JSON.parse(raw);
-    if (!config.plugins?.entries?.['shieldcortex-realtime']) return;
+    let changed = false;
 
-    delete config.plugins.entries['shieldcortex-realtime'];
-    if (Object.keys(config.plugins.entries).length === 0) delete config.plugins.entries;
+    // Remove legacy entries (old format before native installs)
+    if (config.plugins?.entries?.['shieldcortex-realtime']) {
+      delete config.plugins.entries['shieldcortex-realtime'];
+      if (Object.keys(config.plugins.entries).length === 0) delete config.plugins.entries;
+      changed = true;
+    }
+
+    // Remove stale full-path entries from plugins.allow
+    // (pre-v2026.3 format used raw file paths instead of plugin IDs)
+    if (Array.isArray(config.plugins?.allow)) {
+      const before = config.plugins.allow.length;
+      config.plugins.allow = config.plugins.allow.filter(
+        (e: string) => !e.includes(PLUGIN_DIR_NAME) || e === PLUGIN_DIR_NAME,
+      );
+      if (config.plugins.allow.length < before) changed = true;
+    }
+
     if (config.plugins && Object.keys(config.plugins).length === 0) delete config.plugins;
 
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-    console.log('Cleaned up legacy plugin entry from openclaw.json');
+    if (changed) {
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+      console.log('Cleaned up legacy plugin entries from openclaw.json');
+    }
   } catch {
     // Non-critical — don't fail the install
   }
@@ -271,9 +288,10 @@ function openClawConfigPath(): string {
   return path.join(resolveUserHome(), '.openclaw', 'openclaw.json');
 }
 
-function trustLocalPlugin(indexPath: string): boolean {
+function trustLocalPlugin(installDir: string, version: string): boolean {
   const configPath = openClawConfigPath();
   const configDir = path.dirname(configPath);
+  const pluginId = PLUGIN_DIR_NAME; // "shieldcortex-realtime"
 
   try {
     if (!fs.existsSync(configDir)) {
@@ -287,13 +305,38 @@ function trustLocalPlugin(indexPath: string): boolean {
       ? ((plugins as { allow?: string[] }).allow ?? [])
       : [];
 
-    if (!allow.includes(indexPath)) {
-      allow.push(indexPath);
+    // Remove any stale full-path entries for this plugin
+    const cleaned = allow.filter(
+      (e: string) => !e.includes(PLUGIN_DIR_NAME) || e === pluginId,
+    );
+    if (!cleaned.includes(pluginId)) {
+      cleaned.push(pluginId);
+    }
+
+    // Add installs entry so OpenClaw recognises the plugin
+    const installs = typeof plugins.installs === 'object' && plugins.installs !== null
+      ? plugins.installs
+      : {};
+    (installs as Record<string, unknown>)[pluginId] = {
+      source: 'local',
+      installPath: installDir,
+      version,
+      installedAt: new Date().toISOString(),
+    };
+
+    // Add entries to enable the plugin
+    const entries = typeof plugins.entries === 'object' && plugins.entries !== null
+      ? plugins.entries
+      : {};
+    if (!(entries as Record<string, unknown>)[pluginId]) {
+      (entries as Record<string, unknown>)[pluginId] = { enabled: true };
     }
 
     config.plugins = {
       ...plugins,
-      allow,
+      allow: cleaned,
+      installs,
+      entries,
     };
 
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
@@ -419,12 +462,25 @@ function installPlugin(): PluginInstallMode {
       console.warn(`  Warning: ${indexDest} copied but not readable`);
     }
 
-    if (trustLocalPlugin(indexDest)) {
-      console.log('Trusted local OpenClaw plugin path via plugins.allow');
+    // Read plugin version from manifest
+    let pluginVersion = 'unknown';
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(destDir, 'openclaw.plugin.json'), 'utf-8'));
+      pluginVersion = manifest.version ?? pluginVersion;
+    } catch {
+      // Fall back to package.json version
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8'));
+        pluginVersion = pkg.version ?? pluginVersion;
+      } catch { /* keep "unknown" */ }
+    }
+
+    if (trustLocalPlugin(destDir, pluginVersion)) {
+      console.log('Registered plugin in OpenClaw config (plugins.allow + installs)');
       console.log(`Installed real-time plugin to ${destDir}`);
       return 'trusted-local-copy';
     } else {
-      console.warn('  Warning: Could not pin copied plugin path in OpenClaw plugins.allow');
+      console.warn('  Warning: Could not register plugin in OpenClaw config');
       console.log(`Installed real-time plugin to ${destDir}`);
       return 'untrusted-local-copy';
     }
@@ -455,10 +511,20 @@ function uninstallPlugin(): boolean {
     if (fs.existsSync(configPath)) {
       const raw = fs.readFileSync(configPath, 'utf-8');
       const config = JSON.parse(raw);
+      const pluginId = PLUGIN_DIR_NAME;
       if (Array.isArray(config.plugins?.allow)) {
-        config.plugins.allow = config.plugins.allow.filter((entry: string) => entry !== indexPath);
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+        // Remove both old file-path entries and new short-name entries
+        config.plugins.allow = config.plugins.allow.filter(
+          (entry: string) => !entry.includes(pluginId),
+        );
       }
+      if (config.plugins?.installs?.[pluginId]) {
+        delete config.plugins.installs[pluginId];
+      }
+      if (config.plugins?.entries?.[pluginId]) {
+        delete config.plugins.entries[pluginId];
+      }
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
     }
     fs.rmSync(destDir, { recursive: true });
     console.log(`Removed real-time plugin from ${destDir}`);
@@ -491,7 +557,8 @@ function localPluginTrustStatus(pluginPath: string | undefined): 'trusted' | 'un
 
   try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    if (Array.isArray(config.plugins?.allow) && config.plugins.allow.includes(indexPath)) {
+    const allow = config.plugins?.allow;
+    if (Array.isArray(allow) && (allow.includes(PLUGIN_DIR_NAME) || allow.includes(indexPath))) {
       return 'trusted';
     }
     return 'untrusted';
