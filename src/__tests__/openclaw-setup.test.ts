@@ -117,7 +117,7 @@ describe('OpenClaw setup', () => {
     const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
     expect(config.plugins.allow).toContain('shieldcortex-realtime');
     expect(config.plugins.installs['shieldcortex-realtime']).toBeDefined();
-    expect(config.plugins.installs['shieldcortex-realtime'].source).toBe('local');
+    expect(config.plugins.installs['shieldcortex-realtime'].source).toBe('path');
     expect(config.plugins.entries['shieldcortex-realtime']).toEqual({ enabled: true });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Registered plugin in OpenClaw config'));
   });
