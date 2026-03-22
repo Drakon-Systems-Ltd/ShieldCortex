@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Shield,
   Loader2,
@@ -80,17 +80,19 @@ export function IronDomeView() {
   const [scanText, setScanText] = useState('');
   const [scanResult, setScanResult] = useState<InjectionScanResult | null>(null);
   const [resumeReason, setResumeReason] = useState('');
-  const [killPhraseDraft, setKillPhraseDraft] = useState('');
-
   const isActive = status?.enabled ?? false;
   const isKillSwitchActive = controlStatus?.killSwitchActive ?? false;
   const killSwitchMeta = controlStatus?.killSwitchMeta ?? null;
   const activeProfile = status?.profile;
   const config = status?.config;
 
-  useEffect(() => {
-    setKillPhraseDraft(config?.killPhrase ?? '');
-  }, [config?.killPhrase]);
+  const configKillPhrase = config?.killPhrase ?? '';
+  const [killPhraseDraft, setKillPhraseDraft] = useState(configKillPhrase);
+  const [prevKillPhrase, setPrevKillPhrase] = useState(configKillPhrase);
+  if (configKillPhrase !== prevKillPhrase) {
+    setPrevKillPhrase(configKillPhrase);
+    setKillPhraseDraft(configKillPhrase);
+  }
 
   const handleActivate = (profile: IronDomeProfile) => {
     activateMutation.mutate(profile);
