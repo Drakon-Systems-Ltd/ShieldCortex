@@ -48,7 +48,7 @@ When `openclawAutoMemory` is enabled and you run `/new` to start a fresh session
 - Things you learned ("turns out the API requires...")
 - Your preferences ("always use British spelling")
 
-It saves these to a local SQLite database. No cloud. No API keys. Just works.
+It saves these to a local SQLite database by default. No cloud account is required for the core local workflow, and fresh installs with no paid licence automatically get a 14-day Pro trial for Pro-gated local features.
 
 ### 2. Injects Past Context on Startup
 
@@ -125,7 +125,7 @@ You get memory AND security. Not one or the other.
 - OpenClaw installed globally (`npm install -g openclaw`)
 - ~50MB disk space for the SQLite database
 
-That's it. No Docker. No external services. No API keys.
+That's it for the local OpenClaw workflow. No Docker, cloud account, or cloud API key is required unless you also want Team-gated cloud sync and shared cloud review.
 
 ## The Commands
 
@@ -172,6 +172,15 @@ shieldcortex openclaw status
 ```
 
 Then in your next session, say "remember this: testing ShieldCortex memory" and watch it save.
+
+If you later want this OpenClaw machine to appear in ShieldCortex Cloud, add:
+
+```bash
+shieldcortex license activate <team-key>
+shieldcortex config --cloud-api-key <cloud-api-key>
+shieldcortex config --cloud-enable
+shieldcortex service install --headless
+```
 
 ---
 
