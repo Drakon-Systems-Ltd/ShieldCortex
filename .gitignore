@@ -36,6 +36,7 @@ coverage/
 
 # Internal docs
 docs/plans/
+CLAUDE.md
 
 # Blog assets (hosted externally)
 assets/devto-covers/
