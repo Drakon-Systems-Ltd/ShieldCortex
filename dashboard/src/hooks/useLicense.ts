@@ -23,6 +23,11 @@ export interface LicenseStatus {
   expiresAt: string | null;
   daysUntilExpiry: number | null;
   teamId: number | null;
+  trial: {
+    active: boolean;
+    daysRemaining: number;
+    expiresAt: string;
+  } | null;
   features: LicenseFeature[];
 }
 

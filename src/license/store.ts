@@ -24,8 +24,13 @@ import {
 
 export { isTrialActive, getTrialDaysRemaining, getTrialStatus };
 
-const CONFIG_DIR = join(homedir(), '.shieldcortex');
-const LICENSE_FILE = join(CONFIG_DIR, 'license.json');
+function getConfigDir(): string {
+  return process.env.SHIELDCORTEX_CONFIG_DIR || join(homedir(), '.shieldcortex');
+}
+
+function getLicenseFilePath(): string {
+  return join(getConfigDir(), 'license.json');
+}
 
 // ── Cache ────────────────────────────────────────────────
 
@@ -57,12 +62,13 @@ export function getLicense(): LicenseInfo {
   };
 
   try {
-    if (!existsSync(LICENSE_FILE)) {
+    const licenseFile = getLicenseFilePath();
+    if (!existsSync(licenseFile)) {
       cachedLicense = FREE;
       return FREE;
     }
 
-    const raw: LicenseFile = JSON.parse(readFileSync(LICENSE_FILE, 'utf-8'));
+    const raw: LicenseFile = JSON.parse(readFileSync(licenseFile, 'utf-8'));
     if (!raw.key) {
       cachedLicense = FREE;
       return FREE;
@@ -99,7 +105,7 @@ export function getLicenseTier(): LicenseTier {
   if (license.valid) return license.tier;
 
   // No paid license: check if trial is active
-  const licenseFileExists = existsSync(LICENSE_FILE);
+  const licenseFileExists = existsSync(getLicenseFilePath());
   if (isTrialActive(licenseFileExists)) return 'pro';
 
   return license.tier; // 'free'
@@ -111,8 +117,9 @@ export function getLicenseTier(): LicenseTier {
  */
 export function getLicenseFile(): LicenseFile | null {
   try {
-    if (!existsSync(LICENSE_FILE)) return null;
-    return JSON.parse(readFileSync(LICENSE_FILE, 'utf-8'));
+    const licenseFile = getLicenseFilePath();
+    if (!existsSync(licenseFile)) return null;
+    return JSON.parse(readFileSync(licenseFile, 'utf-8'));
   } catch {
     return null;
   }
@@ -138,8 +145,10 @@ export function activateLicense(key: string): LicenseInfo {
     validationStatus: 'unvalidated',
   };
 
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(LICENSE_FILE, JSON.stringify(file, null, 2) + '\n', { mode: 0o600 });
+  const configDir = getConfigDir();
+  const licenseFile = getLicenseFilePath();
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(licenseFile, JSON.stringify(file, null, 2) + '\n', { mode: 0o600 });
 
   // Invalidate cache
   cachedLicense = info;
@@ -151,8 +160,9 @@ export function activateLicense(key: string): LicenseInfo {
  */
 export function deactivateLicense(): void {
   try {
-    if (existsSync(LICENSE_FILE)) {
-      unlinkSync(LICENSE_FILE);
+    const licenseFile = getLicenseFilePath();
+    if (existsSync(licenseFile)) {
+      unlinkSync(licenseFile);
     }
   } catch {
     // Best effort
@@ -167,11 +177,12 @@ export function deactivateLicense(): void {
  */
 export function updateValidationStatus(status: LicenseFile['validationStatus']): void {
   try {
-    if (!existsSync(LICENSE_FILE)) return;
-    const raw: LicenseFile = JSON.parse(readFileSync(LICENSE_FILE, 'utf-8'));
+    const licenseFile = getLicenseFilePath();
+    if (!existsSync(licenseFile)) return;
+    const raw: LicenseFile = JSON.parse(readFileSync(licenseFile, 'utf-8'));
     raw.validationStatus = status;
     raw.lastValidatedAt = new Date().toISOString();
-    writeFileSync(LICENSE_FILE, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
+    writeFileSync(licenseFile, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
 
     // If revoked or expired, invalidate cache so next getLicense() re-verifies
     if (status === 'revoked' || status === 'expired') {

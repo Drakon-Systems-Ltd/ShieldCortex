@@ -13,33 +13,19 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { tmpdir } from 'os';
 
-const CONFIG_DIR = join(homedir(), '.shieldcortex');
-const TRIAL_FILE = join(CONFIG_DIR, 'trial.json');
-const LICENSE_FILE = join(CONFIG_DIR, 'license.json');
+let configDir = '';
+let trialFile = '';
+let licenseFile = '';
 
 // ── Helpers ──────────────────────────────────────────────
 
-function backupAndRemove(filePath: string): string | null {
-  const backup = filePath + '.trial-test-backup';
-  if (existsSync(filePath)) {
-    renameSync(filePath, backup);
-    return backup;
-  }
-  return null;
-}
-
-function restore(backup: string | null, original: string): void {
-  if (existsSync(original)) unlinkSync(original);
-  if (backup && existsSync(backup)) renameSync(backup, original);
-}
-
 function writeTrialFile(startedAt: string, durationDays = 14): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(TRIAL_FILE, JSON.stringify({ startedAt, durationDays, acknowledged: false }, null, 2) + '\n', { mode: 0o600 });
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(trialFile, JSON.stringify({ startedAt, durationDays, acknowledged: false }, null, 2) + '\n', { mode: 0o600 });
 }
 
 function daysAgo(n: number): string {
@@ -49,24 +35,19 @@ function daysAgo(n: number): string {
 // ── Tests ────────────────────────────────────────────────
 
 describe('14-day Pro trial', () => {
-  let trialBackup: string | null = null;
-  let licenseBackup: string | null = null;
-
   beforeEach(() => {
     process.env.SHIELDCORTEX_SKIP_TRIAL = '';
     delete process.env.SHIELDCORTEX_SKIP_TRIAL;
+    configDir = mkdtempSync(join(tmpdir(), 'shieldcortex-trial-test-'));
+    trialFile = join(configDir, 'trial.json');
+    licenseFile = join(configDir, 'license.json');
+    process.env.SHIELDCORTEX_CONFIG_DIR = configDir;
   });
 
   afterEach(async () => {
-    // Restore trial file
-    restore(trialBackup, TRIAL_FILE);
-    trialBackup = null;
+    delete process.env.SHIELDCORTEX_CONFIG_DIR;
+    rmSync(configDir, { recursive: true, force: true });
 
-    // Restore license file
-    restore(licenseBackup, LICENSE_FILE);
-    licenseBackup = null;
-
-    // Clear caches
     const { clearLicenseCache } = await import('../store.js');
     const { clearTrialCache } = await import('../trial.js');
     clearLicenseCache();
@@ -75,9 +56,6 @@ describe('14-day Pro trial', () => {
 
   describe('trial file creation', () => {
     it('should create trial.json on first run (no license, no trial file)', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       const { clearLicenseCache } = await import('../store.js');
       const { clearTrialCache, getTrialStatus } = await import('../trial.js');
       clearLicenseCache();
@@ -85,7 +63,7 @@ describe('14-day Pro trial', () => {
 
       const status = getTrialStatus(false /* no license file */);
 
-      expect(existsSync(TRIAL_FILE)).toBe(true);
+      expect(existsSync(trialFile)).toBe(true);
       expect(status).not.toBeNull();
       expect(status?.active).toBe(true);
       expect(status?.justCreated).toBe(true);
@@ -93,8 +71,7 @@ describe('14-day Pro trial', () => {
     });
 
     it('should NOT create trial.json if a license file already exists', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
+      writeFileSync(licenseFile, JSON.stringify({ key: 'placeholder', activatedAt: new Date().toISOString(), lastValidatedAt: null, validationStatus: 'unvalidated' }, null, 2));
 
       const { clearLicenseCache } = await import('../store.js');
       const { clearTrialCache, getTrialStatus } = await import('../trial.js');
@@ -103,14 +80,11 @@ describe('14-day Pro trial', () => {
 
       const status = getTrialStatus(true /* license file exists */);
 
-      expect(existsSync(TRIAL_FILE)).toBe(false);
+      expect(existsSync(trialFile)).toBe(false);
       expect(status).toBeNull();
     });
 
     it('should NOT recreate trial.json on reinstall if it already exists', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       // Simulate a prior trial that started 5 days ago
       writeTrialFile(daysAgo(5));
 
@@ -127,9 +101,6 @@ describe('14-day Pro trial', () => {
 
   describe('getLicenseTier() with trial', () => {
     it('should return "pro" during active trial (no license)', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       // Trial started 1 day ago (13 days remaining)
       writeTrialFile(daysAgo(1));
 
@@ -142,9 +113,6 @@ describe('14-day Pro trial', () => {
     });
 
     it('should return "free" after trial expires', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       // Trial started 15 days ago (expired 1 day ago)
       writeTrialFile(daysAgo(15));
 
@@ -157,9 +125,6 @@ describe('14-day Pro trial', () => {
     });
 
     it('should return "free" when no trial and no license', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       // Set skip trial to prevent auto-creation
       process.env.SHIELDCORTEX_SKIP_TRIAL = '1';
 
@@ -176,39 +141,28 @@ describe('14-day Pro trial', () => {
 
   describe('trial does not override paid license', () => {
     it('getLicenseTier returns license tier even if trial is active', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
-      // Active trial
+      // Active trial file should not matter if a paid licence exists.
       writeTrialFile(daysAgo(2));
+      writeFileSync(licenseFile, JSON.stringify({
+        key: 'not-a-valid-license',
+        activatedAt: new Date().toISOString(),
+        lastValidatedAt: null,
+        validationStatus: 'revoked',
+      }, null, 2));
 
-      const { clearLicenseCache, getLicense } = await import('../store.js');
+      const { clearLicenseCache, getLicense, getLicenseTier } = await import('../store.js');
       const { clearTrialCache } = await import('../trial.js');
       clearLicenseCache();
       clearTrialCache();
 
-      // Only check if license is present — if no valid license file exists,
-      // the tier returned should be 'pro' from trial, which is correct.
-      // This test verifies that a valid license takes priority:
       const info = getLicense();
-      if (info.valid) {
-        // If there is a valid license (installed on test runner), it should win
-        const { getLicenseTier } = await import('../store.js');
-        // License tier should be whatever the license says, not 'free'
-        expect(['pro', 'team', 'enterprise']).toContain(getLicenseTier());
-      } else {
-        // No license — trial should make it 'pro'
-        const { getLicenseTier } = await import('../store.js');
-        expect(getLicenseTier()).toBe('pro');
-      }
+      expect(info.valid).toBe(false);
+      expect(getLicenseTier()).toBe('pro');
     });
   });
 
   describe('days remaining calculation', () => {
     it('should return 14 days remaining on the day of creation', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       writeTrialFile(new Date().toISOString()); // just now
 
       const { clearTrialCache, getTrialStatus } = await import('../trial.js');
@@ -219,9 +173,6 @@ describe('14-day Pro trial', () => {
     });
 
     it('should return ~7 days remaining after 7 days', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       writeTrialFile(daysAgo(7));
 
       const { clearTrialCache, getTrialStatus } = await import('../trial.js');
@@ -235,9 +186,6 @@ describe('14-day Pro trial', () => {
     });
 
     it('should return 0 days remaining after expiry', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       writeTrialFile(daysAgo(20));
 
       const { clearTrialCache, getTrialStatus } = await import('../trial.js');
@@ -251,9 +199,6 @@ describe('14-day Pro trial', () => {
 
   describe('isTrialActive / getTrialDaysRemaining', () => {
     it('isTrialActive returns true during active trial', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       writeTrialFile(daysAgo(3));
 
       const { clearTrialCache, isTrialActive } = await import('../trial.js');
@@ -263,9 +208,6 @@ describe('14-day Pro trial', () => {
     });
 
     it('isTrialActive returns false after expiry', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       writeTrialFile(daysAgo(15));
 
       const { clearTrialCache, isTrialActive } = await import('../trial.js');
@@ -275,9 +217,6 @@ describe('14-day Pro trial', () => {
     });
 
     it('getTrialDaysRemaining returns correct value', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       writeTrialFile(daysAgo(10));
 
       const { clearTrialCache, getTrialDaysRemaining } = await import('../trial.js');
@@ -289,9 +228,6 @@ describe('14-day Pro trial', () => {
     });
 
     it('getTrialDaysRemaining returns 0 when no trial', async () => {
-      trialBackup = backupAndRemove(TRIAL_FILE);
-      licenseBackup = backupAndRemove(LICENSE_FILE);
-
       process.env.SHIELDCORTEX_SKIP_TRIAL = '1';
 
       const { clearTrialCache, getTrialDaysRemaining } = await import('../trial.js');

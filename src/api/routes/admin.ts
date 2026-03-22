@@ -8,12 +8,15 @@ import {
   rejectQuarantineItem,
   rejectQuarantineItems,
 } from '../../defence/quarantine/review.js';
-import { getLicense, activateLicense, deactivateLicense } from '../../license/store.js';
+import { getLicense, getLicenseTier, getTrialStatus, activateLicense, deactivateLicense } from '../../license/store.js';
 import { listFeatures } from '../../license/gate.js';
 import type { GatedFeature } from '../../license/gate.js';
 import { validateOnceNow } from '../../license/validate.js';
 import type { BrainWorker } from '../../worker/brain-worker.js';
 import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
+import { existsSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
 type FeatureMiddlewareFactory = (feature: GatedFeature) => Middleware;
@@ -294,13 +297,22 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
   app.get('/api/license/status', (_req: Request, res: Response) => {
     try {
       const info = getLicense();
+      const licenseFile = join(process.env.SHIELDCORTEX_CONFIG_DIR || join(homedir(), '.shieldcortex'), 'license.json');
+      const trial = getTrialStatus(existsSync(licenseFile));
       res.json({
-        tier: info.tier,
+        tier: getLicenseTier(),
         valid: info.valid,
         email: info.email,
         expiresAt: info.expiresAt?.toISOString() ?? null,
         daysUntilExpiry: info.daysUntilExpiry,
         teamId: info.teamId,
+        trial: trial
+          ? {
+              active: trial.active,
+              daysRemaining: trial.daysRemaining,
+              expiresAt: trial.expiresAt,
+            }
+          : null,
         features: listFeatures(),
       });
     } catch (error) {

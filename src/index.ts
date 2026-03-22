@@ -405,10 +405,11 @@ async function isLocalDashboardRunning(): Promise<boolean> {
 async function main() {
   // Warn if npx is serving a stale cached version
   checkVersionStaleness();
+  const parsedArgs = parseArgs();
 
   // ── Trial welcome / expiry warning ──────────────────────
   // Only show for interactive CLI commands (not MCP server mode — stdout must stay clean for JSON-RPC)
-  if (process.argv[2]) {
+  if (process.argv[2] && parsedArgs.mode !== 'mcp') {
     try {
       const { existsSync } = await import('fs');
       const { join } = await import('path');
@@ -831,7 +832,7 @@ ${bold}DOCS${reset}
     process.exit(1);
   }
 
-  const { dbPath, mode } = parseArgs();
+  const { dbPath, mode } = parsedArgs;
 
   let dashboardProcess: ChildProcess | null = null;
 

@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.4.29] - 2026-03-22
+
+### Fixed
+
+- **Trial-aware dashboard status** — `/api/license/status` now reports the effective trial tier and active trial metadata, so the dashboard stops showing trial users as free or unlicensed while Pro features are unlocked
+- **Safe MCP first-run startup** — explicit `--mode mcp` no longer emits the Pro trial welcome banner, and database startup/recovery diagnostics were moved off stdout so MCP transports stay clean
+- **Isolated trial test coverage** — the new trial and feature-gating suites now run against a temp ShieldCortex config directory instead of renaming or deleting a developer's real `~/.shieldcortex` files
+
 ## [3.4.28] - 2026-03-22
 
 ### Fixed

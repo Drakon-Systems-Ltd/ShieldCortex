@@ -14,7 +14,9 @@ import { join } from 'path';
 import { homedir } from 'os';
 import type { LicenseTier } from './keys.js';
 
-const LICENSE_FILE = join(homedir(), '.shieldcortex', 'license.json');
+function getLicenseFilePath(): string {
+  return join(process.env.SHIELDCORTEX_CONFIG_DIR || join(homedir(), '.shieldcortex'), 'license.json');
+}
 
 const bold = '\x1b[1m';
 const reset = '\x1b[0m';
@@ -86,7 +88,7 @@ async function handleActivate(key: string | undefined): Promise<void> {
 function handleStatus(): void {
   const info = getLicense();
   const file = getLicenseFile();
-  const licenseFileExists = existsSync(LICENSE_FILE);
+  const licenseFileExists = existsSync(getLicenseFilePath());
   const trial = getTrialStatus(licenseFileExists);
 
   console.log(`\n${bold}ShieldCortex Licence${reset}`);

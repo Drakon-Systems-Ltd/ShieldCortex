@@ -10,8 +10,6 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-const CONFIG_DIR = join(homedir(), '.shieldcortex');
-const TRIAL_FILE = join(CONFIG_DIR, 'trial.json');
 const TRIAL_DURATION_DAYS = 14;
 
 // ── Types ────────────────────────────────────────────────
@@ -33,6 +31,14 @@ export interface TrialStatus {
 // ── Cache ────────────────────────────────────────────────
 
 let cachedTrial: TrialStatus | null | undefined = undefined; // undefined = not loaded yet
+
+function getConfigDir(): string {
+  return process.env.SHIELDCORTEX_CONFIG_DIR || join(homedir(), '.shieldcortex');
+}
+
+function getTrialFile(): string {
+  return join(getConfigDir(), 'trial.json');
+}
 
 /** Clear the in-memory trial cache (useful for testing). */
 export function clearTrialCache(): void {
@@ -76,8 +82,10 @@ export function getTrialStatus(licenseFileExists: boolean): TrialStatus | null {
   if (cachedTrial !== undefined) return cachedTrial;
 
   try {
-    if (existsSync(TRIAL_FILE)) {
-      const data: TrialFile = JSON.parse(readFileSync(TRIAL_FILE, 'utf-8'));
+    const trialFile = getTrialFile();
+
+    if (existsSync(trialFile)) {
+      const data: TrialFile = JSON.parse(readFileSync(trialFile, 'utf-8'));
       // Return full status whether active or expired — callers use status.active to distinguish.
       // Only return null when no trial file exists at all.
       const status = computeStatus(data, false);
@@ -92,14 +100,14 @@ export function getTrialStatus(licenseFileExists: boolean): TrialStatus | null {
     }
 
     // First run — create the trial file
-    mkdirSync(CONFIG_DIR, { recursive: true });
+    mkdirSync(getConfigDir(), { recursive: true });
     const now = new Date().toISOString();
     const trialData: TrialFile = {
       startedAt: now,
       durationDays: TRIAL_DURATION_DAYS,
       acknowledged: false,
     };
-    writeFileSync(TRIAL_FILE, JSON.stringify(trialData, null, 2) + '\n', { mode: 0o600 });
+    writeFileSync(trialFile, JSON.stringify(trialData, null, 2) + '\n', { mode: 0o600 });
 
     const status = computeStatus(trialData, true);
     cachedTrial = status; // always active on creation
@@ -131,11 +139,12 @@ export function getTrialDaysRemaining(licenseFileExists: boolean): number {
  */
 export function acknowledgeTrialWelcome(): void {
   try {
-    if (!existsSync(TRIAL_FILE)) return;
-    const data: TrialFile = JSON.parse(readFileSync(TRIAL_FILE, 'utf-8'));
+    const trialFile = getTrialFile();
+    if (!existsSync(trialFile)) return;
+    const data: TrialFile = JSON.parse(readFileSync(trialFile, 'utf-8'));
     if (!data.acknowledged) {
       data.acknowledged = true;
-      writeFileSync(TRIAL_FILE, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+      writeFileSync(trialFile, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
     }
     // Update cache
     if (cachedTrial) {
@@ -148,5 +157,5 @@ export function acknowledgeTrialWelcome(): void {
 
 /** Exposed for tests — returns the full trial file path */
 export function getTrialFilePath(): string {
-  return TRIAL_FILE;
+  return getTrialFile();
 }

@@ -302,13 +302,13 @@ function attemptDumpRecovery(dbPath: string): Database.Database | null {
 
     // Back up the corrupt file
     const backupPath = backupCorruptDatabase(dbPath);
-    console.log(`[database] Backed up corrupt database to: ${backupPath}`);
+    console.error(`[database] Backed up corrupt database to: ${backupPath}`);
 
     // Create fresh database and import the dump
     const freshDb = new Database(dbPath);
     try {
       freshDb.exec(dumpOutput);
-      console.log('[database] Successfully recovered data via dump/reimport.');
+      console.error('[database] Successfully recovered data via dump/reimport.');
       return freshDb;
     } catch {
       // Dump reimport failed — close and let caller handle fresh creation
@@ -373,7 +373,7 @@ function attemptFtsRecovery(database: Database.Database): boolean {
 
     const postRepairIntegrity = runIntegrityCheck(database);
     if (postRepairIntegrity === 'ok') {
-      console.log('[database] Successfully rebuilt memories_fts after integrity failure.');
+      console.error('[database] Successfully rebuilt memories_fts after integrity failure.');
       return true;
     }
 
@@ -424,7 +424,7 @@ export function initDatabase(dbPath?: string): Database.Database {
   currentDbPath = expandedPath;
   acquireStartupLock(expandedPath);
 
-  console.log(`[database] Startup runtime=${resolveRuntimeInfo().kind} db=${expandedPath} wal=${existsSync(expandedPath + '-wal')} shm=${existsSync(expandedPath + '-shm')}`);
+  console.error(`[database] Startup runtime=${resolveRuntimeInfo().kind} db=${expandedPath} wal=${existsSync(expandedPath + '-wal')} shm=${existsSync(expandedPath + '-shm')}`);
 
   const healthyBackups = listHealthyBackups(expandedPath);
 
