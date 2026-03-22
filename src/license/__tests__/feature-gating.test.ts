@@ -54,18 +54,29 @@ describe('Feature Gating', () => {
     it('should return false for Pro features on free tier', async () => {
       const { isFeatureEnabled } = await import('../gate.js');
       const { clearLicenseCache } = await import('../store.js');
+      const { clearTrialCache } = await import('../trial.js');
       const { existsSync, renameSync } = await import('fs');
       const { join } = await import('path');
       const { homedir } = await import('os');
       const licensePath = join(homedir(), '.shieldcortex', 'license.json');
+      const trialPath = join(homedir(), '.shieldcortex', 'trial.json');
       const backupPath = licensePath + '.test-backup-1';
+      const trialBackupPath = trialPath + '.test-backup-1';
       let backed = false;
+      let trialBacked = false;
 
       if (existsSync(licensePath)) {
         renameSync(licensePath, backupPath);
         backed = true;
       }
+      if (existsSync(trialPath)) {
+        renameSync(trialPath, trialBackupPath);
+        trialBacked = true;
+      }
+      // Suppress trial creation so we get a true free-tier environment
+      process.env.SHIELDCORTEX_SKIP_TRIAL = '1';
       clearLicenseCache();
+      clearTrialCache();
 
       try {
         const proFeatures = [
@@ -80,10 +91,15 @@ describe('Feature Gating', () => {
           expect(isFeatureEnabled(feature)).toBe(false);
         }
       } finally {
+        delete process.env.SHIELDCORTEX_SKIP_TRIAL;
         if (backed) {
           renameSync(backupPath, licensePath);
         }
+        if (trialBacked) {
+          renameSync(trialBackupPath, trialPath);
+        }
         clearLicenseCache();
+        clearTrialCache();
       }
     });
   });
@@ -92,18 +108,29 @@ describe('Feature Gating', () => {
     it('should throw FeatureGatedError for Pro features on free tier', async () => {
       const { requireFeature, FeatureGatedError } = await import('../gate.js');
       const { clearLicenseCache } = await import('../store.js');
+      const { clearTrialCache } = await import('../trial.js');
       const { existsSync, renameSync } = await import('fs');
       const { join } = await import('path');
       const { homedir } = await import('os');
       const licensePath = join(homedir(), '.shieldcortex', 'license.json');
+      const trialPath = join(homedir(), '.shieldcortex', 'trial.json');
       const backupPath = licensePath + '.test-backup-2';
+      const trialBackupPath = trialPath + '.test-backup-2';
       let backed = false;
+      let trialBacked = false;
 
       if (existsSync(licensePath)) {
         renameSync(licensePath, backupPath);
         backed = true;
       }
+      if (existsSync(trialPath)) {
+        renameSync(trialPath, trialBackupPath);
+        trialBacked = true;
+      }
+      // Suppress trial creation so we get a true free-tier environment
+      process.env.SHIELDCORTEX_SKIP_TRIAL = '1';
       clearLicenseCache();
+      clearTrialCache();
 
       try {
         expect(() => requireFeature('custom_firewall_rules')).toThrow(FeatureGatedError);
@@ -112,10 +139,15 @@ describe('Feature Gating', () => {
         expect(() => requireFeature('custom_injection_patterns')).toThrow(FeatureGatedError);
         expect(() => requireFeature('custom_iron_dome_policies')).toThrow(FeatureGatedError);
       } finally {
+        delete process.env.SHIELDCORTEX_SKIP_TRIAL;
         if (backed) {
           renameSync(backupPath, licensePath);
         }
+        if (trialBacked) {
+          renameSync(trialBackupPath, trialPath);
+        }
         clearLicenseCache();
+        clearTrialCache();
       }
     });
 

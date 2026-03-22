@@ -3,7 +3,7 @@
  */
 
 // ── Public API (exported from lib.ts) ────────────────────
-export { getLicense, getLicenseTier, getLicenseFile, clearLicenseCache } from './store.js';
+export { getLicense, getLicenseTier, getLicenseFile, clearLicenseCache, getTrialStatus, isTrialActive, getTrialDaysRemaining } from './store.js';
 export { verifyLicenseKey, parseLicensePayload } from './verify.js';
 export {
   isFeatureEnabled,

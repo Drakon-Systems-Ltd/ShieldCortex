@@ -6,10 +6,15 @@
  * shieldcortex license deactivate
  */
 
-import { activateLicense, deactivateLicense, getLicense, getLicenseFile } from './store.js';
+import { activateLicense, deactivateLicense, getLicense, getLicenseFile, getTrialStatus } from './store.js';
 import { listFeatures } from './gate.js';
 import { validateOnceNow } from './validate.js';
+import { existsSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 import type { LicenseTier } from './keys.js';
+
+const LICENSE_FILE = join(homedir(), '.shieldcortex', 'license.json');
 
 const bold = '\x1b[1m';
 const reset = '\x1b[0m';
@@ -81,35 +86,55 @@ async function handleActivate(key: string | undefined): Promise<void> {
 function handleStatus(): void {
   const info = getLicense();
   const file = getLicenseFile();
+  const licenseFileExists = existsSync(LICENSE_FILE);
+  const trial = getTrialStatus(licenseFileExists);
 
   console.log(`\n${bold}ShieldCortex Licence${reset}`);
   console.log('═'.repeat(40));
-  console.log(`  Tier:       ${tierBadge(info.tier)}`);
 
-  if (info.tier === 'free') {
-    console.log(`\n  No licence activated.`);
-    console.log(`  Upgrade at ${cyan}https://shieldcortex.ai/pricing${reset}`);
+  if (info.valid) {
+    // Paid license active — show full license info, no trial messaging
+    console.log(`  Tier:       ${tierBadge(info.tier)}`);
+    console.log(`  Email:      ${info.email}`);
+    if (info.expiresAt) {
+      const daysStr = info.daysUntilExpiry !== null && info.daysUntilExpiry > 0
+        ? `(${info.daysUntilExpiry} days remaining)`
+        : info.daysUntilExpiry !== null && info.daysUntilExpiry <= 0
+          ? `${red}(expired)${reset}`
+          : '';
+      console.log(`  Expires:    ${info.expiresAt.toLocaleDateString()} ${daysStr}`);
+    }
+
+    if (file?.lastValidatedAt) {
+      console.log(`  Validated:  ${new Date(file.lastValidatedAt).toLocaleString()}`);
+    }
+    if (file?.validationStatus) {
+      const statusColor = file.validationStatus === 'valid' ? green :
+                          file.validationStatus === 'revoked' ? red : yellow;
+      console.log(`  Status:     ${statusColor}${file.validationStatus}${reset}`);
+    }
+  } else if (trial?.active) {
+    // Trial active — no paid license
+    const expiryDate = new Date(trial.expiresAt).toLocaleDateString();
+    console.log(`  Tier:       ${tierBadge('pro')} ${dim}(trial)${reset}`);
+    console.log(`  🎁 Pro Trial: ${yellow}${trial.daysRemaining} day${trial.daysRemaining !== 1 ? 's' : ''} remaining${reset} (expires ${expiryDate})`);
+    console.log(`\n  Upgrade to keep Pro features after the trial:`);
+    console.log(`  ${cyan}https://shieldcortex.ai/pricing${reset}`);
+    console.log(`  shieldcortex license activate <key>`);
+  } else {
+    // No license and no active trial
+    console.log(`  Tier:       ${tierBadge('free')}`);
+
+    if (trial && !trial.active) {
+      // Trial existed but expired
+      console.log(`\n  ${yellow}Pro trial expired.${reset} Upgrade at ${cyan}https://shieldcortex.ai/pricing${reset}`);
+    } else {
+      console.log(`\n  No licence activated.`);
+      console.log(`  Upgrade at ${cyan}https://shieldcortex.ai/pricing${reset}`);
+    }
+
     console.log(`  Activate:  shieldcortex license activate <key>\n`);
     return;
-  }
-
-  console.log(`  Email:      ${info.email}`);
-  if (info.expiresAt) {
-    const daysStr = info.daysUntilExpiry !== null && info.daysUntilExpiry > 0
-      ? `(${info.daysUntilExpiry} days remaining)`
-      : info.daysUntilExpiry !== null && info.daysUntilExpiry <= 0
-        ? `${red}(expired)${reset}`
-        : '';
-    console.log(`  Expires:    ${info.expiresAt.toLocaleDateString()} ${daysStr}`);
-  }
-
-  if (file?.lastValidatedAt) {
-    console.log(`  Validated:  ${new Date(file.lastValidatedAt).toLocaleString()}`);
-  }
-  if (file?.validationStatus) {
-    const statusColor = file.validationStatus === 'valid' ? green :
-                        file.validationStatus === 'revoked' ? red : yellow;
-    console.log(`  Status:     ${statusColor}${file.validationStatus}${reset}`);
   }
 
   console.log(`\n${bold}Features:${reset}`);

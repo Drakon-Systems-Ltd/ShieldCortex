@@ -406,6 +406,64 @@ async function main() {
   // Warn if npx is serving a stale cached version
   checkVersionStaleness();
 
+  // ── Trial welcome / expiry warning ──────────────────────
+  // Only show for interactive CLI commands (not MCP server mode — stdout must stay clean for JSON-RPC)
+  if (process.argv[2]) {
+    try {
+      const { existsSync } = await import('fs');
+      const { join } = await import('path');
+      const { homedir } = await import('os');
+      const { getTrialStatus } = await import('./license/trial.js');
+      const { acknowledgeTrialWelcome } = await import('./license/trial.js');
+      const { getLicense } = await import('./license/store.js');
+
+      const licenseFile = join(homedir(), '.shieldcortex', 'license.json');
+      const licenseFileExists = existsSync(licenseFile);
+      const activeLicense = getLicense();
+
+      // Only show trial messages when no paid license is active
+      if (!activeLicense.valid) {
+        const trial = getTrialStatus(licenseFileExists);
+
+        if (trial?.justCreated) {
+          // First ever run — show welcome message
+          const expiryDate = new Date(trial.expiresAt).toLocaleDateString();
+          const bold = '\x1b[1m';
+          const reset = '\x1b[0m';
+          const green = '\x1b[32m';
+          const cyan = '\x1b[36m';
+          const yellow = '\x1b[33m';
+
+          console.log(`\n${bold}🎁 Welcome to ShieldCortex!${reset}\n`);
+          console.log(`You have a ${yellow}14-day Pro trial${reset} — all Pro features are unlocked.\n`);
+          console.log(`  ${green}✓${reset} Custom injection patterns (up to 50)`);
+          console.log(`  ${green}✓${reset} Custom Iron Dome policies`);
+          console.log(`  ${green}✓${reset} Custom firewall rules`);
+          console.log(`  ${green}✓${reset} Audit export (JSON/CSV)`);
+          console.log(`  ${green}✓${reset} Skill scanner deep mode`);
+          console.log(`\nYour trial expires on ${bold}${expiryDate}${reset}. Upgrade anytime at:`);
+          console.log(`  ${cyan}https://shieldcortex.ai/pricing${reset}`);
+          console.log(`\nRun: shieldcortex license status\n`);
+
+          acknowledgeTrialWelcome();
+
+        } else if (trial?.active && trial.daysRemaining <= 3) {
+          // Trial expiring soon — show warning
+          const yellow = '\x1b[33m';
+          const cyan = '\x1b[36m';
+          const reset = '\x1b[0m';
+          const days = trial.daysRemaining;
+
+          console.error(`${yellow}⚠️  Pro trial expires in ${days} day${days !== 1 ? 's' : ''}. Upgrade to keep Pro features:${reset}`);
+          console.error(`    shieldcortex license activate <key>`);
+          console.error(`    ${cyan}https://shieldcortex.ai/pricing${reset}\n`);
+        }
+      }
+    } catch {
+      // Best effort — never let trial messaging crash the CLI
+    }
+  }
+
   // Handle --help / -h / help / unknown args
   if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
     const bold = '\x1b[1m';

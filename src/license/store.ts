@@ -15,6 +15,14 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { verifyLicenseKey } from './verify.js';
 import type { LicenseTier, LicenseInfo, LicenseFile } from './keys.js';
+import {
+  getTrialStatus,
+  isTrialActive,
+  getTrialDaysRemaining,
+  clearTrialCache,
+} from './trial.js';
+
+export { isTrialActive, getTrialDaysRemaining, getTrialStatus };
 
 const CONFIG_DIR = join(homedir(), '.shieldcortex');
 const LICENSE_FILE = join(CONFIG_DIR, 'license.json');
@@ -26,6 +34,7 @@ let cachedLicense: LicenseInfo | null = null;
 /** Clear the in-memory cache (useful for testing or after activation). */
 export function clearLicenseCache(): void {
   cachedLicense = null;
+  clearTrialCache();
 }
 
 // ── Read ─────────────────────────────────────────────────
@@ -80,10 +89,20 @@ export function getLicense(): LicenseInfo {
 
 /**
  * Quick accessor for the current licence tier.
- * Returns 'free' if no valid licence exists.
+ * Returns 'pro' during an active trial (if no paid license is active).
+ * Returns 'free' otherwise.
  */
 export function getLicenseTier(): LicenseTier {
-  return getLicense().tier;
+  const license = getLicense();
+
+  // Paid license takes priority — trial is irrelevant
+  if (license.valid) return license.tier;
+
+  // No paid license: check if trial is active
+  const licenseFileExists = existsSync(LICENSE_FILE);
+  if (isTrialActive(licenseFileExists)) return 'pro';
+
+  return license.tier; // 'free'
 }
 
 /**
@@ -139,6 +158,7 @@ export function deactivateLicense(): void {
     // Best effort
   }
   cachedLicense = null;
+  clearTrialCache();
 }
 
 /**
