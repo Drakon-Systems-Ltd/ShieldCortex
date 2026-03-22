@@ -318,7 +318,7 @@ function trustLocalPlugin(installDir: string, version: string): boolean {
       ? plugins.installs
       : {};
     (installs as Record<string, unknown>)[pluginId] = {
-      source: 'local',
+      source: 'path',
       installPath: installDir,
       version,
       installedAt: new Date().toISOString(),
