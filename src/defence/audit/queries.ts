@@ -187,6 +187,60 @@ export function getAuditStats(timeRange: '24h' | '7d' | '30d', project?: string)
   };
 }
 
+// ── Lifetime Stats ──
+
+export interface LifetimeStats {
+  totalScans: number;
+  threatsBlocked: number;
+  quarantined: number;
+  credentialLeaks: number;
+  memoriesProtected: number;
+}
+
+/**
+ * Get all-time aggregate stats from the defence_audit table.
+ * Fast COUNT-only queries — no heavy computation.
+ */
+export function getLifetimeStats(): LifetimeStats {
+  const db = getDatabase();
+
+  // Counts by firewall result
+  const counts = db.prepare(`
+    SELECT firewall_result, COUNT(*) as cnt
+    FROM defence_audit
+    GROUP BY firewall_result
+  `).all() as { firewall_result: string; cnt: number }[];
+
+  let totalScans = 0;
+  let threatsBlocked = 0;
+  let quarantined = 0;
+  let memoriesProtected = 0;
+
+  for (const row of counts) {
+    totalScans += row.cnt;
+    if (row.firewall_result === 'BLOCK') threatsBlocked = row.cnt;
+    else if (row.firewall_result === 'QUARANTINE') quarantined = row.cnt;
+    else if (row.firewall_result === 'ALLOW') memoriesProtected = row.cnt;
+  }
+
+  // Credential leaks: threat_indicators contains 'credential' (case-insensitive)
+  const credRow = db.prepare(`
+    SELECT COUNT(*) as cnt
+    FROM defence_audit
+    WHERE LOWER(threat_indicators) LIKE '%credential%'
+  `).get() as { cnt: number };
+
+  const credentialLeaks = credRow?.cnt ?? 0;
+
+  return {
+    totalScans,
+    threatsBlocked,
+    quarantined,
+    credentialLeaks,
+    memoriesProtected,
+  };
+}
+
 // ── Agent Query Functions ──
 
 /**

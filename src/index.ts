@@ -463,6 +463,14 @@ async function main() {
     } catch {
       // Best effort — never let trial messaging crash the CLI
     }
+
+    // Show stats banner (threats blocked etc.) for interactive CLI modes
+    try {
+      const { printStatsBanner } = await import('./cli/stats-banner.js');
+      await printStatsBanner();
+    } catch {
+      // Never fail startup over stats
+    }
   }
 
   // Handle --help / -h / help / unknown args
@@ -654,6 +662,13 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "stats" subcommand — detailed security report
+  if (process.argv[2] === 'stats') {
+    const { runStatsCommand } = await import('./cli/stats-command.js');
+    await runStatsCommand();
+    return;
+  }
+
   // Handle "audit" subcommand — full security audit of agent environment
   if (process.argv[2] === 'audit') {
     const { handleAuditCommand } = await import('./cli/audit.js');
@@ -823,7 +838,7 @@ ${bold}DOCS${reset}
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
-    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker',
+    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {

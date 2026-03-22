@@ -1,6 +1,9 @@
 import type { Express, Request, Response } from 'express';
 import { WebSocket } from 'ws';
 import type { MemoryEvent } from '../events.js';
+import { getLifetimeStats } from '../../defence/audit/queries.js';
+import { getAuditStats } from '../../defence/audit/queries.js';
+import { isDatabaseInitialized } from '../../database/init.js';
 import {
   getCloudConfig,
   getCloudSyncControls,
@@ -58,10 +61,42 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
           }
         : null;
 
+      // Stats (best effort — never fail the status endpoint)
+      let stats: Record<string, unknown> | null = null;
+      try {
+        if (isDatabaseInitialized()) {
+          const lifetime = getLifetimeStats();
+          const h24  = getAuditStats('24h');
+          const d7   = getAuditStats('7d');
+          stats = {
+            lifetime: {
+              totalScans:         lifetime.totalScans,
+              threatsBlocked:     lifetime.threatsBlocked,
+              quarantined:        lifetime.quarantined,
+              credentialLeaks:    lifetime.credentialLeaks,
+              memoriesProtected:  lifetime.memoriesProtected,
+            },
+            last24h: {
+              totalScans:  h24.totalOperations,
+              blocked:     h24.blockedCount,
+              quarantined: h24.quarantinedCount,
+            },
+            last7d: {
+              totalScans:  d7.totalOperations,
+              blocked:     d7.blockedCount,
+              quarantined: d7.quarantinedCount,
+            },
+          };
+        }
+      } catch {
+        // Stats unavailable — still return the rest of the status
+      }
+
       res.json({
         tier: license.valid ? license.tier : (trial?.active ? 'pro' : 'free'),
         licenseValid: license.valid,
         trial: trialInfo,
+        ...(stats ? { stats } : {}),
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

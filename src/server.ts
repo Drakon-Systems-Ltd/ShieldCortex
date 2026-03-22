@@ -36,7 +36,7 @@ import { getHighPriorityMemories, getRecentMemories, getRelatedMemories, createM
 import { detectContradictions, getContradictionsFor } from './memory/contradiction.js';
 import { handleGraphQuery, handleGraphEntities, handleGraphExplain } from './tools/graph.js';
 import { checkDatabaseSize } from './database/init.js';
-import { queryAuditLogs, getAuditStats } from './defence/audit/index.js';
+import { queryAuditLogs, getAuditStats, getLifetimeStats } from './defence/audit/index.js';
 import { scanExistingMemories } from './defence/scanner/index.js';
 import type { FirewallResult as FwResult, DefenceSource } from './defence/types.js';
 import { resolveSource } from './defence/trust/env-detector.js';
@@ -797,17 +797,37 @@ but you can use this tool to check for new contradictions at any time.`,
   { title: 'Defence Statistics', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   async (args) => {
     const stats = getAuditStats(args.timeRange);
+    const fmt = new Intl.NumberFormat('en-US');
+    const n = (v: number) => fmt.format(v);
+
     const lines = [
-      `Defence Stats (${args.timeRange}):`,
-      `  Total operations: ${stats.totalOperations}`,
-      `  Allowed: ${stats.allowedCount}`,
-      `  Blocked: ${stats.blockedCount}`,
-      `  Quarantined: ${stats.quarantinedCount}`,
-      `  Top sources: ${stats.topSources.map(s => `${s.source}(${s.count})`).join(', ') || 'none'}`,
+      `🛡️  ShieldCortex Defence Stats (${args.timeRange})`,
+      `${'─'.repeat(36)}`,
+      `  Total operations:  ${n(stats.totalOperations)}`,
+      `  Allowed:           ${n(stats.allowedCount)}`,
+      `  Blocked:           ${n(stats.blockedCount)}`,
+      `  Quarantined:       ${n(stats.quarantinedCount)}`,
+      `  Top sources:       ${stats.topSources.map(s => `${s.source}(${n(s.count)})`).join(', ') || 'none'}`,
     ];
     if (Object.keys(stats.threatBreakdown).length > 0) {
-      lines.push(`  Threats: ${Object.entries(stats.threatBreakdown).map(([k,v]) => `${k}:${v}`).join(', ')}`);
+      lines.push(`  Threat types:      ${Object.entries(stats.threatBreakdown).map(([k,v]) => `${k}:${n(v)}`).join(', ')}`);
     }
+
+    // Append lifetime totals
+    try {
+      const lifetime = getLifetimeStats();
+      lines.push('');
+      lines.push(`All-Time Totals`);
+      lines.push(`${'─'.repeat(36)}`);
+      lines.push(`  Total scans:        ${n(lifetime.totalScans)}`);
+      lines.push(`  Threats blocked:    ${n(lifetime.threatsBlocked)}`);
+      lines.push(`  Quarantined:        ${n(lifetime.quarantined)}`);
+      lines.push(`  Credential leaks:   ${n(lifetime.credentialLeaks)}`);
+      lines.push(`  Memories protected: ${n(lifetime.memoriesProtected)}`);
+    } catch {
+      // Lifetime stats unavailable — not a problem
+    }
+
     return { content: [{ type: 'text', text: lines.join('\n') }] };
   });
 
