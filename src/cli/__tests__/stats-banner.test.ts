@@ -57,8 +57,10 @@ describe('formatStatsBanner', () => {
   });
 
   it('formats large numbers with commas', () => {
+    // 1,185 memories protected — should be comma-formatted
     const banner = formatStatsBanner(makeStats({ totalScans: 1247, memoriesProtected: 1185, threatsBlocked: 47 }));
     expect(banner).toContain('1,185'); // memoriesProtected (totalScans only shown when no other stats)
+    expect(banner).toContain('1,185');
     expect(banner).toMatch(/1,\d{3}/);
   });
 
