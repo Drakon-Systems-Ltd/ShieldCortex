@@ -1,8 +1,9 @@
 /**
- * ShieldCortex Real-time Scanning Plugin for OpenClaw v2026.2.15+
+ * ShieldCortex Real-time Scanning Plugin for OpenClaw v2026.3.22+
  *
- * Hooks into llm_input/llm_output for real-time defence scanning
- * and optional memory extraction. All operations are fire-and-forget.
+ * Uses explicit capability registration (registerHook + registerCommand)
+ * for llm_input/llm_output scanning and optional memory extraction.
+ * All scanning operations are fire-and-forget.
  */
 
 import { execFileSync } from "node:child_process";
@@ -675,8 +676,36 @@ export default {
 
   register(api: PluginApi) {
     applyPluginConfigOverride(api);
-    api.on("llm_input", handleLlmInput);
-    api.on("llm_output", handleLlmOutput);
-    api.logger.info("[shieldcortex] Real-time scanning plugin registered (llm_input + llm_output)");
+
+    // Explicit capability registration (replaces legacy api.on)
+    api.registerHook("llm_input", handleLlmInput, {
+      name: "shieldcortex-scan-input",
+      description: "Real-time threat scanning on LLM input",
+    });
+    api.registerHook("llm_output", handleLlmOutput, {
+      name: "shieldcortex-scan-output",
+      description: "Memory extraction from LLM output",
+    });
+
+    // Register a lightweight status command so the plugin is not hook-only
+    api.registerCommand({
+      name: "shieldcortex-status",
+      aliases: ["sc-status"],
+      description: "Show ShieldCortex real-time scanner status",
+      async execute({ reply }: { reply: (msg: string) => void }) {
+        const cfg = await loadConfig();
+        const autoMemory = isAutoMemoryEnabled(cfg) ? "on" : "off";
+        const dedupe = isAutoMemoryDedupeEnabled(cfg) ? "on" : "off";
+        const cloud = cfg.cloudApiKey ? "configured" : "not configured";
+        reply(
+          `ShieldCortex v${_version}\n` +
+          `  Hooks: llm_input (scan), llm_output (memory)\n` +
+          `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
+          `  Cloud sync: ${cloud}`,
+        );
+      },
+    });
+
+    api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output + /shieldcortex-status)`);
   },
 };

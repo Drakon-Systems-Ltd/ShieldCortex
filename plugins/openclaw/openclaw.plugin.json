@@ -1,6 +1,6 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "3.4.4",
+  "version": "3.4.33",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input and memory extraction on LLM output.",
   "uiHints": {
