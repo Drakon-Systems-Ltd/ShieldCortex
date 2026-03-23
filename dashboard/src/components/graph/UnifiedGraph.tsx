@@ -19,6 +19,7 @@ import type {
   NodeObject,
 } from 'react-force-graph-2d';
 import { authFetch } from '@/lib/auth';
+import GraphFilterPanel from './GraphFilterPanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -177,6 +178,8 @@ export default function UnifiedGraph() {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<ForceGraphRef | undefined>(undefined);
   const bloomDragRef = useRef<{ startX: number; startY: number; offsetX: number; offsetY: number } | null>(null);
+  const bloomNodeDragRef = useRef<{ nodeId: number; startX: number; startY: number } | null>(null);
+  const [bloomNodeOverrides, setBloomNodeOverrides] = useState<Map<number, { x: number; y: number }>>(new Map());
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
   // Navigation state
@@ -199,6 +202,10 @@ export default function UnifiedGraph() {
 
   // Top entities for initial landing
   const [topEntities, setTopEntities] = useState<Entity[]>([]);
+
+  // Filter state
+  const [visibleEntityTypes, setVisibleEntityTypes] = useState<Set<string>>(new Set());
+  const [visiblePredicates, setVisiblePredicates] = useState<Set<string>>(new Set());
 
   // ── Resize observer ──────────────────────────────────────
   useEffect(() => {
@@ -276,6 +283,10 @@ export default function UnifiedGraph() {
     bloomDragRef.current = null;
   }, [displayMode, focalId]);
 
+  useEffect(() => {
+    setBloomNodeOverrides(new Map());
+  }, [focalId]);
+
   const goBack = useCallback(() => {
     setHistory(h => {
       if (h.length === 0) return h;
@@ -308,6 +319,37 @@ export default function UnifiedGraph() {
     });
   }, []);
 
+  const handleBloomNodeMouseDown = useCallback((e: MouseEvent, nodeId: number) => {
+    e.stopPropagation();
+    const svg = (e.target as unknown as SVGElement).closest('svg');
+    if (!svg) return;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const svgPt = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+    bloomNodeDragRef.current = { nodeId, startX: svgPt.x, startY: svgPt.y };
+  }, []);
+
+  const handleBloomNodeMouseMove = useCallback((e: MouseEvent) => {
+    const drag = bloomNodeDragRef.current;
+    if (!drag) return;
+    const svg = (e.target as unknown as SVGElement).closest('svg');
+    if (!svg) return;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const svgPt = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+    setBloomNodeOverrides((prev) => {
+      const next = new Map(prev);
+      next.set(drag.nodeId, { x: svgPt.x, y: svgPt.y });
+      return next;
+    });
+  }, []);
+
+  const handleBloomNodeMouseUp = useCallback(() => {
+    bloomNodeDragRef.current = null;
+  }, []);
+
   const handleBloomMouseDown = useCallback((event: MouseEvent<SVGSVGElement>) => {
     bloomDragRef.current = {
       startX: event.clientX,
@@ -318,6 +360,10 @@ export default function UnifiedGraph() {
   }, [bloomViewport.offsetX, bloomViewport.offsetY]);
 
   const handleBloomMouseMove = useCallback((event: MouseEvent<SVGSVGElement>) => {
+    if (bloomNodeDragRef.current) {
+      handleBloomNodeMouseMove(event as unknown as MouseEvent);
+      return;
+    }
     const drag = bloomDragRef.current;
     if (!drag) return;
 
@@ -326,11 +372,68 @@ export default function UnifiedGraph() {
       offsetX: drag.offsetX + (event.clientX - drag.startX),
       offsetY: drag.offsetY + (event.clientY - drag.startY),
     }));
-  }, []);
+  }, [handleBloomNodeMouseMove]);
 
   const endBloomDrag = useCallback(() => {
     bloomDragRef.current = null;
+    bloomNodeDragRef.current = null;
   }, []);
+
+  // ── Filter initialisation ──────────────────────────────────
+  useEffect(() => {
+    if (!neighbourhood) return;
+    const types = new Set<string>();
+    types.add(neighbourhood.focal.type);
+    neighbourhood.neighbours.forEach((n) => types.add(n.type));
+    const preds = new Set<string>();
+    neighbourhood.triples.forEach((t) => preds.add(t.predicate));
+    setVisibleEntityTypes(types);
+    setVisiblePredicates(preds);
+  }, [neighbourhood]);
+
+  const handleToggleEntityType = useCallback((type: string) => {
+    setVisibleEntityTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  }, []);
+
+  const handleToggleRelationship = useCallback((predicate: string) => {
+    setVisiblePredicates((prev) => {
+      const next = new Set(prev);
+      if (next.has(predicate)) next.delete(predicate);
+      else next.add(predicate);
+      return next;
+    });
+  }, []);
+
+  const handleResetFilters = useCallback(() => {
+    if (!neighbourhood) return;
+    const types = new Set<string>();
+    types.add(neighbourhood.focal.type);
+    neighbourhood.neighbours.forEach((n) => types.add(n.type));
+    const preds = new Set<string>();
+    neighbourhood.triples.forEach((t) => preds.add(t.predicate));
+    setVisibleEntityTypes(types);
+    setVisiblePredicates(preds);
+  }, [neighbourhood]);
+
+  const availableEntityTypes = useMemo(() => {
+    if (!neighbourhood) return [];
+    const types = new Set<string>();
+    types.add(neighbourhood.focal.type);
+    neighbourhood.neighbours.forEach((n) => types.add(n.type));
+    return [...types].sort();
+  }, [neighbourhood]);
+
+  const availablePredicates = useMemo(() => {
+    if (!neighbourhood) return [];
+    const preds = new Set<string>();
+    neighbourhood.triples.forEach((t) => preds.add(t.predicate));
+    return [...preds].sort();
+  }, [neighbourhood]);
 
   // ── Search ────────────────────────────────────────────────
   useEffect(() => {
@@ -413,8 +516,6 @@ export default function UnifiedGraph() {
         val: 7 + Math.pow(ratio, 0.6) * 14,
         x,
         y,
-        fx: x,
-        fy: y,
         labelDirection: Math.abs(x) < 40 ? 'center' : (x > 0 ? 'right' : 'left'),
       });
     };
@@ -488,20 +589,36 @@ export default function UnifiedGraph() {
       return true;
     });
 
-    return { nodes, links: uniqueLinks };
-  }, [displayMode, neighbourhood]);
+    const filteredNodes = nodes.filter(
+      (n) => n.isFocal || visibleEntityTypes.has(n.entityType),
+    );
+    const visibleFilteredNodeIds = new Set(filteredNodes.map((n) => n.id));
+    const filteredLinks = uniqueLinks.filter(
+      (l) =>
+        visibleFilteredNodeIds.has(l.source as unknown as number) &&
+        visibleFilteredNodeIds.has(l.target as unknown as number) &&
+        visiblePredicates.has(l.predicate),
+    );
+    return { nodes: filteredNodes, links: filteredLinks };
+  }, [displayMode, neighbourhood, visibleEntityTypes, visiblePredicates]);
 
   // ── Force config ──────────────────────────────────────────
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg || graphData.nodes.length === 0) return;
 
-    fg.d3Force('charge')?.strength(0);
+    fg.d3Force('charge')?.strength(-120);
     fg.d3Force('center', null);
     fg.d3Force('link')?.distance((link: GraphLink) => {
       return link.predicate === 'related_to' ? 160 : 120;
     });
+    setTimeout(() => fg.zoomToFit(400, 60), 500);
   }, [graphData]);
+
+  const handleNodeDragEnd = useCallback((node: GraphNode) => {
+    node.fx = (node as unknown as { x: number }).x;
+    node.fy = (node as unknown as { y: number }).y;
+  }, []);
 
   // ── Canvas render: nodes ──────────────────────────────────
   const nodeCanvasObject = useCallback(
@@ -706,7 +823,11 @@ export default function UnifiedGraph() {
     const centerX = width * 0.5;
     const centerY = height * 0.72;
 
-    const neighbourMeta = neighbourhood.neighbours.map((entity) => {
+    const filteredNeighbours = neighbourhood.neighbours.filter(
+      (n) => visibleEntityTypes.has(n.type),
+    );
+
+    const neighbourMeta = filteredNeighbours.map((entity) => {
       const relatedTriples = neighbourhood.triples.filter((triple) =>
         triple.subject_id === entity.id || triple.object_id === entity.id,
       );
@@ -816,7 +937,10 @@ export default function UnifiedGraph() {
     });
 
     const visibleNodeIds = new Set(nodeLookup.keys());
-    const crossLinks = neighbourhood.triples
+    const filteredTriples = neighbourhood.triples.filter(
+      (t) => visiblePredicates.has(t.predicate),
+    );
+    const crossLinks = filteredTriples
       .filter((triple) =>
         visibleNodeIds.has(triple.subject_id) &&
         visibleNodeIds.has(triple.object_id) &&
@@ -855,7 +979,7 @@ export default function UnifiedGraph() {
       branches,
       crossLinks,
     };
-  }, [dimensions.height, dimensions.width, neighbourhood]);
+  }, [dimensions.height, dimensions.width, neighbourhood, visibleEntityTypes, visiblePredicates]);
 
   // ── Empty state ───────────────────────────────────────────
   if (!loading && topEntities.length === 0 && !focalId) {
@@ -1317,16 +1441,27 @@ export default function UnifiedGraph() {
                 This is for shape and cluster reading, not evidence review. Return to <span className="text-cyan-300">Read</span> when you need exact relationships and supporting memories.
               </div>
             </div>
-            <div className="absolute right-4 top-4 z-20 flex items-center gap-2">
-              <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-400">
-                Wheel to zoom • drag to pan
+            <div className="absolute right-4 top-4 z-20 flex items-start gap-2">
+              <GraphFilterPanel
+                entityTypes={availableEntityTypes}
+                predicates={availablePredicates}
+                visibleEntityTypes={visibleEntityTypes}
+                visiblePredicates={visiblePredicates}
+                onToggleEntityType={handleToggleEntityType}
+                onToggleRelationship={handleToggleRelationship}
+                onReset={handleResetFilters}
+              />
+              <div className="flex items-center gap-2">
+                <div className="rounded-full border border-slate-800 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-400">
+                  Wheel to zoom &bull; drag to pan
+                </div>
+                <button
+                  onClick={() => setBloomViewport({ scale: 1, offsetX: 0, offsetY: 0 })}
+                  className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-300 transition-colors hover:border-slate-600 hover:text-white"
+                >
+                  Reset view
+                </button>
               </div>
-              <button
-                onClick={() => setBloomViewport({ scale: 1, offsetX: 0, offsetY: 0 })}
-                className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-[11px] text-slate-300 transition-colors hover:border-slate-600 hover:text-white"
-              >
-                Reset view
-              </button>
             </div>
             {loading && (
               <div className="absolute inset-0 flex items-center justify-center z-10">
@@ -1351,18 +1486,20 @@ export default function UnifiedGraph() {
                 onMouseLeave={endBloomDrag}
               >
                 <defs>
-                  <filter id="bloom-glow" x="-40%" y="-40%" width="180%" height="180%">
-                    <feGaussianBlur stdDeviation="14" result="blur" />
-                    <feColorMatrix
-                      in="blur"
-                      type="matrix"
-                      values="1 0 0 0 0
-                              0 1 0 0 0
-                              0 0 1 0 0
-                              0 0 0 18 -8"
-                    />
+                  <filter id="bloom-glow" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur stdDeviation="18" in="SourceGraphic" result="blur1" />
+                    <feGaussianBlur stdDeviation="6" in="SourceGraphic" result="blur2" />
+                    <feBlend in="blur1" in2="blur2" mode="screen" result="combined" />
+                    <feColorMatrix in="combined" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -9" />
                   </filter>
+                  <radialGradient id="bloom-bg-grad" cx="50%" cy="72%">
+                    <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.06" />
+                    <stop offset="40%" stopColor="#22d3ee" stopOpacity="0.02" />
+                    <stop offset="100%" stopColor="#020617" stopOpacity="0" />
+                  </radialGradient>
                 </defs>
+
+                <rect x="0" y="0" width={bloomLayout.width} height={bloomLayout.height} fill="url(#bloom-bg-grad)" />
 
                 <g transform={`translate(${bloomViewport.offsetX} ${bloomViewport.offsetY}) scale(${bloomViewport.scale})`}>
                 {bloomLayout.branches.map((branch, branchIndex) => (
@@ -1444,11 +1581,14 @@ export default function UnifiedGraph() {
                   {focal.name}
                 </text>
 
-                {bloomLayout.branches.flatMap((branch) => branch.nodes).map((node, nodeIndex) => (
+                {bloomLayout.branches.flatMap((branch) => branch.nodes).map((node, nodeIndex) => {
+                  const pos = bloomNodeOverrides.get(node.id) ?? { x: node.x, y: node.y };
+                  return (
                   <g
                     key={node.id}
                     onClick={() => navigateTo(node.id)}
-                    className="cursor-pointer"
+                    onMouseDown={(e) => handleBloomNodeMouseDown(e as unknown as MouseEvent, node.id)}
+                    style={{ cursor: 'grab' }}
                   >
                     <animateTransform
                       attributeName="transform"
@@ -1459,45 +1599,54 @@ export default function UnifiedGraph() {
                       repeatCount="indefinite"
                     />
                     <circle
-                      cx={node.x}
-                      cy={node.y}
+                      cx={pos.x}
+                      cy={pos.y}
+                      r={node.radius + 8}
+                      fill={ENTITY_COLORS[node.entityType] ?? DEFAULT_COLOR}
+                      opacity={0.07}
+                      filter="url(#bloom-glow)"
+                    />
+                    <circle
+                      cx={pos.x}
+                      cy={pos.y}
                       r={node.radius + 5}
                       fill={ENTITY_COLORS[node.entityType] || DEFAULT_COLOR}
                       opacity={0.1}
                     />
                     <circle
-                      cx={node.x}
-                      cy={node.y}
+                      cx={pos.x}
+                      cy={pos.y}
                       r={node.radius}
                       fill={ENTITY_COLORS[node.entityType] || DEFAULT_COLOR}
                       opacity={0.95}
                     />
                     <rect
-                      x={node.x - 14}
-                      y={node.y - node.radius - 18}
+                      x={pos.x - 14}
+                      y={pos.y - node.radius - 18}
                       rx={8}
                       width={28}
                       height={16}
                       fill={`${ENTITY_COLORS[node.entityType] || DEFAULT_COLOR}dd`}
                     />
                     <text
-                      x={node.x}
-                      y={node.y - node.radius - 7}
+                      x={pos.x}
+                      y={pos.y - node.radius - 7}
                       textAnchor="middle"
                       className="fill-slate-950 text-[10px] font-semibold"
                     >
                       {node.memoryCount}
                     </text>
                     <text
-                      x={node.x}
-                      y={node.y + node.radius + 18}
+                      x={pos.x}
+                      y={pos.y + node.radius + 18}
                       textAnchor="middle"
                       className="fill-slate-200 text-[12px]"
                     >
                       {node.name}
                     </text>
                   </g>
-                ))}
+                  );
+                })}
                 </g>
               </svg>
             )}
@@ -1509,6 +1658,17 @@ export default function UnifiedGraph() {
               <div className="mt-2 text-sm text-slate-300">
                 Use the canvas for spatial context, then switch back to <span className="text-cyan-300">Read</span> to inspect grouped statements and evidence.
               </div>
+            </div>
+            <div className="absolute right-4 top-4 z-20">
+              <GraphFilterPanel
+                entityTypes={availableEntityTypes}
+                predicates={availablePredicates}
+                visibleEntityTypes={visibleEntityTypes}
+                visiblePredicates={visiblePredicates}
+                onToggleEntityType={handleToggleEntityType}
+                onToggleRelationship={handleToggleRelationship}
+                onReset={handleResetFilters}
+              />
             </div>
             {loading && (
               <div className="absolute inset-0 flex items-center justify-center z-10">
@@ -1537,6 +1697,8 @@ export default function UnifiedGraph() {
                 d3VelocityDecay={0.3}
                 warmupTicks={80}
                 cooldownTicks={150}
+                enableNodeDrag={true}
+                onNodeDragEnd={handleNodeDragEnd}
               />
             )}
           </div>
