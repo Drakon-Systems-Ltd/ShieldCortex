@@ -84,6 +84,7 @@ Your agent does not just store text. It gives you operator-grade visibility into
 - 🎞️ **Incident replay** — reconstruct memory and defence timelines from audit, quarantine, and retained event history
 - 🔔 **Webhooks** — POST notifications on memory events, HMAC-SHA256 signed
 - 📅 **Expiry rules** — auto-delete TODOs after 30 days, keep architecture decisions forever
+- 🧠 **Mistake learning** — capture mistakes, run pre-flight checks, graduate mastered rules (Pro)
 
 ### Security that shows up exactly when it matters
 
@@ -314,6 +315,37 @@ Iron Dome profiles, but dashboard write actions still go through the same
 announcement and confirmation tiers as CLI or MCP actions. High-risk REST
 mutations like config changes, SQL writes, quarantine review, and memory
 deletes are no longer advisory-only.
+
+<br>
+
+## 🧠 Cortex — Systematic Mistake Learning
+
+Your agent makes mistakes. Cortex makes sure it doesn't make the same one twice.
+
+```bash
+shieldcortex cortex capture --category code --what "Guessed API endpoints" --why "Didn't check docs" --rule "Always verify endpoints in API docs before calling"
+```
+
+Cortex is a mistake-capture and pre-flight check system built into ShieldCortex:
+
+- **Capture** — Log what went wrong, why, and the rule to prevent it
+- **Pre-flight** — Before any task, check against your mistake database for relevant warnings
+- **Review** — Pattern analysis across categories (code, config, process, design, security, etc.)
+- **Graduate** — Archive rules you've mastered (30+ days, no recurrence)
+- **Search** — Full-text search across all captured mistakes
+
+```bash
+# Before deploying, check for relevant past mistakes
+shieldcortex cortex preflight --task "deploy to production"
+
+# Weekly review — see patterns and repeat offenders
+shieldcortex cortex review
+
+# Graduate mastered rules
+shieldcortex cortex graduate
+```
+
+Cortex data is stored locally in `~/.shieldcortex/cortex/`. Pro licence required.
 
 <br>
 
