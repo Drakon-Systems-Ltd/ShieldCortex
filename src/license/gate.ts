@@ -19,7 +19,8 @@ export type GatedFeature =
   | 'skill_scanner_deep'
   | 'cloud_sync'
   | 'team_management'
-  | 'shared_patterns';
+  | 'shared_patterns'
+  | 'cortex_learning';
 
 const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
   custom_injection_patterns: 'pro',
@@ -30,6 +31,7 @@ const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
   cloud_sync: 'team',
   team_management: 'team',
   shared_patterns: 'team',
+  cortex_learning: 'pro',
 };
 
 const FEATURE_DESCRIPTIONS: Record<GatedFeature, string> = {
@@ -41,6 +43,7 @@ const FEATURE_DESCRIPTIONS: Record<GatedFeature, string> = {
   cloud_sync: 'Sync audit data across devices for centralised team visibility.',
   team_management: 'Manage team members, invites, and shared security policies.',
   shared_patterns: 'Share custom injection patterns and policies across your team.',
+  cortex_learning: 'Systematic mistake learning with pre-flight checks, pattern detection, and rule graduation.',
 };
 
 // ── Error class ──────────────────────────────────────────

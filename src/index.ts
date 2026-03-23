@@ -44,6 +44,10 @@
  *   shieldcortex codex install           # Configure MCP server for Codex CLI + VS Code extension
  *   shieldcortex codex uninstall         # Remove Codex MCP configuration
  *   shieldcortex codex status            # Check Codex MCP configuration
+ *   shieldcortex cortex capture      # Log a mistake with rule extraction
+ *   shieldcortex cortex preflight    # Pre-flight check before a task
+ *   shieldcortex cortex review       # Weekly pattern review
+ *   shieldcortex cortex graduate     # Archive learned rules
  *   shieldcortex license activate <key>  # Activate a licence key
  *   shieldcortex license status          # Show current licence tier and features
  *   shieldcortex license deactivate      # Remove licence
@@ -495,6 +499,7 @@ ${bold}COMMANDS${reset}
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
+  ${cyan}cortex${reset} <command>       Mistake learning & pre-flight checks (Pro)
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
@@ -517,6 +522,7 @@ ${bold}EXAMPLES${reset}
   shieldcortex scan-skill ~/.claude/skills/my-skill/SKILL.md
   shieldcortex dashboard
   shieldcortex worker
+  shieldcortex cortex preflight --task "deploy site"
   shieldcortex license activate sc_pro_...
   shieldcortex config --cloud-enable --cloud-api-key <key>
   shieldcortex cloud sync --full
@@ -833,12 +839,20 @@ ${bold}DOCS${reset}
     process.exit(threatCount > 0 ? 1 : 0);
   }
 
+  // Handle "cortex" subcommand (Pro tier — mistake learning)
+  if (process.argv[2] === 'cortex') {
+    const { handleCortexCommand } = await import('./cortex/cli.js');
+    await handleCortexCommand(process.argv.slice(3));
+    process.exit(0);
+  }
+
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
+
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
-    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats',
+    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
