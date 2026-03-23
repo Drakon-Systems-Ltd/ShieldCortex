@@ -346,10 +346,6 @@ export default function UnifiedGraph() {
     });
   }, []);
 
-  const handleBloomNodeMouseUp = useCallback(() => {
-    bloomNodeDragRef.current = null;
-  }, []);
-
   const handleBloomMouseDown = useCallback((event: MouseEvent<SVGSVGElement>) => {
     bloomDragRef.current = {
       startX: event.clientX,
