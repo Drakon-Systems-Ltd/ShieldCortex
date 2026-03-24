@@ -4,7 +4,7 @@ description: Persistent memory system with security for AI agents. Remembers dec
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 3.4.33
+  version: 3.4.36
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin]
@@ -16,14 +16,17 @@ install:
   runtime: node
   minVersion: "18"
 permissions:
-  filesystem: read
-  network: none
-  credentials: none
+  filesystem: readwrite
+  network: optional
+  credentials: optional
+  env:
+    - SHIELDCORTEX_API_KEY: Optional. Only needed for Cloud sync (team tier). Not required for local use.
   description: >
-    Reads agent instruction files (SKILL.md, .cursorrules, CLAUDE.md) for
-    security scanning. Writes to ~/.shieldcortex/ for local memory storage.
-    No network access required for core features. Optional cloud sync
-    requires a user-provided API key.
+    READS: Agent instruction files (SKILL.md, .cursorrules, CLAUDE.md) when
+    explicitly asked to scan. WRITES: ~/.shieldcortex/ directory for local
+    memory database, cortex mistake log, and config. NETWORK: None for core
+    features. Optional outbound HTTPS to ShieldCortex Cloud API for team sync.
+    CREDENTIALS: None required for local use. Optional API key for cloud sync only.
 ---
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
@@ -32,11 +35,12 @@ Give your agent a brain that persists between sessions and protect it from memor
 
 ## Safety & Scope
 
-- This skill documents a local memory/security tool. It does not auto-install packages or silently execute shell commands.
-- Any install command shown here is a manual setup step for the user to approve and run explicitly.
-- Local ShieldCortex usage does not require credentials. API keys are optional and only needed for ShieldCortex Cloud.
-- Only scan instruction files or other prompts when the user has named the path or clearly asked for that review.
-- `shieldcortex install` writes local MCP configuration; it does not deploy a remote service or request background privileges.
+- **No auto-execution.** This skill documents CLI commands. It does not auto-install packages, run background processes, or silently execute shell commands. All commands require explicit user approval.
+- **No credentials required.** Core features (memory, scanning, audit) work fully offline with zero API keys. The optional Cloud sync feature requires a user-provided `SHIELDCORTEX_API_KEY` — this is never auto-configured.
+- **Constrained file access.** Security scans (`scan-skill`, `scan-skills`) only read files the user explicitly names or `.cursorrules`/`CLAUDE.md`/`SKILL.md` in the current workspace. They do not traverse arbitrary directories or read system files.
+- **Local storage only.** All data is stored in `~/.shieldcortex/` (memory DB, cortex log, config). Nothing leaves the machine unless Cloud sync is explicitly enabled.
+- **Transparent hook.** `shieldcortex openclaw install` copies a plugin to `~/.openclaw/extensions/` — viewable in this skill's `bundled/` directory. It hooks `llm_input`/`llm_output` events for real-time scanning. Users can inspect the exact code before installing.
+- **Provenance.** Source code: [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex). npm package: [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex). Published by [@jarvis-drakon](https://github.com/jarvis-drakon).
 
 ## When to Use This Skill
 
