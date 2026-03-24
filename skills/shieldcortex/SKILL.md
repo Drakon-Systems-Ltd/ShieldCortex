@@ -1,13 +1,29 @@
 ---
 name: shieldcortex
 description: Persistent memory system with security for AI agents. Remembers decisions, preferences, architecture, and context across sessions with knowledge graphs, decay, contradiction detection, and a 6-layer defence pipeline with Iron Dome behavioural protection. Use when asked to "remember this", "what do we know about", "recall context", "scan for threats", "run security audit", "check memory stats", or when starting a new session and needing prior context.
-license: MIT
+license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 3.4.3
+  version: 3.4.33
   mcp-server: shieldcortex
   category: memory-and-security
-  tags: [memory, security, knowledge-graph, mcp, iron-dome]
+  tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin]
+  source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
+  homepage: https://shieldcortex.ai
+  npm: https://www.npmjs.com/package/shieldcortex
+install:
+  command: npm install -g shieldcortex
+  runtime: node
+  minVersion: "18"
+permissions:
+  filesystem: read
+  network: none
+  credentials: none
+  description: >
+    Reads agent instruction files (SKILL.md, .cursorrules, CLAUDE.md) for
+    security scanning. Writes to ~/.shieldcortex/ for local memory storage.
+    No network access required for core features. Optional cloud sync
+    requires a user-provided API key.
 ---
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
