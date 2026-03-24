@@ -1,13 +1,17 @@
 ---
 name: shieldcortex
-description: Persistent memory system with security for AI agents. Remembers decisions, preferences, architecture, and context across sessions with knowledge graphs, decay, contradiction detection, and a 6-layer defence pipeline with Iron Dome behavioural protection. Use when asked to "remember this", "what do we know about", "recall context", "scan for threats", "run security audit", "check memory stats", or when starting a new session and needing prior context.
+description: >
+  Persistent memory and security system for AI agents. Stores memories with
+  semantic search, knowledge graphs, and decay. Scans agent inputs/outputs for
+  prompt injection, credential leaks, and poisoning. Audits agent instruction
+  files and MCP configs. Includes Cortex mistake-learning module (Pro tier).
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 3.4.36
+  version: 3.4.37
   mcp-server: shieldcortex
   category: memory-and-security
-  tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin]
+  tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
   source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
   homepage: https://shieldcortex.ai
   npm: https://www.npmjs.com/package/shieldcortex
@@ -19,223 +23,146 @@ permissions:
   filesystem: readwrite
   network: optional
   credentials: optional
+  paths_read:
+    - ~/.claude/ (project memory files, MCP config, commands)
+    - ~/.openclaw/ (MCP config, extensions)
+    - ~/.cursor/ (rules, memories, MCP config)
+    - ~/.windsurf/ (memories, rules)
+    - ~/.codex/ (MCP config)
+    - $CWD/.claude/, $CWD/.cursor/ (project-level configs)
+    - $CWD/.cursorrules, $CWD/.windsurfrules, $CWD/.clinerules
+    - $CWD/CLAUDE.md, $CWD/copilot-instructions.md
+    - $CWD/.aider.conf.yml, $CWD/.continue/config.json
+    - $CWD/.env (env-scanner checks for leaked secrets)
+  paths_write:
+    - ~/.shieldcortex/ (memory DB, config, cortex log, licence, audit cache)
+    - ~/.openclaw/extensions/shieldcortex-realtime/ (OpenClaw plugin, if installed)
+    - ~/.claude/mcp.json, ~/.cursor/mcp.json (MCP server registration, if set up)
+  network_endpoints:
+    - https://api.shieldcortex.ai (Cloud sync, licence validation — only when Cloud is enabled)
+    - http://localhost:3001 (local dashboard server)
+    - http://localhost:3030 (local worker health check)
   env:
-    - SHIELDCORTEX_API_KEY: Optional. Only needed for Cloud sync (team tier). Not required for local use.
-  description: >
-    READS: Agent instruction files (SKILL.md, .cursorrules, CLAUDE.md) when
-    explicitly asked to scan. WRITES: ~/.shieldcortex/ directory for local
-    memory database, cortex mistake log, and config. NETWORK: None for core
-    features. Optional outbound HTTPS to ShieldCortex Cloud API for team sync.
-    CREDENTIALS: None required for local use. Optional API key for cloud sync only.
+    - SHIELDCORTEX_CONFIG_DIR: Override config directory (default ~/.shieldcortex/)
+    - SHIELDCORTEX_API_KEY: Cloud sync API key (team tier only, optional)
+    - SHIELDCORTEX_LICENSE_TIER: Override licence tier (development use)
+    - SHIELDCORTEX_SKIP_EMBEDDINGS: Disable embedding generation
+    - SHIELDCORTEX_HOST: Override dashboard/API bind host
+    - PORT: Override dashboard/API port
 ---
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
 
-Give your agent a brain that persists between sessions and protect it from memory poisoning attacks.
+Memory system with built-in security. Gives agents persistent memory (semantic search, knowledge graphs, decay, contradiction detection) and protects it with a 6-layer defence pipeline (prompt injection, credential leaks, poisoning, privilege escalation, PII filtering, behavioural analysis).
 
 ## Safety & Scope
 
-- **No auto-execution.** This skill documents CLI commands. It does not auto-install packages, run background processes, or silently execute shell commands. All commands require explicit user approval.
-- **No credentials required.** Core features (memory, scanning, audit) work fully offline with zero API keys. The optional Cloud sync feature requires a user-provided `SHIELDCORTEX_API_KEY` — this is never auto-configured.
-- **Constrained file access.** Security scans (`scan-skill`, `scan-skills`) only read files the user explicitly names or `.cursorrules`/`CLAUDE.md`/`SKILL.md` in the current workspace. They do not traverse arbitrary directories or read system files.
-- **Local storage only.** All data is stored in `~/.shieldcortex/` (memory DB, cortex log, config). Nothing leaves the machine unless Cloud sync is explicitly enabled.
-- **Transparent hook.** `shieldcortex openclaw install` copies a plugin to `~/.openclaw/extensions/` — viewable in this skill's `bundled/` directory. It hooks `llm_input`/`llm_output` events for real-time scanning. Users can inspect the exact code before installing.
-- **Provenance.** Source code: [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex). npm package: [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex). Published by [@jarvis-drakon](https://github.com/jarvis-drakon).
+- **Manual install only.** `npm install -g shieldcortex` is a user-approved step. Nothing auto-executes.
+- **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync (team tier) requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
+- **File access is scoped.** Security scans and audits read agent config directories listed in the permissions block above. They do not traverse arbitrary directories. The full list of scanned paths is declared in the `paths_read` section.
+- **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and ask before writing.
+- **Network is off by default.** No outbound connections unless Cloud sync is explicitly enabled. The dashboard and worker run on localhost only.
+- **Bundled source code.** The OpenClaw plugin and cortex-memory hook are shipped in `bundled/` for inspection before installation.
+- **Provenance.** Source: [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex). npm: [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex). Publisher: [@jarvis-drakon](https://github.com/jarvis-drakon).
 
-## When to Use This Skill
+## CLI Reference
 
-- You want to remember things between sessions (decisions, preferences, architecture, context)
-- You need to recall relevant past context at the start of a session
-- You want knowledge graph extraction from memories (entities, relationships)
-- You need to protect memory from prompt injection or poisoning attacks
-- You want credential leak detection in memory writes
-- You want to audit what has been stored in and retrieved from memory
-- You want to scan instruction files (SKILL.md, .cursorrules, CLAUDE.md) for threats
-
-## Setup
-
-Install the npm package globally, then configure the MCP server, only when the user explicitly wants ShieldCortex enabled:
-
+### Getting Started
 ```bash
-npm install -g shieldcortex
-shieldcortex install
+shieldcortex quickstart          # Detect integrations, guide setup
+shieldcortex setup               # Install into current project
+shieldcortex doctor              # Diagnose installation issues
+shieldcortex status              # Show protection status
+shieldcortex uninstall           # Remove from project
 ```
 
-Python SDK also available:
-
+### Memory
 ```bash
-pip install shieldcortex
+# Memory is typically used via MCP server, not CLI directly.
+# The MCP server exposes: store, recall, search, forget, consolidate, graph.
+shieldcortex graph backfill      # Build knowledge graph from stored memories
+shieldcortex stats               # Memory statistics
 ```
 
-## Core Workflow
-
-### Session Start
-
-At the start of every session, retrieve prior context:
-
-1. Call `start_session` to begin a new session and get relevant memories
-2. Or call `get_context` with a query describing the current task
-
-### Remembering
-
-Call `remember` immediately when any of these happen:
-
-- **Architecture decisions** — "We're using PostgreSQL for the database"
-- **Bug fixes** — capture root cause and solution
-- **User preferences** — "Always use TypeScript strict mode"
-- **Completed features** — what was built and why
-- **Error resolutions** — what broke and how it was fixed
-- **Project context** — tech stack, key patterns, file structure
-
-Parameters:
-- `title` (required): Short summary
-- `content` (required): Detailed information
-- `category`: architecture, pattern, preference, error, context, learning, todo, note
-- `importance`: low, normal, high, critical
-- `project`: Scope to a specific project (auto-detected if omitted)
-- `tags`: Array of tags for categorisation
-
-### Recalling
-
-Call `recall` to search for past memories:
-
-- `mode: "search"` — query-based semantic search (default)
-- `mode: "recent"` — most recent memories
-- `mode: "important"` — highest-salience memories
-
-Filter by `category`, `tags`, `project`, or `type` (short_term, long_term, episodic).
-
-### Forgetting
-
-Call `forget` to remove outdated or incorrect memories:
-
-- Delete by `id` for a specific memory
-- Delete by `query` to match content
-- Always use `dryRun: true` first to preview what will be deleted
-- Use `confirm: true` for bulk deletions
-
-### Session End
-
-Call `end_session` with a summary to trigger memory consolidation. This promotes short-term memories to long-term and runs decay on old, unaccessed memories.
-
-## Knowledge Graph
-
-ShieldCortex automatically extracts entities and relationships from memories.
-
-- `graph_query` — traverse from an entity, returns connected entities up to N hops
-- `graph_entities` — list known entities, filter by type (person, tool, concept, file, language, service, pattern)
-- `graph_explain` — find the path connecting two entities
-
-Use the knowledge graph to understand relationships between concepts, technologies, and decisions across the project.
-
-## Memory Intelligence
-
-- `consolidate` — merge duplicate/similar memories, run decay. Use `dryRun: true` to preview
-- `detect_contradictions` — find conflicting memories (e.g., "use Redis" vs "don't use Redis")
-- `get_related` — find memories connected to a specific memory ID
-- `link_memories` — create explicit relationships (references, extends, contradicts, related)
-- `memory_stats` — view total counts, category breakdown, decay stats
-
-## Security & Defence
-
-Every memory write passes through a 6-layer defence pipeline:
-
-1. Input Sanitisation — strips control characters and null bytes
-2. Pattern Detection — regex matching for known injection patterns
-3. Semantic Analysis — embedding similarity to attack corpus
-4. Structural Validation — JSON/format integrity checks
-5. Behavioural Scoring — anomaly detection over time
-6. Credential Leak Detection — blocks API keys, tokens, private keys (25+ patterns, 11 providers)
-
-### Iron Dome
-
-Behavioural security layer that controls what agents can do, not just what they remember:
-
-- `iron_dome_activate` — activate with a profile: `school`, `enterprise`, `personal`, or `paranoid`
-- `iron_dome_status` — check active profile, trusted channels, and approval rules
-- `iron_dome_check` — gate an action (e.g., send_email, delete_file) before execution
-- `iron_dome_scan` — scan text for prompt injection patterns
-
-Profiles control action gates (what actions require approval), channel trust (which instruction sources are trusted), and approval rules.
-
-### Security Tools
-
-- `audit_query` — query the forensic audit log of all memory operations
-- `defence_stats` — view defence system statistics (blocks, allows, quarantines)
-- `quarantine_review` — review and manage quarantined memories (list, approve, reject)
-- `scan_memories` — scan existing memories for signs of poisoning
-- `scan_skill` — scan an instruction file for hidden threats (SKILL.md, .cursorrules, CLAUDE.md, etc.)
-
-## Universal Memory Bridge
-
-ShieldCortex can act as a security layer for any memory backend — not just its own. Use `ShieldCortexGuardedMemoryBridge` to wrap any memory system with the full defence pipeline:
-
-```javascript
-import { ShieldCortexGuardedMemoryBridge, MarkdownMemoryBackend } from 'shieldcortex';
-
-const bridge = new ShieldCortexGuardedMemoryBridge({
-  backend: new MarkdownMemoryBackend('~/.my-memories/'),
-});
-
-// All writes pass through the 6-layer defence pipeline
-await bridge.write({ title: 'Decision', content: 'Use PostgreSQL' });
-```
-
-Built-in backends: `MarkdownMemoryBackend`, `OpenClawMarkdownBackend`. Implement the backend interface for custom storage.
-ShieldCortex does not auto-discover remote backends or obtain their credentials; the host application must wire that in explicitly.
-
-## Project Scoping
-
-- `set_project` — switch active project context
-- `get_project` — show current project scope
-- Use `project: "*"` for global/cross-project memories
-
-## Best Practices
-
-1. **Remember immediately** — call `remember` right after a decision is made or a bug is fixed, not at the end of the session
-2. **Use categories** — architecture, pattern, preference, error, context, learning
-3. **Set importance** — mark critical decisions as `importance: "critical"` so they resist decay
-4. **Recall at session start** — always call `get_context` or `start_session` first
-5. **End sessions properly** — call `end_session` with a summary to trigger consolidation
-6. **Review contradictions** — periodically run `detect_contradictions` to catch conflicting information
-7. **Scope by project** — memories are automatically scoped to the current project directory
-
-## Troubleshooting
-
-**Memory not found in recall:**
-- Try `mode: "search"` with different query phrasing
-- Check `set_project` — you may be searching the wrong project scope
-- Use `includeDecayed: true` to find memories that have faded
-
-**Memory blocked by firewall:**
-- The defence pipeline detected a potential threat (injection, credential leak)
-- Check `audit_query` for the specific block reason
-- Review with `quarantine_review` if it was a false positive
-- Avoid including literal API keys or tokens in memory content
-
-**Consolidation removing memories:**
-- Run `consolidate` with `dryRun: true` first to preview
-- Mark important memories as `importance: "critical"` to prevent decay
-- Access memories regularly — `recall` boosts activation and prevents decay
-
-## OpenClaw Auto-Memory
-
-When using the OpenClaw hook, auto-memory extraction is off by default. Enable it to automatically extract memories from session output:
-
+### Security Scanning
 ```bash
-shieldcortex config --openclaw-auto-memory
+shieldcortex scan "text"                    # Scan text through defence pipeline
+shieldcortex scan-skill path/to/SKILL.md    # Scan one instruction file for threats
+shieldcortex scan-skills                    # Scan all discovered agent instruction files
+shieldcortex audit                          # Full security audit (memory, env, MCP configs, rules files)
+shieldcortex iron-dome status               # Iron Dome behavioural protection status
 ```
 
-When enabled, the system deduplicates against recent memories to avoid storing duplicates. Configure with:
+### Cortex — Mistake Learning (Pro)
+```bash
+shieldcortex cortex capture --task "..." --mistake "..." --fix "..."  # Log a mistake
+shieldcortex cortex preflight --task "deploy to production"           # Pre-task check
+shieldcortex cortex review                                            # Pattern analysis
+shieldcortex cortex list                                              # View mistake log
+shieldcortex cortex stats                                             # Category breakdown
+```
 
-- `openclawAutoMemory` — enable/disable (default: false)
-- `openclawAutoMemoryDedupe` — deduplicate against existing memories (default: true)
-- `openclawAutoMemoryNoveltyThreshold` — similarity threshold for deduplication (default: 0.88)
-- `openclawAutoMemoryMaxRecent` — number of recent memories to check (default: 300)
+### Dashboard & Services
+```bash
+shieldcortex dashboard           # Open local web dashboard (localhost:3001)
+shieldcortex api                 # Start API server
+shieldcortex worker              # Background sync + heartbeat worker
+shieldcortex service start|stop|status  # Manage background service
+shieldcortex hook start|stop|status     # Manage hooks
+```
+
+### Integrations
+```bash
+shieldcortex openclaw install    # Install OpenClaw realtime plugin
+shieldcortex copilot install     # Set up VS Code / Cursor MCP server
+shieldcortex codex install       # Set up Codex CLI MCP server
+shieldcortex config --openclaw-auto-memory  # Enable auto-memory in OpenClaw
+```
+
+### Cloud & Licensing
+```bash
+shieldcortex config --cloud-enable --cloud-api-key <key>  # Enable cloud sync
+shieldcortex cloud sync --full    # Backfill memories + graph to cloud
+shieldcortex license activate sc_pro_...  # Activate Pro/Team licence
+shieldcortex license status       # Check licence tier
+```
+
+## What Gets Scanned
+
+### `scan-skills` discovers and scans:
+- SKILL.md, HOOK.md, handler.js (Claude Code / OpenClaw skills)
+- .cursorrules, .windsurfrules, .clinerules (editor rules)
+- CLAUDE.md, copilot-instructions.md (agent instructions)
+- .aider.conf.yml, .continue/config.json (tool configs)
+- Searches: ~/.claude/skills/, ~/.openclaw/skills/, ~/.openclaw/hooks/, project directories
+
+### `audit` checks:
+- **Memory files** — ~/.claude/projects/, ~/.cursor/memories/, ~/.windsurf/memories/
+- **Environment** — .env files for leaked credentials
+- **MCP configs** — ~/.claude/mcp.json, ~/.openclaw/mcp.json, ~/.cursor/mcp.json, project-level equivalents
+- **Rules files** — CLAUDE.md, .cursorrules, copilot-instructions.md for injection patterns
+
+## Licence Tiers
+
+| Feature | Free | Pro | Team |
+|---------|------|-----|------|
+| Memory (store/recall/search/graph) | ✅ | ✅ | ✅ |
+| Defence pipeline (scan, Iron Dome) | ✅ | ✅ | ✅ |
+| Audit & scan-skills | ✅ | ✅ | ✅ |
+| Dashboard | ✅ | ✅ | ✅ |
+| Custom injection patterns | ❌ | ✅ | ✅ |
+| Custom Iron Dome policies | ❌ | ✅ | ✅ |
+| Custom firewall rules | ❌ | ✅ | ✅ |
+| Audit export | ❌ | ✅ | ✅ |
+| Deep skill scanning | ❌ | ✅ | ✅ |
+| Cortex (mistake learning) | ❌ | ✅ | ✅ |
+| Cloud sync | ❌ | ❌ | ✅ |
+| Team management | ❌ | ❌ | ✅ |
+| Shared patterns | ❌ | ❌ | ✅ |
 
 ## Links
 
-- npm: https://www.npmjs.com/package/shieldcortex
-- PyPI: https://pypi.org/project/shieldcortex
-- GitHub: https://github.com/Drakon-Systems-Ltd/ShieldCortex
-- Website: https://shieldcortex.ai
+- **Docs:** https://shieldcortex.ai/docs
+- **Source:** https://github.com/Drakon-Systems-Ltd/ShieldCortex
+- **npm:** https://www.npmjs.com/package/shieldcortex
+- **Issues:** https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues
