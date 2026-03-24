@@ -690,19 +690,19 @@ export default {
     // Register a lightweight status command so the plugin is not hook-only
     api.registerCommand({
       name: "shieldcortex-status",
-      aliases: ["sc-status"],
       description: "Show ShieldCortex real-time scanner status",
-      async execute({ reply }: { reply: (msg: string) => void }) {
+      async handler() {
         const cfg = await loadConfig();
         const autoMemory = isAutoMemoryEnabled(cfg) ? "on" : "off";
         const dedupe = isAutoMemoryDedupeEnabled(cfg) ? "on" : "off";
         const cloud = cfg.cloudApiKey ? "configured" : "not configured";
-        reply(
-          `ShieldCortex v${_version}\n` +
-          `  Hooks: llm_input (scan), llm_output (memory)\n` +
-          `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
-          `  Cloud sync: ${cloud}`,
-        );
+        return {
+          text:
+            `ShieldCortex v${_version}\n` +
+            `  Hooks: llm_input (scan), llm_output (memory)\n` +
+            `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
+            `  Cloud sync: ${cloud}`,
+        };
       },
     });
 
