@@ -1,3 +1,21 @@
+---
+name: shieldcortex-skill
+description: >
+  Persistent memory and security system for AI agents. Stores memories with
+  semantic search, knowledge graphs, and decay. Scans agent inputs/outputs for
+  prompt injection, credential leaks, and poisoning. Active tool call
+  interception with approval gating (OpenClaw v2026.3.28+).
+license: MIT-0
+metadata:
+  author: Drakon Systems
+  version: 3.5.0
+  category: memory-and-security
+  tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit, tool-interceptor]
+  source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
+  homepage: https://shieldcortex.ai
+  npm: https://www.npmjs.com/package/shieldcortex
+---
+
 # ShieldCortex — Persistent Memory & Security for AI Agents
 
 Give your AI agent a brain that persists between sessions — and protect it from memory poisoning attacks.
