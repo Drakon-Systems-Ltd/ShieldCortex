@@ -14,6 +14,10 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
+import type { InterceptorConfig, ToolCallContext } from './interceptor.js';
+import { syncInterceptEvent } from './intercept-ingest.js';
+
 // ==================== RESILIENT RUNTIME LOADER ====================
 // Resolves runtime.mjs from multiple locations so the plugin works both
 // inside the npm package tree AND when copied to ~/.openclaw/extensions/
@@ -677,6 +681,66 @@ export default {
   register(api: PluginApi) {
     applyPluginConfigOverride(api);
 
+    // --- Interceptor (lazy init) ---
+    let interceptorReady: ReturnType<typeof createInterceptor> | null = null;
+    let interceptorInitAttempted = false;
+
+    async function initInterceptor(): Promise<ReturnType<typeof createInterceptor> | null> {
+      if (interceptorInitAttempted) return interceptorReady;
+      interceptorInitAttempted = true;
+
+      try {
+        const scConfig = await loadConfig();
+        const rawInterceptorConfig = (scConfig as any).interceptor;
+        const interceptorConfig: InterceptorConfig = {
+          ...DEFAULT_INTERCEPTOR_CONFIG,
+          ...(rawInterceptorConfig && typeof rawInterceptorConfig === 'object' ? {
+            enabled: rawInterceptorConfig.enabled ?? DEFAULT_INTERCEPTOR_CONFIG.enabled,
+            severityActions: { ...DEFAULT_INTERCEPTOR_CONFIG.severityActions, ...rawInterceptorConfig.severityActions },
+            failurePolicy: { ...DEFAULT_INTERCEPTOR_CONFIG.failurePolicy, ...rawInterceptorConfig.failurePolicy },
+          } : {}),
+          logger: { info: api.logger?.info ?? console.log, warn: (api.logger as any)?.warn ?? console.warn },
+        };
+
+        if (!interceptorConfig.enabled) return null;
+
+        const defenceMod = await import('shieldcortex/defence');
+        if (typeof defenceMod.runDefencePipeline !== 'function') return null;
+
+        interceptorReady = createInterceptor(interceptorConfig, defenceMod.runDefencePipeline as Parameters<typeof createInterceptor>[1], {
+          onAuditEntry: (entry) => syncInterceptEvent(entry, {
+            cloudApiKey: (scConfig as any).cloudApiKey ?? '',
+            cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
+            cloudEnabled: (scConfig as any).cloudEnabled ?? false,
+          }),
+        });
+        api.logger?.info?.('[shieldcortex] Interceptor active — watching: remember, mcp__memory__remember');
+        return interceptorReady;
+      } catch (err) {
+        (api.logger as any)?.warn?.(`[shieldcortex] Interceptor init failed: ${err instanceof Error ? err.message : err}`);
+        return null;
+      }
+    }
+
+    // Register before_tool_call with lazy-init wrapper
+    api.registerHook('before_tool_call', async (context: ToolCallContext) => {
+      const interceptor = await initInterceptor();
+      if (interceptor) await interceptor.handleToolCall(context);
+    }, {
+      name: 'shieldcortex-intercept-tool',
+      description: 'Active threat gating on tool calls',
+    });
+
+    // Try to register session_end for cache cleanup
+    try {
+      api.registerHook('session_end', () => { interceptorReady?.resetSession(); }, {
+        name: 'shieldcortex-session-cleanup',
+        description: 'Clear interceptor deny cache on session end',
+      });
+    } catch {
+      // session_end may not be a supported hook — TTL safety net handles this
+    }
+
     // Explicit capability registration (replaces legacy api.on)
     api.registerHook("llm_input", handleLlmInput, {
       name: "shieldcortex-scan-input",
@@ -706,6 +770,6 @@ export default {
       },
     });
 
-    api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output + /shieldcortex-status)`);
+    api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output + before_tool_call + /shieldcortex-status)`);
   },
 };
