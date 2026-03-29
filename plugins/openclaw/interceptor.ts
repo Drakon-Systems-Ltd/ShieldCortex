@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { mkdirSync, appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 export type InterceptAction = 'log' | 'warn' | 'require_approval';
@@ -188,4 +191,196 @@ export function formatApprovalPrompt(input: ApprovalPromptInput): string {
     '',
     '[Approve]  [Deny]',
   ].join('\n');
+}
+
+// --- Audit Logging (local JSONL) ---
+
+const AUDIT_DIR = join(homedir(), '.shieldcortex', 'audit');
+
+function writeAuditEntry(entry: InterceptAuditEntry): void {
+  try {
+    mkdirSync(AUDIT_DIR, { recursive: true });
+    const date = new Date().toISOString().slice(0, 10);
+    const file = join(AUDIT_DIR, `realtime-${date}.jsonl`);
+    appendFileSync(file, JSON.stringify(entry) + '\n');
+  } catch {
+    // Best-effort — never block on audit failure
+  }
+}
+
+// --- Interceptor Factory ---
+
+type PipelineRunner = (content: string, title: string, source: { type: string; identifier: string }) => {
+  allowed: boolean;
+  firewall: {
+    result: 'ALLOW' | 'BLOCK' | 'QUARANTINE';
+    reason: string;
+    threatIndicators: string[];
+    anomalyScore: number;
+    blockedPatterns: string[];
+  };
+  auditId: number;
+};
+
+interface InterceptorOptions {
+  maxPromptsPerMinute?: number;
+  onAuditEntry?: (entry: InterceptAuditEntry) => void;
+}
+
+export function createInterceptor(
+  config: InterceptorConfig,
+  pipeline: PipelineRunner,
+  options?: InterceptorOptions,
+): {
+  handleToolCall: (context: ToolCallContext) => Promise<void>;
+  resetSession: () => void;
+} {
+  const denyCache = new DenyCache();
+  const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
+  const log = config.logger ?? { info: console.log, warn: console.warn };
+  const onAuditEntry = options?.onAuditEntry;
+
+  function emitAudit(entry: InterceptAuditEntry): void {
+    writeAuditEntry(entry);
+    onAuditEntry?.(entry);
+  }
+
+  async function handleToolCall(context: ToolCallContext): Promise<void> {
+    if (!(WATCHED_TOOLS as readonly string[]).includes(context.toolName)) return;
+
+    const { title, content } = extractContent(context.toolName, context.arguments);
+    const fullContent = [title, content].filter(Boolean).join(' ');
+    if (!fullContent.trim()) return;
+
+    let severity: Severity;
+    let firewallResult: string;
+    let threats: string[];
+    let anomalyScore: number;
+
+    try {
+      const result = pipeline(content, title, { type: 'agent', identifier: 'openclaw' });
+      severity = mapSeverity(result.firewall);
+      firewallResult = result.firewall.result;
+      threats = result.firewall.threatIndicators;
+      anomalyScore = result.firewall.anomalyScore;
+    } catch (err) {
+      log.warn(`[shieldcortex] ⚠️ Defence pipeline error: ${err instanceof Error ? err.message : err}`);
+      const failAction = config.failurePolicy.high;
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity: 'high',
+        firewallResult: 'ERROR', threats: ['pipeline_error'], anomalyScore: 0,
+        action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      if (failAction === 'deny') {
+        throw new Error('ShieldCortex: tool call blocked — pipeline error, failure policy: deny');
+      }
+      return;
+    }
+
+    if (denyCache.isDenied(context.toolName, fullContent)) {
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity, firewallResult,
+        threats, anomalyScore, action: 'auto_deny', outcome: 'auto_denied',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      throw new Error('ShieldCortex: tool call auto-denied (previously denied content)');
+    }
+
+    const action = config.severityActions[severity];
+
+    if (action === 'log') {
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity, firewallResult,
+        threats, anomalyScore, action: 'log', outcome: 'logged',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      return;
+    }
+
+    if (action === 'warn') {
+      log.warn(`[shieldcortex] ⚠️ ${severity} risk in ${context.toolName}: ${threats.join(', ') || 'anomaly detected'}`);
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity, firewallResult,
+        threats, anomalyScore, action: 'warn', outcome: 'warned',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      return;
+    }
+
+    // action === 'require_approval'
+    if (typeof context.requireApproval !== 'function') {
+      log.warn(`[shieldcortex] ⚠️ requireApproval not available — falling back to warn for ${severity} risk in ${context.toolName}`);
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity, firewallResult,
+        threats, anomalyScore, action: 'warn', outcome: 'warned',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      return;
+    }
+
+    if (!rateLimiter.shouldAllow()) {
+      log.warn('[shieldcortex] ⚠️ Too many approval prompts — auto-denying');
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity, firewallResult,
+        threats, anomalyScore, action: 'rate_limit', outcome: 'auto_denied',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      denyCache.addDenial(context.toolName, fullContent);
+      throw new Error('ShieldCortex: tool call auto-denied (rate limit exceeded)');
+    }
+
+    const message = formatApprovalPrompt({ tool: context.toolName, severity, firewallResult, threats, content: fullContent });
+
+    let approved: boolean;
+    try {
+      approved = await context.requireApproval(message);
+    } catch (err) {
+      const failAction = config.failurePolicy[severity];
+      log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity, firewallResult,
+        threats, anomalyScore, action: 'require_approval',
+        outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      if (failAction === 'deny') {
+        throw new Error(`ShieldCortex: tool call blocked — requireApproval error, failure policy: deny`);
+      }
+      return;
+    }
+
+    if (approved) {
+      const entry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity, firewallResult,
+        threats, anomalyScore, action: 'require_approval', outcome: 'approved',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(entry);
+      return;
+    }
+
+    // Denied
+    denyCache.addDenial(context.toolName, fullContent);
+    const entry: InterceptAuditEntry = {
+      type: 'intercept', tool: context.toolName, severity, firewallResult,
+      threats, anomalyScore, action: 'require_approval', outcome: 'denied',
+      preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+    };
+    emitAudit(entry);
+    throw new Error('ShieldCortex: tool call denied by user');
+  }
+
+  function resetSession(): void {
+    denyCache.reset();
+  }
+
+  return { handleToolCall, resetSession };
 }
