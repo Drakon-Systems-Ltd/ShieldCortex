@@ -401,6 +401,43 @@ Scans every prompt and response as they flow through OpenClaw:
 - 📤 **Outbound extraction** — architectural decisions and learnings detected in assistant responses are auto-saved to memory
 - 📋 **Audit trail** — all scans logged to `~/.shieldcortex/audit/` with full threat details
 
+### Tool Call Interceptor — Active Memory Firewall
+
+Requires **OpenClaw v2026.3.28+**. Previous versions fall back to passive logging.
+
+The plugin now watches `remember` and `mcp__memory__remember` tool calls and can **block them before they execute**. Content passes through the full 6-layer defence pipeline, and the outcome depends on severity:
+
+| Severity | Action | If pipeline fails |
+|---|---|---|
+| Low | Log | Allow |
+| Medium | Warn | Allow |
+| High | Require user approval | Deny |
+| Critical | Require user approval | Deny |
+
+Denied calls are cached (exact-match, session-scoped, 2-hour TTL) so the same poisoned content does not re-prompt. Approval prompts are rate-limited to 5 per minute.
+
+Configure via `~/.shieldcortex/config.json`:
+
+```json
+{
+  "interceptor": {
+    "enabled": true,
+    "severityActions": {
+      "low": "log",
+      "medium": "warn",
+      "high": "require_approval",
+      "critical": "require_approval"
+    },
+    "failurePolicy": {
+      "low": "allow",
+      "medium": "allow",
+      "high": "deny",
+      "critical": "deny"
+    }
+  }
+}
+```
+
 > [!TIP]
 > Auto-extraction is **off by default** to respect OpenClaw's native memory system. Enable it when you want both:
 > ```bash
