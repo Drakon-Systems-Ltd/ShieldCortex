@@ -7,5 +7,5 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "include": ["plugins/openclaw/index.ts"]
+  "include": ["plugins/openclaw/index.ts", "plugins/openclaw/interceptor.ts", "plugins/openclaw/intercept-ingest.ts"]
 }
