@@ -3,17 +3,22 @@ name: shieldcortex-skill
 description: >
   Persistent memory and security system for AI agents. Stores memories with
   semantic search, knowledge graphs, and decay. Scans agent inputs/outputs for
-  prompt injection, credential leaks, and poisoning. Active tool call
-  interception with approval gating (OpenClaw v2026.3.28+).
+  prompt injection, credential leaks, and poisoning. This skill is
+  instruction-only documentation — it does not execute code or modify files.
 license: MIT-0
 metadata:
   author: Drakon Systems
   version: 3.5.0
   category: memory-and-security
-  tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit, tool-interceptor]
+  tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
   source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
   homepage: https://shieldcortex.ai
   npm: https://www.npmjs.com/package/shieldcortex
+  config_paths_documented:
+    - ~/.shieldcortex/ (local memory database and config)
+    - ~/.claude.json (MCP server config, written only by explicit install command)
+    - ~/.codex/config.toml (MCP config, written only by explicit install command)
+    - ~/.openclaw/hooks/ (hook config, written only by explicit install command)
 ---
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
@@ -22,11 +27,12 @@ Give your AI agent a brain that persists between sessions — and protect it fro
 
 ## Safety & Scope
 
-- This skill is documentation for a local tool. It does not auto-install packages, auto-run shell commands, or grant itself filesystem/network access.
-- Installation commands below are manual setup steps for the user to run explicitly outside the skill when they choose to enable ShieldCortex.
-- Local memory mode does not require credentials. An API key is only needed if the user explicitly enables ShieldCortex Cloud.
-- File scanning should be limited to paths the user names or consents to. Do not scan unrelated skills, prompts, repos, or home-directory files by default.
-- `shieldcortex install` and `shieldcortex openclaw install` write local MCP or hook configuration files for the selected agent environment. They are setup commands, not background deployment or remote access.
+- **Instruction-only.** This skill is documentation for a local tool. It does not auto-install packages, auto-run shell commands, or grant itself filesystem/network access. No code is executed by loading this skill.
+- **Manual install only.** Installation commands below are manual setup steps for the user to run explicitly in their terminal. Nothing is installed automatically.
+- **No credentials required.** Local memory mode needs no API keys or tokens. An optional cloud API key is needed only if the user explicitly enables ShieldCortex Cloud sync.
+- **Explicit consent for file scanning.** The `scan-skill` command only reads files the user explicitly names on the command line. It does not discover, enumerate, or scan other skills, prompts, repos, or home-directory files on its own.
+- **Config writes are explicit.** `shieldcortex install` and `shieldcortex openclaw install` write local MCP or hook configuration files (e.g. `~/.claude.json`, `~/.codex/config.toml`, `~/.openclaw/hooks/`). These are one-time setup commands run by the user — not background processes. The files written are documented below.
+- **No network by default.** All operations are local. Network access is only used if the user explicitly enables Cloud sync with an API key.
 
 ## Description
 
