@@ -175,6 +175,7 @@ const { entities, triples } = extractFromMemory(
 | **Trust Scoring** | Source-based reliability scoring for memory writes |
 | **Audit Trail** | Full forensic log of every memory operation |
 | **Skill Scanner** | Detect prompt injection in SKILL.md, .cursorrules, CLAUDE.md |
+| **Tool Call Interceptor** | Active blocking of suspicious `remember` calls via OpenClaw's `requireApproval` API (v2026.3.28+) |
 
 ### Iron Dome
 

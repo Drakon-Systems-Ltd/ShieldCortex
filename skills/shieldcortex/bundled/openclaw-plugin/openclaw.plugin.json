@@ -1,8 +1,8 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "3.4.33",
+  "version": "3.5.0",
   "name": "ShieldCortex Real-time Scanner",
-  "description": "Real-time defence scanning on LLM input and memory extraction on LLM output.",
+  "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "uiHints": {
     "binaryPath": {
       "label": "ShieldCortex Binary Path",
@@ -40,11 +40,26 @@
       "label": "Recent Memory Cache Size",
       "help": "How many recent extracted memories to keep in the dedupe cache.",
       "advanced": true
+    },
+    "interceptor.enabled": {
+      "label": "Enable Tool Call Interceptor",
+      "description": "Scan memory-write tool calls and gate suspicious content behind user approval",
+      "type": "boolean"
+    },
+    "interceptor.severityActions.high": {
+      "label": "High Severity Action",
+      "description": "Action for high-severity threats (log, warn, require_approval)",
+      "type": "string"
+    },
+    "interceptor.severityActions.critical": {
+      "label": "Critical Severity Action",
+      "description": "Action for critical-severity threats (log, warn, require_approval)",
+      "type": "string"
     }
   },
   "configSchema": {
     "type": "object",
-    "additionalProperties": false,
+    "additionalProperties": true,
     "properties": {
       "enabled": {
         "type": "boolean"
@@ -73,6 +88,30 @@
         "type": "integer",
         "minimum": 50,
         "maximum": 1000
+      },
+      "interceptor": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "severityActions": {
+            "type": "object",
+            "properties": {
+              "low": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "log" },
+              "medium": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "warn" },
+              "high": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "require_approval" },
+              "critical": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "require_approval" }
+            }
+          },
+          "failurePolicy": {
+            "type": "object",
+            "properties": {
+              "low": { "type": "string", "enum": ["allow", "deny"], "default": "allow" },
+              "medium": { "type": "string", "enum": ["allow", "deny"], "default": "allow" },
+              "high": { "type": "string", "enum": ["allow", "deny"], "default": "deny" },
+              "critical": { "type": "string", "enum": ["allow", "deny"], "default": "deny" }
+            }
+          }
+        }
       }
     }
   }

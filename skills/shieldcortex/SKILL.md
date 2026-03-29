@@ -8,7 +8,7 @@ description: >
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 3.4.37
+  version: 3.5.0
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
