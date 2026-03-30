@@ -14,11 +14,20 @@ metadata:
   source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
   homepage: https://shieldcortex.ai
   npm: https://www.npmjs.com/package/shieldcortex
-  config_paths_documented:
+  runtime: node
+  minVersion: "18"
+  install_command: npm install -g shieldcortex
+  permissions_filesystem: readwrite
+  permissions_network: optional
+  permissions_credentials: optional
+  paths_read:
     - ~/.shieldcortex/ (local memory database and config)
-    - ~/.claude.json (MCP server config, written only by explicit install command)
-    - ~/.codex/config.toml (MCP config, written only by explicit install command)
-    - ~/.openclaw/hooks/ (hook config, written only by explicit install command)
+    - Agent instruction files (ONLY by explicit scan-skill command, never automatically)
+  paths_write:
+    - ~/.shieldcortex/ (local memory database, config, audit logs)
+    - ~/.claude.json (ONLY by explicit shieldcortex install command)
+    - ~/.codex/config.toml (ONLY by explicit shieldcortex install command)
+    - ~/.openclaw/hooks/ (ONLY by explicit shieldcortex openclaw install command)
 ---
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
@@ -30,7 +39,7 @@ Give your AI agent a brain that persists between sessions — and protect it fro
 - **Instruction-only.** This skill is documentation for a local tool. It does not auto-install packages, auto-run shell commands, or grant itself filesystem/network access. No code is executed by loading this skill.
 - **Manual install only.** Installation commands below are manual setup steps for the user to run explicitly in their terminal. Nothing is installed automatically.
 - **No credentials required.** Local memory mode needs no API keys or tokens. An optional cloud API key is needed only if the user explicitly enables ShieldCortex Cloud sync.
-- **Explicit consent for file scanning.** The `scan-skill` command only reads files the user explicitly names on the command line. It does not discover, enumerate, or scan other skills, prompts, repos, or home-directory files on its own.
+- **Explicit consent for file scanning.** The `scan-skill` command only reads files the user explicitly names on the command line (e.g. `shieldcortex scan-skill ./path/to/SKILL.md`). It **never** discovers, enumerates, or scans files automatically. No scanning occurs without the user typing a command with an explicit file path.
 - **Config writes are explicit.** `shieldcortex install` and `shieldcortex openclaw install` write local MCP or hook configuration files (e.g. `~/.claude.json`, `~/.codex/config.toml`, `~/.openclaw/hooks/`). These are one-time setup commands run by the user — not background processes. The files written are documented below.
 - **No network by default.** All operations are local. Network access is only used if the user explicitly enables Cloud sync with an API key.
 
