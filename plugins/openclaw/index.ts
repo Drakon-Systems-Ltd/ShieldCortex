@@ -704,7 +704,11 @@ export default {
 
         if (!interceptorConfig.enabled) return null;
 
-        const defenceMod = await import('shieldcortex/defence');
+        // Dynamic import with string variable to prevent TypeScript from resolving
+        // at compile time — 'shieldcortex/defence' only exists at runtime when the
+        // package is installed globally, not during CI builds of the plugin itself.
+        const defenceModPath = 'shieldcortex' + '/defence';
+        const defenceMod = await import(/* webpackIgnore: true */ defenceModPath);
         if (typeof defenceMod.runDefencePipeline !== 'function') return null;
 
         interceptorReady = createInterceptor(interceptorConfig, defenceMod.runDefencePipeline as Parameters<typeof createInterceptor>[1], {
