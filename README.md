@@ -15,7 +15,7 @@ Your AI agent forgets useful context, stores untrusted context, and then confide
 
 ```bash
 npm install -g shieldcortex
-shieldcortex install
+shieldcortex quickstart
 ```
 
 > [!NOTE]
@@ -109,11 +109,12 @@ Blocked content goes to quarantine for review — nothing is silently dropped.
 
 ```bash
 npm install -g shieldcortex
-shieldcortex install
-# restart your editor — done
+shieldcortex quickstart
 ```
 
-This registers the MCP server, installs session hooks (auto-extract context on compaction, auto-recall on session start), and configures your agent to remember across sessions.
+`quickstart` scans your machine and auto-detects which agent tools are installed — **Claude Code, OpenClaw, VS Code, Cursor, and Codex** — then configures ShieldCortex for all of them in one go. One command, everything detected, no per-tool setup steps.
+
+> If you want to configure a single tool manually, use `shieldcortex install` instead. It registers the MCP server and session hooks for whichever agent is in the current working directory.
 
 Verify everything works:
 
@@ -126,12 +127,6 @@ shieldcortex doctor
 ✅ Memories: 245 total (12 STM, 233 LTM)
 ✅ Hooks: 3/3 installed
 ✅ API server: running (port 3001)
-```
-
-Fastest guided setup:
-
-```bash
-shieldcortex quickstart
 ```
 
 ## 💳 Licensing and Trial
