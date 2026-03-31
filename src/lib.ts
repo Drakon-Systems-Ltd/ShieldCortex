@@ -194,3 +194,54 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
 export const version: string = pkg.version;
+
+// ── v4.0.0: New Modules ────────────────────────────────────────
+export {
+  memoryAgeDays,
+  memoryAge,
+  memoryFreshnessScore,
+  memoryFreshnessWarning,
+  appendStalenessWarning,
+} from './memory/staleness.js';
+
+export {
+  rerankResults,
+  buildRerankPrompt,
+  parseRerankResponse,
+  DEFAULT_RERANK_CONFIG,
+} from './memory/rerank.js';
+
+export type { RerankConfig } from './memory/rerank.js';
+
+export {
+  consolidateMemories,
+} from './memory/consolidate.js';
+
+export type { DreamModeResult } from './memory/consolidate.js';
+
+export {
+  shouldFilterMemory,
+  DEFAULT_SAVE_FILTER_CONFIG,
+} from './memory/save-filter.js';
+
+export type { SaveFilterConfig, SaveFilterResult } from './memory/save-filter.js';
+
+export {
+  captureConfirmation,
+  searchConfirmations,
+  loadConfirmations,
+} from './cortex/store.js';
+
+export type { Confirmation } from './cortex/store.js';
+
+export type {
+  MemoryPurpose,
+  MemoryScope,
+} from './memory/types.js';
+
+export {
+  VALID_MEMORY_PURPOSES,
+  VALID_MEMORY_SCOPES,
+  isValidMemoryPurpose,
+  isValidMemoryScope,
+} from './memory/types.js';

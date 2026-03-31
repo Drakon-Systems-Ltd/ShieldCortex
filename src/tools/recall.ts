@@ -10,6 +10,7 @@ import { formatTimeSinceAccess } from '../memory/decay.js';
 import { Memory, SearchResult } from '../memory/types.js';
 import { MemoryNotFoundError, formatErrorForMcp } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
+import { memoryFreshnessWarning } from '../memory/staleness.js';
 import type { DefenceSource } from '../defence/types.js';
 
 const sourceSchema = z.object({
@@ -120,6 +121,15 @@ export async function executeRecall(input: RecallInput): Promise<{
 
     // Access each memory to reinforce it
     memories = memories.map(m => accessMemory(m.id, undefined, source) || m);
+
+    // v4.0.0: Append staleness warnings to old memories
+    memories = memories.map(m => {
+      const warning = memoryFreshnessWarning(m.createdAt.getTime());
+      if (warning) {
+        return { ...m, content: m.content + '\n\n' + warning };
+      }
+      return m;
+    });
 
     return {
       success: true,

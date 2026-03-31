@@ -1004,3 +1004,90 @@ export function fullCleanup(
 
   return { consolidation, vacuumed, merged, quarantineExpired };
 }
+
+// ── v4.0.0: Dream Mode — Advanced Memory Consolidation ──────────
+
+export interface DreamModeResult {
+  nearDuplicatesMerged: number;
+  archivalCandidates: number;
+  contradictionsDetected: number;
+  totalProcessed: number;
+}
+
+/**
+ * "Dream Mode" — comprehensive memory consolidation.
+ *
+ * 1. Find near-duplicates by embedding similarity >0.9, merge them
+ * 2. Flag memories >30 days old with no access as archival candidates
+ * 3. Detect and flag contradictions
+ */
+export function consolidateMemories(): DreamModeResult {
+  const db = getDatabase();
+  let nearDuplicatesMerged = 0;
+  let archivalCandidates = 0;
+  let contradictionsDetected = 0;
+
+  // Step 1: Find and merge near-duplicates
+  const duplicatePairs = findDuplicateMemoryPairs({ limit: 100 });
+  for (const pair of duplicatePairs) {
+    try {
+      const memA = pair.memoryA;
+      const memB = pair.memoryB;
+      if (!memA || !memB) continue;
+
+      // Keep the recommended one, delete the other
+      const removedId = pair.recommendedKeepId === memA.id ? memB.id : memA.id;
+      const keptId = pair.recommendedKeepId;
+
+      // Merge tags from both
+      const kept = keptId === memA.id ? memA : memB;
+      const removed = keptId === memA.id ? memB : memA;
+      const mergedTags = [...new Set([...kept.tags, ...removed.tags])];
+      db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
+        .run(JSON.stringify(mergedTags), keptId);
+      deleteMemory(removedId);
+      nearDuplicatesMerged++;
+    } catch {
+      // Skip problematic pairs
+    }
+  }
+
+  // Step 2: Flag stale memories for archival (>30 days, no access)
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const staleRows = db.prepare(`
+    SELECT id FROM memories
+    WHERE status = 'active'
+      AND last_accessed < ?
+      AND access_count <= 1
+      AND pinned = 0
+  `).all(thirtyDaysAgo) as { id: number }[];
+
+  for (const row of staleRows) {
+    try {
+      db.prepare("UPDATE memories SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .run(row.id);
+      archivalCandidates++;
+    } catch {
+      // Skip
+    }
+  }
+
+  // Step 3: Detect contradictions
+  try {
+    const contradictions = detectContradictions();
+    if (contradictions.length > 0) {
+      contradictionsDetected = linkContradictions(contradictions);
+    }
+  } catch {
+    // Contradiction detection may fail on empty/small DBs
+  }
+
+  const totalProcessed = duplicatePairs.length + staleRows.length;
+
+  return {
+    nearDuplicatesMerged,
+    archivalCandidates,
+    contradictionsDetected,
+    totalProcessed,
+  };
+}

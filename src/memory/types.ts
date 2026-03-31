@@ -6,6 +6,9 @@ export type MemoryType = 'short_term' | 'long_term' | 'episodic';
 export type MemoryStatus = 'active' | 'archived' | 'suppressed' | 'canonical';
 export type MemorySourceKind = 'user' | 'cli' | 'hook' | 'plugin' | 'agent' | 'import' | 'cloud' | 'api' | 'system';
 export type MemoryCaptureMethod = 'manual' | 'hook' | 'plugin' | 'import' | 'cloud' | 'api' | 'auto' | 'review';
+export type MemoryPurpose = 'user' | 'feedback' | 'project' | 'reference';
+export type MemoryScope = 'private' | 'team';
+
 
 export type MemoryCategory =
   | 'architecture'    // System design decisions
@@ -48,6 +51,8 @@ export interface Memory {
   sensitivityLevel: string;
   source: string | null;
   cloudExcluded: boolean;
+  memoryPurpose: MemoryPurpose;
+  memoryScope: MemoryScope;
 }
 
 export interface MemoryInput {
@@ -70,6 +75,8 @@ export interface MemoryInput {
   sensitivityLevel?: string;
   source?: string | null;
   cloudExcluded?: boolean;
+  memoryPurpose?: MemoryPurpose;
+  memoryScope?: MemoryScope;
 }
 
 export interface SearchOptions {
@@ -84,6 +91,8 @@ export interface SearchOptions {
   includeGlobal?: boolean;   // Include global-scoped memories (default: true)
   includeArchived?: boolean;
   includeSuppressed?: boolean;
+  memoryPurpose?: MemoryPurpose;
+  memoryScope?: MemoryScope;
 }
 
 export interface SearchResult {
@@ -192,3 +201,15 @@ export const DELETION_THRESHOLDS: Record<MemoryCategory, number> = {
   todo: 0.25,          // Todos - easier to delete
   custom: 0.22,        // Custom memories
 };
+
+// ── Memory Purpose Validation ────────────────────────────────────
+export const VALID_MEMORY_PURPOSES: MemoryPurpose[] = ['user', 'feedback', 'project', 'reference'];
+export const VALID_MEMORY_SCOPES: MemoryScope[] = ['private', 'team'];
+
+export function isValidMemoryPurpose(value: unknown): value is MemoryPurpose {
+  return typeof value === 'string' && VALID_MEMORY_PURPOSES.includes(value as MemoryPurpose);
+}
+
+export function isValidMemoryScope(value: unknown): value is MemoryScope {
+  return typeof value === 'string' && VALID_MEMORY_SCOPES.includes(value as MemoryScope);
+}

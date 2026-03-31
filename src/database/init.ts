@@ -858,6 +858,17 @@ function runMigrations(database: Database.Database): void {
     database.exec('ALTER TABLE memories ADD COLUMN graph_extraction_version INTEGER DEFAULT 0');
   }
 
+
+  // Migration: v4.0.0 — memory_purpose for type taxonomy
+  if (!columnNames.has('memory_purpose')) {
+    database.exec("ALTER TABLE memories ADD COLUMN memory_purpose TEXT DEFAULT 'project'");
+  }
+
+  // Migration: v4.0.0 — memory_scope for private/team visibility
+  if (!columnNames.has('memory_scope')) {
+    database.exec("ALTER TABLE memories ADD COLUMN memory_scope TEXT DEFAULT 'private'");
+  }
+
   // Migration: Pro feature tables (custom_patterns, iron_dome_policies, firewall_rules)
   try {
     database.exec(`
@@ -1157,7 +1168,9 @@ function getInlineSchema(): string {
       trust_score REAL DEFAULT 1.0,
       sensitivity_level TEXT DEFAULT 'INTERNAL',
       source TEXT DEFAULT 'user:direct',
-      graph_extraction_version INTEGER DEFAULT 0
+      graph_extraction_version INTEGER DEFAULT 0,
+      memory_purpose TEXT DEFAULT 'project',
+      memory_scope TEXT DEFAULT 'private'
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

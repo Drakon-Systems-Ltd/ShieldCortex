@@ -7,6 +7,7 @@ import { requireFeature } from '../license/gate.js';
 import {
   capture, preflight, review, graduate, search, loadMistakes,
   type MistakeCategory, type MistakeSeverity,
+  captureConfirmation, searchConfirmations, loadConfirmations,
 } from './store.js';
 
 const SEVERITY_ICON: Record<string, string> = {
@@ -34,11 +35,14 @@ function printUsage(): void {
     list        Browse mistake log
     stats       Summary counts and trends
     search      Full-text search across all entries
+    confirm     Log a positive confirmation (what worked well)
+    confirmations  List or search confirmations
 
   Examples:
     shieldcortex cortex capture --category code --what "Guessed URLs" --why "Didn't use API" --rule "Always fetch handles from API"
     shieldcortex cortex preflight --task "deploy to Fly.io"
     shieldcortex cortex review
+    shieldcortex cortex confirm --category code --what "Used TypeScript strict mode" --why-worked "Caught type errors early" --when-repeat "Always on new TS projects"
     shieldcortex cortex stats
   `);
 }
@@ -198,6 +202,48 @@ export async function handleCortexCommand(args: string[]): Promise<void> {
         for (const m of results) {
           const icon = SEVERITY_ICON[m.severity] || '⚪';
           console.log(`  ${icon} #${m.id} [${m.category}] ${m.rule}`);
+        }
+      }
+      break;
+    }
+
+
+    case 'confirm': {
+      if (!opts.category || !opts.what || !opts['why-worked'] || !opts['when-repeat']) {
+        console.error('Required: --category, --what, --why-worked, --when-repeat');
+        console.error(`Categories: ${VALID_CATEGORIES.join(', ')}`);
+        process.exit(1);
+      }
+      if (!VALID_CATEGORIES.includes(opts.category as MistakeCategory)) {
+        console.error(`Invalid category. Valid: ${VALID_CATEGORIES.join(', ')}`);
+        process.exit(1);
+      }
+      const entry = captureConfirmation({
+        category: opts.category as MistakeCategory,
+        what: opts.what,
+        whyItWorked: opts['why-worked'],
+        whenToRepeat: opts['when-repeat'],
+        tags: opts.tags ? opts.tags.split(',').map(t => t.trim()) : [],
+        agent: opts.agent,
+        taskContext: opts.context,
+      });
+      console.log(`✅ Captured confirmation #${entry.id}: ${entry.what.slice(0, 60)}`);
+      console.log(`   Why it worked: ${entry.whyItWorked}`);
+      console.log(`   When to repeat: ${entry.whenToRepeat}`);
+      break;
+    }
+
+    case 'confirmations': {
+      const query = opts.query;
+      const confirmations = query ? searchConfirmations(query) : loadConfirmations();
+      if (confirmations.length === 0) {
+        console.log(query ? `No confirmations matching '${query}'` : 'No confirmations logged yet.');
+      } else {
+        console.log(`🎯 ${confirmations.length} confirmation(s)${query ? ` matching '${query}'` : ''}:\n`);
+        for (const c of confirmations) {
+          console.log(`  ✅ #${c.id} [${c.category}] ${c.what}`);
+          console.log(`     Why: ${c.whyItWorked}`);
+          console.log(`     Repeat: ${c.whenToRepeat}\n`);
         }
       }
       break;
