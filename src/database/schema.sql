@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS memories (
   source_kind TEXT DEFAULT 'user',
   capture_method TEXT DEFAULT 'manual',
   cloud_excluded INTEGER DEFAULT 0,
+  graph_extraction_version INTEGER DEFAULT 0,
+  memory_purpose TEXT DEFAULT 'project',
+  memory_scope TEXT DEFAULT 'private',
 
   -- Index for common queries
   CONSTRAINT valid_category CHECK(category IN (

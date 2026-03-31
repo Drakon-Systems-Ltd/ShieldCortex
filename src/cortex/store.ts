@@ -227,3 +227,73 @@ export function search(query: string): Mistake[] {
     return text.includes(q);
   });
 }
+
+// ── v4.0.0: Positive Feedback (Confirmations) ───────────────────
+
+export interface Confirmation {
+  id: number;
+  timestamp: string;
+  category: MistakeCategory;
+  what: string;
+  whyItWorked: string;
+  whenToRepeat: string;
+  tags: string[];
+  agent?: string;
+  taskContext?: string;
+}
+
+function getConfirmationsFile(): string {
+  return join(getDataDir(), 'confirmations.json');
+}
+
+export function loadConfirmations(): Confirmation[] {
+  const file = getConfirmationsFile();
+  if (!existsSync(file)) return [];
+  try {
+    return JSON.parse(readFileSync(file, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+export function saveConfirmations(confirmations: Confirmation[]): void {
+  const file = getConfirmationsFile();
+  writeFileSync(file, JSON.stringify(confirmations, null, 2) + '\n', { mode: 0o600 });
+}
+
+export function captureConfirmation(opts: {
+  category: MistakeCategory;
+  what: string;
+  whyItWorked: string;
+  whenToRepeat: string;
+  tags?: string[];
+  agent?: string;
+  taskContext?: string;
+}): Confirmation {
+  const confirmations = loadConfirmations();
+  const entry: Confirmation = {
+    id: confirmations.length + 1,
+    timestamp: new Date().toISOString(),
+    category: opts.category,
+    what: opts.what,
+    whyItWorked: opts.whyItWorked,
+    whenToRepeat: opts.whenToRepeat,
+    tags: opts.tags || [],
+    agent: opts.agent,
+    taskContext: opts.taskContext,
+  };
+  confirmations.push(entry);
+  saveConfirmations(confirmations);
+  return entry;
+}
+
+export function searchConfirmations(query: string): Confirmation[] {
+  const confirmations = loadConfirmations();
+  const lower = query.toLowerCase();
+  return confirmations.filter(c =>
+    c.what.toLowerCase().includes(lower) ||
+    c.whyItWorked.toLowerCase().includes(lower) ||
+    c.whenToRepeat.toLowerCase().includes(lower) ||
+    c.tags.some(t => t.toLowerCase().includes(lower))
+  );
+}

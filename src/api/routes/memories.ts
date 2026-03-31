@@ -26,6 +26,7 @@ import {
   findDuplicateMemoryPairs,
   formatContextSummary,
   generateContextSummary,
+  consolidateMemories,
 } from '../../memory/consolidate.js';
 import { getActivationStats, getActiveMemories } from '../../memory/activation.js';
 import { detectContradictions, getContradictionsFor } from '../../memory/contradiction.js';
@@ -591,7 +592,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
-      const { title, content, type, category, project, tags, salience } = req.body;
+      const { title, content, type, category, project, tags, salience, memoryPurpose, memoryScope } = req.body;
 
       if (!title || !content) {
         return res.status(400).json({ error: 'Title and content required' });
@@ -605,6 +606,8 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         project,
         tags: tags || [],
         salience,
+        memoryPurpose: memoryPurpose || undefined,
+        memoryScope: memoryScope || undefined,
       });
 
       res.status(201).json(memory);
@@ -1107,7 +1110,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
   }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
-      const { title, content, category, tags, importance, status, pinned, reviewedBy, cloudExcluded, scope, project } = req.body;
+      const { title, content, category, tags, importance, status, pinned, reviewedBy, cloudExcluded, scope, project, memoryPurpose, memoryScope } = req.body;
 
       if (title !== undefined && (typeof title !== 'string' || title.trim().length === 0)) {
         return res.status(400).json({ error: 'Title must be a non-empty string' });
@@ -1273,4 +1276,19 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       res.status(500).json({ error: (error as Error).message });
     }
   });
+
+
+  // v4.0.0: Dream Mode — comprehensive memory consolidation
+  app.post('/api/consolidate', requireNotLocked, (_req: Request, res: Response) => {
+    try {
+      const result = consolidateMemories();
+      res.json({
+        success: true,
+        ...result,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
 }

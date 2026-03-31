@@ -839,6 +839,22 @@ ${bold}DOCS${reset}
     process.exit(threatCount > 0 ? 1 : 0);
   }
 
+
+  // Handle "consolidate" subcommand (v4.0.0 — Dream Mode)
+  if (process.argv[2] === 'consolidate') {
+    const { initDatabase } = await import('./database/init.js');
+    initDatabase();
+    const { consolidateMemories } = await import('./memory/consolidate.js');
+    console.log('🧠 Starting Dream Mode consolidation...');
+    const result = consolidateMemories();
+    console.log(`✅ Consolidation complete:`);
+    console.log(`   Near-duplicates merged: ${result.nearDuplicatesMerged}`);
+    console.log(`   Archival candidates:    ${result.archivalCandidates}`);
+    console.log(`   Contradictions found:   ${result.contradictionsDetected}`);
+    console.log(`   Total processed:        ${result.totalProcessed}`);
+    process.exit(0);
+  }
+
   // Handle "cortex" subcommand (Pro tier — mistake learning)
   if (process.argv[2] === 'cortex') {
     const { handleCortexCommand } = await import('./cortex/cli.js');
@@ -852,7 +868,7 @@ ${bold}DOCS${reset}
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
-    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex',
+    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {

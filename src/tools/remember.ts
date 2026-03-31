@@ -7,9 +7,10 @@
 import { z } from 'zod';
 import { addMemory, searchMemories, detectRelationships, createMemoryLink, getLastTruncationInfo } from '../memory/store.js';
 import { calculateSalience, analyzeSalienceFactors, explainSalience } from '../memory/salience.js';
-import { MemoryCategory, MemoryType } from '../memory/types.js';
+import { MemoryCategory, MemoryType, MemoryPurpose, MemoryScope } from '../memory/types.js';
 import { formatErrorForMcp } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
+import { shouldFilterMemory } from '../memory/save-filter.js';
 
 // Input schema for the remember tool
 export const rememberSchema = z.object({
@@ -29,6 +30,10 @@ export const rememberSchema = z.object({
     .describe('Memory scope: project (default) or global (cross-project)'),
   transferable: z.boolean().optional()
     .describe('Whether this memory can be transferred to other projects'),
+  memoryPurpose: z.enum(['user', 'feedback', 'project', 'reference']).optional()
+    .describe('Purpose of memory: user (preferences), feedback (corrections/confirmations), project (work context), reference (docs/specs)'),
+  memoryScope: z.enum(['private', 'team']).optional()
+    .describe('Scope: private (agent-specific) or team (shared across agents)'),
   source: z.object({
     type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
@@ -135,6 +140,15 @@ export async function executeRemember(input: RememberInput): Promise<{
     }
 
     // Create the memory (use trimmed title and content)
+    // v4.0.0: Save filter — prevent storing derivable info
+    const filterResult = shouldFilterMemory(title, content);
+    if (!filterResult.allowed) {
+      return {
+        success: false,
+        error: `Memory filtered: ${filterResult.reason}${filterResult.warning ? ' — ' + filterResult.warning : ''}`,
+      };
+    }
+
     const memory = addMemory({
       title,
       content,
@@ -146,6 +160,8 @@ export async function executeRemember(input: RememberInput): Promise<{
       scope: input.scope,
       transferable: input.transferable,
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+      memoryPurpose: input.memoryPurpose,
+      memoryScope: input.memoryScope,
     }, undefined, derivedSource ?? { type: 'cli', identifier: 'mcp' });
 
     // Auto-detect and create relationships with existing memories

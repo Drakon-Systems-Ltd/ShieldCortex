@@ -19,6 +19,8 @@ import {
   SearchResult,
   MemoryConfig,
   DEFAULT_CONFIG,
+  MemoryPurpose,
+  MemoryScope,
 } from './types.js';
 import {
   calculateSalience,
@@ -249,6 +251,8 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
     sensitivityLevel: (row.sensitivity_level as string | undefined) ?? 'INTERNAL',
     source: (row.source as string | null) ?? null,
     cloudExcluded: Boolean(row.cloud_excluded),
+    memoryPurpose: ((row.memory_purpose as MemoryPurpose | undefined) ?? 'project'),
+    memoryScope: ((row.memory_scope as MemoryScope | undefined) ?? 'private'),
   };
 }
 
@@ -507,9 +511,9 @@ export function addMemory(
   const stmt = db.prepare(`
     INSERT INTO memories (
       uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable,
-      status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, cloud_excluded, updated_at
+      status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, cloud_excluded, memory_purpose, memory_scope, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -543,7 +547,9 @@ export function addMemory(
       input.reviewedBy ?? null,
       sourceDetails.sourceKind,
       sourceDetails.captureMethod,
-      cloudExcluded
+      cloudExcluded,
+      input.memoryPurpose || 'project',
+      input.memoryScope || 'private'
     );
 
     if (defenceResult) {
@@ -786,6 +792,15 @@ export function updateMemory(
   if (updates.cloudExcluded !== undefined) {
     fields.push('cloud_excluded = ?');
     values.push(updates.cloudExcluded ? 1 : 0);
+  }
+
+  if (updates.memoryPurpose !== undefined) {
+    fields.push('memory_purpose = ?');
+    values.push(updates.memoryPurpose);
+  }
+  if (updates.memoryScope !== undefined) {
+    fields.push('memory_scope = ?');
+    values.push(updates.memoryScope);
   }
 
   if (fields.length === 0) return existing;
