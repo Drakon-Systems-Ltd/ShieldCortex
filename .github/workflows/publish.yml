@@ -58,7 +58,7 @@ jobs:
 
       - run: npm ci
       - run: cd dashboard && npm ci
-      - run: npm run build:all
+      - run: npm run build
       - run: npm test
 
       - name: Check if version already published
