@@ -9,6 +9,9 @@
  *   npx shieldcortex audit --json           # JSON output
  *   npx shieldcortex audit --markdown       # Markdown output
  *   npx shieldcortex audit --ci             # CI mode (exit code reflects grade)
+ *   npx shieldcortex audit --deps           # Also scan ./node_modules for malicious packages
+ *   npx shieldcortex audit --deps-global    # Also scan global npm node_modules
+ *   npx shieldcortex audit --deps-path /p   # Also scan specific node_modules path
  */
 
 import {
@@ -16,6 +19,8 @@ import {
   scanMcpConfigs,
   scanEnvFiles,
   scanRulesFiles,
+  scanDependencies,
+  resolveNodeModulesPath,
   formatTerminalReport,
   formatMarkdownReport,
   formatJsonReport,
@@ -26,15 +31,46 @@ import type { AuditReport, AuditSeverity, ScannerResult, AuditFinding } from '..
 interface AuditOptions {
   format: 'terminal' | 'json' | 'markdown';
   ci: boolean;
+  /** Scan node_modules when true */
+  deps: boolean;
+  /** 'local' | 'global' | 'path' */
+  depsMode: 'local' | 'global' | 'path';
+  /** Custom path for --deps-path */
+  depsPath?: string;
 }
 
 function parseAuditArgs(args: string[]): AuditOptions {
-  const options: AuditOptions = { format: 'terminal', ci: false };
+  const options: AuditOptions = {
+    format: 'terminal',
+    ci: false,
+    deps: false,
+    depsMode: 'local',
+  };
 
-  for (const arg of args) {
-    if (arg === '--json') options.format = 'json';
-    else if (arg === '--markdown' || arg === '--md') options.format = 'markdown';
-    else if (arg === '--ci') { options.ci = true; options.format = 'json'; }
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--json') {
+      options.format = 'json';
+    } else if (arg === '--markdown' || arg === '--md') {
+      options.format = 'markdown';
+    } else if (arg === '--ci') {
+      options.ci = true;
+      options.format = 'json';
+    } else if (arg === '--deps') {
+      options.deps = true;
+      options.depsMode = 'local';
+    } else if (arg === '--deps-global') {
+      options.deps = true;
+      options.depsMode = 'global';
+    } else if (arg === '--deps-path') {
+      options.deps = true;
+      options.depsMode = 'path';
+      const next = args[i + 1];
+      if (next && !next.startsWith('--')) {
+        options.depsPath = next;
+        i++; // consume path argument
+      }
+    }
   }
 
   return options;
@@ -73,26 +109,42 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
 
   // Run all scanners
   const scanners: ScannerResult[] = [];
+  const totalSteps = options.deps ? 5 : 4;
 
-  if (options.format === 'terminal') process.stdout.write('  \x1b[2m[1/4] Memory files...\x1b[0m');
+  if (options.format === 'terminal') process.stdout.write(`  \x1b[2m[1/${totalSteps}] Memory files...\x1b[0m`);
   const memoryResult = scanMemories();
   scanners.push(memoryResult);
-  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[1/4]\x1b[0m Memory files     \x1b[2m${memoryResult.durationMs}ms\x1b[0m\n`);
+  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[1/${totalSteps}]\x1b[0m Memory files     \x1b[2m${memoryResult.durationMs}ms\x1b[0m\n`);
 
-  if (options.format === 'terminal') process.stdout.write('  \x1b[2m[2/4] MCP configs...\x1b[0m');
+  if (options.format === 'terminal') process.stdout.write(`  \x1b[2m[2/${totalSteps}] MCP configs...\x1b[0m`);
   const mcpResult = scanMcpConfigs();
   scanners.push(mcpResult);
-  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[2/4]\x1b[0m MCP configs      \x1b[2m${mcpResult.durationMs}ms\x1b[0m\n`);
+  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[2/${totalSteps}]\x1b[0m MCP configs      \x1b[2m${mcpResult.durationMs}ms\x1b[0m\n`);
 
-  if (options.format === 'terminal') process.stdout.write('  \x1b[2m[3/4] Environment secrets...\x1b[0m');
+  if (options.format === 'terminal') process.stdout.write(`  \x1b[2m[3/${totalSteps}] Environment secrets...\x1b[0m`);
   const envResult = scanEnvFiles();
   scanners.push(envResult);
-  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[3/4]\x1b[0m Environment      \x1b[2m${envResult.durationMs}ms\x1b[0m\n`);
+  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[3/${totalSteps}]\x1b[0m Environment      \x1b[2m${envResult.durationMs}ms\x1b[0m\n`);
 
-  if (options.format === 'terminal') process.stdout.write('  \x1b[2m[4/4] Rules files...\x1b[0m');
+  if (options.format === 'terminal') process.stdout.write(`  \x1b[2m[4/${totalSteps}] Rules files...\x1b[0m`);
   const rulesResult = scanRulesFiles();
   scanners.push(rulesResult);
-  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[4/4]\x1b[0m Rules files      \x1b[2m${rulesResult.durationMs}ms\x1b[0m\n\n`);
+  if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[4/${totalSteps}]\x1b[0m Rules files      \x1b[2m${rulesResult.durationMs}ms\x1b[0m\n`);
+
+  // Optional: dependency scan
+  if (options.deps) {
+    const nodeModulesPath = resolveNodeModulesPath(options.depsMode, options.depsPath);
+    if (options.format === 'terminal') {
+      process.stdout.write(`  \x1b[2m[5/${totalSteps}] Dependencies (${nodeModulesPath})...\x1b[0m`);
+    }
+    const depsResult = scanDependencies({ nodeModulesPath });
+    scanners.push(depsResult);
+    if (options.format === 'terminal') {
+      process.stdout.write(`\r  \x1b[32m[5/${totalSteps}]\x1b[0m Dependencies     \x1b[2m${depsResult.durationMs}ms\x1b[0m\n`);
+    }
+  }
+
+  if (options.format === 'terminal') process.stdout.write('\n');
 
   // Aggregate findings
   const allFindings: AuditFinding[] = scanners.flatMap(s => s.findings);
