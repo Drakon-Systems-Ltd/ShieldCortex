@@ -7,27 +7,17 @@ description: >
   instruction-only documentation — it does not execute code or modify files.
 license: MIT-0
 metadata:
+  openclaw:
+    requires:
+      bins: [node, npm]
+    source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
+    homepage: https://shieldcortex.ai
+    npm: https://www.npmjs.com/package/shieldcortex
+    emoji: "\U0001F6E1\uFE0F"
   author: Drakon Systems
   version: 4.2.5
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
-  source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
-  homepage: https://shieldcortex.ai
-  npm: https://www.npmjs.com/package/shieldcortex
-  runtime: node
-  minVersion: "18"
-  install_command: npm install -g shieldcortex
-  permissions_filesystem: readwrite
-  permissions_network: optional
-  permissions_credentials: optional
-  paths_read:
-    - ~/.shieldcortex/ (local memory database and config)
-    - Agent instruction files (ONLY by explicit scan-skill command, never automatically)
-  paths_write:
-    - ~/.shieldcortex/ (local memory database, config, audit logs)
-    - ~/.claude.json (ONLY by explicit shieldcortex install command)
-    - ~/.codex/config.toml (ONLY by explicit shieldcortex install command)
-    - ~/.openclaw/hooks/ (ONLY by explicit shieldcortex openclaw install command)
 ---
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
