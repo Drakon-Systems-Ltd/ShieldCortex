@@ -49,6 +49,35 @@ function getShieldCortexDir(): string {
   return path.join(os.homedir(), '.shieldcortex');
 }
 
+// ── Environment detection ────────────────────────────────
+interface Environment {
+  hasClaude: boolean;
+  hasOpenClaw: boolean;
+  hasVSCode: boolean;
+  hasCodex: boolean;
+  isHeadless: boolean;
+}
+
+function detectEnvironment(): Environment {
+  const home = os.homedir();
+  const hasClaude = fs.existsSync(path.join(home, '.claude')) || fs.existsSync(path.join(home, '.claude.json'));
+  const hasOpenClaw = fs.existsSync(path.join(home, '.openclaw'));
+  const hasCodex = fs.existsSync(path.join(home, '.codex'));
+
+  const platform = process.platform;
+  const vscodeDirs = platform === 'darwin'
+    ? [path.join(home, 'Library', 'Application Support', 'Code', 'User')]
+    : platform === 'win32'
+      ? [path.join(process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming'), 'Code', 'User')]
+      : [path.join(home, '.config', 'Code', 'User')];
+  const hasVSCode = vscodeDirs.some(d => fs.existsSync(d));
+
+  // Headless = no display environment (SSH server, container, etc.)
+  const isHeadless = !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY && platform !== 'darwin' && platform !== 'win32';
+
+  return { hasClaude, hasOpenClaw, hasVSCode, hasCodex, isHeadless };
+}
+
 function getDbPath(): string {
   const newPath = path.join(getShieldCortexDir(), 'memories.db');
   const legacyPath = path.join(os.homedir(), '.claude-memory', 'memories.db');
@@ -62,11 +91,15 @@ async function checkDatabase(): Promise<CheckResult> {
   const dbPath = getDbPath();
 
   if (!fs.existsSync(dbPath)) {
+    const env = detectEnvironment();
+    const fix = env.hasOpenClaw && !env.hasClaude
+      ? 'Run `shieldcortex scan "test"` to initialise the database (OpenClaw-only setup detected)'
+      : 'Start the MCP server or run `shieldcortex quickstart` to initialise the database';
     return {
       label: 'Database',
       status: 'fail',
       message: 'not found',
-      fix: 'Start the MCP server or run `shieldcortex setup` to initialise the database',
+      fix,
     };
   }
 
@@ -252,6 +285,10 @@ async function checkHooks(): Promise<CheckResult> {
 // ── Check 5: Process check ────────────────────────────────
 async function checkProcesses(): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
+  const env = detectEnvironment();
+
+  // On headless/OpenClaw-only setups, API/Dashboard are optional
+  const isOptional = env.isHeadless || (env.hasOpenClaw && !env.hasClaude && !env.hasVSCode);
 
   // Check API server on port 3001
   try {
@@ -270,12 +307,20 @@ async function checkProcesses(): Promise<CheckResult[]> {
       });
     }
   } catch {
-    results.push({
-      label: 'API server',
-      status: 'warn',
-      message: 'not running',
-      fix: 'Run `shieldcortex dashboard` to start the API server',
-    });
+    if (isOptional) {
+      results.push({
+        label: 'API server',
+        status: 'info',
+        message: 'not running (optional on headless/OpenClaw-only setups)',
+      });
+    } else {
+      results.push({
+        label: 'API server',
+        status: 'warn',
+        message: 'not running',
+        fix: 'Run `shieldcortex dashboard` to start the API server',
+      });
+    }
   }
 
   // Check dashboard on port 3030
@@ -295,12 +340,20 @@ async function checkProcesses(): Promise<CheckResult[]> {
       });
     }
   } catch {
-    results.push({
-      label: 'Dashboard',
-      status: 'warn',
-      message: 'not running',
-      fix: 'Run `shieldcortex dashboard` to start the dashboard',
-    });
+    if (isOptional) {
+      results.push({
+        label: 'Dashboard',
+        status: 'info',
+        message: 'not running (optional on headless/OpenClaw-only setups)',
+      });
+    } else {
+      results.push({
+        label: 'Dashboard',
+        status: 'warn',
+        message: 'not running',
+        fix: 'Run `shieldcortex dashboard` to start the dashboard',
+      });
+    }
   }
 
   return results;
