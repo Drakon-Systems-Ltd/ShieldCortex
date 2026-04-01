@@ -679,6 +679,7 @@ export default {
   },
 
   register(api: PluginApi) {
+    try {
     applyPluginConfigOverride(api);
 
     // --- Interceptor (lazy init) ---
@@ -775,5 +776,11 @@ export default {
     });
 
     api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output + before_tool_call + /shieldcortex-status)`);
+    } catch (err) {
+      // Plugin must never block channel startup — warn and bail gracefully
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[shieldcortex] WARNING: Plugin failed to initialize: ${msg}`);
+      console.warn('[shieldcortex] Real-time scanning is disabled. Channels will start normally.');
+    }
   },
 };

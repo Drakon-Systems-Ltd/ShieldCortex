@@ -202,7 +202,12 @@ function preferredHookDir(hooksDir: string): string {
 }
 
 function legacyHookDirs(hooksDir: string): string[] {
-  return [path.join(hooksDir, 'internal', HOOK_NAME)];
+  return [
+    // Legacy: top-level "shieldcortex" directory created by old installers
+    path.join(hooksDir, 'shieldcortex'),
+    // Legacy: internal/cortex-memory path from v3 and early v4
+    path.join(hooksDir, 'internal', HOOK_NAME),
+  ];
 }
 
 function hasRequiredHookFiles(dir: string): boolean {
@@ -692,10 +697,8 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     for (const hooksDir of hooksDirs) {
       const destDir = preferredHookDir(hooksDir);
       try {
+        // Clean up legacy paths BEFORE installing to avoid duplicate hooks
         const legacyDirsBeforeInstall = detectLegacyHookVariants(hooksDir);
-        copyHookFiles(HOOK_SOURCE, destDir);
-
-        console.log(`Installed cortex-memory hook to ${destDir}`);
         if (legacyDirsBeforeInstall.length > 0) {
           console.log(`Detected legacy OpenClaw hook layout in ${hooksDir} — migrating to ${destDir}`);
         }
@@ -703,6 +706,10 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
           console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
           migratedLegacy++;
         }
+
+        copyHookFiles(HOOK_SOURCE, destDir);
+
+        console.log(`Installed cortex-memory hook to ${destDir}`);
         installed++;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
