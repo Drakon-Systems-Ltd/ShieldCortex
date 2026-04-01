@@ -25,7 +25,7 @@ const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOO
 const PLUGIN_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'dist');
 const PLUGIN_PACKAGE_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw');
 const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
-const HOOK_FILES = ['HOOK.md', 'handler.ts'] as const;
+const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
 const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL';
 
 type PluginInstallMode = 'native-package' | 'native-link' | 'trusted-local-copy' | 'untrusted-local-copy' | 'skipped';
