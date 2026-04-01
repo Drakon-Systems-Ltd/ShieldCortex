@@ -14,11 +14,15 @@
  *   shieldcortex audit --deps                      # scan ./node_modules
  *   shieldcortex audit --deps-global               # scan global npm prefix
  *   shieldcortex audit --deps-path /some/path      # scan specific path
+ *   shieldcortex audit --deps --quarantine         # scan + quarantine CRITICAL/HIGH
+ *   shieldcortex audit --deps --clean --force      # scan + permanently delete CRITICAL
+ *   shieldcortex audit --deps --auto-protect       # scan + auto-quarantine CRITICAL
  */
 
-import { readdirSync, readFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import { readdirSync, readFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { join, resolve } from 'path';
 import { execSync } from 'child_process';
+import { homedir } from 'os';
 import type { AuditFinding, ScannerResult } from './types.js';
 
 const LEARN_MORE_MALICIOUS  = 'https://shieldcortex.ai/docs/threats/supply-chain';
@@ -242,6 +246,113 @@ function checkPackageAge(pkg: PackageInfo): boolean {
   const ageMs = Date.now() - published.getTime();
   const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
   return ageMs < sevenDaysMs;
+}
+
+// ── Quarantine / Clean Actions ───────────────────────────────────────────────
+
+export interface QuarantineManifest {
+  packageName: string;
+  version: string;
+  reason: string;
+  originalPath: string;
+  quarantinedAt: string;
+  severity: string;
+}
+
+/**
+ * Quarantine a package by moving it from node_modules to
+ * ~/.shieldcortex/quarantine/deps/<pkg>-<timestamp>/.
+ *
+ * Creates a manifest.json alongside the quarantined files.
+ * Only acts on CRITICAL and HIGH findings.
+ *
+ * @returns The quarantine destination path, or null if not quarantined.
+ */
+export function quarantinePackage(
+  finding: AuditFinding,
+  nodeModulesPath: string,
+): string | null {
+  // Only quarantine CRITICAL and HIGH
+  if (finding.severity !== 'critical' && finding.severity !== 'high') {
+    return null;
+  }
+
+  // Extract package name from the finding title heuristically
+  // Title examples:
+  //   "Known malicious package: plain-crypto-js"
+  //   "Possible typosquat: "axois" → "axios""
+  //   "Suspicious install script in "bad-pkg""
+  const nameMatch =
+    finding.title.match(/^Known malicious package:\s+(.+)$/) ??
+    finding.title.match(/^Possible typosquat:\s+"([^"]+)"/) ??
+    finding.title.match(/^Suspicious install script in\s+"([^"]+)"/);
+
+  const pkgName = nameMatch?.[1]?.trim();
+  if (!pkgName) return null;
+
+  // Resolve source path
+  const pkgParts = pkgName.split('/');
+  const srcPath = resolve(join(nodeModulesPath, ...pkgParts));
+  if (!existsSync(srcPath)) return null;
+
+  // Determine version from package.json
+  const pkg = readPackageJson(srcPath);
+  const version = pkg?.version ?? 'unknown';
+
+  // Build quarantine destination
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const safeName = pkgName.replace(/\//g, '__');
+  const quarantineBase = join(homedir(), '.shieldcortex', 'quarantine', 'deps');
+  const destDir = join(quarantineBase, `${safeName}-${timestamp}`);
+  const pkgDestDir = join(destDir, 'pkg');
+
+  mkdirSync(destDir, { recursive: true });
+
+  // Move the package directory
+  renameSync(srcPath, pkgDestDir);
+
+  // Write manifest
+  const manifest: QuarantineManifest = {
+    packageName: pkgName,
+    version,
+    reason: finding.title,
+    originalPath: srcPath,
+    quarantinedAt: new Date().toISOString(),
+    severity: finding.severity,
+  };
+  writeFileSync(join(destDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+  return destDir;
+}
+
+/**
+ * Permanently delete a malicious package from node_modules.
+ *
+ * Only acts on CRITICAL findings (known malicious packages from blocklist).
+ *
+ * @returns The package name that was deleted, or null if not deleted.
+ */
+export function cleanPackage(
+  finding: AuditFinding,
+  nodeModulesPath: string,
+): string | null {
+  // Only clean CRITICAL findings
+  if (finding.severity !== 'critical') {
+    return null;
+  }
+
+  // Extract package name from the finding title
+  const nameMatch = finding.title.match(/^Known malicious package:\s+(.+)$/);
+  const pkgName = nameMatch?.[1]?.trim();
+  if (!pkgName) return null;
+
+  const pkgParts = pkgName.split('/');
+  const srcPath = resolve(join(nodeModulesPath, ...pkgParts));
+  if (!existsSync(srcPath)) return null;
+
+  rmSync(srcPath, { recursive: true, force: true });
+
+  return pkgName;
 }
 
 // ── Main Scanner ─────────────────────────────────────────────────────────────

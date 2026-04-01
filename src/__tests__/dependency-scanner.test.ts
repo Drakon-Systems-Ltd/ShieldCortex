@@ -1,11 +1,12 @@
 /**
  * Dependency Scanner Tests
  *
- * Tests for the `shieldcortex audit --deps` feature.
+ * Tests for the `shieldcortex audit --deps` feature, including
+ * quarantine, clean, and auto-protect actions.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync, existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -13,7 +14,10 @@ import {
   levenshtein,
   scanDependencies,
   resolveNodeModulesPath,
+  quarantinePackage,
+  cleanPackage,
 } from '../audit/dependency-scanner.js';
+import type { AuditFinding } from '../audit/types.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +30,16 @@ function makePackage(
   const dir = join(nodeModules, ...parts);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg, null, 2));
+}
+
+function makeFinding(overrides: Partial<AuditFinding> = {}): AuditFinding {
+  return {
+    scanner: 'dependency',
+    severity: 'critical',
+    title: 'Known malicious package: plain-crypto-js',
+    description: 'Test finding',
+    ...overrides,
+  };
 }
 
 // ── Levenshtein ───────────────────────────────────────────────────────────────
@@ -345,5 +359,259 @@ describe('resolveNodeModulesPath()', () => {
   it('returns custom path when mode is "path"', () => {
     const path = resolveNodeModulesPath('path', '/custom/path/node_modules');
     expect(path).toBe('/custom/path/node_modules');
+  });
+});
+
+// ── quarantinePackage() ───────────────────────────────────────────────────────
+
+describe('quarantinePackage()', () => {
+  let tmp: string;
+  let nodeModules: string;
+  let quarantineBase: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'sc-quarantine-'));
+    nodeModules = join(tmp, 'node_modules');
+    quarantineBase = join(tmp, 'quarantine', 'deps');
+    mkdirSync(nodeModules);
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('moves a CRITICAL package to the quarantine directory', () => {
+    makePackage(nodeModules, 'plain-crypto-js', {
+      name: 'plain-crypto-js',
+      version: '2.3.1',
+    });
+
+    const finding = makeFinding({
+      severity: 'critical',
+      title: 'Known malicious package: plain-crypto-js',
+    });
+
+    // Override home dir for quarantine path by using the quarantinePackage function
+    // and checking the actual result
+    const dest = quarantinePackage(finding, nodeModules);
+
+    // Package should no longer exist in node_modules
+    expect(existsSync(join(nodeModules, 'plain-crypto-js'))).toBe(false);
+
+    // Quarantine destination should be returned (non-null)
+    expect(dest).not.toBeNull();
+    expect(dest).toBeTruthy();
+
+    // The pkg subdirectory and manifest should exist in the destination
+    if (dest) {
+      expect(existsSync(join(dest, 'pkg'))).toBe(true);
+      expect(existsSync(join(dest, 'manifest.json'))).toBe(true);
+
+      // Verify manifest content
+      const manifest = JSON.parse(readFileSync(join(dest, 'manifest.json'), 'utf-8'));
+      expect(manifest.packageName).toBe('plain-crypto-js');
+      expect(manifest.version).toBe('2.3.1');
+      expect(manifest.severity).toBe('critical');
+      expect(manifest.reason).toContain('plain-crypto-js');
+      expect(manifest.quarantinedAt).toBeTruthy();
+      expect(manifest.originalPath).toContain('plain-crypto-js');
+    }
+  });
+
+  it('moves a HIGH package to the quarantine directory', () => {
+    makePackage(nodeModules, 'axois', {
+      name: 'axois',
+      version: '1.0.0',
+    });
+
+    const finding = makeFinding({
+      severity: 'high',
+      title: 'Possible typosquat: "axois" → "axios"',
+    });
+
+    const dest = quarantinePackage(finding, nodeModules);
+
+    // Package should no longer exist in node_modules
+    expect(existsSync(join(nodeModules, 'axois'))).toBe(false);
+    expect(dest).not.toBeNull();
+  });
+
+  it('does NOT quarantine a MEDIUM finding', () => {
+    makePackage(nodeModules, 'slightly-sus', {
+      name: 'slightly-sus',
+      version: '1.0.0',
+    });
+
+    const finding = makeFinding({
+      severity: 'medium',
+      title: 'Suspicious install script in "slightly-sus"',
+    });
+
+    const dest = quarantinePackage(finding, nodeModules);
+
+    // Package should still exist
+    expect(existsSync(join(nodeModules, 'slightly-sus'))).toBe(true);
+    expect(dest).toBeNull();
+  });
+
+  it('returns null when the package directory does not exist', () => {
+    const finding = makeFinding({
+      severity: 'critical',
+      title: 'Known malicious package: nonexistent-pkg',
+    });
+
+    const dest = quarantinePackage(finding, nodeModules);
+    expect(dest).toBeNull();
+  });
+});
+
+// ── cleanPackage() ────────────────────────────────────────────────────────────
+
+describe('cleanPackage()', () => {
+  let tmp: string;
+  let nodeModules: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'sc-clean-'));
+    nodeModules = join(tmp, 'node_modules');
+    mkdirSync(nodeModules);
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('permanently deletes a CRITICAL package from node_modules', () => {
+    makePackage(nodeModules, 'plain-crypto-js', {
+      name: 'plain-crypto-js',
+      version: '1.0.0',
+    });
+
+    const finding = makeFinding({
+      severity: 'critical',
+      title: 'Known malicious package: plain-crypto-js',
+    });
+
+    const deleted = cleanPackage(finding, nodeModules);
+
+    expect(deleted).toBe('plain-crypto-js');
+    expect(existsSync(join(nodeModules, 'plain-crypto-js'))).toBe(false);
+  });
+
+  it('does NOT clean a HIGH finding', () => {
+    makePackage(nodeModules, 'axois', {
+      name: 'axois',
+      version: '1.0.0',
+    });
+
+    const finding = makeFinding({
+      severity: 'high',
+      title: 'Possible typosquat: "axois" → "axios"',
+    });
+
+    const deleted = cleanPackage(finding, nodeModules);
+
+    // Should not delete — only CRITICAL
+    expect(deleted).toBeNull();
+    expect(existsSync(join(nodeModules, 'axois'))).toBe(true);
+  });
+
+  it('does NOT clean a MEDIUM finding', () => {
+    makePackage(nodeModules, 'bad-scripts', {
+      name: 'bad-scripts',
+      version: '1.0.0',
+    });
+
+    const finding = makeFinding({
+      severity: 'medium',
+      title: 'Suspicious install script in "bad-scripts"',
+    });
+
+    const deleted = cleanPackage(finding, nodeModules);
+
+    expect(deleted).toBeNull();
+    expect(existsSync(join(nodeModules, 'bad-scripts'))).toBe(true);
+  });
+
+  it('returns null when package does not exist', () => {
+    const finding = makeFinding({
+      severity: 'critical',
+      title: 'Known malicious package: ghost-pkg',
+    });
+
+    const deleted = cleanPackage(finding, nodeModules);
+    expect(deleted).toBeNull();
+  });
+});
+
+// ── Auto-protect behaviour via scan + quarantine ──────────────────────────────
+
+describe('auto-protect logic (scan → quarantine CRITICAL, warn HIGH)', () => {
+  let tmp: string;
+  let nodeModules: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'sc-autoprot-'));
+    nodeModules = join(tmp, 'node_modules');
+    mkdirSync(nodeModules);
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('quarantines CRITICAL findings and leaves HIGH findings intact', () => {
+    // CRITICAL package
+    makePackage(nodeModules, 'plain-crypto-js', {
+      name: 'plain-crypto-js',
+      version: '1.0.0',
+    });
+
+    // HIGH package (typosquat — not in blocklist so won't be auto-cleaned)
+    makePackage(nodeModules, 'axois', {
+      name: 'axois',
+      version: '1.0.0',
+    });
+
+    const result = scanDependencies({ nodeModulesPath: nodeModules });
+    const criticals = result.findings.filter(f => f.severity === 'critical');
+    const highs = result.findings.filter(f => f.severity === 'high');
+
+    // Auto-protect: quarantine CRITICAL only
+    for (const finding of criticals) {
+      quarantinePackage(finding, nodeModules);
+    }
+
+    // CRITICAL package should be quarantined (gone from node_modules)
+    expect(existsSync(join(nodeModules, 'plain-crypto-js'))).toBe(false);
+
+    // HIGH package should still be present (auto-protect only warns)
+    expect(existsSync(join(nodeModules, 'axois'))).toBe(true);
+
+    // Verify the findings themselves
+    expect(criticals.length).toBeGreaterThanOrEqual(1);
+    expect(highs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('does not act on MEDIUM findings in auto-protect mode', () => {
+    // MEDIUM: single suspicious pattern
+    makePackage(nodeModules, 'slightly-sus', {
+      name: 'slightly-sus',
+      version: '1.0.0',
+      scripts: {
+        preinstall: 'node -e "require(\'child_process\')"',
+      },
+    });
+
+    const result = scanDependencies({ nodeModulesPath: nodeModules });
+    const criticals = result.findings.filter(f => f.severity === 'critical');
+
+    // No CRITICAL → nothing quarantined
+    for (const finding of criticals) {
+      quarantinePackage(finding, nodeModules);
+    }
+
+    // MEDIUM package still present
+    expect(existsSync(join(nodeModules, 'slightly-sus'))).toBe(true);
   });
 });

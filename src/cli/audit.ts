@@ -12,6 +12,9 @@
  *   npx shieldcortex audit --deps           # Also scan ./node_modules for malicious packages
  *   npx shieldcortex audit --deps-global    # Also scan global npm node_modules
  *   npx shieldcortex audit --deps-path /p   # Also scan specific node_modules path
+ *   npx shieldcortex audit --deps --quarantine         # Scan + quarantine CRITICAL/HIGH
+ *   npx shieldcortex audit --deps --clean --force      # Scan + permanently delete CRITICAL
+ *   npx shieldcortex audit --deps --auto-protect       # Scan + auto-quarantine CRITICAL
  */
 
 import {
@@ -21,6 +24,8 @@ import {
   scanRulesFiles,
   scanDependencies,
   resolveNodeModulesPath,
+  quarantinePackage,
+  cleanPackage,
   formatTerminalReport,
   formatMarkdownReport,
   formatJsonReport,
@@ -37,6 +42,14 @@ interface AuditOptions {
   depsMode: 'local' | 'global' | 'path';
   /** Custom path for --deps-path */
   depsPath?: string;
+  /** Move CRITICAL + HIGH packages to quarantine */
+  quarantine: boolean;
+  /** Permanently delete CRITICAL packages */
+  clean: boolean;
+  /** Scan + quarantine CRITICAL automatically, warn about HIGH */
+  autoProtect: boolean;
+  /** Skip confirmation prompt for --clean */
+  force: boolean;
 }
 
 function parseAuditArgs(args: string[]): AuditOptions {
@@ -45,6 +58,10 @@ function parseAuditArgs(args: string[]): AuditOptions {
     ci: false,
     deps: false,
     depsMode: 'local',
+    quarantine: false,
+    clean: false,
+    autoProtect: false,
+    force: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -70,6 +87,17 @@ function parseAuditArgs(args: string[]): AuditOptions {
         options.depsPath = next;
         i++; // consume path argument
       }
+    } else if (arg === '--quarantine') {
+      options.quarantine = true;
+      options.deps = true;
+    } else if (arg === '--clean') {
+      options.clean = true;
+      options.deps = true;
+    } else if (arg === '--auto-protect') {
+      options.autoProtect = true;
+      options.deps = true;
+    } else if (arg === '--force') {
+      options.force = true;
     }
   }
 
@@ -82,6 +110,16 @@ function parseAuditArgs(args: string[]): AuditOptions {
 export async function handleAuditCommand(args: string[]): Promise<void> {
   const options = parseAuditArgs(args);
   const start = Date.now();
+
+  // --clean without --force: print warning and exit
+  if (options.clean && !options.force && !options.ci) {
+    console.error(
+      '\x1b[33m⚠  Are you sure? Use --force to confirm.\x1b[0m\n' +
+      '   --clean permanently deletes CRITICAL packages from node_modules.\n' +
+      '   Run: shieldcortex audit --deps --clean --force',
+    );
+    process.exit(1);
+  }
 
   // Get version from package.json
   let version = 'unknown';
@@ -132,8 +170,9 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
   if (options.format === 'terminal') process.stdout.write(`\r  \x1b[32m[4/${totalSteps}]\x1b[0m Rules files      \x1b[2m${rulesResult.durationMs}ms\x1b[0m\n`);
 
   // Optional: dependency scan
+  let nodeModulesPath = '';
   if (options.deps) {
-    const nodeModulesPath = resolveNodeModulesPath(options.depsMode, options.depsPath);
+    nodeModulesPath = resolveNodeModulesPath(options.depsMode, options.depsPath);
     if (options.format === 'terminal') {
       process.stdout.write(`  \x1b[2m[5/${totalSteps}] Dependencies (${nodeModulesPath})...\x1b[0m`);
     }
@@ -187,6 +226,80 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
     default:
       console.log(formatTerminalReport(report));
       break;
+  }
+
+  // ── Post-scan actions ────────────────────────────────────────────────────
+
+  const depFindings = allFindings.filter(f => f.scanner === 'dependency');
+
+  if (options.quarantine && depFindings.length > 0) {
+    const eligible = depFindings.filter(
+      f => f.severity === 'critical' || f.severity === 'high',
+    );
+    if (eligible.length === 0) {
+      if (options.format === 'terminal') {
+        console.log('\n\x1b[32m✓  No CRITICAL or HIGH dependency findings to quarantine.\x1b[0m');
+      }
+    } else {
+      if (options.format === 'terminal') {
+        console.log(`\n\x1b[33m⚠  Quarantining ${eligible.length} package(s)...\x1b[0m`);
+      }
+      for (const finding of eligible) {
+        const dest = quarantinePackage(finding, nodeModulesPath);
+        if (dest && options.format === 'terminal') {
+          console.log(`  \x1b[31m✗\x1b[0m  Quarantined: ${finding.title}`);
+          console.log(`       → ${dest}`);
+        }
+      }
+    }
+  }
+
+  if (options.clean && depFindings.length > 0) {
+    const criticals = depFindings.filter(f => f.severity === 'critical');
+    if (criticals.length === 0) {
+      if (options.format === 'terminal') {
+        console.log('\n\x1b[32m✓  No CRITICAL dependency findings to clean.\x1b[0m');
+      }
+    } else {
+      if (options.format === 'terminal') {
+        console.log(`\n\x1b[31m🗑  Cleaning ${criticals.length} CRITICAL package(s)...\x1b[0m`);
+      }
+      for (const finding of criticals) {
+        const deleted = cleanPackage(finding, nodeModulesPath);
+        if (deleted && options.format === 'terminal') {
+          console.log(`  \x1b[31m✗\x1b[0m  Deleted: ${deleted}`);
+        }
+      }
+    }
+  }
+
+  if (options.autoProtect && depFindings.length > 0) {
+    const criticals = depFindings.filter(f => f.severity === 'critical');
+    const highs = depFindings.filter(f => f.severity === 'high');
+
+    if (criticals.length > 0) {
+      if (options.format === 'terminal') {
+        console.log(`\n\x1b[33m⚠  Auto-protect: quarantining ${criticals.length} CRITICAL package(s)...\x1b[0m`);
+      }
+      for (const finding of criticals) {
+        const dest = quarantinePackage(finding, nodeModulesPath);
+        if (dest && options.format === 'terminal') {
+          console.log(`  \x1b[31m✗\x1b[0m  Quarantined: ${finding.title}`);
+          console.log(`       → ${dest}`);
+        }
+      }
+    }
+
+    if (highs.length > 0 && options.format === 'terminal') {
+      console.log(`\n\x1b[33m⚠  Auto-protect: ${highs.length} HIGH finding(s) detected (manual review required):\x1b[0m`);
+      for (const finding of highs) {
+        console.log(`  \x1b[33m!\x1b[0m  ${finding.title}`);
+      }
+    }
+
+    if (criticals.length === 0 && highs.length === 0 && options.format === 'terminal') {
+      console.log('\n\x1b[32m✓  Auto-protect: no CRITICAL or HIGH dependency findings.\x1b[0m');
+    }
   }
 
   // Exit code
