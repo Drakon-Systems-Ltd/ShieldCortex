@@ -17,6 +17,7 @@
  *   npx shieldcortex audit --deps --auto-protect       # Scan + auto-quarantine CRITICAL
  */
 
+import { requireFeature, FeatureGatedError } from '../license/gate.js';
 import {
   scanMemories,
   scanMcpConfigs,
@@ -233,6 +234,10 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
   const depFindings = allFindings.filter(f => f.scanner === 'dependency');
 
   if (options.quarantine && depFindings.length > 0) {
+    try { requireFeature('deps_quarantine'); } catch (e) {
+      if (e instanceof FeatureGatedError) { console.error('\n' + e.message); process.exit(1); }
+      throw e;
+    }
     const eligible = depFindings.filter(
       f => f.severity === 'critical' || f.severity === 'high',
     );
@@ -255,6 +260,10 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
   }
 
   if (options.clean && depFindings.length > 0) {
+    try { requireFeature('deps_clean'); } catch (e) {
+      if (e instanceof FeatureGatedError) { console.error('\n' + e.message); process.exit(1); }
+      throw e;
+    }
     const criticals = depFindings.filter(f => f.severity === 'critical');
     if (criticals.length === 0) {
       if (options.format === 'terminal') {
@@ -274,6 +283,10 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
   }
 
   if (options.autoProtect && depFindings.length > 0) {
+    try { requireFeature('deps_auto_protect'); } catch (e) {
+      if (e instanceof FeatureGatedError) { console.error('\n' + e.message); process.exit(1); }
+      throw e;
+    }
     const criticals = depFindings.filter(f => f.severity === 'critical');
     const highs = depFindings.filter(f => f.severity === 'high');
 
