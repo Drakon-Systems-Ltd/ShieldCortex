@@ -31,7 +31,7 @@ shieldcortex quickstart
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -80,6 +80,12 @@ Your agent does not just store text. It gives you operator-grade visibility into
 - ⏳ **Natural decay** — old, unaccessed memories fade over time; important ones persist — just like human memory
 - ⚡ **Contradiction detection** — new memories that conflict with existing ones get flagged before they cause confusion
 - 🧹 **Auto-consolidation** — duplicate and overlapping memories merge automatically, keeping your memory store clean
+- 🏷️ **Memory type taxonomy** — every memory gets a `memoryPurpose`: `user`, `feedback`, `project`, or `reference`. Categorises by purpose, not just topic
+- ⏰ **Staleness scoring** — freshness awareness via `memoryAgeDays` and `memoryFreshnessScore`. Memories older than 2 days get staleness warnings appended during recall
+- 🔀 **Hybrid recall with LLM reranking** — optional LLM-powered reranking after embedding-based retrieval. Configurable model and candidate limits for precision-critical workflows
+- 🌐 **Memory scope** — `memoryScope: 'private' | 'team'`. Private memories stay local; team memories are shared cross-agent knowledge
+- ✅ **Positive feedback capture** — Cortex Confirmations track what worked alongside what failed. CLI: `shieldcortex cortex confirm`
+- 🧹 **Memory save filtering** — auto-filters derivable information (file paths, git refs, imports, env vars, shell commands) from being saved as memories
 - 📁 **Project isolation** — memories scoped per project by default, with cross-project queries when you need them
 - 🎞️ **Incident replay** — reconstruct memory and defence timelines from audit, quarantine, and retained event history
 - 🔔 **Webhooks** — POST notifications on memory events, HMAC-SHA256 signed
@@ -100,6 +106,16 @@ Every memory write passes through 6 defence layers before it's stored:
 ```
 
 Blocked content goes to quarantine for review — nothing is silently dropped.
+
+**Dependency Scanner** (Pro) — detect malicious packages, typosquats, and suspicious install scripts in your project dependencies:
+
+```bash
+shieldcortex audit
+```
+
+Actions: `quarantine` flagged packages, `clean` confirmed threats, or `auto-protect` to block future installs.
+
+**Docker Install Safety** — auto-detects container environments and skips plugin install to avoid gateway crashes. No configuration needed.
 
 <br>
 
@@ -310,6 +326,30 @@ Iron Dome profiles, but dashboard write actions still go through the same
 announcement and confirmation tiers as CLI or MCP actions. High-risk REST
 mutations like config changes, SQL writes, quarantine review, and memory
 deletes are no longer advisory-only.
+
+<br>
+
+## 🌙 Dream Mode — Background Consolidation
+
+Offline memory maintenance that merges near-duplicates, archives stale memories, and detects contradictions — like defragmenting your agent's brain.
+
+```bash
+shieldcortex consolidate
+```
+
+Dream Mode runs three passes:
+
+1. **Merge** — finds near-duplicate memories and combines them into a single canonical entry
+2. **Archive** — identifies stale memories that haven't been accessed or reinforced, and moves them out of active recall
+3. **Contradict** — surfaces memory pairs that conflict so you can resolve them before they cause confusion
+
+Also available as an API call for programmatic use:
+
+```bash
+curl -X POST http://localhost:3001/api/consolidate
+```
+
+Schedule it nightly, run it before important sessions, or let the auto-consolidation timer handle it. Either way, your memory store stays lean and contradiction-free.
 
 <br>
 
@@ -542,6 +582,9 @@ openclaw hooks install shieldcortex
 openclaw plugins install @drakon-systems/shieldcortex-realtime
 shieldcortex openclaw status      # Check OpenClaw hook status
 shieldcortex codex install        # Connect Codex CLI / VS Code
+shieldcortex consolidate          # Run Dream Mode (merge, archive, contradict)
+shieldcortex audit                # Dependency scanner (Pro)
+shieldcortex cortex confirm       # Capture positive feedback
 shieldcortex config --key value   # Update configuration
 ```
 
