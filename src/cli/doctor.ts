@@ -215,12 +215,14 @@ async function checkHooks(): Promise<CheckResult> {
     for (const name of hookNames) {
       const hookConfig = hooks[name];
       if (hookConfig) {
-        // Check if the hook command/script exists
-        const commands: string[] = Array.isArray(hookConfig)
-          ? hookConfig.map((h: { command?: string }) => h.command).filter(Boolean)
-          : hookConfig.command ? [hookConfig.command] : [];
-
-        const hasShieldCortex = commands.some((cmd: string) => cmd.includes('shieldcortex'));
+        // Check if any hook command references shieldcortex.
+        // Settings format: [{ hooks: [{ type, command, timeout }] }]
+        const hasShieldCortex = Array.isArray(hookConfig) && hookConfig.some(
+          (entry: { hooks?: Array<{ command?: string }> }) =>
+            Array.isArray(entry?.hooks) && entry.hooks.some(
+              (h) => typeof h?.command === 'string' && h.command.includes('shieldcortex'),
+            ),
+        );
         if (hasShieldCortex) {
           installed++;
         } else {
