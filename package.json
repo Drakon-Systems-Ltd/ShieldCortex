@@ -38,9 +38,9 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
-    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true }); fs.rmSync('plugins/openclaw/dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && tsc -p tsconfig.openclaw-plugin.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/",
+    "build:ts": "node -e \"fs.rmSync('dist', { recursive: true, force: true }); fs.rmSync('plugins/openclaw/dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && tsc -p tsconfig.openclaw-plugin.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/",
     "build:dashboard": "cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true) && cd .. && node scripts/prune-dashboard-standalone.mjs",
-    "build:all": "npm run build && npm run build:dashboard",
+    "build": "npm run build:ts && npm run build:dashboard",
     "start": "node dist/index.js",
     "start:api": "node dist/index.js --mode api",
     "start:dashboard": "node dist/index.js --dashboard",
@@ -52,7 +52,7 @@
     "test:watch": "node scripts/run-jest.mjs --watch",
     "test:coverage": "node scripts/run-jest.mjs --coverage",
     "audit:security": "npm audit --audit-level=moderate",
-    "prepublishOnly": "npm run build:all"
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "ai-memory",
