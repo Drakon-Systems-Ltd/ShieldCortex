@@ -9,7 +9,7 @@
  *   - SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1 is set
  *   - Running as a local/dev install (npm_config_global !== 'true')
  */
-import { existsSync, copyFileSync, mkdirSync, readdirSync } from 'fs';
+import { existsSync, copyFileSync, mkdirSync, readdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { spawnSync } from 'child_process';
@@ -28,8 +28,8 @@ function isDockerEnvironment() {
   if (process.env.DOCKER === 'true' || process.env.DOCKER === '1') return true;
   if (process.env.container === 'docker') return true;
   try {
-    const { readFileSync } = await import('fs').catch(() => ({ readFileSync: null }));
-    // Sync fallback — import() can't be used synchronously here
+    const cgroup = readFileSync('/proc/1/cgroup', 'utf8');
+    if (cgroup.includes('docker') || cgroup.includes('kubepods') || cgroup.includes('containerd')) return true;
   } catch { /* ignore */ }
   return false;
 }
