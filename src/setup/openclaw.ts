@@ -30,6 +30,31 @@ const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INST
 
 type PluginInstallMode = 'native-package' | 'native-link' | 'trusted-local-copy' | 'untrusted-local-copy' | 'skipped';
 
+// ==================== Docker/Container Detection ====================
+
+/**
+ * Detect whether ShieldCortex is running inside a Docker container
+ * or similar isolated environment (Umbrel, Unraid, NixOS sandbox, etc.).
+ *
+ * In these environments, OpenClaw hook/plugin installation may crash or
+ * produce broken state. We warn and skip by default.
+ */
+export function isDockerEnvironment(): boolean {
+  // Standard Docker marker file
+  try {
+    if (fs.existsSync('/.dockerenv')) return true;
+  } catch { /* ignore */ }
+  // Explicit env overrides
+  if (process.env.DOCKER === 'true' || process.env.DOCKER === '1') return true;
+  if (process.env.container === 'docker') return true;
+  // /proc/1/cgroup contains "docker" or "kubepods" on containerised systems
+  try {
+    const cgroup = fs.readFileSync('/proc/1/cgroup', 'utf-8');
+    if (/docker|kubepods|containerd/i.test(cgroup)) return true;
+  } catch { /* not Linux or not accessible */ }
+  return false;
+}
+
 /**
  * Resolve the real user's home directory.
  *
@@ -413,7 +438,29 @@ function isPluginInLoadPaths(): boolean {
   }
 }
 
-function installPlugin(): PluginInstallMode {
+/**
+ * Install the real-time plugin.
+ * In Docker environments, skip with a warning — plugin install can crash
+ * the gateway in containers where filesystem permissions differ.
+ *
+ * @param options.noPlugins  Skip plugin installation entirely (--no-plugins flag)
+ */
+function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode {
+  if (options.noPlugins) {
+    console.log('  Skipping plugin install (--no-plugins flag).');
+    return 'skipped';
+  }
+
+  // Docker / container environments: warn and skip
+  if (isDockerEnvironment()) {
+    console.warn('  ⚠  Docker/container environment detected.');
+    console.warn('  Skipping real-time plugin install to avoid gateway crash.');
+    console.warn('  To install manually after confirming OpenClaw support:');
+    console.warn('    DOCKER=false shieldcortex openclaw install');
+    console.warn('  Or suppress this warning: shieldcortex openclaw install --no-plugins');
+    return 'skipped';
+  }
+
   const nativeInstall = tryNativeOpenClawPluginInstall();
   if (nativeInstall) {
     return nativeInstall;
@@ -524,7 +571,6 @@ function uninstallPlugin(): boolean {
   if (!extensionsDir) return false;
 
   const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
-  const indexPath = path.join(destDir, 'index.js');
   if (!fs.existsSync(destDir)) return false;
 
   try {
@@ -590,7 +636,17 @@ function localPluginTrustStatus(pluginPath: string | undefined): 'trusted' | 'un
 
 // ==================== Commands ====================
 
-export async function installOpenClawHook(): Promise<void> {
+/**
+ * Install options for `shieldcortex openclaw install`.
+ */
+export interface OpenClawInstallOptions {
+  /** Skip hook installation (--no-hooks flag) */
+  noHooks?: boolean;
+  /** Skip plugin installation (--no-plugins flag) */
+  noPlugins?: boolean;
+}
+
+export async function installOpenClawHook(options: OpenClawInstallOptions = {}): Promise<void> {
   const hooksDirs = findAllHooksDirs();
 
   if (hooksDirs.length === 0) {
@@ -620,45 +676,60 @@ export async function installOpenClawHook(): Promise<void> {
   // Clean up legacy plugin entry that caused config validation errors
   cleanupLegacyPlugin();
 
-  // Install to ALL detected hook directories
-  let installed = 0;
-  let migratedLegacy = 0;
-  for (const hooksDir of hooksDirs) {
-    const destDir = preferredHookDir(hooksDir);
-    try {
-      const legacyDirsBeforeInstall = detectLegacyHookVariants(hooksDir);
-      copyHookFiles(HOOK_SOURCE, destDir);
-
-      console.log(`Installed cortex-memory hook to ${destDir}`);
-      if (legacyDirsBeforeInstall.length > 0) {
-        console.log(`Detected legacy OpenClaw hook layout in ${hooksDir} — migrating to ${destDir}`);
-      }
-      for (const removedDir of removeLegacyHookVariants(hooksDir)) {
-        console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
-        migratedLegacy++;
-      }
-      installed++;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'EACCES' || code === 'EPERM') {
-        console.warn(`  Skipped ${destDir} (permission denied)`);
-      } else {
-        throw err;
-      }
-    }
+  // Docker / container: warn about environment
+  if (isDockerEnvironment()) {
+    console.warn('⚠  Docker/container environment detected.');
+    console.warn('   Hook and plugin installation may behave differently in containers.');
+    console.warn('   Use --no-plugins to skip plugin install, or --no-hooks to skip hooks.');
+    console.warn('');
   }
 
-  if (installed === 0) {
-    console.error('Could not install to any hook directory (permission denied).');
-    console.log('Try one of these:');
-    console.log('  sudo "$(command -v shieldcortex)" openclaw install');
-    console.log('  sudo chown -R "$USER":"$USER" ~/.openclaw ~/.claude');
-    console.log('  shieldcortex openclaw install');
-    process.exit(1);
+  let installed = 0;
+  let migratedLegacy = 0;
+
+  if (!options.noHooks) {
+    // Install to ALL detected hook directories
+    for (const hooksDir of hooksDirs) {
+      const destDir = preferredHookDir(hooksDir);
+      try {
+        const legacyDirsBeforeInstall = detectLegacyHookVariants(hooksDir);
+        copyHookFiles(HOOK_SOURCE, destDir);
+
+        console.log(`Installed cortex-memory hook to ${destDir}`);
+        if (legacyDirsBeforeInstall.length > 0) {
+          console.log(`Detected legacy OpenClaw hook layout in ${hooksDir} — migrating to ${destDir}`);
+        }
+        for (const removedDir of removeLegacyHookVariants(hooksDir)) {
+          console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
+          migratedLegacy++;
+        }
+        installed++;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'EACCES' || code === 'EPERM') {
+          console.warn(`  Skipped ${destDir} (permission denied)`);
+        } else {
+          // Never throw — warn gracefully
+          console.warn(`  Warning: Could not install hook to ${destDir}: ${(err as Error).message}`);
+        }
+      }
+    }
+
+    if (installed === 0) {
+      console.warn('Could not install hooks to any directory (permission denied or error).');
+      console.log('Try one of these:');
+      console.log('  sudo "$(command -v shieldcortex)" openclaw install');
+      console.log('  sudo chown -R "$USER":"$USER" ~/.openclaw ~/.claude');
+      console.log('  shieldcortex openclaw install --no-hooks  # skip hook install');
+      // Do not exit(1) — allow plugin install to continue
+    }
+  } else {
+    console.log('Skipping hook installation (--no-hooks flag).');
+    installed = hooksDirs.length; // pretend success so plugin install proceeds
   }
 
   // Install the real-time plugin to the extensions directory
-  const pluginInstallMode = installPlugin();
+  const pluginInstallMode = installPlugin({ noPlugins: options.noPlugins });
 
   console.log('');
   if (migratedLegacy > 0) {
@@ -666,8 +737,16 @@ export async function installOpenClawHook(): Promise<void> {
     console.log('');
   }
   console.log('What was installed:');
-  console.log('  • cortex-memory hook (memory injection + "remember this:" trigger)');
-  console.log('    Auto-save is optional: shieldcortex config --openclaw-auto-memory true');
+  if (!options.noHooks) {
+    if (installed > 0) {
+      console.log('  • cortex-memory hook (memory injection + "remember this:" trigger)');
+      console.log('    Auto-save is optional: shieldcortex config --openclaw-auto-memory true');
+    } else {
+      console.log('  • cortex-memory hook: skipped (see warnings above)');
+    }
+  } else {
+    console.log('  • cortex-memory hook: skipped (--no-hooks)');
+  }
   if (pluginInstallMode !== 'skipped') {
     console.log('  • shieldcortex-realtime plugin (real-time LLM input scanning + optional output extraction)');
     if (pluginInstallMode === 'native-package') {
@@ -679,6 +758,8 @@ export async function installOpenClawHook(): Promise<void> {
     } else if (pluginInstallMode === 'untrusted-local-copy') {
       console.log('    Installed as a local fallback, but trust pinning failed.');
     }
+  } else {
+    console.log('  • shieldcortex-realtime plugin: skipped');
   }
   console.log('');
   console.log('Native OpenClaw install is also supported:');
@@ -766,10 +847,13 @@ export async function openClawHookStatus(): Promise<void> {
   console.log(`  Real-time plugin: installed (${plugin.path}) — ${trustSuffix}`);
 }
 
-export async function handleOpenClawCommand(subcommand: string): Promise<void> {
+export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
+  const noHooks = extraArgs.includes('--no-hooks');
+  const noPlugins = extraArgs.includes('--no-plugins');
+
   switch (subcommand) {
     case 'install':
-      await installOpenClawHook();
+      await installOpenClawHook({ noHooks, noPlugins });
       break;
     case 'uninstall':
       await uninstallOpenClawHook();
@@ -779,6 +863,10 @@ export async function handleOpenClawCommand(subcommand: string): Promise<void> {
       break;
     default:
       console.log('Usage: shieldcortex openclaw <install|uninstall|status>');
+      console.log('');
+      console.log('Install options:');
+      console.log('  --no-hooks     Skip hook installation (useful in Docker/CI)');
+      console.log('  --no-plugins   Skip plugin installation (useful in Docker/CI)');
       process.exit(1);
   }
 }

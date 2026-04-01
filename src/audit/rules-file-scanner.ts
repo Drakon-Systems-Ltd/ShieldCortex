@@ -18,6 +18,31 @@ import { scanSkill, discoverSkillFiles } from '../defence/skill-scanner/index.js
 
 const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/rules-file-backdoor';
 
+// ── ShieldCortex Own-Hook Whitelist ──
+
+/**
+ * Paths belonging to ShieldCortex itself.
+ * These are legitimate hooks/plugins that should never be flagged by the
+ * audit scanner — doing so produces false HIGH/MEDIUM findings (#14).
+ */
+const SHIELDCORTEX_OWN_PATHS: string[] = [
+  'cortex-memory/HOOK.md',
+  'cortex-memory/handler.ts',
+  'cortex-memory/handler.js',
+  'shieldcortex-realtime',
+];
+
+/**
+ * Return true if this file belongs to ShieldCortex's own hook/plugin set
+ * and should be excluded from audit findings.
+ */
+function isShieldCortexOwnPath(filePath: string): boolean {
+  const normalised = filePath.replace(/\\/g, '/');
+  return SHIELDCORTEX_OWN_PATHS.some(p => normalised.includes(p));
+}
+
+
+
 // ── Unicode Backdoor Detection ──
 
 /** Invisible Unicode characters used in the "Rules File Backdoor" attack. */
@@ -187,6 +212,8 @@ export function scanRulesFiles(): ScannerResult {
 
   const allFindings: AuditFinding[] = [];
   for (const file of allFiles) {
+    // Skip ShieldCortex's own hook/plugin files to avoid false positives (#14)
+    if (isShieldCortexOwnPath(file)) continue;
     allFindings.push(...scanRulesFile(file));
   }
 

@@ -17,6 +17,26 @@ import type { DefenceSource } from '../defence/types.js';
 
 const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/memory-poisoning';
 
+// ── ShieldCortex Own-Hook Whitelist ──
+
+/**
+ * Paths belonging to ShieldCortex itself (hooks, plugin manifests, etc.).
+ * These should never produce false audit findings (#14).
+ */
+const SHIELDCORTEX_OWN_PATHS: string[] = [
+  'cortex-memory/HOOK.md',
+  'cortex-memory/handler.ts',
+  'cortex-memory/handler.js',
+  'shieldcortex-realtime',
+];
+
+function isShieldCortexOwnPath(filePath: string): boolean {
+  const normalised = filePath.replace(/\\/g, '/');
+  return SHIELDCORTEX_OWN_PATHS.some(p => normalised.includes(p));
+}
+
+
+
 /** Maximum file size to scan (1 MB) */
 const MAX_FILE_SIZE = 1024 * 1024;
 
@@ -208,6 +228,8 @@ export function scanMemories(): ScannerResult {
 
   const allFindings: AuditFinding[] = [];
   for (const file of files) {
+    // Skip ShieldCortex's own hook/plugin files to avoid false positives (#14)
+    if (isShieldCortexOwnPath(file)) continue;
     allFindings.push(...scanMemoryFile(file));
   }
 

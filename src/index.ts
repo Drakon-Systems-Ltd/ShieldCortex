@@ -595,7 +595,7 @@ ${bold}DOCS${reset}
 
   // Handle "openclaw" subcommand (backward compat: "clawdbot" also accepted)
   if (process.argv[2] === 'openclaw' || process.argv[2] === 'clawdbot') {
-    await handleOpenClawCommand(process.argv[3] || '');
+    await handleOpenClawCommand(process.argv[3] || '', process.argv.slice(4));
     return;
   }
 
