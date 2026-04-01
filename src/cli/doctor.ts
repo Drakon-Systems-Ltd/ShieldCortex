@@ -125,7 +125,7 @@ async function checkSchema(): Promise<CheckResult> {
       const columns = db.pragma('table_info(memories)') as Array<{ name: string }>;
       const columnNames = new Set(columns.map((c: { name: string }) => c.name));
 
-      const required = ['decayed_score', 'graph_extraction_version', 'sensitivity'];
+      const required = ['decayed_score', 'graph_extraction_version', 'sensitivity_level'];
       const missing = required.filter(col => !columnNames.has(col));
 
       if (missing.length === 0) {
