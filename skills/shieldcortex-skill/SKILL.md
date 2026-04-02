@@ -15,7 +15,7 @@ metadata:
     npm: https://www.npmjs.com/package/shieldcortex
     emoji: "\U0001F6E1\uFE0F"
   author: Drakon Systems
-  version: 4.4.0
+  version: 4.4.1
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
 ---
