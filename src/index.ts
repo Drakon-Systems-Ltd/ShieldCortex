@@ -44,6 +44,9 @@
  *   shieldcortex codex install           # Configure MCP server for Codex CLI + VS Code extension
  *   shieldcortex codex uninstall         # Remove Codex MCP configuration
  *   shieldcortex codex status            # Check Codex MCP configuration
+ *   shieldcortex xray <target>           # Inspect package/file/plugin for hidden risk
+ *   shieldcortex xray <path> --deep      # Deep scan (Pro) with full analysis
+ *   shieldcortex xray <package> --json   # JSON output
  *   shieldcortex cortex capture      # Log a mistake with rule extraction
  *   shieldcortex cortex preflight    # Pre-flight check before a task
  *   shieldcortex cortex review       # Weekly pattern review
@@ -855,6 +858,13 @@ ${bold}DOCS${reset}
     process.exit(0);
   }
 
+  // Handle "xray" subcommand — package/file/plugin risk inspector
+  if (process.argv[2] === 'xray') {
+    const { handleXRayCommand } = await import('./xray/index.js');
+    await handleXRayCommand(process.argv.slice(3));
+    process.exit(0);
+  }
+
   // Handle "cortex" subcommand (Pro tier — mistake learning)
   if (process.argv[2] === 'cortex') {
     const { handleCortexCommand } = await import('./cortex/cli.js');
@@ -868,7 +878,7 @@ ${bold}DOCS${reset}
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
-    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate',
+    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {

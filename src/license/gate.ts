@@ -29,7 +29,8 @@ export type GatedFeature =
   | 'memory_scopes'
   | 'dream_mode'
   | 'llm_reranking'
-  | 'positive_feedback';
+  | 'positive_feedback'
+  | 'xray_deep';
 
 const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
   custom_injection_patterns: 'pro',
@@ -50,6 +51,7 @@ const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
   dream_mode: 'pro',
   llm_reranking: 'pro',
   positive_feedback: 'pro',
+  xray_deep: 'pro',
 };
 
 const FEATURE_DESCRIPTIONS: Record<GatedFeature, string> = {
@@ -71,6 +73,7 @@ const FEATURE_DESCRIPTIONS: Record<GatedFeature, string> = {
   dream_mode: 'Background memory consolidation — merge duplicates, archive stale, detect contradictions.',
   llm_reranking: 'LLM-powered memory reranking for precision recall.',
   positive_feedback: 'Capture what worked, not just what failed — learn from success.',
+  xray_deep: 'Deep X-Ray scanning: npm registry analysis, binary file inspection, dependency graph risk, and AI-directive detection in metadata and filenames.',
 };
 
 // ── Error class ──────────────────────────────────────────
