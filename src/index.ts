@@ -293,12 +293,12 @@ function startDashboard(): ChildProcess {
     });
   } else {
     // Fall back to npm run start (local development)
-    // Use explicit shell path for macOS Tahoe compatibility (no /bin/sh)
-    const shellPath = process.env.SHELL || '/bin/zsh';
-    dashboard = spawn('npm', ['run', 'start'], {
+    // Don't use shell: true — it fails on macOS Tahoe when /bin/zsh isn't accessible.
+    // Instead, find the npm binary path and spawn it directly.
+    const npmPath = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    dashboard = spawn(npmPath, ['run', 'start'], {
       cwd: dashboardDir,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: shellPath,
     });
   }
 
