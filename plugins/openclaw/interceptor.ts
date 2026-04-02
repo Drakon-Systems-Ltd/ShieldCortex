@@ -258,10 +258,10 @@ function xrayMemoryGuard(content: string, title?: string): XRayGuardResult {
     }
   }
 
-  // Score: 100 - 25 per critical finding
-  const score = Math.max(0, 100 - findings.length * 25);
+  // Score: 100 - 60 per critical finding (single critical = blocked)
+  const score = Math.max(0, 100 - findings.length * 60);
   const riskLevel = score >= 80 ? 'SAFE' : score >= 60 ? 'LOW' : score >= 40 ? 'MEDIUM' : score >= 20 ? 'HIGH' : 'CRITICAL';
-  return { allowed: score >= 40, findings, riskLevel };
+  return { allowed: score >= 60, findings, riskLevel };
 }
 
 // --- Interceptor Factory ---
@@ -383,13 +383,19 @@ export function createInterceptor(
 
     // action === 'require_approval'
     if (typeof context.requireApproval !== 'function') {
-      log.warn(`[shieldcortex] ⚠️ requireApproval not available — falling back to warn for ${severity} risk in ${context.toolName}`);
+      // requireApproval unavailable (pre-v2026.3.28) — apply failurePolicy, not blanket allow
+      const failAction = config.failurePolicy[severity];
+      log.warn(`[shieldcortex] ⚠️ requireApproval not available for ${severity} risk in ${context.toolName} — failure policy: ${failAction}`);
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'warn', outcome: 'warned',
+        threats, anomalyScore, action: 'require_approval',
+        outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
       emitAudit(entry);
+      if (failAction === 'deny') {
+        throw new Error(`ShieldCortex: tool call blocked — requireApproval unavailable, failure policy: deny`);
+      }
       return;
     }
 

@@ -332,5 +332,57 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
     }
   }
 
+  // Deep mode: additional analysis (Pro feature)
+  if (deep && stat.size > 0) {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+
+      // Entropy analysis — detect packed/obfuscated code
+      if (CODE_EXTENSIONS.has(ext) || ext === '.js' || ext === '.mjs') {
+        const entropy = shannonEntropy(content);
+        if (entropy > 5.5) {
+          findings.push({
+            category: 'obfuscation',
+            title: `High entropy code (${entropy.toFixed(2)} bits/char)`,
+            description: 'File may contain obfuscated or packed code',
+            severity: 'medium',
+            file: filePath,
+          });
+        }
+      }
+
+      // Long single-line detection — common in minified/obfuscated code
+      const lines = content.split('\n');
+      const longLines = lines.filter(l => l.length > 2000);
+      if (longLines.length > 0 && lines.length < 10) {
+        findings.push({
+          category: 'obfuscation',
+          title: `Minified/packed code (${longLines.length} lines over 2000 chars)`,
+          description: 'File appears to contain minified or packed code which may hide malicious content',
+          severity: 'low',
+          file: filePath,
+        });
+      }
+    } catch {
+      // Can't read as text for deep analysis — skip
+    }
+  }
+
   return findings;
+}
+
+/** Shannon entropy of a string (bits per character). Higher = more random/compressed. */
+function shannonEntropy(str: string): number {
+  if (str.length === 0) return 0;
+  const freq = new Map<number, number>();
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    freq.set(c, (freq.get(c) ?? 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of freq.values()) {
+    const p = count / str.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
 }

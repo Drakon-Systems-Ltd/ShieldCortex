@@ -285,7 +285,7 @@ describe('Interceptor', () => {
       expect(approvalCallCount).toBe(1);
     });
 
-    it('should fall back to warn when requireApproval is unavailable', async () => {
+    it('should apply failurePolicy when requireApproval is unavailable (deny for high)', async () => {
       const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
       const warnings: string[] = [];
       const config = { ...DEFAULT_CONFIG, logger: { info: () => {}, warn: (m: string) => warnings.push(m) } };
@@ -296,7 +296,8 @@ describe('Interceptor', () => {
         toolName: 'remember',
         arguments: { title: 'test', content: 'suspicious' },
       };
-      await interceptor.handleToolCall(context);
+      // High severity + failurePolicy.high = 'deny' → should throw
+      await expect(interceptor.handleToolCall(context)).rejects.toThrow('requireApproval unavailable');
       expect(warnings.some(w => w.includes('requireApproval not available'))).toBe(true);
     });
 

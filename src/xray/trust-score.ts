@@ -9,10 +9,10 @@ import type { XRayFinding, XRayResult } from './types.js';
 // ── Penalty weights ─────────────────────────────────────────
 
 const SEVERITY_PENALTY: Record<XRayFinding['severity'], number> = {
-  critical: 25,
-  high: 15,
-  medium: 8,
-  low: 3,
+  critical: 60,
+  high: 35,
+  medium: 15,
+  low: 5,
   info: 0,
 };
 

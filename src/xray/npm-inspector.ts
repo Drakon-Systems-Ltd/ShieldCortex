@@ -145,7 +145,15 @@ function extractTarBuffer(buf: Buffer, outDir: string): void {
     const prefix = header.subarray(345, Math.min(prefixEnd, 500)).toString('utf-8');
 
     const fullName = prefix ? `${prefix}/${name}` : name;
-    const filePath = path.join(outDir, fullName);
+
+    // Path traversal protection: resolve and verify the target stays within outDir
+    const filePath = path.resolve(outDir, fullName);
+    const resolvedOutDir = path.resolve(outDir);
+    if (!filePath.startsWith(resolvedOutDir + path.sep) && filePath !== resolvedOutDir) {
+      // Malicious entry trying to escape extraction directory — skip it
+      offset += 512 + Math.ceil(size / 512) * 512;
+      continue;
+    }
 
     offset += 512; // Move past header
 

@@ -26,7 +26,7 @@ export interface MemoryGuardResult {
  * @param content - The memory content to scan
  * @param title - Optional title/name for the memory entry
  * @returns { allowed, findings, riskLevel }
- *   - allowed: true if trust score >= 40 (MEDIUM or better)
+ *   - allowed: true if trust score >= 60 (LOW risk or better)
  *   - findings: all detected X-Ray findings
  *   - riskLevel: SAFE | LOW | MEDIUM | HIGH | CRITICAL
  */
@@ -47,7 +47,7 @@ export function xrayMemoryContent(
   const { score, riskLevel } = calculateTrustScore(findings);
 
   return {
-    allowed: score >= 40,
+    allowed: score >= 60,
     findings,
     riskLevel,
   };

@@ -134,18 +134,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
 
   const target = positional[0];
 
-  // Watch mode — delegate to watchDirectory
-  if (watchMode) {
-    const resolved = path.resolve(target);
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
-      console.error(`--watch requires a directory target: ${resolved}`);
-      process.exit(1);
-    }
-    await watchDirectory(resolved, deep, { json: jsonOutput });
-    return;
-  }
-
-  // Deep scan requires Pro
+  // Deep scan requires Pro (checked before watch mode to prevent bypass)
   if (deep) {
     try {
       requireFeature('xray_deep');
@@ -155,11 +144,22 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
     }
   }
 
-  // Check free tier limit
+  // Check free tier limit (checked before watch mode to prevent bypass)
   if (!checkFreeLimit()) {
     console.error('Daily scan limit reached. Upgrade to Pro for unlimited scans.');
     console.error('  https://shieldcortex.ai/pricing');
     process.exit(1);
+  }
+
+  // Watch mode — delegate to watchDirectory (after license/usage gates)
+  if (watchMode) {
+    const resolved = path.resolve(target);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      console.error(`--watch requires a directory target: ${resolved}`);
+      process.exit(1);
+    }
+    await watchDirectory(resolved, deep, { json: jsonOutput });
+    return;
   }
 
   let result: XRayResult;
