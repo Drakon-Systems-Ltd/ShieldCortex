@@ -19,6 +19,7 @@ import { scanDirectory } from './dir-scanner.js';
 import { inspectNpmPackage } from './npm-inspector.js';
 import { calculateTrustScore } from './trust-score.js';
 import { formatXRayReport, formatXRayMarkdown } from './report.js';
+import { watchDirectory } from './watch.js';
 
 // ── Re-exports ──────────────────────────────────────────────
 
@@ -29,6 +30,10 @@ export { scanFile } from './file-scanner.js';
 export { scanDirectory } from './dir-scanner.js';
 export { inspectNpmPackage } from './npm-inspector.js';
 export { formatXRayReport, formatXRayMarkdown } from './report.js';
+export { watchDirectory } from './watch.js';
+export { handlePreinstallCheck } from './preinstall.js';
+export { xrayMemoryContent } from './memory-guard.js';
+export type { MemoryGuardResult } from './memory-guard.js';
 
 // ── Usage tracking ──────────────────────────────────────────
 
@@ -99,24 +104,46 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
   const deep = flags.has('--deep');
   const jsonOutput = flags.has('--json');
   const markdownOutput = flags.has('--markdown');
+  const ciMode = flags.has('--ci');
+  const watchMode = flags.has('--watch');
+  const ciThreshold = (() => {
+    const t = args.find(a => a.startsWith('--threshold='));
+    if (t) return t.split('=')[1]?.toUpperCase() || 'HIGH';
+    return 'HIGH';
+  })();
 
   // Show usage if no target
   if (positional.length === 0) {
-    console.error('Usage: shieldcortex xray <target> [--deep] [--json] [--markdown]');
+    console.error('Usage: shieldcortex xray <target> [--deep] [--json] [--markdown] [--watch]');
     console.error('');
     console.error('  target:     npm package name, local file path, or directory path');
     console.error('  --deep      Deep scan with full analysis (Pro)');
     console.error('  --json      Output JSON result');
     console.error('  --markdown  Output markdown report');
+    console.error('  --ci        CI/CD mode: exit code 1 if risk >= threshold');
+    console.error('  --threshold=LEVEL  Risk threshold for --ci (CRITICAL|HIGH|MEDIUM|LOW, default: HIGH)');
+    console.error('  --watch     Watch directory for changes and scan incrementally');
     console.error('');
     console.error('Examples:');
     console.error('  shieldcortex xray ./src/');
     console.error('  shieldcortex xray package.json');
     console.error('  shieldcortex xray lodash --deep');
+    console.error('  shieldcortex xray ./src --watch');
     process.exit(1);
   }
 
   const target = positional[0];
+
+  // Watch mode — delegate to watchDirectory
+  if (watchMode) {
+    const resolved = path.resolve(target);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      console.error(`--watch requires a directory target: ${resolved}`);
+      process.exit(1);
+    }
+    await watchDirectory(resolved, deep, { json: jsonOutput });
+    return;
+  }
 
   // Deep scan requires Pro
   if (deep) {
@@ -187,5 +214,16 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
     console.log(formatXRayMarkdown(result));
   } else {
     console.log(formatXRayReport(result));
+  }
+
+  // CI/CD gate: exit 1 if risk level meets or exceeds threshold
+  if (ciMode) {
+    const levels: Record<string, number> = { SAFE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+    const resultLevel = levels[result.riskLevel] ?? 0;
+    const thresholdLevel = levels[ciThreshold] ?? 3;
+    if (resultLevel >= thresholdLevel) {
+      process.exit(1);
+    }
+    process.exit(0);
   }
 }

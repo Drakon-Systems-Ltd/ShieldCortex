@@ -208,6 +208,62 @@ function writeAuditEntry(entry: InterceptAuditEntry): void {
   }
 }
 
+// --- X-Ray Inline Guard ---
+// Lightweight inline version of xrayMemoryContent for the plugin build boundary.
+// Detects AI directive injection patterns in memory content.
+
+const XRAY_AI_DIRECTIVE_PATTERNS: RegExp[] = [
+  /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)/i,
+  /disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|rules?)/i,
+  /override\s+(previous|prior|all)\s+(instructions?|rules?|constraints?)/i,
+  /you\s+are\s+now\s+(?:in\s+)?(?:developer|god|admin|root|unrestricted)\s+mode/i,
+  /enter\s+(?:developer|god|admin|DAN|jailbreak)\s+mode/i,
+  /(?:system|hidden|secret)\s*(?:prompt|instruction|directive)\s*:/i,
+  /\[SYSTEM\]\s*:/i,
+  /\[INST\]/i,
+  /<\|(?:system|user|assistant|im_start|im_end)\|>/i,
+  /(?:decode|execute|follow)\s+(?:the\s+)?hidden\s+(?:instructions?|payload|message)/i,
+  /(?:hidden|embedded|encoded)\s+(?:instructions?|directive|command)\s+(?:in|within|inside)/i,
+];
+
+const XRAY_FILENAME_PATTERNS: RegExp[] = [
+  /ignore_previous/i, /decode_hidden/i, /execute_instructions/i,
+  /override_previous/i, /developer_mode/i, /system_prompt/i,
+  /jailbreak/i, /\[SYSTEM\]/i, /\[INST\]/i,
+];
+
+interface XRayGuardResult {
+  allowed: boolean;
+  findings: Array<{ category: string; title: string; severity: string }>;
+  riskLevel: string;
+}
+
+function xrayMemoryGuard(content: string, title?: string): XRayGuardResult {
+  const findings: Array<{ category: string; title: string; severity: string }> = [];
+  const text = content.length > 50000 ? content.slice(0, 50000) : content;
+
+  for (const pattern of XRAY_AI_DIRECTIVE_PATTERNS) {
+    if (pattern.test(text)) {
+      findings.push({ category: 'ai-directive', title: 'AI directive injection detected', severity: 'critical' });
+      break;
+    }
+  }
+
+  if (title) {
+    for (const pattern of XRAY_FILENAME_PATTERNS) {
+      if (pattern.test(title)) {
+        findings.push({ category: 'ai-directive', title: 'AI directive in title', severity: 'critical' });
+        break;
+      }
+    }
+  }
+
+  // Score: 100 - 25 per critical finding
+  const score = Math.max(0, 100 - findings.length * 25);
+  const riskLevel = score >= 80 ? 'SAFE' : score >= 60 ? 'LOW' : score >= 40 ? 'MEDIUM' : score >= 20 ? 'HIGH' : 'CRITICAL';
+  return { allowed: score >= 40, findings, riskLevel };
+}
+
 // --- Interceptor Factory ---
 
 type PipelineRunner = (content: string, title: string, source: { type: string; identifier: string }) => {
@@ -251,6 +307,19 @@ export function createInterceptor(
     const { title, content } = extractContent(context.toolName, context.arguments);
     const fullContent = [title, content].filter(Boolean).join(' ');
     if (!fullContent.trim()) return;
+
+    // X-Ray content scan — fast, synchronous, no I/O
+    const xrayResult = xrayMemoryGuard(content, title || undefined);
+    if (!xrayResult.allowed) {
+      const xrayEntry: InterceptAuditEntry = {
+        type: 'intercept', tool: context.toolName, severity: 'critical',
+        firewallResult: 'BLOCK', threats: xrayResult.findings.map(f => f.category),
+        anomalyScore: 1, action: 'auto_deny', outcome: 'auto_denied',
+        preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+      };
+      emitAudit(xrayEntry);
+      throw new Error(`ShieldCortex: tool call blocked by X-Ray memory guard (risk: ${xrayResult.riskLevel}, findings: ${xrayResult.findings.length})`);
+    }
 
     let severity: Severity;
     let firewallResult: string;

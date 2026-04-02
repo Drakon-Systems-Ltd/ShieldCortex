@@ -865,6 +865,13 @@ ${bold}DOCS${reset}
     process.exit(0);
   }
 
+  // Handle "xray-preinstall" subcommand — lightweight pre-install safety check
+  if (process.argv[2] === 'xray-preinstall') {
+    const { handlePreinstallCheck } = await import('./xray/preinstall.js');
+    await handlePreinstallCheck();
+    process.exit(0);
+  }
+
   // Handle "cortex" subcommand (Pro tier — mistake learning)
   if (process.argv[2] === 'cortex') {
     const { handleCortexCommand } = await import('./cortex/cli.js');
@@ -878,7 +885,7 @@ ${bold}DOCS${reset}
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
-    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray',
+    'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
