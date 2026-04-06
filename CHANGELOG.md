@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.4] - 2026-04-06
+
+### Fixed
+- **Plugin install missing files** — extensions copy now includes `interceptor.js` and `intercept-ingest.js` alongside `index.js`. Also writes `package.json` with `"type": "module"` to prevent Node ESM reparsing warnings.
+
 ## [4.6.3] - 2026-04-06
 
 ### Fixed

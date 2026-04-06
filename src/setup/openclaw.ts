@@ -520,7 +520,7 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
   try {
     fs.mkdirSync(destDir, { recursive: true });
 
-    const requiredFiles = ['index.js', 'openclaw.plugin.json'];
+    const requiredFiles = ['index.js', 'interceptor.js', 'intercept-ingest.js', 'openclaw.plugin.json'];
     for (const file of requiredFiles) {
       const src = path.join(PLUGIN_SOURCE, file);
       const dest = path.join(destDir, file);
@@ -557,6 +557,12 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
     } catch (e) {
       console.warn(`  Warning: Could not patch plugin imports/version: ${(e as Error).message}`);
     }
+
+    // Write package.json with "type": "module" to prevent ESM reparsing warnings
+    try {
+      const pluginPkg = { name: 'shieldcortex-realtime-local', type: 'module', private: true };
+      fs.writeFileSync(path.join(destDir, 'package.json'), JSON.stringify(pluginPkg, null, 2) + '\n', 'utf-8');
+    } catch { /* non-critical */ }
 
     // Verify readability
     try {
