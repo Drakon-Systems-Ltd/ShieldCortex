@@ -1,17 +1,14 @@
 'use client';
 
 import { useSearchParams } from 'next/navigation';
-import { useState, useEffect, Suspense } from 'react';
+import { useState, Suspense } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import {
   AlertTriangle,
-  FileText,
-  Lock,
   RadioTower,
   Shield,
   ShieldAlert,
 } from 'lucide-react';
-import { GlassCard } from '@/components/ds/GlassCard';
 import { StatCard } from '@/components/ds/StatCard';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { useIronDomeStatus } from '@/hooks/useIronDome';
@@ -28,13 +25,9 @@ type ProtectionTab = 'dome' | 'quarantine' | 'audit' | 'intercepts' | 'policies'
 function ProtectionContent() {
   const searchParams = useSearchParams();
   const urlTab = searchParams.get('tab') as ProtectionTab | null;
-  const [tab, setTab] = useState<ProtectionTab>(urlTab || 'dome');
-
-  useEffect(() => {
-    if (urlTab && ['dome', 'quarantine', 'audit', 'intercepts', 'policies'].includes(urlTab)) {
-      setTab(urlTab);
-    }
-  }, [urlTab]);
+  const validUrlTab = urlTab && ['dome', 'quarantine', 'audit', 'intercepts', 'policies'].includes(urlTab) ? urlTab : null;
+  const [userTab, setTab] = useState<ProtectionTab>('dome');
+  const tab = validUrlTab ?? userTab;
 
   const { data: ironDome } = useIronDomeStatus();
   const { data: auditStats } = useAuditStats('24h');
