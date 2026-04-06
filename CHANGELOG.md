@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.1] - 2026-04-06
+
+### Fixed
+- **OpenClaw plugin stack overflow** — `import('shieldcortex/defence')` caught and handled gracefully instead of crashing with "Maximum call stack size exceeded"
+- **Plugin registering 200+ times** — guard prevents `register()` from running more than once per process
+- **Plugin version showing v0.0.0** — now reads version from `openclaw.plugin.json` manifest when `package.json` isn't available at the installed path
+
 ## [4.6.0] - 2026-04-06
 
 ### Added

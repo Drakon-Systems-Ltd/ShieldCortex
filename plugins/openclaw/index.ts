@@ -219,14 +219,16 @@ let _config: SCConfig | null = null;
 let _configOverride: SCConfig | null = null;
 let _version = "0.0.0";
 try {
-  for (const packageUrl of [
+  // Try package.json first, then openclaw.plugin.json (the manifest IS copied to extensions/)
+  for (const candidateUrl of [
     new URL("./package.json", import.meta.url),
     new URL("../../package.json", import.meta.url),
+    new URL("./openclaw.plugin.json", import.meta.url),
   ]) {
     try {
-      const pkg = JSON.parse(readFileSync(packageUrl, "utf-8"));
-      if (typeof pkg.version === "string" && pkg.version.trim()) {
-        _version = pkg.version;
+      const data = JSON.parse(readFileSync(candidateUrl, "utf-8"));
+      if (typeof data.version === "string" && data.version.trim()) {
+        _version = data.version;
         break;
       }
     } catch {
@@ -234,6 +236,8 @@ try {
     }
   }
 } catch { /* fallback */ }
+
+let _registered = false;
 
 function normaliseConfig(raw: unknown): SCConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
@@ -679,6 +683,8 @@ export default {
   },
 
   register(api: PluginApi) {
+    if (_registered) return;
+    _registered = true;
     try {
     applyPluginConfigOverride(api);
 
@@ -708,8 +714,15 @@ export default {
         // Dynamic import with string variable to prevent TypeScript from resolving
         // at compile time — 'shieldcortex/defence' only exists at runtime when the
         // package is installed globally, not during CI builds of the plugin itself.
-        const defenceModPath = 'shieldcortex' + '/defence';
-        const defenceMod = await import(/* webpackIgnore: true */ defenceModPath);
+        let defenceMod: any;
+        try {
+          const defenceModPath = 'shieldcortex' + '/defence';
+          defenceMod = await import(/* webpackIgnore: true */ defenceModPath);
+        } catch (importErr) {
+          // Stack overflow or missing module — interceptor can't load
+          (api.logger as any)?.warn?.(`[shieldcortex] Cannot load defence module: ${importErr instanceof Error ? importErr.message : importErr}`);
+          return null;
+        }
         if (typeof defenceMod.runDefencePipeline !== 'function') return null;
 
         interceptorReady = createInterceptor(interceptorConfig, defenceMod.runDefencePipeline as Parameters<typeof createInterceptor>[1], {
