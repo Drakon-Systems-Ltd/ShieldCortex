@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.3] - 2026-04-06
+
+### Fixed
+- **OpenClaw plugin not found on custom npm paths** — installer now only skips extensions copy when npm global is in a path OpenClaw auto-discovers (`/usr/lib`, `/usr/local/lib`, `/opt/homebrew/lib`). Custom paths like `~/.npm-global` correctly fall back to the extensions copy.
+
 ## [4.6.2] - 2026-04-06
 
 ### Fixed

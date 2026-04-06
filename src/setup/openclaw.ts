@@ -466,13 +466,21 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
     return 'skipped';
   }
 
-  // If the plugin is already discoverable via npm global install, skip the
-  // extensions copy entirely — it causes "duplicate plugin id" warnings.
+  // If the plugin is already discoverable by OpenClaw via npm global install,
+  // skip the extensions copy to avoid "duplicate plugin id" warnings.
+  // OpenClaw auto-discovers from standard global node_modules paths only.
   if (!process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV]) {
     try {
       const npmRoot = execSync('npm root -g', { encoding: 'utf-8', timeout: 5000 }).trim();
       const globalPluginPath = path.join(npmRoot, 'shieldcortex', 'plugins', 'openclaw', 'dist', 'openclaw.plugin.json');
-      if (fs.existsSync(globalPluginPath)) {
+      // Only skip extensions copy if npm global is in a path OpenClaw searches
+      const openclawSearchPaths = [
+        '/usr/lib/node_modules',
+        '/usr/local/lib/node_modules',
+        '/opt/homebrew/lib/node_modules',
+      ];
+      const isInOpenClawSearchPath = openclawSearchPaths.some((p) => npmRoot.startsWith(p));
+      if (fs.existsSync(globalPluginPath) && isInOpenClawSearchPath) {
         // Clean up any existing extensions copy that would cause duplicates
         const extDir = findExtensionsDir();
         if (extDir) {
