@@ -466,6 +466,28 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
     return 'skipped';
   }
 
+  // If the plugin is already discoverable via npm global install, skip the
+  // extensions copy entirely — it causes "duplicate plugin id" warnings.
+  if (!process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV]) {
+    try {
+      const npmRoot = execSync('npm root -g', { encoding: 'utf-8', timeout: 5000 }).trim();
+      const globalPluginPath = path.join(npmRoot, 'shieldcortex', 'plugins', 'openclaw', 'dist', 'openclaw.plugin.json');
+      if (fs.existsSync(globalPluginPath)) {
+        // Clean up any existing extensions copy that would cause duplicates
+        const extDir = findExtensionsDir();
+        if (extDir) {
+          const staleDir = path.join(extDir, PLUGIN_DIR_NAME);
+          if (fs.existsSync(staleDir)) {
+            fs.rmSync(staleDir, { recursive: true, force: true });
+          }
+        }
+        console.log(`Installed real-time plugin to ${path.dirname(globalPluginPath)}`);
+        trustLocalPlugin(path.dirname(path.dirname(globalPluginPath)), '');
+        return 'native-package';
+      }
+    } catch { /* npm not available or no global install — fall through */ }
+  }
+
   const nativeInstall = tryNativeOpenClawPluginInstall();
   if (nativeInstall) {
     return nativeInstall;

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.2] - 2026-04-06
+
+### Fixed
+- **OpenClaw duplicate plugin warning** — installer now detects global npm install and skips the `~/.openclaw/extensions/` copy that caused "duplicate plugin id" warnings. Cleans up stale extensions copies automatically.
+
 ## [4.6.1] - 2026-04-06
 
 ### Fixed
