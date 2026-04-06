@@ -571,18 +571,19 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
       console.warn(`  Warning: ${indexDest} copied but not readable`);
     }
 
-    // Read plugin version from manifest
+    // Sync the manifest version to the main package version so it never drifts
     let pluginVersion = 'unknown';
     try {
-      const manifest = JSON.parse(fs.readFileSync(path.join(destDir, 'openclaw.plugin.json'), 'utf-8'));
-      pluginVersion = manifest.version ?? pluginVersion;
-    } catch {
-      // Fall back to package.json version
-      try {
-        const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8'));
-        pluginVersion = pkg.version ?? pluginVersion;
-      } catch { /* keep "unknown" */ }
-    }
+      const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8'));
+      pluginVersion = pkg.version ?? pluginVersion;
+
+      const manifestPath = path.join(destDir, 'openclaw.plugin.json');
+      if (fs.existsSync(manifestPath)) {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        manifest.version = pluginVersion;
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
+      }
+    } catch { /* keep whatever version the manifest has */ }
 
     if (trustLocalPlugin(destDir, pluginVersion)) {
       console.log('Registered plugin in OpenClaw config (plugins.allow + installs)');

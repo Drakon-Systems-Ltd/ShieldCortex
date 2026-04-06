@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.5] - 2026-04-06
+
+### Fixed
+- **Plugin version drift** — installer now patches the manifest version to match the main package version during extensions copy, so the registered version is always correct. Plugin manifests also aligned to current release.
+
 ## [4.6.4] - 2026-04-06
 
 ### Fixed
