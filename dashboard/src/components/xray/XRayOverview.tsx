@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -18,7 +18,6 @@ import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge, riskVariant } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
 import { PageHeader } from '@/components/ds/PageHeader';
-import { TabBar } from '@/components/ds/TabBar';
 import { StatCard } from '@/components/ds/StatCard';
 import { TrustGauge } from '@/components/xray/TrustGauge';
 import { FindingActions } from '@/components/xray/FindingActions';
@@ -83,12 +82,13 @@ export function XRayOverview() {
   const { data: findingsStats } = useXRayFindingsStats();
   const { data: findingsData } = useXRayFindingsList({ status: findingsFilter === 'all' ? undefined : findingsFilter });
 
-  const historyEntries = historyData?.entries ?? [];
+  const historyEntries = useMemo(() => historyData?.entries ?? [], [historyData?.entries]);
   const activityEntries = activityData?.entries ?? [];
   const watchSessions = watchSessionsData?.entries ?? [];
   const scanMutation = useXRayScan();
   const pickTargetMutation = usePickXRayTarget();
-  const detailQuery = useXRayHistoryEntry(selectedHistoryId);
+  const effectiveHistoryId = selectedHistoryId ?? (historyEntries.length > 0 ? historyEntries[0].id : null);
+  const detailQuery = useXRayHistoryEntry(effectiveHistoryId);
   const { data: activeWatchersData } = useActiveWatchers();
   const startWatchMutation = useStartWatch();
   const stopWatchMutation = useStopWatch();
@@ -111,13 +111,7 @@ export function XRayOverview() {
     },
   });
 
-  useEffect(() => {
-    if (!selectedHistoryId && historyEntries.length > 0) {
-      setSelectedHistoryId(historyEntries[0].id);
-    }
-  }, [historyEntries, selectedHistoryId]);
-
-  const selectedHistory = detailQuery.data?.entry ?? historyEntries.find((e) => e.id === selectedHistoryId) ?? null;
+  const selectedHistory = detailQuery.data?.entry ?? historyEntries.find((e) => e.id === effectiveHistoryId) ?? null;
   const visibleResult = latestResult ?? selectedHistory?.result ?? null;
 
   const summary = useMemo(() => ({
@@ -424,7 +418,7 @@ export function XRayOverview() {
                     <GlassCard
                       key={entry.id}
                       hover
-                      selected={selectedHistoryId === entry.id}
+                      selected={effectiveHistoryId === entry.id}
                       onClick={() => {
                         setSelectedHistoryId(entry.id);
                         setTarget(entry.target);

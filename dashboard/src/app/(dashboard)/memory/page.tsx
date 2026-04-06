@@ -1,7 +1,7 @@
 'use client';
 
 import { useSearchParams } from 'next/navigation';
-import { useState, useEffect, Suspense } from 'react';
+import { useState, Suspense } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import dynamic from 'next/dynamic';
 import {
@@ -36,13 +36,9 @@ type MemoryTab = 'recall' | 'review' | 'capture' | 'graph';
 function MemoryContent() {
   const searchParams = useSearchParams();
   const urlTab = searchParams.get('tab') as MemoryTab | null;
-  const [tab, setTab] = useState<MemoryTab>(urlTab || 'recall');
-
-  useEffect(() => {
-    if (urlTab && ['recall', 'review', 'capture', 'graph'].includes(urlTab)) {
-      setTab(urlTab);
-    }
-  }, [urlTab]);
+  const validUrlTab = urlTab && ['recall', 'review', 'capture', 'graph'].includes(urlTab) ? urlTab : null;
+  const [userTab, setTab] = useState<MemoryTab>('recall');
+  const tab = validUrlTab ?? userTab;
 
   const { data: stats } = useStats();
   const { data: contradictions } = useContradictions();

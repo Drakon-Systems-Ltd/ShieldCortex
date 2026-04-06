@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowRight, Bot, Radar, ShieldAlert, Sparkles, TimerReset } from 'lucide-react';
+import { ArrowRight, Bot, Radar, Sparkles, TimerReset } from 'lucide-react';
 import { useAuditStats, useQuarantine } from '@/hooks/useDefence';
 import { useIronDomeStatus } from '@/hooks/useIronDome';
 import { useInterceptorEvents } from '@/hooks/useInterceptorEvents';
