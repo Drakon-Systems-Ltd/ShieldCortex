@@ -40,11 +40,13 @@ function StatCard({
   value,
   detail,
   tone = 'default',
+  onClick,
 }: {
   label: string;
   value: string;
   detail: string;
   tone?: 'default' | 'danger' | 'warning' | 'success';
+  onClick?: () => void;
 }) {
   const toneClass =
     tone === 'danger'
@@ -55,12 +57,17 @@ function StatCard({
           ? 'border-[var(--sc-cyan)]/30 bg-[var(--sc-cyan)]/5'
           : 'border-[var(--sc-border)] bg-[var(--sc-bg-surface)]';
 
+  const Wrapper = onClick ? 'button' : 'div';
+
   return (
-    <div className={`rounded-xl border p-4 ${toneClass}`}>
+    <Wrapper
+      onClick={onClick}
+      className={`rounded-xl border p-4 text-left ${toneClass} ${onClick ? 'cursor-pointer transition-colors hover:border-[var(--sc-text-muted)]/60 hover:bg-[var(--sc-bg-elevated)]' : ''}`}
+    >
       <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">{label}</div>
       <div className="mt-2 text-2xl font-semibold text-[var(--sc-text-primary)]">{value}</div>
       <div className="mt-1 text-sm text-[var(--sc-text-secondary)]">{detail}</div>
-    </div>
+    </Wrapper>
   );
 }
 
@@ -326,24 +333,28 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
                 label="Memory Base"
                 value={String(totalMemories)}
                 detail={`${stats?.averageSalience ? `${Math.round(stats.averageSalience * 100)}% avg salience` : 'No salience data yet'}`}
+                onClick={() => openMemories()}
               />
               <StatCard
                 label="Healthy"
                 value={healthPercent === null ? '—' : `${healthPercent}%`}
                 detail={`${healthyCount} healthy · ${fadingCount} fading · ${criticalCount} critical`}
                 tone={healthPercent !== null && healthPercent < 50 ? 'warning' : 'success'}
+                onClick={criticalCount > 0 ? () => openReview('stale') : () => openMemories()}
               />
               <StatCard
                 label="Queue"
                 value={String(pendingQuarantine)}
                 detail="Pending quarantine review"
                 tone={pendingQuarantine > 0 ? 'warning' : 'success'}
+                onClick={() => openView('quarantine')}
               />
               <StatCard
                 label="Blocked"
                 value={String(blockedCount)}
                 detail="Blocked operations in the last 24h"
                 tone={blockedCount > 0 ? 'danger' : 'success'}
+                onClick={() => openView('audit')}
               />
             </div>
           </div>
@@ -374,18 +385,18 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
               <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-4">
                 <div className="text-sm font-medium text-[var(--sc-text-primary)]">Memory hygiene</div>
                 <div className="mt-2 grid grid-cols-3 gap-3 text-sm">
-                  <div>
+                  <button onClick={() => openReview('duplicates')} className="text-left rounded-lg p-1.5 -m-1.5 transition-colors hover:bg-[var(--sc-surface-interactive)]">
                     <div className="text-xl font-semibold text-[var(--sc-text-primary)]">{duplicateCount}</div>
                     <div className="text-[var(--sc-text-muted)]">duplicates</div>
-                  </div>
-                  <div>
+                  </button>
+                  <button onClick={() => openReview('stale')} className="text-left rounded-lg p-1.5 -m-1.5 transition-colors hover:bg-[var(--sc-surface-interactive)]">
                     <div className="text-xl font-semibold text-[var(--sc-text-primary)]">{staleCount}</div>
                     <div className="text-[var(--sc-text-muted)]">stale</div>
-                  </div>
-                  <div>
+                  </button>
+                  <button onClick={() => openReview('neverUsed')} className="text-left rounded-lg p-1.5 -m-1.5 transition-colors hover:bg-[var(--sc-surface-interactive)]">
                     <div className="text-xl font-semibold text-[var(--sc-text-primary)]">{neverAccessedCount}</div>
                     <div className="text-[var(--sc-text-muted)]">never used</div>
-                  </div>
+                  </button>
                 </div>
               </div>
               <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-4">

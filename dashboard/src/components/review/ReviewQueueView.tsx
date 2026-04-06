@@ -8,6 +8,16 @@ import { Button } from '@/components/ds/Button';
 import { ReviewCard, type ReviewCardAction } from './ReviewCard';
 import type { Memory } from '@/types/memory';
 
+const FOCUS_TO_QUEUE: Record<string, QueueKey | null> = {
+  lowTrust: 'lowTrust',
+  stale: 'stale',
+  noisyAutoExtracted: 'noisyAutoExtracted',
+  neverUsed: 'neverUsed',
+  projectless: 'projectless',
+  duplicates: null,      // scroll target, not a queue
+  contradictions: null,  // scroll target, not a queue
+};
+
 type QueueKey = 'lowTrust' | 'stale' | 'noisyAutoExtracted' | 'neverUsed' | 'projectless';
 
 const QUEUE_META: Record<QueueKey, { label: string; reasonLabel: string; reasonVariant: string }> = {
@@ -53,7 +63,7 @@ function actionToApi(action: ReviewCardAction, memory: Memory): string {
 }
 
 export function ReviewQueueView() {
-  const { projectFilter, selectedMemory, setSelectedMemory } = useDashboardStore();
+  const { projectFilter, selectedMemory, setSelectedMemory, reviewFocus, setReviewFocus } = useDashboardStore();
   const { data, isLoading } = useReviewQueue(projectFilter);
   const reviewAction = useReviewAction();
   const mergeMutation = useMergeMemories();
@@ -63,6 +73,28 @@ export function ReviewQueueView() {
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [exiting, setExiting] = useState(false);
   const cardKey = useRef(0);
+  const contradictionsRef = useRef<HTMLDivElement>(null);
+  const duplicatesRef = useRef<HTMLDivElement>(null);
+  const focusHandled = useRef<string | null>(null);
+
+  // Handle reviewFocus from OverviewView navigation
+  useEffect(() => {
+    if (!reviewFocus || !data || focusHandled.current === reviewFocus) return;
+    focusHandled.current = reviewFocus;
+
+    const queueTarget = FOCUS_TO_QUEUE[reviewFocus];
+    if (queueTarget) {
+      setActiveQueue(queueTarget);
+      setCurrentIndex(0);
+    } else if (reviewFocus === 'duplicates') {
+      setTimeout(() => duplicatesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    } else if (reviewFocus === 'contradictions') {
+      setTimeout(() => contradictionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    }
+
+    // Clear focus so re-clicking from overview works
+    setReviewFocus(null);
+  }, [reviewFocus, data, setReviewFocus]);
 
   const busy = reviewAction.isPending || mergeMutation.isPending || exiting;
 
@@ -278,7 +310,7 @@ export function ReviewQueueView() {
       )}
 
       {/* Contradictions */}
-      <div className="glass-card-strong p-5">
+      <div ref={contradictionsRef} className="glass-card-strong p-5">
         <div className="flex items-center gap-2">
           <ShieldAlert size={16} className="text-[var(--sc-amber)]" />
           <h3 className="text-base font-semibold text-[var(--sc-text-primary)]">
@@ -334,7 +366,7 @@ export function ReviewQueueView() {
       </div>
 
       {/* Duplicates */}
-      <div className="glass-card-strong p-5">
+      <div ref={duplicatesRef} className="glass-card-strong p-5">
         <div className="flex items-center gap-2">
           <Layers size={16} className="text-[var(--sc-cyan)]" />
           <h3 className="text-base font-semibold text-[var(--sc-text-primary)]">

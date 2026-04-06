@@ -381,7 +381,10 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         SELECT m1.id as id1, m1.title as title_a, m2.id as id2, m2.title as title_b
         FROM memories m1
         JOIN memories m2 ON m1.title = m2.title AND m1.id < m2.id
-        ${project ? 'WHERE m1.project = ?' : ''}
+        WHERE COALESCE(m1.status, 'active') NOT IN ('archived', 'suppressed')
+          AND COALESCE(m2.status, 'active') NOT IN ('archived', 'suppressed')
+          AND m1.reviewed_at IS NULL AND m2.reviewed_at IS NULL
+          ${project ? 'AND m1.project = ?' : ''}
         LIMIT 50
       `).all(...params) as Array<Record<string, unknown>>;
 
