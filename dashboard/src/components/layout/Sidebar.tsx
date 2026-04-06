@@ -7,45 +7,54 @@ import { cn } from '@/lib/utils';
 import { NAV_ITEMS } from '@/components/layout/route-config';
 import { useDashboardStore } from '@/lib/store';
 import { useVersion } from '@/hooks/useMemories';
-import { useEffect, useState } from 'react';
+import { useCallback, useState, useSyncExternalStore } from 'react';
 
 function isActive(pathname: string, href: string): boolean {
   if (href === '/overview') return pathname === '/overview' || pathname === '/';
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+let _wsConnected = false;
+const _wsListeners = new Set<() => void>();
+function _notifyWs() { _wsListeners.forEach((l) => l()); }
+
+function checkWs() {
+  try {
+    const ws = new WebSocket('ws://localhost:3001/ws/events');
+    ws.onopen = () => { _wsConnected = true; _notifyWs(); ws.close(); };
+    ws.onerror = () => { _wsConnected = false; _notifyWs(); };
+  } catch { _wsConnected = false; _notifyWs(); }
+}
+
+// Start polling once at module level
+if (typeof window !== 'undefined') {
+  checkWs();
+  setInterval(checkWs, 15000);
+}
+
+function useWsConnected() {
+  const subscribe = useCallback((cb: () => void) => {
+    _wsListeners.add(cb);
+    return () => { _wsListeners.delete(cb); };
+  }, []);
+  return useSyncExternalStore(subscribe, () => _wsConnected, () => false);
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const { sidebarPinned, toggleSidebarPinned } = useDashboardStore();
   const [hovered, setHovered] = useState(false);
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [wsConnected, setWsConnected] = useState(false);
+  const [mobileOpenFor, setMobileOpenFor] = useState<string | null>(null);
+  const mobileOpen = mobileOpenFor === pathname;
+  const wsConnected = useWsConnected();
   const { data: versionData } = useVersion();
   const expanded = sidebarPinned || hovered || mobileOpen;
-
-  // Close mobile menu on navigation
-  useEffect(() => {
-    setMobileOpen(false);
-  }, [pathname]);
-
-  useEffect(() => {
-    const check = () => {
-      try {
-        const ws = new WebSocket(`ws://localhost:3001/ws/events`);
-        ws.onopen = () => { setWsConnected(true); ws.close(); };
-        ws.onerror = () => { setWsConnected(false); };
-      } catch { setWsConnected(false); }
-    };
-    check();
-    const interval = setInterval(check, 15000);
-    return () => clearInterval(interval);
-  }, []);
 
   return (
     <>
       {/* Mobile hamburger — visible only on small screens */}
       <button
-        onClick={() => setMobileOpen(true)}
+        onClick={() => setMobileOpenFor(pathname)}
         className="fixed left-3 top-3 z-50 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] text-[var(--sc-text-secondary)] md:hidden"
         aria-label="Open navigation"
       >
@@ -56,7 +65,7 @@ export function Sidebar() {
       {mobileOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
-          onClick={() => setMobileOpen(false)}
+          onClick={() => setMobileOpenFor(null)}
         />
       )}
 
@@ -84,7 +93,7 @@ export function Sidebar() {
           {/* Mobile close button */}
           {mobileOpen && (
             <button
-              onClick={() => setMobileOpen(false)}
+              onClick={() => setMobileOpenFor(null)}
               className="ml-auto text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)] md:hidden"
               aria-label="Close navigation"
             >

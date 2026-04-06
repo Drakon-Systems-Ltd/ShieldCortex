@@ -1,7 +1,7 @@
 'use client';
 
 import { useSearchParams } from 'next/navigation';
-import { useState, useEffect, Suspense } from 'react';
+import { useState, Suspense } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import { Cloud, CreditCard, Settings } from 'lucide-react';
 import { PageHeader } from '@/components/ds/PageHeader';
@@ -18,14 +18,10 @@ type SettingsTab = 'cloud' | 'licence' | 'admin';
 function SettingsContent() {
   const searchParams = useSearchParams();
   const urlTab = searchParams.get('tab') as SettingsTab | null;
-  const [tab, setTab] = useState<SettingsTab>(urlTab || 'cloud');
+  const validUrlTab = urlTab && ['cloud', 'licence', 'admin'].includes(urlTab) ? urlTab : null;
+  const [userTab, setTab] = useState<SettingsTab>('cloud');
+  const tab = validUrlTab ?? userTab;
   const { data: license } = useLicenseStatus();
-
-  useEffect(() => {
-    if (urlTab && ['cloud', 'licence', 'admin'].includes(urlTab)) {
-      setTab(urlTab);
-    }
-  }, [urlTab]);
 
   const tabs = [
     { id: 'cloud', label: 'Cloud Sync', icon: <Cloud size={14} /> },
