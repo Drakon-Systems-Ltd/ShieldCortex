@@ -26,19 +26,19 @@ export function InsightsView({ selectedProject, stats }: InsightsViewProps) {
   return (
     <div className="h-full overflow-y-auto p-6 space-y-8">
       <section>
-        <h2 className="text-lg font-semibold text-white mb-4">Activity</h2>
+        <h2 className="text-lg font-semibold text-[var(--sc-text-primary)] mb-4">Activity</h2>
         <ActivityHeatmap activity={activityData?.activity ?? []} />
       </section>
 
       {stats && (
         <section>
-          <h2 className="text-lg font-semibold text-white mb-4">Knowledge Coverage</h2>
+          <h2 className="text-lg font-semibold text-[var(--sc-text-primary)] mb-4">Knowledge Coverage</h2>
           <KnowledgeMapPanel stats={stats} onNavigate={handleNavigate} />
         </section>
       )}
 
       <section>
-        <h2 className="text-lg font-semibold text-white mb-4">Memory Quality</h2>
+        <h2 className="text-lg font-semibold text-[var(--sc-text-primary)] mb-4">Memory Quality</h2>
         <QualityPanel project={selectedProject} />
       </section>
     </div>

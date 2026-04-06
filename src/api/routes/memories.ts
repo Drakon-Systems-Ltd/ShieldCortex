@@ -440,6 +440,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       const stale = db.prepare(`
         SELECT * FROM memories
         WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND reviewed_at IS NULL
         AND decayed_score < 0.3 ${projectFilter}
         AND last_accessed < datetime('now', '-30 days')
         ORDER BY decayed_score ASC LIMIT ?
@@ -448,6 +449,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       const neverUsed = db.prepare(`
         SELECT * FROM memories
         WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND reviewed_at IS NULL
         AND access_count = 0 ${projectFilter}
         AND created_at < datetime('now', '-1 day')
         ORDER BY created_at DESC LIMIT ?
@@ -456,6 +458,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       const lowTrust = db.prepare(`
         SELECT * FROM memories
         WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND reviewed_at IS NULL
         AND trust_score < 0.7 ${projectFilter}
         ORDER BY trust_score ASC, updated_at DESC LIMIT ?
       `).all(...params, limit) as Record<string, unknown>[];
@@ -463,6 +466,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       const noisyAutoExtracted = db.prepare(`
         SELECT * FROM memories
         WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND reviewed_at IS NULL
         AND (capture_method = 'auto' OR tags LIKE '%auto-extracted%') ${projectFilter}
         ORDER BY updated_at DESC LIMIT ?
       `).all(...params, limit) as Record<string, unknown>[];
@@ -470,6 +474,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       const projectless = db.prepare(`
         SELECT * FROM memories
         WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+        AND reviewed_at IS NULL
         AND (project IS NULL OR project = '') AND scope != 'global'
         ORDER BY updated_at DESC LIMIT ?
       `).all(limit) as Record<string, unknown>[];
@@ -492,6 +497,27 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         pinned_count: number;
       };
 
+      // True totals (not limited) for summary counts
+      const bf = `COALESCE(status, 'active') NOT IN ('archived', 'suppressed') AND reviewed_at IS NULL`;
+      const pf = projectFilter;
+      const countSql = `
+        SELECT
+          (SELECT COUNT(*) FROM memories WHERE ${bf} AND decayed_score < 0.3 ${pf} AND last_accessed < datetime('now', '-30 days')) as stale,
+          (SELECT COUNT(*) FROM memories WHERE ${bf} AND access_count = 0 ${pf} AND created_at < datetime('now', '-1 day')) as never_used,
+          (SELECT COUNT(*) FROM memories WHERE ${bf} AND trust_score < 0.7 ${pf}) as low_trust,
+          (SELECT COUNT(*) FROM memories WHERE ${bf} AND (capture_method = 'auto' OR tags LIKE '%auto-extracted%') ${pf}) as noisy_auto,
+          (SELECT COUNT(*) FROM memories WHERE ${bf} AND (project IS NULL OR project = '') AND scope != 'global') as projectless
+      `;
+      // Each subquery with projectFilter needs one param; projectless doesn't use it
+      const countParams = project ? [project, project, project, project] : [];
+      const counts = db.prepare(countSql).get(...countParams) as {
+        stale: number;
+        never_used: number;
+        low_trust: number;
+        noisy_auto: number;
+        projectless: number;
+      };
+
       const contradictions = detectContradictions({
         project,
         minScore: 0.4,
@@ -501,11 +527,11 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
 
       res.json({
         summary: {
-          stale: stale.length,
-          neverUsed: neverUsed.length,
-          lowTrust: lowTrust.length,
-          noisyAutoExtracted: noisyAutoExtracted.length,
-          projectless: projectless.length,
+          stale: counts.stale,
+          neverUsed: counts.never_used,
+          lowTrust: counts.low_trust,
+          noisyAutoExtracted: counts.noisy_auto,
+          projectless: counts.projectless,
           contradictions: contradictions.length,
           duplicates: duplicates.length,
         },

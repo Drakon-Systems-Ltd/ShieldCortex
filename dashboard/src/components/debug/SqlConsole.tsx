@@ -173,12 +173,12 @@ export function SqlConsole() {
   return (
     <div className="h-full flex flex-col">
       {/* Query Editor */}
-      <div className="p-3 border-b border-slate-700">
+      <div className="p-3 border-b border-[var(--sc-border)]">
         <div className="flex gap-2 mb-2">
           {/* Template Dropdown */}
           <select
             onChange={(e) => e.target.value && loadTemplate(e.target.value)}
-            className="bg-slate-800 border border-slate-600 text-white text-xs rounded px-2 py-1"
+            className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-xs rounded px-2 py-1"
             value=""
           >
             <option value="">Templates...</option>
@@ -193,7 +193,7 @@ export function SqlConsole() {
           {history.length > 0 && (
             <select
               onChange={(e) => e.target.value && loadFromHistory(e.target.value)}
-              className="bg-slate-800 border border-slate-600 text-white text-xs rounded px-2 py-1"
+              className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-xs rounded px-2 py-1"
               value=""
             >
               <option value="">History...</option>
@@ -208,12 +208,12 @@ export function SqlConsole() {
           <div className="flex-1" />
 
           {/* Allow Write Toggle */}
-          <label className="flex items-center gap-1 text-xs text-slate-400 cursor-pointer">
+          <label className="flex items-center gap-1 text-xs text-[var(--sc-text-secondary)] cursor-pointer">
             <input
               type="checkbox"
               checked={allowWrite}
               onChange={(e) => setAllowWrite(e.target.checked)}
-              className="rounded border-slate-600 bg-slate-800"
+              className="rounded border-[var(--sc-border)] bg-[var(--sc-bg-elevated)]"
             />
             Allow writes
           </label>
@@ -232,7 +232,7 @@ export function SqlConsole() {
           ref={textareaRef}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="w-full h-24 bg-slate-900 border border-slate-600 rounded p-2 text-white font-mono text-sm resize-none focus:outline-none focus:border-blue-500"
+          className="w-full h-24 bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded p-2 text-[var(--sc-text-primary)] font-mono text-sm resize-none focus:outline-none focus:border-blue-500"
           placeholder="Enter SQL query..."
           spellCheck={false}
         />
@@ -241,14 +241,14 @@ export function SqlConsole() {
       {/* Results */}
       <div className="flex-1 overflow-auto p-3">
         {result?.error && (
-          <div className="p-3 rounded-lg bg-red-500/20 border border-red-500/50 text-red-300 text-sm mb-3">
+          <div className="p-3 rounded-lg bg-[var(--sc-coral)]/20 border border-[var(--sc-coral)]/50 text-[var(--sc-coral)] text-sm mb-3">
             {result.error}
           </div>
         )}
 
         {result && !result.error && (
           <>
-            <div className="text-xs text-slate-400 mb-2">
+            <div className="text-xs text-[var(--sc-text-secondary)] mb-2">
               {result.rowCount} row{result.rowCount !== 1 ? 's' : ''} returned in{' '}
               {result.executionTime.toFixed(0)}ms
             </div>
@@ -257,11 +257,11 @@ export function SqlConsole() {
               <div className="overflow-x-auto">
                 <table className="w-full text-xs border-collapse">
                   <thead>
-                    <tr className="border-b border-slate-700">
+                    <tr className="border-b border-[var(--sc-border)]">
                       {result.columns.map((col) => (
                         <th
                           key={col}
-                          className="text-left text-slate-400 font-medium py-2 px-3 bg-slate-800/50"
+                          className="text-left text-[var(--sc-text-secondary)] font-medium py-2 px-3 bg-[var(--sc-bg-elevated)]"
                         >
                           {col}
                         </th>
@@ -270,9 +270,9 @@ export function SqlConsole() {
                   </thead>
                   <tbody>
                     {result.rows.map((row, i) => (
-                      <tr key={i} className="border-b border-slate-800 hover:bg-slate-800/30">
+                      <tr key={i} className="border-b border-[var(--sc-border)] hover:bg-[var(--sc-bg-elevated)]">
                         {result.columns.map((col) => (
-                          <td key={col} className="py-2 px-3 text-white">
+                          <td key={col} className="py-2 px-3 text-[var(--sc-text-primary)]">
                             {formatCellValue(row[col])}
                           </td>
                         ))}
@@ -282,13 +282,13 @@ export function SqlConsole() {
                 </table>
               </div>
             ) : (
-              <div className="text-slate-500 text-center py-4">No rows returned</div>
+              <div className="text-[var(--sc-text-muted)] text-center py-4">No rows returned</div>
             )}
           </>
         )}
 
         {!result && (
-          <div className="text-slate-500 text-sm text-center py-8">
+          <div className="text-[var(--sc-text-muted)] text-sm text-center py-8">
             Enter a SQL query and press Execute or Ctrl+Enter
           </div>
         )}

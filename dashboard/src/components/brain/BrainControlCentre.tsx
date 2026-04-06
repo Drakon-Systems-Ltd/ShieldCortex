@@ -170,68 +170,68 @@ export function BrainControlCentre({
 
   if (isLoading) {
     return (
-      <div className="w-full h-full flex items-center justify-center bg-slate-950">
-        <div className="text-slate-400 animate-pulse">Loading Brain...</div>
+      <div className="w-full h-full flex items-center justify-center bg-[var(--sc-bg-deep)]">
+        <div className="text-[var(--sc-text-secondary)] animate-pulse">Loading Brain...</div>
       </div>
     );
   }
 
   return (
-    <div className="w-full h-full flex flex-col bg-slate-950 relative">
-      <section className="shrink-0 border-b border-slate-800 bg-slate-900/60 px-6 py-4">
+    <div className="w-full h-full flex flex-col bg-[var(--sc-bg-deep)] relative">
+      <section className="shrink-0 border-b border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-6 py-4">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="max-w-3xl">
-            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-cyan-300">
+            <div className="inline-flex items-center gap-2 rounded-full border border-[var(--sc-cyan)]/20 bg-[var(--sc-cyan)]/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-[var(--sc-cyan)]">
               <Brain size={12} />
               Brain workspace
             </div>
-            <h2 className="mt-3 text-2xl font-semibold text-white">Explore structure without drowning in every signal at once.</h2>
-            <p className="mt-2 text-sm text-slate-400">
+            <h2 className="mt-3 text-2xl font-semibold text-[var(--sc-text-primary)]">Explore structure without drowning in every signal at once.</h2>
+            <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
               The Brain view is best used to inspect one cluster at a time. Start with the selected memory, then expand into links, contradictions, and recent activity only when you need them.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-3 xl:w-[520px]">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Focus</div>
-              <div className="mt-2 text-sm font-medium text-white">{selectedMemory ? selectedMemory.title : 'Nothing selected'}</div>
-              <div className="mt-1 text-xs text-slate-400">{selectedMemory ? `${selectedMemory.category} · ${(selectedMemory.trustScore ?? 1).toFixed(2)} trust` : 'Click a node to inspect it.'}</div>
+            <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Focus</div>
+              <div className="mt-2 text-sm font-medium text-[var(--sc-text-primary)]">{selectedMemory ? selectedMemory.title : 'Nothing selected'}</div>
+              <div className="mt-1 text-xs text-[var(--sc-text-secondary)]">{selectedMemory ? `${selectedMemory.category} · ${(selectedMemory.trustScore ?? 1).toFixed(2)} trust` : 'Click a node to inspect it.'}</div>
             </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Pressure</div>
-              <div className="mt-2 text-sm font-medium text-white">{contradictionCount} contradictions</div>
-              <div className="mt-1 text-xs text-slate-400">{quarantineCount} quarantined items need review.</div>
+            <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Pressure</div>
+              <div className="mt-2 text-sm font-medium text-[var(--sc-text-primary)]">{contradictionCount} contradictions</div>
+              <div className="mt-1 text-xs text-[var(--sc-text-secondary)]">{quarantineCount} quarantined items need review.</div>
             </div>
             <button
               onClick={() => setFeedCollapsed(!feedCollapsed)}
-              className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-left transition-colors hover:border-slate-600"
+              className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3 text-left transition-colors hover:border-[var(--sc-border)]"
             >
-              <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+              <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
                 <PanelBottomOpen size={12} />
                 Activity feed
               </div>
-              <div className="mt-2 text-sm font-medium text-white">{feedCollapsed ? 'Show recent activity' : 'Hide recent activity'}</div>
-              <div className="mt-1 text-xs text-slate-400">Keep the canvas calmer unless you are tracing events.</div>
+              <div className="mt-2 text-sm font-medium text-[var(--sc-text-primary)]">{feedCollapsed ? 'Show recent activity' : 'Hide recent activity'}</div>
+              <div className="mt-1 text-xs text-[var(--sc-text-secondary)]">Keep the canvas calmer unless you are tracing events.</div>
             </button>
             <button
               onClick={() => setShowCategorySidebar(!showCategorySidebar)}
-              className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-left transition-colors hover:border-slate-600"
+              className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3 text-left transition-colors hover:border-[var(--sc-border)]"
             >
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Categories</div>
-              <div className="mt-2 text-sm font-medium text-white">{showCategorySidebar ? 'Hide category rail' : 'Show category rail'}</div>
-              <div className="mt-1 text-xs text-slate-400">Open the category map only when you are narrowing the canvas.</div>
+              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Categories</div>
+              <div className="mt-2 text-sm font-medium text-[var(--sc-text-primary)]">{showCategorySidebar ? 'Hide category rail' : 'Show category rail'}</div>
+              <div className="mt-1 text-xs text-[var(--sc-text-secondary)]">Open the category map only when you are narrowing the canvas.</div>
             </button>
           </div>
         </div>
         {categoryFilter && (
-          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs text-amber-200">
+          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-[var(--sc-amber)]/20 bg-[var(--sc-amber)]/10 px-3 py-1 text-xs text-[var(--sc-amber)]">
             <ShieldAlert size={12} />
             Category focus: {categoryFilter}
           </div>
         )}
       </section>
 
-      <details className="border-b border-slate-800 bg-slate-900/30">
-        <summary className="cursor-pointer list-none px-6 py-3 text-sm font-medium text-slate-200">
+      <details className="border-b border-[var(--sc-border)] bg-[var(--sc-bg-surface)]">
+        <summary className="cursor-pointer list-none px-6 py-3 text-sm font-medium text-[var(--sc-text-primary)]">
           Brain metrics
         </summary>
         <TopStatsBar

@@ -32,12 +32,12 @@ const FILTER_BUTTONS: { key: FilterKey; label: string; types: EventType[] }[] = 
 ];
 
 const EVENT_DOT_COLOUR: Record<EventType, string> = {
-  memory_created: 'bg-emerald-400',
+  memory_created: 'bg-[var(--sc-cyan)]',
   memory_accessed: 'bg-blue-400',
-  memory_updated: 'bg-amber-400',
-  memory_deleted: 'bg-red-400',
+  memory_updated: 'bg-[var(--sc-amber)]',
+  memory_deleted: 'bg-[var(--sc-coral)]',
   consolidation_complete: 'bg-purple-400',
-  decay_tick: 'bg-slate-400',
+  decay_tick: 'bg-[var(--sc-bg-elevated)]',
 };
 
 const EVENT_LABEL: Record<EventType, string> = {
@@ -124,7 +124,7 @@ export function ActivityFeed({
 
   return (
     <div
-      className={`bg-slate-900/80 backdrop-blur-sm border-t border-slate-800 transition-all duration-300 ease-in-out ${
+      className={`bg-[var(--sc-bg-surface)] backdrop-blur-sm border-t border-[var(--sc-border)] transition-all duration-300 ease-in-out ${
         isCollapsed ? 'h-8' : 'h-32'
       }`}
     >
@@ -133,7 +133,7 @@ export function ActivityFeed({
         <div className="flex items-center h-8 px-3 gap-2">
           <button
             onClick={onToggleCollapse}
-            className="flex items-center justify-center w-5 h-5 rounded hover:bg-slate-800 transition-colors text-slate-400 hover:text-slate-200 shrink-0"
+            className="flex items-center justify-center w-5 h-5 rounded hover:bg-[var(--sc-bg-elevated)] transition-colors text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] shrink-0"
             aria-label="Expand activity feed"
           >
             <svg
@@ -150,22 +150,22 @@ export function ActivityFeed({
           {latestEvent ? (
             <div className="flex items-center gap-2 text-xs min-w-0">
               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${EVENT_DOT_COLOUR[latestEvent.type]}`} />
-              <span className="text-slate-500">{relativeTime(latestEvent.timestamp)}</span>
-              <span className="text-slate-300">{EVENT_LABEL[latestEvent.type]}</span>
-              <span className="text-slate-500 truncate">{extractDescription(latestEvent.data)}</span>
+              <span className="text-[var(--sc-text-muted)]">{relativeTime(latestEvent.timestamp)}</span>
+              <span className="text-[var(--sc-text-primary)]">{EVENT_LABEL[latestEvent.type]}</span>
+              <span className="text-[var(--sc-text-muted)] truncate">{extractDescription(latestEvent.data)}</span>
             </div>
           ) : (
-            <span className="text-xs text-slate-500">No activity</span>
+            <span className="text-xs text-[var(--sc-text-muted)]">No activity</span>
           )}
         </div>
       ) : (
         /* Expanded: filter bar + scrollable event list */
         <div className="flex flex-col h-full">
           {/* Header with filter bar and collapse button */}
-          <div className="flex items-center h-7 px-3 gap-2 shrink-0 border-b border-slate-800/50">
+          <div className="flex items-center h-7 px-3 gap-2 shrink-0 border-b border-[var(--sc-border)]/50">
             <button
               onClick={onToggleCollapse}
-              className="flex items-center justify-center w-5 h-5 rounded hover:bg-slate-800 transition-colors text-slate-400 hover:text-slate-200 shrink-0"
+              className="flex items-center justify-center w-5 h-5 rounded hover:bg-[var(--sc-bg-elevated)] transition-colors text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] shrink-0"
               aria-label="Collapse activity feed"
             >
               <svg
@@ -186,8 +186,8 @@ export function ActivityFeed({
                   onClick={() => toggleFilter(filter.key)}
                   className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${
                     activeFilters.has(filter.key)
-                      ? 'bg-cyan-600 text-white'
-                      : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                      ? 'bg-[var(--sc-cyan)] text-white'
+                      : 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] hover:bg-[var(--sc-bg-elevated)]'
                   }`}
                 >
                   {filter.label}
@@ -200,7 +200,7 @@ export function ActivityFeed({
           <div className="flex-1 overflow-y-auto min-h-0">
             {filteredEvents.length === 0 ? (
               <div className="flex items-center justify-center h-full">
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-[var(--sc-text-muted)]">
                   No activity yet -- events will appear as the brain processes memories
                 </span>
               </div>
@@ -212,19 +212,19 @@ export function ActivityFeed({
                     <button
                       key={`${event.type}-${event.timestamp}-${i}`}
                       onClick={() => onClickEvent?.(event.data)}
-                      className="flex items-center gap-2 w-full text-left py-0.5 px-1 rounded hover:bg-slate-800/60 transition-colors group"
+                      className="flex items-center gap-2 w-full text-left py-0.5 px-1 rounded hover:bg-[var(--sc-bg-elevated)] transition-colors group"
                     >
                       <span
                         className={`w-1.5 h-1.5 rounded-full shrink-0 ${EVENT_DOT_COLOUR[event.type]}`}
                       />
-                      <span className="text-[10px] text-slate-500 w-12 shrink-0 tabular-nums">
+                      <span className="text-[10px] text-[var(--sc-text-muted)] w-12 shrink-0 tabular-nums">
                         {relativeTime(event.timestamp)}
                       </span>
-                      <span className="text-[10px] text-slate-300 w-16 shrink-0">
+                      <span className="text-[10px] text-[var(--sc-text-primary)] w-16 shrink-0">
                         {EVENT_LABEL[event.type]}
                       </span>
                       {description && (
-                        <span className="text-[10px] text-slate-500 truncate group-hover:text-slate-400 transition-colors">
+                        <span className="text-[10px] text-[var(--sc-text-muted)] truncate group-hover:text-[var(--sc-text-secondary)] transition-colors">
                           {description}
                         </span>
                       )}

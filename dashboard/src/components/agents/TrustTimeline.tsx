@@ -63,11 +63,11 @@ export function TrustTimeline({ identifier, timeRange }: Props) {
   }, [points, timeRange]);
 
   if (isLoading) {
-    return <div className="h-[120px] flex items-center justify-center text-slate-500 text-xs">Loading timeline...</div>;
+    return <div className="h-[120px] flex items-center justify-center text-[var(--sc-text-muted)] text-xs">Loading timeline...</div>;
   }
 
   if (points.length === 0) {
-    return <div className="h-[120px] flex items-center justify-center text-slate-500 text-xs">No data for this time range.</div>;
+    return <div className="h-[120px] flex items-center justify-center text-[var(--sc-text-muted)] text-xs">No data for this time range.</div>;
   }
 
   return (

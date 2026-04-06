@@ -36,9 +36,9 @@ export function ControlPanel() {
 
   if (isLoading) {
     return (
-      <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700 animate-pulse">
-        <div className="h-4 bg-slate-700 rounded w-24 mb-2"></div>
-        <div className="h-8 bg-slate-700 rounded w-full"></div>
+      <div className="p-3 rounded-lg bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] animate-pulse">
+        <div className="h-4 bg-[var(--sc-bg-elevated)] rounded w-24 mb-2"></div>
+        <div className="h-8 bg-[var(--sc-bg-elevated)] rounded w-full"></div>
       </div>
     );
   }
@@ -47,7 +47,7 @@ export function ControlPanel() {
     <div className="space-y-3">
       {/* Kill Switch Banner */}
       {isKillSwitchActive && (
-        <div className="px-3 py-2 rounded-lg bg-red-500/20 border border-red-500/50 text-red-300 text-sm flex items-center gap-2">
+        <div className="px-3 py-2 rounded-lg bg-[var(--sc-coral)]/20 border border-[var(--sc-coral)]/50 text-[var(--sc-coral)] text-sm flex items-center gap-2">
           <span className="text-lg">🛑</span>
           <span className="font-bold">KILL SWITCH ACTIVE</span>
         </div>
@@ -55,30 +55,30 @@ export function ControlPanel() {
 
       {/* Pause Banner (only when paused but NOT kill switch) */}
       {isPaused && !isKillSwitchActive && (
-        <div className="px-3 py-2 rounded-lg bg-orange-500/20 border border-orange-500/50 text-orange-300 text-sm flex items-center gap-2">
+        <div className="px-3 py-2 rounded-lg bg-[var(--sc-coral)]/20 border border-[var(--sc-coral)]/50 text-[var(--sc-coral)] text-sm flex items-center gap-2">
           <span className="text-lg">⏸</span>
           <span>Memory creation paused</span>
         </div>
       )}
 
       {/* Server Status */}
-      <div className={`p-3 rounded-lg bg-slate-800/50 border ${isKillSwitchActive ? 'border-red-500/50' : 'border-slate-700'}`}>
+      <div className={`p-3 rounded-lg bg-[var(--sc-bg-elevated)] border ${isKillSwitchActive ? 'border-[var(--sc-coral)]/50' : 'border-[var(--sc-border)]'}`}>
         <div className="flex items-center justify-between mb-3">
-          <span className="text-sm text-slate-400">Server Status</span>
+          <span className="text-sm text-[var(--sc-text-secondary)]">Server Status</span>
           <div className="flex items-center gap-2">
             <span
               className={`w-2 h-2 rounded-full ${
-                isKillSwitchActive ? 'bg-red-500 animate-pulse' :
-                isPaused ? 'bg-orange-500' : 'bg-green-500'
+                isKillSwitchActive ? 'bg-[var(--sc-coral)] animate-pulse' :
+                isPaused ? 'bg-[var(--sc-coral)]' : 'bg-[var(--sc-cyan)]'
               }`}
             />
-            <span className="text-xs text-slate-300">
+            <span className="text-xs text-[var(--sc-text-primary)]">
               {isKillSwitchActive ? 'Locked Down' : isPaused ? 'Paused' : 'Active'}
             </span>
           </div>
         </div>
 
-        <div className="text-xs text-slate-500 mb-3">
+        <div className="text-xs text-[var(--sc-text-muted)] mb-3">
           Uptime: {status?.uptimeFormatted || '—'}
         </div>
 
@@ -91,10 +91,10 @@ export function ControlPanel() {
             disabled={isToggling || isKillSwitchActive}
             className={`text-xs ${
               isKillSwitchActive
-                ? 'border-red-800 text-red-600 opacity-50 cursor-not-allowed'
+                ? 'border-[var(--sc-coral)] text-[var(--sc-coral)] opacity-50 cursor-not-allowed'
                 : isPaused
-                  ? 'border-green-600 text-green-400 hover:bg-green-600/20 hover:text-green-300'
-                  : 'border-orange-600 text-orange-400 hover:bg-orange-600/20 hover:text-orange-300'
+                  ? 'border-[var(--sc-cyan)] text-[var(--sc-cyan)] hover:bg-[var(--sc-cyan)]/20 hover:text-[var(--sc-cyan)]'
+                  : 'border-[var(--sc-coral)] text-[var(--sc-coral)] hover:bg-[var(--sc-coral)]/20 hover:text-[var(--sc-coral)]'
             }`}
             title={isKillSwitchActive ? 'Kill switch active — use Iron Dome to resume' : isPaused ? 'Resume memory creation' : 'Pause memory creation'}
           >
@@ -106,7 +106,7 @@ export function ControlPanel() {
             size="sm"
             onClick={handleConsolidate}
             disabled={consolidateMutation.isPending || isKillSwitchActive}
-            className={`text-xs ${isKillSwitchActive ? 'border-red-800 text-red-600 opacity-50 cursor-not-allowed' : 'border-slate-600 text-slate-300 hover:bg-slate-600/20'}`}
+            className={`text-xs ${isKillSwitchActive ? 'border-[var(--sc-coral)] text-[var(--sc-coral)] opacity-50 cursor-not-allowed' : 'border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-bg-elevated)]/20'}`}
             title={isKillSwitchActive ? 'Kill switch active — operations blocked' : 'Consolidate memories (promote STM to LTM)'}
           >
             {consolidateMutation.isPending ? '...' : '🔄 Sync'}

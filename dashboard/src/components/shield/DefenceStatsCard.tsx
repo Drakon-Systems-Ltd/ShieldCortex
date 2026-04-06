@@ -13,27 +13,27 @@ export function DefenceStatsCard({ timeRange }: Props) {
 
   if (isLoading) {
     return (
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-slate-300 mb-4">Stats Summary</h3>
-        <div className="text-xs text-slate-500 animate-pulse">Loading...</div>
+      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
+        <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Stats Summary</h3>
+        <div className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading...</div>
       </div>
     );
   }
 
   if (isError) {
     return (
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-slate-300 mb-4">Stats Summary</h3>
-        <div className="text-xs text-red-400">Failed to load stats</div>
+      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
+        <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Stats Summary</h3>
+        <div className="text-xs text-[var(--sc-coral)]">Failed to load stats</div>
       </div>
     );
   }
 
   if (!stats) {
     return (
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-slate-300 mb-4">Stats Summary</h3>
-        <div className="text-xs text-slate-500">No data</div>
+      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
+        <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Stats Summary</h3>
+        <div className="text-xs text-[var(--sc-text-muted)]">No data</div>
       </div>
     );
   }
@@ -47,32 +47,32 @@ export function DefenceStatsCard({ timeRange }: Props) {
     .slice(0, 5);
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-      <h3 className="text-sm font-medium text-slate-300 mb-4">Stats Summary</h3>
+    <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
+      <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Stats Summary</h3>
 
       {/* Key metrics */}
       <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="bg-slate-800/50 rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-white">{stats.totalOperations}</div>
-          <div className="text-[10px] text-slate-500 uppercase">Total Scans</div>
+        <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3 text-center">
+          <div className="text-2xl font-bold text-[var(--sc-text-primary)]">{stats.totalOperations}</div>
+          <div className="text-[10px] text-[var(--sc-text-muted)] uppercase">Total Scans</div>
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-3 text-center">
-          <div className={`text-2xl font-bold ${parseFloat(blockRate) > 10 ? 'text-red-400' : 'text-green-400'}`}>
+        <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3 text-center">
+          <div className={`text-2xl font-bold ${parseFloat(blockRate) > 10 ? 'text-[var(--sc-coral)]' : 'text-[var(--sc-cyan)]'}`}>
             {blockRate}%
           </div>
-          <div className="text-[10px] text-slate-500 uppercase">Block Rate</div>
+          <div className="text-[10px] text-[var(--sc-text-muted)] uppercase">Block Rate</div>
         </div>
       </div>
 
       {/* Top sources */}
       {stats.topSources.length > 0 && (
         <div className="mb-4">
-          <div className="text-[10px] text-slate-500 uppercase mb-2">Top Sources</div>
+          <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-2">Top Sources</div>
           <div className="space-y-1">
             {stats.topSources.slice(0, 3).map((s) => (
               <div key={s.source} className="flex items-center justify-between">
-                <span className="text-xs text-slate-400">{s.source}</span>
-                <span className="text-xs text-slate-500">{s.count}</span>
+                <span className="text-xs text-[var(--sc-text-secondary)]">{s.source}</span>
+                <span className="text-xs text-[var(--sc-text-muted)]">{s.count}</span>
               </div>
             ))}
           </div>
@@ -82,12 +82,12 @@ export function DefenceStatsCard({ timeRange }: Props) {
       {/* Top threat types */}
       {threats.length > 0 && (
         <div>
-          <div className="text-[10px] text-slate-500 uppercase mb-2">Threat Types</div>
+          <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-2">Threat Types</div>
           <div className="space-y-1">
             {threats.map(([type, count]) => (
               <div key={type} className="flex items-center justify-between">
-                <span className="text-xs text-slate-400">{type}</span>
-                <span className="text-xs font-medium text-red-400">{count}</span>
+                <span className="text-xs text-[var(--sc-text-secondary)]">{type}</span>
+                <span className="text-xs font-medium text-[var(--sc-coral)]">{count}</span>
               </div>
             ))}
           </div>
@@ -97,7 +97,7 @@ export function DefenceStatsCard({ timeRange }: Props) {
       {/* Navigate to full audit view */}
       <button
         onClick={() => useDashboardStore.getState().setViewMode('audit')}
-        className="mt-3 w-full text-center text-xs text-cyan-400 hover:text-cyan-300 transition-colors py-1"
+        className="mt-3 w-full text-center text-xs text-[var(--sc-cyan)] hover:text-[var(--sc-cyan)] transition-colors py-1"
       >
         View full audit log &rarr;
       </button>

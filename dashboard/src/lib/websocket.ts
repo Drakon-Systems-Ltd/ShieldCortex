@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { getApiToken } from './auth';
+import { getApiToken, invalidateApiToken } from './auth';
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws/events';
 
@@ -33,7 +33,9 @@ export type WebSocketEventType =
   | 'update_started'
   | 'update_complete'
   | 'update_failed'
-  | 'server_restarting';
+  | 'server_restarting'
+  // X-Ray watch events
+  | 'xray_detection';
 
 // Alias for backwards compatibility
 export type MemoryEventType = WebSocketEventType;
@@ -65,6 +67,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
   const reconnectDelayRef = useRef(INITIAL_RECONNECT_DELAY);
   const connectRef = useRef<() => void>(() => {});
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionFailed, setConnectionFailed] = useState(false);
   const [lastEvent, setLastEvent] = useState<{
     type: WebSocketEventType;
     data?: unknown;
@@ -194,6 +197,13 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               // Server is restarting - let onMessage callback handle UI
               console.log('[WebSocket] Server restarting, will reconnect shortly...');
               break;
+
+            case 'xray_detection':
+              queryClient.invalidateQueries({ queryKey: ['xray-activity'] });
+              queryClient.invalidateQueries({ queryKey: ['xray-watch-sessions'] });
+              queryClient.invalidateQueries({ queryKey: ['xray-findings'] });
+              queryClient.invalidateQueries({ queryKey: ['xray-status'] });
+              break;
           }
         } catch (err) {
           console.error('[WebSocket] Failed to parse message:', err);
@@ -206,9 +216,14 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
         console.warn('[WebSocket] Connection failed - is the API server running?');
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setIsConnected(false);
-        console.log('[WebSocket] Disconnected');
+        console.log('[WebSocket] Disconnected', event.code);
+
+        // If closed due to auth failure, invalidate cached token so reconnect fetches fresh
+        if (event.code === 1008 || event.code === 4001 || event.code === 4003) {
+          invalidateApiToken();
+        }
 
         // Attempt to reconnect with exponential backoff
         if (enabled && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
@@ -229,6 +244,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
             connectRef.current();
           }, delay);
         } else if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+          setConnectionFailed(true);
           console.error('[WebSocket] Max reconnection attempts reached. Use reconnect() to try again.');
         }
       };
@@ -262,11 +278,13 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
   const manualReconnect = useCallback(() => {
     reconnectAttemptsRef.current = 0;
     reconnectDelayRef.current = INITIAL_RECONNECT_DELAY;
+    setConnectionFailed(false);
     connect();
   }, [connect]);
 
   return {
     isConnected,
+    connectionFailed,
     lastEvent,
     reconnect: manualReconnect,
   };

@@ -81,8 +81,8 @@ export function ActivityHeatmap({ activity }: ActivityHeatmapProps) {
   const svgHeight = TOP_LABEL_HEIGHT + DAYS * (CELL_SIZE + CELL_GAP);
 
   return (
-    <div className="bg-slate-900/50 rounded-lg p-4 overflow-x-auto">
-      <svg width={svgWidth} height={svgHeight} className="text-slate-400">
+    <div className="bg-[var(--sc-bg-surface)] rounded-lg p-4 overflow-x-auto">
+      <svg width={svgWidth} height={svgHeight} className="text-[var(--sc-text-secondary)]">
         {/* Month labels */}
         {monthPositions.map((m, i) => (
           <text

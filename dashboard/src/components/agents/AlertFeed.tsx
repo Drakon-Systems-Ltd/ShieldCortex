@@ -58,7 +58,7 @@ export function AlertFeed({ agentFilter }: Props) {
 
   if (alerts.length === 0) {
     return (
-      <div className="flex items-center gap-2 text-slate-500 text-xs py-2">
+      <div className="flex items-center gap-2 text-[var(--sc-text-muted)] text-xs py-2">
         <Bell size={12} />
         <span>Listening for defence events...</span>
       </div>
@@ -76,21 +76,21 @@ export function AlertFeed({ agentFilter }: Props) {
             exit={{ opacity: 0 }}
             className={`px-2 py-1.5 rounded border text-xs ${
               alert.firewall_result === 'BLOCK'
-                ? 'bg-red-500/5 border-red-500/20'
-                : 'bg-yellow-500/5 border-yellow-500/20'
+                ? 'bg-[var(--sc-coral)]/5 border-[var(--sc-coral)]/20'
+                : 'bg-[var(--sc-amber)]/5 border-[var(--sc-amber)]/20'
             }`}
           >
             <div className="flex items-center justify-between">
               <span className={`font-medium ${
-                alert.firewall_result === 'BLOCK' ? 'text-red-400' : 'text-yellow-400'
+                alert.firewall_result === 'BLOCK' ? 'text-[var(--sc-coral)]' : 'text-[var(--sc-amber)]'
               }`}>
                 {alert.firewall_result}
               </span>
-              <span className="text-[10px] text-slate-500">
+              <span className="text-[10px] text-[var(--sc-text-muted)]">
                 {new Date(alert.timestamp).toLocaleTimeString()}
               </span>
             </div>
-            <p className="text-slate-400 text-[11px] truncate mt-0.5">
+            <p className="text-[var(--sc-text-secondary)] text-[11px] truncate mt-0.5">
               {alert.source_identifier} — {alert.reason ?? 'No reason'}
             </p>
           </motion.div>

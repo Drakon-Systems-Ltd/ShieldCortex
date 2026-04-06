@@ -237,7 +237,7 @@ export function QuantumCell({
         center
         style={{ pointerEvents: 'none' }}
       >
-        <div className="text-[8px] font-mono text-amber-400/60 whitespace-nowrap">
+        <div className="text-[8px] font-mono text-[var(--sc-amber)]/60 whitespace-nowrap">
           |Q{memory.id}⟩
         </div>
       </Html>
@@ -252,14 +252,14 @@ export function QuantumCell({
             transform: 'translateY(-100%)',
           }}
         >
-          <div className="bg-slate-900/95 border border-amber-600/50 rounded-lg px-3 py-2 text-xs max-w-[220px] backdrop-blur-sm shadow-lg">
+          <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-amber)]/50 rounded-lg px-3 py-2 text-xs max-w-[220px] backdrop-blur-sm shadow-lg">
             <div className="flex items-center gap-2 mb-1">
-              <span className="text-amber-400 text-[10px]">QUANTUM</span>
-              <span className="text-slate-500">|</span>
-              <span className="text-slate-400">{Math.round(memory.salience * 100)}% salience</span>
+              <span className="text-[var(--sc-amber)] text-[10px]">QUANTUM</span>
+              <span className="text-[var(--sc-text-muted)]">|</span>
+              <span className="text-[var(--sc-text-secondary)]">{Math.round(memory.salience * 100)}% salience</span>
             </div>
-            <div className="font-semibold text-white truncate">{memory.title}</div>
-            <div className="text-slate-400 mt-1 flex items-center gap-2">
+            <div className="font-semibold text-[var(--sc-text-primary)] truncate">{memory.title}</div>
+            <div className="text-[var(--sc-text-secondary)] mt-1 flex items-center gap-2">
               <span
                 className="w-2 h-2 rounded-full"
                 style={{ backgroundColor: color }}

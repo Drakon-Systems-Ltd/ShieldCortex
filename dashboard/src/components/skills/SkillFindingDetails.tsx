@@ -12,9 +12,9 @@ export function SkillFindingDetails({ findings }: { findings: SkillThreatFinding
         <div key={`${f.pattern}-${i}`} className="flex items-start gap-2">
           <SeverityBadge level={f.severity} />
           <div className="flex-1 min-w-0">
-            <span className="text-xs text-slate-300">{f.description}</span>
+            <span className="text-xs text-[var(--sc-text-primary)]">{f.description}</span>
             {f.matchedText && (
-              <div className="mt-0.5 text-[10px] text-slate-500 font-mono truncate">
+              <div className="mt-0.5 text-[10px] text-[var(--sc-text-muted)] font-mono truncate">
                 Match: &quot;{f.matchedText}&quot;
               </div>
             )}

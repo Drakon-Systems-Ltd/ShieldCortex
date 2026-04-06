@@ -303,14 +303,14 @@ export function RelationshipGraph() {
   return (
     <div className="h-full flex flex-col">
       {/* Controls */}
-      <div className="p-2 border-b border-slate-700 flex items-center gap-3">
-        <span className="text-xs text-slate-400">Filter:</span>
+      <div className="p-2 border-b border-[var(--sc-border)] flex items-center gap-3">
+        <span className="text-xs text-[var(--sc-text-secondary)]">Filter:</span>
         <button
           onClick={() => setRelationshipFilter(null)}
           className={`px-2 py-0.5 text-xs rounded ${
             relationshipFilter === null
-              ? 'bg-slate-600 text-white'
-              : 'text-slate-400 hover:text-white'
+              ? 'bg-[var(--sc-bg-elevated)] text-white'
+              : 'text-[var(--sc-text-secondary)] hover:text-white'
           }`}
         >
           All
@@ -320,7 +320,7 @@ export function RelationshipGraph() {
             key={type}
             onClick={() => setRelationshipFilter(type)}
             className={`px-2 py-0.5 text-xs rounded ${
-              relationshipFilter === type ? 'text-white' : 'text-slate-400 hover:text-white'
+              relationshipFilter === type ? 'text-white' : 'text-[var(--sc-text-secondary)] hover:text-white'
             }`}
             style={{
               backgroundColor: relationshipFilter === type ? RELATIONSHIP_COLORS[type] : 'transparent',
@@ -333,16 +333,16 @@ export function RelationshipGraph() {
         <div className="flex-1" />
 
         {/* Instructions */}
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-[var(--sc-text-muted)]">
           {selectedNodeId ? 'Click elsewhere to deselect' : 'Click a node to focus'}
         </span>
 
         {/* Legend */}
-        <div className="flex items-center gap-2 text-xs border-l border-slate-700 pl-3">
+        <div className="flex items-center gap-2 text-xs border-l border-[var(--sc-border)] pl-3">
           {Object.entries(RELATIONSHIP_COLORS).map(([type, color]) => (
             <div key={type} className="flex items-center gap-1">
               <div className="w-3 h-0.5" style={{ backgroundColor: color }} />
-              <span className="text-slate-500">{type}</span>
+              <span className="text-[var(--sc-text-muted)]">{type}</span>
             </div>
           ))}
         </div>
@@ -354,7 +354,7 @@ export function RelationshipGraph() {
 
         {/* Selected Node Details */}
         {selectedNode && (
-          <div className="absolute top-3 left-3 p-3 bg-slate-800/95 border border-slate-700 rounded-lg max-w-xs">
+          <div className="absolute top-3 left-3 p-3 bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg max-w-xs">
             <div className="flex items-center gap-2 mb-2">
               <div
                 className="w-3 h-3 rounded-full"
@@ -362,14 +362,14 @@ export function RelationshipGraph() {
               />
               <span className="text-white font-medium text-sm">{selectedNode.title}</span>
             </div>
-            <div className="text-xs text-slate-400 space-y-1">
+            <div className="text-xs text-[var(--sc-text-secondary)] space-y-1">
               <div>Category: {selectedNode.category}</div>
               <div>Salience: {(selectedNode.salience * 100).toFixed(0)}%</div>
               <div>Connections: {selectedConnections.connectedIds.size}</div>
             </div>
             {selectedConnections.connectedEdges.length > 0 && (
-              <div className="mt-2 pt-2 border-t border-slate-700">
-                <div className="text-xs text-slate-500 mb-1">Connected to:</div>
+              <div className="mt-2 pt-2 border-t border-[var(--sc-border)]">
+                <div className="text-xs text-[var(--sc-text-muted)] mb-1">Connected to:</div>
                 <div className="space-y-1 max-h-24 overflow-y-auto">
                   {selectedConnections.connectedEdges.map((edge, i) => {
                     const otherId = edge.source === selectedNodeId ? edge.target : edge.source;
@@ -380,8 +380,8 @@ export function RelationshipGraph() {
                           className="w-2 h-2 rounded-full shrink-0"
                           style={{ backgroundColor: RELATIONSHIP_COLORS[edge.relationship] }}
                         />
-                        <span className="text-slate-400">{edge.relationship}:</span>
-                        <span className="text-slate-300 truncate">{other?.title || 'Unknown'}</span>
+                        <span className="text-[var(--sc-text-secondary)]">{edge.relationship}:</span>
+                        <span className="text-[var(--sc-text-primary)] truncate">{other?.title || 'Unknown'}</span>
                       </div>
                     );
                   })}
@@ -393,7 +393,7 @@ export function RelationshipGraph() {
 
         {/* Empty state */}
         {nodes.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-slate-500">
+          <div className="absolute inset-0 flex items-center justify-center text-[var(--sc-text-muted)]">
             No relationships to display
           </div>
         )}

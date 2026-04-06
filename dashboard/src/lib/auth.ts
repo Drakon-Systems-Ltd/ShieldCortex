@@ -10,6 +10,12 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 let cachedToken: string | null = null;
 let tokenPromise: Promise<string> | null = null;
 
+/** Invalidate the cached token so the next getApiToken() fetches a fresh one. */
+export function invalidateApiToken() {
+  cachedToken = null;
+  tokenPromise = null;
+}
+
 /**
  * Fetch the session token from the server (one-time).
  * Caches the result — subsequent calls return the cached token.
@@ -17,13 +23,14 @@ let tokenPromise: Promise<string> | null = null;
 export async function getApiToken(): Promise<string> {
   if (cachedToken) return cachedToken;
 
-  // Deduplicate concurrent calls
+  // Deduplicate concurrent calls — all callers share the same promise
   if (tokenPromise) return tokenPromise;
 
   tokenPromise = (async () => {
     const res = await fetch(`${API_BASE}/api/auth/session-token`);
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
+      tokenPromise = null; // Allow retry on failure
       throw new Error(data.error || 'Failed to fetch session token');
     }
     const { token } = await res.json();
@@ -31,11 +38,7 @@ export async function getApiToken(): Promise<string> {
     return token;
   })();
 
-  try {
-    return await tokenPromise;
-  } finally {
-    tokenPromise = null;
-  }
+  return tokenPromise;
 }
 
 /**

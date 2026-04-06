@@ -87,8 +87,8 @@ export function VersionPanel() {
 
   if (versionLoading) {
     return (
-      <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700 animate-pulse">
-        <div className="h-4 bg-slate-700 rounded w-24"></div>
+      <div className="p-3 rounded-lg bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] animate-pulse">
+        <div className="h-4 bg-[var(--sc-bg-elevated)] rounded w-24"></div>
       </div>
     );
   }
@@ -100,14 +100,14 @@ export function VersionPanel() {
   const latestVersion = updateInfo?.latestVersion;
 
   return (
-    <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700">
+    <div className="p-3 rounded-lg bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)]">
       {/* Version Display */}
       <div className="flex items-center justify-between mb-3">
-        <span className="text-sm text-slate-400">Version</span>
+        <span className="text-sm text-[var(--sc-text-secondary)]">Version</span>
         <div className="flex items-center gap-2">
-          <span className="text-sm font-mono text-slate-300">v{currentVersion}</span>
+          <span className="text-sm font-mono text-[var(--sc-text-primary)]">v{currentVersion}</span>
           {hasUpdate && (
-            <span className="px-1.5 py-0.5 text-xs rounded bg-green-500/20 text-green-400 border border-green-500/30">
+            <span className="px-1.5 py-0.5 text-xs rounded bg-[var(--sc-cyan)]/20 text-[var(--sc-cyan)] border border-[var(--sc-cyan)]/30">
               Update available
             </span>
           )}
@@ -116,9 +116,9 @@ export function VersionPanel() {
 
       {/* Stale Version Warning */}
       {isStale && (
-        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-amber-500/20 border border-amber-500/30 text-amber-300">
+        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-[var(--sc-amber)]/20 border border-[var(--sc-amber)]/30 text-[var(--sc-amber)]">
           <div className="font-medium mb-0.5">Restart required</div>
-          <div className="text-amber-400/80">
+          <div className="text-[var(--sc-amber)]/80">
             Running v{runningVersion} but v{currentVersion} is installed. Restart to load the new version.
           </div>
         </div>
@@ -126,29 +126,29 @@ export function VersionPanel() {
 
       {/* Update Info */}
       {updateInfo && latestVersion && currentVersion !== latestVersion && (
-        <div className="text-xs text-slate-500 mb-3">
+        <div className="text-xs text-[var(--sc-text-muted)] mb-3">
           Latest: v{latestVersion}
-          {updateInfo.cacheHit && <span className="text-slate-600"> (cached)</span>}
+          {updateInfo.cacheHit && <span className="text-[var(--sc-text-muted)]"> (cached)</span>}
         </div>
       )}
 
       {/* Error Message */}
       {errorMessage && (
-        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-red-500/20 border border-red-500/30 text-red-300">
+        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-[var(--sc-coral)]/20 border border-[var(--sc-coral)]/30 text-[var(--sc-coral)]">
           {errorMessage}
         </div>
       )}
 
       {/* Success Message with Restart Prompt */}
       {updateState === 'success' && showRestartPrompt && (
-        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-green-500/20 border border-green-500/30 text-green-300">
+        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-[var(--sc-cyan)]/20 border border-[var(--sc-cyan)]/30 text-[var(--sc-cyan)]">
           Update complete! Restart the server to apply changes.
         </div>
       )}
 
       {/* Restarting Message */}
       {updateState === 'restarting' && (
-        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-orange-500/20 border border-orange-500/30 text-orange-300">
+        <div className="px-2 py-1.5 mb-3 rounded text-xs bg-[var(--sc-coral)]/20 border border-[var(--sc-coral)]/30 text-[var(--sc-coral)]">
           Restarting server... Refresh the page in a few seconds.
         </div>
       )}
@@ -160,7 +160,7 @@ export function VersionPanel() {
           size="sm"
           onClick={handleCheckUpdates}
           disabled={checkMutation.isPending || updateState === 'updating'}
-          className="flex-1 border-slate-600 text-slate-300 hover:bg-slate-600/20"
+          className="flex-1 border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-bg-elevated)]/20"
           title="Check npm for newer versions"
         >
           {checkMutation.isPending || updateState === 'checking' ? '...' : 'Check Updates'}
@@ -172,7 +172,7 @@ export function VersionPanel() {
             size="sm"
             onClick={handleUpdate}
             disabled={updateState === 'updating' || updateState === 'restarting'}
-            className="flex-1 border-green-600 text-green-400 hover:bg-green-600/20 hover:text-green-300"
+            className="flex-1 border-[var(--sc-cyan)] text-[var(--sc-cyan)] hover:bg-[var(--sc-cyan)]/20 hover:text-[var(--sc-cyan)]"
             title="Update to latest version via npm"
           >
             {updateState === 'updating' ? '...' : 'Update'}
@@ -185,7 +185,7 @@ export function VersionPanel() {
             size="sm"
             onClick={handleRestart}
             disabled={updateState === 'restarting'}
-            className="flex-1 border-orange-600 text-orange-400 hover:bg-orange-600/20 hover:text-orange-300"
+            className="flex-1 border-[var(--sc-coral)] text-[var(--sc-coral)] hover:bg-[var(--sc-coral)]/20 hover:text-[var(--sc-coral)]"
             title="Restart the server to apply updates"
           >
             {updateState === 'restarting' ? '...' : 'Restart'}

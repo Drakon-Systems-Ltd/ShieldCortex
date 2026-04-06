@@ -42,7 +42,7 @@ export function HealthRing({
           fill="none"
           stroke="currentColor"
           strokeWidth={strokeWidth}
-          className="text-slate-700"
+          className="text-[var(--sc-text-muted)]"
         />
         {/* Foreground progress arc */}
         <circle

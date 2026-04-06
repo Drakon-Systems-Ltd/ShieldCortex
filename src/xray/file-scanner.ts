@@ -57,7 +57,9 @@ function hasZeroWidthUnicode(content: string): XRayFinding | null {
 }
 
 function checkPolyglot(buf: Buffer): XRayFinding | null {
-  // Check for multiple magic byte signatures in a single file
+  // Only check magic bytes at file start (first 8 bytes) to avoid false positives
+  // from coincidental byte sequences in large binary files
+  const head = buf.subarray(0, 8);
   const signatures: Array<{ name: string; magic: Buffer }> = [
     { name: 'PDF', magic: Buffer.from('%PDF') },
     { name: 'ZIP/JAR', magic: Buffer.from([0x50, 0x4b, 0x03, 0x04]) },
@@ -66,21 +68,39 @@ function checkPolyglot(buf: Buffer): XRayFinding | null {
     { name: 'GZIP', magic: Buffer.from([0x1f, 0x8b]) },
   ];
 
-  const matched: string[] = [];
+  // Identify the primary format from the file header
+  let primaryFormat: string | null = null;
   for (const sig of signatures) {
-    // Check at start and also embedded
-    if (buf.includes(sig.magic)) {
-      matched.push(sig.name);
+    if (head.subarray(0, sig.magic.length).equals(sig.magic)) {
+      primaryFormat = sig.name;
+      break;
+    }
+  }
+  if (!primaryFormat) return null;
+
+  // Check for a SECOND format signature embedded after the first 64 bytes
+  // (a real polyglot embeds another format, not just coincidental bytes)
+  const searchStart = 64;
+  if (buf.length < searchStart + 4) return null;
+
+  const rest = buf.subarray(searchStart);
+  const embedded: string[] = [];
+  for (const sig of signatures) {
+    if (sig.name === primaryFormat) continue;
+    // Look for the signature at a plausible offset (not random noise)
+    const idx = rest.indexOf(sig.magic);
+    if (idx >= 0 && idx < 1024) {
+      embedded.push(sig.name);
     }
   }
 
-  if (matched.length >= 2) {
+  if (embedded.length > 0) {
     return {
       severity: 'high',
       category: 'steganography',
       title: 'Polyglot file detected',
-      description: `File contains multiple format signatures (${matched.join(', ')}), indicating a polyglot that may hide payloads.`,
-      evidence: matched.join(', '),
+      description: `File starts as ${primaryFormat} but also contains ${embedded.join(', ')} signatures, indicating a polyglot that may hide payloads.`,
+      evidence: `${primaryFormat} + ${embedded.join(', ')}`,
     };
   }
 
@@ -351,17 +371,19 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
         }
       }
 
-      // Long single-line detection — common in minified/obfuscated code
-      const lines = content.split('\n');
-      const longLines = lines.filter(l => l.length > 2000);
-      if (longLines.length > 0 && lines.length < 10) {
-        findings.push({
-          category: 'obfuscation',
-          title: `Minified/packed code (${longLines.length} lines over 2000 chars)`,
-          description: 'File appears to contain minified or packed code which may hide malicious content',
-          severity: 'low',
-          file: filePath,
-        });
+      // Long single-line detection — only for code/JSON files (binary blobs always have long "lines")
+      if (CODE_EXTENSIONS.has(ext) || JSON_EXTENSIONS.has(ext)) {
+        const lines = content.split('\n');
+        const longLines = lines.filter(l => l.length > 2000);
+        if (longLines.length > 0 && lines.length < 10) {
+          findings.push({
+            category: 'obfuscation',
+            title: `Minified/packed code (${longLines.length} lines over 2000 chars)`,
+            description: 'File appears to contain minified or packed code which may hide malicious content',
+            severity: 'low',
+            file: filePath,
+          });
+        }
       }
     } catch {
       // Can't read as text for deep analysis — skip

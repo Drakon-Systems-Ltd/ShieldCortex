@@ -51,3 +51,26 @@ export interface XRayResult {
   scannedAt: Date;
   deepScan: boolean;
 }
+
+// ── Actionable Findings ──────────────────────────────────────
+
+export type FindingStatus = 'new' | 'reviewed' | 'ignored' | 'resolved' | 'quarantined';
+
+export interface ActionableXRayFinding extends XRayFinding {
+  /** Unique ID for this finding instance */
+  id: string;
+  /** Which scan/watch session produced this finding */
+  sourceId: string;
+  /** Source type: manual scan or watch detection */
+  sourceKind: 'scan' | 'watch';
+  /** Full path to the target that was scanned */
+  target: string;
+  /** Current lifecycle status */
+  status: FindingStatus;
+  /** When the finding was first detected */
+  detectedAt: string;
+  /** When status was last changed */
+  updatedAt: string;
+  /** Optional note from user when resolving/ignoring */
+  resolutionNote?: string;
+}

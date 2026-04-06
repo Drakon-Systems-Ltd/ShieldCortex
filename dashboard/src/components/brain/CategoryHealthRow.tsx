@@ -36,8 +36,8 @@ export function CategoryHealthRow({
       onClick={onClick}
       className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors ${
         isActive
-          ? 'bg-slate-700/60 border border-slate-600'
-          : 'bg-transparent border border-transparent hover:bg-slate-800/60'
+          ? 'bg-[var(--sc-bg-elevated)]/60 border border-[var(--sc-border)]'
+          : 'bg-transparent border border-transparent hover:bg-[var(--sc-bg-elevated)]'
       }`}
     >
       {/* Category colour dot */}
@@ -49,7 +49,7 @@ export function CategoryHealthRow({
       {/* Name and bar */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between mb-0.5">
-          <span className="text-[11px] text-slate-300 capitalize truncate">
+          <span className="text-[11px] text-[var(--sc-text-primary)] capitalize truncate">
             {category}
           </span>
 
@@ -57,16 +57,16 @@ export function CategoryHealthRow({
             {/* Warning indicator when health <50% */}
             {clamped < 50 && (
               <span
-                className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0"
+                className="w-1.5 h-1.5 rounded-full bg-[var(--sc-amber)] flex-shrink-0"
                 title="Health below 50%"
               />
             )}
-            <span className="text-[10px] text-slate-500">{count}</span>
+            <span className="text-[10px] text-[var(--sc-text-muted)]">{count}</span>
           </div>
         </div>
 
         {/* Horizontal progress bar */}
-        <div className="w-full h-1 rounded-full bg-slate-700 overflow-hidden">
+        <div className="w-full h-1 rounded-full bg-[var(--sc-bg-elevated)] overflow-hidden">
           <div
             className="h-full rounded-full"
             style={{

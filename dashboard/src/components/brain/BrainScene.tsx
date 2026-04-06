@@ -217,7 +217,7 @@ export function BrainScene({
   });
 
   return (
-    <div className="w-full h-full bg-slate-950">
+    <div className="w-full h-full bg-[var(--sc-bg-deep)]">
       <Canvas
         camera={{ position: [0, 2, 12], fov: 55 }}
         gl={{ antialias: true, alpha: true }}

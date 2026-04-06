@@ -125,21 +125,21 @@ export function CloudUpsellCard() {
   // Free/Pro users: show upgrade prompt instead of cloud setup
   if (!hasCloudAccess && state === 'upsell') {
     return (
-      <div className="mt-4 bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950/20 border border-violet-800/30 rounded-xl p-5 relative">
+      <div className="mt-4 bg-gradient-to-br from-slate-900 via-[var(--sc-bg-surface)] to-violet-950/20 border border-[var(--sc-coral)]/30 rounded-xl p-5 relative">
         <button
           onClick={handleDismiss}
-          className="absolute top-3 right-3 text-slate-500 hover:text-slate-300 transition-colors"
+          className="absolute top-3 right-3 text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
           title="Dismiss for 30 days"
         >
           <X size={16} />
         </button>
         <div className="space-y-3">
           <div className="flex items-center gap-2">
-            <Cloud size={20} className="text-violet-400" />
-            <h3 className="text-sm font-semibold text-white">Cloud Sync</h3>
-            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded text-violet-400 bg-violet-400/10">Team</span>
+            <Cloud size={20} className="text-[var(--sc-coral)]" />
+            <h3 className="text-sm font-semibold text-[var(--sc-text-primary)]">Cloud Sync</h3>
+            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded text-[var(--sc-coral)] bg-[var(--sc-coral)]/10">Team</span>
           </div>
-          <p className="text-sm text-slate-300">
+          <p className="text-sm text-[var(--sc-text-primary)]">
             {blockedCount > 0
               ? `You've blocked ${blockedCount} threats locally. Upgrade to Team to sync across devices and give your team visibility.`
               : 'Sync defence data across devices, share audit logs with your team, and get centralised alerts.'}
@@ -148,7 +148,7 @@ export function CloudUpsellCard() {
             href="https://shieldcortex.ai/pricing"
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium text-white transition-colors"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--sc-coral)] hover:bg-[var(--sc-coral)] rounded-lg text-sm font-medium text-[var(--sc-text-primary)] transition-colors"
           >
             Upgrade to Team
             <ExternalLink size={12} />
@@ -159,12 +159,12 @@ export function CloudUpsellCard() {
   }
 
   return (
-    <div className="mt-4 bg-gradient-to-br from-slate-900 via-slate-900 to-cyan-950/30 border border-cyan-800/30 rounded-xl p-5 relative">
+    <div className="mt-4 bg-gradient-to-br from-slate-900 via-[var(--sc-bg-surface)] to-cyan-950/30 border border-[var(--sc-cyan)]/30 rounded-xl p-5 relative">
       {/* Dismiss button */}
       {state === 'upsell' && (
         <button
           onClick={handleDismiss}
-          className="absolute top-3 right-3 text-slate-500 hover:text-slate-300 transition-colors"
+          className="absolute top-3 right-3 text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
           title="Dismiss for 30 days"
         >
           <X size={16} />
@@ -174,11 +174,11 @@ export function CloudUpsellCard() {
       {state === 'upsell' && (
         <div className="space-y-4">
           <div className="flex items-center gap-2">
-            <Cloud size={20} className="text-cyan-400" />
-            <h3 className="text-sm font-semibold text-white">ShieldCortex Cloud</h3>
+            <Cloud size={20} className="text-[var(--sc-cyan)]" />
+            <h3 className="text-sm font-semibold text-[var(--sc-text-primary)]">ShieldCortex Cloud</h3>
           </div>
 
-          <p className="text-sm text-slate-300">
+          <p className="text-sm text-[var(--sc-text-primary)]">
             {blockedCount > 0
               ? `You've blocked ${blockedCount} threats across ${totalOps} scans — your team can't see them yet.`
               : 'Sync your defence data to the cloud for team visibility, audit logs, and alerts.'}
@@ -191,12 +191,12 @@ export function CloudUpsellCard() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500"
+              className="flex-1 bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-sm text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-cyan)] focus:border-[var(--sc-cyan)]"
             />
             <button
               type="submit"
               disabled={isSubmitting}
-              className="flex items-center gap-1.5 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 rounded-lg text-sm font-medium text-white transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] disabled:opacity-50 rounded-lg text-sm font-medium text-[var(--sc-text-primary)] transition-colors"
             >
               {isSubmitting ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
               Get Started
@@ -204,29 +204,29 @@ export function CloudUpsellCard() {
           </form>
 
           {error && (
-            <p className="text-xs text-red-400">{error}</p>
+            <p className="text-xs text-[var(--sc-coral)]">{error}</p>
           )}
 
-          <p className="text-[10px] text-slate-500">Your Team licence includes cloud sync. Enter your email to connect.</p>
+          <p className="text-[10px] text-[var(--sc-text-muted)]">Your Team licence includes cloud sync. Enter your email to connect.</p>
         </div>
       )}
 
       {state === 'polling' && (
         <div className="flex items-center gap-3 py-2">
-          <Loader2 size={20} className="text-cyan-400 animate-spin" />
+          <Loader2 size={20} className="text-[var(--sc-cyan)] animate-spin" />
           <div>
-            <p className="text-sm text-white font-medium">Check your email</p>
-            <p className="text-xs text-slate-400">Click the link in your inbox to complete setup. We&apos;ll auto-configure everything.</p>
+            <p className="text-sm text-[var(--sc-text-primary)] font-medium">Check your email</p>
+            <p className="text-xs text-[var(--sc-text-secondary)]">Click the link in your inbox to complete setup. We&apos;ll auto-configure everything.</p>
           </div>
         </div>
       )}
 
       {state === 'success' && (
         <div className="flex items-center gap-3 py-2">
-          <CheckCircle2 size={20} className="text-emerald-400" />
+          <CheckCircle2 size={20} className="text-[var(--sc-cyan)]" />
           <div>
-            <p className="text-sm text-white font-medium">Connected to ShieldCortex Cloud</p>
-            <p className="text-xs text-slate-400">Your defence data will now sync automatically.</p>
+            <p className="text-sm text-[var(--sc-text-primary)] font-medium">Connected to ShieldCortex Cloud</p>
+            <p className="text-xs text-[var(--sc-text-secondary)]">Your defence data will now sync automatically.</p>
           </div>
         </div>
       )}

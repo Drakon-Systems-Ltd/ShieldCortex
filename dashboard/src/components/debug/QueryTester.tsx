@@ -72,26 +72,26 @@ export function QueryTester() {
   return (
     <div className="h-full flex flex-col">
       {/* Search Controls */}
-      <div className="p-3 border-b border-slate-700 flex gap-2 items-center">
+      <div className="p-3 border-b border-[var(--sc-border)] flex gap-2 items-center">
         <Input
           type="text"
           placeholder="Enter search query..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
-          className="flex-1 bg-slate-800 border-slate-600 text-white"
+          className="flex-1 bg-[var(--sc-bg-elevated)] border-[var(--sc-border)] text-[var(--sc-text-primary)]"
         />
 
         {/* Mode Toggle */}
-        <div className="flex gap-1 bg-slate-800 rounded-lg p-1">
+        <div className="flex gap-1 bg-[var(--sc-bg-elevated)] rounded-lg p-1">
           {(['hybrid', 'fts', 'vector'] as SearchMode[]).map((m) => (
             <button
               key={m}
               onClick={() => setMode(m)}
               className={`px-2 py-1 text-xs rounded transition-colors ${
                 mode === m
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-400 hover:text-white'
+                  ? 'bg-blue-600 text-[var(--sc-text-primary)]'
+                  : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
               }`}
             >
               {m.toUpperCase()}
@@ -112,26 +112,26 @@ export function QueryTester() {
       {/* Results */}
       <div className="flex-1 overflow-auto p-3">
         {error && (
-          <div className="p-3 rounded-lg bg-red-500/20 border border-red-500/50 text-red-300 text-sm mb-3">
+          <div className="p-3 rounded-lg bg-[var(--sc-coral)]/20 border border-[var(--sc-coral)]/50 text-[var(--sc-coral)] text-sm mb-3">
             {error}
           </div>
         )}
 
         {results.length === 0 && !error && (
-          <div className="text-slate-500 text-sm text-center py-8">
+          <div className="text-[var(--sc-text-muted)] text-sm text-center py-8">
             {query ? 'No results found' : 'Enter a query to search memories'}
           </div>
         )}
 
         {results.length > 0 && (
           <div className="space-y-2">
-            <div className="text-xs text-slate-400 mb-2">
+            <div className="text-xs text-[var(--sc-text-secondary)] mb-2">
               Found {results.length} results
             </div>
 
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-slate-400 border-b border-slate-700">
+                <tr className="text-left text-[var(--sc-text-secondary)] border-b border-[var(--sc-border)]">
                   <th className="pb-2 pr-4">Title</th>
                   <th className="pb-2 pr-4 w-20">Score</th>
                   <th className="pb-2 pr-4 w-24">Type</th>
@@ -142,14 +142,14 @@ export function QueryTester() {
                 {results.map((result, index) => (
                   <tr
                     key={result.memory.id}
-                    className="border-b border-slate-800 hover:bg-slate-800/50"
+                    className="border-b border-[var(--sc-border)] hover:bg-[var(--sc-bg-elevated)]"
                   >
                     <td className="py-2 pr-4">
                       <div className="flex items-center gap-2">
-                        <span className="text-slate-500 text-xs w-5">
+                        <span className="text-[var(--sc-text-muted)] text-xs w-5">
                           {index + 1}.
                         </span>
-                        <span className="text-white truncate max-w-[300px]">
+                        <span className="text-[var(--sc-text-primary)] truncate max-w-[300px]">
                           {result.memory.title}
                         </span>
                       </div>
@@ -160,7 +160,7 @@ export function QueryTester() {
                           className="h-1.5 rounded-full bg-gradient-to-r from-blue-600 to-purple-600"
                           style={{ width: `${result.relevanceScore * 100}%`, maxWidth: '60px' }}
                         />
-                        <span className="text-xs text-slate-400">
+                        <span className="text-xs text-[var(--sc-text-secondary)]">
                           {(result.relevanceScore * 100).toFixed(0)}%
                         </span>
                       </div>
@@ -171,13 +171,13 @@ export function QueryTester() {
                           ? 'bg-purple-600/30 text-purple-300'
                           : result.memory.type === 'short_term'
                           ? 'bg-blue-600/30 text-blue-300'
-                          : 'bg-green-600/30 text-green-300'
+                          : 'bg-[var(--sc-cyan)]/30 text-[var(--sc-cyan)]'
                       }`}>
                         {result.memory.type.replace('_', '-')}
                       </span>
                     </td>
                     <td className="py-2">
-                      <span className="text-xs text-slate-400">
+                      <span className="text-xs text-[var(--sc-text-secondary)]">
                         {result.memory.category}
                       </span>
                     </td>

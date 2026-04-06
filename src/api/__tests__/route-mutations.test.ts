@@ -190,6 +190,7 @@ describe('API route mutation regressions', () => {
         enqueueFailedQuarantineSync: jest.fn(),
         processRetryQueue: jest.fn(),
         purgeOldEntries: jest.fn(),
+        reconcileSyncQueue: jest.fn(() => ({ removed: 0 })),
       }));
 
       const routeModule = await import('../routes/system.js');

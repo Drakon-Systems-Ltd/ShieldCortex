@@ -14,7 +14,7 @@ import type { GatedFeature } from '../../license/gate.js';
 import { validateOnceNow } from '../../license/validate.js';
 import type { BrainWorker } from '../../worker/brain-worker.js';
 import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -26,6 +26,19 @@ interface AdminRouteDeps {
   requireNotLocked: Middleware;
   requireProFeature: FeatureMiddlewareFactory;
   requireIronDomeAction: (options: IronDomeRouteGuardOptions) => IronDomeMiddleware;
+}
+
+interface InterceptAuditEntry {
+  type: 'intercept';
+  tool: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  firewallResult: string;
+  threats: string[];
+  anomalyScore: number;
+  action: string;
+  outcome: string;
+  preview: string;
+  ts: string;
 }
 
 export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
@@ -53,6 +66,99 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
       const timeRange = (req.query.timeRange as '24h' | '7d' | '30d') ?? '24h';
       const project = req.query.project as string | undefined;
       res.json(getAuditStats(timeRange, project));
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.get('/api/v1/intercepts', (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string, 10) || 100;
+      const severityFilter = typeof req.query.severity === 'string' ? req.query.severity : undefined;
+      const outcomeFilter = typeof req.query.outcome === 'string' ? req.query.outcome : undefined;
+      const toolFilter = typeof req.query.tool === 'string' ? req.query.tool : undefined;
+
+      const auditDir = join(homedir(), '.shieldcortex', 'audit');
+      const entries: InterceptAuditEntry[] = [];
+
+      if (existsSync(auditDir)) {
+        const files = readdirSync(auditDir)
+          .filter((file) => /^realtime-\d{4}-\d{2}-\d{2}\.jsonl$/.test(file))
+          .sort()
+          .slice(-14);
+
+        for (const file of files) {
+          const raw = readFileSync(join(auditDir, file), 'utf-8');
+          for (const line of raw.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const parsed = JSON.parse(line) as Record<string, unknown>;
+              if (parsed.type !== 'intercept') continue;
+
+              const entry: InterceptAuditEntry = {
+                type: 'intercept',
+                tool: typeof parsed.tool === 'string' ? parsed.tool : 'unknown',
+                severity: parsed.severity === 'critical' || parsed.severity === 'high' || parsed.severity === 'medium' || parsed.severity === 'low'
+                  ? parsed.severity
+                  : 'low',
+                firewallResult: typeof parsed.firewallResult === 'string' ? parsed.firewallResult : 'UNKNOWN',
+                threats: Array.isArray(parsed.threats) ? parsed.threats.filter((item): item is string => typeof item === 'string') : [],
+                anomalyScore: typeof parsed.anomalyScore === 'number' ? parsed.anomalyScore : 0,
+                action: typeof parsed.action === 'string' ? parsed.action : 'unknown',
+                outcome: typeof parsed.outcome === 'string' ? parsed.outcome : 'unknown',
+                preview: typeof parsed.preview === 'string' ? parsed.preview : '',
+                ts: typeof parsed.ts === 'string' ? parsed.ts : new Date().toISOString(),
+              };
+
+              if (severityFilter && entry.severity !== severityFilter) continue;
+              if (outcomeFilter && entry.outcome !== outcomeFilter) continue;
+              if (toolFilter && entry.tool !== toolFilter) continue;
+
+              entries.push(entry);
+            } catch {
+              // ignore malformed lines
+            }
+          }
+        }
+      }
+
+      entries.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
+      const limited = entries.slice(0, limit);
+
+      const summary = limited.reduce((acc, entry) => {
+        acc.total += 1;
+        if (entry.outcome === 'approved') acc.approved += 1;
+        if (entry.outcome === 'denied' || entry.outcome === 'auto_denied') acc.denied += 1;
+        if (entry.outcome === 'failure_allowed' || entry.outcome === 'failure_denied') acc.failures += 1;
+        acc.bySeverity[entry.severity] = (acc.bySeverity[entry.severity] || 0) + 1;
+        acc.byTool[entry.tool] = (acc.byTool[entry.tool] || 0) + 1;
+        return acc;
+      }, {
+        total: 0,
+        approved: 0,
+        denied: 0,
+        failures: 0,
+        bySeverity: {} as Record<string, number>,
+        byTool: {} as Record<string, number>,
+      });
+
+      const topTools = Object.entries(summary.byTool)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([tool, count]) => ({ tool, count }));
+
+      res.json({
+        entries: limited,
+        total: entries.length,
+        summary: {
+          total: summary.total,
+          approved: summary.approved,
+          denied: summary.denied,
+          failures: summary.failures,
+          bySeverity: summary.bySeverity,
+          topTools,
+        },
+      });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -165,10 +271,11 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
-      const ids: number[] = req.body?.ids;
-      if (!Array.isArray(ids) || ids.length === 0) {
-        return res.status(400).json({ error: 'ids must be a non-empty array of numbers' });
+      const rawIds = req.body?.ids;
+      if (!Array.isArray(rawIds) || rawIds.length === 0 || !rawIds.every((id: unknown) => Number.isInteger(id))) {
+        return res.status(400).json({ error: 'ids must be a non-empty array of integers' });
       }
+      const ids = rawIds as number[];
       const reviewedBy = req.body?.reviewedBy ?? 'dashboard';
       res.json(approveQuarantineItems(ids, reviewedBy));
     } catch (error) {
@@ -183,10 +290,11 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
     enforceAmber: true,
   }), (req: Request, res: Response) => {
     try {
-      const ids: number[] = req.body?.ids;
-      if (!Array.isArray(ids) || ids.length === 0) {
-        return res.status(400).json({ error: 'ids must be a non-empty array of numbers' });
+      const rawIds = req.body?.ids;
+      if (!Array.isArray(rawIds) || rawIds.length === 0 || !rawIds.every((id: unknown) => Number.isInteger(id))) {
+        return res.status(400).json({ error: 'ids must be a non-empty array of integers' });
       }
+      const ids = rawIds as number[];
       const reviewedBy = req.body?.reviewedBy ?? 'dashboard';
       res.json(rejectQuarantineItems(ids, reviewedBy));
     } catch (error) {

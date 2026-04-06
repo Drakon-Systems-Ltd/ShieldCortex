@@ -165,15 +165,15 @@ export function MemoryCell({
             transform: 'translateY(-100%)',
           }}
         >
-          <div className="bg-slate-900/95 border border-slate-600 rounded-lg px-3 py-2 text-xs max-w-[200px] backdrop-blur-sm shadow-lg">
-            <div className="font-semibold text-white truncate">{memory.title}</div>
-            <div className="text-slate-400 mt-1 flex items-center gap-2">
+          <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs max-w-[200px] backdrop-blur-sm shadow-lg">
+            <div className="font-semibold text-[var(--sc-text-primary)] truncate">{memory.title}</div>
+            <div className="text-[var(--sc-text-secondary)] mt-1 flex items-center gap-2">
               <span
                 className="w-2 h-2 rounded-full"
                 style={{ backgroundColor: color }}
               />
               <span className="capitalize">{memory.category}</span>
-              <span className="text-slate-500">|</span>
+              <span className="text-[var(--sc-text-muted)]">|</span>
               <span>{Math.round(memory.salience * 100)}%</span>
             </div>
           </div>

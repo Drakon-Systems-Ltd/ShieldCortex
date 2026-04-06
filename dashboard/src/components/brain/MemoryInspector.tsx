@@ -48,9 +48,9 @@ const TYPE_LABELS: Record<string, string> = {
 
 const RELATIONSHIP_COLORS: Record<string, string> = {
   references: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  extends: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  contradicts: 'bg-red-500/20 text-red-400 border-red-500/30',
-  related: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
+  extends: 'bg-[var(--sc-cyan)]/20 text-[var(--sc-cyan)] border-[var(--sc-cyan)]/30',
+  contradicts: 'bg-[var(--sc-coral)]/20 text-[var(--sc-coral)] border-[var(--sc-coral)]/30',
+  related: 'bg-[var(--sc-bg-elevated)]/20 text-[var(--sc-text-secondary)] border-[var(--sc-border)]/30',
 };
 
 const RELATIONSHIP_BAR_COLORS: Record<string, string> = {
@@ -74,15 +74,15 @@ export function MemoryInspector({
   // Empty state
   if (!memory) {
     return (
-      <div className="w-80 shrink-0 h-full bg-slate-900/80 backdrop-blur-sm border-l border-slate-800 flex flex-col items-center justify-center">
-        <div className="text-slate-600 mb-3">
+      <div className="w-80 shrink-0 h-full bg-[var(--sc-bg-surface)] backdrop-blur-sm border-l border-[var(--sc-border)] flex flex-col items-center justify-center">
+        <div className="text-[var(--sc-text-muted)] mb-3">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z" />
             <path d="M9 21h6" />
             <path d="M10 21v1a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-1" />
           </svg>
         </div>
-        <p className="text-slate-500 text-sm">Click a memory node to inspect it</p>
+        <p className="text-[var(--sc-text-muted)] text-sm">Click a memory node to inspect it</p>
       </div>
     );
   }
@@ -94,10 +94,10 @@ export function MemoryInspector({
   // Health indicator based on decayedScore
   const healthClass =
     decayedScore > 0.7
-      ? 'bg-emerald-400'
+      ? 'bg-[var(--sc-cyan)]'
       : decayedScore >= 0.4
-        ? 'bg-amber-400'
-        : 'bg-red-400';
+        ? 'bg-[var(--sc-amber)]'
+        : 'bg-[var(--sc-coral)]';
 
   // Resolve connections: find the other side of each link relative to this memory
   const connections = links.map((link) => {
@@ -115,13 +115,13 @@ export function MemoryInspector({
   });
 
   return (
-    <div className="w-80 shrink-0 h-full bg-slate-900/80 backdrop-blur-sm border-l border-slate-800 flex flex-col">
+    <div className="w-80 shrink-0 h-full bg-[var(--sc-bg-surface)] backdrop-blur-sm border-l border-[var(--sc-border)] flex flex-col">
       {/* ── Header (sticky top) ── */}
-      <div className="sticky top-0 z-10 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 p-4 flex-shrink-0">
+      <div className="sticky top-0 z-10 bg-[var(--sc-bg-surface)] backdrop-blur-sm border-b border-[var(--sc-border)] p-4 flex-shrink-0">
         {/* Close button */}
         <button
           onClick={onClose}
-          className="absolute top-3 right-3 text-slate-500 hover:text-slate-300 transition-colors"
+          className="absolute top-3 right-3 text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
           aria-label="Close inspector"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -130,7 +130,7 @@ export function MemoryInspector({
         </button>
 
         {/* Title */}
-        <h3 className="text-slate-200 font-medium text-sm pr-6 leading-tight mb-2">
+        <h3 className="text-[var(--sc-text-primary)] font-medium text-sm pr-6 leading-tight mb-2">
           {memory.title}
         </h3>
 
@@ -146,7 +146,7 @@ export function MemoryInspector({
           >
             {memory.category}
           </span>
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)]">
             {TYPE_LABELS[memory.type] || memory.type}
           </span>
         </div>
@@ -154,10 +154,10 @@ export function MemoryInspector({
         {/* Salience meter */}
         <div className="mb-1.5">
           <div className="flex items-center justify-between mb-0.5">
-            <span className="text-[10px] text-slate-500">Salience</span>
-            <span className="text-[10px] text-slate-400 font-mono">{salience.toFixed(2)}</span>
+            <span className="text-[10px] text-[var(--sc-text-muted)]">Salience</span>
+            <span className="text-[10px] text-[var(--sc-text-secondary)] font-mono">{salience.toFixed(2)}</span>
           </div>
-          <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
+          <div className="h-1 bg-[var(--sc-bg-elevated)] rounded-full overflow-hidden">
             <div
               className="h-full rounded-full transition-all duration-300"
               style={{
@@ -171,7 +171,7 @@ export function MemoryInspector({
         {/* Health indicator */}
         <div className="flex items-center gap-1.5">
           <div className={`w-2 h-2 rounded-full ${healthClass}`} />
-          <span className="text-[10px] text-slate-500">
+          <span className="text-[10px] text-[var(--sc-text-muted)]">
             Health {decayedScore.toFixed(2)}
           </span>
         </div>
@@ -180,12 +180,12 @@ export function MemoryInspector({
       {/* ── Scrollable content area ── */}
       <div className="flex-1 overflow-y-auto min-h-0">
         {/* ── Detail Section ── */}
-        <div className="p-4 border-b border-slate-800">
+        <div className="p-4 border-b border-[var(--sc-border)]">
           {/* Content */}
           <div className="mb-3">
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Content</div>
-            <div className="max-h-48 overflow-y-auto rounded bg-slate-950/60 border border-slate-800 p-2">
-              <pre className="text-xs text-slate-300 whitespace-pre-wrap break-words font-mono leading-relaxed">
+            <div className="text-[10px] text-[var(--sc-text-muted)] uppercase tracking-wider mb-1">Content</div>
+            <div className="max-h-48 overflow-y-auto rounded bg-[var(--sc-bg-deep)]/60 border border-[var(--sc-border)] p-2">
+              <pre className="text-xs text-[var(--sc-text-primary)] whitespace-pre-wrap break-words font-mono leading-relaxed">
                 {memory.content}
               </pre>
             </div>
@@ -194,12 +194,12 @@ export function MemoryInspector({
           {/* Tags */}
           {memory.tags && memory.tags.length > 0 && (
             <div className="mb-3">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Tags</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)] uppercase tracking-wider mb-1">Tags</div>
               <div className="flex flex-wrap gap-1">
                 {memory.tags.map((tag) => (
                   <span
                     key={tag}
-                    className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700"
+                    className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)]"
                   >
                     {tag}
                   </span>
@@ -211,20 +211,20 @@ export function MemoryInspector({
           {/* Metadata grid */}
           <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
             <div>
-              <div className="text-[10px] text-slate-500">Created</div>
-              <div className="text-xs text-slate-300">{relativeTime(memory.createdAt)}</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)]">Created</div>
+              <div className="text-xs text-[var(--sc-text-primary)]">{relativeTime(memory.createdAt)}</div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500">Last Accessed</div>
-              <div className="text-xs text-slate-300">{relativeTime(memory.lastAccessed)}</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)]">Last Accessed</div>
+              <div className="text-xs text-[var(--sc-text-primary)]">{relativeTime(memory.lastAccessed)}</div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500">Access Count</div>
-              <div className="text-xs text-slate-300">{memory.accessCount}</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)]">Access Count</div>
+              <div className="text-xs text-[var(--sc-text-primary)]">{memory.accessCount}</div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500">Project</div>
-              <div className="text-xs text-slate-300 truncate" title={memory.project || 'Global'}>
+              <div className="text-[10px] text-[var(--sc-text-muted)]">Project</div>
+              <div className="text-xs text-[var(--sc-text-primary)] truncate" title={memory.project || 'Global'}>
                 {memory.project || 'Global'}
               </div>
             </div>
@@ -234,16 +234,16 @@ export function MemoryInspector({
         {/* ── Connections Section ── */}
         <div className="p-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[10px] text-slate-500 uppercase tracking-wider">
+            <span className="text-[10px] text-[var(--sc-text-muted)] uppercase tracking-wider">
               Connections
             </span>
-            <span className="text-[10px] text-slate-600 font-mono">
+            <span className="text-[10px] text-[var(--sc-text-muted)] font-mono">
               {connections.length}
             </span>
           </div>
 
           {connections.length === 0 ? (
-            <p className="text-xs text-slate-600 py-2">No connections yet</p>
+            <p className="text-xs text-[var(--sc-text-muted)] py-2">No connections yet</p>
           ) : (
             <div className="space-y-2">
               {connections.map((conn) => {
@@ -257,7 +257,7 @@ export function MemoryInspector({
                   <button
                     key={conn.link.id}
                     onClick={() => onNavigateToMemory(conn.targetId)}
-                    className="w-full text-left rounded bg-slate-800/40 hover:bg-slate-800/70 border border-slate-800 hover:border-slate-700 p-2 transition-colors group"
+                    className="w-full text-left rounded bg-[var(--sc-bg-elevated)] hover:bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] hover:border-[var(--sc-border)] p-2 transition-colors group"
                   >
                     {/* Target title with category dot */}
                     <div className="flex items-start gap-1.5 mb-1">
@@ -265,7 +265,7 @@ export function MemoryInspector({
                         className="w-1.5 h-1.5 rounded-full mt-1 flex-shrink-0"
                         style={{ backgroundColor: connCategoryColor }}
                       />
-                      <span className="text-xs text-slate-300 group-hover:text-slate-200 leading-tight line-clamp-2">
+                      <span className="text-xs text-[var(--sc-text-primary)] group-hover:text-[var(--sc-text-primary)] leading-tight line-clamp-2">
                         {conn.targetTitle}
                       </span>
                     </div>
@@ -277,7 +277,7 @@ export function MemoryInspector({
                       </span>
 
                       {/* Strength bar */}
-                      <div className="flex-1 h-0.5 bg-slate-800 rounded-full overflow-hidden">
+                      <div className="flex-1 h-0.5 bg-[var(--sc-bg-elevated)] rounded-full overflow-hidden">
                         <div
                           className="h-full rounded-full"
                           style={{
@@ -286,7 +286,7 @@ export function MemoryInspector({
                           }}
                         />
                       </div>
-                      <span className="text-[9px] text-slate-600 font-mono">
+                      <span className="text-[9px] text-[var(--sc-text-muted)] font-mono">
                         {conn.strength.toFixed(1)}
                       </span>
                     </div>
@@ -299,12 +299,12 @@ export function MemoryInspector({
       </div>
 
       {/* ── Actions Toolbar (sticky bottom) ── */}
-      <div className="sticky bottom-0 z-10 bg-slate-900/95 backdrop-blur-sm border-t border-slate-800 p-3 flex-shrink-0">
+      <div className="sticky bottom-0 z-10 bg-[var(--sc-bg-surface)] backdrop-blur-sm border-t border-[var(--sc-border)] p-3 flex-shrink-0">
         <div className="flex items-center gap-1">
           {/* Boost */}
           <button
             onClick={() => onBoost(memory.id)}
-            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-slate-400 hover:text-emerald-400 hover:bg-slate-800/60 transition-colors"
+            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-[var(--sc-text-secondary)] hover:text-[var(--sc-cyan)] hover:bg-[var(--sc-bg-elevated)] transition-colors"
             title="Boost salience"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -316,7 +316,7 @@ export function MemoryInspector({
           {/* Demote */}
           <button
             onClick={() => onDemote(memory.id)}
-            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-slate-400 hover:text-amber-400 hover:bg-slate-800/60 transition-colors"
+            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-[var(--sc-text-secondary)] hover:text-[var(--sc-amber)] hover:bg-[var(--sc-bg-elevated)] transition-colors"
             title="Demote salience"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -329,7 +329,7 @@ export function MemoryInspector({
           {memory.type === 'short_term' && (
             <button
               onClick={() => onPromote(memory.id)}
-              className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-slate-400 hover:text-blue-400 hover:bg-slate-800/60 transition-colors"
+              className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-[var(--sc-text-secondary)] hover:text-blue-400 hover:bg-[var(--sc-bg-elevated)] transition-colors"
               title="Promote to LTM"
             >
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -347,7 +347,7 @@ export function MemoryInspector({
                 onDelete(memory.id);
               }
             }}
-            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-slate-400 hover:text-red-400 hover:bg-slate-800/60 transition-colors"
+            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-[var(--sc-text-secondary)] hover:text-[var(--sc-coral)] hover:bg-[var(--sc-bg-elevated)] transition-colors"
             title="Delete memory"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -364,7 +364,7 @@ export function MemoryInspector({
                 onQuarantine(memory.id);
               }
             }}
-            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-slate-400 hover:text-violet-400 hover:bg-slate-800/60 transition-colors"
+            className="flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-[var(--sc-text-secondary)] hover:text-[var(--sc-coral)] hover:bg-[var(--sc-bg-elevated)] transition-colors"
             title="Quarantine memory"
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

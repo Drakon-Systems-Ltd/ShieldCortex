@@ -47,10 +47,10 @@ export function DebugPanel({ onCollapse }: DebugPanelProps) {
 
   if (isCollapsed) {
     return (
-      <div className="h-10 border-t border-slate-700 bg-slate-900/80 flex items-center px-4">
+      <div className="h-10 border-t border-[var(--sc-border)] bg-[var(--sc-bg-surface)] flex items-center px-4">
         <button
           onClick={handleCollapse}
-          className="flex items-center gap-2 text-sm text-slate-400 hover:text-white"
+          className="flex items-center gap-2 text-sm text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]"
         >
           <span>▲</span>
           <span>Debug Panel</span>
@@ -60,17 +60,17 @@ export function DebugPanel({ onCollapse }: DebugPanelProps) {
   }
 
   return (
-    <div className="h-96 border-t border-slate-700 bg-slate-900/80 flex flex-col">
+    <div className="h-96 border-t border-[var(--sc-border)] bg-[var(--sc-bg-surface)] flex flex-col">
       {/* Tab Bar */}
-      <div className="flex items-center border-b border-slate-700 px-2">
+      <div className="flex items-center border-b border-[var(--sc-border)] px-2">
         {TABS.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`px-4 py-2 text-sm flex items-center gap-1.5 border-b-2 transition-colors ${
               activeTab === tab.id
-                ? 'text-white border-blue-500'
-                : 'text-slate-400 border-transparent hover:text-white hover:border-slate-600'
+                ? 'text-[var(--sc-text-primary)] border-blue-500'
+                : 'text-[var(--sc-text-secondary)] border-transparent hover:text-[var(--sc-text-primary)] hover:border-[var(--sc-border)]'
             }`}
           >
             <span>{tab.icon}</span>
@@ -82,7 +82,7 @@ export function DebugPanel({ onCollapse }: DebugPanelProps) {
 
         <button
           onClick={handleCollapse}
-          className="p-2 text-slate-400 hover:text-white"
+          className="p-2 text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]"
           title="Collapse panel"
         >
           ▼

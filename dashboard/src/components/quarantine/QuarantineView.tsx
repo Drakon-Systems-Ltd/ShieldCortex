@@ -21,28 +21,28 @@ function ConfirmationDialog({
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-md w-full mx-4">
-        <h3 className="text-sm font-semibold text-white mb-2">
+      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
+        <h3 className="text-sm font-semibold text-[var(--sc-text-primary)] mb-2">
           {action === 'approve' ? 'Approve' : 'Reject'} quarantined item?
         </h3>
-        <p className="text-xs text-slate-400 mb-1">
+        <p className="text-xs text-[var(--sc-text-secondary)] mb-1">
           <strong>{item.title || 'Untitled'}</strong>
         </p>
-        <p className="text-xs text-slate-500 mb-4">
+        <p className="text-xs text-[var(--sc-text-muted)] mb-4">
           {action === 'approve'
             ? 'This will approve the item and promote it into memory.'
             : 'This will permanently discard the memory.'}
         </p>
 
         <div className="mb-4">
-          <label className="text-xs text-slate-400 block mb-1">
-            Type <strong className="text-white">YES</strong> to confirm:
+          <label className="text-xs text-[var(--sc-text-secondary)] block mb-1">
+            Type <strong className="text-[var(--sc-text-primary)]">YES</strong> to confirm:
           </label>
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-cyan-500 focus:border-cyan-500"
+            className="w-full bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-sm rounded-lg px-3 py-2 focus:ring-[var(--sc-cyan)] focus:border-[var(--sc-cyan)]"
             autoFocus
             onKeyDown={(e) => {
               if (e.key === 'Enter' && isValid) onConfirm();
@@ -54,7 +54,7 @@ function ConfirmationDialog({
         <div className="flex gap-2 justify-end">
           <button
             onClick={onCancel}
-            className="px-3 py-1.5 text-xs text-slate-400 hover:text-white transition-colors"
+            className="px-3 py-1.5 text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
           >
             Cancel
           </button>
@@ -64,9 +64,9 @@ function ConfirmationDialog({
             className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
               isValid
                 ? action === 'approve'
-                  ? 'bg-green-600 text-white hover:bg-green-500'
-                  : 'bg-red-600 text-white hover:bg-red-500'
-                : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                  ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-cyan-mid)]'
+                  : 'bg-[var(--sc-coral)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-coral-mid)]'
+                : 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-muted)] cursor-not-allowed'
             }`}
           >
             {action === 'approve' ? 'Approve' : 'Reject'}
@@ -144,7 +144,7 @@ export function QuarantineView() {
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-slate-950">
+    <div className="space-y-6">
       {/* Confirmation dialog */}
       {confirmAction && (
         <ConfirmationDialog
@@ -158,11 +158,11 @@ export function QuarantineView() {
       {/* Bulk confirmation dialog */}
       {bulkConfirm && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-md w-full mx-4">
-            <h3 className="text-sm font-semibold text-white mb-2">
+          <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
+            <h3 className="text-sm font-semibold text-[var(--sc-text-primary)] mb-2">
               {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}?
             </h3>
-            <p className="text-xs text-slate-400 mb-4">
+            <p className="text-xs text-[var(--sc-text-secondary)] mb-4">
               {bulkConfirm === 'approve'
                 ? 'This will approve all selected items and promote them into memory.'
                 : 'This will permanently discard all selected memories.'}
@@ -170,7 +170,7 @@ export function QuarantineView() {
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setBulkConfirm(null)}
-                className="px-3 py-1.5 text-xs text-slate-400 hover:text-white transition-colors"
+                className="px-3 py-1.5 text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
               >
                 Cancel
               </button>
@@ -178,8 +178,8 @@ export function QuarantineView() {
                 onClick={handleBulkConfirm}
                 className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
                   bulkConfirm === 'approve'
-                    ? 'bg-green-600 text-white hover:bg-green-500'
-                    : 'bg-red-600 text-white hover:bg-red-500'
+                    ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-cyan-mid)]'
+                    : 'bg-[var(--sc-coral)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-coral-mid)]'
                 }`}
               >
                 {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}
@@ -189,18 +189,16 @@ export function QuarantineView() {
         </div>
       )}
 
-      <div className="mx-auto max-w-6xl space-y-6 p-6">
-      {/* Header */}
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+      {/* Filters and bulk actions */}
+      <div className="glass-card p-5">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">Quarantine Review</h2>
-          <div className="flex gap-1 bg-slate-800 rounded-lg p-0.5">
+          <div className="flex gap-1 bg-[var(--sc-bg-elevated)] rounded-lg p-0.5">
             {['pending', 'approved', 'rejected'].map((status) => (
               <button
                 key={status}
                 onClick={() => { setStatusFilter(status); setSelectedIds(new Set()); }}
                 className={`px-3 py-1 text-xs rounded-md transition-colors capitalize ${
-                  statusFilter === status ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
+                  statusFilter === status ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
                 }`}
               >
                 {status}
@@ -214,23 +212,23 @@ export function QuarantineView() {
           <div className="flex items-center gap-3 mt-3">
             <button
               onClick={toggleSelectAll}
-              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors"
+              className="flex items-center gap-1.5 text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
             >
-              {allSelected ? <CheckSquare size={14} className="text-cyan-400" /> : someSelected ? <MinusSquare size={14} className="text-cyan-400" /> : <Square size={14} />}
+              {allSelected ? <CheckSquare size={14} className="text-[var(--sc-cyan)]" /> : someSelected ? <MinusSquare size={14} className="text-[var(--sc-cyan)]" /> : <Square size={14} />}
               {allSelected ? 'Deselect all' : 'Select all'}
             </button>
             {someSelected && (
               <>
-                <span className="text-xs text-slate-500">{selectedIds.size} selected</span>
+                <span className="text-xs text-[var(--sc-text-muted)]">{selectedIds.size} selected</span>
                 <button
                   onClick={() => setBulkConfirm('approve')}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-green-600/10 text-green-400 rounded-lg hover:bg-green-600/20 transition-colors"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)] rounded-lg hover:bg-[var(--sc-cyan)]/20 transition-colors"
                 >
                   <Check size={12} /> Approve
                 </button>
                 <button
                   onClick={() => setBulkConfirm('reject')}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-red-600/10 text-red-400 rounded-lg hover:bg-red-600/20 transition-colors"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-coral)]/10 text-[var(--sc-coral)] rounded-lg hover:bg-[var(--sc-coral)]/20 transition-colors"
                 >
                   <X size={12} /> Reject
                 </button>
@@ -241,7 +239,7 @@ export function QuarantineView() {
       </div>
 
       {mutationError && (
-        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+        <div className="glass-card p-5 border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 text-sm text-[var(--sc-coral)]">
           {mutationError}
         </div>
       )}
@@ -249,12 +247,12 @@ export function QuarantineView() {
       {/* Items */}
       <div>
         {isLoading ? (
-          <div className="flex items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/70 h-32">
-            <div className="text-xs text-slate-500 animate-pulse">Loading quarantine items...</div>
+          <div className="glass-card p-5 flex items-center justify-center h-32">
+            <div className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading quarantine items...</div>
           </div>
         ) : items.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/70 h-32 text-slate-500">
-            <AlertTriangle size={24} className="mb-2 text-slate-600" />
+          <div className="glass-card p-5 flex flex-col items-center justify-center h-32 text-[var(--sc-text-muted)]">
+            <AlertTriangle size={24} className="mb-2 text-[var(--sc-text-muted)]" />
             <span className="text-xs">No {statusFilter} items</span>
           </div>
         ) : (
@@ -267,39 +265,39 @@ export function QuarantineView() {
               return (
                 <div
                   key={item.id}
-                  className={`bg-slate-900 border rounded-xl p-4 ${selectedIds.has(item.id) ? 'border-cyan-600/50' : 'border-slate-800'}`}
+                  className={`glass-card p-5 ${selectedIds.has(item.id) ? 'border-[var(--sc-cyan)]/50' : ''}`}
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex items-start gap-2.5">
                       {item.status === 'pending' && (
                         <button
                           onClick={() => toggleSelect(item.id)}
-                          className="mt-0.5 text-slate-500 hover:text-cyan-400 transition-colors shrink-0"
+                          className="mt-0.5 text-[var(--sc-text-muted)] hover:text-[var(--sc-cyan)] transition-colors shrink-0"
                         >
-                          {selectedIds.has(item.id) ? <CheckSquare size={14} className="text-cyan-400" /> : <Square size={14} />}
+                          {selectedIds.has(item.id) ? <CheckSquare size={14} className="text-[var(--sc-cyan)]" /> : <Square size={14} />}
                         </button>
                       )}
                       <div>
-                        <h4 className="text-sm font-medium text-white">
+                        <h4 className="text-sm font-medium text-[var(--sc-text-primary)]">
                           {item.title || 'Untitled'}
                         </h4>
-                        <div className="text-[10px] text-slate-500 mt-0.5">
+                        <div className="text-[10px] text-[var(--sc-text-muted)] mt-0.5">
                           {item.source_type} &middot; {new Date(item.created_at).toLocaleString()}
                           {item.anomaly_score > 0 && (
-                            <span className={`ml-2 ${item.anomaly_score > 0.5 ? 'text-red-400' : 'text-yellow-400'}`}>
+                            <span className={`ml-2 ${item.anomaly_score > 0.5 ? 'text-[var(--sc-coral)]' : 'text-[var(--sc-amber)]'}`}>
                               Anomaly: {item.anomaly_score.toFixed(2)}
                             </span>
                           )}
                         </div>
                       </div>
                     </div>
-                    <span className="text-[10px] text-red-400 bg-red-400/10 px-2 py-0.5 rounded">
+                    <span className="text-[10px] text-[var(--sc-coral)] bg-[var(--sc-coral)]/10 px-2 py-0.5 rounded">
                       {item.reason?.slice(0, 50) || 'Threat detected'}
                     </span>
                   </div>
 
                   {/* Content preview */}
-                  <div className="bg-slate-800/50 rounded-lg p-3 mb-3 text-xs text-slate-300 whitespace-pre-wrap break-words">
+                  <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3 mb-3 text-xs text-[var(--sc-text-primary)] whitespace-pre-wrap break-words">
                     {item.content?.slice(0, 500) || 'No content'}
                   </div>
 
@@ -307,7 +305,7 @@ export function QuarantineView() {
                   {indicators.length > 0 && (
                     <div className="flex gap-1 mb-3 flex-wrap">
                       {indicators.map((ind: string, i: number) => (
-                        <span key={i} className="text-[9px] text-yellow-400 bg-yellow-400/10 px-1.5 py-0.5 rounded">
+                        <span key={i} className="text-[9px] text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 px-1.5 py-0.5 rounded">
                           {ind}
                         </span>
                       ))}
@@ -320,14 +318,14 @@ export function QuarantineView() {
                       <button
                         onClick={() => setConfirmAction({ action: 'approve', item })}
                         disabled={approveMutation.isPending || bulkApproveMutation.isPending}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-green-600/10 text-green-400 rounded-lg hover:bg-green-600/20 transition-colors"
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)] rounded-lg hover:bg-[var(--sc-cyan)]/20 transition-colors"
                       >
                         <Check size={12} /> Approve
                       </button>
                       <button
                         onClick={() => setConfirmAction({ action: 'reject', item })}
                         disabled={rejectMutation.isPending || bulkRejectMutation.isPending}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-red-600/10 text-red-400 rounded-lg hover:bg-red-600/20 transition-colors"
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-coral)]/10 text-[var(--sc-coral)] rounded-lg hover:bg-[var(--sc-coral)]/20 transition-colors"
                       >
                         <X size={12} /> Reject
                       </button>
@@ -336,7 +334,7 @@ export function QuarantineView() {
 
                   {/* Review info (for reviewed items) */}
                   {item.reviewed_at && (
-                    <div className="text-[10px] text-slate-500">
+                    <div className="text-[10px] text-[var(--sc-text-muted)]">
                       {item.status === 'approved' ? 'Approved' : 'Rejected'} by {item.reviewed_by} at {new Date(item.reviewed_at).toLocaleString()}
                     </div>
                   )}
@@ -345,7 +343,6 @@ export function QuarantineView() {
             })}
           </div>
         )}
-      </div>
       </div>
     </div>
   );

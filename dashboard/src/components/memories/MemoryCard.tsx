@@ -31,12 +31,12 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
   return (
     <div
       onClick={() => onSelect(memory)}
-      className={`bg-slate-900 border rounded-lg p-3 hover:border-slate-600 cursor-pointer transition-colors relative ${
-        isSelected ? 'border-cyan-500' : 'border-slate-800'
+      className={`bg-[var(--sc-bg-surface)] border rounded-lg p-3 hover:border-[var(--sc-border)] cursor-pointer transition-colors relative ${
+        isSelected ? 'border-[var(--sc-cyan)]' : 'border-[var(--sc-border)]'
       }`}
     >
       {/* Salience bar */}
-      <div className="h-0.5 rounded-full bg-slate-800 mb-2 overflow-hidden">
+      <div className="h-0.5 rounded-full bg-[var(--sc-bg-elevated)] mb-2 overflow-hidden">
         <div
           className="h-full rounded-full"
           style={{ width: `${memory.salience * 100}%`, backgroundColor: catColor }}
@@ -58,7 +58,7 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
       )}
 
       {/* Title */}
-      <h3 className="text-sm font-semibold text-white truncate pr-6">{memory.title}</h3>
+      <h3 className="text-sm font-semibold text-[var(--sc-text-primary)] truncate pr-6">{memory.title}</h3>
 
       {/* Badges */}
       <div className="flex items-center gap-1.5 mt-1">
@@ -75,12 +75,12 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
           {memory.type.replace('_', '-')}
         </span>
         {memory.status && memory.status !== 'active' && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-amber-500/15 text-amber-300">
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-[var(--sc-amber)]/15 text-[var(--sc-amber)]">
             {memory.status}
           </span>
         )}
         {memory.pinned && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-emerald-500/15 text-emerald-300">
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-[var(--sc-cyan)]/15 text-[var(--sc-cyan)]">
             pinned
           </span>
         )}
@@ -88,48 +88,48 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
 
       <div className="flex items-center gap-1.5 mt-2 flex-wrap">
         {memory.sourceKind && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)]">
             {memory.sourceKind}
           </span>
         )}
         {memory.captureMethod && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)]">
             {memory.captureMethod}
           </span>
         )}
         {typeof memory.trustScore === 'number' && (
           <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-            memory.trustScore < 0.7 ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'
+            memory.trustScore < 0.7 ? 'bg-[var(--sc-coral)]/15 text-[var(--sc-coral)]' : 'bg-[var(--sc-cyan)]/15 text-[var(--sc-cyan)]'
           }`}>
             trust {memory.trustScore.toFixed(2)}
           </span>
         )}
         {memory.cloudExcluded && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-amber)]/15 text-[var(--sc-amber)]">
             cloud excluded
           </span>
         )}
       </div>
 
       {/* Content preview */}
-      <p className="text-[13px] text-slate-400 mt-1.5 line-clamp-3 leading-snug">{memory.content}</p>
+      <p className="text-[13px] text-[var(--sc-text-secondary)] mt-1.5 line-clamp-3 leading-snug">{memory.content}</p>
 
       {/* Tags */}
       {memory.tags.length > 0 && (
         <div className="flex items-center gap-1 mt-2 flex-wrap">
           {memory.tags.slice(0, 3).map((tag) => (
-            <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+            <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)]">
               {tag}
             </span>
           ))}
           {memory.tags.length > 3 && (
-            <span className="text-[10px] text-slate-500">+{memory.tags.length - 3} more</span>
+            <span className="text-[10px] text-[var(--sc-text-muted)]">+{memory.tags.length - 3} more</span>
           )}
         </div>
       )}
 
       {/* Footer */}
-      <div className="flex items-center justify-between mt-2 text-[11px] text-slate-500">
+      <div className="flex items-center justify-between mt-2 text-[11px] text-[var(--sc-text-muted)]">
         <span>Created {relativeTime(memory.createdAt)}</span>
         <span>Accessed {relativeTime(memory.lastAccessed)}</span>
       </div>

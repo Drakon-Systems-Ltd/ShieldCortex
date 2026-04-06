@@ -19,7 +19,7 @@ import {
   setOpenClawMemoryConfig,
   type DefenceMode,
 } from '../../cloud/config.js';
-import { getQueueStats } from '../../cloud/sync-queue.js';
+import { getQueueStats, reconcileSyncQueue } from '../../cloud/sync-queue.js';
 import { getDatabase } from '../../database/init.js';
 import { getRequiredTier, isFeatureEnabled } from '../../license/gate.js';
 import { getLicense } from '../../license/store.js';
@@ -349,6 +349,16 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
           latestFailureAt: queue.latestFailureAt,
         },
       });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/cloud/sync-queue/clear-failed', (req: Request, res: Response) => {
+    try {
+      const kinds = Array.isArray(req.body?.kinds) ? req.body.kinds : ['memory', 'graph', 'audit', 'quarantine'];
+      const result = reconcileSyncQueue({ kinds, statuses: ['failed'] });
+      res.json({ cleared: result.removed });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

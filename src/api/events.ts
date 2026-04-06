@@ -32,7 +32,9 @@ export type MemoryEventType =
   | 'update_started'
   | 'update_complete'
   | 'update_failed'
-  | 'server_restarting';
+  | 'server_restarting'
+  // X-Ray watch events
+  | 'xray_detection';
 
 export interface MemoryEvent {
   type: MemoryEventType;

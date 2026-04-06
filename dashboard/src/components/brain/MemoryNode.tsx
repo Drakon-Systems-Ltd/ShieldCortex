@@ -190,7 +190,7 @@ function MemoryNodeInner({
             transform: 'translate(-50%, -120%)',
           }}
         >
-          <div className="bg-slate-900/95 border border-slate-700 px-3 py-2 rounded-lg shadow-xl backdrop-blur-sm whitespace-nowrap">
+          <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] px-3 py-2 rounded-lg shadow-xl backdrop-blur-sm whitespace-nowrap">
             <div className="text-white font-medium text-sm">{memory.title}</div>
             <div className="flex items-center gap-2 mt-1 text-xs">
               <span
@@ -199,7 +199,7 @@ function MemoryNodeInner({
               >
                 {memory.category}
               </span>
-              <span className="text-slate-400">
+              <span className="text-[var(--sc-text-secondary)]">
                 {(memory.salience * 100).toFixed(0)}%
               </span>
               {colorMode === 'health' && (

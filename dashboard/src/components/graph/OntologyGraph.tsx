@@ -346,7 +346,7 @@ export default function OntologyGraph() {
   if (loading) {
     return (
       <div className="w-full h-full flex items-center justify-center">
-        <div className="text-slate-400 animate-pulse">Loading ontology graph...</div>
+        <div className="text-[var(--sc-text-secondary)] animate-pulse">Loading ontology graph...</div>
       </div>
     );
   }
@@ -354,7 +354,7 @@ export default function OntologyGraph() {
   if (error) {
     return (
       <div className="w-full h-full flex items-center justify-center">
-        <div className="text-red-400">Failed to load ontology: {error}</div>
+        <div className="text-[var(--sc-coral)]">Failed to load ontology: {error}</div>
       </div>
     );
   }
@@ -364,16 +364,16 @@ export default function OntologyGraph() {
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Controls bar */}
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-slate-800 bg-slate-900/50 shrink-0">
+      <div className="flex items-center gap-3 px-4 py-2 border-b border-[var(--sc-border)] bg-[var(--sc-bg-surface)] shrink-0">
         {/* Search */}
         <div className="relative">
-          <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500" />
+          <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--sc-text-muted)]" />
           <input
             type="text"
             placeholder="Filter entities..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            className="pl-7 pr-2 py-1 text-sm bg-slate-800 border border-slate-700 rounded text-white placeholder:text-slate-500 w-48 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            className="pl-7 pr-2 py-1 text-sm bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] w-48 focus:outline-none focus:ring-1 focus:ring-[var(--sc-cyan)]"
           />
         </div>
 
@@ -385,8 +385,8 @@ export default function OntologyGraph() {
               onClick={() => toggleType(type)}
               className={`px-2 py-0.5 text-xs rounded-full border transition-colors ${
                 activeTypes.has(type)
-                  ? 'border-transparent text-white'
-                  : 'border-slate-600 text-slate-500 bg-transparent'
+                  ? 'border-transparent text-[var(--sc-text-primary)]'
+                  : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] bg-transparent'
               }`}
               style={activeTypes.has(type) ? { backgroundColor: ENTITY_COLORS[type] + '40', color: ENTITY_COLORS[type] } : {}}
             >
@@ -395,7 +395,7 @@ export default function OntologyGraph() {
           ))}
         </div>
 
-        <span className="text-xs text-slate-500 ml-auto">
+        <span className="text-xs text-[var(--sc-text-muted)] ml-auto">
           {filteredEntities.length} entities, {graphData.links.length} triples
         </span>
       </div>
@@ -427,13 +427,13 @@ export default function OntologyGraph() {
         </div>
 
         {/* Right panel: detail or stats */}
-        <div className="border-l border-slate-800 bg-slate-900/30 overflow-y-auto" style={{ flex: 2, minWidth: 240, maxWidth: 400 }}>
+        <div className="border-l border-[var(--sc-border)] bg-[var(--sc-bg-surface)] overflow-y-auto" style={{ flex: 2, minWidth: 240, maxWidth: 400 }}>
           {selectedEntity ? (
             /* Entity detail */
             <div className="p-4">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-white truncate">{selectedEntity.entity.name}</h3>
-                <button onClick={() => setSelectedEntity(null)} className="text-slate-500 hover:text-white">
+                <h3 className="text-sm font-semibold text-[var(--sc-text-primary)] truncate">{selectedEntity.entity.name}</h3>
+                <button onClick={() => setSelectedEntity(null)} className="text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)]">
                   <X size={16} />
                 </button>
               </div>
@@ -445,48 +445,48 @@ export default function OntologyGraph() {
                 >
                   {selectedEntity.entity.type}
                 </span>
-                <span className="text-xs text-slate-500">{selectedEntity.entity.memoryCount} memories</span>
+                <span className="text-xs text-[var(--sc-text-muted)]">{selectedEntity.entity.memoryCount} memories</span>
               </div>
 
               {selectedEntity.entity.aliases.length > 0 && (
                 <div className="mb-4">
-                  <div className="text-xs text-slate-400 mb-1">Aliases</div>
+                  <div className="text-xs text-[var(--sc-text-secondary)] mb-1">Aliases</div>
                   <div className="flex flex-wrap gap-1">
                     {selectedEntity.entity.aliases.map((a, i) => (
-                      <span key={i} className="text-xs bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded">{a}</span>
+                      <span key={i} className="text-xs bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)] px-1.5 py-0.5 rounded">{a}</span>
                     ))}
                   </div>
                 </div>
               )}
 
-              <div className="text-xs text-slate-400 mb-2">Relationships ({selectedEntity.triples.length})</div>
+              <div className="text-xs text-[var(--sc-text-secondary)] mb-2">Relationships ({selectedEntity.triples.length})</div>
               <div className="space-y-2 mb-4">
                 {selectedEntity.triples.map(t => (
-                  <div key={t.id} className="text-xs bg-slate-800/50 rounded p-2">
-                    <span className="text-cyan-400">{t.subject_name}</span>
-                    <span className="text-slate-500 mx-1">{t.predicate}</span>
-                    <span className="text-amber-400">{t.object_name}</span>
+                  <div key={t.id} className="text-xs bg-[var(--sc-bg-elevated)] rounded p-2">
+                    <span className="text-[var(--sc-cyan)]">{t.subject_name}</span>
+                    <span className="text-[var(--sc-text-muted)] mx-1">{t.predicate}</span>
+                    <span className="text-[var(--sc-amber)]">{t.object_name}</span>
                   </div>
                 ))}
                 {selectedEntity.triples.length === 0 && (
-                  <div className="text-xs text-slate-600">No relationships found</div>
+                  <div className="text-xs text-[var(--sc-text-muted)]">No relationships found</div>
                 )}
               </div>
 
-              <div className="text-xs text-slate-400 mb-2">Linked Memories ({selectedEntity.memories.length})</div>
+              <div className="text-xs text-[var(--sc-text-secondary)] mb-2">Linked Memories ({selectedEntity.memories.length})</div>
               <div className="space-y-1.5">
                 {selectedEntity.memories.map(m => (
-                  <div key={m.id} className="text-xs bg-slate-800/50 rounded p-2">
-                    <div className="text-slate-200 mb-1">{m.title}</div>
+                  <div key={m.id} className="text-xs bg-[var(--sc-bg-elevated)] rounded p-2">
+                    <div className="text-[var(--sc-text-primary)] mb-1">{m.title}</div>
                     <div className="flex items-center gap-2">
-                      <span className="text-slate-500">{m.category}</span>
-                      <span className="text-slate-600">{m.type.replace('_', '-')}</span>
-                      <span className="text-slate-600 ml-auto">{new Date(m.created_at).toLocaleDateString()}</span>
+                      <span className="text-[var(--sc-text-muted)]">{m.category}</span>
+                      <span className="text-[var(--sc-text-muted)]">{m.type.replace('_', '-')}</span>
+                      <span className="text-[var(--sc-text-muted)] ml-auto">{new Date(m.created_at).toLocaleDateString()}</span>
                     </div>
                   </div>
                 ))}
                 {selectedEntity.memories.length === 0 && (
-                  <div className="text-xs text-slate-600">No linked memories</div>
+                  <div className="text-xs text-[var(--sc-text-muted)]">No linked memories</div>
                 )}
               </div>
             </div>
@@ -495,35 +495,35 @@ export default function OntologyGraph() {
             <div className="p-4 space-y-6">
               {/* Graph Stats */}
               <div>
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Overview</h3>
+                <h3 className="text-xs font-semibold text-[var(--sc-text-secondary)] uppercase tracking-wider mb-3">Overview</h3>
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="bg-slate-800/50 rounded p-2.5">
-                    <div className="text-lg font-bold text-white">{entities.length}</div>
-                    <div className="text-xs text-slate-500">Entities</div>
+                  <div className="bg-[var(--sc-bg-elevated)] rounded p-2.5">
+                    <div className="text-lg font-bold text-[var(--sc-text-primary)]">{entities.length}</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Entities</div>
                   </div>
-                  <div className="bg-slate-800/50 rounded p-2.5">
-                    <div className="text-lg font-bold text-white">{triples.length}</div>
-                    <div className="text-xs text-slate-500">Triples</div>
+                  <div className="bg-[var(--sc-bg-elevated)] rounded p-2.5">
+                    <div className="text-lg font-bold text-[var(--sc-text-primary)]">{triples.length}</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Triples</div>
                   </div>
-                  <div className="bg-slate-800/50 rounded p-2.5">
-                    <div className="text-lg font-bold text-white">{graphStats.typesPresent}</div>
-                    <div className="text-xs text-slate-500">Types</div>
+                  <div className="bg-[var(--sc-bg-elevated)] rounded p-2.5">
+                    <div className="text-lg font-bold text-[var(--sc-text-primary)]">{graphStats.typesPresent}</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Types</div>
                   </div>
-                  <div className="bg-slate-800/50 rounded p-2.5">
-                    <div className="text-lg font-bold text-white">{graphStats.avgConnections}</div>
-                    <div className="text-xs text-slate-500">Avg connections</div>
+                  <div className="bg-[var(--sc-bg-elevated)] rounded p-2.5">
+                    <div className="text-lg font-bold text-[var(--sc-text-primary)]">{graphStats.avgConnections}</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Avg connections</div>
                   </div>
                 </div>
                 {graphStats.mostConnected && (
-                  <div className="mt-2 text-xs text-slate-500">
-                    Most connected: <span className="text-white">{graphStats.mostConnected.name}</span> ({graphStats.maxConn})
+                  <div className="mt-2 text-xs text-[var(--sc-text-muted)]">
+                    Most connected: <span className="text-[var(--sc-text-primary)]">{graphStats.mostConnected.name}</span> ({graphStats.maxConn})
                   </div>
                 )}
               </div>
 
               {/* Entity Type Breakdown */}
               <div>
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Entity Types</h3>
+                <h3 className="text-xs font-semibold text-[var(--sc-text-secondary)] uppercase tracking-wider mb-3">Entity Types</h3>
                 <div className="space-y-1.5">
                   {typeBreakdown.map(({ type, count }) => (
                     <button
@@ -535,10 +535,10 @@ export default function OntologyGraph() {
                         className="w-2.5 h-2.5 rounded-full shrink-0"
                         style={{ backgroundColor: ENTITY_COLORS[type] || DEFAULT_COLOR, opacity: activeTypes.has(type) ? 1 : 0.3 }}
                       />
-                      <span className={`text-xs flex-1 text-left ${activeTypes.has(type) ? 'text-slate-300' : 'text-slate-600'}`}>
+                      <span className={`text-xs flex-1 text-left ${activeTypes.has(type) ? 'text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-muted)]'}`}>
                         {type}
                       </span>
-                      <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                      <div className="flex-1 h-1.5 bg-[var(--sc-bg-elevated)] rounded-full overflow-hidden">
                         <div
                           className="h-full rounded-full transition-all"
                           style={{
@@ -548,7 +548,7 @@ export default function OntologyGraph() {
                           }}
                         />
                       </div>
-                      <span className={`text-xs tabular-nums w-6 text-right ${activeTypes.has(type) ? 'text-slate-400' : 'text-slate-600'}`}>
+                      <span className={`text-xs tabular-nums w-6 text-right ${activeTypes.has(type) ? 'text-[var(--sc-text-secondary)]' : 'text-[var(--sc-text-muted)]'}`}>
                         {count}
                       </span>
                     </button>
@@ -558,7 +558,7 @@ export default function OntologyGraph() {
 
               {/* Predicate Breakdown */}
               <div>
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Relationships</h3>
+                <h3 className="text-xs font-semibold text-[var(--sc-text-secondary)] uppercase tracking-wider mb-3">Relationships</h3>
                 {predicateBreakdown.length > 0 ? (
                   <div className="space-y-1.5">
                     {predicateBreakdown.map(({ predicate, count }) => (
@@ -567,34 +567,34 @@ export default function OntologyGraph() {
                           className="w-2.5 h-2.5 rounded-full shrink-0"
                           style={{ backgroundColor: PREDICATE_COLORS[predicate] || DEFAULT_EDGE_COLOR }}
                         />
-                        <span className="text-xs text-slate-300 flex-1">{predicate}</span>
-                        <span className="text-xs text-slate-400 tabular-nums">{count}</span>
+                        <span className="text-xs text-[var(--sc-text-primary)] flex-1">{predicate}</span>
+                        <span className="text-xs text-[var(--sc-text-secondary)] tabular-nums">{count}</span>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div className="text-xs text-slate-600">No relationships extracted yet</div>
+                  <div className="text-xs text-[var(--sc-text-muted)]">No relationships extracted yet</div>
                 )}
               </div>
 
               {/* Top Entities */}
               <div>
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Top Entities</h3>
+                <h3 className="text-xs font-semibold text-[var(--sc-text-secondary)] uppercase tracking-wider mb-3">Top Entities</h3>
                 <div className="space-y-1">
                   {topEntities.map(entity => (
                     <button
                       key={entity.id}
                       onClick={() => handleEntityClick(entity)}
-                      className="w-full flex items-center gap-2 py-1 px-1.5 rounded hover:bg-slate-800/50 transition-colors group"
+                      className="w-full flex items-center gap-2 py-1 px-1.5 rounded hover:bg-[var(--sc-bg-elevated)] transition-colors group"
                     >
                       <div
                         className="w-2 h-2 rounded-full shrink-0"
                         style={{ backgroundColor: ENTITY_COLORS[entity.type] || DEFAULT_COLOR }}
                       />
-                      <span className="text-xs text-slate-300 flex-1 text-left truncate group-hover:text-white">
+                      <span className="text-xs text-[var(--sc-text-primary)] flex-1 text-left truncate group-hover:text-[var(--sc-text-primary)]">
                         {entity.name}
                       </span>
-                      <span className="text-xs text-slate-600 tabular-nums shrink-0">
+                      <span className="text-xs text-[var(--sc-text-muted)] tabular-nums shrink-0">
                         {entity.memoryCount}
                       </span>
                     </button>
@@ -607,14 +607,14 @@ export default function OntologyGraph() {
       </div>
 
       {/* Bottom panel: entity tags */}
-      <div className="border-t border-slate-800 bg-slate-900/50 px-4 py-2.5 shrink-0">
+      <div className="border-t border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-4 py-2.5 shrink-0">
         <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide" style={{ scrollbarWidth: 'none' }}>
-          <span className="text-xs text-slate-500 shrink-0">Known:</span>
+          <span className="text-xs text-[var(--sc-text-muted)] shrink-0">Known:</span>
           {recentEntities.map(entity => (
             <button
               key={entity.id}
               onClick={() => handleEntityClick(entity)}
-              className="shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-full text-xs transition-colors hover:bg-slate-800"
+              className="shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-full text-xs transition-colors hover:bg-[var(--sc-bg-elevated)]"
               style={{ color: ENTITY_COLORS[entity.type] || DEFAULT_COLOR }}
             >
               <div
@@ -622,7 +622,7 @@ export default function OntologyGraph() {
                 style={{ backgroundColor: ENTITY_COLORS[entity.type] || DEFAULT_COLOR }}
               />
               {entity.name}
-              <span className="text-slate-600">{entity.memoryCount}</span>
+              <span className="text-[var(--sc-text-muted)]">{entity.memoryCount}</span>
             </button>
           ))}
         </div>

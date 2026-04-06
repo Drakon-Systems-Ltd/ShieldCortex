@@ -41,7 +41,10 @@ export interface ReviewQueueResponse {
 }
 
 function isReviewable(memory: Memory) {
-  return (memory.status ?? 'active') !== 'archived' && (memory.status ?? 'active') !== 'suppressed';
+  if ((memory.status ?? 'active') === 'archived' || (memory.status ?? 'active') === 'suppressed') return false;
+  // Once reviewed via the review queue, remove from the queue
+  if (memory.reviewedAt) return false;
+  return true;
 }
 
 function isOlderThanDay(value?: string) {
@@ -79,7 +82,7 @@ function reconcileReviewQueueMemory(queue: ReviewQueueResponse | undefined, upda
     lowTrust: mapSection(queue.sections.lowTrust, (memory) => isReviewable(memory) && (memory.trustScore ?? 1) < 0.7),
     noisyAutoExtracted: mapSection(
       queue.sections.noisyAutoExtracted,
-      (memory) => isReviewable(memory) && (memory.captureMethod === 'auto' || memory.tags.includes('auto-extracted')),
+      (memory) => isReviewable(memory) && (memory.captureMethod === 'auto' || memory.tags?.includes('auto-extracted')),
     ),
     projectless: mapSection(
       queue.sections.projectless,

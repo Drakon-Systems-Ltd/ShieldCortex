@@ -88,10 +88,10 @@ export function TimelineControls({
   );
 
   return (
-    <div className="absolute bottom-4 right-4 bg-slate-900/90 border border-slate-700 rounded-lg p-3 backdrop-blur-sm min-w-[200px]">
+    <div className="absolute bottom-4 right-4 bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-lg p-3 backdrop-blur-sm min-w-[200px]">
       {/* Color Mode Toggle */}
       <div className="mb-3">
-        <div className="text-xs text-slate-400 mb-1.5">Color Mode</div>
+        <div className="text-xs text-[var(--sc-text-secondary)] mb-1.5">Color Mode</div>
         <div className="flex gap-1">
           {[
             { value: 'category', label: 'Category', icon: '🎨' },
@@ -104,8 +104,8 @@ export function TimelineControls({
               onClick={() => onColorModeChange(mode.value as ColorMode)}
               className={`flex-1 px-2 py-1 text-[10px] rounded transition-colors ${
                 colorMode === mode.value
-                  ? mode.value === 'holographic' ? 'bg-amber-500 text-white' : 'bg-blue-600 text-white'
-                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                  ? mode.value === 'holographic' ? 'bg-[var(--sc-amber)] text-white' : 'bg-blue-600 text-white'
+                  : 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] hover:bg-[var(--sc-bg-elevated)]'
               }`}
             >
               <span className="mr-0.5">{mode.icon}</span>
@@ -117,7 +117,7 @@ export function TimelineControls({
 
       {/* Time Filter Presets */}
       <div className="mb-3">
-        <div className="text-xs text-slate-400 mb-1.5">Time Filter</div>
+        <div className="text-xs text-[var(--sc-text-secondary)] mb-1.5">Time Filter</div>
         <div className="flex gap-1">
           {TIME_PRESETS.map((preset, i) => (
             <button
@@ -125,8 +125,8 @@ export function TimelineControls({
               onClick={() => handlePresetClick(preset.hours, i)}
               className={`flex-1 px-2 py-1 text-[10px] rounded transition-colors ${
                 activePreset === i
-                  ? 'bg-cyan-600 text-white'
-                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                  ? 'bg-[var(--sc-cyan)] text-white'
+                  : 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] hover:bg-[var(--sc-bg-elevated)]'
               }`}
             >
               {preset.label}
@@ -137,7 +137,7 @@ export function TimelineControls({
 
       {/* Age Distribution Histogram */}
       <div>
-        <div className="text-xs text-slate-400 mb-1.5">Age Distribution</div>
+        <div className="text-xs text-[var(--sc-text-secondary)] mb-1.5">Age Distribution</div>
         <div className="flex items-end gap-0.5 h-8">
           {ageDistribution.map((bucket) => (
             <div key={bucket.label} className="flex-1 flex flex-col items-center">
@@ -153,7 +153,7 @@ export function TimelineControls({
           {ageDistribution.map((bucket) => (
             <div
               key={bucket.label}
-              className="flex-1 text-[8px] text-slate-500 text-center truncate"
+              className="flex-1 text-[8px] text-[var(--sc-text-muted)] text-center truncate"
             >
               {bucket.label}
             </div>
@@ -163,7 +163,7 @@ export function TimelineControls({
 
       {/* Date Range Info */}
       {dateRange.oldest && dateRange.newest && (
-        <div className="mt-2 pt-2 border-t border-slate-700 text-[9px] text-slate-500">
+        <div className="mt-2 pt-2 border-t border-[var(--sc-border)] text-[9px] text-[var(--sc-text-muted)]">
           <div className="flex justify-between">
             <span>Oldest:</span>
             <span>{dateRange.oldest.toLocaleDateString()}</span>

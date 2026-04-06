@@ -7,9 +7,9 @@ import { AuditExportPanel } from './AuditExportPanel';
 import { AuditDetailPanel } from './AuditDetailPanel';
 
 const RESULT_COLORS: Record<string, string> = {
-  ALLOW: 'bg-green-500/10 text-green-400',
-  BLOCK: 'bg-red-500/10 text-red-400',
-  QUARANTINE: 'bg-yellow-500/10 text-yellow-400',
+  ALLOW: 'bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]',
+  BLOCK: 'bg-[var(--sc-coral)]/10 text-[var(--sc-coral)]',
+  QUARANTINE: 'bg-[var(--sc-amber)]/10 text-[var(--sc-amber)]',
 };
 
 export function AuditLogView() {
@@ -67,167 +67,159 @@ export function AuditLogView() {
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-slate-950">
-      <div className="mx-auto max-w-7xl space-y-6 p-6">
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between mb-3">
-            <div>
-              <h2 className="text-lg font-semibold text-white">Audit Log</h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Start with the result counts and pick a row only when you need the deeper payload. Export stays available, but it should not dominate the first screen.
-              </p>
-            </div>
-            <div className="flex gap-1 bg-slate-800 rounded-lg p-0.5">
-              {(['24h', '7d', '30d'] as const).map((range) => (
-                <button
-                  key={range}
-                  onClick={() => setTimeRange(range)}
-                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
-                    timeRange === range ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {range}
-                </button>
-              ))}
-            </div>
+    <div className="space-y-6">
+      <div className="glass-card-strong p-5">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between mb-3">
+          <div className="flex gap-1 bg-[var(--sc-bg-elevated)] rounded-lg p-0.5 ml-auto">
+            {(['24h', '7d', '30d'] as const).map((range) => (
+              <button
+                key={range}
+                onClick={() => setTimeRange(range)}
+                className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                  timeRange === range ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
+                }`}
+              >
+                {range}
+              </button>
+            ))}
           </div>
+        </div>
 
-          <div className="mb-4 grid gap-3 md:grid-cols-4">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Entries</div>
-              <div className="mt-1 text-xl font-semibold text-white">{logs.length}</div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Allowed</div>
-              <div className="mt-1 text-xl font-semibold text-emerald-300">{allowedCount}</div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Blocked</div>
-              <div className="mt-1 text-xl font-semibold text-red-300">{blockedCount}</div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Quarantined</div>
-              <div className="mt-1 text-xl font-semibold text-amber-300">{quarantinedCount}</div>
-            </div>
+        <div className="mb-4 grid gap-3 md:grid-cols-4">
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Entries</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-text-primary)]">{logs.length}</div>
           </div>
-
-          <div className="flex gap-2 flex-wrap">
-            <select
-              value={resultFilter || ''}
-              onChange={(e) => setResultFilter(e.target.value || undefined)}
-              className="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-2 py-1"
-            >
-              <option value="">All Results</option>
-              <option value="ALLOW">Allowed</option>
-              <option value="BLOCK">Blocked</option>
-              <option value="QUARANTINE">Quarantined</option>
-            </select>
-
-            <select
-              value={sourceFilter || ''}
-              onChange={(e) => setSourceFilter(e.target.value || undefined)}
-              className="bg-slate-800 border border-slate-700 text-white text-xs rounded-lg px-2 py-1"
-            >
-              <option value="">All Sources</option>
-              <option value="hook">Hook</option>
-              <option value="api">API</option>
-              <option value="agent">Agent</option>
-              <option value="user">User</option>
-              <option value="cli">CLI</option>
-            </select>
-
-            <button
-              onClick={() => setSelectedAuditEntry(null)}
-              className="ml-auto rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs text-slate-300 transition-colors hover:border-slate-500 hover:text-white"
-            >
-              Clear selection
-            </button>
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Allowed</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-cyan)]">{allowedCount}</div>
           </div>
-        </section>
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Blocked</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-coral)]">{blockedCount}</div>
+          </div>
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Quarantined</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-amber)]">{quarantinedCount}</div>
+          </div>
+        </div>
 
-        <div className={`grid gap-6 ${selectedAuditEntry ? 'xl:grid-cols-[minmax(0,1.35fr)_360px]' : ''}`}>
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/70 overflow-hidden">
-            {isLoading ? (
-              <div className="flex items-center justify-center h-32">
-                <div className="text-xs text-slate-500 animate-pulse">Loading audit logs...</div>
-              </div>
-            ) : logs.length === 0 ? (
-              <div className="flex items-center justify-center h-32">
-                <div className="text-xs text-slate-500">No audit entries for this period</div>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead className="bg-slate-950/80">
-                    <tr className="border-b border-slate-800">
-                      <th className="text-left text-slate-500 font-medium px-4 py-2">Time</th>
-                      <th className="text-left text-slate-500 font-medium px-4 py-2">Source</th>
-                      <th className="text-left text-slate-500 font-medium px-4 py-2">Result</th>
-                      <th className="text-left text-slate-500 font-medium px-4 py-2">Trust</th>
-                      <th className="text-left text-slate-500 font-medium px-4 py-2">Anomaly</th>
-                      <th className="text-left text-slate-500 font-medium px-4 py-2">Reason</th>
+        <div className="flex gap-2 flex-wrap">
+          <select
+            value={resultFilter || ''}
+            onChange={(e) => setResultFilter(e.target.value || undefined)}
+            className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-xs rounded-lg px-2 py-1"
+          >
+            <option value="">All Results</option>
+            <option value="ALLOW">Allowed</option>
+            <option value="BLOCK">Blocked</option>
+            <option value="QUARANTINE">Quarantined</option>
+          </select>
+
+          <select
+            value={sourceFilter || ''}
+            onChange={(e) => setSourceFilter(e.target.value || undefined)}
+            className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-xs rounded-lg px-2 py-1"
+          >
+            <option value="">All Sources</option>
+            <option value="hook">Hook</option>
+            <option value="api">API</option>
+            <option value="agent">Agent</option>
+            <option value="user">User</option>
+            <option value="cli">CLI</option>
+          </select>
+
+          <button
+            onClick={() => setSelectedAuditEntry(null)}
+            className="ml-auto rounded-full border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-3 py-1 text-xs text-[var(--sc-text-primary)] transition-colors hover:border-[var(--sc-border)] hover:text-[var(--sc-text-primary)]"
+          >
+            Clear selection
+          </button>
+        </div>
+      </div>
+
+      <div className={`grid gap-6 ${selectedAuditEntry ? 'xl:grid-cols-[minmax(0,1.35fr)_360px]' : ''}`}>
+        <div className="glass-card overflow-hidden">
+          {isLoading ? (
+            <div className="flex items-center justify-center h-32">
+              <div className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading audit logs...</div>
+            </div>
+          ) : logs.length === 0 ? (
+            <div className="flex items-center justify-center h-32">
+              <div className="text-xs text-[var(--sc-text-muted)]">No audit entries for this period</div>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-[var(--sc-bg-deep)]">
+                  <tr className="border-b border-[var(--sc-border)]">
+                    <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Time</th>
+                    <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Source</th>
+                    <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Result</th>
+                    <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Trust</th>
+                    <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Anomaly</th>
+                    <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logs.map((log) => (
+                    <tr
+                      key={log.id}
+                      onClick={() => handleRowClick(log)}
+                      className={`border-b border-[var(--sc-border)] cursor-pointer transition-colors ${
+                        selectedAuditEntry?.id === log.id
+                          ? 'bg-[var(--sc-cyan)]/10 hover:bg-[var(--sc-cyan)]/15'
+                          : 'hover:bg-[var(--sc-surface-interactive)]'
+                      }`}
+                    >
+                      <td className="px-4 py-2 text-[var(--sc-text-secondary)] whitespace-nowrap">
+                        {new Date(log.timestamp).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2 text-[var(--sc-text-primary)]">
+                        {log.source_type}
+                      </td>
+                      <td className="px-4 py-2">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${RESULT_COLORS[log.firewall_result] || 'text-[var(--sc-text-secondary)]'}`}>
+                          {log.firewall_result}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 text-[var(--sc-text-secondary)]">
+                        {log.trust_score.toFixed(1)}
+                      </td>
+                      <td className="px-4 py-2">
+                        <span className={log.anomaly_score > 0.5 ? 'text-[var(--sc-coral)]' : log.anomaly_score > 0.2 ? 'text-[var(--sc-amber)]' : 'text-[var(--sc-text-secondary)]'}>
+                          {log.anomaly_score.toFixed(2)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 text-[var(--sc-text-secondary)] max-w-xs truncate">
+                        {log.reason || '\u2014'}
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {logs.map((log) => (
-                      <tr
-                        key={log.id}
-                        onClick={() => handleRowClick(log)}
-                        className={`border-b border-slate-800/50 cursor-pointer transition-colors ${
-                          selectedAuditEntry?.id === log.id
-                            ? 'bg-cyan-500/10 hover:bg-cyan-500/15'
-                            : 'hover:bg-slate-800/30'
-                        }`}
-                      >
-                        <td className="px-4 py-2 text-slate-400 whitespace-nowrap">
-                          {new Date(log.timestamp).toLocaleString()}
-                        </td>
-                        <td className="px-4 py-2 text-slate-300">
-                          {log.source_type}
-                        </td>
-                        <td className="px-4 py-2">
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${RESULT_COLORS[log.firewall_result] || 'text-slate-400'}`}>
-                            {log.firewall_result}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-slate-400">
-                          {log.trust_score.toFixed(1)}
-                        </td>
-                        <td className="px-4 py-2">
-                          <span className={log.anomaly_score > 0.5 ? 'text-red-400' : log.anomaly_score > 0.2 ? 'text-yellow-400' : 'text-slate-400'}>
-                            {log.anomaly_score.toFixed(2)}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-slate-400 max-w-xs truncate">
-                          {log.reason || '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-
-          {selectedAuditEntry && (
-            <div className="xl:sticky xl:top-6 self-start">
-              <AuditDetailPanel
-                entry={selectedAuditEntry}
-                onClose={() => setSelectedAuditEntry(null)}
-              />
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
 
-        <details className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-          <summary className="cursor-pointer list-none text-sm font-medium text-slate-200">
-            Export audit trail
-          </summary>
-          <div className="mt-4">
-            <AuditExportPanel />
+        {selectedAuditEntry && (
+          <div className="xl:sticky xl:top-6 self-start">
+            <AuditDetailPanel
+              entry={selectedAuditEntry}
+              onClose={() => setSelectedAuditEntry(null)}
+            />
           </div>
-        </details>
+        )}
       </div>
+
+      <details className="glass-card p-6">
+        <summary className="cursor-pointer list-none text-sm font-medium text-[var(--sc-text-primary)]">
+          Export audit trail
+        </summary>
+        <div className="mt-4">
+          <AuditExportPanel />
+        </div>
+      </details>
     </div>
   );
 }

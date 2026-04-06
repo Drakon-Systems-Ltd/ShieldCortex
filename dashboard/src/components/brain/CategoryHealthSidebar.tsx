@@ -82,26 +82,26 @@ export function CategoryHealthSidebar({
       ? 'Idle'
       : 'Stopped';
   const workerDotClass = workerStatus?.running
-    ? 'bg-emerald-400'
+    ? 'bg-[var(--sc-cyan)]'
     : workerStatus?.lastRun
-      ? 'bg-amber-400'
-      : 'bg-slate-500';
+      ? 'bg-[var(--sc-amber)]'
+      : 'bg-[var(--sc-bg-elevated)]';
 
   return (
-    <div className="w-56 shrink-0 h-full flex flex-col bg-slate-900/80 backdrop-blur-sm border-r border-slate-800">
+    <div className="w-56 shrink-0 h-full flex flex-col bg-[var(--sc-bg-surface)] backdrop-blur-sm border-r border-[var(--sc-border)]">
       {/* -- Top: Overall Health Ring -- */}
-      <div className="flex flex-col items-center py-4 px-3 border-b border-slate-800">
+      <div className="flex flex-col items-center py-4 px-3 border-b border-[var(--sc-border)]">
         <HealthRing percentage={overallHealth} size={80} strokeWidth={6} />
-        <span className="text-[11px] text-slate-400 mt-2">Brain Health</span>
+        <span className="text-[11px] text-[var(--sc-text-secondary)] mt-2">Brain Health</span>
       </div>
 
       {/* -- Middle: Category Health List -- */}
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5">
-        <div className="text-[10px] text-slate-500 uppercase tracking-wider px-2 mb-1">
+        <div className="text-[10px] text-[var(--sc-text-muted)] uppercase tracking-wider px-2 mb-1">
           Categories
         </div>
         {categoryHealthData.length === 0 && (
-          <div className="text-[11px] text-slate-500 px-2 py-2">
+          <div className="text-[11px] text-[var(--sc-text-muted)] px-2 py-2">
             No categories yet
           </div>
         )}
@@ -121,13 +121,13 @@ export function CategoryHealthSidebar({
       </div>
 
       {/* -- Bottom: Quick Actions -- */}
-      <div className="px-3 py-3 border-t border-slate-800 space-y-2">
+      <div className="px-3 py-3 border-t border-[var(--sc-border)] space-y-2">
         <button
           onClick={onConsolidate}
           disabled={isConsolidating}
           className={`w-full px-2 py-1.5 text-[11px] rounded transition-colors ${
             isConsolidating
-              ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
+              ? 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-muted)] cursor-not-allowed'
               : 'bg-blue-600/80 text-blue-100 hover:bg-blue-600'
           }`}
         >
@@ -137,7 +137,7 @@ export function CategoryHealthSidebar({
         {onScanContradictions && (
           <button
             onClick={onScanContradictions}
-            className="w-full px-2 py-1.5 text-[11px] rounded bg-slate-700/60 text-slate-300 hover:bg-slate-700 transition-colors"
+            className="w-full px-2 py-1.5 text-[11px] rounded bg-[var(--sc-bg-elevated)]/60 text-[var(--sc-text-primary)] hover:bg-[var(--sc-bg-elevated)] transition-colors"
           >
             Scan Contradictions
           </button>
@@ -146,7 +146,7 @@ export function CategoryHealthSidebar({
         {/* Worker status indicator */}
         <div className="flex items-center gap-2 px-1 pt-1">
           <span className={`w-1.5 h-1.5 rounded-full ${workerDotClass}`} />
-          <span className="text-[10px] text-slate-500">
+          <span className="text-[10px] text-[var(--sc-text-muted)]">
             Worker: {workerLabel}
           </span>
         </div>

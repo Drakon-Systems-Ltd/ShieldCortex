@@ -28,7 +28,8 @@ export function useAuditExport() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Defer revocation so the browser can process the download
+      setTimeout(() => URL.revokeObjectURL(url), 200);
 
       return { success: true };
     },

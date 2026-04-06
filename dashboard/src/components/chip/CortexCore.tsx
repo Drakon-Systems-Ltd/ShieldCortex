@@ -139,7 +139,7 @@ export function CortexCore({
             userSelect: 'none',
           }}
         >
-          <div className="text-[10px] font-mono text-amber-400/80 whitespace-nowrap tracking-wider">
+          <div className="text-[10px] font-mono text-[var(--sc-amber)]/80 whitespace-nowrap tracking-wider">
             CORTEX CORE
           </div>
         </Html>

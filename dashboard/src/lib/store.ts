@@ -52,6 +52,14 @@ interface DashboardState {
   // Search query
   searchQuery: string;
   setSearchQuery: (query: string) => void;
+
+  // Sidebar pin state
+  sidebarPinned: boolean;
+  toggleSidebarPinned: () => void;
+
+  // Per-page active tab
+  activeTab: Record<string, string>;
+  setActiveTab: (page: string, tab: string) => void;
 }
 
 export const useDashboardStore = create<DashboardState>((set) => ({
@@ -102,4 +110,14 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   // Search
   searchQuery: '',
   setSearchQuery: (query) => set({ searchQuery: query }),
+
+  // Sidebar
+  sidebarPinned: false,
+  toggleSidebarPinned: () =>
+    set((state) => ({ sidebarPinned: !state.sidebarPinned })),
+
+  // Per-page tabs
+  activeTab: {},
+  setActiveTab: (page, tab) =>
+    set((state) => ({ activeTab: { ...state.activeTab, [page]: tab } })),
 }));

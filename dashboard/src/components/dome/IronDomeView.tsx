@@ -51,18 +51,18 @@ const MODULES = [
 ];
 
 const SEVERITY_COLOURS: Record<string, string> = {
-  critical: 'bg-red-500/20 text-red-400 border-red-500/30',
-  high: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-  medium: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
-  low: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
+  critical: 'bg-[var(--sc-coral)]/20 text-[var(--sc-coral)] border-[var(--sc-coral)]/30',
+  high: 'bg-[var(--sc-coral)]/20 text-[var(--sc-coral)] border-[var(--sc-coral)]/30',
+  medium: 'bg-[var(--sc-amber)]/20 text-[var(--sc-amber)] border-[var(--sc-amber)]/30',
+  low: 'bg-[var(--sc-bg-elevated)]/20 text-[var(--sc-text-secondary)] border-[var(--sc-border)]/30',
 };
 
 const RISK_COLOURS: Record<string, string> = {
-  CRITICAL: 'bg-red-500/20 text-red-400',
-  HIGH: 'bg-orange-500/20 text-orange-400',
-  MEDIUM: 'bg-yellow-500/20 text-yellow-400',
-  LOW: 'bg-slate-500/20 text-slate-400',
-  NONE: 'bg-green-500/20 text-green-400',
+  CRITICAL: 'bg-[var(--sc-coral)]/20 text-[var(--sc-coral)]',
+  HIGH: 'bg-[var(--sc-coral)]/20 text-[var(--sc-coral)]',
+  MEDIUM: 'bg-[var(--sc-amber)]/20 text-[var(--sc-amber)]',
+  LOW: 'bg-[var(--sc-bg-elevated)]/20 text-[var(--sc-text-secondary)]',
+  NONE: 'bg-[var(--sc-cyan)]/20 text-[var(--sc-cyan)]',
 };
 
 export function IronDomeView() {
@@ -116,31 +116,27 @@ export function IronDomeView() {
   const killPhraseDirty = Boolean(config) && killPhraseDraft.trim() !== (config?.killPhrase ?? '');
 
   return (
-    <div className="h-full overflow-y-auto p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <Zap size={20} className="text-red-400" />
-          <h2 className="text-lg font-semibold text-white">Iron Dome</h2>
-          {statusLoading ? (
-            <span className="text-[10px] text-slate-500 animate-pulse">Loading...</span>
-          ) : (
-            <span
-              className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                isActive
-                  ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                  : 'bg-slate-700/50 text-slate-500'
-              }`}
-            >
-              {isActive ? 'ACTIVE' : 'INACTIVE'}
-            </span>
-          )}
-        </div>
+    <div className="space-y-6">
+      {/* Status + Deactivate */}
+      <div className="flex items-center gap-3">
+        {statusLoading ? (
+          <span className="text-[10px] text-[var(--sc-text-muted)] animate-pulse">Loading...</span>
+        ) : (
+          <span
+            className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
+              isActive
+                ? 'bg-[var(--sc-coral)]/20 text-[var(--sc-coral)] border border-[var(--sc-coral)]/30'
+                : 'bg-[var(--sc-bg-elevated)]/50 text-[var(--sc-text-muted)]'
+            }`}
+          >
+            {isActive ? 'ACTIVE' : 'INACTIVE'}
+          </span>
+        )}
         {isActive && (
           <button
             onClick={handleDeactivate}
             disabled={deactivateMutation.isPending}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 disabled:opacity-50 rounded-lg text-xs font-medium text-red-400 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--sc-coral)]/10 border border-[var(--sc-coral)]/30 hover:bg-[var(--sc-coral)]/20 disabled:opacity-50 rounded-lg text-xs font-medium text-[var(--sc-coral)] transition-colors"
           >
             {deactivateMutation.isPending ? (
               <Loader2 size={12} className="animate-spin" />
@@ -153,10 +149,10 @@ export function IronDomeView() {
       </div>
 
       {/* ── CONTROL PANEL ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Profile Selector */}
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <h3 className="text-sm font-medium text-slate-300 mb-3">Security Profiles</h3>
+        <div className="glass-card p-6">
+          <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-3">Security Profiles</h3>
           <div className="grid grid-cols-2 gap-2">
             {PROFILES.map(({ id, label, description, icon: Icon }) => (
               <button
@@ -165,37 +161,37 @@ export function IronDomeView() {
                 disabled={activateMutation.isPending}
                 className={`text-left p-3 rounded-lg border transition-colors ${
                   activeProfile === id
-                    ? 'border-red-500/50 bg-red-500/10 text-red-400'
-                    : 'border-slate-700 bg-slate-800/50 text-slate-400 hover:border-slate-600'
+                    ? 'border-[var(--sc-coral)]/50 bg-[var(--sc-coral)]/10 text-[var(--sc-coral)]'
+                    : 'border-[var(--sc-border)] bg-[var(--sc-bg-elevated)]/50 text-[var(--sc-text-secondary)] hover:border-[var(--sc-text-muted)]'
                 }`}
               >
                 <div className="flex items-center gap-1.5 mb-1">
                   <Icon size={12} />
                   <span className="text-xs font-medium">{label}</span>
                 </div>
-                <div className="text-[10px] text-slate-500">{description}</div>
+                <div className="text-[10px] text-[var(--sc-text-muted)]">{description}</div>
               </button>
             ))}
           </div>
         </div>
 
         {/* Module Status */}
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <h3 className="text-sm font-medium text-slate-300 mb-3">Module Status</h3>
+        <div className="glass-card p-6">
+          <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-3">Module Status</h3>
           <div className="space-y-2">
             {MODULES.map(({ name, description, icon: Icon }) => (
               <div
                 key={name}
-                className="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-800/50"
+                className="flex items-center gap-3 px-3 py-2 rounded-lg bg-[var(--sc-bg-elevated)]/50"
               >
-                <Icon size={14} className={isActive ? 'text-red-400' : 'text-slate-600'} />
+                <Icon size={14} className={isActive ? 'text-[var(--sc-coral)]' : 'text-[var(--sc-text-muted)]'} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-medium text-slate-300">{name}</div>
-                  <div className="text-[10px] text-slate-500 truncate">{description}</div>
+                  <div className="text-xs font-medium text-[var(--sc-text-primary)]">{name}</div>
+                  <div className="text-[10px] text-[var(--sc-text-muted)] truncate">{description}</div>
                 </div>
                 <span
                   className={`w-2 h-2 rounded-full ${
-                    isActive ? 'bg-red-400' : 'bg-slate-600'
+                    isActive ? 'bg-[var(--sc-coral)]' : 'bg-[var(--sc-text-muted)]'
                   }`}
                 />
               </div>
@@ -206,48 +202,48 @@ export function IronDomeView() {
 
       {/* Config summary (when active) */}
       {config && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6">
-          <h3 className="text-sm font-medium text-slate-300 mb-3">Active Configuration</h3>
+        <div className="glass-card p-6">
+          <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-3">Active Configuration</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
             <div>
-              <div className="text-[10px] text-slate-500 uppercase mb-1">Trusted Channels</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-1">Trusted Channels</div>
               <div className="flex flex-wrap gap-1">
                 {config.trustedChannels.map((ch) => (
-                  <span key={ch} className="px-1.5 py-0.5 bg-slate-800 rounded text-slate-400">
+                  <span key={ch} className="px-1.5 py-0.5 bg-[var(--sc-bg-elevated)] rounded text-[var(--sc-text-secondary)]">
                     {ch}
                   </span>
                 ))}
               </div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500 uppercase mb-1">Requires Approval</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-1">Requires Approval</div>
               <div className="flex flex-wrap gap-1">
                 {config.requireApproval.map((a) => (
-                  <span key={a} className="px-1.5 py-0.5 bg-red-500/10 border border-red-500/20 rounded text-red-400">
+                  <span key={a} className="px-1.5 py-0.5 bg-[var(--sc-coral)]/10 border border-[var(--sc-coral)]/20 rounded text-[var(--sc-coral)]">
                     {a}
                   </span>
                 ))}
               </div>
             </div>
             <div>
-              <div className="text-[10px] text-slate-500 uppercase mb-1">Kill Phrase</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-1">Kill Phrase</div>
               <div className="space-y-2">
                 <input
                   type="text"
                   value={killPhraseDraft}
                   onChange={(e) => setKillPhraseDraft(e.target.value)}
                   placeholder="Set emergency stop phrase"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-red-500"
+                  className="w-full bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs text-[var(--sc-text-primary)] font-mono placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-coral)]"
                 />
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => updateConfigMutation.mutate({ killPhrase: killPhraseDraft.trim() })}
                     disabled={updateConfigMutation.isPending || !killPhraseDraft.trim() || !killPhraseDirty}
-                    className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-50 text-[11px] font-medium text-white transition-colors"
+                    className="px-3 py-1.5 rounded-lg bg-[var(--sc-coral)] hover:bg-[var(--sc-coral)]/80 disabled:opacity-50 text-[11px] font-medium text-[var(--sc-text-primary)] transition-colors"
                   >
-                    {updateConfigMutation.isPending ? 'Saving…' : 'Save phrase'}
+                    {updateConfigMutation.isPending ? 'Saving...' : 'Save phrase'}
                   </button>
-                  <span className="text-[10px] text-slate-500">
+                  <span className="text-[10px] text-[var(--sc-text-muted)]">
                     {isActive ? 'Say this in a conversation to trigger lockdown.' : 'This will apply the next time Iron Dome is active.'}
                   </span>
                 </div>
@@ -259,34 +255,34 @@ export function IronDomeView() {
 
       {/* ── KILL SWITCH / EMERGENCY STOP ── */}
       {isKillSwitchActive ? (
-        <div className="bg-red-950/50 border-2 border-red-500/50 rounded-xl p-5 mb-6 animate-pulse-slow">
+        <div className="glass-card-strong p-6 border-2 !border-[var(--sc-coral)]/50 animate-pulse-slow">
           <div className="flex items-center gap-2 mb-3">
-            <OctagonX size={18} className="text-red-400" />
-            <h3 className="text-sm font-bold text-red-400 uppercase tracking-wide">Kill Switch Active</h3>
-            <span className="ml-auto text-[10px] bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full border border-red-500/30">
+            <OctagonX size={18} className="text-[var(--sc-coral)]" />
+            <h3 className="text-sm font-bold text-[var(--sc-coral)] uppercase tracking-wide">Kill Switch Active</h3>
+            <span className="ml-auto text-[10px] bg-[var(--sc-coral)]/20 text-[var(--sc-coral)] px-2 py-0.5 rounded-full border border-[var(--sc-coral)]/30">
               LOCKDOWN
             </span>
           </div>
-          <p className="text-xs text-red-300/80 mb-2">
+          <p className="text-xs text-[var(--sc-coral)]/80 mb-2">
             All agent operations are blocked. No memory reads, writes, graph queries, or consolidation. Iron Dome remains active and continues protecting.
           </p>
 
           {/* Kill switch metadata */}
           {killSwitchMeta && (
-            <div className="bg-red-950/30 border border-red-500/20 rounded-lg p-3 mb-4 space-y-1">
-              <div className="text-[10px] text-slate-500">
-                <span className="text-red-400 font-medium">Triggered:</span>{' '}
+            <div className="bg-[var(--sc-coral)]/10 border border-[var(--sc-coral)]/20 rounded-lg p-3 mb-4 space-y-1">
+              <div className="text-[10px] text-[var(--sc-text-muted)]">
+                <span className="text-[var(--sc-coral)] font-medium">Triggered:</span>{' '}
                 {new Date(killSwitchMeta.triggeredAt).toLocaleString()}
               </div>
-              <div className="text-[10px] text-slate-500">
-                <span className="text-red-400 font-medium">Source:</span>{' '}
+              <div className="text-[10px] text-[var(--sc-text-muted)]">
+                <span className="text-[var(--sc-coral)] font-medium">Source:</span>{' '}
                 {killSwitchMeta.source === 'kill_phrase' ? `Kill phrase "${killSwitchMeta.phrase}"` :
                  killSwitchMeta.source === 'manual' ? 'Manual (dashboard)' :
                  killSwitchMeta.source === 'mcp_tool' ? 'MCP tool' : killSwitchMeta.source}
               </div>
               {killSwitchMeta.memoryCountAtTrigger !== undefined && (
-                <div className="text-[10px] text-slate-500">
-                  <span className="text-red-400 font-medium">Memories at trigger:</span>{' '}
+                <div className="text-[10px] text-[var(--sc-text-muted)]">
+                  <span className="text-[var(--sc-coral)] font-medium">Memories at trigger:</span>{' '}
                   {killSwitchMeta.memoryCountAtTrigger}
                 </div>
               )}
@@ -300,7 +296,7 @@ export function IronDomeView() {
               value={resumeReason}
               onChange={(e) => setResumeReason(e.target.value)}
               placeholder="Reason for resuming (required)..."
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+              className="w-full bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-green-500"
             />
             <div className="flex items-center gap-3">
               <button
@@ -310,7 +306,7 @@ export function IronDomeView() {
                   setResumeReason('');
                 }}
                 disabled={resumeMutation.isPending || !resumeReason.trim()}
-                className="flex items-center gap-1.5 px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded-lg text-xs font-medium text-white transition-colors"
+                className="flex items-center gap-1.5 px-4 py-2 bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] disabled:opacity-50 rounded-lg text-xs font-medium text-[var(--sc-text-primary)] transition-colors"
               >
                 {resumeMutation.isPending ? (
                   <Loader2 size={12} className="animate-spin" />
@@ -319,30 +315,30 @@ export function IronDomeView() {
                 )}
                 Resume Agent
               </button>
-              <span className="text-[10px] text-slate-500">
+              <span className="text-[10px] text-[var(--sc-text-muted)]">
                 Only resume after you&apos;ve investigated the threat
               </span>
             </div>
           </div>
         </div>
       ) : (
-        <div className="bg-slate-900 border border-orange-500/30 rounded-xl p-4 mb-6">
+        <div className="glass-card p-6 !border-[var(--sc-coral)]/30">
           <div className="flex items-center gap-2 mb-2">
-            <OctagonX size={14} className="text-orange-400" />
-            <h3 className="text-sm font-medium text-orange-300">Emergency Stop</h3>
+            <OctagonX size={14} className="text-[var(--sc-coral)]" />
+            <h3 className="text-sm font-medium text-[var(--sc-coral)]">Emergency Stop</h3>
           </div>
-          <p className="text-xs text-slate-400 mb-3">
+          <p className="text-xs text-[var(--sc-text-secondary)] mb-3">
             Immediately halts your agent when you suspect it has been compromised or is acting on poisoned data. Blocks ALL operations — no reads, writes, or modifications. Iron Dome stays active.
           </p>
           {config?.killPhrase && (
-            <p className="text-[10px] text-slate-500 mb-3">
-              Kill phrase: <span className="font-mono text-slate-400">&quot;{config.killPhrase}&quot;</span> — say this in conversation for hands-free stop
+            <p className="text-[10px] text-[var(--sc-text-muted)] mb-3">
+              Kill phrase: <span className="font-mono text-[var(--sc-text-secondary)]">&quot;{config.killPhrase}&quot;</span> — say this in conversation for hands-free stop
             </p>
           )}
           <button
             onClick={() => emergencyStopMutation.mutate()}
             disabled={emergencyStopMutation.isPending}
-            className="flex items-center gap-1.5 px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded-lg text-xs font-bold text-white uppercase tracking-wider transition-colors"
+            className="flex items-center gap-1.5 px-4 py-2 bg-[var(--sc-coral)] hover:bg-[var(--sc-coral)]/80 disabled:opacity-50 rounded-lg text-xs font-bold text-[var(--sc-text-primary)] uppercase tracking-wider transition-colors"
           >
             {emergencyStopMutation.isPending ? (
               <Loader2 size={12} className="animate-spin" />
@@ -357,21 +353,21 @@ export function IronDomeView() {
       {/* ── LIVE MONITOR ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Injection Scanner (Test) */}
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <h3 className="text-sm font-medium text-slate-300 mb-3">
-            <Scan size={14} className="inline mr-1.5 text-red-400" />
+        <div className="glass-card p-6">
+          <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-3">
+            <Scan size={14} className="inline mr-1.5 text-[var(--sc-coral)]" />
             Injection Scanner
           </h3>
           <textarea
             value={scanText}
             onChange={(e) => setScanText(e.target.value)}
             placeholder="Paste suspicious text to scan for injection patterns..."
-            className="w-full h-28 bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm text-white placeholder:text-slate-500 resize-none focus:outline-none focus:ring-1 focus:ring-red-500 focus:border-red-500"
+            className="w-full h-28 bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg p-3 text-sm text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] resize-none focus:outline-none focus:ring-1 focus:ring-[var(--sc-coral)] focus:border-[var(--sc-coral)]"
           />
           <button
             onClick={handleScan}
             disabled={scanMutation.isPending || !scanText.trim()}
-            className="mt-2 flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded-lg text-xs font-medium text-white transition-colors"
+            className="mt-2 flex items-center gap-1.5 px-3 py-1.5 bg-[var(--sc-coral)] hover:bg-[var(--sc-coral)]/80 disabled:opacity-50 rounded-lg text-xs font-medium text-[var(--sc-text-primary)] transition-colors"
           >
             {scanMutation.isPending ? (
               <Loader2 size={12} className="animate-spin" />
@@ -387,18 +383,18 @@ export function IronDomeView() {
               {/* Risk Level Badge */}
               <div className="flex items-center gap-2">
                 {scanResult.clean ? (
-                  <CheckCircle2 size={14} className="text-green-400" />
+                  <CheckCircle2 size={14} className="text-[var(--sc-cyan)]" />
                 ) : (
-                  <XCircle size={14} className="text-red-400" />
+                  <XCircle size={14} className="text-[var(--sc-coral)]" />
                 )}
                 <span
                   className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                    RISK_COLOURS[scanResult.riskLevel] ?? 'bg-slate-500/20 text-slate-400'
+                    RISK_COLOURS[scanResult.riskLevel] ?? 'bg-[var(--sc-bg-elevated)]/20 text-[var(--sc-text-secondary)]'
                   }`}
                 >
                   {scanResult.riskLevel}
                 </span>
-                <span className="text-xs text-slate-400">{scanResult.summary}</span>
+                <span className="text-xs text-[var(--sc-text-secondary)]">{scanResult.summary}</span>
               </div>
 
               {/* Detection Cards */}
@@ -406,17 +402,17 @@ export function IronDomeView() {
                 <div
                   key={i}
                   className={`border rounded-lg p-3 ${
-                    SEVERITY_COLOURS[d.severity] ?? 'border-slate-700'
+                    SEVERITY_COLOURS[d.severity] ?? 'border-[var(--sc-border)]'
                   }`}
                 >
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-[10px] font-medium uppercase">
                       {d.severity}
                     </span>
-                    <span className="text-xs text-slate-300">{d.category.replace(/_/g, ' ')}</span>
+                    <span className="text-xs text-[var(--sc-text-primary)]">{d.category.replace(/_/g, ' ')}</span>
                   </div>
-                  <p className="text-[11px] text-slate-400 mb-1">{d.description}</p>
-                  <code className="text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded block truncate">
+                  <p className="text-[11px] text-[var(--sc-text-secondary)] mb-1">{d.description}</p>
+                  <code className="text-[10px] text-[var(--sc-text-muted)] bg-[var(--sc-bg-elevated)] px-1.5 py-0.5 rounded block truncate">
                     {d.match}
                   </code>
                 </div>
@@ -426,27 +422,27 @@ export function IronDomeView() {
         </div>
 
         {/* Event Feed */}
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div className="glass-card p-6">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-slate-300">Event Feed</h3>
-            <span className="text-[10px] text-slate-500">
+            <h3 className="text-sm font-medium text-[var(--sc-text-primary)]">Event Feed</h3>
+            <span className="text-[10px] text-[var(--sc-text-muted)]">
               Last {logs.length} events
             </span>
           </div>
 
           {/* Stats bar */}
           <div className="grid grid-cols-3 gap-2 mb-3">
-            <div className="bg-slate-800/50 rounded-lg p-2 text-center">
-              <div className="text-sm font-bold text-slate-300">{logs.length}</div>
-              <div className="text-[10px] text-slate-500">Total</div>
+            <div className="bg-[var(--sc-bg-elevated)]/50 rounded-lg p-2 text-center">
+              <div className="text-sm font-bold text-[var(--sc-text-primary)]">{logs.length}</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)]">Total</div>
             </div>
-            <div className="bg-slate-800/50 rounded-lg p-2 text-center">
-              <div className="text-sm font-bold text-red-400">{blockCount}</div>
-              <div className="text-[10px] text-slate-500">Blocked</div>
+            <div className="bg-[var(--sc-bg-elevated)]/50 rounded-lg p-2 text-center">
+              <div className="text-sm font-bold text-[var(--sc-coral)]">{blockCount}</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)]">Blocked</div>
             </div>
-            <div className="bg-slate-800/50 rounded-lg p-2 text-center">
-              <div className="text-sm font-bold text-green-400">{allowCount}</div>
-              <div className="text-[10px] text-slate-500">Allowed</div>
+            <div className="bg-[var(--sc-bg-elevated)]/50 rounded-lg p-2 text-center">
+              <div className="text-sm font-bold text-[var(--sc-cyan)]">{allowCount}</div>
+              <div className="text-[10px] text-[var(--sc-text-muted)]">Allowed</div>
             </div>
           </div>
 
@@ -454,8 +450,8 @@ export function IronDomeView() {
           <div className="space-y-1 max-h-72 overflow-y-auto">
             {logs.length === 0 ? (
               <div className="text-center py-6">
-                <Shield size={20} className="text-slate-600 mx-auto mb-1.5" />
-                <p className="text-[10px] text-slate-500">
+                <Shield size={20} className="text-[var(--sc-text-muted)] mx-auto mb-1.5" />
+                <p className="text-[10px] text-[var(--sc-text-muted)]">
                   No Iron Dome events yet
                 </p>
               </div>
@@ -463,17 +459,17 @@ export function IronDomeView() {
               logs.map((log: IronDomeAuditLog, i: number) => (
                 <div
                   key={log.id ?? i}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-800/50 text-xs"
+                  className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-[var(--sc-bg-elevated)]/50 text-xs"
                 >
                   <span
                     className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                      log.firewall_result === 'BLOCK' ? 'bg-red-400' : 'bg-green-400'
+                      log.firewall_result === 'BLOCK' ? 'bg-[var(--sc-coral)]' : 'bg-[var(--sc-cyan)]'
                     }`}
                   />
-                  <span className="text-slate-400 truncate flex-1">
+                  <span className="text-[var(--sc-text-secondary)] truncate flex-1">
                     {(log.reason ?? '').replace(/^\[iron-dome:\w+\]\s*/, '')}
                   </span>
-                  <span className="text-[10px] text-slate-600 shrink-0">
+                  <span className="text-[10px] text-[var(--sc-text-muted)] shrink-0">
                     {new Date(log.timestamp).toLocaleTimeString()}
                   </span>
                 </div>
@@ -484,14 +480,10 @@ export function IronDomeView() {
       </div>
 
       {/* Pro: Custom injection patterns */}
-      <div className="mt-4">
-        <CustomPatternsPanel />
-      </div>
+      <CustomPatternsPanel />
 
       {/* Pro: Custom Iron Dome policies */}
-      <div className="mt-4">
-        <CustomPoliciesPanel />
-      </div>
+      <CustomPoliciesPanel />
     </div>
   );
 }

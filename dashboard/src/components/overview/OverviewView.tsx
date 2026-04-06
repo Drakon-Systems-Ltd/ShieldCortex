@@ -48,18 +48,18 @@ function StatCard({
 }) {
   const toneClass =
     tone === 'danger'
-      ? 'border-red-500/30 bg-red-500/5'
+      ? 'border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/5'
       : tone === 'warning'
-        ? 'border-amber-500/30 bg-amber-500/5'
+        ? 'border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/5'
         : tone === 'success'
-          ? 'border-emerald-500/30 bg-emerald-500/5'
-          : 'border-slate-800 bg-slate-900/70';
+          ? 'border-[var(--sc-cyan)]/30 bg-[var(--sc-cyan)]/5'
+          : 'border-[var(--sc-border)] bg-[var(--sc-bg-surface)]';
 
   return (
     <div className={`rounded-xl border p-4 ${toneClass}`}>
-      <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{label}</div>
-      <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
-      <div className="mt-1 text-sm text-slate-400">{detail}</div>
+      <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">{label}</div>
+      <div className="mt-2 text-2xl font-semibold text-[var(--sc-text-primary)]">{value}</div>
+      <div className="mt-1 text-sm text-[var(--sc-text-secondary)]">{detail}</div>
     </div>
   );
 }
@@ -67,29 +67,29 @@ function StatCard({
 function ActionRow({ action }: { action: ActionCard }) {
   const toneClass =
     action.tone === 'critical'
-      ? 'border-red-500/30 bg-red-500/8'
+      ? 'border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/8'
       : action.tone === 'warning'
-        ? 'border-amber-500/30 bg-amber-500/8'
-        : 'border-emerald-500/30 bg-emerald-500/8';
+        ? 'border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/8'
+        : 'border-[var(--sc-cyan)]/30 bg-[var(--sc-cyan)]/8';
 
   const icon =
     action.tone === 'critical'
-      ? <AlertTriangle size={16} className="text-red-400 shrink-0" />
+      ? <AlertTriangle size={16} className="text-[var(--sc-coral)] shrink-0" />
       : action.tone === 'warning'
-        ? <Clock3 size={16} className="text-amber-400 shrink-0" />
-        : <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />;
+        ? <Clock3 size={16} className="text-[var(--sc-amber)] shrink-0" />
+        : <CheckCircle2 size={16} className="text-[var(--sc-cyan)] shrink-0" />;
 
   return (
     <button
       onClick={action.onClick}
-      className={`w-full rounded-xl border p-4 text-left transition-colors hover:border-slate-500/60 hover:bg-slate-800/60 ${toneClass}`}
+      className={`w-full rounded-xl border p-4 text-left transition-colors hover:border-[var(--sc-text-muted)]/60 hover:bg-[var(--sc-bg-elevated)] ${toneClass}`}
     >
       <div className="flex items-start gap-3">
         {icon}
         <div className="flex-1">
-          <div className="text-sm font-medium text-white">{action.title}</div>
-          <div className="mt-1 text-sm text-slate-400">{action.detail}</div>
-          <div className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-cyan-300">
+          <div className="text-sm font-medium text-[var(--sc-text-primary)]">{action.title}</div>
+          <div className="mt-1 text-sm text-[var(--sc-text-secondary)]">{action.detail}</div>
+          <div className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[var(--sc-cyan)]">
             {action.cta}
             <ArrowRight size={12} />
           </div>
@@ -105,11 +105,11 @@ function WorkflowCard({ card, license, onOpen }: { card: WorkflowCard; license?:
   const requiredTier = featureInfo?.requiredTier ?? 'pro';
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+    <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-medium text-white">{card.title}</div>
-          <div className="mt-1 text-sm text-slate-400">{card.detail}</div>
+          <div className="text-sm font-medium text-[var(--sc-text-primary)]">{card.title}</div>
+          <div className="mt-1 text-sm text-[var(--sc-text-secondary)]">{card.detail}</div>
         </div>
         {locked ? (
           <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold ${TIER_BG[requiredTier]} ${TIER_COLOURS[requiredTier]}`}>
@@ -117,7 +117,7 @@ function WorkflowCard({ card, license, onOpen }: { card: WorkflowCard; license?:
             {TIER_LABELS[requiredTier]}
           </span>
         ) : (
-          <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-300">
+          <span className="rounded-full bg-[var(--sc-cyan)]/10 px-2 py-1 text-[10px] font-semibold text-[var(--sc-cyan)]">
             Ready
           </span>
         )}
@@ -125,7 +125,7 @@ function WorkflowCard({ card, license, onOpen }: { card: WorkflowCard; license?:
       <div className="mt-4 flex items-center justify-between">
         <button
           onClick={() => onOpen(card.target)}
-          className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:bg-slate-800"
+          className="inline-flex items-center gap-1 rounded-lg border border-[var(--sc-border)] px-3 py-2 text-xs font-medium text-[var(--sc-text-primary)] transition-colors hover:border-[var(--sc-text-muted)] hover:bg-[var(--sc-bg-elevated)]"
         >
           {locked ? `See ${TIER_LABELS[requiredTier]} workflow` : card.cta}
           <ArrowRight size={12} />
@@ -135,7 +135,7 @@ function WorkflowCard({ card, license, onOpen }: { card: WorkflowCard; license?:
             href="https://shieldcortex.ai/pricing"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-xs text-cyan-300 hover:text-cyan-200"
+            className="text-xs text-[var(--sc-cyan)] hover:text-[var(--sc-cyan)]"
           >
             Upgrade
           </a>
@@ -166,12 +166,12 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
   const healthPercent = stats?.decayDistribution
     ? Math.round((healthyCount / Math.max(1, totalMemories)) * 100)
     : null;
-  const contradictionCount = contradictionsData?.count ?? contradictionsData?.contradictions.length ?? 0;
+  const contradictionCount = contradictionsData?.count ?? contradictionsData?.contradictions?.length ?? 0;
   const pendingQuarantine = quarantineData?.total ?? 0;
   const blockedCount = auditStats?.blockedCount ?? 0;
-  const duplicateCount = quality?.duplicates.count ?? 0;
-  const staleCount = quality?.stale.count ?? 0;
-  const neverAccessedCount = quality?.neverAccessed.count ?? 0;
+  const duplicateCount = quality?.duplicates?.count ?? 0;
+  const staleCount = quality?.stale?.count ?? 0;
+  const neverAccessedCount = quality?.neverAccessed?.count ?? 0;
 
   const thinCategories = useMemo(
     () =>
@@ -307,15 +307,15 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-7xl space-y-6">
-        <section className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-cyan-950/20 p-6">
+        <section className="rounded-2xl border border-[var(--sc-border)] bg-gradient-to-br from-[var(--sc-bg-deep)] via-[var(--sc-bg-surface)] to-cyan-950/20 p-6">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
+              <div className="inline-flex items-center gap-2 rounded-full border border-[var(--sc-cyan)]/20 bg-[var(--sc-cyan)]/10 px-3 py-1 text-xs font-medium text-[var(--sc-cyan)]">
                 <Shield size={12} />
                 Trust Console
               </div>
-              <h2 className="mt-4 text-3xl font-semibold text-white">One place to see whether your memory system is actually healthy.</h2>
-              <p className="mt-3 text-sm leading-6 text-slate-400">
+              <h2 className="mt-4 text-3xl font-semibold text-[var(--sc-text-primary)]">One place to see whether your memory system is actually healthy.</h2>
+              <p className="mt-3 text-sm leading-6 text-[var(--sc-text-secondary)]">
                 {selectedProject
                   ? `Project scope: ${selectedProject}. This view pulls memory quality, threat pressure, review queue, and graph coverage into one operational surface.`
                   : 'Workspace scope: all projects. This view pulls memory quality, threat pressure, review queue, and graph coverage into one operational surface.'}
@@ -350,13 +350,13 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         </section>
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-white">Urgent actions</h3>
-                <p className="mt-1 text-sm text-slate-400">These are the quickest wins for trust, safety, or recall quality.</p>
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Urgent actions</h3>
+                <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">These are the quickest wins for trust, safety, or recall quality.</p>
               </div>
-              <span className="rounded-full bg-slate-800 px-2.5 py-1 text-xs text-slate-400">
+              <span className="rounded-full bg-[var(--sc-bg-elevated)] px-2.5 py-1 text-xs text-[var(--sc-text-secondary)]">
                 {urgentActions.length} active
               </span>
             </div>
@@ -367,30 +367,30 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
             </div>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-            <h3 className="text-lg font-semibold text-white">Operator snapshot</h3>
-            <p className="mt-1 text-sm text-slate-400">A compact read of the things that most often turn into recall or trust problems.</p>
+          <div className="rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
+            <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Operator snapshot</h3>
+            <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">A compact read of the things that most often turn into recall or trust problems.</p>
             <div className="mt-4 space-y-3">
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="text-sm font-medium text-white">Memory hygiene</div>
+              <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-4">
+                <div className="text-sm font-medium text-[var(--sc-text-primary)]">Memory hygiene</div>
                 <div className="mt-2 grid grid-cols-3 gap-3 text-sm">
                   <div>
-                    <div className="text-xl font-semibold text-white">{duplicateCount}</div>
-                    <div className="text-slate-500">duplicates</div>
+                    <div className="text-xl font-semibold text-[var(--sc-text-primary)]">{duplicateCount}</div>
+                    <div className="text-[var(--sc-text-muted)]">duplicates</div>
                   </div>
                   <div>
-                    <div className="text-xl font-semibold text-white">{staleCount}</div>
-                    <div className="text-slate-500">stale</div>
+                    <div className="text-xl font-semibold text-[var(--sc-text-primary)]">{staleCount}</div>
+                    <div className="text-[var(--sc-text-muted)]">stale</div>
                   </div>
                   <div>
-                    <div className="text-xl font-semibold text-white">{neverAccessedCount}</div>
-                    <div className="text-slate-500">never used</div>
+                    <div className="text-xl font-semibold text-[var(--sc-text-primary)]">{neverAccessedCount}</div>
+                    <div className="text-[var(--sc-text-muted)]">never used</div>
                   </div>
                 </div>
               </div>
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="text-sm font-medium text-white">Knowledge coverage</div>
-                <div className="mt-2 text-sm text-slate-400">
+              <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-4">
+                <div className="text-sm font-medium text-[var(--sc-text-primary)]">Knowledge coverage</div>
+                <div className="mt-2 text-sm text-[var(--sc-text-secondary)]">
                   {thinCategories.length > 0 ? (
                     <>
                       Thin categories:
@@ -403,15 +403,15 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
                 </div>
                 <button
                   onClick={() => openView('graph')}
-                  className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-cyan-300"
+                  className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[var(--sc-cyan)]"
                 >
                   Open graph coverage
                   <ArrowRight size={12} />
                 </button>
               </div>
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="text-sm font-medium text-white">Free vs Pro value</div>
-                <div className="mt-2 text-sm text-slate-400">
+              <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-4">
+                <div className="text-sm font-medium text-[var(--sc-text-primary)]">Free vs Pro value</div>
+                <div className="mt-2 text-sm text-[var(--sc-text-secondary)]">
                   Free gives visibility and cleanup. Pro adds stronger audit workflows, custom policy controls, and deeper skill review.
                 </div>
               </div>
@@ -420,15 +420,15 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         </section>
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_1fr]">
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-white">Knowledge coverage</h3>
-                <p className="mt-1 text-sm text-slate-400">Thin categories are usually where recall feels random or incomplete.</p>
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Knowledge coverage</h3>
+                <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">Thin categories are usually where recall feels random or incomplete.</p>
               </div>
               <button
                 onClick={() => openView('graph')}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-500 hover:bg-slate-800"
+                className="inline-flex items-center gap-1 rounded-lg border border-[var(--sc-border)] px-3 py-2 text-xs text-[var(--sc-text-primary)] hover:border-[var(--sc-text-muted)] hover:bg-[var(--sc-bg-elevated)]"
               >
                 <GitBranch size={12} />
                 Open graph
@@ -441,20 +441,20 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
                   onNavigate={({ category }) => openMemories({ category: category ?? null })}
                 />
               ) : (
-                <div className="rounded-lg bg-slate-950/70 p-4 text-sm text-slate-500">No category data available yet.</div>
+                <div className="rounded-lg bg-[var(--sc-bg-deep)]/70 p-4 text-sm text-[var(--sc-text-muted)]">No category data available yet.</div>
               )}
             </div>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-white">Memory cleanup</h3>
-                <p className="mt-1 text-sm text-slate-400">The fastest way to improve recall is usually removing ambiguity and dead weight.</p>
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Memory cleanup</h3>
+                <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">The fastest way to improve recall is usually removing ambiguity and dead weight.</p>
               </div>
               <button
                 onClick={() => openView('memories')}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-500 hover:bg-slate-800"
+                className="inline-flex items-center gap-1 rounded-lg border border-[var(--sc-border)] px-3 py-2 text-xs text-[var(--sc-text-primary)] hover:border-[var(--sc-text-muted)] hover:bg-[var(--sc-bg-elevated)]"
               >
                 <Database size={12} />
                 Open memories
@@ -467,20 +467,20 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
         </section>
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
             <div className="flex items-center gap-2">
-              <Sparkles size={16} className="text-cyan-400" />
-              <h3 className="text-lg font-semibold text-white">Free workflows</h3>
+              <Sparkles size={16} className="text-[var(--sc-cyan)]" />
+              <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Free workflows</h3>
             </div>
-            <p className="mt-1 text-sm text-slate-400">These are the core jobs the free dashboard should do well every day.</p>
+            <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">These are the core jobs the free dashboard should do well every day.</p>
             <div className="mt-4 space-y-3">
               {freeWorkflows.map((workflow) => (
-                <div key={workflow.title} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                  <div className="text-sm font-medium text-white">{workflow.title}</div>
-                  <div className="mt-1 text-sm text-slate-400">{workflow.detail}</div>
+                <div key={workflow.title} className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-4">
+                  <div className="text-sm font-medium text-[var(--sc-text-primary)]">{workflow.title}</div>
+                  <div className="mt-1 text-sm text-[var(--sc-text-secondary)]">{workflow.detail}</div>
                   <button
                     onClick={() => openView(workflow.target)}
-                    className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-cyan-300"
+                    className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[var(--sc-cyan)]"
                   >
                     {workflow.cta}
                     <ArrowRight size={12} />
@@ -490,17 +490,17 @@ export function OverviewView({ stats, selectedProject }: OverviewViewProps) {
             </div>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <FileSearch size={16} className="text-violet-400" />
-                <h3 className="text-lg font-semibold text-white">Pro workflows</h3>
+                <FileSearch size={16} className="text-[var(--sc-coral)]" />
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Pro workflows</h3>
               </div>
               <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${TIER_BG[license?.tier ?? 'free']} ${TIER_COLOURS[license?.tier ?? 'free']}`}>
                 {TIER_LABELS[license?.tier ?? 'free']}
               </span>
             </div>
-            <p className="mt-1 text-sm text-slate-400">Paid value should save operator time, not just expose more settings.</p>
+            <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">Paid value should save operator time, not just expose more settings.</p>
             <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-3">
               {proWorkflows.map((workflow) => (
                 <WorkflowCard key={workflow.title} card={workflow} license={license} onOpen={openView} />

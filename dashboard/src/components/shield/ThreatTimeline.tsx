@@ -55,20 +55,20 @@ export function ThreatTimeline({ timeRange }: Props) {
   const maxValue = Math.max(1, ...buckets.map((b) => b.allowed + b.blocked + b.quarantined));
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-      <h3 className="text-sm font-medium text-slate-300 mb-4">Threat Timeline</h3>
+    <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
+      <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Threat Timeline</h3>
 
       {isLoading ? (
         <div className="h-32 flex items-center justify-center">
-          <div className="text-xs text-slate-500 animate-pulse">Loading timeline...</div>
+          <div className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading timeline...</div>
         </div>
       ) : isError ? (
         <div className="h-32 flex items-center justify-center">
-          <div className="text-xs text-red-400">Failed to load timeline</div>
+          <div className="text-xs text-[var(--sc-coral)]">Failed to load timeline</div>
         </div>
       ) : buckets.length === 0 ? (
         <div className="h-32 flex items-center justify-center">
-          <div className="text-xs text-slate-500">No audit data</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">No audit data</div>
         </div>
       ) : (
         <>
@@ -93,12 +93,12 @@ export function ThreatTimeline({ timeRange }: Props) {
                     {/* Stacked: blocked (red) bottom, quarantined (yellow) middle, allowed (green) top */}
                     <div className="w-full h-full flex flex-col-reverse">
                       {bucket.blocked > 0 && (
-                        <div className="bg-red-500" style={{ height: `${blockedPct}%` }} />
+                        <div className="bg-[var(--sc-coral)]" style={{ height: `${blockedPct}%` }} />
                       )}
                       {bucket.quarantined > 0 && (
-                        <div className="bg-yellow-500" style={{ height: `${quarantinedPct}%` }} />
+                        <div className="bg-[var(--sc-amber)]" style={{ height: `${quarantinedPct}%` }} />
                       )}
-                      <div className="bg-emerald-500/60 flex-1" />
+                      <div className="bg-[var(--sc-cyan)]/60 flex-1" />
                     </div>
                   </div>
                 </div>
@@ -109,23 +109,23 @@ export function ThreatTimeline({ timeRange }: Props) {
           {/* Legend */}
           <div className="flex gap-4 mt-3 justify-center">
             <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-full bg-emerald-500/60" />
-              <span className="text-[10px] text-slate-500">Allowed</span>
+              <div className="w-2 h-2 rounded-full bg-[var(--sc-cyan)]/60" />
+              <span className="text-[10px] text-[var(--sc-text-muted)]">Allowed</span>
             </div>
             <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-full bg-red-500" />
-              <span className="text-[10px] text-slate-500">Blocked</span>
+              <div className="w-2 h-2 rounded-full bg-[var(--sc-coral)]" />
+              <span className="text-[10px] text-[var(--sc-text-muted)]">Blocked</span>
             </div>
             <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-full bg-yellow-500" />
-              <span className="text-[10px] text-slate-500">Quarantined</span>
+              <div className="w-2 h-2 rounded-full bg-[var(--sc-amber)]" />
+              <span className="text-[10px] text-[var(--sc-text-muted)]">Quarantined</span>
             </div>
           </div>
 
           {/* Navigate to full audit view */}
           <button
             onClick={() => useDashboardStore.getState().setViewMode('audit')}
-            className="mt-3 w-full text-center text-xs text-cyan-400 hover:text-cyan-300 transition-colors py-1"
+            className="mt-3 w-full text-center text-xs text-[var(--sc-cyan)] hover:text-[var(--sc-cyan)] transition-colors py-1"
           >
             View detailed audit log &rarr;
           </button>

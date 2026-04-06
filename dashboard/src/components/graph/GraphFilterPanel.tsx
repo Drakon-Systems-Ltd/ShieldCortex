@@ -38,7 +38,7 @@ export default function GraphFilterPanel({
     return (
       <button
         onClick={() => setIsOpen(true)}
-        className="flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-1.5 text-[11px] text-slate-400 backdrop-blur-sm transition-colors hover:border-slate-700 hover:text-slate-300"
+        className="flex items-center gap-1.5 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/80 px-3 py-1.5 text-[11px] text-[var(--sc-text-secondary)] backdrop-blur-sm transition-colors hover:border-[var(--sc-border)] hover:text-[var(--sc-text-primary)]"
       >
         <Filter size={13} />
         Filters
@@ -47,31 +47,31 @@ export default function GraphFilterPanel({
   }
 
   return (
-    <div className="w-[220px] rounded-2xl border border-slate-800 bg-slate-950/90 p-4 backdrop-blur-sm">
+    <div className="w-[220px] rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/90 p-4 backdrop-blur-sm">
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Filters</span>
-        <button onClick={() => setIsOpen(false)} className="text-slate-500 hover:text-slate-300">
+        <span className="text-[10px] uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">Filters</span>
+        <button onClick={() => setIsOpen(false)} className="text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)]">
           <X size={14} />
         </button>
       </div>
 
       {/* Entity types */}
       <div className="mb-3">
-        <div className="mb-2 text-[10px] uppercase tracking-[0.15em] text-slate-600">Entity Types</div>
+        <div className="mb-2 text-[10px] uppercase tracking-[0.15em] text-[var(--sc-text-muted)]">Entity Types</div>
         <div className="flex flex-col gap-1.5">
           {entityTypes.map((type) => {
             const active = visibleEntityTypes.has(type);
             return (
               <label
                 key={type}
-                className={`flex cursor-pointer items-center gap-2 text-xs ${active ? 'text-slate-300' : 'text-slate-600 line-through'}`}
+                className={`flex cursor-pointer items-center gap-2 text-xs ${active ? 'text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-muted)] line-through'}`}
                 onClick={() => onToggleEntityType(type)}
               >
                 <span
                   className={`flex h-3.5 w-3.5 items-center justify-center rounded-sm border ${
                     active
-                      ? 'border-cyan-400/60 bg-cyan-400/15 text-[9px] text-cyan-400'
-                      : 'border-slate-700'
+                      ? 'border-[var(--sc-cyan)]/60 bg-[var(--sc-cyan)]/15 text-[9px] text-[var(--sc-cyan)]'
+                      : 'border-[var(--sc-border)]'
                   }`}
                 >
                   {active && '✓'}
@@ -89,21 +89,21 @@ export default function GraphFilterPanel({
 
       {/* Relationships */}
       <div className="mb-3">
-        <div className="mb-2 text-[10px] uppercase tracking-[0.15em] text-slate-600">Relationships</div>
+        <div className="mb-2 text-[10px] uppercase tracking-[0.15em] text-[var(--sc-text-muted)]">Relationships</div>
         <div className="flex flex-col gap-1.5">
           {predicates.map((pred) => {
             const active = visiblePredicates.has(pred);
             return (
               <label
                 key={pred}
-                className={`flex cursor-pointer items-center gap-2 text-xs ${active ? 'text-slate-300' : 'text-slate-600 line-through'}`}
+                className={`flex cursor-pointer items-center gap-2 text-xs ${active ? 'text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-muted)] line-through'}`}
                 onClick={() => onToggleRelationship(pred)}
               >
                 <span
                   className={`flex h-3.5 w-3.5 items-center justify-center rounded-sm border ${
                     active
-                      ? 'border-cyan-400/60 bg-cyan-400/15 text-[9px] text-cyan-400'
-                      : 'border-slate-700'
+                      ? 'border-[var(--sc-cyan)]/60 bg-[var(--sc-cyan)]/15 text-[9px] text-[var(--sc-cyan)]'
+                      : 'border-[var(--sc-border)]'
                   }`}
                 >
                   {active && '✓'}
@@ -115,10 +115,10 @@ export default function GraphFilterPanel({
         </div>
       </div>
 
-      <div className="border-t border-slate-800 pt-2.5">
+      <div className="border-t border-[var(--sc-border)] pt-2.5">
         <button
           onClick={onReset}
-          className="w-full rounded-lg border border-slate-700 bg-transparent px-3 py-1.5 text-[11px] text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-300"
+          className="w-full rounded-lg border border-[var(--sc-border)] bg-transparent px-3 py-1.5 text-[11px] text-[var(--sc-text-secondary)] transition-colors hover:border-[var(--sc-border)] hover:text-[var(--sc-text-primary)]"
         >
           Reset filters
         </button>

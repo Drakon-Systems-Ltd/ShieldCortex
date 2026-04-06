@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authFetch, readApiError } from '@/lib/auth';
 
 const API_URL = 'http://localhost:3001';
@@ -142,6 +142,25 @@ export function useCloudSyncStatus() {
       if (!res.ok) throw new Error(await readApiError(res, 'Failed to fetch sync status'));
       return normalizeCloudSyncStatus(await res.json());
     },
-    refetchInterval: 10000, // Poll every 10s
+    refetchInterval: 30000, // Poll every 30s
+    staleTime: 15000,
+  });
+}
+
+export function useClearFailedSync() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await authFetch(`${API_URL}/api/cloud/sync-queue/clear-failed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to clear failed items'));
+      return res.json() as Promise<{ cleared: number }>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['cloud-sync-status'] });
+    },
   });
 }

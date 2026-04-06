@@ -28,15 +28,15 @@ function scoreColour(score: number): string {
 }
 
 function scoreColourClass(score: number): string {
-  if (score > 70) return 'bg-green-500';
-  if (score >= 40) return 'bg-yellow-500';
-  return 'bg-red-500';
+  if (score > 70) return 'bg-[var(--sc-cyan)]';
+  if (score >= 40) return 'bg-[var(--sc-amber)]';
+  return 'bg-[var(--sc-coral)]';
 }
 
 function scoreTrackClass(score: number): string {
-  if (score > 70) return 'bg-green-500/20';
-  if (score >= 40) return 'bg-yellow-500/20';
-  return 'bg-red-500/20';
+  if (score > 70) return 'bg-[var(--sc-cyan)]/20';
+  if (score >= 40) return 'bg-[var(--sc-amber)]/20';
+  return 'bg-[var(--sc-coral)]/20';
 }
 
 /** SVG circular progress ring */
@@ -79,8 +79,8 @@ function SubScoreBar({ component }: { component: ComponentScore }) {
   return (
     <div className="group relative">
       <div className="flex items-center justify-between mb-1">
-        <span className="text-xs text-slate-400">{component.label}</span>
-        <span className="text-xs font-medium text-slate-300">{component.score}</span>
+        <span className="text-xs text-[var(--sc-text-secondary)]">{component.label}</span>
+        <span className="text-xs font-medium text-[var(--sc-text-primary)]">{component.score}</span>
       </div>
       <div className={`h-1.5 rounded-full ${scoreTrackClass(component.score)}`}>
         <div
@@ -89,7 +89,7 @@ function SubScoreBar({ component }: { component: ComponentScore }) {
         />
       </div>
       {/* Tooltip */}
-      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 rounded bg-slate-800 text-[10px] text-slate-300 whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 border border-white/10">
+      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 rounded bg-[var(--sc-bg-elevated)] text-[10px] text-[var(--sc-text-primary)] whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 border border-white/10">
         {component.detail}
       </div>
     </div>
@@ -124,8 +124,8 @@ export default function HealthScore() {
   if (loading) {
     return (
       <div className="bg-[#12121a] border border-white/10 rounded-xl p-5 w-[300px]">
-        <h3 className="text-sm font-medium text-slate-300 mb-4">Memory Health</h3>
-        <div className="text-xs text-slate-500 animate-pulse">Loading...</div>
+        <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Memory Health</h3>
+        <div className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading...</div>
       </div>
     );
   }
@@ -133,8 +133,8 @@ export default function HealthScore() {
   if (error || !data) {
     return (
       <div className="bg-[#12121a] border border-white/10 rounded-xl p-5 w-[300px]">
-        <h3 className="text-sm font-medium text-slate-300 mb-4">Memory Health</h3>
-        <div className="text-xs text-red-400">Failed to load health score</div>
+        <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Memory Health</h3>
+        <div className="text-xs text-[var(--sc-coral)]">Failed to load health score</div>
       </div>
     );
   }
@@ -143,7 +143,7 @@ export default function HealthScore() {
 
   return (
     <div className="bg-[#12121a] border border-white/10 rounded-xl p-5 w-[300px]">
-      <h3 className="text-sm font-medium text-slate-300 mb-4">Memory Health</h3>
+      <h3 className="text-sm font-medium text-[var(--sc-text-primary)] mb-4">Memory Health</h3>
 
       {/* Circular progress ring with score in centre */}
       <div className="flex justify-center mb-5">

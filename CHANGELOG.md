@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.0] - 2026-04-06
+
+### Added
+- **Constellation graph**: Full knowledge graph with 2-level cluster/detail view — all entities visible as coloured nebula clusters, click to bloom into individual nodes
+- **Review queue**: Card-based review flow with Keep/Suppress/Archive actions, slide animations, progress tracking, and accurate total counts
+- **Cloud sync diagnostics**: Clear failed items button, manual refresh, save feedback toast
+- **Graph search limit**: `/api/graph/search` now respects `limit` query parameter
+
+### Changed
+- Cloud sync polling reduced from 10s to 30s for better battery life
+- Button component defaults to `type="button"` preventing accidental form submissions
+- GlassCard now supports keyboard activation (Enter/Space) when clickable
+
+### Fixed
+- **Review Keep button**: Now correctly sets `reviewed_at` timestamp and removes item from queue
+- **Review queue counts**: Summary uses COUNT queries for true totals instead of capped page sizes
+- **X-Ray false positives**: Polyglot detection now checks file header only (not entire buffer), obfuscation only flags code files, system paths excluded from scanning
+- **Graph fit-to-view**: Now calls `zoomToFit()` via ref instead of no-op state toggle
+- **OverviewView crash**: Null-safe property chains for `contradictions`, `duplicates`, `stale`, `neverAccessed`
+- **Auth token race**: Token deduplication no longer nulls promise prematurely
+- **WebSocket reconnect**: Invalidates cached auth token on auth failure close codes
+- **Audit export**: `revokeObjectURL` deferred to prevent download race condition
+- **Decay tick leak**: Interval now assigned to variable and cleared on shutdown
+- **API 404s**: Unmatched `/api/*` routes return JSON instead of HTML
+- **Bulk quarantine validation**: Array element types now validated as integers
+
+### Removed
+- Dead code: `Topbar.tsx`, `RouteScaffold.tsx` components
+
+## [4.5.0] - 2026-04-03
+
+### Added
+- **Finding lifecycle**: X-Ray findings now have persistent status (new, reviewed, ignored, resolved, quarantined)
+- **Finding actions**: Review, ignore, resolve (with notes), quarantine file, delete — all from the dashboard
+- **Real-time alerts**: Watch detections broadcast via WebSocket with toast notifications in dashboard
+- **Findings tab**: New tab in X-Ray with status filters, stats summary, and action buttons on every finding
+- **File quarantine**: Move suspicious files to `~/.shieldcortex/quarantine/files/` directly from the dashboard
+- **Findings store**: Persistent JSON store with deduplication, 30-day auto-cleanup, and 500 finding cap
+- **API endpoints**: `GET/PATCH/DELETE /api/xray/findings/:id`, `POST /api/xray/findings/:id/quarantine`, `GET /api/xray/findings/stats`
+- **IPC for watch detections**: Atomic JSONL-based event file with 512KB cap for cross-process communication
+- **Toast notifications**: `sonner` integration for dark-themed toast alerts
+
+### Changed
+- Dashboard redesigned with OpenClaw-inspired dark theme (coral/cyan accents, glassmorphic cards)
+- Navigation simplified from 18 routes to 5 tabbed sections
+- All sub-components restyled with `--sc-*` CSS variable system
+- Mobile responsive sidebar with hamburger menu
+- Error boundaries added for dashboard routes
+- Skeleton loaders replace text loading states
+- Watch mode ignore list expanded (.next, .cache, .turbo, __pycache__, .venv)
+
 ## [Unreleased]
 
 ## [3.4.29] - 2026-03-22

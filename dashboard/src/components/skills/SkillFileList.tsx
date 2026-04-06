@@ -29,44 +29,44 @@ function SkillFileRow({ file, cloudConnected, onTrust, onUntrust, onRemove, onCl
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   return (
-    <div className="bg-slate-800/50 border border-slate-700 rounded-lg overflow-hidden">
+    <div className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg overflow-hidden">
       <div className="flex items-center">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex-1 px-3 py-2.5 flex items-center gap-3 hover:bg-slate-800/80 transition-colors min-w-0"
+          className="flex-1 px-3 py-2.5 flex items-center gap-3 hover:bg-[var(--sc-bg-elevated)] transition-colors min-w-0"
         >
           {file.trusted ? (
-            <ShieldCheck size={16} className="text-cyan-400 shrink-0" />
+            <ShieldCheck size={16} className="text-[var(--sc-cyan)] shrink-0" />
           ) : file.safe ? (
-            <CheckCircle2 size={16} className="text-green-400 shrink-0" />
+            <CheckCircle2 size={16} className="text-[var(--sc-cyan)] shrink-0" />
           ) : (
-            <XCircle size={16} className="text-red-400 shrink-0" />
+            <XCircle size={16} className="text-[var(--sc-coral)] shrink-0" />
           )}
 
           <div className="flex-1 min-w-0 text-left">
-            <span className="text-xs font-medium text-white truncate block">
+            <span className="text-xs font-medium text-[var(--sc-text-primary)] truncate block">
               {file.skillName || basename(file.path)}
             </span>
-            <span className="text-[10px] text-slate-500 truncate block">
+            <span className="text-[10px] text-[var(--sc-text-muted)] truncate block">
               {shortenPath(file.path)}
             </span>
           </div>
 
-          <span className="text-[10px] text-slate-500 shrink-0">{file.format}</span>
+          <span className="text-[10px] text-[var(--sc-text-muted)] shrink-0">{file.format}</span>
 
           {file.trusted ? (
-            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-cyan-400/10 text-cyan-400">TRUSTED</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]">TRUSTED</span>
           ) : (
             <SeverityBadge level={file.riskLevel} />
           )}
 
-          <span className="text-[10px] text-slate-600 shrink-0">{file.scanDurationMs}ms</span>
+          <span className="text-[10px] text-[var(--sc-text-muted)] shrink-0">{file.scanDurationMs}ms</span>
 
           {file.findings.length > 0 ? (
             expanded ? (
-              <ChevronDown size={14} className="text-slate-500 shrink-0" />
+              <ChevronDown size={14} className="text-[var(--sc-text-muted)] shrink-0" />
             ) : (
-              <ChevronRight size={14} className="text-slate-500 shrink-0" />
+              <ChevronRight size={14} className="text-[var(--sc-text-muted)] shrink-0" />
             )
           ) : (
             <div className="w-[14px] shrink-0" />
@@ -80,7 +80,7 @@ function SkillFileRow({ file, cloudConnected, onTrust, onUntrust, onRemove, onCl
             <button
               onClick={() => onUntrust(file.path)}
               title="Remove trust"
-              className="p-1.5 rounded hover:bg-slate-700 transition-colors text-cyan-400 hover:text-cyan-300"
+              className="p-1.5 rounded hover:bg-[var(--sc-bg-elevated)] transition-colors text-[var(--sc-cyan)] hover:text-[var(--sc-cyan)]"
             >
               <ShieldCheck size={14} />
             </button>
@@ -88,7 +88,7 @@ function SkillFileRow({ file, cloudConnected, onTrust, onUntrust, onRemove, onCl
             <button
               onClick={() => onTrust(file.path)}
               title="Mark as trusted"
-              className="p-1.5 rounded hover:bg-slate-700 transition-colors text-slate-500 hover:text-cyan-400"
+              className="p-1.5 rounded hover:bg-[var(--sc-bg-elevated)] transition-colors text-[var(--sc-text-muted)] hover:text-[var(--sc-cyan)]"
             >
               <Shield size={14} />
             </button>
@@ -101,8 +101,8 @@ function SkillFileRow({ file, cloudConnected, onTrust, onUntrust, onRemove, onCl
               title={cloudConnected ? 'Remove skill file' : 'Connect to Cloud to remove'}
               className={`p-1.5 rounded transition-colors ${
                 cloudConnected
-                  ? 'hover:bg-red-500/10 text-slate-500 hover:text-red-400'
-                  : 'text-slate-600 hover:text-slate-400 cursor-not-allowed'
+                  ? 'hover:bg-[var(--sc-coral)]/10 text-[var(--sc-text-muted)] hover:text-[var(--sc-coral)]'
+                  : 'text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)] cursor-not-allowed'
               }`}
             >
               <Trash2 size={14} />
@@ -113,19 +113,19 @@ function SkillFileRow({ file, cloudConnected, onTrust, onUntrust, onRemove, onCl
 
       {/* Confirm remove dialog */}
       {confirmRemove && (
-        <div className="border-t border-slate-700/50 px-3 py-2.5 bg-red-950/30 flex items-center gap-3">
-          <span className="text-xs text-red-300 flex-1">
+        <div className="border-t border-[var(--sc-border)]/50 px-3 py-2.5 bg-[var(--sc-coral)]/10 flex items-center gap-3">
+          <span className="text-xs text-[var(--sc-coral)] flex-1">
             Remove <span className="font-medium">{file.skillName || basename(file.path)}</span>? This will delete the file from disk.
           </span>
           <button
             onClick={() => { onRemove(file.path); setConfirmRemove(false); }}
-            className="px-3 py-1 text-xs font-medium bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
+            className="px-3 py-1 text-xs font-medium bg-[var(--sc-coral)] hover:bg-[var(--sc-coral-mid)] text-[var(--sc-text-primary)] rounded transition-colors"
           >
             Delete
           </button>
           <button
             onClick={() => setConfirmRemove(false)}
-            className="px-3 py-1 text-xs text-slate-400 hover:text-white transition-colors"
+            className="px-3 py-1 text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
           >
             Cancel
           </button>
@@ -133,7 +133,7 @@ function SkillFileRow({ file, cloudConnected, onTrust, onUntrust, onRemove, onCl
       )}
 
       {expanded && file.findings.length > 0 && (
-        <div className="border-t border-slate-700/50 px-3 py-2 bg-slate-900/50">
+        <div className="border-t border-[var(--sc-border)]/50 px-3 py-2 bg-[var(--sc-bg-surface)]">
           <SkillFindingDetails findings={file.findings} />
         </div>
       )}

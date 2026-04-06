@@ -24,14 +24,14 @@ export function KnowledgeMapPanel({ stats, onNavigate }: KnowledgeMapPanelProps)
 
   if (data.length === 0) {
     return (
-      <div className="bg-slate-900/50 rounded-lg p-4 text-slate-400 text-sm">
+      <div className="bg-[var(--sc-bg-surface)] rounded-lg p-4 text-[var(--sc-text-secondary)] text-sm">
         No category data available.
       </div>
     );
   }
 
   return (
-    <div className="bg-slate-900/50 rounded-lg p-4">
+    <div className="bg-[var(--sc-bg-surface)] rounded-lg p-4">
       <ResponsiveContainer width="100%" height={data.length * 36 + 20}>
         <BarChart data={data} layout="vertical" margin={{ left: 10, right: 30 }}>
           <XAxis type="number" hide />
@@ -69,7 +69,7 @@ export function KnowledgeMapPanel({ stats, onNavigate }: KnowledgeMapPanelProps)
       {data.some(d => d.thin) && (
         <div className="mt-2 flex flex-wrap gap-2">
           {data.filter(d => d.thin).map(d => (
-            <span key={d.category} className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded">
+            <span key={d.category} className="text-xs text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 px-2 py-0.5 rounded">
               ⚠ {d.category} ({d.count})
             </span>
           ))}

@@ -79,47 +79,47 @@ export function ChipScene({
 
       {/* Hover tooltip */}
       {hoveredMemory && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-900/95 border border-slate-600 rounded-lg px-4 py-2 text-sm backdrop-blur-sm pointer-events-none z-50">
-          <div className="font-semibold text-white">{hoveredMemory.title}</div>
-          <div className="text-slate-400 text-xs mt-1 flex items-center gap-2">
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-lg px-4 py-2 text-sm backdrop-blur-sm pointer-events-none z-50">
+          <div className="font-semibold text-[var(--sc-text-primary)]">{hoveredMemory.title}</div>
+          <div className="text-[var(--sc-text-secondary)] text-xs mt-1 flex items-center gap-2">
             <span
               className="w-2 h-2 rounded-full"
               style={{ backgroundColor: CATEGORY_COLORS[hoveredMemory.category] }}
             />
             <span className="capitalize">{hoveredMemory.category}</span>
-            <span className="text-slate-500">|</span>
+            <span className="text-[var(--sc-text-muted)]">|</span>
             <span>{Math.round(hoveredMemory.salience * 100)}% salience</span>
           </div>
         </div>
       )}
 
       {/* Legend */}
-      <div className="absolute bottom-4 left-4 bg-slate-900/90 border border-slate-700 rounded-lg p-3 text-xs backdrop-blur-sm">
-        <h4 className="font-semibold text-white mb-2">Memory Banks</h4>
+      <div className="absolute bottom-4 left-4 bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-lg p-3 text-xs backdrop-blur-sm">
+        <h4 className="font-semibold text-[var(--sc-text-primary)] mb-2">Memory Banks</h4>
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-sm bg-orange-500/30 border border-orange-500" />
-            <span className="text-slate-300">STM</span>
-            <span className="text-slate-500 ml-auto">{groupedMemories.stm.length}</span>
+            <div className="w-3 h-3 rounded-sm bg-[var(--sc-coral)]/30 border border-[var(--sc-coral)]" />
+            <span className="text-[var(--sc-text-primary)]">STM</span>
+            <span className="text-[var(--sc-text-muted)] ml-auto">{groupedMemories.stm.length}</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 rounded-sm bg-purple-500/30 border border-purple-500" />
-            <span className="text-slate-300">Episodic</span>
-            <span className="text-slate-500 ml-auto">{groupedMemories.episodic.length}</span>
+            <span className="text-[var(--sc-text-primary)]">Episodic</span>
+            <span className="text-[var(--sc-text-muted)] ml-auto">{groupedMemories.episodic.length}</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 rounded-sm bg-blue-500/30 border border-blue-500" />
-            <span className="text-slate-300">Long-Term</span>
-            <span className="text-slate-500 ml-auto">{groupedMemories.ltm.length}</span>
+            <span className="text-[var(--sc-text-primary)]">Long-Term</span>
+            <span className="text-[var(--sc-text-muted)] ml-auto">{groupedMemories.ltm.length}</span>
           </div>
         </div>
-        <div className="mt-3 pt-2 border-t border-slate-700 text-slate-400">
+        <div className="mt-3 pt-2 border-t border-[var(--sc-border)] text-[var(--sc-text-secondary)]">
           {memories.length} total memories
         </div>
       </div>
 
       {/* Status */}
-      <div className="absolute top-4 right-4 text-xs text-slate-500 font-mono">
+      <div className="absolute top-4 right-4 text-xs text-[var(--sc-text-muted)] font-mono">
         CORTEX PCB v1.0
       </div>
     </div>

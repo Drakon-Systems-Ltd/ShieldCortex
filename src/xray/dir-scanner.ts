@@ -19,15 +19,59 @@ import type { XRayFinding } from './types.js';
 const SKIP_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg', 'dist', 'build', '.next',
   '__pycache__', '.tox', '.venv', 'venv', '.cache', 'coverage',
+  'Caches', 'CacheStorage', 'IndexedDB', 'GPUCache',
 ]);
+
+/** Absolute path prefixes to never scan — system/OS files that always produce false positives. */
+const SKIP_PATH_PREFIXES = [
+  '/System/',
+  '/Library/',
+  '/usr/',
+  '/bin/',
+  '/sbin/',
+  '/private/var/',
+  '/System/Volumes/Preboot/',
+  '/System/Volumes/Data/private/',
+];
+
+/** Path segments that indicate non-code data we should skip. */
+const SKIP_PATH_SEGMENTS = [
+  '/Library/Caches/',
+  '/Library/Application Support/Google/Chrome/',
+  '/Library/Application Support/Firefox/',
+  '/Library/Application Support/Arc/',
+  '/Library/Containers/',
+  '/Library/News/',
+  '/Library/Mail/',
+  '/Library/Messages/',
+  '/Library/Safari/',
+  '/Library/Cookies/',
+  '/Library/Saved Application State/',
+  '/Library/WebKit/',
+  '/.Trash/',
+];
 
 /** Maximum number of files to scan per directory. */
 const MAX_FILES = 5000;
+
+/** Check if a full file path should be excluded from scanning. */
+function isExcludedPath(filePath: string): boolean {
+  for (const prefix of SKIP_PATH_PREFIXES) {
+    if (filePath.startsWith(prefix)) return true;
+  }
+  for (const segment of SKIP_PATH_SEGMENTS) {
+    if (filePath.includes(segment)) return true;
+  }
+  return false;
+}
 
 // ── Directory walker ────────────────────────────────────────
 
 function walkDir(dirPath: string, files: string[], depth: number = 0): void {
   if (depth > 20 || files.length >= MAX_FILES) return;
+
+  // Skip entire system/cache directory trees early
+  if (isExcludedPath(dirPath + '/')) return;
 
   let entries: fs.Dirent[];
   try {
@@ -39,12 +83,16 @@ function walkDir(dirPath: string, files: string[], depth: number = 0): void {
   for (const entry of entries) {
     if (files.length >= MAX_FILES) break;
 
+    const fullPath = path.join(dirPath, entry.name);
+
     if (entry.isDirectory()) {
       if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        walkDir(path.join(dirPath, entry.name), files, depth + 1);
+        walkDir(fullPath, files, depth + 1);
       }
     } else if (entry.isFile()) {
-      files.push(path.join(dirPath, entry.name));
+      if (!isExcludedPath(fullPath)) {
+        files.push(fullPath);
+      }
     }
   }
 }

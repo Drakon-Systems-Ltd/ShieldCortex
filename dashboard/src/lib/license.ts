@@ -19,17 +19,17 @@ export const TIER_LABELS: Record<LicenseTier, string> = {
 };
 
 export const TIER_COLOURS: Record<LicenseTier, string> = {
-  free: 'text-slate-400',
-  pro: 'text-cyan-400',
-  team: 'text-violet-400',
-  enterprise: 'text-amber-400',
+  free: 'text-[var(--sc-text-muted)]',
+  pro: 'text-[var(--sc-cyan)]',
+  team: 'text-[var(--sc-coral)]',
+  enterprise: 'text-[var(--sc-amber)]',
 };
 
 export const TIER_BG: Record<LicenseTier, string> = {
-  free: 'bg-slate-400/10',
-  pro: 'bg-cyan-400/10',
-  team: 'bg-violet-400/10',
-  enterprise: 'bg-amber-400/10',
+  free: 'bg-[var(--sc-surface-interactive)]',
+  pro: 'bg-[var(--sc-cyan)]/10',
+  team: 'bg-[var(--sc-coral)]/10',
+  enterprise: 'bg-[var(--sc-amber)]/10',
 };
 
 export const PLAN_PRICING: Record<'pro' | 'team', { label: string; price: string }> = {

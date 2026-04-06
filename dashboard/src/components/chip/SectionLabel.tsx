@@ -54,8 +54,8 @@ export function SectionLabel({ type, count, maxCount, position }: SectionLabelPr
         }}
       >
         <span style={{ color: config.color }}>{config.label}</span>
-        <span className="text-slate-500">|</span>
-        <span className="text-slate-400">
+        <span className="text-[var(--sc-text-muted)]">|</span>
+        <span className="text-[var(--sc-text-secondary)]">
           {count}/{maxCount}
         </span>
       </div>

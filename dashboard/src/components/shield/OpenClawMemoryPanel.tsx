@@ -41,11 +41,11 @@ function OpenClawMemoryForm({ initialAutoMemory, initialDedupe, initialNoveltyTh
   return (
     <div className="mt-4 space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-400">Auto-memory extraction</span>
+        <span className="text-xs text-[var(--sc-text-secondary)]">Auto-memory extraction</span>
         <button
           type="button"
           onClick={() => setAutoMemory(!autoMemory)}
-          className={`h-6 w-11 rounded-full transition-colors ${autoMemory ? 'bg-cyan-500' : 'bg-slate-700'}`}
+          className={`h-6 w-11 rounded-full transition-colors ${autoMemory ? 'bg-[var(--sc-cyan)]' : 'bg-[var(--sc-bg-elevated)]'}`}
         >
           <span
             className={`block h-5 w-5 rounded-full bg-white transition-transform ${autoMemory ? 'translate-x-5' : 'translate-x-0.5'}`}
@@ -54,12 +54,12 @@ function OpenClawMemoryForm({ initialAutoMemory, initialDedupe, initialNoveltyTh
       </div>
 
       <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-400">Novelty dedupe</span>
+        <span className="text-xs text-[var(--sc-text-secondary)]">Novelty dedupe</span>
         <button
           type="button"
           onClick={() => setDedupe(!dedupe)}
           disabled={!autoMemory}
-          className={`h-6 w-11 rounded-full transition-colors ${dedupe && autoMemory ? 'bg-emerald-500' : 'bg-slate-700'} ${!autoMemory ? 'opacity-50 cursor-not-allowed' : ''}`}
+          className={`h-6 w-11 rounded-full transition-colors ${dedupe && autoMemory ? 'bg-[var(--sc-cyan)]' : 'bg-[var(--sc-bg-elevated)]'} ${!autoMemory ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
           <span
             className={`block h-5 w-5 rounded-full bg-white transition-transform ${(dedupe && autoMemory) ? 'translate-x-5' : 'translate-x-0.5'}`}
@@ -69,7 +69,7 @@ function OpenClawMemoryForm({ initialAutoMemory, initialDedupe, initialNoveltyTh
 
       <div className="grid grid-cols-2 gap-2">
         <div>
-          <label className="block text-[11px] text-slate-500 mb-1">Novelty threshold</label>
+          <label className="block text-[11px] text-[var(--sc-text-muted)] mb-1">Novelty threshold</label>
           <Input
             type="number"
             step="0.01"
@@ -78,11 +78,11 @@ function OpenClawMemoryForm({ initialAutoMemory, initialDedupe, initialNoveltyTh
             value={noveltyThreshold}
             disabled={!autoMemory || !dedupe}
             onChange={(e) => setNoveltyThreshold(e.target.value)}
-            className="h-8 text-xs bg-slate-800 border-slate-700"
+            className="h-8 text-xs bg-[var(--sc-bg-elevated)] border-[var(--sc-border)]"
           />
         </div>
         <div>
-          <label className="block text-[11px] text-slate-500 mb-1">Max recent records</label>
+          <label className="block text-[11px] text-[var(--sc-text-muted)] mb-1">Max recent records</label>
           <Input
             type="number"
             step="1"
@@ -91,20 +91,20 @@ function OpenClawMemoryForm({ initialAutoMemory, initialDedupe, initialNoveltyTh
             value={maxRecent}
             disabled={!autoMemory || !dedupe}
             onChange={(e) => setMaxRecent(e.target.value)}
-            className="h-8 text-xs bg-slate-800 border-slate-700"
+            className="h-8 text-xs bg-[var(--sc-bg-elevated)] border-[var(--sc-border)]"
           />
         </div>
       </div>
 
       <div className="flex items-center justify-between pt-1">
-        <span className="text-[11px] text-slate-500">
+        <span className="text-[11px] text-[var(--sc-text-muted)]">
           Default: dedupe on, threshold 0.88, max 300
         </span>
         <Button
           size="sm"
           onClick={handleSave}
           disabled={isSaving}
-          className="h-8 text-xs bg-cyan-600 hover:bg-cyan-500 text-white"
+          className="h-8 text-xs bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] text-[var(--sc-text-primary)]"
         >
           {isSaving ? <Loader2 size={12} className="animate-spin" /> : null}
           Save
@@ -122,17 +122,17 @@ export function OpenClawMemoryPanel() {
   const formKey = cfg ? `${cfg.autoMemory}-${cfg.dedupe}-${cfg.noveltyThreshold}-${cfg.maxRecent}` : 'default';
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-      <h3 className="text-sm font-medium text-slate-300">OpenClaw Memory</h3>
-      <p className="text-xs text-slate-500 mt-1">
+    <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
+      <h3 className="text-sm font-medium text-[var(--sc-text-primary)]">OpenClaw Memory</h3>
+      <p className="text-xs text-[var(--sc-text-muted)] mt-1">
         Configure how ShieldCortex complements native OpenClaw memory.
       </p>
-      <p className="text-[11px] text-slate-600 mt-1">
+      <p className="text-[11px] text-[var(--sc-text-muted)] mt-1">
         Changes apply on next OpenClaw gateway restart.
       </p>
 
       {isLoading ? (
-        <div className="text-xs text-slate-500 mt-4 animate-pulse">Loading settings...</div>
+        <div className="text-xs text-[var(--sc-text-muted)] mt-4 animate-pulse">Loading settings...</div>
       ) : (
         <OpenClawMemoryForm
           key={formKey}

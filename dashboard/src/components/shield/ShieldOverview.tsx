@@ -23,27 +23,27 @@ export function ShieldOverview() {
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-7xl space-y-6">
-        <section className="rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-cyan-950/15 p-6">
+        <section className="rounded-2xl border border-[var(--sc-border)] bg-gradient-to-br from-[var(--sc-bg-deep)] via-[var(--sc-bg-surface)] to-cyan-950/15 p-6">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-cyan-300">
+              <div className="inline-flex items-center gap-2 rounded-full border border-[var(--sc-cyan)]/20 bg-[var(--sc-cyan)]/10 px-3 py-1 text-xs uppercase tracking-[0.18em] text-[var(--sc-cyan)]">
                 <ShieldAlert size={12} />
                 Defence workspace
               </div>
-              <h2 className="mt-4 text-3xl font-semibold text-white">See what is being blocked, what needs review, and what needs tuning.</h2>
-              <p className="mt-2 text-sm leading-6 text-slate-400">
+              <h2 className="mt-4 text-3xl font-semibold text-[var(--sc-text-primary)]">See what is being blocked, what needs review, and what needs tuning.</h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--sc-text-secondary)]">
                 Shield should help you answer three questions quickly: what is happening now, what needs a decision, and where should policy change next.
               </p>
             </div>
-            <div className="flex gap-1 self-start rounded-lg bg-slate-800 p-0.5">
+            <div className="flex gap-1 self-start rounded-lg bg-[var(--sc-bg-elevated)] p-0.5">
               {(['24h', '7d', '30d'] as const).map((range) => (
                 <button
                   key={range}
                   onClick={() => setTimeRange(range)}
                   className={`px-3 py-1 text-xs rounded-md transition-colors ${
                     timeRange === range
-                      ? 'bg-cyan-600 text-white'
-                      : 'text-slate-400 hover:text-white'
+                      ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)]'
+                      : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
                   }`}
                 >
                   {range}
@@ -56,20 +56,20 @@ export function ShieldOverview() {
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.05fr_0.95fr]">
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
                 <ShieldAlert size={12} />
                 Act Now
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={() => setViewMode('quarantine')}
-                  className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/15"
+                  className="rounded-full border border-[var(--sc-amber)]/20 bg-[var(--sc-amber)]/10 px-3 py-1 text-xs font-medium text-[var(--sc-amber)] transition-colors hover:bg-[var(--sc-amber)]/15"
                 >
                   Review quarantine
                 </button>
                 <button
                   onClick={() => setViewMode('audit')}
-                  className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/30 hover:text-white"
+                  className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-3 py-1 text-xs font-medium text-[var(--sc-text-primary)] transition-colors hover:border-[var(--sc-cyan)]/30 hover:text-[var(--sc-text-primary)]"
                 >
                   Open audit
                 </button>
@@ -83,13 +83,13 @@ export function ShieldOverview() {
 
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
                 <Cloud size={12} />
                 System Status
               </div>
               <button
                 onClick={() => setViewMode('cloud')}
-                className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/30 hover:text-white"
+                className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-3 py-1 text-xs font-medium text-[var(--sc-text-primary)] transition-colors hover:border-[var(--sc-cyan)]/30 hover:text-[var(--sc-text-primary)]"
               >
                 Open cloud
               </button>
@@ -103,7 +103,7 @@ export function ShieldOverview() {
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.05fr_0.95fr]">
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
               <SlidersHorizontal size={12} />
               Tune Defence
             </div>
@@ -115,13 +115,13 @@ export function ShieldOverview() {
 
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
                 <Brain size={12} />
                 Memory Pressure
               </div>
               <button
                 onClick={() => setViewMode('brain')}
-                className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-cyan-500/30 hover:text-white"
+                className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-3 py-1 text-xs font-medium text-[var(--sc-text-primary)] transition-colors hover:border-[var(--sc-cyan)]/30 hover:text-[var(--sc-text-primary)]"
               >
                 Open brain
               </button>
@@ -134,13 +134,13 @@ export function ShieldOverview() {
         </section>
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_1fr]">
-          <details className="group rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <details className="group rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
             <summary className="flex cursor-pointer list-none items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-white">Advanced review</h3>
-                <p className="mt-1 text-sm text-slate-400">Use these when you are inspecting instructions, hardening policies, or debugging low-level behaviour.</p>
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Advanced review</h3>
+                <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">Use these when you are inspecting instructions, hardening policies, or debugging low-level behaviour.</p>
               </div>
-              <span className="text-xs text-slate-400 group-open:text-cyan-300">Expand</span>
+              <span className="text-xs text-[var(--sc-text-secondary)] group-open:text-[var(--sc-cyan)]">Expand</span>
             </summary>
             <div className="mt-4 space-y-4">
               <SkillScannerCard />
@@ -148,13 +148,13 @@ export function ShieldOverview() {
             </div>
           </details>
 
-          <details className="group rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <details className="group rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-5">
             <summary className="flex cursor-pointer list-none items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-white">Policy controls</h3>
-                <p className="mt-1 text-sm text-slate-400">Custom firewall rules are powerful, but they are not the first thing most operators need every day.</p>
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Policy controls</h3>
+                <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">Custom firewall rules are powerful, but they are not the first thing most operators need every day.</p>
               </div>
-              <span className="text-xs text-slate-400 group-open:text-cyan-300">Expand</span>
+              <span className="text-xs text-[var(--sc-text-secondary)] group-open:text-[var(--sc-cyan)]">Expand</span>
             </summary>
             <div className="mt-4">
               <CustomFirewallRulesPanel />

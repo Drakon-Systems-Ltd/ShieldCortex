@@ -50,7 +50,7 @@ export function NavRail() {
   const blockedCount = auditStats?.blockedCount ?? 0;
 
   return (
-    <nav className="w-14 border-r border-slate-800 bg-slate-900/50 flex flex-col items-center py-3 shrink-0">
+    <nav className="w-14 border-r border-[var(--sc-border)] bg-[var(--sc-bg-surface)] flex flex-col items-center py-3 shrink-0">
       <div className="flex-1 flex flex-col items-center gap-1">
         {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
           const sparkData =
@@ -70,9 +70,9 @@ export function NavRail() {
             } ${
               viewMode === id
                 ? id === 'dome'
-                  ? 'bg-red-600/20 text-red-400'
-                  : 'bg-cyan-600/20 text-cyan-400'
-                : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
+                  ? 'bg-[var(--sc-coral)]/20 text-[var(--sc-coral)]'
+                  : 'bg-[var(--sc-cyan)]/20 text-[var(--sc-cyan)]'
+                : 'text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] hover:bg-[var(--sc-bg-elevated)]'
             }`}
             title={label}
           >
@@ -82,12 +82,12 @@ export function NavRail() {
             )}
             <span className="text-[9px] leading-none">{label}</span>
             {id === 'shield' && blockedCount > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] rounded-full bg-red-500 text-white text-[8px] flex items-center justify-center px-0.5">
+              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] rounded-full bg-[var(--sc-coral)] text-[var(--sc-text-primary)] text-[8px] flex items-center justify-center px-0.5">
                 {blockedCount > 99 ? '99+' : blockedCount}
               </span>
             )}
             {isFreeTier && PRO_TABS.has(id) && (
-              <span className="absolute -bottom-0.5 -left-0.5 px-1 h-[12px] rounded-full bg-cyan-600/80 text-white text-[7px] font-bold flex items-center justify-center leading-none">
+              <span className="absolute -bottom-0.5 -left-0.5 px-1 h-[12px] rounded-full bg-[var(--sc-cyan)]/80 text-[var(--sc-text-primary)] text-[7px] font-bold flex items-center justify-center leading-none">
                 PRO
               </span>
             )}
@@ -97,7 +97,7 @@ export function NavRail() {
       </div>
 
       {/* Bottom stats */}
-      <div className="flex flex-col items-center gap-1 text-[10px] text-slate-500">
+      <div className="flex flex-col items-center gap-1 text-[10px] text-[var(--sc-text-muted)]">
         {stats && <span>{stats.total}</span>}
         {healthPercent !== null && <span>{healthPercent}%</span>}
         {versionData?.version && <span>v{versionData.version}</span>}

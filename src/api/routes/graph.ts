@@ -25,7 +25,7 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
       const db = getDatabase();
       const type = typeof req.query.type === 'string' ? req.query.type : undefined;
       const minMentions = typeof req.query.minMentions === 'string' ? parseInt(req.query.minMentions, 10) : 0;
-      const limit = typeof req.query.limit === 'string' ? Math.min(parseInt(req.query.limit, 10), 500) : 100;
+      const limit = typeof req.query.limit === 'string' ? Math.min(parseInt(req.query.limit, 10), 5000) : 100;
       const offset = typeof req.query.offset === 'string' ? parseInt(req.query.offset, 10) : 0;
 
       let whereClause = 'WHERE 1=1';
@@ -248,13 +248,14 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
     try {
       const db = getDatabase();
       const q = typeof req.query.q === 'string' ? req.query.q : '';
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
       if (!q) {
         return res.status(400).json({ error: 'Query parameter "q" is required' });
       }
 
       const rows = db.prepare(
-        `SELECT * FROM entities WHERE LOWER(name) LIKE ? ORDER BY memory_count DESC LIMIT 20`,
-      ).all(`%${q.toLowerCase()}%`) as Record<string, unknown>[];
+        `SELECT * FROM entities WHERE LOWER(name) LIKE ? ORDER BY memory_count DESC LIMIT ?`,
+      ).all(`%${q.toLowerCase()}%`, limit) as Record<string, unknown>[];
 
       res.json({
         entities: rows.map((row) => ({

@@ -58,10 +58,10 @@ export function TopStatsBar({
   // Health colour: green > 70, amber > 40, red otherwise
   const healthColor =
     healthPct > 70
-      ? 'text-emerald-400'
+      ? 'text-[var(--sc-cyan)]'
       : healthPct > 40
-        ? 'text-amber-400'
-        : 'text-red-400';
+        ? 'text-[var(--sc-amber)]'
+        : 'text-[var(--sc-coral)]';
 
   const totalMemories = stats?.total ?? 0;
   const totalLinks =
@@ -70,76 +70,76 @@ export function TopStatsBar({
     0;
 
   return (
-    <div className="flex items-center h-10 px-4 bg-slate-900/80 backdrop-blur-sm border-b border-slate-800 text-sm">
+    <div className="flex items-center h-10 px-4 bg-[var(--sc-bg-surface)] backdrop-blur-sm border-b border-[var(--sc-border)] text-sm">
       {/* Brain Health */}
       <div className="flex items-center gap-1.5">
-        <span className="text-slate-400">Brain Health</span>
+        <span className="text-[var(--sc-text-secondary)]">Brain Health</span>
         <span className={`font-medium ${healthColor}`}>{healthPct}%</span>
       </div>
 
-      <div className="w-px h-4 bg-slate-700 mx-3" />
+      <div className="w-px h-4 bg-[var(--sc-bg-elevated)] mx-3" />
 
       {/* Total Memories */}
       <div className="flex items-center gap-1.5">
-        <span className="text-slate-400">Memories</span>
-        <span className="text-slate-200 font-medium">{totalMemories}</span>
+        <span className="text-[var(--sc-text-secondary)]">Memories</span>
+        <span className="text-[var(--sc-text-primary)] font-medium">{totalMemories}</span>
       </div>
 
-      <div className="w-px h-4 bg-slate-700 mx-3" />
+      <div className="w-px h-4 bg-[var(--sc-bg-elevated)] mx-3" />
 
       {/* Total Links */}
       <div className="flex items-center gap-1.5">
-        <span className="text-slate-400">Links</span>
-        <span className="text-slate-200 font-medium">{totalLinks}</span>
+        <span className="text-[var(--sc-text-secondary)]">Links</span>
+        <span className="text-[var(--sc-text-primary)] font-medium">{totalLinks}</span>
       </div>
 
-      <div className="w-px h-4 bg-slate-700 mx-3" />
+      <div className="w-px h-4 bg-[var(--sc-bg-elevated)] mx-3" />
 
       {/* Contradictions */}
       <button
         onClick={onClickContradictions}
-        className="flex items-center gap-1.5 hover:bg-slate-800/60 rounded px-1.5 py-0.5 transition-colors"
+        className="flex items-center gap-1.5 hover:bg-[var(--sc-bg-elevated)] rounded px-1.5 py-0.5 transition-colors"
       >
-        <span className="text-slate-400">Contradictions</span>
+        <span className="text-[var(--sc-text-secondary)]">Contradictions</span>
         <span
           className={`font-medium ${
             contradictionCount > 0
-              ? 'text-amber-400 animate-pulse'
-              : 'text-slate-200'
+              ? 'text-[var(--sc-amber)] animate-pulse'
+              : 'text-[var(--sc-text-primary)]'
           }`}
         >
           {contradictionCount}
         </span>
       </button>
 
-      <div className="w-px h-4 bg-slate-700 mx-3" />
+      <div className="w-px h-4 bg-[var(--sc-bg-elevated)] mx-3" />
 
       {/* Quarantine */}
       <button
         onClick={onClickQuarantine}
-        className="flex items-center gap-1.5 hover:bg-slate-800/60 rounded px-1.5 py-0.5 transition-colors"
+        className="flex items-center gap-1.5 hover:bg-[var(--sc-bg-elevated)] rounded px-1.5 py-0.5 transition-colors"
       >
-        <span className="text-slate-400">Quarantine</span>
+        <span className="text-[var(--sc-text-secondary)]">Quarantine</span>
         <span
           className={`font-medium ${
             quarantineCount > 0
-              ? 'text-red-400 animate-pulse'
-              : 'text-slate-200'
+              ? 'text-[var(--sc-coral)] animate-pulse'
+              : 'text-[var(--sc-text-primary)]'
           }`}
         >
           {quarantineCount}
         </span>
       </button>
 
-      <div className="w-px h-4 bg-slate-700 mx-3" />
+      <div className="w-px h-4 bg-[var(--sc-bg-elevated)] mx-3" />
 
       {/* Last Consolidation */}
       <button
         onClick={onClickConsolidation}
-        className="flex items-center gap-1.5 hover:bg-slate-800/60 rounded px-1.5 py-0.5 transition-colors"
+        className="flex items-center gap-1.5 hover:bg-[var(--sc-bg-elevated)] rounded px-1.5 py-0.5 transition-colors"
       >
-        <span className="text-slate-400">Consolidated</span>
-        <span className="text-slate-200 font-medium">
+        <span className="text-[var(--sc-text-secondary)]">Consolidated</span>
+        <span className="text-[var(--sc-text-primary)] font-medium">
           {formatConsolidationTime(lastConsolidation)}
         </span>
       </button>

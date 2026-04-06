@@ -205,15 +205,15 @@ function NeuralConnection({
                 {style.label}
               </span>
             </div>
-            <div className="text-slate-300 text-[10px] space-y-0.5">
+            <div className="text-[var(--sc-text-primary)] text-[10px] space-y-0.5">
               <div className="truncate max-w-[180px]">
                 {link.source_title || `Memory #${link.source_id}`}
               </div>
-              <div className="text-slate-500">↓</div>
+              <div className="text-[var(--sc-text-muted)]">↓</div>
               <div className="truncate max-w-[180px]">
                 {link.target_title || `Memory #${link.target_id}`}
               </div>
-              <div className="mt-1 pt-1 border-t border-slate-700">
+              <div className="mt-1 pt-1 border-t border-[var(--sc-border)]">
                 Strength: <span style={{ color: style.color }}>{(link.strength * 100).toFixed(0)}%</span>
               </div>
             </div>

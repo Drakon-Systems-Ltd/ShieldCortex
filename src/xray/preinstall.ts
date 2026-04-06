@@ -14,6 +14,7 @@ import path from 'path';
 import type { XRayFinding } from './types.js';
 import { detectPatterns } from './patterns.js';
 import { calculateTrustScore } from './trust-score.js';
+import { appendActivity } from './activity.js';
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -39,6 +40,19 @@ export async function handlePreinstallCheck(): Promise<void> {
 
   if (!fs.existsSync(pkgJsonPath)) {
     console.log('ShieldCortex X-Ray pre-install check: PASS (no package.json found)');
+    appendActivity({
+      kind: 'preinstall',
+      status: 'pass',
+      target: pkgJsonPath,
+      targetType: 'file',
+      deepScan: false,
+      trustScore: 100,
+      riskLevel: 'SAFE',
+      filesScanned: 0,
+      findingCount: 0,
+      scannedAt: new Date().toISOString(),
+      summary: 'Skipped: no package.json found',
+    });
     process.exit(0);
   }
 
@@ -47,6 +61,19 @@ export async function handlePreinstallCheck(): Promise<void> {
     pkgContent = fs.readFileSync(pkgJsonPath, 'utf-8');
   } catch {
     console.log('ShieldCortex X-Ray pre-install check: PASS (could not read package.json)');
+    appendActivity({
+      kind: 'preinstall',
+      status: 'warn',
+      target: pkgJsonPath,
+      targetType: 'file',
+      deepScan: false,
+      trustScore: 100,
+      riskLevel: 'SAFE',
+      filesScanned: 0,
+      findingCount: 0,
+      scannedAt: new Date().toISOString(),
+      summary: 'Skipped: could not read package.json',
+    });
     process.exit(0);
   }
 
@@ -55,6 +82,19 @@ export async function handlePreinstallCheck(): Promise<void> {
     pkg = JSON.parse(pkgContent);
   } catch {
     console.log('ShieldCortex X-Ray pre-install check: PASS (invalid package.json)');
+    appendActivity({
+      kind: 'preinstall',
+      status: 'warn',
+      target: pkgJsonPath,
+      targetType: 'file',
+      deepScan: false,
+      trustScore: 100,
+      riskLevel: 'SAFE',
+      filesScanned: 0,
+      findingCount: 0,
+      scannedAt: new Date().toISOString(),
+      summary: 'Skipped: invalid package.json',
+    });
     process.exit(0);
   }
 
@@ -88,6 +128,19 @@ export async function handlePreinstallCheck(): Promise<void> {
 
   if (allFindings.length === 0) {
     console.log(`ShieldCortex X-Ray pre-install check: PASS — ${label} (score: ${score})`);
+    appendActivity({
+      kind: 'preinstall',
+      status: 'pass',
+      target: pkgJsonPath,
+      targetType: 'file',
+      deepScan: false,
+      trustScore: score,
+      riskLevel,
+      filesScanned: 1,
+      findingCount: 0,
+      scannedAt: new Date().toISOString(),
+      summary: `Preinstall check passed for ${label}`,
+    });
     process.exit(0);
   }
 
@@ -108,10 +161,36 @@ export async function handlePreinstallCheck(): Promise<void> {
   // HIGH or CRITICAL → block
   if (maxSeverity >= SEVERITY_RANK.high) {
     console.log('ShieldCortex X-Ray pre-install check: FAIL — blocking install due to HIGH+ risk findings');
+    appendActivity({
+      kind: 'preinstall',
+      status: 'blocked',
+      target: pkgJsonPath,
+      targetType: 'file',
+      deepScan: false,
+      trustScore: score,
+      riskLevel,
+      filesScanned: 1,
+      findingCount: allFindings.length,
+      scannedAt: new Date().toISOString(),
+      summary: `Blocked install for ${label}`,
+    });
     process.exit(1);
   }
 
   // MEDIUM or below → warn but allow
   console.log('ShieldCortex X-Ray pre-install check: PASS (warnings found, but below blocking threshold)');
+  appendActivity({
+    kind: 'preinstall',
+    status: 'warn',
+    target: pkgJsonPath,
+    targetType: 'file',
+    deepScan: false,
+    trustScore: score,
+    riskLevel,
+    filesScanned: 1,
+    findingCount: allFindings.length,
+    scannedAt: new Date().toISOString(),
+    summary: `Warnings detected for ${label}`,
+  });
   process.exit(0);
 }

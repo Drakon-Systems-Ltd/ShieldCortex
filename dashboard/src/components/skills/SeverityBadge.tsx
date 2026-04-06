@@ -3,11 +3,11 @@
 import type { Severity, RiskLevel } from '@/types/skills';
 
 const SEVERITY_STYLES: Record<string, string> = {
-  critical: 'text-red-400 bg-red-400/10',
-  high: 'text-red-400 bg-red-400/10',
-  medium: 'text-yellow-400 bg-yellow-400/10',
-  low: 'text-slate-400 bg-slate-400/10',
-  safe: 'text-green-400 bg-green-400/10',
+  critical: 'text-[var(--sc-coral)] bg-[var(--sc-coral)]/10',
+  high: 'text-[var(--sc-coral)] bg-[var(--sc-coral)]/10',
+  medium: 'text-[var(--sc-amber)] bg-[var(--sc-amber)]/10',
+  low: 'text-[var(--sc-text-secondary)] bg-[var(--sc-bg-elevated)]/10',
+  safe: 'text-[var(--sc-cyan)] bg-[var(--sc-cyan)]/10',
 };
 
 export function SeverityBadge({ level }: { level: Severity | RiskLevel }) {

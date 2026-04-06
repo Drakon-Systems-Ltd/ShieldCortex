@@ -45,7 +45,10 @@ import { registerIncidentRoutes } from './routes/incidents.js';
 import { registerMemoryRoutes } from './routes/memories.js';
 import { registerRecallRoutes } from './routes/recall.js';
 import { registerSystemRoutes } from './routes/system.js';
+import { registerXRayRoutes } from './routes/xray.js';
+import { registerXRayFindingRoutes } from './routes/xray-findings.js';
 import { createIronDomeRouteGuard } from './iron-dome-route-guard.js';
+import { readAndClearDetectionEvents } from '../xray/activity.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -198,6 +201,8 @@ export function startVisualizationServer(dbPath?: string): void {
     requireIronDomeAction: createIronDomeRouteGuard,
   });
   registerRecallRoutes(app, requireNotLocked);
+  registerXRayRoutes(app, requireNotLocked);
+  registerXRayFindingRoutes(app, requireNotLocked);
   registerSystemRoutes(app, {
     broadcast,
     clients,
@@ -690,6 +695,11 @@ export function startVisualizationServer(dbPath?: string): void {
     requireIronDomeAction: createIronDomeRouteGuard,
   });
 
+  // Catch-all for unmatched API routes — return JSON instead of Express HTML 404
+  app.all('/api/*', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not found' });
+  });
+
   // ============================================
   // WEBSOCKET SERVER
   // ============================================
@@ -764,7 +774,7 @@ export function startVisualizationServer(dbPath?: string): void {
 
   // Decay tick - update clients with decay changes every 30 seconds
   let decayTickCount = 0;
-  setInterval(() => {
+  const decayTickInterval = setInterval(() => {
     const db = getDatabase();
     const rawRows = db.prepare(
       'SELECT * FROM memories ORDER BY last_accessed DESC LIMIT 200'
@@ -843,6 +853,18 @@ export function startVisualizationServer(dbPath?: string): void {
     }
   }, 60 * 60 * 1000);
 
+  // Poll for X-Ray watch detections every 3 seconds and broadcast to WebSocket clients
+  const xrayDetectionInterval = setInterval(() => {
+    const events = readAndClearDetectionEvents();
+    for (const event of events) {
+      broadcast({
+        type: 'xray_detection',
+        timestamp: (event.timestamp as string) || new Date().toISOString(),
+        data: event,
+      });
+    }
+  }, 3000);
+
   // ============================================
   // START SERVER
   // ============================================
@@ -861,8 +883,10 @@ export function startVisualizationServer(dbPath?: string): void {
     brainWorker.stop();
 
     // Clear polling intervals
+    clearInterval(decayTickInterval);
     clearInterval(eventPollInterval);
     clearInterval(cleanupInterval);
+    clearInterval(xrayDetectionInterval);
 
     // Close WebSocket connections
     for (const client of clients) {

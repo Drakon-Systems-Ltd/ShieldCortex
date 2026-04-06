@@ -3,26 +3,18 @@
 import { Lock, ExternalLink } from 'lucide-react';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_LABELS } from '@/lib/license';
+import { Button } from '@/components/ds/Button';
 import type { GatedFeature } from '@/lib/license';
 
 interface ProFeatureGateProps {
-  /** The feature key to check */
   feature: GatedFeature;
-  /** Content to render when the feature is unlocked */
   children: React.ReactNode;
-  /** Optional short label for what this feature does */
   label?: string;
 }
 
-/**
- * Wraps content that requires a paid licence.
- * If the feature is enabled, renders children normally.
- * If not, shows a lock overlay with upgrade prompt.
- */
 export function ProFeatureGate({ feature, children, label }: ProFeatureGateProps) {
   const { data: license } = useLicenseStatus();
 
-  // While loading, render children (avoids flash of lock state)
   if (!license) return <>{children}</>;
 
   const featureInfo = license.features.find(f => f.feature === feature);
@@ -32,19 +24,19 @@ export function ProFeatureGate({ feature, children, label }: ProFeatureGateProps
 
   return (
     <div className="relative">
-      {/* Blurred content behind the gate */}
-      <div className="pointer-events-none select-none opacity-30 blur-[2px]">
+      <div className="pointer-events-none select-none opacity-20 blur-[3px]">
         {children}
       </div>
 
-      {/* Lock overlay */}
-      <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/60 rounded-xl backdrop-blur-sm">
-        <Lock size={24} className="text-slate-500 mb-2" />
-        <p className="text-sm font-medium text-slate-300 mb-1">
+      <div className="absolute inset-0 flex flex-col items-center justify-center rounded-2xl bg-[var(--sc-card-bg-strong)] backdrop-blur-sm">
+        <div className="rounded-xl bg-[var(--sc-coral)]/10 p-3">
+          <Lock size={24} className="text-[var(--sc-coral)]" />
+        </div>
+        <p className="mt-3 text-sm font-semibold text-[var(--sc-text-primary)]">
           {TIER_LABELS[requiredTier]} Feature
         </p>
         {label && (
-          <p className="text-xs text-slate-500 mb-3 text-center max-w-xs">
+          <p className="mt-1 max-w-xs text-center text-xs text-[var(--sc-text-muted)]">
             {label}
           </p>
         )}
@@ -52,10 +44,12 @@ export function ProFeatureGate({ feature, children, label }: ProFeatureGateProps
           href="https://shieldcortex.ai/pricing"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 px-4 py-2 text-xs bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors"
+          className="mt-4"
         >
-          Upgrade to {TIER_LABELS[requiredTier]}
-          <ExternalLink size={10} />
+          <Button variant="coral" size="sm" glow>
+            Upgrade to {TIER_LABELS[requiredTier]}
+            <ExternalLink size={12} />
+          </Button>
         </a>
       </div>
     </div>

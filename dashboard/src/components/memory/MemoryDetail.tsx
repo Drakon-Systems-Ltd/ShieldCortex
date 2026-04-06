@@ -228,18 +228,18 @@ export function MemoryDetail({
             : 'Active';
 
   return (
-    <Card className={`bg-slate-900 border-slate-700 overflow-auto transition-all duration-300 ${showSuccessFlash ? 'ring-2 ring-green-500 ring-opacity-75' : ''} ${showSaveSuccess ? 'ring-2 ring-emerald-500 ring-opacity-75' : ''}`}>
-      <CardHeader className="border-b border-slate-700 pb-3">
+    <Card className={`bg-[var(--sc-bg-surface)] border-[var(--sc-border)] overflow-auto transition-all duration-300 ${showSuccessFlash ? 'ring-2 ring-green-500 ring-opacity-75' : ''} ${showSaveSuccess ? 'ring-2 ring-emerald-500 ring-opacity-75' : ''}`}>
+      <CardHeader className="border-b border-[var(--sc-border)] pb-3">
         <div className="flex items-start justify-between gap-2">
           {isEditing ? (
             <Input
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
-              className="bg-slate-800 border-slate-600 text-white text-lg font-semibold"
+              className="bg-[var(--sc-bg-elevated)] border-[var(--sc-border)] text-[var(--sc-text-primary)] text-lg font-semibold"
             />
           ) : (
-            <CardTitle className="text-lg font-semibold text-white leading-tight flex items-center gap-2">
-              {showSaveSuccess && <Check className="w-4 h-4 text-emerald-400 shrink-0" />}
+            <CardTitle className="text-lg font-semibold text-[var(--sc-text-primary)] leading-tight flex items-center gap-2">
+              {showSaveSuccess && <Check className="w-4 h-4 text-[var(--sc-cyan)] shrink-0" />}
               {memory.title}
             </CardTitle>
           )}
@@ -249,7 +249,7 @@ export function MemoryDetail({
                 variant="ghost"
                 size="sm"
                 onClick={() => setIsEditing(true)}
-                className="text-slate-400 hover:text-white"
+                className="text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]"
                 title="Edit memory"
               >
                 <Pencil className="w-4 h-4" />
@@ -259,7 +259,7 @@ export function MemoryDetail({
               variant="ghost"
               size="sm"
               onClick={onClose}
-              className="text-slate-400 hover:text-white"
+              className="text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]"
             >
               ✕
             </Button>
@@ -270,7 +270,7 @@ export function MemoryDetail({
             <select
               value={editCategory}
               onChange={(e) => setEditCategory(e.target.value as Category)}
-              className="bg-slate-800 border border-slate-600 text-white text-xs rounded-lg px-2 py-1"
+              className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-xs rounded-lg px-2 py-1"
             >
               {CATEGORIES.map((cat) => (
                 <option key={cat} value={cat}>{cat}</option>
@@ -302,16 +302,16 @@ export function MemoryDetail({
       <CardContent className="p-4 space-y-4">
         {/* Content */}
         <div>
-          <h4 className="text-xs font-medium text-slate-400 mb-1">Content</h4>
+          <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-1">Content</h4>
           {isEditing ? (
             <textarea
               value={editContent}
               onChange={(e) => setEditContent(e.target.value)}
               rows={6}
-              className="w-full bg-slate-800 border border-slate-600 text-sm text-slate-200 rounded-lg p-3 resize-y focus:ring-cyan-500 focus:border-cyan-500"
+              className="w-full bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-sm text-[var(--sc-text-primary)] rounded-lg p-3 resize-y focus:ring-[var(--sc-cyan)] focus:border-[var(--sc-cyan)]"
             />
           ) : (
-            <p className="text-sm text-slate-200 whitespace-pre-wrap leading-relaxed">
+            <p className="text-sm text-[var(--sc-text-primary)] whitespace-pre-wrap leading-relaxed">
               {memory.content}
             </p>
           )}
@@ -320,12 +320,12 @@ export function MemoryDetail({
         {/* Tags (edit mode) */}
         {isEditing && (
           <div>
-            <h4 className="text-xs font-medium text-slate-400 mb-1">Tags (comma-separated)</h4>
+            <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-1">Tags (comma-separated)</h4>
             <Input
               value={editTags}
               onChange={(e) => setEditTags(e.target.value)}
               placeholder="tag1, tag2, tag3"
-              className="bg-slate-800 border-slate-600 text-white text-sm"
+              className="bg-[var(--sc-bg-elevated)] border-[var(--sc-border)] text-[var(--sc-text-primary)] text-sm"
             />
           </div>
         )}
@@ -338,7 +338,7 @@ export function MemoryDetail({
               size="sm"
               onClick={handleSaveEdit}
               disabled={editMutation.isPending}
-              className="flex-1 bg-emerald-600 hover:bg-emerald-700"
+              className="flex-1 bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan)]"
             >
               {editMutation.isPending ? 'Saving...' : 'Save Changes'}
             </Button>
@@ -346,7 +346,7 @@ export function MemoryDetail({
               variant="outline"
               size="sm"
               onClick={handleCancelEdit}
-              className="flex-1 border-slate-600 text-slate-300 hover:text-white"
+              className="flex-1 border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:text-[var(--sc-text-primary)]"
             >
               Cancel
             </Button>
@@ -367,7 +367,7 @@ export function MemoryDetail({
               <div className="text-sm font-medium" style={{ color: healthStatus.color }}>
                 {healthStatus.label}
               </div>
-              <div className="text-xs text-slate-400">
+              <div className="text-xs text-[var(--sc-text-secondary)]">
                 {decayFactor > 0.7
                   ? 'Memory is strong and stable'
                   : decayFactor > 0.4
@@ -381,12 +381,12 @@ export function MemoryDetail({
         {/* Metrics */}
         {!isEditing && (
           <div className="grid grid-cols-2 gap-3">
-            <div className="bg-slate-800 rounded-lg p-3">
-              <div className="text-xs text-slate-400">Salience</div>
-              <div className="text-lg font-bold text-white">
+            <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
+              <div className="text-xs text-[var(--sc-text-secondary)]">Salience</div>
+              <div className="text-lg font-bold text-[var(--sc-text-primary)]">
                 {(memory.salience * 100).toFixed(0)}%
               </div>
-              <div className="mt-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div className="mt-1 h-1.5 bg-[var(--sc-border)] rounded-full overflow-hidden">
                 <div
                   className="h-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500 rounded-full transition-all"
                   style={{ width: `${memory.salience * 100}%` }}
@@ -394,12 +394,12 @@ export function MemoryDetail({
               </div>
             </div>
 
-            <div className="bg-slate-800 rounded-lg p-3">
-              <div className="text-xs text-slate-400">Decay Factor</div>
-              <div className="text-lg font-bold text-white">
+            <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
+              <div className="text-xs text-[var(--sc-text-secondary)]">Decay Factor</div>
+              <div className="text-lg font-bold text-[var(--sc-text-primary)]">
                 {(decayFactor * 100).toFixed(0)}%
               </div>
-              <div className="mt-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div className="mt-1 h-1.5 bg-[var(--sc-border)] rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full transition-all"
                   style={{
@@ -414,22 +414,22 @@ export function MemoryDetail({
 
         {/* Access info */}
         {!isEditing && (
-          <div className={`bg-slate-800 rounded-lg p-3 space-y-2 transition-all duration-300 ${showSuccessFlash ? 'ring-1 ring-green-500/50' : ''}`}>
+          <div className={`bg-[var(--sc-bg-elevated)] rounded-lg p-3 space-y-2 transition-all duration-300 ${showSuccessFlash ? 'ring-1 ring-green-500/50' : ''}`}>
             <div className="flex justify-between items-center">
-              <span className="text-xs text-slate-400">Access Count</span>
-              <span className={`text-sm font-medium transition-all duration-300 ${showSuccessFlash ? 'text-green-400 scale-110' : 'text-white'}`}>
+              <span className="text-xs text-[var(--sc-text-secondary)]">Access Count</span>
+              <span className={`text-sm font-medium transition-all duration-300 ${showSuccessFlash ? 'text-[var(--sc-cyan)] scale-110' : 'text-[var(--sc-text-primary)]'}`}>
                 {memory.accessCount} times
               </span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-xs text-slate-400">Last Accessed</span>
-              <span className={`text-sm transition-all duration-300 ${showSuccessFlash ? 'text-green-400' : 'text-white'}`}>
+              <span className="text-xs text-[var(--sc-text-secondary)]">Last Accessed</span>
+              <span className={`text-sm transition-all duration-300 ${showSuccessFlash ? 'text-[var(--sc-cyan)]' : 'text-[var(--sc-text-primary)]'}`}>
                 {showSuccessFlash ? 'Just now' : timeSince(memory.lastAccessed)}
               </span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-xs text-slate-400">Created</span>
-              <span className="text-sm text-white">
+              <span className="text-xs text-[var(--sc-text-secondary)]">Created</span>
+              <span className="text-sm text-[var(--sc-text-primary)]">
                 {formatDate(memory.createdAt)}
               </span>
             </div>
@@ -438,57 +438,57 @@ export function MemoryDetail({
 
         {!isEditing && (
           <div className="grid gap-3 md:grid-cols-1">
-            <div className="rounded-lg bg-slate-800 p-3 space-y-2">
-              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Provenance</h4>
+            <div className="rounded-lg bg-[var(--sc-bg-elevated)] p-3 space-y-2">
+              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Provenance</h4>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Source kind</span>
-                <span className="text-white">{memory.sourceKind || 'user'}</span>
+                <span className="text-[var(--sc-text-secondary)]">Source kind</span>
+                <span className="text-[var(--sc-text-primary)]">{memory.sourceKind || 'user'}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Capture</span>
-                <span className="text-white">{memory.captureMethod || 'manual'}</span>
+                <span className="text-[var(--sc-text-secondary)]">Capture</span>
+                <span className="text-[var(--sc-text-primary)]">{memory.captureMethod || 'manual'}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Trust</span>
-                <span className="text-white">{(memory.trustScore ?? 1).toFixed(2)}</span>
+                <span className="text-[var(--sc-text-secondary)]">Trust</span>
+                <span className="text-[var(--sc-text-primary)]">{(memory.trustScore ?? 1).toFixed(2)}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Origin</span>
-                <span className="truncate text-right text-slate-300">{memory.source || 'user:direct'}</span>
+                <span className="text-[var(--sc-text-secondary)]">Origin</span>
+                <span className="truncate text-right text-[var(--sc-text-primary)]">{memory.source || 'user:direct'}</span>
               </div>
             </div>
 
-            <div className="rounded-lg bg-slate-800 p-3 space-y-2">
-              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Review state</h4>
+            <div className="rounded-lg bg-[var(--sc-bg-elevated)] p-3 space-y-2">
+              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Review state</h4>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Status</span>
-                <span className="text-white">{reviewStatusLabel}</span>
+                <span className="text-[var(--sc-text-secondary)]">Status</span>
+                <span className="text-[var(--sc-text-primary)]">{reviewStatusLabel}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Pinned</span>
-                <span className="text-white">{memory.pinned ? 'Yes' : 'No'}</span>
+                <span className="text-[var(--sc-text-secondary)]">Pinned</span>
+                <span className="text-[var(--sc-text-primary)]">{memory.pinned ? 'Yes' : 'No'}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Reviewed</span>
-                <span className="text-white">
+                <span className="text-[var(--sc-text-secondary)]">Reviewed</span>
+                <span className="text-[var(--sc-text-primary)]">
                   {memory.reviewedAt ? `${timeSince(memory.reviewedAt)} by ${memory.reviewedBy || 'operator'}` : 'Not reviewed'}
                 </span>
               </div>
             </div>
 
-            <div className="rounded-lg bg-slate-800 p-3 space-y-2">
-              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Sync state</h4>
+            <div className="rounded-lg bg-[var(--sc-bg-elevated)] p-3 space-y-2">
+              <h4 className="text-xs font-medium uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Sync state</h4>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Scope</span>
-                <span className="text-white">{memory.scope || 'project'}</span>
+                <span className="text-[var(--sc-text-secondary)]">Scope</span>
+                <span className="text-[var(--sc-text-primary)]">{memory.scope || 'project'}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Cloud</span>
-                <span className="text-white">{memory.cloudExcluded ? 'Excluded' : 'Eligible'}</span>
+                <span className="text-[var(--sc-text-secondary)]">Cloud</span>
+                <span className="text-[var(--sc-text-primary)]">{memory.cloudExcluded ? 'Excluded' : 'Eligible'}</span>
               </div>
               <div className="flex justify-between gap-3 text-sm">
-                <span className="text-slate-400">Sensitivity</span>
-                <span className="text-white">{memory.sensitivityLevel || 'INTERNAL'}</span>
+                <span className="text-[var(--sc-text-secondary)]">Sensitivity</span>
+                <span className="text-[var(--sc-text-primary)]">{memory.sensitivityLevel || 'INTERNAL'}</span>
               </div>
             </div>
           </div>
@@ -497,7 +497,7 @@ export function MemoryDetail({
         {/* Related Memories */}
         {!isEditing && relatedMemories.length > 0 && (
           <div>
-            <h4 className="text-xs font-medium text-slate-400 mb-2 flex items-center gap-2">
+            <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-2 flex items-center gap-2">
               <span className="inline-block w-4 h-4">🔗</span>
               Related Memories ({relatedMemories.length})
             </h4>
@@ -510,7 +510,7 @@ export function MemoryDetail({
                   <button
                     key={`${related.id}-${direction}`}
                     onClick={() => onSelectMemory?.(related.id)}
-                    className="w-full text-left p-2 bg-slate-800 hover:bg-slate-750 rounded-lg transition-colors group"
+                    className="w-full text-left p-2 bg-[var(--sc-bg-elevated)] hover:bg-[var(--sc-surface-interactive)] rounded-lg transition-colors group"
                   >
                     <div className="flex items-center gap-2 mb-1">
                       <span
@@ -523,11 +523,11 @@ export function MemoryDetail({
                       >
                         {direction === 'to' ? `${style.icon} ${style.label}` : `${style.label} ${style.icon}`}
                       </span>
-                      <span className="text-[10px] text-slate-500 ml-auto">
+                      <span className="text-[10px] text-[var(--sc-text-muted)] ml-auto">
                         {(strength * 100).toFixed(0)}%
                       </span>
                     </div>
-                    <div className="text-sm text-white truncate group-hover:text-blue-400 transition-colors">
+                    <div className="text-sm text-[var(--sc-text-primary)] truncate group-hover:text-blue-400 transition-colors">
                       {related.title}
                     </div>
                     <div className="flex items-center gap-2 mt-1">
@@ -540,7 +540,7 @@ export function MemoryDetail({
                       >
                         {related.category}
                       </span>
-                      <span className="text-[10px] text-slate-500">
+                      <span className="text-[10px] text-[var(--sc-text-muted)]">
                         {(related.salience * 100).toFixed(0)}% salience
                       </span>
                     </div>
@@ -554,12 +554,12 @@ export function MemoryDetail({
         {/* Tags (view mode) */}
         {!isEditing && memory.tags && memory.tags.length > 0 && (
           <div>
-            <h4 className="text-xs font-medium text-slate-400 mb-2">Tags</h4>
+            <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-2">Tags</h4>
             <div className="flex flex-wrap gap-1">
               {memory.tags.map((tag, i) => (
                 <span
                   key={i}
-                  className="px-2 py-0.5 bg-slate-700 text-slate-300 rounded text-xs"
+                  className="px-2 py-0.5 bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)] rounded text-xs"
                 >
                   {tag}
                 </span>
@@ -579,7 +579,7 @@ export function MemoryDetail({
                 disabled={isReinforcing}
                 className={`w-full transition-all duration-300 ${
                   showSuccessFlash
-                    ? 'bg-green-600 hover:bg-green-600'
+                    ? 'bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan)]'
                     : 'bg-blue-600 hover:bg-blue-700'
                 }`}
               >
@@ -598,15 +598,15 @@ export function MemoryDetail({
 
             {/* Delete */}
             {showDeleteConfirm ? (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
-                <p className="text-xs text-red-400 mb-2">Delete this memory permanently?</p>
+              <div className="bg-[var(--sc-coral)]/10 border border-[var(--sc-coral)]/30 rounded-lg p-3">
+                <p className="text-xs text-[var(--sc-coral)] mb-2">Delete this memory permanently?</p>
                 <div className="flex gap-2">
                   <Button
                     variant="default"
                     size="sm"
                     onClick={handleDelete}
                     disabled={deleteMutation.isPending}
-                    className="flex-1 bg-red-600 hover:bg-red-700"
+                    className="flex-1 bg-[var(--sc-coral)] hover:bg-[var(--sc-coral)]"
                   >
                     {deleteMutation.isPending ? 'Deleting...' : 'Confirm Delete'}
                   </Button>
@@ -614,7 +614,7 @@ export function MemoryDetail({
                     variant="outline"
                     size="sm"
                     onClick={() => setShowDeleteConfirm(false)}
-                    className="flex-1 border-slate-600 text-slate-300 hover:text-white"
+                    className="flex-1 border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:text-[var(--sc-text-primary)]"
                   >
                     Cancel
                   </Button>
@@ -625,7 +625,7 @@ export function MemoryDetail({
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowDeleteConfirm(true)}
-                className="w-full text-slate-500 hover:text-red-400 hover:bg-red-500/10"
+                className="w-full text-[var(--sc-text-muted)] hover:text-[var(--sc-coral)] hover:bg-[var(--sc-coral)]/10"
               >
                 Delete Memory
               </Button>

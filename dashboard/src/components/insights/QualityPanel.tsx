@@ -22,15 +22,15 @@ function Section({
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="border border-slate-800 rounded-lg overflow-hidden">
+    <div className="border border-[var(--sc-border)] rounded-lg overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-slate-800/50 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-[var(--sc-bg-elevated)] transition-colors"
       >
-        {expanded ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
-        <Icon size={14} className="text-slate-400" />
-        <span className="text-sm text-slate-200 flex-1 text-left">{title}</span>
-        <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300">{count}</span>
+        {expanded ? <ChevronDown size={14} className="text-[var(--sc-text-secondary)]" /> : <ChevronRight size={14} className="text-[var(--sc-text-secondary)]" />}
+        <Icon size={14} className="text-[var(--sc-text-secondary)]" />
+        <span className="text-sm text-[var(--sc-text-primary)] flex-1 text-left">{title}</span>
+        <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)]">{count}</span>
       </button>
       {expanded && <div className="px-3 pb-3 space-y-1">{children}</div>}
     </div>
@@ -51,15 +51,15 @@ export function QualityPanel({ project }: QualityPanelProps) {
       <Section icon={Eye} title="Never Accessed" count={neverAccessed?.count ?? 0}>
         {neverAccessed?.items?.length ? (
           neverAccessed.items.map((item, i) => (
-            <div key={i} className="text-xs text-slate-400 py-1 border-b border-slate-800/50 last:border-0">
-              <span className="text-slate-300">{String(item.title || 'Untitled')}</span>
+            <div key={i} className="text-xs text-[var(--sc-text-secondary)] py-1 border-b border-[var(--sc-border)]/50 last:border-0">
+              <span className="text-[var(--sc-text-primary)]">{String(item.title || 'Untitled')}</span>
               {item.created_at ? (
-                <span className="ml-2 text-slate-500">{String(item.created_at).slice(0, 10)}</span>
+                <span className="ml-2 text-[var(--sc-text-muted)]">{String(item.created_at).slice(0, 10)}</span>
               ) : null}
             </div>
           ))
         ) : (
-          <div className="text-xs text-slate-500">None found</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">None found</div>
         )}
       </Section>
 
@@ -67,48 +67,48 @@ export function QualityPanel({ project }: QualityPanelProps) {
         {stale?.items?.length ? (
           stale.items.map((item, i) => {
             const score = Number(item.decayed_score ?? 0);
-            const color = score < 0.3 ? 'text-red-400' : score < 0.5 ? 'text-amber-400' : 'text-slate-400';
+            const color = score < 0.3 ? 'text-[var(--sc-coral)]' : score < 0.5 ? 'text-[var(--sc-amber)]' : 'text-[var(--sc-text-secondary)]';
             return (
-              <div key={i} className="text-xs text-slate-400 py-1 border-b border-slate-800/50 last:border-0 flex items-center gap-2">
+              <div key={i} className="text-xs text-[var(--sc-text-secondary)] py-1 border-b border-[var(--sc-border)]/50 last:border-0 flex items-center gap-2">
                 <span className={`${color} font-mono`}>{score.toFixed(2)}</span>
-                <span className="text-slate-300">{String(item.title || 'Untitled')}</span>
+                <span className="text-[var(--sc-text-primary)]">{String(item.title || 'Untitled')}</span>
               </div>
             );
           })
         ) : (
-          <div className="text-xs text-slate-500">None found</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">None found</div>
         )}
       </Section>
 
       <Section icon={Copy} title="Duplicates" count={duplicates?.count ?? 0}>
         {duplicates?.items?.length ? (
           duplicates.items.map((item, i) => (
-            <div key={i} className="text-xs text-slate-400 py-1 border-b border-slate-800/50 last:border-0">
-              <span className="text-slate-300">{String(item.title_a || 'Untitled')}</span>
-              <span className="mx-1 text-slate-600">&harr;</span>
-              <span className="text-slate-300">{String(item.title_b || 'Untitled')}</span>
+            <div key={i} className="text-xs text-[var(--sc-text-secondary)] py-1 border-b border-[var(--sc-border)]/50 last:border-0">
+              <span className="text-[var(--sc-text-primary)]">{String(item.title_a || 'Untitled')}</span>
+              <span className="mx-1 text-[var(--sc-text-muted)]">&harr;</span>
+              <span className="text-[var(--sc-text-primary)]">{String(item.title_b || 'Untitled')}</span>
             </div>
           ))
         ) : (
-          <div className="text-xs text-slate-500">None found</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">None found</div>
         )}
       </Section>
 
       <Section icon={AlertTriangle} title="Contradictions" count={contradictions.length}>
         {contradictions.length ? (
           contradictions.map((c, i) => (
-            <div key={i} className="text-xs py-1 border-b border-slate-800/50 last:border-0">
-              <div className="flex items-center gap-2 text-slate-400">
-                <span className="font-mono text-amber-400">{c.score.toFixed(2)}</span>
-                <span className="text-slate-300">{c.memoryATitle}</span>
-                <span className="text-slate-600">&harr;</span>
-                <span className="text-slate-300">{c.memoryBTitle}</span>
+            <div key={i} className="text-xs py-1 border-b border-[var(--sc-border)]/50 last:border-0">
+              <div className="flex items-center gap-2 text-[var(--sc-text-secondary)]">
+                <span className="font-mono text-[var(--sc-amber)]">{c.score.toFixed(2)}</span>
+                <span className="text-[var(--sc-text-primary)]">{c.memoryATitle}</span>
+                <span className="text-[var(--sc-text-muted)]">&harr;</span>
+                <span className="text-[var(--sc-text-primary)]">{c.memoryBTitle}</span>
               </div>
-              {c.reason && <div className="text-slate-500 mt-0.5 ml-10">{c.reason}</div>}
+              {c.reason && <div className="text-[var(--sc-text-muted)] mt-0.5 ml-10">{c.reason}</div>}
             </div>
           ))
         ) : (
-          <div className="text-xs text-slate-500">None found</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">None found</div>
         )}
       </Section>
     </div>

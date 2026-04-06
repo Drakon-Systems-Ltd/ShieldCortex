@@ -7,8 +7,8 @@ interface Props {
 }
 
 const resultColors: Record<string, string> = {
-  BLOCK: 'text-red-400 bg-red-500/10',
-  QUARANTINE: 'text-yellow-400 bg-yellow-500/10',
+  BLOCK: 'text-[var(--sc-coral)] bg-[var(--sc-coral)]/10',
+  QUARANTINE: 'text-[var(--sc-amber)] bg-[var(--sc-amber)]/10',
 };
 
 export function FlaggedOperations({ identifier }: Props) {
@@ -29,11 +29,11 @@ export function FlaggedOperations({ identifier }: Props) {
   ].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   if (isLoading) {
-    return <div className="text-slate-500 text-xs">Loading...</div>;
+    return <div className="text-[var(--sc-text-muted)] text-xs">Loading...</div>;
   }
 
   if (entries.length === 0) {
-    return <div className="text-slate-500 text-xs">No flagged operations.</div>;
+    return <div className="text-[var(--sc-text-muted)] text-xs">No flagged operations.</div>;
   }
 
   return (
@@ -47,31 +47,31 @@ export function FlaggedOperations({ identifier }: Props) {
         return (
           <div
             key={entry.id}
-            className="px-2 py-1.5 rounded bg-slate-800/50 border border-slate-800"
+            className="px-2 py-1.5 rounded bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)]"
           >
             <div className="flex items-center justify-between">
-              <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${resultColors[entry.firewall_result] ?? 'text-slate-400'}`}>
+              <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${resultColors[entry.firewall_result] ?? 'text-[var(--sc-text-secondary)]'}`}>
                 {entry.firewall_result}
               </span>
-              <span className="text-[10px] text-slate-500">
+              <span className="text-[10px] text-[var(--sc-text-muted)]">
                 {new Date(entry.timestamp).toLocaleString([], {
                   month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
                 })}
               </span>
             </div>
             {entry.reason && (
-              <p className="text-[11px] text-slate-400 mt-0.5 truncate">{entry.reason}</p>
+              <p className="text-[11px] text-[var(--sc-text-secondary)] mt-0.5 truncate">{entry.reason}</p>
             )}
             {threats.length > 0 && (
               <div className="flex gap-1 mt-1 flex-wrap">
                 {threats.map((t, i) => (
-                  <span key={i} className="px-1 py-0.5 rounded text-[9px] bg-red-500/10 text-red-400">
+                  <span key={i} className="px-1 py-0.5 rounded text-[9px] bg-[var(--sc-coral)]/10 text-[var(--sc-coral)]">
                     {t}
                   </span>
                 ))}
               </div>
             )}
-            <div className="flex gap-3 mt-1 text-[10px] text-slate-500">
+            <div className="flex gap-3 mt-1 text-[10px] text-[var(--sc-text-muted)]">
               <span>Trust: {entry.trust_score.toFixed(2)}</span>
               <span>Anomaly: {entry.anomaly_score.toFixed(2)}</span>
               {entry.pipeline_duration_ms !== null && <span>{entry.pipeline_duration_ms}ms</span>}

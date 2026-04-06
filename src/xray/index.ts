@@ -20,6 +20,7 @@ import { inspectNpmPackage } from './npm-inspector.js';
 import { calculateTrustScore } from './trust-score.js';
 import { formatXRayReport, formatXRayMarkdown } from './report.js';
 import { watchDirectory } from './watch.js';
+import { appendActivity, appendHistory, createHistoryEntry, type XRayTargetType } from './activity.js';
 
 // ── Re-exports ──────────────────────────────────────────────
 
@@ -163,6 +164,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
   }
 
   let result: XRayResult;
+  let targetType: XRayTargetType = 'file';
 
   if (isNpmPackageName(target)) {
     // NPM package inspection
@@ -172,6 +174,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
       console.error('  Upgrade: https://shieldcortex.ai/pricing');
       process.exit(1);
     }
+    targetType = 'npm';
     result = await inspectNpmPackage(target, deep);
   } else {
     // Local file or directory
@@ -185,8 +188,10 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
     const stat = fs.statSync(resolved);
 
     if (stat.isDirectory()) {
+      targetType = 'dir';
       result = await scanDirectory(resolved, deep);
     } else if (stat.isFile()) {
+      targetType = 'file';
       const findings = await scanFile(resolved, deep);
       const { score, riskLevel } = calculateTrustScore(findings);
       result = {
@@ -206,6 +211,22 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
 
   // Track usage
   incrementUsage();
+  appendHistory(createHistoryEntry(result, targetType));
+  appendActivity({
+    kind: 'scan',
+    status: result.findings.length === 0 ? 'pass' : result.riskLevel === 'LOW' ? 'warn' : 'detected',
+    target: result.target,
+    targetType,
+    deepScan: result.deepScan,
+    trustScore: result.trustScore,
+    riskLevel: result.riskLevel,
+    filesScanned: result.filesScanned,
+    findingCount: result.findings.length,
+    scannedAt: result.scannedAt.toISOString(),
+    summary: result.findings.length === 0
+      ? 'No findings detected'
+      : `${result.findings.length} findings across ${result.filesScanned} files`,
+  });
 
   // Output
   if (jsonOutput) {

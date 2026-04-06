@@ -243,8 +243,8 @@ export default function MemoryTimeline({ className }: MemoryTimelineProps) {
     return (
       <div className={`flex items-center justify-center h-full bg-[#0a0a0f] ${className ?? ''}`}>
         <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-2 border-slate-700 border-t-cyan-500 rounded-full animate-spin" />
-          <span className="text-sm text-slate-400">Loading timeline...</span>
+          <div className="w-8 h-8 border-2 border-[var(--sc-border)] border-t-cyan-500 rounded-full animate-spin" />
+          <span className="text-sm text-[var(--sc-text-secondary)]">Loading timeline...</span>
         </div>
       </div>
     );
@@ -254,37 +254,37 @@ export default function MemoryTimeline({ className }: MemoryTimelineProps) {
     return (
       <div className={`flex items-center justify-center h-full bg-[#0a0a0f] ${className ?? ''}`}>
         <div className="text-center space-y-2">
-          <p className="text-red-400 text-sm">Failed to load memories</p>
-          <p className="text-slate-500 text-xs">{error}</p>
+          <p className="text-[var(--sc-coral)] text-sm">Failed to load memories</p>
+          <p className="text-[var(--sc-text-muted)] text-xs">{error}</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className={`h-full flex flex-col bg-[#0a0a0f] text-slate-200 ${className ?? ''}`}>
+    <div className={`h-full flex flex-col bg-[#0a0a0f] text-[var(--sc-text-primary)] ${className ?? ''}`}>
       {/* ── Filter bar ─────────────────────────────────────── */}
-      <div className="shrink-0 border-b border-slate-800/60 px-4 py-3 space-y-3">
+      <div className="shrink-0 border-b border-[var(--sc-border)]/60 px-4 py-3 space-y-3">
         {/* Search */}
         <input
           type="text"
           placeholder="Search memories..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/40 focus:border-cyan-500/40"
+          className="w-full bg-[var(--sc-bg-surface)] border border-[var(--sc-border)]/50 rounded-lg px-3 py-2 text-sm text-[var(--sc-text-primary)] placeholder-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-cyan)]/40 focus:border-[var(--sc-cyan)]/40"
         />
 
         {/* Memory type filter */}
         <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500 uppercase tracking-wider mr-1">Type</span>
+          <span className="text-xs text-[var(--sc-text-muted)] uppercase tracking-wider mr-1">Type</span>
           {TYPE_FILTER_OPTIONS.map((opt) => (
             <button
               key={opt.value}
               onClick={() => setTypeFilter(opt.value)}
               className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
                 typeFilter === opt.value
-                  ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
-                  : 'bg-slate-800/40 text-slate-400 border border-slate-700/30 hover:bg-slate-800/80'
+                  ? 'bg-[var(--sc-cyan)]/20 text-[var(--sc-cyan)] border border-[var(--sc-cyan)]/30'
+                  : 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)]/30 hover:bg-[var(--sc-bg-elevated)]'
               }`}
             >
               {opt.label}
@@ -294,7 +294,7 @@ export default function MemoryTimeline({ className }: MemoryTimelineProps) {
 
         {/* Category chips */}
         <div className="flex flex-wrap gap-1.5">
-          <span className="text-xs text-slate-500 uppercase tracking-wider mr-1 self-center">Category</span>
+          <span className="text-xs text-[var(--sc-text-muted)] uppercase tracking-wider mr-1 self-center">Category</span>
           {ALL_CATEGORIES.map((cat) => {
             const active = selectedCategories.has(cat);
             const colour = CATEGORY_COLOURS[cat] ?? '#64748b';
@@ -316,7 +316,7 @@ export default function MemoryTimeline({ className }: MemoryTimelineProps) {
           {selectedCategories.size > 0 && (
             <button
               onClick={() => setSelectedCategories(new Set())}
-              className="px-2 py-1 rounded-md text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              className="px-2 py-1 rounded-md text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
             >
               Clear
             </button>
@@ -329,25 +329,25 @@ export default function MemoryTimeline({ className }: MemoryTimelineProps) {
         {groups.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center space-y-2 max-w-sm">
-              <div className="text-slate-600 text-4xl mb-3">--</div>
-              <p className="text-slate-400 text-sm">No memories yet.</p>
-              <p className="text-slate-500 text-xs">
-                Start a conversation and use <code className="text-cyan-500/80 bg-slate-800/60 px-1.5 py-0.5 rounded text-xs">remember</code> to build your timeline.
+              <div className="text-[var(--sc-text-muted)] text-4xl mb-3">--</div>
+              <p className="text-[var(--sc-text-secondary)] text-sm">No memories yet.</p>
+              <p className="text-[var(--sc-text-muted)] text-xs">
+                Start a conversation and use <code className="text-[var(--sc-cyan)]/80 bg-[var(--sc-bg-elevated)] px-1.5 py-0.5 rounded text-xs">remember</code> to build your timeline.
               </p>
             </div>
           </div>
         ) : (
           <div className="relative">
             {/* Vertical timeline line */}
-            <div className="absolute left-4 md:left-1/2 top-0 bottom-0 w-px bg-slate-800/80" />
+            <div className="absolute left-4 md:left-1/2 top-0 bottom-0 w-px bg-[var(--sc-bg-elevated)]" />
 
             {groups.map((group) => (
               <div key={group.key} className="mb-8">
                 {/* Day header */}
                 <div className="relative flex items-center mb-4">
-                  <div className="absolute left-4 md:left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-slate-700 border-2 border-slate-600 z-10" />
+                  <div className="absolute left-4 md:left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-[var(--sc-bg-elevated)] border-2 border-[var(--sc-border)] z-10" />
                   <div className="ml-10 md:ml-0 md:absolute md:left-1/2 md:translate-x-4">
-                    <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider bg-[#0a0a0f] px-2">
+                    <span className="text-xs font-semibold text-[var(--sc-text-secondary)] uppercase tracking-wider bg-[#0a0a0f] px-2">
                       {group.label}
                     </span>
                   </div>
@@ -384,22 +384,22 @@ export default function MemoryTimeline({ className }: MemoryTimelineProps) {
 
                       {/* Card */}
                       <div
-                        className={`ml-10 md:ml-0 w-full md:w-[calc(50%-2rem)] rounded-lg border border-slate-800/60 bg-slate-900/40 backdrop-blur-sm p-3 hover:border-slate-700/80 transition-colors ${
+                        className={`ml-10 md:ml-0 w-full md:w-[calc(50%-2rem)] rounded-lg border border-[var(--sc-border)]/60 bg-[var(--sc-bg-surface)] backdrop-blur-sm p-3 hover:border-[var(--sc-border)]/80 transition-colors ${
                           isLeft ? 'md:mr-auto md:ml-0' : 'md:ml-auto md:mr-0'
                         }`}
                       >
                         {/* Header row */}
                         <div className="flex items-start justify-between gap-2 mb-1.5">
-                          <h3 className="text-sm font-medium text-slate-200 leading-tight flex-1 line-clamp-1">
+                          <h3 className="text-sm font-medium text-[var(--sc-text-primary)] leading-tight flex-1 line-clamp-1">
                             {memory.title}
                           </h3>
-                          <span className="text-[10px] text-slate-500 whitespace-nowrap">
+                          <span className="text-[10px] text-[var(--sc-text-muted)] whitespace-nowrap">
                             {formatTime(memory.createdAt)}
                           </span>
                         </div>
 
                         {/* Content (truncated to 2 lines) */}
-                        <p className="text-xs text-slate-400 line-clamp-2 mb-2 leading-relaxed">
+                        <p className="text-xs text-[var(--sc-text-secondary)] line-clamp-2 mb-2 leading-relaxed">
                           {memory.content}
                         </p>
 

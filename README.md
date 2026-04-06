@@ -31,7 +31,7 @@ shieldcortex quickstart
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -114,6 +114,16 @@ shieldcortex audit
 ```
 
 Actions: `quarantine` flagged packages, `clean` confirmed threats, or `auto-protect` to block future installs.
+
+**X-Ray Scanner** — deep file analysis for hidden threats in your codebase:
+
+```bash
+shieldcortex xray ./my-project          # one-off scan
+shieldcortex xray ./my-project --watch  # real-time file watcher
+shieldcortex xray ./my-project --ci --threshold=HIGH  # CI/CD gate
+```
+
+Detects prompt injection in files, steganographic payloads, obfuscated code, network beacons, eval/exec patterns, credential leaks in metadata, and dependency risk indicators. Results appear in the dashboard X-Ray tab with actionable review, ignore, resolve, and quarantine workflows.
 
 **Docker Install Safety** — auto-detects container environments and skips plugin install to avoid gateway crashes. No configuration needed.
 
@@ -525,24 +535,23 @@ The key shift is that memory is no longer a black box:
 - `Review` tells you what should be suppressed, archived, pinned, or marked canonical
 - `Shield` tells you what got blocked before it could poison memory or behavior
 
-**Shield Overview** — scan counts, block rates, quarantine queue, threat timeline, and memory health score.
+**Command Centre** — memory health, threat pressure, X-Ray score, and urgent actions at a glance.
 
-![Shield Overview](docs/images/dashboard-shield.png)
+![Command Centre](docs/images/dashboard-overview.png)
 
-**Knowledge Graph** — focus on one entity at a time, then switch between `Read` for relationship statements, `Map` for a cleaner graph canvas, and `Bloom` for an organic branch view.
+**Constellation Graph** — all entities visible as coloured nebula clusters grouped by type. Click to bloom into individual nodes with connection lines.
+
+![Constellation Graph](docs/images/dashboard-graph.png)
+
+**Protection** — Iron Dome security profiles, active configuration, module status, and quarantine queue.
+
+![Protection](docs/images/dashboard-protection.png)
+
+**X-Ray Scanner** — scan findings with human-readable guidance, actionable review workflow, and quarantine.
+
+![X-Ray Scanner](docs/images/dashboard-xray.png)
 
 **Cloud Diagnostics** — inspect local-to-cloud queue health, retry pressure, sync policy, device identity, and Team-gated cloud replica controls from the local dashboard.
-
-**Timeline** — every memory, chronologically. Filter by category, type, or search. Edit memories inline.
-
-**Audit Log** — full forensic log of every memory operation with trust scores and threat reasons.
-
-**New backend APIs for dashboard workflows**
-
-- `GET /api/recall/explain` — explain why memories ranked for a query without mutating salience or links
-- `GET /api/v1/incidents/replay` — reconstruct a best-effort incident timeline from audit, quarantine, and retained event data
-
-![Audit Log](docs/images/dashboard-audit.png)
 
 <br>
 
@@ -584,6 +593,9 @@ shieldcortex openclaw status      # Check OpenClaw hook status
 shieldcortex codex install        # Connect Codex CLI / VS Code
 shieldcortex consolidate          # Run Dream Mode (merge, archive, contradict)
 shieldcortex audit                # Dependency scanner (Pro)
+shieldcortex xray <path>          # Deep file analysis for hidden threats
+shieldcortex xray <path> --watch  # Real-time file watcher
+shieldcortex xray <path> --ci     # CI/CD gate (exits non-zero on findings)
 shieldcortex cortex confirm       # Capture positive feedback
 shieldcortex config --key value   # Update configuration
 ```

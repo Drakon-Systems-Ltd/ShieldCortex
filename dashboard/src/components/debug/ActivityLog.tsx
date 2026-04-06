@@ -19,24 +19,25 @@ interface LogEntry {
 }
 
 const EVENT_COLORS: Record<MemoryEventType, string> = {
-  memory_created: 'text-green-400',
+  memory_created: 'text-[var(--sc-cyan)]',
   memory_accessed: 'text-blue-400',
-  memory_updated: 'text-yellow-400',
-  memory_deleted: 'text-red-400',
+  memory_updated: 'text-[var(--sc-amber)]',
+  memory_deleted: 'text-[var(--sc-coral)]',
   consolidation_complete: 'text-purple-400',
-  decay_tick: 'text-slate-500',
-  initial_state: 'text-slate-400',
-  worker_light_tick: 'text-slate-500',
-  worker_medium_tick: 'text-slate-500',
-  link_discovered: 'text-cyan-400',
+  decay_tick: 'text-[var(--sc-text-muted)]',
+  initial_state: 'text-[var(--sc-text-secondary)]',
+  worker_light_tick: 'text-[var(--sc-text-muted)]',
+  worker_medium_tick: 'text-[var(--sc-text-muted)]',
+  link_discovered: 'text-[var(--sc-cyan)]',
   predictive_consolidation: 'text-purple-400',
   update_started: 'text-blue-400',
-  update_complete: 'text-green-400',
-  update_failed: 'text-red-400',
-  server_restarting: 'text-orange-400',
-  defence_event: 'text-red-400',
-  kill_switch_activated: 'text-red-500',
-  kill_switch_deactivated: 'text-green-500',
+  update_complete: 'text-[var(--sc-cyan)]',
+  update_failed: 'text-[var(--sc-coral)]',
+  server_restarting: 'text-[var(--sc-coral)]',
+  defence_event: 'text-[var(--sc-coral)]',
+  kill_switch_activated: 'text-[var(--sc-coral)]',
+  kill_switch_deactivated: 'text-[var(--sc-cyan)]',
+  xray_detection: 'text-[var(--sc-amber)]',
 };
 
 const EVENT_ICONS: Record<MemoryEventType, string> = {
@@ -58,6 +59,7 @@ const EVENT_ICONS: Record<MemoryEventType, string> = {
   defence_event: '🛡',
   kill_switch_activated: '🛑',
   kill_switch_deactivated: '▶',
+  xray_detection: '🔍',
 };
 
 export function ActivityLog() {
@@ -82,6 +84,7 @@ export function ActivityLog() {
     defence_event: true,
     kill_switch_activated: true,
     kill_switch_deactivated: true,
+    xray_detection: true,
   });
 
   const logContainerRef = useRef<HTMLDivElement>(null);
@@ -140,18 +143,18 @@ export function ActivityLog() {
   return (
     <div className="h-full flex flex-col">
       {/* Controls */}
-      <div className="p-3 border-b border-slate-700 flex items-center gap-3 flex-wrap">
+      <div className="p-3 border-b border-[var(--sc-border)] flex items-center gap-3 flex-wrap">
         {/* Connection Status */}
         <div className="flex items-center gap-2 text-xs">
           <span
-            className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}
+            className={`w-2 h-2 rounded-full ${isConnected ? 'bg-[var(--sc-cyan)]' : 'bg-[var(--sc-coral)]'}`}
           />
-          <span className="text-slate-400">
+          <span className="text-[var(--sc-text-secondary)]">
             {isConnected ? 'Connected' : 'Disconnected'}
           </span>
         </div>
 
-        <div className="w-px h-4 bg-slate-700" />
+        <div className="w-px h-4 bg-[var(--sc-bg-elevated)]" />
 
         {/* Filters */}
         <div className="flex items-center gap-1 flex-wrap">
@@ -161,8 +164,8 @@ export function ActivityLog() {
               onClick={() => toggleFilter(type)}
               className={`px-2 py-0.5 text-xs rounded transition-colors ${
                 filters[type]
-                  ? `${EVENT_COLORS[type]} bg-slate-700`
-                  : 'text-slate-600 bg-slate-800'
+                  ? `${EVENT_COLORS[type]} bg-[var(--sc-bg-elevated)]`
+                  : 'text-[var(--sc-text-muted)] bg-[var(--sc-bg-elevated)]'
               }`}
             >
               {type.replace(/_/g, ' ').replace('memory ', '')}
@@ -173,26 +176,26 @@ export function ActivityLog() {
         <div className="flex-1" />
 
         {/* Actions */}
-        <label className="flex items-center gap-1 text-xs text-slate-400 cursor-pointer">
+        <label className="flex items-center gap-1 text-xs text-[var(--sc-text-secondary)] cursor-pointer">
           <input
             type="checkbox"
             checked={autoScroll}
             onChange={(e) => setAutoScroll(e.target.checked)}
-            className="rounded border-slate-600 bg-slate-800"
+            className="rounded border-[var(--sc-border)] bg-[var(--sc-bg-elevated)]"
           />
           Auto-scroll
         </label>
 
         <button
           onClick={exportLogs}
-          className="text-xs text-slate-400 hover:text-white"
+          className="text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]"
         >
           Export
         </button>
 
         <button
           onClick={clearLogs}
-          className="text-xs text-red-400 hover:text-red-300"
+          className="text-xs text-[var(--sc-coral)] hover:text-[var(--sc-coral)]"
         >
           Clear
         </button>
@@ -204,14 +207,14 @@ export function ActivityLog() {
         className="flex-1 overflow-auto p-3 font-mono text-xs"
       >
         {filteredLogs.length === 0 ? (
-          <div className="text-slate-500 text-center py-8">
+          <div className="text-[var(--sc-text-muted)] text-center py-8">
             {isConnected ? 'Waiting for events...' : 'Not connected to server'}
           </div>
         ) : (
           <div className="space-y-1">
             {filteredLogs.map((log) => (
-              <div key={log.id} className="flex gap-2 hover:bg-slate-800/50 px-1 rounded">
-                <span className="text-slate-500 shrink-0">
+              <div key={log.id} className="flex gap-2 hover:bg-[var(--sc-bg-elevated)] px-1 rounded">
+                <span className="text-[var(--sc-text-muted)] shrink-0">
                   {log.timestamp.toLocaleTimeString()}
                 </span>
                 <span className={`shrink-0 w-4 ${EVENT_COLORS[log.type]}`}>
