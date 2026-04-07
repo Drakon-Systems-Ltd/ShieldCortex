@@ -436,7 +436,7 @@ export function reconcileSyncQueue(options: {
   let sqlText = `
     DELETE FROM sync_queue
     WHERE status IN (${statusPlaceholders})
-      AND json_extract(payload, '$.kind') IN (${kindPlaceholders})
+      AND COALESCE(json_extract(payload, '$.kind'), 'audit') IN (${kindPlaceholders})
   `;
 
   if (options.maxCreatedAt) {

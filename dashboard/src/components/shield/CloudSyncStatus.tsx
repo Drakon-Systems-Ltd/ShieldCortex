@@ -101,11 +101,11 @@ export function CloudSyncStatus() {
       label = 'Cloud sync needs attention';
       detail = queue.lastError ?? 'One or more sync jobs failed and need retry.';
     } else if (replicationFailed > 0) {
-      status = stale ? 'warning' : 'queued';
-      label = stale ? 'Cloud sync has unresolved failures' : 'Cloud sync healthy, with failed history';
+      status = 'warning';
+      label = `${replicationFailed} failed sync job${replicationFailed === 1 ? '' : 's'} need clearing`;
       detail = queue.lastError
         ? `${queue.lastError}${queue.latestFailureAt ? ` • last failure ${formatTimeAgo(queue.latestFailureAt)}` : ''}`
-        : `${replicationFailed} failed replication job${replicationFailed === 1 ? '' : 's'} remain in history.`;
+        : `These items exhausted retries. Clear them or investigate.`;
     } else if (replicationPending > 0) {
       status = 'queued';
       label = 'Cloud sync queued';

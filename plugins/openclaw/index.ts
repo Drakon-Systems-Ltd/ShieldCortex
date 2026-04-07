@@ -743,7 +743,15 @@ export default {
     // Register before_tool_call with lazy-init wrapper
     api.registerHook('before_tool_call', async (context: ToolCallContext) => {
       const interceptor = await initInterceptor();
-      if (interceptor) await interceptor.handleToolCall(context);
+      if (!interceptor) return;
+      try {
+        await interceptor.handleToolCall(context);
+      } catch (err) {
+        // Intentional blocks from the interceptor (ShieldCortex: ...) should propagate
+        if (err instanceof Error && err.message.startsWith('ShieldCortex:')) throw err;
+        // Unexpected errors (DB crash, etc.) — log and allow the tool call through
+        (api.logger as any)?.warn?.(`[shieldcortex] Interceptor error (allowing tool call): ${err instanceof Error ? err.message : err}`);
+      }
     }, {
       name: 'shieldcortex-intercept-tool',
       description: 'Active threat gating on tool calls',

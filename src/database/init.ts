@@ -17,6 +17,7 @@ let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
 let lockFilePath: string | null = null;
 let lockFileFd: number | null = null;
+let dbInode: bigint | null = null; // Track file identity for staleness detection
 
 // Anti-bloat: Database size limits
 const MAX_DB_SIZE = 100 * 1024 * 1024; // 100MB hard limit
@@ -325,6 +326,34 @@ function attemptDumpRecovery(dbPath: string): Database.Database | null {
 }
 
 /**
+ * Remove .corrupt.* and .recovery-failed.* backup files older than 7 days.
+ * Runs once at startup after successful init — prevents unbounded accumulation.
+ */
+function cleanupStaleBackups(dbPath: string): void {
+  const dir = dirname(dbPath);
+  const base = basename(dbPath);
+  const maxAge = 7 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith(base + '.corrupt.') && !name.startsWith(base + '.recovery-failed.')) continue;
+      const filePath = join(dir, name);
+      try {
+        const age = now - statSync(filePath).mtimeMs;
+        if (age > maxAge) {
+          unlinkSync(filePath);
+        }
+      } catch {
+        // Best-effort — file may have been removed by another process
+      }
+    }
+  } catch {
+    // Non-fatal — dir listing failure shouldn't block startup
+  }
+}
+
+/**
  * Run integrity check on an open database.
  * Returns 'ok' if healthy, or the error message if corrupt.
  */
@@ -512,6 +541,16 @@ export function initDatabase(dbPath?: string): Database.Database {
   }
 
   db = database;
+
+  // Record file identity so getDatabase() can detect if the file was replaced
+  try {
+    dbInode = statSync(expandedPath, { bigint: true }).ino;
+  } catch {
+    dbInode = null;
+  }
+
+  // Clean up old corrupt/recovery backups (older than 7 days)
+  cleanupStaleBackups(expandedPath);
 
   // Enable WAL mode for better concurrency
   db.pragma('journal_mode = WAL');
@@ -925,7 +964,27 @@ export function getDatabase(): Database.Database {
   if (!db) {
     throw new Error('Database not initialized. Call initDatabase() first.');
   }
-  return db;
+
+  // Staleness check: if the live file was replaced (recovery renamed it),
+  // close the stale handle and re-init against the new file.
+  if (currentDbPath && dbInode !== null) {
+    try {
+      const currentIno = statSync(currentDbPath, { bigint: true }).ino;
+      if (currentIno !== dbInode) {
+        console.error(`[database] Live database file replaced (inode ${dbInode} → ${currentIno}). Reconnecting.`);
+        const pathToReopen = currentDbPath;
+        try { db.close(); } catch { /* best-effort */ }
+        db = null;
+        dbInode = null;
+        return initDatabase(pathToReopen);
+      }
+    } catch {
+      // File missing — another process may be mid-recovery. Let the caller hit
+      // the error naturally rather than racing the recovery.
+    }
+  }
+
+  return db!;
 }
 
 /**
@@ -951,6 +1010,7 @@ export function closeDatabase(): void {
     db.close();
     db = null;
     currentDbPath = null;
+    dbInode = null;
   }
 
   if (lockFileFd !== null) {

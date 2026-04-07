@@ -66,12 +66,12 @@ function StatusBanner() {
     detail = sync.queue.lastError ?? 'One or more queued sync jobs are failing.';
     Icon = ShieldAlert;
   } else if (sync.enabled && sync.apiKeySet && replicationFailed > 0) {
-    tone = stale ? 'border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 text-[var(--sc-coral)]' : 'border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/10 text-[var(--sc-amber)]';
-    title = stale ? 'Cloud sync has unresolved failures' : 'Cloud sync healthy, with failed history';
+    tone = 'border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/10 text-[var(--sc-amber)]';
+    title = `${replicationFailed} failed sync job${replicationFailed === 1 ? '' : 's'} need clearing`;
     detail = sync.queue.lastError
       ? `${sync.queue.lastError}${sync.queue.latestFailureAt ? ` Last failure ${formatTimeAgo(sync.queue.latestFailureAt)}.` : ''}`
-      : `${replicationFailed} failed replication job${replicationFailed === 1 ? '' : 's'} remain in queue history.`;
-    Icon = stale ? ShieldAlert : AlertTriangle;
+      : `These items exhausted retries and won't sync automatically. Clear them or investigate the cause.`;
+    Icon = AlertTriangle;
   } else if (sync.enabled && sync.apiKeySet && replicationPending > 0) {
     tone = 'border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/10 text-[var(--sc-amber)]';
     title = 'Cloud sync is catching up';
