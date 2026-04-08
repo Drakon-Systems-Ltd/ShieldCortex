@@ -89,14 +89,19 @@ function StatusBanner() {
     Icon = CheckCircle2;
   }
 
+  const showClearInBanner = replicationFailed > 0 && replicationPending === 0;
+
   return (
     <div className={`rounded-2xl border p-4 ${tone}`}>
-      <div className="flex items-start gap-3">
-        <Icon size={18} className="mt-0.5 shrink-0" />
-        <div>
-          <h2 className="text-sm font-semibold">{title}</h2>
-          <p className="mt-1 text-sm opacity-90">{detail}</p>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <Icon size={18} className="mt-0.5 shrink-0" />
+          <div>
+            <h2 className="text-sm font-semibold">{title}</h2>
+            <p className="mt-1 text-sm opacity-90">{detail}</p>
+          </div>
         </div>
+        {showClearInBanner && <ClearFailedButton />}
       </div>
     </div>
   );
