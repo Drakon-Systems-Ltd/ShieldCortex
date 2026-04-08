@@ -2,7 +2,7 @@
  * CLI handler for hook subcommands.
  * Spawns the actual hook scripts with stdin/stdout passthrough.
  *
- * Built-in hooks: pre-compact, session-start, session-end, stop
+ * Built-in hooks: pre-compact, session-start, session-end, stop, prompt-recall
  * Custom hooks: user-defined in ~/.shieldcortex/config.json → customHooks
  */
 
@@ -23,6 +23,7 @@ const BUILT_IN_HOOKS: Record<string, string> = {
   'session-start': 'session-start-hook.mjs',
   'session-end': 'session-end-hook.mjs',
   'stop': 'stop-hook.mjs',
+  'prompt-recall': 'prompt-recall-hook.mjs',
 };
 
 interface CustomHookConfig {

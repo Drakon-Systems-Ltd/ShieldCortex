@@ -23,6 +23,9 @@ const CORTEX_HOOKS: Record<string, HookEntry> = {
   SessionEnd: {
     hooks: [{ type: 'command', command: 'npx shieldcortex hook session-end', timeout: 10 }],
   },
+  UserPromptSubmit: {
+    hooks: [{ type: 'command', command: 'npx shieldcortex hook prompt-recall', timeout: 2 }],
+  },
 };
 
 const STOP_HOOK: HookEntry = {
