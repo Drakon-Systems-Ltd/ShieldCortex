@@ -31,7 +31,7 @@ shieldcortex quickstart
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -501,6 +501,24 @@ Configure via `~/.shieldcortex/config.json`:
 | Audit | None | Full forensic log of every operation |
 
 OpenClaw handles agent orchestration. ShieldCortex handles what the agent remembers, why it remembers it, and whether it is safe to keep. Together, you get persistent, inspectable, secure memory without inventing your own memory layer.
+
+### Proactive Recall (v4.7.0)
+
+Every time you type a message, ShieldCortex automatically recalls relevant memories and injects them into the conversation — before the model even starts thinking.
+
+```bash
+# You type: "fix the auth bug"
+# ShieldCortex automatically injects:
+# 🧠 Recalled from memory:
+# - **API key bcrypt mismatch bug**: Keys created from dashboard had different hash...
+# - **Auth middleware rewrite**: Legal flagged session token storage...
+```
+
+- **<100ms** — FTS5 + category boost, no external API calls
+- **Smart skip** — ignores "yes", "do it", and other trivial confirmations
+- **Category boost** — error prompts surface error memories, deploy prompts surface architecture decisions
+- **Works everywhere** — Claude Code (UserPromptSubmit hook) + OpenClaw (cortex-memory hook)
+- **Configurable** — `npx shieldcortex config --proactive-recall false`
 
 **New in the local dashboard:** OpenClaw activity is no longer just a background hook. The Capture workflow includes a dedicated session view with:
 

@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.7.0 — 8 April 2026
+
+**Proactive Recall** — AI agents now automatically recall relevant memories before responding to every message. No more repeated mistakes.
+
+- **`UserPromptSubmit` hook** — queries memory via FTS5 + category boost on every user prompt (<100ms)
+- **Automatic context injection** — relevant memories injected into the conversation before the model responds
+- **Smart filtering** — skips trivial prompts ("yes", "do it", confirmations), max 5 memories per recall
+- **Category boost** — error-related prompts automatically surface error memories, deploy prompts surface architecture memories
+- **OpenClaw integration** — proactive recall also works in the cortex-memory hook for non-Claude agents
+- **Configurable** — `npx shieldcortex config --proactive-recall false` to disable
+- Access counts reinforced on recalled memories (strengthens frequently-needed knowledge)
+
+## v4.6.8 — 8 April 2026
+
+- Cloud sync banner: "Clear failed" button now appears directly in the warning banner when dead-letter failures exist
+
+## v4.6.7 — 7 April 2026
+
+**Database resilience + cloud sync fixes**
+
+- **DB staleness detection** — `getDatabase()` checks file inode; auto-reconnects if the live file was replaced during recovery
+- **Startup cleanup** — removes `.corrupt.*` and `.recovery-failed.*` backup files older than 7 days
+- **Cloud sync banner** — no longer says "healthy" when there are dead-letter failures; honest messaging
+- **Clear Failed fix** — `reconcileSyncQueue` DELETE now handles legacy payloads without `$.kind` field via COALESCE fallback
+- **Plugin hardening** — `before_tool_call` hook catches unexpected errors gracefully (intentional blocks still propagate)
+- Plugin manifest version aligned
+
+## v4.6.6 — 6 April 2026
+
+**Dashboard navigation + data alignment**
+
+- **Stat card data alignment** — quality API duplicate count now filters archived/suppressed/reviewed memories, matching the review queue
+- **Clickable stat cards** — Memory Base → Memories, Healthy → Review, Queue → Quarantine, Blocked → Audit
+- **Clickable hygiene numbers** — duplicates/stale/never-used numbers navigate to the right review queue section
+- **Review focus wiring** — clicking from Overview navigates to Review and auto-scrolls to the right section (duplicates, contradictions)
+- **QualityPanel navigation** — every item is clickable; "Review all N" links for sections with 5+ items
+
 ## [4.6.5] - 2026-04-06
 
 ### Fixed
