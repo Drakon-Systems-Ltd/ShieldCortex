@@ -420,6 +420,26 @@ export function setOpenClawAutoMemory(enabled: boolean): void {
   setOpenClawMemoryConfig({ autoMemory: enabled });
 }
 
+// ── Proactive Recall ─────────────────────────────────
+
+/**
+ * Returns whether proactive memory recall is enabled on prompt submit.
+ * Default is true (on by default, opt-out with --proactive-recall false).
+ */
+export function isProactiveRecallEnabled(): boolean {
+  const raw = readRawConfig();
+  return raw.proactiveRecall !== false;
+}
+
+/**
+ * Persists proactive recall preference to ~/.shieldcortex/config.json.
+ */
+export function setProactiveRecall(enabled: boolean): void {
+  const raw = readRawConfig();
+  raw.proactiveRecall = enabled;
+  writeRawConfig(raw);
+}
+
 // ── Tool Response Scan Config ─────────────────────────
 
 export interface ToolResponseScanConfig {

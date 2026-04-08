@@ -7,6 +7,8 @@ import {
   setVerifyConfig,
   getOpenClawAutoMemory,
   setOpenClawAutoMemory,
+  isProactiveRecallEnabled,
+  setProactiveRecall,
   type DefenceMode,
 } from './config.js';
 import { syncAllGraphToCloud } from './graph-sync.js';
@@ -32,6 +34,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log(`  LLM Verify:   ${verify.verifyEnabled ? 'Enabled' : 'Disabled'} (${verify.verifyMode}, ${verify.verifyTimeoutMs}ms timeout)`);
     console.log(`  Verify Triggers: ${verify.verifyTriggers.join(', ')}`);
     console.log(`  OpenClaw Auto-Memory: ${openclawAutoMemory ? 'Enabled' : 'Disabled'}`);
+    console.log(`  Proactive Recall: ${isProactiveRecallEnabled() ? 'Enabled' : 'Disabled'}`);
     console.log('');
     return;
   }
@@ -139,6 +142,24 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  const proactiveRecallIdx = args.indexOf('--proactive-recall');
+  if (proactiveRecallIdx !== -1) {
+    const value = args[proactiveRecallIdx + 1];
+    if (!value) {
+      console.error('Missing value for --proactive-recall. Use true or false.');
+      process.exit(1);
+    }
+    const normalized = value.toLowerCase();
+    if (normalized !== 'true' && normalized !== 'false') {
+      console.error(`Invalid value for --proactive-recall: ${value}. Use true or false.`);
+      process.exit(1);
+    }
+    const enabled = normalized === 'true';
+    setProactiveRecall(enabled);
+    console.log(`Proactive recall ${enabled ? 'enabled' : 'disabled'}.`);
+    changed = true;
+  }
+
   if (!changed) {
     console.log('Usage: shieldcortex config [options]');
     console.log('');
@@ -150,6 +171,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-disable        Disable cloud sync');
     console.log('  --cloud-status         Show current configuration');
     console.log('  --openclaw-auto-memory <true|false>  Enable or disable OpenClaw auto-memory extraction');
+    console.log('  --proactive-recall <true|false>  Enable or disable proactive memory recall on prompts');
     console.log('');
     console.log('LLM Verification:');
     console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
