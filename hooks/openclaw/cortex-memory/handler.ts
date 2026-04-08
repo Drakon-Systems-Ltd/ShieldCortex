@@ -24,6 +24,11 @@ async function isOpenClawAutoMemoryEnabled() {
   return runtime.isOpenClawAutoMemoryEnabled(config);
 }
 
+async function isProactiveRecallEnabled() {
+  const config = await loadShieldConfig();
+  return config?.proactiveRecall !== false; // Default: true
+}
+
 // ==================== NOVELTY / DEDUPE GATE ====================
 
 const NOVELTY_CACHE_FILE = path.join(homedir(), ".shieldcortex", "openclaw-memory-cache.json");
@@ -634,6 +639,39 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
 }
 
 /**
+ * Proactive recall — query memory on every user message and surface relevant context
+ */
+async function proactiveRecall(event) {
+  if (event.role !== "user") return;
+  if (!(await isProactiveRecallEnabled())) return;
+
+  let messageText = event.content;
+  if (Array.isArray(messageText)) {
+    const textBlock = messageText.find((c) => c.type === "text");
+    messageText = textBlock?.text || "";
+  }
+
+  if (!messageText || messageText.length < 8) return;
+  if (/^(yes|no|ok|sure|do it|go|send it|y|n|yep|nope)\s*[.!?]?\s*$/i.test(messageText.trim())) return;
+
+  try {
+    const result = await callCortex("recall", {
+      query: messageText.slice(0, 200),
+      limit: 5,
+      project: "*",
+    });
+
+    if (result && typeof result === "string" && result.includes("Found") && !result.includes("Found 0")) {
+      if (event.messages) {
+        event.messages.push(`🧠 ${result}`);
+      }
+    }
+  } catch {
+    // Proactive recall is best-effort — never block message processing
+  }
+}
+
+/**
  * Handle message events — check for keyword triggers in user messages
  * This is the FIX: keyword triggers must work on message events, not just commands
  */
@@ -783,7 +821,7 @@ const cortexMemoryHandler = async (event) => {
       await selfCheckAndHeal(event);
       await onBootstrap(event);
     } else if (event.type === "message") {
-      // FIX: Check for keyword triggers on message events (not just commands)
+      await proactiveRecall(event);
       await onMessageKeywordTrigger(event);
     } else if (event.type === "command") {
       // Fallback: also check commands for keyword triggers (legacy support)
