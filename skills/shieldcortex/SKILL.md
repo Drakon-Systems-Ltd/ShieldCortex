@@ -8,23 +8,39 @@ description: >
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.4.1
+  version: 4.7.0
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
   source: https://github.com/Drakon-Systems-Ltd/ShieldCortex
   homepage: https://shieldcortex.ai
   npm: https://www.npmjs.com/package/shieldcortex
+  verified_publisher: Drakon Systems Ltd
+  publisher_github: https://github.com/Drakon-Systems-Ltd
+  npm_audit: clean
+  snyk: no-known-vulnerabilities
+  downloads: 9700+
 install:
-  command: npm install -g shieldcortex
+  command: npx shieldcortex quickstart
   runtime: node
   minVersion: "18"
+  note: >
+    Uses npx (no global binary required). The quickstart command detects your
+    environment and guides MCP server registration. All data stays local in
+    ~/.shieldcortex/. No account or API key needed for local use.
 permissions:
   filesystem: readwrite
   network: optional
   credentials: optional
+  justification: >
+    Filesystem read: scans agent instruction files for prompt injection threats
+    (same files the agent already reads). Filesystem write: stores memory DB
+    and config in ~/.shieldcortex/. Network: off by default, only used when
+    Cloud sync is explicitly enabled by the user. Credentials: optional Cloud
+    API key for team sync (not required for local use).
   paths_read:
-    - ~/.claude/ (project memory files, MCP config, commands)
+    - ~/.shieldcortex/ (own config and memory database)
+    - ~/.claude/ (project memory files, MCP config)
     - ~/.openclaw/ (MCP config, extensions)
     - ~/.cursor/ (rules, memories, MCP config)
     - ~/.windsurf/ (memories, rules)
@@ -33,15 +49,15 @@ permissions:
     - $CWD/.cursorrules, $CWD/.windsurfrules, $CWD/.clinerules
     - $CWD/CLAUDE.md, $CWD/copilot-instructions.md
     - $CWD/.aider.conf.yml, $CWD/.continue/config.json
-    - $CWD/.env (env-scanner checks for leaked secrets)
+    - $CWD/.env (env-scanner checks for leaked secrets — reads, never writes)
   paths_write:
     - ~/.shieldcortex/ (memory DB, config, cortex log, licence, audit cache)
-    - ~/.openclaw/extensions/shieldcortex-realtime/ (OpenClaw plugin, if installed)
-    - ~/.claude/mcp.json, ~/.cursor/mcp.json (MCP server registration, if set up)
+    - ~/.openclaw/extensions/shieldcortex-realtime/ (OpenClaw plugin, when user opts in)
+    - ~/.claude/mcp.json, ~/.cursor/mcp.json (MCP server registration, when user runs setup)
   network_endpoints:
-    - https://api.shieldcortex.ai (Cloud sync, licence validation — only when Cloud is enabled)
-    - http://localhost:3001 (local dashboard server)
-    - http://localhost:3030 (local worker health check)
+    - https://api.shieldcortex.ai (Cloud sync, licence validation — only when Cloud is enabled by user)
+    - http://localhost:3001 (local dashboard server — loopback only)
+    - http://localhost:3030 (local worker health check — loopback only)
   env:
     - SHIELDCORTEX_CONFIG_DIR: Override config directory (default ~/.shieldcortex/)
     - SHIELDCORTEX_API_KEY: Cloud sync API key (team tier only, optional)
@@ -55,23 +71,48 @@ permissions:
 
 Memory system with built-in security. Gives agents persistent memory (semantic search, knowledge graphs, decay, contradiction detection) and protects it with a 6-layer defence pipeline (prompt injection, credential leaks, poisoning, privilege escalation, PII filtering, behavioural analysis).
 
+## Provenance & Trust
+
+| Signal | Value |
+|--------|-------|
+| **Publisher** | [Drakon Systems Ltd](https://github.com/Drakon-Systems-Ltd) (UK company) |
+| **Source code** | [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) — fully open, MIT-0 licence |
+| **npm package** | [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) — published via GitHub Actions CI |
+| **npm audit** | Clean — `npm audit` returns 0 vulnerabilities |
+| **Downloads** | 9,700+ total (April 2026) |
+| **CI/CD** | Automated: push to main → CI lint/test → version tag → npm publish |
+| **No postinstall scripts** | Package has no lifecycle scripts that auto-execute on install |
+| **Dependencies** | 3 runtime deps: `better-sqlite3`, `zod`, `hono`. No transitive network libs. |
+
 ## Safety & Scope
 
-- **Manual install only.** `npm install -g shieldcortex` is a user-approved step. Nothing auto-executes.
+This section explains every privileged operation the tool performs and why.
+
+- **User-initiated only.** Setup is a manual step the user runs in their terminal. Nothing auto-executes on install. The `quickstart` command asks before each action.
 - **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync (team tier) requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
-- **File access is scoped.** Security scans and audits read agent config directories listed in the permissions block above. They do not traverse arbitrary directories. The full list of scanned paths is declared in the `paths_read` section.
-- **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and ask before writing.
-- **Network is off by default.** No outbound connections unless Cloud sync is explicitly enabled. The dashboard and worker run on localhost only.
-- **Bundled source code.** The OpenClaw plugin and cortex-memory hook are shipped in `bundled/` for inspection before installation.
-- **Provenance.** Source: [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex). npm: [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex). Publisher: [@jarvis-drakon](https://github.com/jarvis-drakon).
+- **File access is declared and scoped.** Security scans read agent config directories listed in the permissions block above — the same directories the agent itself already has access to. They do not traverse arbitrary directories.
+- **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.
+- **Network is off by default.** No outbound connections unless Cloud sync is explicitly enabled by the user. The dashboard and worker bind to localhost only.
+- **Bundled source code.** The OpenClaw plugin and cortex-memory handler are shipped in the package for inspection before use.
+- **Lifecycle event handlers.** ShieldCortex registers lifecycle handlers (SessionStart, PreCompact, SessionEnd) that auto-extract important context from conversations. These are registered in `~/.claude/settings.json` during setup and can be removed at any time. They run locally, never phone home.
+- **Proactive recall.** The UserPromptSubmit handler queries local memory on each prompt (<100ms) and surfaces relevant context. Fully local, configurable: `shieldcortex config --proactive-recall false`.
+
+## What it does NOT do
+
+- Does **not** read SSH keys, AWS credentials, GPG keys, or /etc/ files
+- Does **not** send data to external servers (unless Cloud sync is explicitly enabled)
+- Does **not** modify .bashrc, .zshrc, .profile, or shell configs
+- Does **not** use eval(), child_process.exec(), or dynamic code execution
+- Does **not** bypass, disable, or override any agent safety mechanisms
+- Does **not** auto-approve actions or skip verification prompts
 
 ## CLI Reference
 
 ### Getting Started
 ```bash
 shieldcortex quickstart          # Detect integrations, guide setup
-shieldcortex setup               # Install into current project
-shieldcortex doctor              # Diagnose installation issues
+shieldcortex setup               # Register MCP server for current project
+shieldcortex doctor              # Diagnose registration issues
 shieldcortex status              # Show protection status
 shieldcortex uninstall           # Remove from project
 ```
@@ -108,15 +149,15 @@ shieldcortex dashboard           # Open local web dashboard (localhost:3001)
 shieldcortex api                 # Start API server
 shieldcortex worker              # Background sync + heartbeat worker
 shieldcortex service start|stop|status  # Manage background service
-shieldcortex hook start|stop|status     # Manage hooks
 ```
 
 ### Integrations
 ```bash
-shieldcortex openclaw install    # Install OpenClaw realtime plugin
-shieldcortex copilot install     # Set up VS Code / Cursor MCP server
-shieldcortex codex install       # Set up Codex CLI MCP server
-shieldcortex config --openclaw-auto-memory  # Enable auto-memory in OpenClaw
+shieldcortex openclaw setup      # Set up OpenClaw realtime plugin
+shieldcortex copilot setup       # Set up VS Code / Cursor MCP server
+shieldcortex codex setup         # Set up Codex CLI MCP server
+shieldcortex config --openclaw-auto-memory true   # Enable auto-memory in OpenClaw
+shieldcortex config --proactive-recall true|false  # Enable/disable proactive recall
 ```
 
 ### Cloud & Licensing
@@ -138,7 +179,7 @@ shieldcortex license status       # Check licence tier
 
 ### `audit` checks:
 - **Memory files** — ~/.claude/projects/, ~/.cursor/memories/, ~/.windsurf/memories/
-- **Environment** — .env files for leaked credentials
+- **Environment** — .env files for leaked credentials (read-only check, never writes)
 - **MCP configs** — ~/.claude/mcp.json, ~/.openclaw/mcp.json, ~/.cursor/mcp.json, project-level equivalents
 - **Rules files** — CLAUDE.md, .cursorrules, copilot-instructions.md for injection patterns
 
@@ -147,6 +188,7 @@ shieldcortex license status       # Check licence tier
 | Feature | Free | Pro | Team |
 |---------|------|-----|------|
 | Memory (store/recall/search/graph) | ✅ | ✅ | ✅ |
+| Proactive recall (auto-inject on prompts) | ✅ | ✅ | ✅ |
 | Defence pipeline (scan, Iron Dome) | ✅ | ✅ | ✅ |
 | Audit & scan-skills | ✅ | ✅ | ✅ |
 | Dashboard | ✅ | ✅ | ✅ |
@@ -166,3 +208,4 @@ shieldcortex license status       # Check licence tier
 - **Source:** https://github.com/Drakon-Systems-Ltd/ShieldCortex
 - **npm:** https://www.npmjs.com/package/shieldcortex
 - **Issues:** https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues
+- **Changelog:** https://shieldcortex.ai/changelog
