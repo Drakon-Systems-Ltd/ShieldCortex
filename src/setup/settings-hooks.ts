@@ -15,21 +15,21 @@ interface HookEntry {
 
 const CORTEX_HOOKS: Record<string, HookEntry> = {
   PreCompact: {
-    hooks: [{ type: 'command', command: 'npx shieldcortex hook pre-compact', timeout: 10 }],
+    hooks: [{ type: 'command', command: 'shieldcortex hook pre-compact', timeout: 10 }],
   },
   SessionStart: {
-    hooks: [{ type: 'command', command: 'npx shieldcortex hook session-start', timeout: 5 }],
+    hooks: [{ type: 'command', command: 'shieldcortex hook session-start', timeout: 5 }],
   },
   SessionEnd: {
-    hooks: [{ type: 'command', command: 'npx shieldcortex hook session-end', timeout: 10 }],
+    hooks: [{ type: 'command', command: 'shieldcortex hook session-end', timeout: 10 }],
   },
   UserPromptSubmit: {
-    hooks: [{ type: 'command', command: 'npx shieldcortex hook prompt-recall', timeout: 2 }],
+    hooks: [{ type: 'command', command: 'shieldcortex hook prompt-recall', timeout: 2 }],
   },
 };
 
 const STOP_HOOK: HookEntry = {
-  hooks: [{ type: 'command', command: 'npx shieldcortex hook stop', timeout: 10 }],
+  hooks: [{ type: 'command', command: 'shieldcortex hook stop', timeout: 10 }],
 };
 
 function hasCortexHook(entries: HookEntry[]): boolean {
