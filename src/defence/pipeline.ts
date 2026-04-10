@@ -103,10 +103,10 @@ export function runDefencePipeline(
       reason = `Quarantined: ${firewall.reason}`;
     } else if (
       fragmentation !== null &&
-      fragmentation.score > cfg.autoQuarantineThreshold
+      Math.round(fragmentation.score * 1000) > Math.round(cfg.autoQuarantineThreshold * 1000)
     ) {
       allowed = false;
-      reason = `Quarantined: fragmentation score ${fragmentation.score} exceeds threshold ${cfg.autoQuarantineThreshold}`;
+      reason = `Quarantined: fragmentation score ${fragmentation.score.toFixed(2)} exceeds threshold ${cfg.autoQuarantineThreshold}`;
       firewall.result = 'QUARANTINE';
       firewall.reason = reason;
     } else if (sensitivity.level === 'RESTRICTED') {
