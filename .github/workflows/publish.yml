@@ -32,29 +32,51 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - name: Require successful CI checks for this commit
+      - name: Wait for CI checks to complete (up to 5 minutes)
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
             const ref = context.sha;
-            const { data } = await github.rest.checks.listForRef({
-              owner,
-              repo,
-              ref,
-              per_page: 100,
-            });
+            const maxWait = 300_000; // 5 minutes
+            const interval = 15_000; // 15 seconds
+            const start = Date.now();
 
-            const buildChecks = data.check_runs.filter((run) => run.name.startsWith('build-and-test'));
-            if (buildChecks.length === 0) {
-              core.setFailed(`No CI build-and-test checks found for ${ref}`);
+            while (Date.now() - start < maxWait) {
+              const { data } = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref,
+                per_page: 100,
+              });
+
+              const buildChecks = data.check_runs.filter((run) => run.name.startsWith('build-and-test'));
+
+              if (buildChecks.length === 0) {
+                core.info(`No CI checks found yet, waiting... (${Math.round((Date.now() - start) / 1000)}s)`);
+                await new Promise((r) => setTimeout(r, interval));
+                continue;
+              }
+
+              const pending = buildChecks.filter((run) => run.status !== 'completed');
+              if (pending.length > 0) {
+                core.info(`CI still running: ${pending.map((r) => r.name).join(', ')} (${Math.round((Date.now() - start) / 1000)}s)`);
+                await new Promise((r) => setTimeout(r, interval));
+                continue;
+              }
+
+              // All completed — check for failures
+              const failed = buildChecks.filter((run) => run.conclusion !== 'success');
+              if (failed.length > 0) {
+                core.setFailed(`CI checks failed: ${failed.map((r) => `${r.name}=${r.conclusion}`).join(', ')}`);
+                return;
+              }
+
+              core.info(`All CI checks passed: ${buildChecks.map((r) => r.name).join(', ')}`);
               return;
             }
 
-            const incomplete = buildChecks.filter((run) => run.status !== 'completed' || run.conclusion !== 'success');
-            if (incomplete.length > 0) {
-              core.setFailed(`CI checks are not green for ${ref}: ${incomplete.map((run) => `${run.name}=${run.conclusion || run.status}`).join(', ')}`);
-            }
+            core.setFailed(`Timed out waiting for CI checks after ${maxWait / 1000}s`);
 
       - run: npm ci
       - run: cd dashboard && npm ci
