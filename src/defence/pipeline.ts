@@ -118,8 +118,13 @@ export function runDefencePipeline(
         firewall.threatIndicators.push('restricted_content');
       }
     } else {
-      allowed = true;
-      reason = firewall.reason;
+      if (firewall.result !== 'ALLOW') {
+        allowed = false;
+        reason = `Unexpected firewall result: ${firewall.result}`;
+      } else {
+        allowed = true;
+        reason = firewall.reason;
+      }
     }
 
     // 6b. Apply custom firewall rules (Pro feature, additive only — can tighten, never weaken)

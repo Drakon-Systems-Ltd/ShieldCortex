@@ -10,6 +10,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { existsSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
+import { resolve, join } from 'path';
 import { generateSessionToken, cleanupSessionToken, validateSessionToken, getSessionToken } from './session-token.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import { getDatabase, initDatabase, checkpointWal } from '../database/init.js';
@@ -305,6 +306,23 @@ export function startVisualizationServer(dbPath?: string): void {
 
       if (!filePath && !content) {
         return res.status(400).json({ error: 'Either "path" (file path) or "content" (raw content) is required' });
+      }
+
+      if (filePath) {
+        const resolved = resolve(filePath);
+        const home = homedir();
+        const allowedPrefixes = [
+          process.cwd(),
+          join(home, '.claude'),
+          join(home, '.openclaw'),
+          join(home, '.cursor'),
+          join(home, '.windsurf'),
+          join(home, '.codex'),
+          join(home, '.shieldcortex'),
+        ];
+        if (!allowedPrefixes.some(prefix => resolved.startsWith(prefix))) {
+          return res.status(403).json({ error: 'Path outside allowed directories' });
+        }
       }
 
       let result;
