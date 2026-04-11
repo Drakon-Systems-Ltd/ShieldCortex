@@ -20,9 +20,9 @@ const CORTEX_HOOKS: Record<string, HookEntry> = {
   SessionStart: {
     hooks: [{ type: 'command', command: 'shieldcortex hook session-start', timeout: 5 }],
   },
-  SessionEnd: {
-    hooks: [{ type: 'command', command: 'shieldcortex hook session-end', timeout: 10 }],
-  },
+  // SessionEnd removed from defaults — it causes fatal failures in OpenClaw
+  // agents when the session is already gone. PreCompact handles memory
+  // extraction. The cortex-memory hook handles session-end for OpenClaw.
   UserPromptSubmit: {
     hooks: [{ type: 'command', command: 'shieldcortex hook prompt-recall', timeout: 2 }],
   },
@@ -87,6 +87,18 @@ export function setupHooks(options?: { stopHook?: boolean }): void {
 
   // First: migrate any stale npx commands to direct binary
   const migrated = migrateNpxHooks(settings);
+
+  // Remove SessionEnd hook — causes fatal failures in OpenClaw agents
+  if (settings.hooks.SessionEnd) {
+    const hadCortex = hasCortexHook(settings.hooks.SessionEnd);
+    if (hadCortex) {
+      settings.hooks.SessionEnd = settings.hooks.SessionEnd.filter(
+        (e: HookEntry) => !e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('shieldcortex'))
+      );
+      if (settings.hooks.SessionEnd.length === 0) delete settings.hooks.SessionEnd;
+      console.log('  - Hook: SessionEnd (removed — causes agent crashes, PreCompact handles this)');
+    }
+  }
 
   let added = 0;
 
