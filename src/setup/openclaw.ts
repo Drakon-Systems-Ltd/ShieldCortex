@@ -380,9 +380,20 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
   if (!isOpenClawInstalled()) return null;
 
+  // Remove existing extensions copy so OpenClaw doesn't refuse with "plugin already exists"
+  const extDir = findExtensionsDir();
+  if (extDir) {
+    const existingDir = path.join(extDir, PLUGIN_DIR_NAME);
+    if (fs.existsSync(existingDir)) {
+      try {
+        fs.rmSync(existingDir, { recursive: true, force: true });
+      } catch { /* best-effort cleanup */ }
+    }
+  }
+
   const env = { ...process.env, HOME: resolveUserHome() };
   const attempts: Array<{ args: string[]; label: string }> = [
-    { args: ['plugins', 'install', '@drakon-systems/shieldcortex-realtime'], label: 'package install' },
+    { args: ['plugins', 'install', '@drakon-systems/shieldcortex-realtime@latest'], label: 'package install' },
     { args: ['plugins', 'install', '--link', PLUGIN_PACKAGE_SOURCE], label: 'linked install' },
   ];
 
@@ -702,7 +713,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     console.error(`  OpenClaw binary found: ${isOpenClawInstalled()}`);
     console.error('');
     console.error('If OpenClaw is installed, try running directly:');
-    console.error('  openclaw hooks install shieldcortex');
+    console.error('  openclaw skills install shieldcortex');
     console.error('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
     console.error('');
     console.error('Or install OpenClaw first:');
@@ -807,7 +818,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   }
   console.log('');
   console.log('Native OpenClaw install is also supported:');
-  console.log('  openclaw hooks install shieldcortex');
+  console.log('  openclaw skills install shieldcortex');
   console.log('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
   console.log('');
   console.log('Restart your agent to activate.');
