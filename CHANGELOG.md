@@ -14,6 +14,26 @@ All notable changes to this project will be documented in this file.
 - **Configurable** — `npx shieldcortex config --proactive-recall false` to disable
 - Access counts reinforced on recalled memories (strengthens frequently-needed knowledge)
 
+## v4.7.7 — 11 April 2026
+
+- **Plugin scanner compatibility** — removed `child_process` import from OpenClaw plugin; runtime resolution now uses filesystem-only lookups instead of spawning `which`/`npm` processes. Removes `process.env` access (replaced with config file read). Fixes OpenClaw's "dangerous code patterns detected" block on `openclaw plugins install`.
+
+## v4.7.6 — 11 April 2026
+
+- **`shieldcortex update`** — new CLI command to self-update via `npm install -g shieldcortex@latest`. Shows current vs available version, skips if already up to date.
+
+## v4.7.5 — 11 April 2026
+
+- **CI publish race condition fixed** — publish workflow now polls for CI checks to complete (up to 5 minutes, 15s intervals) instead of failing instantly when checks haven't started yet. No more manual `gh run rerun` after every release.
+
+## v4.7.4 — 10 April 2026
+
+- **Hook commands use global binary** — all hook registrations now use `shieldcortex hook ...` directly instead of `npx shieldcortex hook ...` which hits stale npx cache.
+
+## v4.7.3 — 10 April 2026
+
+- **Floating-point precision fix** — fragmentation score of 0.30000000000000004 was blocking at threshold 0.3 due to IEEE 754 rounding. Now uses integer math at 3 decimal places.
+
 ## v4.6.8 — 8 April 2026
 
 - Cloud sync banner: "Clear failed" button now appears directly in the warning banner when dead-letter failures exist
