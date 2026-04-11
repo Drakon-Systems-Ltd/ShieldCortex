@@ -6,7 +6,6 @@
  * All scanning operations are fire-and-forget.
  */
 
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
@@ -53,49 +52,43 @@ function collectRuntimeCandidates(): string[] {
   // 1. Relative path (works when running from within npm package tree)
   candidates.add(new URL("../../hooks/openclaw/cortex-memory/runtime.mjs", import.meta.url).href);
 
-  // 2. Environment variable override
-  if (process.env.SHIELDCORTEX_ROOT) {
-    addRuntimeCandidate(candidates, process.env.SHIELDCORTEX_ROOT);
-  }
+  // 2. Config file override (reads path from ~/.shieldcortex/config.json instead of env var)
+  try {
+    const cfgPath = path.join(homedir(), ".shieldcortex", "config.json");
+    if (existsSync(cfgPath)) {
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+      if (cfg.installRoot) addRuntimeCandidate(candidates, cfg.installRoot);
+    }
+  } catch { /* no config */ }
 
   // 3. Walk up from current file location
   addAncestorCandidates(candidates, path.dirname(fileURLToPath(import.meta.url)));
 
-  // 4. Find via shieldcortex binary
-  try {
-    const bin = execFileSync("which", ["shieldcortex"], {
-      encoding: "utf-8",
-      timeout: 3000,
-    }).trim();
-    if (bin) addAncestorCandidates(candidates, realpathSync(bin));
-  } catch {}
+  // 4. Resolve via common bin symlink paths (no child_process needed)
+  for (const binDir of ["/usr/local/bin", "/opt/homebrew/bin", path.join(homedir(), ".npm-global", "bin")]) {
+    const binPath = path.join(binDir, "shieldcortex");
+    try {
+      if (existsSync(binPath)) addAncestorCandidates(candidates, realpathSync(binPath));
+    } catch { /* broken symlink */ }
+  }
 
-  // 5. npm global root
-  try {
-    const npmRoot = execFileSync("npm", ["root", "-g"], {
-      encoding: "utf-8",
-      timeout: 3000,
-    }).trim();
-    if (npmRoot) addRuntimeCandidate(candidates, path.join(npmRoot, "shieldcortex"));
-  } catch {}
-
-  // 6. npm prefix
-  try {
-    const prefix = execFileSync("npm", ["config", "get", "prefix"], {
-      encoding: "utf-8",
-      timeout: 3000,
-    }).trim();
-    if (prefix) addRuntimeCandidate(candidates, path.join(prefix, "lib", "node_modules", "shieldcortex"));
-  } catch {}
-
-  // 7. Common global install paths
+  // 5. Common global install paths (covers npm root -g results without spawning npm)
   for (const root of [
     "/usr/lib/node_modules/shieldcortex",
     "/usr/local/lib/node_modules/shieldcortex",
     "/opt/homebrew/lib/node_modules/shieldcortex",
     path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex"),
+    path.join(homedir(), ".nvm", "versions", "node"),  // nvm users
   ]) {
-    addRuntimeCandidate(candidates, root);
+    if (root.includes(".nvm")) {
+      // For nvm, check the current symlink
+      try {
+        const currentNode = path.join(homedir(), ".nvm", "current", "lib", "node_modules", "shieldcortex");
+        addRuntimeCandidate(candidates, currentNode);
+      } catch { /* no nvm */ }
+    } else {
+      addRuntimeCandidate(candidates, root);
+    }
   }
 
   return [...candidates];
