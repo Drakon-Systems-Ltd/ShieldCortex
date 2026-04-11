@@ -11,7 +11,7 @@ I got tired of it. So I built something.
 If you're running [OpenClaw](https://github.com/openclaw/openclaw) (or its predecessors Clawdbot/Moltbot), here's all you need:
 
 ```bash
-openclaw hooks install shieldcortex
+openclaw skills install shieldcortex
 openclaw plugins install @drakon-systems/shieldcortex-realtime
 ```
 
@@ -131,7 +131,7 @@ That's it for the local OpenClaw workflow. No Docker, cloud account, or cloud AP
 
 ```bash
 # Install the hook
-openclaw hooks install shieldcortex
+openclaw skills install shieldcortex
 openclaw plugins install @drakon-systems/shieldcortex-realtime
 
 # Check OpenClaw integration status
@@ -165,7 +165,7 @@ Not using OpenClaw? ShieldCortex also works with:
 ## Try It
 
 ```bash
-openclaw hooks install shieldcortex
+openclaw skills install shieldcortex
 openclaw plugins install @drakon-systems/shieldcortex-realtime
 # restart openclaw
 shieldcortex openclaw status

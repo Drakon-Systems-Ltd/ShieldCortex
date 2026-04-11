@@ -111,7 +111,7 @@ Memories stored in `~/.shieldcortex/memories.db` (SQLite). Shared with Claude Co
 ## Install
 
 ```bash
-openclaw hooks install shieldcortex
+openclaw skills install shieldcortex
 ```
 
 Optional companion real-time plugin:

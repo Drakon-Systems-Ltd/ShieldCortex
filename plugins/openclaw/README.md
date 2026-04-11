@@ -32,7 +32,7 @@ openclaw plugins install @drakon-systems/shieldcortex-realtime
 If you also want the companion session hook, install it from the main package:
 
 ```bash
-openclaw hooks install shieldcortex
+openclaw skills install shieldcortex
 ```
 
 Restart OpenClaw after installing:

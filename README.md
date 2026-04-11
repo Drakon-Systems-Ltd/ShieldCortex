@@ -399,7 +399,7 @@ Cortex data is stored locally in `~/.shieldcortex/cortex/`. Pro licence required
 ShieldCortex is a first-class citizen in [OpenClaw](https://github.com/openclaw) — the open-source AI agent framework. One command connects them:
 
 ```bash
-openclaw hooks install shieldcortex
+openclaw skills install shieldcortex
 openclaw plugins install @drakon-systems/shieldcortex-realtime
 ```
 
@@ -581,7 +581,7 @@ The key shift is that memory is no longer a black box:
 | **Codex CLI / VS Code** | `shieldcortex codex install` |
 | **Cursor** | `shieldcortex install` |
 | **VS Code** (Copilot) | `shieldcortex install` |
-| **OpenClaw** | `openclaw hooks install shieldcortex && openclaw plugins install @drakon-systems/shieldcortex-realtime` — [details above](#-openclaw-integration) |
+| **OpenClaw** | `openclaw skills install shieldcortex && openclaw plugins install @drakon-systems/shieldcortex-realtime` — [details above](#-openclaw-integration) |
 | **LangChain JS** | `import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'` |
 | **Python** (CrewAI, AutoGPT, etc.) | `pip install shieldcortex` |
 | **Any MCP agent** | `shieldcortex install` |
@@ -605,7 +605,7 @@ shieldcortex scan-skills          # Scan installed agent skills for threats
 shieldcortex dashboard            # Launch the visual dashboard
 shieldcortex iron-dome activate   # Enable behaviour controls
 shieldcortex iron-dome status     # Check Iron Dome status
-openclaw hooks install shieldcortex
+openclaw skills install shieldcortex
 openclaw plugins install @drakon-systems/shieldcortex-realtime
 shieldcortex openclaw status      # Check OpenClaw hook status
 shieldcortex codex install        # Connect Codex CLI / VS Code
