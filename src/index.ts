@@ -641,6 +641,37 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "update" subcommand
+  if (process.argv[2] === 'update') {
+    const { execSync } = await import('child_process');
+    const fs = await import('fs');
+    const pkgPath = new URL('../package.json', import.meta.url);
+    const currentVersion = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version ?? 'unknown';
+
+    console.log(`Current version: v${currentVersion}`);
+    console.log('Checking for updates...');
+
+    try {
+      const latest = execSync('npm view shieldcortex version', { encoding: 'utf-8', timeout: 10000 }).trim();
+
+      if (latest === currentVersion) {
+        console.log(`✓ Already on the latest version (v${latest})`);
+        return;
+      }
+
+      console.log(`New version available: v${latest}`);
+      console.log('Updating...');
+      execSync('npm install -g shieldcortex@latest', { stdio: 'inherit', timeout: 120000 });
+      console.log(`✓ Updated to v${latest}`);
+      console.log('Restart Claude Code to use the new version.');
+    } catch (error) {
+      console.error(`Update failed: ${(error as Error).message}`);
+      console.error('Try manually: npm install -g shieldcortex@latest');
+      process.exit(1);
+    }
+    return;
+  }
+
   // Handle "graph" subcommand
   if (process.argv[2] === 'graph') {
     const action = process.argv[3];
@@ -882,7 +913,7 @@ ${bold}DOCS${reset}
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
 
-    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook',
+    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
