@@ -3,15 +3,7 @@ name: cortex-memory
 description: "Persistent brain-like memory via ShieldCortex — recalls past knowledge, with optional auto-save"
 homepage: https://github.com/Drakon-Systems-Ltd/ShieldCortex
 metadata:
-  {
-    "openclaw":
-      {
-        "emoji": "🧠",
-        "events": ["command:new", "command:stop", "agent:bootstrap", "command"],
-        "requires": { "anyBins": ["npx"] },
-        "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }],
-      },
-  }
+  { "openclaw": { "emoji": "🧠", "events": ["command:new", "command:stop", "agent:bootstrap"], "requires": { "bins": ["npx"] }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }
 ---
 
 # Cortex Memory Hook

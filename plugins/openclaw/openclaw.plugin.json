@@ -59,7 +59,7 @@
   },
   "configSchema": {
     "type": "object",
-    "additionalProperties": true,
+    "additionalProperties": false,
     "properties": {
       "enabled": {
         "type": "boolean"
@@ -95,6 +95,7 @@
           "enabled": { "type": "boolean", "default": true },
           "severityActions": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
               "low": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "log" },
               "medium": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "warn" },
@@ -104,6 +105,7 @@
           },
           "failurePolicy": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
               "low": { "type": "string", "enum": ["allow", "deny"], "default": "allow" },
               "medium": { "type": "string", "enum": ["allow", "deny"], "default": "allow" },
