@@ -660,10 +660,43 @@ ${bold}DOCS${reset}
       }
 
       console.log(`New version available: v${latest}`);
-      console.log('Updating...');
+      console.log('Updating npm package...');
       execSync('npm install -g shieldcortex@latest', { stdio: 'inherit', timeout: 120000 });
       console.log(`✓ Updated to v${latest}`);
-      console.log('Restart Claude Code to use the new version.');
+
+      // Update OpenClaw plugin if installed
+      try {
+        const { homedir } = await import('os');
+        const home = homedir();
+        const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
+        if (fs.existsSync(extDir)) {
+          console.log('Updating OpenClaw plugin...');
+          fs.rmSync(extDir, { recursive: true, force: true });
+          try {
+            execSync('openclaw plugins install @drakon-systems/shieldcortex-realtime@latest', {
+              stdio: 'inherit',
+              timeout: 30000,
+              env: { ...process.env, HOME: home },
+            });
+            console.log('✓ OpenClaw plugin updated');
+          } catch {
+            console.warn('⚠ OpenClaw plugin reinstall failed — run manually:');
+            console.warn('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
+          }
+        }
+      } catch {
+        // OpenClaw not installed — skip silently
+      }
+
+      // Migrate hooks if needed
+      try {
+        const { setupHooks } = await import('./setup/settings-hooks.js');
+        setupHooks();
+      } catch {
+        // Hook migration is best-effort
+      }
+
+      console.log('Restart Claude Code / OpenClaw gateway to use the new version.');
     } catch (error) {
       console.error(`Update failed: ${(error as Error).message}`);
       console.error('Try manually: npm install -g shieldcortex@latest');
