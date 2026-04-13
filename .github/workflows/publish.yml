@@ -104,6 +104,28 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Install ClawHub CLI
+        if: steps.version_check.outputs.already_published == 'false' && secrets.CLAWHUB_TOKEN != ''
+        run: npm install -g clawhub
+
+      - name: Publish ShieldCortex skill to ClawHub
+        if: steps.version_check.outputs.already_published == 'false' && secrets.CLAWHUB_TOKEN != ''
+        env:
+          CLAWHUB_CONFIG_PATH: ${{ runner.temp }}/clawhub-config.json
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: |
+          node -e "const fs=require('fs'); fs.writeFileSync(process.env.CLAWHUB_CONFIG_PATH, JSON.stringify({ token: process.env.CLAWHUB_TOKEN }, null, 2) + '\n', { mode: 0o600 })"
+          clawhub whoami
+          clawhub publish ./skills/shieldcortex \
+            --slug shieldcortex \
+            --name "ShieldCortex" \
+            --version "$(node -p \"require('./package.json').version\")" \
+            --changelog "Auto-sync from npm publish ${GITHUB_REF_NAME}"
+
+      - name: Skip ClawHub sync (missing token)
+        if: steps.version_check.outputs.already_published == 'false' && secrets.CLAWHUB_TOKEN == ''
+        run: echo "⚠️ CLAWHUB_TOKEN secret missing, skipping ClawHub auto-sync"
+
       - name: Skip publish (already exists)
         if: steps.version_check.outputs.already_published == 'true'
         run: echo "⚠️ Skipping publish - version already exists on npm"

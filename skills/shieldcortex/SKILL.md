@@ -8,7 +8,7 @@ description: >
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.8.1
+  version: 4.8.4
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -21,13 +21,13 @@ metadata:
   snyk: no-known-vulnerabilities
   downloads: 9700+
 install:
-  command: npx shieldcortex quickstart
+  command: shieldcortex quickstart
   runtime: node
   minVersion: "18"
   note: >
-    Uses npx (no global binary required). The quickstart command detects your
-    environment and guides MCP server registration. All data stays local in
-    ~/.shieldcortex/. No account or API key needed for local use.
+    Run the installed `shieldcortex` binary directly. The quickstart command
+    detects your environment and guides MCP server registration. All data stays
+    local in ~/.shieldcortex/. No account or API key needed for local use.
 permissions:
   filesystem: readwrite
   network: optional
@@ -94,7 +94,7 @@ This section explains every privileged operation the tool performs and why.
 - **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.
 - **Network is off by default.** No outbound connections unless Cloud sync is explicitly enabled by the user. The dashboard and worker bind to localhost only.
 - **Bundled source code.** The OpenClaw plugin and cortex-memory handler are shipped in the package for inspection before use.
-- **Lifecycle event handlers.** ShieldCortex registers lifecycle handlers (SessionStart, PreCompact, SessionEnd) that auto-extract important context from conversations. These are registered in `~/.claude/settings.json` during setup and can be removed at any time. They run locally, never phone home.
+- **Lifecycle event handlers.** ShieldCortex registers lifecycle handlers that auto-extract important context from conversations. These are registered in `~/.claude/settings.json` during setup and can be removed at any time. They run locally, never phone home.
 - **Proactive recall.** The UserPromptSubmit handler queries local memory on each prompt (<100ms) and surfaces relevant context. Fully local, configurable: `shieldcortex config --proactive-recall false`.
 
 ## What it does NOT do
@@ -105,6 +105,8 @@ This section explains every privileged operation the tool performs and why.
 - Does **not** use eval(), child_process.exec(), or dynamic code execution
 - Does **not** bypass, disable, or override any agent safety mechanisms
 - Does **not** auto-approve actions or skip verification prompts
+- Does **not** mine cryptocurrency, trade tokens, manage wallets, or initiate purchases
+- Does **not** make purchases, place orders, or move money on the user's behalf
 
 ## CLI Reference
 
@@ -182,6 +184,15 @@ shieldcortex license status       # Check licence tier
 - **Environment** — .env files for leaked credentials (read-only check, never writes)
 - **MCP configs** — ~/.claude/mcp.json, ~/.openclaw/mcp.json, ~/.cursor/mcp.json, project-level equivalents
 - **Rules files** — CLAUDE.md, .cursorrules, copilot-instructions.md for injection patterns
+
+## What Gets Uploaded to Cloud
+
+Cloud sync is **Team tier only** and **off by default**.
+
+- **Uploaded when Cloud sync is enabled by the user:** selected memory records, related embeddings/metadata, and knowledge-graph entities/relationships required for sync.
+- **Not uploaded by default:** local agent configs, MCP configs, raw rules files, shell configs, SSH keys, secrets, `.env` contents, or arbitrary project files.
+- **Security scan results stay local** unless the user explicitly exports or syncs data through a Cloud-enabled workflow.
+- **No cloud traffic at all** occurs unless the user explicitly enables Cloud sync and provides a valid API key.
 
 ## Licence Tiers
 
