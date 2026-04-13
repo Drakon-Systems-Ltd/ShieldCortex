@@ -1,8 +1,18 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "4.8.2",
+  "version": "4.8.3",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
+  "kind": null,
+  "enabledByDefault": false,
+  "activation": {
+    "hooks": ["llm_input", "llm_output", "before_tool_call", "session_end"],
+    "commands": ["shieldcortex-status"]
+  },
+  "contracts": {},
+  "commandAliases": {
+    "shieldcortex-status": "shieldcortex-status"
+  },
   "uiHints": {
     "binaryPath": {
       "label": "ShieldCortex Binary Path",
