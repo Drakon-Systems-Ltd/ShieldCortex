@@ -9,30 +9,47 @@
  * worker_threads Worker solves this — the main thread stays free.
  */
 import { parentPort } from 'worker_threads';
-import { pipeline, env } from '@huggingface/transformers';
-import type { FeatureExtractionPipeline } from '@huggingface/transformers';
 import { join } from 'path';
 import { homedir } from 'os';
 
-env.allowRemoteModels = true;
-env.allowLocalModels = true;
-env.cacheDir = join(homedir(), '.cache', 'shieldcortex', 'models');
+// Lazy-loaded to catch import failures gracefully
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let pipelineFn: any = null;
+let loadError: string | null = null;
 
-let extractor: FeatureExtractionPipeline | null = null;
+async function initTransformers(): Promise<void> {
+  if (pipelineFn) return;
+  if (loadError) throw new Error(loadError);
+
+  try {
+    const mod = await import('@huggingface/transformers');
+    pipelineFn = mod.pipeline;
+    mod.env.allowRemoteModels = true;
+    mod.env.allowLocalModels = true;
+    mod.env.cacheDir = join(homedir(), '.cache', 'shieldcortex', 'models');
+  } catch (err: unknown) {
+    loadError = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to load @huggingface/transformers: ${loadError}`);
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let extractor: any = null;
 
 async function loadModel(): Promise<void> {
   if (extractor) return;
-  extractor = await pipeline(
+  await initTransformers();
+  extractor = await pipelineFn(
     'feature-extraction',
     'Xenova/all-MiniLM-L6-v2',
-  ) as unknown as FeatureExtractionPipeline;
+  );
 }
 
 async function embed(text: string): Promise<number[]> {
   if (!extractor) await loadModel();
 
   const truncated = text.slice(0, 2000);
-  const output = await extractor!(truncated, {
+  const output = await extractor(truncated, {
     pooling: 'mean',
     normalize: true,
   });
@@ -54,6 +71,15 @@ async function embed(text: string): Promise<number[]> {
   return result;
 }
 
+// Catch uncaught errors so the worker doesn't exit silently with code 0
+process.on('uncaughtException', (err) => {
+  parentPort?.postMessage({ type: 'error', error: `Uncaught: ${err.message}` });
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  parentPort?.postMessage({ type: 'error', error: `Unhandled rejection: ${msg}` });
+});
+
 parentPort!.on('message', async (msg: { id: number; type: string; text?: string }) => {
   try {
     if (msg.type === 'load') {
@@ -71,5 +97,5 @@ parentPort!.on('message', async (msg: { id: number; type: string; text?: string 
   }
 });
 
-// Signal ready
+// Signal ready — worker is alive and listening for messages
 parentPort!.postMessage({ type: 'ready' });

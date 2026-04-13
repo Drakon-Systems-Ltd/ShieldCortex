@@ -63,6 +63,10 @@ function ensureWorker(): Worker {
       workerReady = true;
       return;
     }
+    if (msg.type === 'error') {
+      console.error('[shieldcortex] Embedding worker reported error:', msg.error);
+      return;
+    }
     if (msg.id == null) return;
     const p = pending.get(msg.id);
     if (!p) return;
