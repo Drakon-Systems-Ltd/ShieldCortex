@@ -688,6 +688,35 @@ ${bold}DOCS${reset}
         // OpenClaw not installed — skip silently
       }
 
+      // Update OpenClaw skill if installed
+      try {
+        const { homedir } = await import('os');
+        const home = homedir();
+        const skillDirs = [
+          path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
+          path.join(home, '.openclaw', 'skills', 'shieldcortex'),
+          path.join(home, 'clawd', 'skills', 'shieldcortex'),
+          path.join(home, 'friday', 'skills', 'shieldcortex'),
+        ];
+        const existingSkill = skillDirs.find(d => fs.existsSync(d));
+        if (existingSkill) {
+          console.log('Updating OpenClaw skill...');
+          try {
+            execSync('openclaw skills install shieldcortex --force', {
+              stdio: 'inherit',
+              timeout: 30000,
+              env: { ...process.env, HOME: home },
+            });
+            console.log('✓ OpenClaw skill updated');
+          } catch {
+            console.warn('⚠ OpenClaw skill update failed — run manually:');
+            console.warn('  openclaw skills install shieldcortex --force');
+          }
+        }
+      } catch {
+        // Skill update is best-effort
+      }
+
       // Migrate hooks if needed
       try {
         const { setupHooks } = await import('./setup/settings-hooks.js');
