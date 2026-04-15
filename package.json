@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "4.8.5",
+  "version": "4.8.6",
   "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -139,6 +139,7 @@
     "scripts/session-end-hook.mjs",
     "scripts/session-start-hook.mjs",
     "scripts/stop-hook.mjs",
+    "scripts/prompt-recall-hook.mjs",
     "dashboard/.next/standalone"
   ]
 }
