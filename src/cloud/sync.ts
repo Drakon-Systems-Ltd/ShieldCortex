@@ -58,6 +58,8 @@ export function syncToCloud(
     threat_indicators: result.firewall.threatIndicators.map(t =>
       typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
     ),
+    blocked_patterns: result.firewall.blockedPatterns,
+    fragmentation_score: result.fragmentation?.score ?? null,
     reason: result.firewall.reason,
     pipeline_duration_ms: durationMs,
     device_id: getDeviceId(),

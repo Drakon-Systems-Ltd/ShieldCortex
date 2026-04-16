@@ -157,14 +157,17 @@ describe('Defence Pipeline', () => {
     const { storeFragmentationData } = await import('../fragmentation/index.js');
 
     const title = 'Fragment Seed';
-    const content = 'npm install lodash /tmp/project';
+    const content = 'see report at https://example.com/data referenced from /tmp/working with host 192.168.1.42';
     const db = getDatabase();
     const insert = db.prepare(
       "INSERT INTO memories (uuid, type, category, title, content, project, tags) VALUES (?, ?, ?, ?, ?, ?, ?)"
     );
-    const row = insert.run(crypto.randomUUID(), 'long_term', 'note', 'seed', 'seed', 'test-project', '[]');
-    const memoryId = Number(row.lastInsertRowid);
-    storeFragmentationData(memoryId, `${title}\n${content}`);
+    // Insert 5 seed memories sharing the same entities so memoryCount bonus triggers (+0.3)
+    for (let i = 0; i < 5; i++) {
+      const row = insert.run(crypto.randomUUID(), 'long_term', 'note', `seed-${i}`, 'seed', 'test-project', '[]');
+      const memoryId = Number(row.lastInsertRowid);
+      storeFragmentationData(memoryId, `${title}\n${content}`);
+    }
 
     const cfg: DefenceConfig = {
       ...testConfig,

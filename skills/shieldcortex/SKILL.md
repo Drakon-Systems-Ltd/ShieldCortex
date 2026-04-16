@@ -8,7 +8,7 @@ description: >
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.8.4
+  version: 4.9.1
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -69,7 +69,7 @@ permissions:
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
 
-Memory system with built-in security. Gives agents persistent memory (semantic search, knowledge graphs, decay, contradiction detection) and protects it with a 6-layer defence pipeline (prompt injection, credential leaks, poisoning, privilege escalation, PII filtering, behavioural analysis).
+Memory system with built-in security. Gives agents persistent memory (semantic search, knowledge graphs, decay, contradiction detection) and protects it with a 6-layer defence pipeline (prompt injection, credential leaks, poisoning, privilege escalation, PII filtering, behavioural analysis). Skill threat patterns (tool injection, scope escalation, data exfiltration, persistence, supply-chain, agent manipulation, stealth instructions) now also block at memory-write time, not just on skill-file scans.
 
 ## Provenance & Trust
 
@@ -168,6 +168,11 @@ shieldcortex config --cloud-enable --cloud-api-key <key>  # Enable cloud sync
 shieldcortex cloud sync --full    # Backfill memories + graph to cloud
 shieldcortex license activate sc_pro_...  # Activate Pro/Team licence
 shieldcortex license status       # Check licence tier
+```
+
+### Maintenance
+```bash
+shieldcortex update              # Self-update (npm package + OpenClaw plugin + skill)
 ```
 
 ## What Gets Scanned
