@@ -26,6 +26,9 @@ import type { EncodingDetectionResult } from './encoding-detector.js';
 
 import { scoreAnomaly } from './anomaly-scorer.js';
 
+import { detectSkillThreats } from '../skill-scanner/patterns.js';
+import { scanForCredentials } from '../credential-leak/index.js';
+
 // Re-exports
 export { detectInstructions } from './instruction-detector.js';
 export type { InstructionDetectionResult } from './instruction-detector.js';
@@ -49,6 +52,11 @@ export function analyzeFirewall(
   const privilege = detectPrivilegeEscalation(content);
   const encoding = detectEncoding(content);
   const anomaly = scoreAnomaly(content, title);
+
+  // Skill scanner patterns — catches tool injection, scope escalation,
+  // data exfiltration, persistence, supply chain, agent manipulation,
+  // and stealth instructions in memory content (not just skill files).
+  const skillThreats = detectSkillThreats(content);
 
   // Collect threat indicators
   const threatIndicators: ThreatIndicator[] = [];
@@ -78,6 +86,16 @@ export function analyzeFirewall(
     blockedPatterns.push(...encoding.encodingTypes);
   }
 
+  // Skill-level threats in memory content (tool injection, scope escalation, etc.)
+  if (skillThreats.detected) {
+    for (const threat of skillThreats.threats) {
+      if (!threatIndicators.includes(threat as ThreatIndicator)) {
+        threatIndicators.push(threat as ThreatIndicator);
+      }
+    }
+    blockedPatterns.push(...skillThreats.threats.map(t => `skill:${t}`));
+  }
+
   // Determine result based on mode
   const { result, reason } = determineResult(
     config.mode,
@@ -87,6 +105,7 @@ export function analyzeFirewall(
     anomaly,
     trustScore,
     threatIndicators,
+    skillThreats,
   );
 
   return {
@@ -106,6 +125,7 @@ function determineResult(
   anomalyScore: number,
   trustScore: number,
   threatIndicators: ThreatIndicator[],
+  skillThreats?: { detected: boolean; threats: string[]; confidence: number },
 ): { result: FirewallResult; reason: string } {
   const lowTrust = trustScore < 0.5;
   const detectionCount = threatIndicators.length;
@@ -146,6 +166,15 @@ function determineResult(
     };
   }
 
+  // Skill-level threats (tool injection, scope escalation, agent manipulation, etc.)
+  if (skillThreats?.detected && skillThreats.confidence >= 0.8) {
+    const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
+    return {
+      result,
+      reason: `Skill-level threat detected: ${skillThreats.threats.join(', ')} (confidence: ${skillThreats.confidence})${lowTrust ? ', low trust source' : ''}`,
+    };
+  }
+
   // High severity privilege escalation → quarantine
   if (privilege.detected && privilege.severity === 'high') {
     const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
@@ -183,6 +212,25 @@ function determineResult(
         return {
           result,
           reason: `Encoded content contains privilege escalation: ${decodedPrivilege.indicators.join(', ')} (${encoding.encodingTypes.join(', ')})`,
+        };
+      }
+
+      // Check for credential leaks in decoded content
+      const decodedCredentials = scanForCredentials(snippet);
+      if (decodedCredentials.findings.some(f => f.action === 'blocked')) {
+        return {
+          result: 'BLOCK',
+          reason: `Encoded content contains credential leak (${encoding.encodingTypes.join(', ')})`,
+        };
+      }
+
+      // Check for skill-level threats in decoded content
+      const decodedSkill = detectSkillThreats(snippet);
+      if (decodedSkill.detected && decodedSkill.confidence >= 0.8) {
+        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
+        return {
+          result,
+          reason: `Encoded content contains skill threat: ${decodedSkill.threats.join(', ')} (${encoding.encodingTypes.join(', ')})`,
         };
       }
 
