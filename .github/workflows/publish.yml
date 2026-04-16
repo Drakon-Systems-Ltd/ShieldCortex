@@ -113,10 +113,9 @@ jobs:
       - name: Publish ShieldCortex skill to ClawHub
         if: steps.version_check.outputs.already_published == 'false' && env.HAS_CLAWHUB_TOKEN == 'true'
         env:
-          CLAWHUB_CONFIG_PATH: ${{ runner.temp }}/clawhub-config.json
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
         run: |
-          node -e "const fs=require('fs'); fs.writeFileSync(process.env.CLAWHUB_CONFIG_PATH, JSON.stringify({ token: process.env.CLAWHUB_TOKEN }, null, 2) + '\n', { mode: 0o600 })"
+          clawhub login --token "$CLAWHUB_TOKEN" --no-browser
           clawhub whoami
           clawhub publish ./skills/shieldcortex \
             --slug shieldcortex \
