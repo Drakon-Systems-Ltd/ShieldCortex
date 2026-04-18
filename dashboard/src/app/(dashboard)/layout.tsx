@@ -1,5 +1,6 @@
 import { AppShell } from '@/components/layout/AppShell';
 import { ToastProvider } from '@/components/ds/Toast';
+import { BlockToastBridge } from '@/components/ds/BlockToastBridge';
 
 export default function DashboardSectionLayout({
   children,
@@ -10,6 +11,7 @@ export default function DashboardSectionLayout({
     <AppShell>
       {children}
       <ToastProvider />
+      <BlockToastBridge />
     </AppShell>
   );
 }
