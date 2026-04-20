@@ -128,12 +128,16 @@ jobs:
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
         run: |
+          # Derive version from the tag (v4.10.1 → 4.10.1). Avoid `node -p` with
+          # nested quotes inside a YAML run block — the previous form tripped
+          # 'syntax error near unexpected token `('' and silently failed.
+          VERSION="${GITHUB_REF_NAME#v}"
           clawhub login --token "$CLAWHUB_TOKEN" --no-browser
           clawhub whoami
           clawhub publish ./skills/shieldcortex \
             --slug shieldcortex \
             --name "ShieldCortex" \
-            --version "$(node -p \"require('./package.json').version\")" \
+            --version "$VERSION" \
             --changelog "Auto-sync from npm publish ${GITHUB_REF_NAME}"
 
       - name: Skip ClawHub sync (missing token)
