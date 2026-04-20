@@ -890,6 +890,39 @@ ${bold}DOCS${reset}
     process.exit(result.safe ? 0 : 1);
   }
 
+  // Handle "env" subcommand — Environment Firewall (Phase 1: scan a URL)
+  if (process.argv[2] === 'env') {
+    const sub = process.argv[3];
+    if (sub !== 'scan') {
+      console.error('Usage: shieldcortex env scan <url> [--json | --markdown]');
+      console.error('  Fetches the URL, scores provenance, detects hidden instructions,');
+      console.error('  runs injection patterns against visible + hidden content, and returns a taint label.');
+      process.exit(1);
+    }
+    const urlArg = process.argv[4];
+    if (!urlArg) {
+      console.error('Usage: shieldcortex env scan <url> [--json | --markdown]');
+      process.exit(1);
+    }
+    const wantsJson = process.argv.includes('--json');
+    const wantsMarkdown = process.argv.includes('--markdown');
+
+    const { scanUrl } = await import('./environment/index.js');
+    const { formatEnvScanReport, formatEnvScanMarkdown } = await import('./environment/index.js');
+    const result = await scanUrl(urlArg);
+
+    if (wantsJson) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (wantsMarkdown) {
+      console.log(formatEnvScanMarkdown(result));
+    } else {
+      console.log(formatEnvScanReport(result));
+    }
+
+    const blocking = result.taint.label === 'hostile' ? 2 : result.taint.label === 'suspicious' ? 1 : 0;
+    process.exit(blocking);
+  }
+
   // Handle "scan-skills" subcommand — scan all installed skills/hooks
   if (process.argv[2] === 'scan-skills') {
     const { scanSkill, discoverSkillFiles } = await import('./defence/skill-scanner/index.js');

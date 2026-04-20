@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.0 — 20 April 2026
+
+**Environment Firewall (Phase 1)** — new third defence layer that scores hostile environments before they influence the agent.
+
+- **New CLI**: `shieldcortex env scan <url>` — fetches a URL, scores provenance, detects hidden instructions, runs injection patterns against visible + hidden content, returns a taint label (`trusted` / `untrusted` / `suspicious` / `hostile`) and exit code (0 / 1 / 2)
+- **Provenance scoring** — TLS check, redirect chain, domain allowlist, suspicious TLD detection, Punycode / IP-host / embedded-credential penalties
+- **Hidden instruction detection** — `display:none`, `visibility:hidden`, zero font-size, off-screen positioning, same-colour text, ARIA-hidden, HTML comments, inline scripts, Unicode bidi overrides, zero-width characters, meta refreshes
+- **Taint derivation** — hostile if hidden content contains injection patterns; suspicious if layout-hidden regions are substantial; trusted only for allowlisted TLS domains with no injection hits
+- **Library export**: `import { scanUrl } from 'shieldcortex/environment'`
+- Extends the strategic model: *memory firewall* (what the agent stores) + *Iron Dome* (what the agent does) + *Environment Firewall* (what the agent sees)
+
 ## v4.9.1 — 16 April 2026
 
 **Cloud audit log alignment** — closes silent data loss between npm package and SaaS audit ingest.
