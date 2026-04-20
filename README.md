@@ -31,7 +31,7 @@ shieldcortex quickstart
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Environment Firewall](#-environment-firewall) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -56,7 +56,7 @@ The core workflow is:
 - **Capture** — inspect what the agent tried to store, where it came from, and whether it was manual, auto-extracted, or session-driven
 - **Recall** — inspect what would rank for a query, why it ranked, and what is missing
 - **Review** — suppress, archive, pin, canonicalize, or merge memory before it quietly shapes future output
-- **Protect** — scan memory writes, detect prompt injection and credential leakage, and gate risky behavior with Iron Dome
+- **Protect** — three layers: the 6-layer memory firewall (what the agent *stores*), Iron Dome (what the agent *does*), and the Environment Firewall (what the agent *sees* from the web)
 
 That is the real product:
 
@@ -339,6 +339,42 @@ deletes are no longer advisory-only.
 
 <br>
 
+## 🌐 Environment Firewall
+
+Third defence layer (added in v4.10.0). The memory firewall protects **what the agent stores**. Iron Dome protects **what the agent does**. The Environment Firewall protects **what the agent sees** from the outside world — URLs, pages, and rendered environments before their content becomes authority.
+
+```bash
+shieldcortex env scan https://example.com/docs
+```
+
+Returns a taint label and an exit code you can wire into CI:
+
+| Label | Exit code | Meaning |
+|---|:---:|---|
+| `trusted` | 0 | Allowlisted TLS domain, no injection hits |
+| `untrusted` | 0 | No hostile signals, but not explicitly trusted |
+| `suspicious` | 1 | Layout-hidden content or visible injection patterns found |
+| `hostile` | 2 | Injection pattern found inside hidden content, denylisted domain, or both |
+
+What it checks:
+
+- 🔒 **Provenance score** — TLS, redirect chain, domain allowlist, suspicious TLDs, Punycode homograph, raw-IP hosts, embedded credentials
+- 🫥 **Hidden-instruction detection** — `display:none`, `visibility:hidden`, zero font-size, off-screen positioning, same-colour text, ARIA-hidden, HTML comments, inline scripts, Unicode bidi overrides, zero-width characters, meta refreshes
+- 🎯 **Two-surface injection scan** — visible text and hidden text are scanned separately; a prompt-injection pattern found inside hidden content marks the page hostile regardless of the domain, because humans will never see it
+
+Library usage:
+
+```javascript
+import { scanUrl } from 'shieldcortex/environment';
+
+const result = await scanUrl('https://example.com/page');
+if (result.taint.label === 'hostile') {
+  // refuse to let the agent act on the page
+}
+```
+
+<br>
+
 ## 🌙 Dream Mode — Background Consolidation
 
 Offline memory maintenance that merges near-duplicates, archives stale memories, and detects contradictions — like defragmenting your agent's brain.
@@ -602,6 +638,7 @@ shieldcortex doctor               # Health check your installation
 shieldcortex status               # Database and hook status
 shieldcortex scan "text"          # Scan content for threats
 shieldcortex scan-skills          # Scan installed agent skills for threats
+shieldcortex env scan <url>       # Environment Firewall — score URL provenance + hidden content
 shieldcortex dashboard            # Launch the visual dashboard
 shieldcortex iron-dome activate   # Enable behaviour controls
 shieldcortex iron-dome status     # Check Iron Dome status
