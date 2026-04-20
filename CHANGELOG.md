@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.1 — 20 April 2026
+
+**Upgrade-path fix** — `shieldcortex update` now always reconciles the OpenClaw plugin and skill, even when the main npm package is already on the latest version.
+
+- **Short-circuit removed** — the `if (latest === currentVersion) return` guard was skipping plugin + skill reconciliation once main was current, so v4.9 → v4.10 upgraders stayed stuck on v4.9 of the plugin
+- **Plugin reconciliation always runs** — rm-rf of the extension dir + fresh `openclaw plugins install` on every `shieldcortex update`, not only when main is out of date
+- **Skill reconciliation always runs** — `openclaw skills install shieldcortex --force` every time, regardless of main version state
+- **"Restart gateway" hint only shown when main actually changed** — less confusing when only plugin/skill drifted
+
+No behaviour change for fresh installs. Only matters if you were previously on v4.9.x and already upgraded main to v4.10.0 with a stale plugin/skill.
+
 ## v4.10.0 — 20 April 2026
 
 **Environment Firewall (Phase 1)** — new third defence layer that scores hostile environments before they influence the agent.

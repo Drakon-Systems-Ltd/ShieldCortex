@@ -645,91 +645,96 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'update') {
     const { execSync } = await import('child_process');
     const fs = await import('fs');
+    const { homedir } = await import('os');
+    const home = homedir();
     const pkgPath = new URL('../package.json', import.meta.url);
     const currentVersion = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version ?? 'unknown';
 
     console.log(`Current version: v${currentVersion}`);
     console.log('Checking for updates...');
 
+    // Step 1 — update the npm package if a newer version exists.
+    let mainUpdated = false;
     try {
       const latest = execSync('npm view shieldcortex version', { encoding: 'utf-8', timeout: 10000 }).trim();
 
       if (latest === currentVersion) {
-        console.log(`✓ Already on the latest version (v${latest})`);
-        return;
+        console.log(`✓ Main package already on v${latest}`);
+      } else {
+        console.log(`New version available: v${latest}`);
+        console.log('Updating npm package...');
+        execSync('npm install -g shieldcortex@latest', { stdio: 'inherit', timeout: 120000 });
+        console.log(`✓ Updated to v${latest}`);
+        mainUpdated = true;
       }
-
-      console.log(`New version available: v${latest}`);
-      console.log('Updating npm package...');
-      execSync('npm install -g shieldcortex@latest', { stdio: 'inherit', timeout: 120000 });
-      console.log(`✓ Updated to v${latest}`);
-
-      // Update OpenClaw plugin if installed
-      try {
-        const { homedir } = await import('os');
-        const home = homedir();
-        const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
-        if (fs.existsSync(extDir)) {
-          console.log('Updating OpenClaw plugin...');
-          fs.rmSync(extDir, { recursive: true, force: true });
-          try {
-            execSync('openclaw plugins install @drakon-systems/shieldcortex-realtime@latest', {
-              stdio: 'inherit',
-              timeout: 30000,
-              env: { ...process.env, HOME: home },
-            });
-            console.log('✓ OpenClaw plugin updated');
-          } catch {
-            console.warn('⚠ OpenClaw plugin reinstall failed — run manually:');
-            console.warn('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
-          }
-        }
-      } catch {
-        // OpenClaw not installed — skip silently
-      }
-
-      // Update OpenClaw skill if installed
-      try {
-        const { homedir } = await import('os');
-        const home = homedir();
-        const skillDirs = [
-          path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
-          path.join(home, '.openclaw', 'skills', 'shieldcortex'),
-          path.join(home, 'clawd', 'skills', 'shieldcortex'),
-          path.join(home, 'friday', 'skills', 'shieldcortex'),
-        ];
-        const existingSkill = skillDirs.find(d => fs.existsSync(d));
-        if (existingSkill) {
-          console.log('Updating OpenClaw skill...');
-          try {
-            execSync('openclaw skills install shieldcortex --force', {
-              stdio: 'inherit',
-              timeout: 30000,
-              env: { ...process.env, HOME: home },
-            });
-            console.log('✓ OpenClaw skill updated');
-          } catch {
-            console.warn('⚠ OpenClaw skill update failed — run manually:');
-            console.warn('  openclaw skills install shieldcortex --force');
-          }
-        }
-      } catch {
-        // Skill update is best-effort
-      }
-
-      // Migrate hooks if needed
-      try {
-        const { setupHooks } = await import('./setup/settings-hooks.js');
-        setupHooks();
-      } catch {
-        // Hook migration is best-effort
-      }
-
-      console.log('Restart Claude Code / OpenClaw gateway to use the new version.');
     } catch (error) {
-      console.error(`Update failed: ${(error as Error).message}`);
+      console.error(`npm update failed: ${(error as Error).message}`);
       console.error('Try manually: npm install -g shieldcortex@latest');
-      process.exit(1);
+      // Continue — plugin + skill may still have their own updates available.
+    }
+
+    // Step 2 — always reconcile the OpenClaw plugin. Plugin and skill have their
+    // own release cadences; skipping them when main is current caused v4.9 → v4.10
+    // users to be stuck on v4.9 of the plugin until they manually removed the
+    // extension dir and re-ran `openclaw plugins install`.
+    try {
+      const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
+      if (fs.existsSync(extDir)) {
+        console.log('Reconciling OpenClaw plugin...');
+        fs.rmSync(extDir, { recursive: true, force: true });
+        try {
+          execSync('openclaw plugins install @drakon-systems/shieldcortex-realtime@latest', {
+            stdio: 'inherit',
+            timeout: 60000,
+            env: { ...process.env, HOME: home },
+          });
+          console.log('✓ OpenClaw plugin reconciled');
+        } catch {
+          console.warn('⚠ OpenClaw plugin reinstall failed — run manually:');
+          console.warn('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
+        }
+      }
+    } catch {
+      // OpenClaw not installed — skip silently
+    }
+
+    // Step 3 — always reconcile the OpenClaw / ClawHub skill.
+    try {
+      const skillDirs = [
+        path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
+        path.join(home, '.openclaw', 'skills', 'shieldcortex'),
+        path.join(home, 'clawd', 'skills', 'shieldcortex'),
+        path.join(home, 'friday', 'skills', 'shieldcortex'),
+      ];
+      const existingSkill = skillDirs.find(d => fs.existsSync(d));
+      if (existingSkill) {
+        console.log('Reconciling OpenClaw skill...');
+        try {
+          execSync('openclaw skills install shieldcortex --force', {
+            stdio: 'inherit',
+            timeout: 60000,
+            env: { ...process.env, HOME: home },
+          });
+          console.log('✓ OpenClaw skill reconciled');
+        } catch {
+          console.warn('⚠ OpenClaw skill update failed — run manually:');
+          console.warn('  openclaw skills install shieldcortex --force');
+        }
+      }
+    } catch {
+      // Skill update is best-effort
+    }
+
+    // Step 4 — migrate Claude Code hooks if needed.
+    try {
+      const { setupHooks } = await import('./setup/settings-hooks.js');
+      setupHooks();
+    } catch {
+      // Hook migration is best-effort
+    }
+
+    if (mainUpdated) {
+      console.log('Restart Claude Code / OpenClaw gateway to use the new version.');
     }
     return;
   }
