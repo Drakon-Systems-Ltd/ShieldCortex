@@ -106,12 +106,25 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Create the GitHub Release immediately after npm publish so a later
+      # ClawHub auth failure can't skip it. (Hit this on v4.10.0 — CLAWHUB_TOKEN
+      # was stale, Release step was skipped, had to be created manually.)
+      - name: Create GitHub Release
+        if: steps.version_check.outputs.already_published == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install ClawHub CLI
         if: steps.version_check.outputs.already_published == 'false' && env.HAS_CLAWHUB_TOKEN == 'true'
         run: npm install -g clawhub
 
       - name: Publish ShieldCortex skill to ClawHub
         if: steps.version_check.outputs.already_published == 'false' && env.HAS_CLAWHUB_TOKEN == 'true'
+        continue-on-error: true
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
         run: |
@@ -130,12 +143,3 @@ jobs:
       - name: Skip publish (already exists)
         if: steps.version_check.outputs.already_published == 'true'
         run: echo "⚠️ Skipping publish - version already exists on npm"
-
-      - name: Create GitHub Release
-        if: steps.version_check.outputs.already_published == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          tag_name: ${{ github.ref_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
