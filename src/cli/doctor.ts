@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { createRequire } from 'module';
+import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -241,7 +242,10 @@ async function checkHooks(): Promise<CheckResult> {
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     const hooks = settings.hooks || {};
 
-    const hookNames = ['SessionStart', 'PreCompact', 'SessionEnd'];
+    // Single source of truth: whatever `shieldcortex install` actually installs.
+    // Previously hardcoded a different list which produced false "missing" warnings
+    // after SessionEnd was removed from defaults (was crashing OpenClaw agents). [#23]
+    const hookNames = [...REQUIRED_HOOK_NAMES];
     let installed = 0;
     const missing: string[] = [];
 

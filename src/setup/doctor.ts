@@ -7,6 +7,7 @@ import path from 'path';
 import os from 'os';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
+import { REQUIRED_HOOK_NAMES } from './settings-hooks.js';
 
 const require = createRequire(import.meta.url);
 
@@ -100,7 +101,9 @@ function checkHooks(): void {
   }
 
   const hooks = settings?.hooks || {};
-  const expected = ['PreCompact', 'SessionStart', 'SessionEnd'];
+  // Canonical source of truth lives in settings-hooks.ts alongside the install logic,
+  // so doctor and install stay in lockstep. [#23]
+  const expected = REQUIRED_HOOK_NAMES;
 
   for (const name of expected) {
     const entries = hooks[name];

@@ -28,6 +28,13 @@ const CORTEX_HOOKS: Record<string, HookEntry> = {
   },
 };
 
+/**
+ * Canonical list of Claude Code hook names that ShieldCortex installs.
+ * Source of truth for `shieldcortex doctor` so doctor and install agree.
+ * Keep this alongside CORTEX_HOOKS — drift between the two is what caused #23.
+ */
+export const REQUIRED_HOOK_NAMES: readonly string[] = Object.freeze(Object.keys(CORTEX_HOOKS));
+
 const STOP_HOOK: HookEntry = {
   hooks: [{ type: 'command', command: 'shieldcortex hook stop', timeout: 10 }],
 };
