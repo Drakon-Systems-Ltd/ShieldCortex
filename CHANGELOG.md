@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.3 — 21 April 2026
+
+**OpenClaw status detection fix** — resolves [#20](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/20). `shieldcortex openclaw status` now reports the plugin as installed after a successful `openclaw plugins install @drakon-systems/shieldcortex-realtime`, instead of claiming "not installed".
+
+- **Canonical marker switched from `index.js` to `openclaw.plugin.json`** — the published plugin tarball ships raw TypeScript (`index.ts`, OpenClaw transpiles at runtime). The old disk check only looked for `index.js`, so it returned false immediately after a successful native install and status reported "not installed" despite config + files being present
+- **Disk state and config state now surfaced separately** — status output distinguishes "installed on disk but not in openclaw.json" from "referenced in config but no files on disk", so drift is visible instead of flattened to "not installed"
+- **Trust check also accepts `index.ts`** in the `plugins.allow` entry path, for the same reason
+- **Entry file name (`index.js` vs `index.ts`) printed** in status output so operators can see which form the install took
+
 ## v4.10.2 — 21 April 2026
 
 **Library API fix** — `addMemory()` and other programmatic insert paths now work against fresh installs. Resolves [#19](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/19).

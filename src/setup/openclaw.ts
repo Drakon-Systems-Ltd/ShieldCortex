@@ -656,29 +656,62 @@ function uninstallPlugin(): boolean {
 
 /**
  * Check whether the plugin is installed in the extensions directory.
+ *
+ * Uses `openclaw.plugin.json` as the canonical marker — every OpenClaw plugin
+ * ships one, whereas the entry file may be `index.ts` (raw TypeScript,
+ * transpiled by OpenClaw at runtime — current shape of the published tarball)
+ * OR `index.js` (locally-built / older releases). Checking only for `index.js`
+ * caused `status` to report "not installed" immediately after a successful
+ * `openclaw plugins install`.
  */
-function pluginStatus(): { installed: boolean; path?: string } {
+function pluginStatus(): { installed: boolean; path?: string; entry?: 'index.ts' | 'index.js' } {
   const extensionsDir = findExtensionsDir();
   if (!extensionsDir) return { installed: false };
 
   const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
-  const indexPath = path.join(destDir, 'index.js');
-  if (fs.existsSync(indexPath)) {
-    return { installed: true, path: destDir };
-  }
+  const manifestPath = path.join(destDir, 'openclaw.plugin.json');
+  if (!fs.existsSync(manifestPath)) return { installed: false };
+
+  const jsEntry = path.join(destDir, 'index.js');
+  const tsEntry = path.join(destDir, 'index.ts');
+  if (fs.existsSync(jsEntry)) return { installed: true, path: destDir, entry: 'index.js' };
+  if (fs.existsSync(tsEntry)) return { installed: true, path: destDir, entry: 'index.ts' };
+  // Manifest present but no recognised entry — treat as broken install, not hidden.
   return { installed: false };
+}
+
+/**
+ * Check whether the plugin is registered in OpenClaw's config, independently
+ * of what's on disk. A discrepancy between disk and config surfaces clearly
+ * in `shieldcortex openclaw status`.
+ */
+function pluginConfigStatus(): { inAllow: boolean; inInstalls: boolean; inEntries: boolean } {
+  const configPath = openClawConfigPath();
+  if (!fs.existsSync(configPath)) return { inAllow: false, inInstalls: false, inEntries: false };
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const plugins = config.plugins ?? {};
+    const allow = Array.isArray(plugins.allow) ? plugins.allow : [];
+    const inAllow = allow.some((e: unknown) => typeof e === 'string' && (e === PLUGIN_DIR_NAME || e.endsWith(`/${PLUGIN_DIR_NAME}`) || e.endsWith(`/${PLUGIN_DIR_NAME}/index.js`) || e.endsWith(`/${PLUGIN_DIR_NAME}/index.ts`)));
+    const inInstalls = typeof plugins.installs === 'object' && plugins.installs !== null && PLUGIN_DIR_NAME in plugins.installs;
+    const inEntries = typeof plugins.entries === 'object' && plugins.entries !== null && PLUGIN_DIR_NAME in plugins.entries;
+    return { inAllow, inInstalls, inEntries };
+  } catch {
+    return { inAllow: false, inInstalls: false, inEntries: false };
+  }
 }
 
 function localPluginTrustStatus(pluginPath: string | undefined): 'trusted' | 'untrusted' | 'unknown' {
   if (!pluginPath) return 'unknown';
-  const indexPath = path.join(pluginPath, 'index.js');
+  const jsEntry = path.join(pluginPath, 'index.js');
+  const tsEntry = path.join(pluginPath, 'index.ts');
   const configPath = openClawConfigPath();
   if (!fs.existsSync(configPath)) return 'unknown';
 
   try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     const allow = config.plugins?.allow;
-    if (Array.isArray(allow) && (allow.includes(PLUGIN_DIR_NAME) || allow.includes(indexPath))) {
+    if (Array.isArray(allow) && (allow.includes(PLUGIN_DIR_NAME) || allow.includes(jsEntry) || allow.includes(tsEntry))) {
       return 'trusted';
     }
     return 'untrusted';
@@ -887,8 +920,22 @@ export async function openClawHookStatus(): Promise<void> {
 
   console.log('');
   const plugin = pluginStatus();
-  if (!plugin.installed) {
+  const configState = pluginConfigStatus();
+  const anyConfig = configState.inAllow || configState.inInstalls || configState.inEntries;
+
+  if (!plugin.installed && !anyConfig) {
     console.log('  Real-time plugin: not installed');
+    return;
+  }
+
+  if (!plugin.installed && anyConfig) {
+    // Config says yes, disk says no — the drift case that caused #20.
+    const refs = [
+      configState.inAllow ? 'plugins.allow' : null,
+      configState.inInstalls ? 'plugins.installs' : null,
+      configState.inEntries ? 'plugins.entries' : null,
+    ].filter(Boolean).join(' + ');
+    console.log(`  Real-time plugin: config references (${refs}) but no files on disk — run \`openclaw plugins install @drakon-systems/shieldcortex-realtime\` to reinstall`);
     return;
   }
 
@@ -899,7 +946,13 @@ export async function openClawHookStatus(): Promise<void> {
       : trust === 'untrusted'
         ? 'local install not yet trusted'
         : 'native or unknown trust source';
-  console.log(`  Real-time plugin: installed (${plugin.path}) — ${trustSuffix}`);
+  const entrySuffix = plugin.entry ? ` [${plugin.entry}]` : '';
+  console.log(`  Real-time plugin: installed (${plugin.path})${entrySuffix} — ${trustSuffix}`);
+
+  // Surface any config/disk drift even when installed.
+  if (!configState.inInstalls && !configState.inEntries && !configState.inAllow) {
+    console.log('    warning: on disk but missing from openclaw.json — OpenClaw may not load it');
+  }
 }
 
 export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {

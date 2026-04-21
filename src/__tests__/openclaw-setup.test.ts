@@ -133,4 +133,45 @@ describe('OpenClaw setup', () => {
 
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('trusted via plugins.allow'));
   });
+
+  it('reports plugin as installed when only index.ts is present (native OpenClaw install)', async () => {
+    const { openClawHookStatus } = await loadOpenClawModule();
+    const extDir = path.join(tempHome, '.openclaw', 'extensions', 'shieldcortex-realtime');
+    fs.mkdirSync(extDir, { recursive: true });
+    // Simulate what `openclaw plugins install @drakon-systems/shieldcortex-realtime` leaves behind:
+    // the published tarball ships index.ts (no index.js), plus the canonical manifest.
+    fs.writeFileSync(path.join(extDir, 'index.ts'), 'export default {};\n', 'utf-8');
+    fs.writeFileSync(path.join(extDir, 'openclaw.plugin.json'), '{"id":"shieldcortex-realtime","version":"4.10.3"}\n', 'utf-8');
+    fs.writeFileSync(openClawConfigPath(), JSON.stringify({
+      plugins: {
+        allow: ['shieldcortex-realtime'],
+        installs: { 'shieldcortex-realtime': { source: 'npm', version: '4.10.3' } },
+        entries: { 'shieldcortex-realtime': { enabled: true } },
+      },
+    }, null, 2), 'utf-8');
+
+    await openClawHookStatus();
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Real-time plugin: installed'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[index.ts]'));
+  });
+
+  it('reports config/disk drift when config references plugin but files are missing', async () => {
+    const { openClawHookStatus } = await loadOpenClawModule();
+    // Config says plugin is installed, but extensions dir is empty — the bug case from issue #20
+    // where `openclaw plugins install` succeeded and wrote config, but a later
+    // state-change removed the files without cleaning config.
+    fs.writeFileSync(openClawConfigPath(), JSON.stringify({
+      plugins: {
+        allow: ['shieldcortex-realtime'],
+        installs: { 'shieldcortex-realtime': { source: 'npm', version: '4.10.3' } },
+        entries: { 'shieldcortex-realtime': { enabled: true } },
+      },
+    }, null, 2), 'utf-8');
+
+    await openClawHookStatus();
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('config references'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('no files on disk'));
+  });
 });
