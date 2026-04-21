@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.4 — 21 April 2026
+
+**Bundled bug fixes + security** — cleans up the remaining issues from the 2026-04-20 shipping audit.
+
+- **All 12 npm audit vulnerabilities cleared** — `npm audit fix` resolved protobufjs (CRITICAL, arbitrary code execution via @huggingface/transformers), tar (CRITICAL, path traversal), picomatch + path-to-regexp (HIGH, ReDoS), qs (moderate, DoS). No breaking changes required. Resolves [#25](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/25).
+- **Fresh-clone `npm run build` no longer fails with `next: not found`** — added `bootstrap:dashboard` gate that runs `npm ci` inside `dashboard/` if `node_modules` is missing. Idempotent and sub-second on subsequent builds. Resolves [#22](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/22).
+- **`doctor` and `install` now share one canonical hook list** — both previously hardcoded different lists including SessionEnd (which was removed from defaults because it crashes OpenClaw agents). Now both import `REQUIRED_HOOK_NAMES` from `settings-hooks.ts`. Includes a regression-guard test. Resolves [#23](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/23).
+- **Permission-denied hook skip message now says which framework is affected** — instead of a bare "Skipped /home/ubuntu/.claude/hooks/cortex-memory (permission denied)", the message now explains whether it's the Claude Code path (informational, OpenClaw unaffected) or the OpenClaw path (blocking — fix immediately) with the exact chown command. Resolves [#26](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/26).
+
 ## v4.10.3 — 21 April 2026
 
 **OpenClaw status detection fix** — resolves [#20](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/20). `shieldcortex openclaw status` now reports the plugin as installed after a successful `openclaw plugins install @drakon-systems/shieldcortex-realtime`, instead of claiming "not installed".
