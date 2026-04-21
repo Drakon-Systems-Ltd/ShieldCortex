@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.2 — 21 April 2026
+
+**Library API fix** — `addMemory()` and other programmatic insert paths now work against fresh installs. Resolves [#19](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/19).
+
+- **`schema.sql` is now copied to `dist/database/`** during build — was being silently dropped from the published npm tarball, forcing fresh installs onto the inline-fallback schema
+- **Inline-fallback schema synced with `schema.sql`** — the fallback was missing seven columns (`status`, `pinned`, `reviewed_at`, `reviewed_by`, `source_kind`, `capture_method`, `cloud_excluded`), causing `addMemory()` to fail with `table memories has no column named status` on any fresh database created after the inline-fallback path was hit
+- Now there are two layers: the file-based `schema.sql` is the canonical source, and the inline fallback is kept in sync as defence-in-depth for bundlers that strip non-JS assets
+
 ## v4.10.1 — 20 April 2026
 
 **Upgrade-path fix** — `shieldcortex update` now always reconciles the OpenClaw plugin and skill, even when the main npm package is already on the latest version.

@@ -1228,6 +1228,13 @@ function getInlineSchema(): string {
       trust_score REAL DEFAULT 1.0,
       sensitivity_level TEXT DEFAULT 'INTERNAL',
       source TEXT DEFAULT 'user:direct',
+      status TEXT DEFAULT 'active' CHECK(status IN ('active', 'archived', 'suppressed', 'canonical')),
+      pinned INTEGER DEFAULT 0,
+      reviewed_at TIMESTAMP,
+      reviewed_by TEXT,
+      source_kind TEXT DEFAULT 'user',
+      capture_method TEXT DEFAULT 'manual',
+      cloud_excluded INTEGER DEFAULT 0,
       graph_extraction_version INTEGER DEFAULT 0,
       memory_purpose TEXT DEFAULT 'project',
       memory_scope TEXT DEFAULT 'private'

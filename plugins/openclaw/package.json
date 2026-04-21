@@ -1,6 +1,6 @@
 {
   "name": "@drakon-systems/shieldcortex-realtime",
-  "version": "4.10.1",
+  "version": "4.10.2",
   "description": "OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory extraction.",
   "type": "module",
   "main": "index.ts",
@@ -24,7 +24,7 @@
     "pack:verify": "npm pack --dry-run"
   },
   "peerDependencies": {
-    "shieldcortex": "^4.10.1"
+    "shieldcortex": "^4.10.2"
   },
   "engines": {
     "node": ">=18.0.0"
