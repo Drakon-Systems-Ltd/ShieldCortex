@@ -794,8 +794,23 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
         installed++;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
+        const framework = destDir.includes(`${path.sep}.claude${path.sep}`)
+          ? 'Claude Code'
+          : destDir.includes(`${path.sep}.openclaw${path.sep}`)
+            ? 'OpenClaw'
+            : null;
         if (code === 'EACCES' || code === 'EPERM') {
-          console.warn(`  Skipped ${destDir} (permission denied)`);
+          if (framework === 'Claude Code') {
+            console.warn(`  Skipped ${framework} hook install at ${destDir} (permission denied).`);
+            console.warn('    This only affects Claude Code memory-sync. OpenClaw integration is unaffected.');
+            console.warn(`    To fix: sudo chown -R "$USER":"$USER" ~/.claude`);
+          } else if (framework === 'OpenClaw') {
+            console.warn(`  Skipped ${framework} hook install at ${destDir} (permission denied).`);
+            console.warn('    OpenClaw memory capture will not run until this is fixed.');
+            console.warn(`    To fix: sudo chown -R "$USER":"$USER" ~/.openclaw`);
+          } else {
+            console.warn(`  Skipped ${destDir} (permission denied)`);
+          }
         } else {
           // Never throw — warn gracefully
           console.warn(`  Warning: Could not install hook to ${destDir}: ${(err as Error).message}`);
