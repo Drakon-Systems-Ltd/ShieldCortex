@@ -736,6 +736,41 @@ ${bold}DOCS${reset}
     if (mainUpdated) {
       console.log('Restart Claude Code / OpenClaw gateway to use the new version.');
     }
+
+    // One-time notice for users crossing the v4.11.0 default-changes boundary.
+    // `currentVersion` was captured pre-update, so any main-updated run that
+    // came from <4.11.0 has the migration message shown once.
+    try {
+      const crossed4_11 = mainUpdated && /^\d+\.\d+\.\d+/.test(currentVersion) && (() => {
+        const [maj, min] = currentVersion.split('.').map(Number);
+        return maj < 4 || (maj === 4 && min < 11);
+      })();
+      if (crossed4_11) {
+        console.log('');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(' ShieldCortex v4.11.0 — default behaviour changes');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('');
+        console.log(' • Proactive recall on prompt submit is now OFF by default.');
+        console.log(' • Tool-call interceptor no longer blocks critical/high');
+        console.log('   severity writes with an approval prompt (defence still');
+        console.log('   denies on failurePolicy).');
+        console.log(' • SessionStart preamble instruction block is now OFF.');
+        console.log(' • SessionStart memory cap reduced 15 → 5.');
+        console.log(' • PreCompact thresholds raised; auto-memories cap 5 → 2.');
+        console.log('');
+        console.log(' Why: fleet evidence showed per-turn memory-injection tax');
+        console.log(' was net-negative on fast agent loops. The defence pipeline');
+        console.log(' stays on; only the memory-injection side is now opt-in.');
+        console.log('');
+        console.log(' To restore pre-v4.11.0 behaviour:');
+        console.log('   shieldcortex config --restore-4.10-defaults');
+        console.log('');
+        console.log(' See CHANGELOG: https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      }
+    } catch { /* notice is best-effort */ }
+
     return;
   }
 

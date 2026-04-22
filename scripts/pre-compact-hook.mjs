@@ -40,19 +40,21 @@ const MAX_LONG_TERM_MEMORIES = 1000;
 // Lowered from 0.45 to capture more content
 const BASE_THRESHOLD = 0.35;
 
-// Category-specific extraction thresholds (lower = easier to extract)
-// Lowered across the board to be more permissive
+// Category-specific extraction thresholds (lower = easier to extract).
+// Raised +0.1 across the board in v4.11.0 after fleet evidence showed the
+// previous permissive thresholds produced ~5% signal and flooded recall with
+// noise. Prefer missing a marginal memory to saving a noisy one.
 const CATEGORY_EXTRACTION_THRESHOLDS = {
-  architecture: 0.28,  // Very valuable - extract readily
-  error: 0.30,         // Valuable for debugging
-  context: 0.32,       // Important decisions
-  learning: 0.32,      // Useful learnings
-  pattern: 0.35,       // Code patterns
-  preference: 0.38,    // User preferences
-  note: 0.42,          // General notes
-  todo: 0.40,          // Moderate
-  relationship: 0.35,
-  custom: 0.35,
+  architecture: 0.38,
+  error: 0.40,
+  context: 0.42,
+  learning: 0.42,
+  pattern: 0.45,
+  preference: 0.48,
+  note: 0.52,
+  todo: 0.50,
+  relationship: 0.45,
+  custom: 0.45,
 };
 
 // ==================== PROJECT DETECTION (Mirrors src/context/project-context.ts) ====================
@@ -88,8 +90,9 @@ function extractProjectFromPath(path) {
   return null;
 }
 
-// Maximum memories to auto-create per compaction
-const MAX_AUTO_MEMORIES = 5;
+// Maximum memories to auto-create per compaction.
+// Dropped 5 → 2 in v4.11.0 for the same reason thresholds were raised.
+const MAX_AUTO_MEMORIES = 2;
 
 // ==================== DYNAMIC THRESHOLD CALCULATION ====================
 
@@ -738,33 +741,14 @@ function extractConversationText(hookData) {
 
 /**
  * Output reminder message to stdout.
- * Context retrieval is handled by the SessionStart compact hook, so we only
- * need to report auto-extraction results and proactive memory instructions.
+ * v4.11.0: preamble instructions removed. The memories themselves are the
+ * signal; repeating "use remember proactively" every compaction just eats
+ * context. The one-line status note is kept for human visibility when the
+ * hook runs interactively.
  */
 function outputReminder(autoExtractedCount, dynamicThreshold) {
   if (autoExtractedCount > 0) {
-    console.log(`\n🧠 AUTO-MEMORY: ${autoExtractedCount} important items were automatically saved before compaction.`);
-  } else {
-    const thresholdNote = dynamicThreshold > 0.5
-      ? ' (Memory near capacity - being selective)'
-      : '';
-    console.log(`\n🧠 PRE-COMPACT: No auto-extractable content found with high enough salience${thresholdNote}.
-If there's something important, use 'remember' to save it explicitly.`);
+    console.log(`\n🧠 AUTO-MEMORY: ${autoExtractedCount} item(s) saved before compaction.`);
   }
-
-  // Proactive memory instructions
-  console.log(`
-## IMPORTANT: Proactive Memory Use
-
-You have access to a persistent memory system. Use it proactively:
-
-**ALWAYS use \`remember\` immediately when:**
-- Making architecture/design decisions
-- Fixing bugs (capture the root cause and solution)
-- Learning something new about the codebase
-- User states a preference
-- Completing significant features
-
-**Don't wait** - call \`remember\` right after the event, not at the end of the session.
-`);
+  // No stdout when nothing was extracted — silence is cheaper than chatter.
 }

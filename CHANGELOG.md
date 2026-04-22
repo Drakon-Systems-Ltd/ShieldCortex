@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.11.0 — 22 April 2026
+
+> **Default behaviour changes — please read.** This is the first release in the 4.10.x line that flips user-visible defaults. Every previous behaviour is still available; it's just opt-in now. To restore the pre-v4.11.0 defaults in one command: `shieldcortex config --restore-4.10-defaults`.
+
+**Why this exists.** Fleet evidence showed the per-turn memory-injection side of the product was net-negative on fast agent loops — three production agents (Tars, Friday, Jarvis) ran measurably better with ShieldCortex removed. The defence pipeline (scan, X-Ray, Iron Dome, Environment Firewall, credential leak detection, interceptor) stays on: it earns its cost. The memory-injection-into-prompt side (prompt recall, SessionStart preamble, PreCompact auto-extract at old thresholds) pays per-turn tax that only breaks even on deep interactive sessions, not agent workloads. See `docs/audits/2026-04-22-hooks-and-defaults-audit.md` for the full analysis.
+
+### Default changes
+
+- **Proactive memory recall on prompt submit is now OFF** — was ON. Opt in with `shieldcortex config --proactive-recall true`. Used to add 200–500ms of synchronous latency and 100–400 tokens of recall context to every user message, which on a 100-turn fleet loop was 20–50s of cumulative drag plus 20–80k tokens of mostly noisy context. Applies to the Claude Code `UserPromptSubmit` hook and the OpenClaw `cortex-memory` `message` event.
+- **Tool-call interceptor no longer prompts for approval on critical/high severity writes** — `severityActions.critical` default changed from `require_approval` to `log`; `high` changed from `require_approval` to `warn`. The defence pipeline still runs, and `failurePolicy` still denies on critical/high failure, so the *defensive block* is preserved. What goes away is the 1–5 second sync pause and human approval prompt on every legitimate memory write. Opt back in with `shieldcortex config --restore-4.10-defaults` or explicit plugin config.
+- **SessionStart preamble is now OFF by default** — was `minimal`. The preamble was a prescriptive "ALWAYS use `remember`…" instruction block that repeated every fresh session. The memory list itself is the signal; the drumbeat is noise. Opt in with `"sessionStart": { "preamble": "minimal" }` or `"full"` in `~/.shieldcortex/config.json`.
+- **SessionStart memory cap reduced 15 → 5** — each memory is 100–400 tokens, so 15 of them was 500–2000 tokens of boot-time context pollution. Five high-salience items is enough to orient a returning session without eating the window. (This is a constant; not reversible via config. Pin `shieldcortex@4.10.7` if you need the old cap.)
+- **PreCompact extraction thresholds raised +0.1 across the board** — architecture 0.28 → 0.38, error 0.30 → 0.40, and so on. Previous thresholds produced ~5% signal and flooded the memory store with noise, which then hurt recall precision downstream. Prefer missing a marginal memory to saving a noisy one.
+- **PreCompact `MAX_AUTO_MEMORIES` dropped 5 → 2** — same reason.
+- **PreCompact stdout reminder text removed** — the 200-token "## IMPORTANT: Proactive Memory Use…" block that printed after every compaction was pure context spam. The memories themselves remain the signal.
+
+### New
+
+- **`shieldcortex config --restore-4.10-defaults`** — one-command migration helper. Writes explicit overrides for every flipped default to `~/.shieldcortex/config.json`. The MAX_CONTEXT_MEMORIES constant change is not reversible via config and is called out at the end of the helper's output.
+- **One-time notice on `shieldcortex update`** — when a user updates from <4.11.0, the CLI prints a summary of the default changes and the restore command.
+- **Regression-guard test** in `src/defence/__tests__/interceptor.test.ts` — locks in the new `DEFAULT_CONFIG.severityActions` map so the flip can't silently regress.
+
+### What stays on
+
+- Defence pipeline at every `runDefencePipeline()` call site (scan, firewall, at memory write time).
+- Iron Dome behavioural action gates.
+- Environment Firewall (`env scan`).
+- X-Ray supply-chain scanner (`xray`).
+- Credential leak detection (25+ patterns, 11 providers).
+- OpenClaw `llm_input` async fire-and-forget scan — ~50ms, doesn't block the model, clear defensive value.
+- Tool-call interceptor itself — just with the approval gate relaxed.
+- SessionStart hook for fresh `source=startup` only (it already stopped re-pasting on `resume`/`compact`/`clear` in v4.10.5).
+- PreCompact extraction — just with tightened thresholds.
+- CLAUDE.md block as rewritten in v4.10.7.
+
+### Breaking?
+
+Technically yes. Users who explicitly relied on `proactiveRecall: true` behaviour, the require-approval prompts on memory writes, or the preamble block will see different behaviour. The restore helper is a one-command undo. No code moved; only defaults flipped.
+
 ## v4.10.7 — 22 April 2026
 
 **Closes the #27 loose end** — the static ghost-tool block injected into `~/.claude/CLAUDE.md` at install time has been rewritten. Previously it told the model to unconditionally call `remember` / `recall` / `get_context` / `forget` — tools that are not exposed in OpenClaw-only installs where the ShieldCortex MCP server isn't wired. The model would follow the instruction, the call would fail silently, and the user would see apparent amnesia.

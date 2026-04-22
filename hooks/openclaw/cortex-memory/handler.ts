@@ -26,7 +26,7 @@ async function isOpenClawAutoMemoryEnabled() {
 
 async function isProactiveRecallEnabled() {
   const config = await loadShieldConfig();
-  return config?.proactiveRecall !== false; // Default: true
+  return config?.proactiveRecall === true; // Default: false since v4.11.0 (opt-in)
 }
 
 // ==================== NOVELTY / DEDUPE GATE ====================

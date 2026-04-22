@@ -153,7 +153,7 @@ process.stdin.on('end', () => {
   try {
     const config = loadConfig();
 
-    if (config.proactiveRecall === false) {
+    if (config.proactiveRecall !== true) {
       process.exit(0);
     }
 

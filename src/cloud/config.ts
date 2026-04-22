@@ -424,11 +424,13 @@ export function setOpenClawAutoMemory(enabled: boolean): void {
 
 /**
  * Returns whether proactive memory recall is enabled on prompt submit.
- * Default is true (on by default, opt-out with --proactive-recall false).
+ * Default is false since v4.11.0 — opt-in with --proactive-recall true.
+ * Per-turn recall was found to be net-negative for fast agent loops; kept
+ * available for interactive sessions that want it.
  */
 export function isProactiveRecallEnabled(): boolean {
   const raw = readRawConfig();
-  return raw.proactiveRecall !== false;
+  return raw.proactiveRecall === true;
 }
 
 /**
@@ -437,6 +439,40 @@ export function isProactiveRecallEnabled(): boolean {
 export function setProactiveRecall(enabled: boolean): void {
   const raw = readRawConfig();
   raw.proactiveRecall = enabled;
+  writeRawConfig(raw);
+}
+
+/**
+ * Restores the v4.10.x defaults for users who preferred the old behaviour.
+ * Writes explicit overrides for every default the v4.11.0 release flipped,
+ * so the flip is a one-command undo.
+ */
+export function restore410Defaults(): void {
+  const raw = readRawConfig();
+  raw.proactiveRecall = true;
+  const existingInterceptor = (raw.interceptor && typeof raw.interceptor === 'object')
+    ? raw.interceptor as Record<string, unknown>
+    : {};
+  const existingSeverity = (existingInterceptor.severityActions && typeof existingInterceptor.severityActions === 'object')
+    ? existingInterceptor.severityActions as Record<string, string>
+    : {};
+  raw.interceptor = {
+    ...existingInterceptor,
+    severityActions: {
+      ...existingSeverity,
+      low: 'log',
+      medium: 'warn',
+      high: 'require_approval',
+      critical: 'require_approval',
+    },
+  };
+  const existingSessionStart = (raw.sessionStart && typeof raw.sessionStart === 'object')
+    ? raw.sessionStart as Record<string, unknown>
+    : {};
+  raw.sessionStart = {
+    ...existingSessionStart,
+    preamble: 'minimal',
+  };
   writeRawConfig(raw);
 }
 

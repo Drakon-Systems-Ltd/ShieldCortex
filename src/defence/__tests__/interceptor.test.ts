@@ -174,6 +174,26 @@ describe('Interceptor', () => {
   });
 
   describe('createInterceptor', () => {
+    // Mirrors the pre-v4.11.0 defaults. Tests that exercise the
+    // require_approval path pass this instead of DEFAULT_CONFIG (which in
+    // v4.11.0 downgrades high/critical to warn/log). The behaviour under
+    // test is still part of the product — it's just now opt-in.
+    const STRICT_CONFIG = {
+      enabled: true,
+      severityActions: {
+        low: 'log' as const,
+        medium: 'warn' as const,
+        high: 'require_approval' as const,
+        critical: 'require_approval' as const,
+      },
+      failurePolicy: {
+        low: 'allow' as const,
+        medium: 'allow' as const,
+        high: 'deny' as const,
+        critical: 'deny' as const,
+      },
+    };
+
     function mockPipelineResult(overrides: {
       allowed?: boolean;
       firewallResult?: 'ALLOW' | 'BLOCK' | 'QUARANTINE';
@@ -221,9 +241,9 @@ describe('Interceptor', () => {
     });
 
     it('should warn on medium-severity results', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
       const warnings: string[] = [];
-      const config = { ...DEFAULT_CONFIG, logger: { info: () => {}, warn: (m: string) => warnings.push(m) } };
+      const config = { ...STRICT_CONFIG, logger: { info: () => {}, warn: (m: string) => warnings.push(m) } };
       const interceptor = createInterceptor(config, () => mockPipelineResult({ anomalyScore: 0.5 }));
       const context = {
         toolName: 'remember',
@@ -236,9 +256,9 @@ describe('Interceptor', () => {
     });
 
     it('should call requireApproval on high-severity and allow on approve', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
       let approvalCalled = false;
-      const interceptor = createInterceptor(DEFAULT_CONFIG, () =>
+      const interceptor = createInterceptor(STRICT_CONFIG, () =>
         mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7, threatIndicators: ['instruction_injection'] })
       );
       const context = {
@@ -251,8 +271,8 @@ describe('Interceptor', () => {
     });
 
     it('should throw on high-severity denial', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
-      const interceptor = createInterceptor(DEFAULT_CONFIG, () =>
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
+      const interceptor = createInterceptor(STRICT_CONFIG, () =>
         mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7 })
       );
       const context = {
@@ -264,9 +284,9 @@ describe('Interceptor', () => {
     });
 
     it('should auto-deny previously denied content', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
       let approvalCallCount = 0;
-      const interceptor = createInterceptor(DEFAULT_CONFIG, () =>
+      const interceptor = createInterceptor(STRICT_CONFIG, () =>
         mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7 })
       );
       const ctx1 = {
@@ -286,9 +306,9 @@ describe('Interceptor', () => {
     });
 
     it('should apply failurePolicy when requireApproval is unavailable (deny for high)', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
       const warnings: string[] = [];
-      const config = { ...DEFAULT_CONFIG, logger: { info: () => {}, warn: (m: string) => warnings.push(m) } };
+      const config = { ...STRICT_CONFIG, logger: { info: () => {}, warn: (m: string) => warnings.push(m) } };
       const interceptor = createInterceptor(config, () =>
         mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7 })
       );
@@ -302,8 +322,8 @@ describe('Interceptor', () => {
     });
 
     it('should deny on requireApproval failure for high severity', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
-      const interceptor = createInterceptor(DEFAULT_CONFIG, () =>
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
+      const interceptor = createInterceptor(STRICT_CONFIG, () =>
         mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7 })
       );
       const context = {
@@ -346,8 +366,8 @@ describe('Interceptor', () => {
     });
 
     it('should auto-deny when rate limit exceeded', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
-      const interceptor = createInterceptor(DEFAULT_CONFIG, () =>
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
+      const interceptor = createInterceptor(STRICT_CONFIG, () =>
         mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7 }),
         { maxPromptsPerMinute: 2 }
       );
@@ -364,8 +384,8 @@ describe('Interceptor', () => {
     });
 
     it('should clear deny cache on resetSession', async () => {
-      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
-      const interceptor = createInterceptor(DEFAULT_CONFIG, () =>
+      const { createInterceptor } = await import('../../../plugins/openclaw/interceptor.js');
+      const interceptor = createInterceptor(STRICT_CONFIG, () =>
         mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7 })
       );
       const ctx1 = {
@@ -383,6 +403,42 @@ describe('Interceptor', () => {
       };
       await interceptor.handleToolCall(ctx2);
       expect(prompted).toBe(true);
+    });
+
+    // v4.11.0 default-flip regression guard. If these expectations break,
+    // the audit in docs/audits/2026-04-22-hooks-and-defaults-audit.md was
+    // changed implicitly — update the audit + CHANGELOG first.
+    it('DEFAULT_CONFIG matches v4.11.0 relaxed severity defaults', async () => {
+      const { DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
+      expect(DEFAULT_CONFIG.severityActions).toEqual({
+        low: 'log',
+        medium: 'log',
+        high: 'warn',
+        critical: 'log',
+      });
+      expect(DEFAULT_CONFIG.failurePolicy).toEqual({
+        low: 'allow',
+        medium: 'allow',
+        high: 'deny',
+        critical: 'deny',
+      });
+    });
+
+    it('DEFAULT_CONFIG no longer prompts on high-severity quarantine', async () => {
+      const { createInterceptor, DEFAULT_CONFIG } = await import('../../../plugins/openclaw/interceptor.js');
+      let approvalCalled = false;
+      const interceptor = createInterceptor(DEFAULT_CONFIG, () =>
+        mockPipelineResult({ firewallResult: 'QUARANTINE', anomalyScore: 0.7 })
+      );
+      const context = {
+        toolName: 'remember',
+        arguments: { title: 'test', content: 'suspicious content' },
+        requireApproval: async () => { approvalCalled = true; return true; },
+      };
+      // Default action for high is now 'warn' — the tool call is allowed
+      // through without a user prompt. The defence pipeline still runs.
+      await interceptor.handleToolCall(context);
+      expect(approvalCalled).toBe(false);
     });
   });
 });

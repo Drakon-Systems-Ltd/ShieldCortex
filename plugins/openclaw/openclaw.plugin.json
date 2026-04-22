@@ -1,6 +1,6 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "4.10.7",
+  "version": "4.11.0",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
@@ -108,9 +108,9 @@
             "additionalProperties": false,
             "properties": {
               "low": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "log" },
-              "medium": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "warn" },
-              "high": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "require_approval" },
-              "critical": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "require_approval" }
+              "medium": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "log" },
+              "high": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "warn" },
+              "critical": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "log" }
             }
           },
           "failurePolicy": {

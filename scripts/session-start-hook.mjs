@@ -39,7 +39,10 @@ function getDbPath() {
 
 const { path: DB_PATH } = getDbPath();
 
-const MAX_CONTEXT_MEMORIES = 15;
+// Reduced 15 → 5 in v4.11.0. Each memory is 100–400 tokens; 15 of them was
+// 500–2000 tokens of boot-time context pollution. Five high-salience items
+// is enough to jog a returning session without eating the window.
+const MAX_CONTEXT_MEMORIES = 5;
 const MIN_SALIENCE_THRESHOLD = 0.3;
 
 // Sources Claude Code passes on SessionStart. Only 'startup' should trigger
@@ -213,7 +216,10 @@ process.stdin.on('end', () => {
     }
 
     const config = loadConfig();
-    const preambleMode = config.sessionStart?.preamble ?? 'minimal';
+    // v4.11.0: default preamble off. The memory list is the signal — prescriptive
+    // "use remember proactively" text is drumbeat noise. Opt in via
+    // config.sessionStart.preamble = 'minimal' | 'full'.
+    const preambleMode = config.sessionStart?.preamble ?? 'off';
     const preamble = preambleFor(preambleMode);
 
     let memories = [];

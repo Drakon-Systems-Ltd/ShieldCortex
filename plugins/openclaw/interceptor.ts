@@ -40,13 +40,18 @@ const CONTENT_FIELDS: Record<string, string[]> = {
   mcp__memory__remember: ['content', 'title'],
 };
 
+// Defaults relaxed in v4.11.0: critical/high no longer block the tool call with
+// a synchronous approval prompt. The defence pipeline still runs and
+// `failurePolicy` still denies on critical/high, so the block is preserved —
+// what changes is the user-facing approval gate. Opt back in with
+// `severityActions: { high: 'require_approval', critical: 'require_approval' }`.
 const DEFAULT_CONFIG: InterceptorConfig = {
   enabled: true,
   severityActions: {
     low: 'log',
-    medium: 'warn',
-    high: 'require_approval',
-    critical: 'require_approval',
+    medium: 'log',
+    high: 'warn',
+    critical: 'log',
   },
   failurePolicy: {
     low: 'allow',

@@ -9,6 +9,7 @@ import {
   setOpenClawAutoMemory,
   isProactiveRecallEnabled,
   setProactiveRecall,
+  restore410Defaults,
   type DefenceMode,
 } from './config.js';
 import { syncAllGraphToCloud } from './graph-sync.js';
@@ -142,6 +143,20 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  if (args.includes('--restore-4.10-defaults')) {
+    restore410Defaults();
+    console.log('Restored v4.10.x defaults:');
+    console.log('  proactiveRecall: true');
+    console.log('  interceptor.severityActions.high: require_approval');
+    console.log('  interceptor.severityActions.critical: require_approval');
+    console.log('  sessionStart.preamble: minimal');
+    console.log('');
+    console.log('Note: the v4.11.0 MAX_CONTEXT_MEMORIES reduction (15 → 5) is a');
+    console.log('constant and cannot be reverted via config. Pin shieldcortex@4.10.7');
+    console.log('if you need that behaviour.');
+    changed = true;
+  }
+
   const proactiveRecallIdx = args.indexOf('--proactive-recall');
   if (proactiveRecallIdx !== -1) {
     const value = args[proactiveRecallIdx + 1];
@@ -172,6 +187,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-status         Show current configuration');
     console.log('  --openclaw-auto-memory <true|false>  Enable or disable OpenClaw auto-memory extraction');
     console.log('  --proactive-recall <true|false>  Enable or disable proactive memory recall on prompts');
+    console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('');
     console.log('LLM Verification:');
     console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
