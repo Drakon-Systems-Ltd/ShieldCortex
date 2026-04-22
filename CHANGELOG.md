@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.7 — 22 April 2026
+
+**Closes the #27 loose end** — the static ghost-tool block injected into `~/.claude/CLAUDE.md` at install time has been rewritten. Previously it told the model to unconditionally call `remember` / `recall` / `get_context` / `forget` — tools that are not exposed in OpenClaw-only installs where the ShieldCortex MCP server isn't wired. The model would follow the instruction, the call would fail silently, and the user would see apparent amnesia.
+
+- **Block now describes automatic capture first** (PreCompact / UserPromptSubmit / SessionStart hooks), with manual tool calls framed as optional and conditional on the tools actually appearing in the session's tool surface.
+- **Explicit anti-nag line**: "Do not nag yourself to call tools that do not appear — it produces silent failures and user-visible amnesia".
+- **Installer now self-updates stale blocks** — `setupClaudeMd()` detects the marker plus a content-signature substring, and rewrites the whole block if the signature is missing. Previously idempotent-skip left the stale block in place forever on existing installs.
+- Two new tests in `src/__tests__/claude-md-refresh.test.ts` lock in the refresh behaviour.
+
 ## v4.10.6 — 22 April 2026
 
 **Ship the shared helper Tars added in v4.10.5** — fixes silent fleet-wide amnesia.
