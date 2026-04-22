@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { deriveProjectKey } from './lib/project-key.mjs';
 
 // ==================== CONFIG ====================
 
@@ -41,24 +42,9 @@ function getDbPath() {
 }
 
 // ==================== PROJECT DETECTION ====================
-
-const SKIP_DIRS = [
-  'src', 'lib', 'dist', 'build', 'out', 'node_modules', '.git',
-  '.next', '.cache', 'test', 'tests', '__tests__', 'spec',
-  'bin', 'scripts', 'config', 'public', 'static',
-];
-
-function extractProject(path) {
-  if (!path) return null;
-  const segments = path.split(/[/\\]/).filter(Boolean);
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const seg = segments[i];
-    if (!SKIP_DIRS.includes(seg.toLowerCase()) && !seg.startsWith('.')) {
-      return seg;
-    }
-  }
-  return null;
-}
+// Uses the shared helper in scripts/lib/project-key.mjs so that the recall
+// scope, the session-start banner, and the pre-compact writer all agree on
+// which project key this cwd maps to.
 
 // ==================== FTS5 QUERY ====================
 
@@ -183,7 +169,7 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
 
-    const project = extractProject(cwd);
+    const project = deriveProjectKey(cwd);
     if (!project) {
       process.exit(0);
     }
