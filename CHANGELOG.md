@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.6 — 22 April 2026
+
+**Ship the shared helper Tars added in v4.10.5** — fixes silent fleet-wide amnesia.
+
+- **`scripts/lib/project-key.mjs` was missing from the npm tarball** — v4.10.5 introduced the shared helper to unify project-key derivation across `session-start-hook.mjs` and `prompt-recall-hook.mjs`, but `package.json` `files` only listed the individual `scripts/*.mjs` files by name. The `scripts/lib` directory was excluded from published packages, so every install of 4.10.5 had both hooks crashing on startup with `ERR_MODULE_NOT_FOUND` and exit code 0 (silent failure).
+- **Impact on OpenClaw fleets** — Claude Code fires `UserPromptSubmit → prompt-recall` on every user turn. With the hook broken, no prior-turn context was injected, so Opus 4.7 (which refuses to confabulate the way 4.6 did) replied "I don't have context for what you're replying to — this looks like the start of our conversation" to every Telegram message. Surfaced on the Jarvis / Edith / Tars fleet right after the Opus 4.7 switch; masked the packaging bug as a model-behaviour complaint.
+- **Fix** — added `scripts/lib` to the `files` array in `package.json` so the whole directory ships with the npm tarball. Verified by `npm pack --dry-run` listing `scripts/lib/project-key.mjs`.
+
 ## v4.10.5 — 22 April 2026
 
 **Session-start hook fixes** — stops the v4.10.4 "amnesia every resume" complaint.
