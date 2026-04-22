@@ -106,6 +106,37 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Plugin is a second npm package (`@drakon-systems/shieldcortex-realtime`)
+      # under `plugins/openclaw/`. Historically published manually, which meant
+      # the plugin repeatedly drifted behind the main package — v4.11.0 shipped
+      # with plugin stuck at 4.10.7 on npm because this step didn't exist.
+      # Assumes plugin version has been bumped in lockstep with the main package
+      # (memory 2080: bump root, plugin package, openclaw.plugin.json, SKILL.md
+      # together on every release).
+      - name: Check plugin version
+        id: plugin_version_check
+        if: steps.version_check.outputs.already_published == 'false'
+        run: |
+          PLUGIN_VERSION=$(node -p "require('./plugins/openclaw/package.json').version")
+          MAIN_VERSION=$(node -p "require('./package.json').version")
+          echo "Plugin version: $PLUGIN_VERSION"
+          echo "Main version:   $MAIN_VERSION"
+          if [ "$PLUGIN_VERSION" != "$MAIN_VERSION" ]; then
+            echo "::error::Plugin version ($PLUGIN_VERSION) does not match main ($MAIN_VERSION). Bump plugins/openclaw/package.json before tagging."
+            exit 1
+          fi
+          if npm view @drakon-systems/shieldcortex-realtime@$PLUGIN_VERSION version 2>/dev/null; then
+            echo "plugin_already_published=true" >> $GITHUB_OUTPUT
+          else
+            echo "plugin_already_published=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish plugin to npm
+        if: steps.version_check.outputs.already_published == 'false' && steps.plugin_version_check.outputs.plugin_already_published == 'false'
+        run: cd plugins/openclaw && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       # Create the GitHub Release immediately after npm publish so a later
       # ClawHub auth failure can't skip it. (Hit this on v4.10.0 — CLAWHUB_TOKEN
       # was stale, Release step was skipped, had to be created manually.)

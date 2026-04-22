@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.11.1 — 22 April 2026
+
+**Fleet-critical fix: MCP registration no longer uses `npx -y` as the command** — it now resolves and pins the installed `shieldcortex` binary path (falls back to `npx -y` only when no global install exists). This closes a silent session-wipe loop that was hitting every production OpenClaw install.
+
+### The bug
+
+Claude Code and OpenClaw both hash the effective MCP server configuration to decide whether the active CLI session needs resetting. The ShieldCortex installer was writing `{command: "npx", args: ["-y", "shieldcortex"]}` — but `npx -y` resolves dynamically on every invocation (global cache vs on-demand, version-drift between resolutions, fresh npm publish), and every shift in what it resolves to flipped the MCP config hash. A flipped hash triggers `cli session reset reason=mcp`, which starts a fresh CLI session and throws away all prior conversation context.
+
+Observed on TARS (Oracle ARM, systemd-managed `openclaw-gateway`) on 2026-04-22: `cli session reset reason=mcp` fired 14 times in one day, roughly every 30 minutes. Symptom surfaced as "Fresh session here — no prior context loaded" mid-conversation in Telegram DMs, plus confabulated responses ("Yeah, I restarted the worker" — nothing had been restarted) when the model tried to fill the context gap. Completely silent from the user's perspective until you compared timestamps.
+
+### Fix
+
+- **`src/setup/claude-md.ts::setupGlobalMcp`** now calls a new `resolveMcpCommand()` helper that shells out to `which shieldcortex` (or `where` on Windows) to find the installed binary, and writes that absolute path into `~/.claude.json`. If no binary resolves, falls back to the previous `npx -y` behaviour (which still works for `npx shieldcortex setup` one-shot users who have nothing installed globally).
+- **Existing `npx -y` registrations are auto-upgraded** — the installer was previously short-circuiting with "already configured" when it saw any shieldcortex entry. Now it detects the stale form and rewrites it to the stable binary path, logging the reason. Re-running `shieldcortex setup` (or `shieldcortex quickstart`) on any v4.11.0-or-earlier install migrates the config.
+- **Three regression tests** in `src/__tests__/mcp-registration.test.ts` lock in: binary path preferred over `npx`; TARS-scenario stale `npx -y` registration is auto-upgraded; idempotent when already on the stable form.
+
+### Also
+
+- **Plugin `@drakon-systems/shieldcortex-realtime@4.11.0` was never on npm** — the CI `Publish to npm` workflow only published the main `shieldcortex` package and the ClawHub skill; the plugin had been manually published historically, which silently drifted every release. Fixed in `.github/workflows/publish.yml` with a new `Publish plugin to npm` step that verifies plugin version matches main and then publishes `plugins/openclaw/` on tag push. Manually published `@drakon-systems/shieldcortex-realtime@4.11.0` to unblock; v4.11.1 onward is CI-published.
+
+### Manual migration for existing installs
+
+If you're already on v4.11.0 and hitting the session-reset loop, either:
+
+```bash
+# One-command fix (works on v4.11.1+; re-runs the MCP setup with the new resolver)
+shieldcortex setup
+
+# Or manually, for any version:
+WHICH=$(which shieldcortex)
+jq --arg p "$WHICH" '.mcpServers.memory = {type:"stdio", command:$p, args:[]}' ~/.claude.json > /tmp/c.json && mv /tmp/c.json ~/.claude.json
+# Restart your OpenClaw gateway / Claude Code session.
+```
+
 ## v4.11.0 — 22 April 2026
 
 > **Default behaviour changes — please read.** This is the first release in the 4.10.x line that flips user-visible defaults. Every previous behaviour is still available; it's just opt-in now. To restore the pre-v4.11.0 defaults in one command: `shieldcortex config --restore-4.10-defaults`.

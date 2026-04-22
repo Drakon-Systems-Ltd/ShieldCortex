@@ -12,6 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
 import { installOpenClawHook, findAllHooksDirs } from './openclaw.js';
 import { setupHooks } from './settings-hooks.js';
 
@@ -89,46 +90,104 @@ function setupClaudeCode(): void {
   }
 }
 
+interface McpCommand {
+  command: string;
+  args: string[];
+}
+
+/**
+ * Resolve the best shieldcortex command for the MCP stdio registration.
+ *
+ * Prefers an installed global binary over `npx -y shieldcortex`. Reason:
+ * Claude Code / OpenClaw hash the effective MCP config to decide whether
+ * to reset the active CLI session. `npx -y` resolves dynamically on every
+ * invocation — when the npm cache shifts (version drift, fresh publish,
+ * cache miss), the resolved command changes, the hash changes, and the
+ * active CLI session is silently reset. Every reset wipes conversation
+ * context mid-flight. On TARS (v4.10.x install on Oracle ARM) this fired
+ * every ~30 minutes and surfaced as the fleet "Fresh session, no prior
+ * context" bug on 2026-04-22.
+ *
+ * If no global binary exists (single-shot `npx shieldcortex setup`),
+ * falls back to `npx -y shieldcortex` — which still works, just trades
+ * stability for availability in ephemeral installs.
+ */
+function resolveMcpCommand(): McpCommand {
+  try {
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+    const resolved = execSync(`${whichCmd} shieldcortex`, {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim().split('\n')[0];
+    if (resolved && fs.existsSync(resolved)) {
+      return { command: resolved, args: [] };
+    }
+  } catch {
+    // No global install on PATH.
+  }
+  return { command: 'npx', args: ['-y', 'shieldcortex'] };
+}
+
+function isIdealMcpEntry(entry: unknown, ideal: McpCommand): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as { command?: unknown; args?: unknown };
+  if (e.command !== ideal.command) return false;
+  if (!Array.isArray(e.args) || e.args.length !== ideal.args.length) return false;
+  return e.args.every((v, i) => v === ideal.args[i]);
+}
+
 function setupGlobalMcp(): void {
   // Claude Code reads user-scope MCP servers from ~/.claude.json
   const mcpPath = path.join(os.homedir(), '.claude.json');
+  const ideal = resolveMcpCommand();
+  const idealEntry = {
+    type: 'stdio' as const,
+    command: ideal.command,
+    args: ideal.args,
+  };
+  const isStablePath = ideal.command !== 'npx';
 
-  // Check if already configured
   if (fs.existsSync(mcpPath)) {
     try {
       const existing = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
       const servers = existing.mcpServers || {};
-      if (servers.memory?.command?.includes?.('shieldcortex') ||
-          servers.memory?.args?.some?.((a: string) => a.includes('shieldcortex'))) {
-        console.log('✓ MCP: global server already configured in ~/.claude.json');
+      const current = servers.memory;
+
+      if (isIdealMcpEntry(current, idealEntry)) {
+        console.log(
+          `✓ MCP: global server already configured in ~/.claude.json (stable binary: ${isStablePath ? ideal.command : 'npx'})`
+        );
         return;
       }
-      // File exists but no shieldcortex entry — merge it in
+
+      // Detect whether this is a fresh add or an upgrade from the old
+      // `npx -y shieldcortex` form so we log the right message.
+      const currentIsShieldCortex = !!current && (
+        current.command?.includes?.('shieldcortex') ||
+        current.args?.some?.((a: string) => typeof a === 'string' && a.includes('shieldcortex'))
+      );
+
       existing.mcpServers = servers;
-      existing.mcpServers.memory = {
-        type: 'stdio',
-        command: 'npx',
-        args: ['-y', 'shieldcortex'],
-      };
+      existing.mcpServers.memory = idealEntry;
       fs.writeFileSync(mcpPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
-      console.log('✓ MCP: added shieldcortex server to ~/.claude.json');
+
+      if (currentIsShieldCortex && isStablePath) {
+        console.log(`✓ MCP: upgraded shieldcortex server to stable binary path (${ideal.command})`);
+        console.log('  Reason: `npx -y` resolution drift was causing periodic CLI session resets.');
+      } else if (currentIsShieldCortex) {
+        console.log('✓ MCP: refreshed shieldcortex server registration');
+      } else {
+        console.log(`✓ MCP: added shieldcortex server to ~/.claude.json (${ideal.command})`);
+      }
       return;
     } catch {
-      // Parse error — create fresh
+      // Parse error — fall through and create fresh below.
     }
   }
 
-  const config = {
-    mcpServers: {
-      memory: {
-        type: 'stdio',
-        command: 'npx',
-        args: ['-y', 'shieldcortex'],
-      },
-    },
-  };
+  const config = { mcpServers: { memory: idealEntry } };
   fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-  console.log('✓ MCP: created global server config at ~/.claude.json');
+  console.log(`✓ MCP: created global server config at ~/.claude.json (${ideal.command})`);
 }
 
 export async function setupClaudeMd(options?: { stopHook?: boolean }): Promise<void> {
