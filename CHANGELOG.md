@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.10.5 — 22 April 2026
+
+**Session-start hook fixes** — stops the v4.10.4 "amnesia every resume" complaint.
+
+- **`SessionStart` hook no longer re-pastes its banner on `resume` / `compact` / `clear`** — Claude Code fires this hook on every context reboot, not just first-run. The banner was landing back in the model's context after every compaction and long conversations felt like a fresh session every message. The hook now inspects `hookData.source` and exits silently for the three non-startup sources, logging the skip to stderr only.
+- **Proactive-memory preamble is now `minimal` by default** — the 13-line "ALWAYS use `remember`" block was burning ~400 tokens on every startup and, worse, naming MCP tools that aren't exposed in every install (OpenClaw-only users see read-only `memory_search`/`memory_get` and fail silently when they try to call `remember`). Default is now a one-line hint; the original block is still available with `"sessionStart": { "preamble": "full" }` in `~/.shieldcortex/config.json`, or can be fully silenced with `"preamble": "off"`.
+- **Project-key derivation prefers git `origin` over cwd basename** — sessions running under sibling repos that share a remote now resolve to the same project key, so memories stored from one aren't siloed from the other. Resolution order: `SHIELDCORTEX_PROJECT_KEY` env → `config.projectKey` → `config.projectAliases[basename]` → git origin (`owner-repo`) → cwd basename (legacy fallback).
+- **Shared `scripts/lib/project-key.mjs` helper** — session-start and prompt-recall hooks now agree on the project key for a given cwd; previously each ran separate basename-only logic.
+- **Regression tests** added for source gating, preamble suppression, and project-key derivation.
+
 ## v4.10.4 — 21 April 2026
 
 **Bundled bug fixes + security** — cleans up the remaining issues from the 2026-04-20 shipping audit.

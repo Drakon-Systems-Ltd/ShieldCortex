@@ -2,24 +2,32 @@
 /**
  * Session Start Hook for ShieldCortex - Auto-Recall Context
  *
- * This script runs when Claude Code starts a new session and:
- * 1. Detects the current project from the working directory
- * 2. Retrieves relevant context from memory
- * 3. Outputs it so Claude has immediate access to project knowledge
+ * Fires on Claude Code session boot. Emits project-scoped memory context so
+ * the model starts with relevant knowledge.
  *
- * The goal: Claude always starts with relevant project context.
+ * Behaviour (resolves issues #27 / #28 / #29):
+ *   - Only emits output when `source === 'startup'`. On `resume`, `compact`,
+ *     and `clear` the hook exits silently — those transitions should not
+ *     re-paste the banner into context (that was the "amnesia every other
+ *     message" bug in v4.10.4).
+ *   - The proactive-memory nag block is now opt-in via config
+ *     (`sessionStart.preamble`: 'full' | 'minimal' | 'off'). Default is
+ *     'minimal' — one line instead of 13 — because CLAUDE.md already carries
+ *     the long-form instructions and repeating them burns context.
+ *   - Project key is derived via the shared helper (git origin → config alias
+ *     → cwd basename) so sibling repos under one workspace resolve together.
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { deriveProjectKey } from './lib/project-key.mjs';
 
-// Database paths (with legacy fallback)
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
+const CONFIG_PATH = join(homedir(), '.shieldcortex', 'config.json');
 
-// Auto-detect: use new path if it exists, or if legacy doesn't exist (new install)
 function getDbPath() {
   const newPath = join(NEW_DB_DIR, 'memories.db');
   const legacyPath = join(LEGACY_DB_DIR, 'memories.db');
@@ -29,44 +37,49 @@ function getDbPath() {
   return { dir: LEGACY_DB_DIR, path: legacyPath };
 }
 
-const { dir: DB_DIR, path: DB_PATH } = getDbPath();
+const { path: DB_PATH } = getDbPath();
 
-// Configuration
 const MAX_CONTEXT_MEMORIES = 15;
 const MIN_SALIENCE_THRESHOLD = 0.3;
 
-// ==================== PROJECT DETECTION (Mirrors src/context/project-context.ts) ====================
+// Sources Claude Code passes on SessionStart. Only 'startup' should trigger
+// the full banner; the rest would re-paste it after every resume/compact.
+const EMITTING_SOURCES = new Set(['startup']);
 
-const SKIP_DIRECTORIES = [
-  'src', 'lib', 'dist', 'build', 'out',
-  'node_modules', '.git', '.next', '.cache',
-  'test', 'tests', '__tests__', 'spec',
-  'bin', 'scripts', 'config', 'public', 'static',
-];
-
-function extractProjectFromPath(path) {
-  if (!path) return null;
-
-  const segments = path.split(/[/\\]/).filter(Boolean);
-  if (segments.length === 0) return null;
-
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const segment = segments[i];
-    if (!SKIP_DIRECTORIES.includes(segment.toLowerCase())) {
-      if (segment.startsWith('.')) continue;
-      return segment;
-    }
+function loadConfig() {
+  try {
+    if (!existsSync(CONFIG_PATH)) return {};
+    return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+  } catch {
+    return {};
   }
-
-  return null;
 }
 
-// ==================== CONTEXT RETRIEVAL ====================
+function preambleFor(mode) {
+  if (mode === 'off') return '';
+  if (mode === 'full') {
+    return `
+## IMPORTANT: Proactive Memory Use
+
+You have access to a persistent memory system. Use it proactively:
+
+**ALWAYS use \`remember\` immediately when:**
+- Making architecture/design decisions
+- Fixing bugs (capture the root cause and solution)
+- Learning something new about the codebase
+- User states a preference
+- Completing significant features
+
+**Don't wait** - call \`remember\` right after the event, not at the end of the session.
+`;
+  }
+  // Default: minimal — one line, no ghost-tool drumbeat.
+  return '\n_Memory tools available — capture decisions, bug fixes, and preferences as they happen._\n';
+}
 
 function getProjectContext(db, project) {
   const memories = [];
 
-  // Get high-priority memories for this project
   const highPriority = db.prepare(`
     SELECT id, title, content, category, type, salience, tags, created_at
     FROM memories
@@ -79,7 +92,6 @@ function getProjectContext(db, project) {
 
   memories.push(...highPriority);
 
-  // If we don't have enough, get recent memories too
   if (memories.length < 5) {
     const excludeIds = memories.map(m => m.id);
     const placeholders = excludeIds.length > 0 ? excludeIds.map(() => '?').join(',') : '0';
@@ -99,16 +111,9 @@ function getProjectContext(db, project) {
 }
 
 function formatContext(memories, project) {
-  if (memories.length === 0) {
-    return null;
-  }
+  if (memories.length === 0) return null;
 
-  const lines = [
-    `# Project Context: ${project}`,
-    '',
-  ];
-
-  // Group by category
+  const lines = [`# Project Context: ${project}`, ''];
   const byCategory = {};
   for (const mem of memories) {
     const cat = mem.category || 'note';
@@ -116,7 +121,6 @@ function formatContext(memories, project) {
     byCategory[cat].push(mem);
   }
 
-  // Priority order for categories
   const categoryOrder = ['architecture', 'pattern', 'preference', 'error', 'context', 'learning', 'note', 'todo'];
 
   for (const cat of categoryOrder) {
@@ -128,7 +132,6 @@ function formatContext(memories, project) {
     for (const mem of byCategory[cat]) {
       const salience = Math.round(mem.salience * 100);
       lines.push(`- **${mem.title}** (${salience}% salience)`);
-      // Truncate long content
       const content = mem.content.length > 200
         ? mem.content.slice(0, 200) + '...'
         : mem.content;
@@ -140,12 +143,6 @@ function formatContext(memories, project) {
   return lines.join('\n');
 }
 
-// ==================== SKILL FILE CHECK ====================
-
-/**
- * Quick check of project instruction files for obviously suspicious content.
- * This is a lightweight inline check — for full scanning use `shieldcortex scan-skills`.
- */
 function checkProjectInstructionFiles(cwd) {
   const warnings = [];
 
@@ -156,7 +153,6 @@ function checkProjectInstructionFiles(cwd) {
     { path: '.github/copilot-instructions.md', name: 'copilot-instructions.md' },
   ];
 
-  // Suspicious patterns that indicate potential threats in instruction files
   const suspiciousPatterns = [
     { pattern: /ignore\s+(all\s+)?(safety|security|permission)/i, label: 'safety bypass' },
     { pattern: /bypass\s+(the\s+)?(sandbox|permission|safety)/i, label: 'sandbox bypass' },
@@ -175,22 +171,19 @@ function checkProjectInstructionFiles(cwd) {
 
     try {
       const content = readFileSync(fullPath, 'utf-8');
-
       for (const { pattern, label } of suspiciousPatterns) {
         if (pattern.test(content)) {
           warnings.push(`${file.name}: suspicious pattern detected (${label})`);
-          break; // One warning per file is enough
+          break;
         }
       }
     } catch {
-      // File unreadable — skip
+      // skip unreadable
     }
   }
 
   return warnings;
 }
-
-// ==================== MAIN HOOK LOGIC ====================
 
 let input = '';
 process.stdin.setEncoding('utf8');
@@ -205,83 +198,69 @@ process.stdin.on('readable', () => {
 process.stdin.on('end', () => {
   try {
     const hookData = JSON.parse(input || '{}');
-    const project = extractProjectFromPath(hookData.cwd || process.cwd());
+    const source = typeof hookData.source === 'string' ? hookData.source : 'startup';
+
+    if (!EMITTING_SOURCES.has(source)) {
+      console.error(`[shieldcortex] Session start: source=${source} — skipping banner`);
+      process.exit(0);
+    }
+
+    const cwd = hookData.cwd || process.cwd();
+    const project = deriveProjectKey(cwd);
 
     if (!project) {
-      // No project detected, skip context retrieval
       process.exit(0);
     }
 
-    // Check if database exists
+    const config = loadConfig();
+    const preambleMode = config.sessionStart?.preamble ?? 'minimal';
+    const preamble = preambleFor(preambleMode);
+
+    let memories = [];
+    let context = null;
     if (!existsSync(DB_PATH)) {
-      console.error('[session-start] Memory database not found, skipping context retrieval');
-      process.exit(0);
+      console.error('[shieldcortex] Memory database not found, skipping context retrieval');
+    } else {
+      const db = new Database(DB_PATH, { readonly: true, timeout: 5000 });
+      memories = getProjectContext(db, project);
+      context = formatContext(memories, project);
+      db.close();
     }
-
-    // Connect to database (read-only to avoid contention)
-    // timeout: 5000ms to handle busy database during concurrent access
-    const db = new Database(DB_PATH, { readonly: true, timeout: 5000 });
-
-    // Get project context
-    const memories = getProjectContext(db, project);
-    const context = formatContext(memories, project);
-
-    db.close();
-
-    // Proactive memory instructions
-    const proactiveInstructions = `
-## IMPORTANT: Proactive Memory Use
-
-You have access to a persistent memory system. Use it proactively:
-
-**ALWAYS use \`remember\` immediately when:**
-- Making architecture/design decisions
-- Fixing bugs (capture the root cause and solution)
-- Learning something new about the codebase
-- User states a preference
-- Completing significant features
-
-**Don't wait** - call \`remember\` right after the event, not at the end of the session.
-`;
 
     if (context) {
-      // Output context to stdout - this will be shown to Claude
       console.log(`
 🧠 SHIELDCORTEX - Project "${project}"
 
-${context}
-${proactiveInstructions}
-`);
+${context}${preamble}`);
       console.error(`[shieldcortex] Session start: loaded ${memories.length} memories for "${project}"`);
     } else {
-      console.log(`
+      // No memories — only emit a banner when the preamble mode asks for one.
+      // 'off' and 'minimal' stay silent here; the banner was the primary source
+      // of context pollution in the #27 bug and there's no context to load.
+      if (preambleMode === 'full') {
+        console.log(`
 🧠 SHIELDCORTEX - New project "${project}"
 
-No stored memories yet for this project.
-${proactiveInstructions}
-`);
+No stored memories yet for this project.${preamble}`);
+      }
       console.error(`[shieldcortex] Session start: no memories found for "${project}"`);
     }
 
-    // Quick check for suspicious project instruction files
     try {
-      const cwd = hookData.cwd || process.cwd();
       const skillWarnings = checkProjectInstructionFiles(cwd);
       if (skillWarnings.length > 0) {
         console.log(`\n⚠️  ShieldCortex detected suspicious instruction files:`);
-        for (const w of skillWarnings) {
-          console.log(`  - ${w}`);
-        }
+        for (const w of skillWarnings) console.log(`  - ${w}`);
         console.log(`Run \`shieldcortex scan-skills\` for a full report.\n`);
         console.error(`[shieldcortex] WARNING: ${skillWarnings.length} suspicious file(s) detected`);
       }
     } catch {
-      // Skill check is best-effort — never block session start
+      // best-effort
     }
 
     process.exit(0);
   } catch (error) {
     console.error(`[session-start] Error: ${error.message}`);
-    process.exit(0); // Don't block session start on errors
+    process.exit(0);
   }
 });
