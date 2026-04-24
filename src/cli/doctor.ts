@@ -92,10 +92,15 @@ async function checkDatabase(): Promise<CheckResult> {
   const dbPath = getDbPath();
 
   if (!fs.existsSync(dbPath)) {
+    // The database is created lazily on the first memory operation.
+    // `quickstart` only configures hooks/MCP — it does NOT touch the DB.
+    // The reliable one-shot init paths are: `shieldcortex scan "..."`
+    // (works on every install shape) or starting an MCP-bound session
+    // (Claude Code) which lazy-inits via the MCP server.
     const env = detectEnvironment();
-    const fix = env.hasOpenClaw && !env.hasClaude
-      ? 'Run `shieldcortex scan "test"` to initialise the database (OpenClaw-only setup detected)'
-      : 'Start the MCP server or run `shieldcortex quickstart` to initialise the database';
+    const fix = env.hasClaude
+      ? 'Run `shieldcortex scan "init"` to create the database now, or start a Claude Code session — the MCP server will lazy-init on first memory call'
+      : 'Run `shieldcortex scan "init"` to create the database now (OpenClaw-only / headless install)';
     return {
       label: 'Database',
       status: 'fail',

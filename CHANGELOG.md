@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.2 — 24 April 2026
+
+**Fix: `shieldcortex doctor` no longer suggests `quickstart` to initialise the database.**
+
+v4.12.1 doctor's "Database: not found" suggested-fix message read _"Start the MCP server or run `shieldcortex quickstart` to initialise the database"_ — but `quickstart` only configures hooks/MCP, it does not touch the database. On TARS during fleet rollout this caused a loop: `quickstart` → `doctor` (still complains) → `quickstart` again.
+
+### Fix
+
+- `checkDatabase()` now suggests `shieldcortex scan "init"` as the explicit one-shot init command (works on every install shape — Claude+OpenClaw, OpenClaw-only, headless).
+- On Claude+OpenClaw hosts, the message also mentions the lazy-init alternative: starting a Claude Code session, where the MCP server creates the DB on first memory call.
+- 3 new tests in `src/__tests__/doctor-db-init-hint.test.ts` lock the corrected guidance in: no `quickstart` reference, explicit `scan "init"` reference, and the MCP lazy-init mention preserved for Claude+OpenClaw hosts.
+
+### Why it matters
+
+Doctor's job is to tell operators what to do. A suggested fix that doesn't fix the thing wastes their time and erodes trust in the tool. This is a docs-shaped bug — same severity as the v4.12.0 false-positive residue check that v4.12.1 closed.
+
 ## v4.12.1 — 24 April 2026
 
 **Fix: `shieldcortex doctor` no longer reports false-positive residue on healthy installs.**
