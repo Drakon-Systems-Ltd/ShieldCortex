@@ -28,9 +28,9 @@ When `openclawAutoMemory` is enabled:
 5. Skips exact and near-duplicate memories using novelty filtering
 
 ### On Session Start (Agent Bootstrap)
-1. Calls Cortex `get_context` to retrieve relevant memories
-2. Injects them into the agent's bootstrap context
-3. Agent starts with knowledge of past sessions
+Bootstrap context injection was **disabled in v2026.2.26**. OpenClaw's native Memory Search now handles context recall at session start, so the hook no longer pushes memories into the system prompt (which was producing ~40× duplication of CORTEX_MEMORY.md and eating most of the context window).
+
+The hook still fires on `agent:bootstrap` for lifecycle wiring (warning-bootstrap-file handoff, etc.) but contributes nothing to the system prompt. This keeps `extraSystemPromptHash` stable across turns and prevents the session-binding reset loop documented in `src/setup/claude-md.ts`.
 
 ### Keyword Triggers
 
