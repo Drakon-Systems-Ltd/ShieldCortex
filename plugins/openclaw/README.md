@@ -10,6 +10,11 @@ OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory 
 
 OpenClaw is declared as an **optional** peer dependency, so installs on older OpenClaw keep working but miss the linking benefit.
 
+### Known limitations under OpenClaw 2026.4.23
+
+- **Forked subagent context is host-owned.** OpenClaw 2026.4.23 added `ContextEngine.prepareSubagentSpawn({ contextMode: "isolated" | "fork" })` on the plugin-sdk's `ContextEngine` interface, but the spawn itself is initiated by the host runtime — plugins can only react to the lifecycle, not call `sessions_spawn` directly. Work that would benefit from an isolated scratch transcript (e.g. batch scans) therefore still runs inline in the parent session. If upstream exposes a plugin-callable spawn API, scan offloading will be revisited.
+- **No public `systemPromptAddition` seam in plugin-sdk.** Hook metadata (`{ name, description }`) is typed and stable, but the SDK does not expose a structured hook for contributing to the effective system prompt. SC's bootstrap injection was disabled in v2026.2.26 for this reason (it was using private internals), and OpenClaw's native Memory Search now handles context recall at session start.
+
 ## What it does
 
 | Hook | Action |
