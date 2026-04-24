@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.1 — 24 April 2026
+
+**Fix: `shieldcortex doctor` no longer reports false-positive residue on healthy installs.**
+
+v4.12.0 shipped a broken OpenClaw residue check. After a clean `shieldcortex openclaw install`, OpenClaw legitimately writes `.plugins.installs`, `.plugins.entries`, `.plugins.allow`, and matching `.hooks.*` entries in `openclaw.json` — these are *expected* config state, not residue. The doctor was flagging any presence of SC entries as residue unconditionally, so a freshly-installed host showed 6–7 warnings and pointed users at `uninstall --deep` to "purge" a healthy install.
+
+Reproduced on aiquant/Case after fleet rollout to v4.12.0: fresh install → `shieldcortex openclaw install` → `shieldcortex doctor` → 7 false positives.
+
+### Fix
+
+- Every `ResiduePath` now carries a `category`: `plugin-config`, `hook-config`, `clawhub-skill-lock`, `plugin-dir`, `hook-dir`, or `legacy-hook-dir`.
+- New `scanForOrphans()` applies presence-aware filtering:
+  - `plugin-config` → orphan only if the plugin extensions dir is absent
+  - `hook-config` → orphan only if no cortex-memory hook dir exists
+  - `plugin-dir` / `hook-dir` → never orphaned (they *are* the install)
+  - `legacy-hook-dir` → always orphaned (paths kept for migration cleanup only)
+  - `clawhub-skill-lock` → always flagged (SC doesn't manage skills)
+- `doctor` now uses `scanForOrphans()` and tailors its "clean" message to install state: `"plugin + hook installed, config aligned"` instead of a generic "clean" line.
+
+### What doesn't change
+
+`scanForResidue()` / `cleanResidue()` / `runDeepClean()` (the `uninstall --deep` path) still flag and remove ALL traces regardless of install state. Deep clean's job is total purge; this fix only corrects the doctor.
+
+### Tests
+
+7 new cases in a second `describe` block of `src/__tests__/deep-clean.test.ts`:
+
+- Reports zero orphans when plugin + hook are installed (the v4.12.0 bug)
+- Flags plugin-config entries as orphans when plugin dir is gone
+- Flags hook-config entries as orphans when no hook dir exists
+- Flags legacy hook dirs as orphans even with healthy install
+- Flags clawhub skill lock as orphan
+- Does NOT flag the current plugin/hook dirs as orphans
+- Migration regression guard: every residue path has a valid category
+
 ## v4.12.0 — 24 April 2026
 
 **ShieldCortex ↔ OpenClaw compatibility pass (Phase 1 + 2).** Three themes:
