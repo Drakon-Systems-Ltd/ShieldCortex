@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
 import { describe, expect, it } from '@jest/globals';
 
 /**
@@ -21,7 +22,8 @@ import { describe, expect, it } from '@jest/globals';
  * OpenClaw setup module, which trips the baseline ESM/CJS issue in Jest.)
  */
 describe('ShieldCortex system-prompt hash stability', () => {
-  const repoRoot = path.resolve(__dirname, '..', '..');
+  const thisFile = fileURLToPath(import.meta.url);
+  const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
   const claudeMdSource = path.join(repoRoot, 'src', 'setup', 'claude-md.ts');
   const hookDir = path.join(repoRoot, 'hooks', 'openclaw', 'cortex-memory');
 
