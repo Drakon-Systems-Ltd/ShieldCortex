@@ -2,23 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## v4.12.0 — 24 April 2026
 
-**New: `shieldcortex uninstall --deep` and `shieldcortex doctor` residue check** — closes the "partial uninstall" gap that left ~9 orphan config entries across `~/.openclaw/openclaw.json`, `~/.openclaw/workspace/.clawhub/lock.json`, and stale hook/extension directories after every version bump or manual cleanup (incident 2026-04-23/24: five-host fleet residue took several hours of hand-scripted `jq` surgery to purge).
+**ShieldCortex ↔ OpenClaw compatibility pass (Phase 1 + 2).** Three themes:
+
+1. **Deep uninstall closes the "partial cleanup" gap.** `shieldcortex uninstall --deep` scans 15 known residue locations across `~/.openclaw/openclaw.json`, `~/.openclaw/workspace/.clawhub/lock.json`, and stale hook/extension directories, then surgically removes any ShieldCortex references while preserving sibling keys. Best-effort restarts the OpenClaw gateway so the purge takes effect. Driven by the 2026-04-23/24 fleet incident where five hosts needed hand-scripted `jq` surgery to purge orphan entries left by prior version bumps and manual cleanups.
+
+2. **Doctor gains an OpenClaw residue check.** `shieldcortex doctor` now reports dirty-location count and points at `uninstall --deep` as the fix. Skipped cleanly on non-OpenClaw hosts.
+
+3. **Plugin declares `openclaw` as an optional peer dependency.** Unlocks OpenClaw 2026.4.23's [#70462](https://github.com/openclaw/openclaw/pull/70462) host-package linking for plugins that declare the peer, so future `openclaw/plugin-sdk/*` imports resolve without duplicating the runtime bundle. Manifest also carries an `engines` block hinting at `>=2026.4.23` as recommended.
 
 ### What's new
 
-- **`shieldcortex uninstall --deep`** — after the normal uninstall, scans 15 known residue locations (plugins.installs / entries / allow / load.paths, hooks.shieldcortex, hooks.internal.installs/entries/allow, clawhub skills lock, legacy hook dirs, extensions dir) and surgically removes any ShieldCortex references while preserving sibling keys. Then best-effort restarts the OpenClaw gateway (`systemctl --user restart openclaw-gateway` on Linux, `launchctl kickstart` on macOS) so the purge takes effect. `--no-gateway-restart` opts out.
-- **`shieldcortex doctor`** now runs an OpenClaw residue check that reports how many of the 15 locations are dirty and points at `uninstall --deep` as the fix. Skipped cleanly on non-OpenClaw hosts.
-- **New module `src/setup/deep-clean.ts`** exposes `scanForResidue()`, `cleanResidue()`, and `runDeepClean()` for programmatic use. Each location is declared once with its own `Removal` spec (delete-config-key / filter-config-array / delete-directory), so adding a new residue path is a single-item append.
-
-### Why it matters
-
-The existing `uninstallPlugin()` only cleans config entries when the extension directory still exists on disk. In the field we saw hosts where files had been removed manually (or wiped by a failed update) but config entries remained, producing recurring "plugin references without files" warnings and load-time errors. Deep-clean scans independently of disk state, so orphan entries get purged even when the on-disk artefacts are already gone.
+- **`shieldcortex uninstall --deep [--no-gateway-restart]`** — `src/setup/deep-clean.ts`. Declarative scan spec per residue location (`delete-config-key` / `filter-config-array` / `delete-directory`), so adding a new residue path is a single-item append. Exposes `scanForResidue()`, `cleanResidue()`, and `runDeepClean()` for programmatic use.
+- **`shieldcortex doctor`** — new `OpenClaw residue` check in `src/cli/doctor.ts`.
+- **Plugin manifest** — `plugins/openclaw/package.json` + `plugins/openclaw/openclaw.plugin.json` add `openclaw >=2026.3.22` (optional peer) and `engines.openclaw >=2026.4.23` recommended.
+- **Plugin README** — new Compatibility matrix + Known limitations section documenting the 2026.4.23 gaps (plugins can't call `sessions_spawn` directly, no public `systemPromptAddition` seam).
+- **Hook docs corrected** — `hooks/openclaw/cortex-memory/HOOK.md` no longer claims bootstrap context injection happens. Injection was actually disabled in v2026.2.26 (native OpenClaw Memory Search handles recall); docs were stale for ~2 months.
 
 ### Tests
 
-Eight new tests in `src/__tests__/deep-clean.test.ts` cover: zero-residue baseline, full-residue detection (all 15 locations), surgical removal with sibling preservation, idempotency, dryRun, orphan-entry cleanup (the incident case), malformed-JSON tolerance, and `runDeepClean` structured return.
+- 8 new tests in `src/__tests__/deep-clean.test.ts` (baseline / full detection / surgical removal / idempotency / dryRun / orphan entries / malformed JSON / structured return)
+- 7 new tests in `src/__tests__/plugin-manifest.test.ts` lock in peer-dep shape, engines block, activation hooks, and plugin-version/root-version invariants
+- 4 new tests in `src/__tests__/hook-hash-stability.test.ts` assert the CLAUDE.md INSTRUCTIONS template contains no runtime-dependent interpolations (no `Date.now`, `randomUUID`, `Math.random`, etc.), and that HOOK.md matches the actual handler behaviour
+
+### Why it matters
+
+The existing `uninstallPlugin()` only cleaned config entries when the extension directory still existed on disk. In the field we kept seeing orphan config entries produce "plugin references without files" warnings and load-time errors after every partial update. Deep-clean scans independently of disk state.
+
+The hash-stability tests guard a silent failure mode: if anyone introduces dynamic content into the CLAUDE.md block (timestamps, UUIDs, env reads), every SC install flips `extraSystemPromptHash` and every claude-cli session resets mid-flight with `reason=system-prompt`. Same shape as the v4.11.1 `npx -y` MCP hash thrash, different source.
 
 ## v4.11.1 — 22 April 2026
 
