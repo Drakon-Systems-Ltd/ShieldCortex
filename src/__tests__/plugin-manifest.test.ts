@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { describe, expect, it } from '@jest/globals';
 
 /**
@@ -8,7 +9,8 @@ import { describe, expect, it } from '@jest/globals';
  * in these fields silently break peer-only SDK imports after install.
  */
 describe('shieldcortex-realtime plugin manifest', () => {
-  const repoRoot = path.resolve(__dirname, '..', '..');
+  const thisFile = fileURLToPath(import.meta.url);
+  const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
   const pluginDir = path.join(repoRoot, 'plugins', 'openclaw');
 
   const pkg = JSON.parse(fs.readFileSync(path.join(pluginDir, 'package.json'), 'utf-8'));
