@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+**New: `shieldcortex uninstall --deep` and `shieldcortex doctor` residue check** — closes the "partial uninstall" gap that left ~9 orphan config entries across `~/.openclaw/openclaw.json`, `~/.openclaw/workspace/.clawhub/lock.json`, and stale hook/extension directories after every version bump or manual cleanup (incident 2026-04-23/24: five-host fleet residue took several hours of hand-scripted `jq` surgery to purge).
+
+### What's new
+
+- **`shieldcortex uninstall --deep`** — after the normal uninstall, scans 15 known residue locations (plugins.installs / entries / allow / load.paths, hooks.shieldcortex, hooks.internal.installs/entries/allow, clawhub skills lock, legacy hook dirs, extensions dir) and surgically removes any ShieldCortex references while preserving sibling keys. Then best-effort restarts the OpenClaw gateway (`systemctl --user restart openclaw-gateway` on Linux, `launchctl kickstart` on macOS) so the purge takes effect. `--no-gateway-restart` opts out.
+- **`shieldcortex doctor`** now runs an OpenClaw residue check that reports how many of the 15 locations are dirty and points at `uninstall --deep` as the fix. Skipped cleanly on non-OpenClaw hosts.
+- **New module `src/setup/deep-clean.ts`** exposes `scanForResidue()`, `cleanResidue()`, and `runDeepClean()` for programmatic use. Each location is declared once with its own `Removal` spec (delete-config-key / filter-config-array / delete-directory), so adding a new residue path is a single-item append.
+
+### Why it matters
+
+The existing `uninstallPlugin()` only cleans config entries when the extension directory still exists on disk. In the field we saw hosts where files had been removed manually (or wiped by a failed update) but config entries remained, producing recurring "plugin references without files" warnings and load-time errors. Deep-clean scans independently of disk state, so orphan entries get purged even when the on-disk artefacts are already gone.
+
+### Tests
+
+Eight new tests in `src/__tests__/deep-clean.test.ts` cover: zero-residue baseline, full-residue detection (all 15 locations), surgical removal with sibling preservation, idempotency, dryRun, orphan-entry cleanup (the incident case), malformed-JSON tolerance, and `runDeepClean` structured return.
+
 ## v4.11.1 — 22 April 2026
 
 **Fleet-critical fix: MCP registration no longer uses `npx -y` as the command** — it now resolves and pins the installed `shieldcortex` binary path (falls back to `npx -y` only when no global install exists). This closes a silent session-wipe loop that was hitting every production OpenClaw install.
