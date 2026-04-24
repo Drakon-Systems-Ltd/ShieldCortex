@@ -49,16 +49,40 @@ type Removal =
   | { kind: 'filter-config-array'; file: string; keyPath: string[]; contains: string }
   | { kind: 'delete-directory'; path: string };
 
+/**
+ * Classification of residue paths. Drives orphan detection: a `plugin-config`
+ * entry is legitimate (not an orphan) while the plugin extension dir is on disk;
+ * a `legacy-hook-dir` is always an orphan because the current install uses a
+ * different path.
+ */
+export type ResidueCategory =
+  | 'plugin-config'         // .plugins.{installs|entries|allow|load.paths} referencing the plugin id
+  | 'hook-config'           // .hooks.* entries referencing shieldcortex
+  | 'clawhub-skill-lock'    // .clawhub/lock.json: .skills.shieldcortex
+  | 'plugin-dir'            // current extensions dir (the install itself)
+  | 'hook-dir'              // current cortex-memory hook dir (the install itself)
+  | 'legacy-hook-dir';      // pre-v4.x hook paths kept around for migration cleanup only
+
 export interface ResiduePath {
   description: string;
   removal: Removal;
   present: boolean;
+  category: ResidueCategory;
 }
 
 export interface ResidueReport {
   paths: ResiduePath[];
   dirtyCount: number;
   cleanCount: number;
+}
+
+export interface OrphanReport {
+  paths: ResiduePath[];
+  orphanCount: number;
+  installState: {
+    pluginInstalled: boolean;
+    hookInstalled: boolean;
+  };
 }
 
 export interface CleanOptions {
@@ -152,11 +176,13 @@ export function scanForResidue(): ResidueReport {
     description: `openclaw.json: .plugins.installs["${PLUGIN_ID}"]`,
     removal: { kind: 'delete-config-key', file: openclawJson, keyPath: ['plugins', 'installs', PLUGIN_ID] },
     present: !!getPath(cfg, ['plugins', 'installs', PLUGIN_ID]),
+    category: 'plugin-config',
   });
   paths.push({
     description: `openclaw.json: .plugins.entries["${PLUGIN_ID}"]`,
     removal: { kind: 'delete-config-key', file: openclawJson, keyPath: ['plugins', 'entries', PLUGIN_ID] },
     present: !!getPath(cfg, ['plugins', 'entries', PLUGIN_ID]),
+    category: 'plugin-config',
   });
   paths.push({
     description: `openclaw.json: .plugins.allow[] contains "${PLUGIN_ID}"`,
@@ -165,6 +191,7 @@ export function scanForResidue(): ResidueReport {
       const arr = getPath(cfg, ['plugins', 'allow']);
       return Array.isArray(arr) && arr.some((e) => typeof e === 'string' && e.includes(PLUGIN_ID));
     })(),
+    category: 'plugin-config',
   });
   paths.push({
     description: `openclaw.json: .plugins.load.paths[] contains "${PLUGIN_ID}"`,
@@ -173,6 +200,7 @@ export function scanForResidue(): ResidueReport {
       const arr = getPath(cfg, ['plugins', 'load', 'paths']);
       return Array.isArray(arr) && arr.some((e) => typeof e === 'string' && e.includes(PLUGIN_ID));
     })(),
+    category: 'plugin-config',
   });
 
   // ── openclaw.json: hooks (both modern and legacy shapes) ─
@@ -180,16 +208,19 @@ export function scanForResidue(): ResidueReport {
     description: 'openclaw.json: .hooks.shieldcortex',
     removal: { kind: 'delete-config-key', file: openclawJson, keyPath: ['hooks', 'shieldcortex'] },
     present: !!getPath(cfg, ['hooks', 'shieldcortex']),
+    category: 'hook-config',
   });
   paths.push({
     description: 'openclaw.json: .hooks.internal.installs.shieldcortex',
     removal: { kind: 'delete-config-key', file: openclawJson, keyPath: ['hooks', 'internal', 'installs', 'shieldcortex'] },
     present: !!getPath(cfg, ['hooks', 'internal', 'installs', 'shieldcortex']),
+    category: 'hook-config',
   });
   paths.push({
     description: 'openclaw.json: .hooks.internal.entries.shieldcortex',
     removal: { kind: 'delete-config-key', file: openclawJson, keyPath: ['hooks', 'internal', 'entries', 'shieldcortex'] },
     present: !!getPath(cfg, ['hooks', 'internal', 'entries', 'shieldcortex']),
+    category: 'hook-config',
   });
   paths.push({
     description: 'openclaw.json: .hooks.internal.allow[] contains "shieldcortex"',
@@ -198,6 +229,7 @@ export function scanForResidue(): ResidueReport {
       const arr = getPath(cfg, ['hooks', 'internal', 'allow']);
       return Array.isArray(arr) && arr.some((e) => typeof e === 'string' && e.includes('shieldcortex'));
     })(),
+    category: 'hook-config',
   });
 
   // ── clawhub lock ────────────────────────────────────────
@@ -205,29 +237,100 @@ export function scanForResidue(): ResidueReport {
     description: 'clawhub/lock.json: .skills.shieldcortex',
     removal: { kind: 'delete-config-key', file: clawhubLock, keyPath: ['skills', 'shieldcortex'] },
     present: !!getPath(lock, ['skills', 'shieldcortex']),
+    category: 'clawhub-skill-lock',
   });
 
   // ── filesystem ──────────────────────────────────────────
-  const dirs = [
-    path.join(home, '.openclaw', 'hooks', HOOK_NAME),
-    path.join(home, '.openclaw', 'hooks', 'internal', HOOK_NAME),
-    path.join(home, '.openclaw', 'hooks', 'shieldcortex'),
-    path.join(home, '.claude', 'hooks', HOOK_NAME),
-    path.join(home, '.claude', 'hooks', 'internal', HOOK_NAME),
-    path.join(home, '.openclaw', 'extensions', PLUGIN_ID),
+  const dirEntries: Array<{ dir: string; category: ResidueCategory }> = [
+    // Current canonical paths (these ARE the install when present)
+    { dir: path.join(home, '.openclaw', 'hooks', HOOK_NAME), category: 'hook-dir' },
+    { dir: path.join(home, '.claude', 'hooks', HOOK_NAME), category: 'hook-dir' },
+    { dir: path.join(home, '.openclaw', 'extensions', PLUGIN_ID), category: 'plugin-dir' },
+    // Legacy paths — always orphaned when present (migrations should remove them)
+    { dir: path.join(home, '.openclaw', 'hooks', 'internal', HOOK_NAME), category: 'legacy-hook-dir' },
+    { dir: path.join(home, '.openclaw', 'hooks', 'shieldcortex'), category: 'legacy-hook-dir' },
+    { dir: path.join(home, '.claude', 'hooks', 'internal', HOOK_NAME), category: 'legacy-hook-dir' },
   ];
 
-  for (const dir of dirs) {
+  for (const { dir, category } of dirEntries) {
     paths.push({
       description: dir,
       removal: { kind: 'delete-directory', path: dir },
       present: fs.existsSync(dir),
+      category,
     });
   }
 
   const dirtyCount = paths.filter((p) => p.present).length;
   const cleanCount = paths.length - dirtyCount;
   return { paths, dirtyCount, cleanCount };
+}
+
+/**
+ * Detect whether the SC plugin / hook are currently installed on disk.
+ * Used by `scanForOrphans()` to tell legitimate install state from true orphans.
+ */
+function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolean } {
+  const home = resolveHome();
+  const pluginManifest = path.join(home, '.openclaw', 'extensions', PLUGIN_ID, 'openclaw.plugin.json');
+  const pluginInstalled = fs.existsSync(pluginManifest);
+
+  const hookCandidates = [
+    path.join(home, '.openclaw', 'hooks', HOOK_NAME),
+    path.join(home, '.claude', 'hooks', HOOK_NAME),
+  ];
+  const hookInstalled = hookCandidates.some((d) => fs.existsSync(d));
+
+  return { pluginInstalled, hookInstalled };
+}
+
+/**
+ * Return only residue entries that are TRUE ORPHANS — meaning the config /
+ * lock-file entry references a ShieldCortex artefact that is NOT currently
+ * installed on disk, OR it's a legacy path that shouldn't exist anymore.
+ *
+ * This is what `shieldcortex doctor` wants: it should flag partial-uninstall
+ * wreckage without flagging every legitimate install as "residue" (which was
+ * the v4.12.0 bug — the doctor couldn't tell a healthy install from a leftover).
+ *
+ * The `--deep` purge path continues to use `scanForResidue()` because its job
+ * is to remove ALL traces unconditionally, not just orphans.
+ */
+export function scanForOrphans(): OrphanReport {
+  const installState = detectInstallState();
+  const report = scanForResidue();
+
+  const orphans = report.paths.filter((p): boolean => {
+    if (!p.present) return false;
+    switch (p.category) {
+      case 'plugin-config':
+        // Config entry is legitimate iff the plugin dir is installed.
+        return !installState.pluginInstalled;
+      case 'hook-config':
+        // Config entry is legitimate iff any current hook dir is installed.
+        return !installState.hookInstalled;
+      case 'plugin-dir':
+      case 'hook-dir':
+        // These ARE the install when present — never orphaned.
+        return false;
+      case 'legacy-hook-dir':
+        // Legacy paths should have been migrated off; always flag.
+        return true;
+      case 'clawhub-skill-lock':
+        // SC's openclaw install wrapper doesn't manage the skill. If the entry
+        // is present it was written by `openclaw skills install shieldcortex`
+        // and is either a matching live skill or an orphan. We can't confirm
+        // which without knowing where OpenClaw keeps skill artefacts, so we
+        // conservatively flag it so the operator can decide (purge or reinstall).
+        return true;
+    }
+  });
+
+  return {
+    paths: orphans,
+    orphanCount: orphans.length,
+    installState,
+  };
 }
 
 /**

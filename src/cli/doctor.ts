@@ -461,7 +461,7 @@ async function checkLockFile(): Promise<CheckResult> {
   }
 }
 
-// ── Check 7.5: OpenClaw residue ──────────────────────────
+// ── Check 7.5: OpenClaw residue (orphans only) ───────────
 async function checkOpenClawResidue(): Promise<CheckResult> {
   const env = detectEnvironment();
   if (!env.hasOpenClaw) {
@@ -469,21 +469,30 @@ async function checkOpenClawResidue(): Promise<CheckResult> {
   }
 
   try {
-    const { scanForResidue } = await import('../setup/deep-clean.js');
-    const report = scanForResidue();
+    const { scanForOrphans } = await import('../setup/deep-clean.js');
+    const report = scanForOrphans();
 
-    if (report.dirtyCount === 0) {
-      return { label: 'OpenClaw residue', status: 'pass', message: `clean (${report.cleanCount} locations checked)` };
+    if (report.orphanCount === 0) {
+      // Legitimate install state is not flagged — a fresh `openclaw install`
+      // writes plugin config entries that SHOULD be there, and those are not
+      // reported as residue.
+      const summary = report.installState.pluginInstalled && report.installState.hookInstalled
+        ? 'clean (plugin + hook installed, config aligned)'
+        : report.installState.pluginInstalled
+          ? 'clean (plugin installed, hook absent but non-orphaned)'
+          : report.installState.hookInstalled
+            ? 'clean (hook installed, plugin absent but non-orphaned)'
+            : 'clean (no ShieldCortex artefacts detected)';
+      return { label: 'OpenClaw residue', status: 'pass', message: summary };
     }
 
-    const dirty = report.paths.filter((p) => p.present);
-    const first = dirty.slice(0, 3).map((p) => p.description).join('; ');
-    const suffix = dirty.length > 3 ? ` (+${dirty.length - 3} more)` : '';
+    const first = report.paths.slice(0, 3).map((p) => p.description).join('; ');
+    const suffix = report.paths.length > 3 ? ` (+${report.paths.length - 3} more)` : '';
 
     return {
       label: 'OpenClaw residue',
       status: 'warn',
-      message: `${report.dirtyCount} residue location${report.dirtyCount === 1 ? '' : 's'} — ${first}${suffix}`,
+      message: `${report.orphanCount} orphan${report.orphanCount === 1 ? '' : 's'} — ${first}${suffix}`,
       fix: 'Run `shieldcortex uninstall --deep --confirm` to purge, or reinstall with `shieldcortex openclaw install`',
     };
   } catch (err: unknown) {

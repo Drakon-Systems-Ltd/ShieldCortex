@@ -226,3 +226,172 @@ describe('deep-clean — OpenClaw residue purge', () => {
     expect(gateway).toBeUndefined();
   });
 });
+
+describe('deep-clean — orphan detection (doctor path)', () => {
+  const originalHome = process.env.HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalSudoUser = process.env.SUDO_USER;
+  let tempHome: string;
+  let homedirSpy: jest.SpiedFunction<typeof os.homedir>;
+
+  beforeEach(() => {
+    jest.resetModules();
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-orphans-'));
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+    delete process.env.SUDO_USER;
+    fs.mkdirSync(path.join(tempHome, '.openclaw'), { recursive: true });
+    homedirSpy = jest.spyOn(os, 'homedir').mockReturnValue(tempHome);
+  });
+
+  afterEach(() => {
+    homedirSpy.mockRestore();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    if (originalSudoUser === undefined) delete process.env.SUDO_USER;
+    else process.env.SUDO_USER = originalSudoUser;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  async function loadModule() {
+    return import('../setup/deep-clean.js');
+  }
+
+  function installPluginDir(): void {
+    const extDir = path.join(tempHome, '.openclaw', 'extensions', 'shieldcortex-realtime');
+    fs.mkdirSync(extDir, { recursive: true });
+    fs.writeFileSync(path.join(extDir, 'openclaw.plugin.json'), '{"id":"shieldcortex-realtime","version":"4.12.1"}\n', 'utf-8');
+    fs.writeFileSync(path.join(extDir, 'index.ts'), 'export default {};\n', 'utf-8');
+  }
+
+  function installHookDir(): void {
+    fs.mkdirSync(path.join(tempHome, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
+  }
+
+  function writeHealthyInstallConfig(): void {
+    fs.writeFileSync(
+      path.join(tempHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          installs: { 'shieldcortex-realtime': { source: 'npm', version: '4.12.1' } },
+          entries: { 'shieldcortex-realtime': { enabled: true } },
+          allow: ['shieldcortex-realtime'],
+        },
+        hooks: {
+          internal: {
+            installs: { shieldcortex: { version: '4.12.1' } },
+            entries: { shieldcortex: { enabled: true } },
+            allow: ['shieldcortex'],
+          },
+        },
+      }, null, 2),
+      'utf-8',
+    );
+  }
+
+  it('reports zero orphans when plugin+hook are installed and config references them (v4.12.0 bug fix)', async () => {
+    // Reproduces the fleet scenario: `shieldcortex openclaw install` on Case
+    // populated config entries AND copied the plugin/hook to disk. The v4.12.0
+    // doctor flagged all the config entries as "residue"; it should not have.
+    installPluginDir();
+    installHookDir();
+    writeHealthyInstallConfig();
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.orphanCount).toBe(0);
+    expect(report.installState.pluginInstalled).toBe(true);
+    expect(report.installState.hookInstalled).toBe(true);
+  });
+
+  it('flags plugin-config entries as orphans when the plugin dir is gone', async () => {
+    // Partial uninstall — config still references the plugin but the dir is gone.
+    writeHealthyInstallConfig();
+    installHookDir(); // keep hook installed to isolate plugin-config detection
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.orphanCount).toBeGreaterThanOrEqual(3); // installs, entries, allow
+    expect(report.paths.every((p) => p.category !== 'hook-config')).toBe(true);
+    expect(report.paths.some((p) => p.category === 'plugin-config')).toBe(true);
+  });
+
+  it('flags hook-config entries as orphans when no hook dir exists', async () => {
+    writeHealthyInstallConfig();
+    installPluginDir(); // keep plugin installed to isolate hook-config detection
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.paths.some((p) => p.category === 'hook-config')).toBe(true);
+    expect(report.paths.every((p) => p.category !== 'plugin-config')).toBe(true);
+  });
+
+  it('flags legacy hook dirs as orphans even when current install is healthy', async () => {
+    installPluginDir();
+    installHookDir();
+    writeHealthyInstallConfig();
+
+    // Also drop a legacy hook dir that should have been migrated off
+    const legacyDir = path.join(tempHome, '.openclaw', 'hooks', 'internal', 'cortex-memory');
+    fs.mkdirSync(legacyDir, { recursive: true });
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.orphanCount).toBeGreaterThanOrEqual(1);
+    expect(report.paths.some((p) => p.category === 'legacy-hook-dir' && p.description === legacyDir)).toBe(true);
+  });
+
+  it('flags clawhub skill lock as orphan (SC does not manage skills automatically)', async () => {
+    installPluginDir();
+    installHookDir();
+    writeHealthyInstallConfig();
+
+    const lockPath = path.join(tempHome, '.openclaw', 'workspace', '.clawhub', 'lock.json');
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ skills: { shieldcortex: { version: '4.10.5' } } }, null, 2), 'utf-8');
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.paths.some((p) => p.category === 'clawhub-skill-lock')).toBe(true);
+  });
+
+  it('does NOT flag the plugin extensions dir or the current hook dir themselves as orphans', async () => {
+    installPluginDir();
+    installHookDir();
+    writeHealthyInstallConfig();
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.paths.some((p) => p.category === 'plugin-dir')).toBe(false);
+    expect(report.paths.some((p) => p.category === 'hook-dir')).toBe(false);
+  });
+
+  it('tags every residue path with a category (migration regression guard)', async () => {
+    writeHealthyInstallConfig();
+    installPluginDir();
+    installHookDir();
+
+    const { scanForResidue } = await loadModule();
+    const report = scanForResidue();
+
+    for (const p of report.paths) {
+      expect(p.category).toBeDefined();
+      expect([
+        'plugin-config',
+        'hook-config',
+        'clawhub-skill-lock',
+        'plugin-dir',
+        'hook-dir',
+        'legacy-hook-dir',
+      ]).toContain(p.category);
+    }
+  });
+});
