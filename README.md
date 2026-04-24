@@ -634,7 +634,9 @@ The key shift is that memory is no longer a black box:
 ```bash
 shieldcortex install              # Set up MCP server + hooks
 shieldcortex quickstart           # Detect the fastest setup path
-shieldcortex doctor               # Health check your installation
+shieldcortex doctor               # Health check + OpenClaw residue scan
+shieldcortex uninstall            # Full uninstall (requires TTY)
+shieldcortex uninstall --deep     # Also purge OpenClaw residue (v4.12.0)
 shieldcortex status               # Database and hook status
 shieldcortex scan "text"          # Scan content for threats
 shieldcortex scan-skills          # Scan installed agent skills for threats
