@@ -586,7 +586,11 @@ ${bold}DOCS${reset}
   // Handle "uninstall" subcommand
   if (process.argv[2] === 'uninstall') {
     const { uninstallAll } = await import('./setup/uninstall.js');
-    await uninstallAll({ keepLogs: process.argv.includes('--keep-logs') });
+    await uninstallAll({
+      keepLogs: process.argv.includes('--keep-logs'),
+      deep: process.argv.includes('--deep'),
+      restartGateway: !process.argv.includes('--no-gateway-restart'),
+    });
     return;
   }
 

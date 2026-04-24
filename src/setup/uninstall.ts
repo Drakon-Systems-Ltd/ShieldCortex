@@ -186,10 +186,17 @@ export async function uninstallSetup(): Promise<void> {
   console.log('\nSetup removal complete.');
 }
 
-export async function uninstallAll(options?: { keepLogs?: boolean }): Promise<void> {
+export async function uninstallAll(options?: {
+  keepLogs?: boolean;
+  deep?: boolean;
+  restartGateway?: boolean;
+}): Promise<void> {
   if (blockAgentUninstall()) return;
 
-  const confirmed = await requireConfirmation('fully uninstall ShieldCortex');
+  const action = options?.deep
+    ? 'fully uninstall ShieldCortex and purge OpenClaw residue'
+    : 'fully uninstall ShieldCortex';
+  const confirmed = await requireConfirmation(action);
   if (!confirmed) {
     console.log('Uninstall cancelled.');
     return;
@@ -223,6 +230,42 @@ export async function uninstallAll(options?: { keepLogs?: boolean }): Promise<vo
     removeClaudeMdBlock();
   } catch (err: any) {
     console.error(`Failed to remove CLAUDE.md block: ${err.message}`);
+  }
+
+  // 5. Deep clean: purge all known OpenClaw residue locations that the
+  //    version-specific uninstall paths miss, then (best-effort) restart
+  //    the gateway so the purged config takes effect immediately.
+  if (options?.deep) {
+    try {
+      const { runDeepClean } = await import('./deep-clean.js');
+      const { report, result, gateway } = await runDeepClean({
+        restartGateway: options?.restartGateway !== false,
+      });
+      if (result.removed.length > 0) {
+        console.log(`\nDeep clean: removed ${result.removed.length} residue reference(s):`);
+        for (const r of result.removed) {
+          console.log(`  - ${r}`);
+        }
+      } else if (report.dirtyCount === 0) {
+        console.log('\nDeep clean: no OpenClaw residue detected.');
+      }
+      if (result.errors.length > 0) {
+        console.warn(`\nDeep clean: ${result.errors.length} error(s):`);
+        for (const e of result.errors) {
+          console.warn(`  - ${e.description}: ${e.error}`);
+        }
+      }
+      if (gateway) {
+        if (gateway.restarted) {
+          console.log(`\nOpenClaw gateway restarted via ${gateway.method}.`);
+        } else if (gateway.attempted) {
+          console.warn(`\nOpenClaw gateway restart via ${gateway.method} failed: ${gateway.detail ?? 'unknown'}`);
+          console.warn('Restart it manually for the cleanup to take effect.');
+        }
+      }
+    } catch (err: any) {
+      console.error(`Deep clean failed: ${err.message}`);
+    }
   }
 
   console.log('\nDatabase preserved at ~/.shieldcortex/memories.db — delete manually if desired.');

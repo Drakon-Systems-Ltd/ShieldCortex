@@ -461,6 +461,37 @@ async function checkLockFile(): Promise<CheckResult> {
   }
 }
 
+// ── Check 7.5: OpenClaw residue ──────────────────────────
+async function checkOpenClawResidue(): Promise<CheckResult> {
+  const env = detectEnvironment();
+  if (!env.hasOpenClaw) {
+    return { label: 'OpenClaw residue', status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  try {
+    const { scanForResidue } = await import('../setup/deep-clean.js');
+    const report = scanForResidue();
+
+    if (report.dirtyCount === 0) {
+      return { label: 'OpenClaw residue', status: 'pass', message: `clean (${report.cleanCount} locations checked)` };
+    }
+
+    const dirty = report.paths.filter((p) => p.present);
+    const first = dirty.slice(0, 3).map((p) => p.description).join('; ');
+    const suffix = dirty.length > 3 ? ` (+${dirty.length - 3} more)` : '';
+
+    return {
+      label: 'OpenClaw residue',
+      status: 'warn',
+      message: `${report.dirtyCount} residue location${report.dirtyCount === 1 ? '' : 's'} — ${first}${suffix}`,
+      fix: 'Run `shieldcortex uninstall --deep --confirm` to purge, or reinstall with `shieldcortex openclaw install`',
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label: 'OpenClaw residue', status: 'warn', message: `check failed — ${msg}` };
+  }
+}
+
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
   const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
@@ -512,6 +543,7 @@ export async function runDoctor(): Promise<void> {
     checkProcesses,
     checkDiskUsage,
     checkLockFile,
+    checkOpenClawResidue,
     checkModelCache,
   ];
 
