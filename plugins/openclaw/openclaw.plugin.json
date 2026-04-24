@@ -4,6 +4,10 @@
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
+  "engines": {
+    "openclaw": ">=2026.3.22",
+    "recommended": ">=2026.4.23"
+  },
   "enabledByDefault": false,
   "activation": {
     "hooks": ["llm_input", "llm_output", "before_tool_call", "session_end"],

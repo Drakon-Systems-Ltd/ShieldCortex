@@ -2,6 +2,14 @@
 
 OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory extraction.
 
+## Compatibility
+
+- **Node.js** — ≥ 18 required
+- **OpenClaw** — ≥ 2026.3.22 required, **≥ 2026.4.23 recommended** — 2026.4.23 added host-package linking for plugins that declare `openclaw` as a peer dependency ([#70462](https://github.com/openclaw/openclaw/pull/70462)), which lets any future `openclaw/plugin-sdk/*` imports resolve without a duplicate runtime bundle
+- **ShieldCortex** — ≥ 4.11.1 required
+
+OpenClaw is declared as an **optional** peer dependency, so installs on older OpenClaw keep working but miss the linking benefit.
+
 ## What it does
 
 | Hook | Action |
