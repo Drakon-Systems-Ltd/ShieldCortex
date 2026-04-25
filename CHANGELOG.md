@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.6 — 25 April 2026
+
+**Fix: `shieldcortex openclaw install` now auto-restarts the OpenClaw gateway** so freshly-copied plugin/hook files take effect immediately without manual intervention. Symmetric with `uninstall --deep`'s gateway-restart, which has been live since v4.12.0.
+
+### Why this matters
+
+Reproduced on Edith 2026-04-25 during the v4.12.5 fleet rollout: the npm package upgraded cleanly to 4.12.5, but OpenClaw still showed the plugin loaded as v4.12.2 in memory. Result: `shieldcortex status` reported 0 memories / `Last activity: never` despite a successful upgrade. Fixing this required a manual `systemctl --user restart openclaw-gateway`. With this release the install command does it for you.
+
+### What changed
+
+- `OpenClawInstallOptions` adds `restartGateway?: boolean` (default `true`).
+- `installOpenClawHook()` calls the existing `restartOpenClawGateway()` helper from `src/setup/deep-clean.ts` after install completes — only when something actually landed (avoids wasting a restart on `--no-hooks --no-plugins` no-op runs).
+- `shieldcortex openclaw install` accepts a new `--no-gateway-restart` flag for cases where the operator wants to defer the restart (CI, scripted multi-step installs, or when the gateway will be restarted later as part of a larger orchestration).
+- On restart failure, the install output prints platform-specific manual restart instructions (`systemctl --user restart openclaw-gateway` on Linux, `launchctl kickstart -k gui/$UID/ai.openclaw.gateway` on macOS).
+
+### Tests
+
+8 new in `src/__tests__/openclaw-install-gateway-restart.test.ts` lock in the wiring: option declared, CLI flag parsed and passed through, default-true gating, "only restart when something installed" guard, usage block advertises the flag, restart helper reused (not duplicated), and platform-specific manual fallback messages.
+
+50/50 release-track tests green.
+
 ## v4.12.5 — 25 April 2026
 
 **Fix: auto-extracted memories were silently failing every INSERT with `NOT NULL constraint failed: memories.uuid`.**

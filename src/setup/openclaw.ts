@@ -730,6 +730,20 @@ export interface OpenClawInstallOptions {
   noHooks?: boolean;
   /** Skip plugin installation (--no-plugins flag) */
   noPlugins?: boolean;
+  /**
+   * Best-effort restart of the OpenClaw gateway after install so the freshly
+   * copied hook + plugin files are picked up without manual intervention.
+   * Defaults to true. Set to false (or pass `--no-gateway-restart` from the
+   * CLI) to skip the restart.
+   *
+   * Symmetric with `uninstall --deep`'s gateway-restart, which has been live
+   * since v4.12.0. Without this on the install side, an upgrade of the npm
+   * package leaves the running gateway with the old plugin in memory until
+   * something else triggers a restart — observed on Edith 2026-04-25 where
+   * the npm package was on 4.12.5 but the plugin loaded was still 4.12.2,
+   * silently producing zero memories.
+   */
+  restartGateway?: boolean;
 }
 
 export async function installOpenClawHook(options: OpenClawInstallOptions = {}): Promise<void> {
@@ -868,8 +882,32 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   console.log('Native OpenClaw install is also supported:');
   console.log('  openclaw skills install shieldcortex');
   console.log('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
-  console.log('');
-  console.log('Restart your agent to activate.');
+
+  // Best-effort gateway restart so the new plugin/hook are picked up
+  // immediately. Skipped only when the caller explicitly opts out, both
+  // capability paths skipped (--no-hooks AND --no-plugins), or no work
+  // landed (installed === 0 AND plugin skipped).
+  const didInstallSomething = installed > 0 || pluginInstallMode !== 'skipped';
+  const restartRequested = options.restartGateway !== false;
+  if (restartRequested && didInstallSomething) {
+    const { restartOpenClawGateway } = await import('./deep-clean.js');
+    const result = await restartOpenClawGateway();
+    console.log('');
+    if (result.restarted) {
+      console.log(`OpenClaw gateway restarted via ${result.method}.`);
+    } else if (result.attempted) {
+      console.warn(`OpenClaw gateway restart via ${result.method} failed: ${result.detail ?? 'unknown'}`);
+      console.warn('Restart it manually so the new plugin/hook take effect:');
+      console.warn(process.platform === 'linux'
+        ? '  systemctl --user restart openclaw-gateway'
+        : '  launchctl kickstart -k gui/$UID/ai.openclaw.gateway');
+    } else {
+      console.log('Restart your agent / OpenClaw gateway to activate.');
+    }
+  } else {
+    console.log('');
+    console.log('Restart your agent to activate.');
+  }
 }
 
 export async function uninstallOpenClawHook(): Promise<void> {
@@ -973,10 +1011,11 @@ export async function openClawHookStatus(): Promise<void> {
 export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
+  const restartGateway = !extraArgs.includes('--no-gateway-restart');
 
   switch (subcommand) {
     case 'install':
-      await installOpenClawHook({ noHooks, noPlugins });
+      await installOpenClawHook({ noHooks, noPlugins, restartGateway });
       break;
     case 'uninstall':
       await uninstallOpenClawHook();
@@ -988,8 +1027,9 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       console.log('Usage: shieldcortex openclaw <install|uninstall|status>');
       console.log('');
       console.log('Install options:');
-      console.log('  --no-hooks     Skip hook installation (useful in Docker/CI)');
-      console.log('  --no-plugins   Skip plugin installation (useful in Docker/CI)');
+      console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
+      console.log('  --no-plugins            Skip plugin installation (useful in Docker/CI)');
+      console.log('  --no-gateway-restart    Skip the auto gateway restart after install');
       process.exit(1);
   }
 }
