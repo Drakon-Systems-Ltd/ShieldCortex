@@ -55,6 +55,14 @@ export function launchdPlist(config: ServiceConfig): string {
 }
 
 export function systemdUnit(config: ServiceConfig): string {
+  // Logs go to journald rather than absolute file paths.
+  // History: pre-v4.12.10 used `StandardOutput=append:~/.shieldcortex/logs/...`,
+  // which crash-looped with exit 209/STDOUT if that dir was ever removed
+  // (e.g. by `uninstall --clean-logs` or any cleanup of ~/.shieldcortex).
+  // systemd opens the StandardOutput file before any ExecStart*, so an
+  // ExecStartPre=mkdir cannot recover it. journald has no filesystem
+  // dependency and works on every systemd version we support.
+  // Inspect with: journalctl --user -u shieldcortex-dashboard.service
   return `[Unit]
 Description=ShieldCortex ${modeLabel(config.mode)}
 After=network.target
@@ -64,8 +72,9 @@ Type=simple
 ExecStart=${config.nodePath} ${config.entryPoint} --mode ${config.mode}
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:${config.logsDir}/dashboard-stdout.log
-StandardError=append:${config.logsDir}/dashboard-stderr.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shieldcortex-${config.mode}
 Environment=PATH=${config.nodeBinDir}:/usr/local/bin:/usr/bin:/bin
 
 [Install]

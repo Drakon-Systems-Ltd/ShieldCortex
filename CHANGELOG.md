@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.10 — 25 April 2026
+
+**Fix: `shieldcortex-dashboard.service` crash-loops with exit 209/STDOUT after `~/.shieldcortex/logs/` is removed.**
+
+Caught on Jarvis (clawdbot1) and Tars after both went through this session's residue cleanup, which `rm -rf`'d `~/.shieldcortex/`. The systemd unit hardcoded `StandardOutput=append:~/.shieldcortex/logs/dashboard-stdout.log`. systemd opens that file *before* any `ExecStart*`, so when the directory disappeared, the service entered a permanent restart loop (300+ attempts on Jarvis). `ExecStartPre=mkdir` would not have helped — the file open precedes ExecStartPre too.
+
+Edith was unaffected because the dashboard service was never installed there. Anyone who ran `shieldcortex uninstall --clean-logs` (which deletes `~/.shieldcortex/logs/`) without removing the unit file would have hit the same crash.
+
+### Fix
+
+`src/service/templates.ts` — `systemdUnit()` now uses journald instead of `append:` to a filesystem path:
+
+```text
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shieldcortex-${mode}
+```
+
+Logs are accessible via `journalctl --user -u shieldcortex-dashboard.service` (filterable by `_SYSTEMD_USER_UNIT` and the per-mode SyslogIdentifier). No filesystem dependency — `rm -rf` of any user dir cannot break it. journald handles rotation, compression, and indexing automatically.
+
+Why journald and not `LogsDirectory=`: `LogsDirectory=` for `--user` units requires systemd ≥ 250. Ubuntu 22.04 ships systemd 249. journald works on every supported version.
+
+### Migration of existing broken installs
+
+`src/service/install.ts` now exports `detectStaleAppendLogs()` and `inspectServiceEntryPoint()` checks for the pre-v4.12.10 broken state. `shieldcortex service status` will now print:
+
+```text
+Healthy: no (repair recommended)
+Reason:  unit logs to missing dir /home/u/.shieldcortex/logs (pre-v4.12.10 append: format)
+```
+
+Run `shieldcortex service repair --headless` (or `--worker` / `--api` / no flag) to rewrite the unit. Repair calls `uninstallService` then `installService`, so the new template lands and systemd reloads.
+
+### Tests
+
+2 new files in `src/__tests__/`:
+
+- `service-template.test.ts` — 4 cases asserting `systemdUnit()` routes both streams to journald, embeds no logsDir path, declares `SyslogIdentifier` per mode, preserves Restart/Type/WantedBy. Source-level guard against regressing the fix.
+- `service-stale-unit-detection.test.ts` — 4 cases asserting `detectStaleAppendLogs()` flags the Jarvis/Tars state, doesn't false-positive when the dir exists, and ignores v4.12.10+ journald units.
+
+61/61 release-track tests passing.
+
+### Out of scope
+
+- macOS launchd (`launchdPlist`) — different code path, no field reports, not touched. Same fix could be applied preemptively if launchd starts hitting the same problem on cleaned-up Macs.
+- `Restart=on-failure` policy — fine; the bug was never the restart policy, it was the logs directive.
+
 ## v4.12.9 — 25 April 2026
 
 **Fix: v4.12.8's silencer didn't actually silence — OpenClaw's audit scans comments too.**

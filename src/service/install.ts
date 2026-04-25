@@ -51,9 +51,25 @@ function getServiceConfig(mode: ServiceMode): ServiceConfig {
   };
 }
 
-function inspectServiceEntryPoint(platform: Platform, servicePath: string): { entryPoint: string | null; stale: boolean; mode: ServiceMode | null } {
+export function detectStaleAppendLogs(content: string): { stale: boolean; missingPath: string | null } {
+  // Pre-v4.12.10 Linux units used `StandardOutput=append:/abs/path/...`.
+  // If that absolute path no longer exists, systemd will fail to open it
+  // before any ExecStart* runs (exit 209/STDOUT) and the service will
+  // crash-loop forever. Detect this so `service status` can suggest
+  // `service repair`, which rewrites the unit to the journald template.
+  const match = content.match(/^Standard(?:Output|Error)=append:(\S+)/m);
+  if (!match) return { stale: false, missingPath: null };
+  const logFile = match[1];
+  const logDir = path.dirname(logFile);
+  if (!fs.existsSync(logDir)) {
+    return { stale: true, missingPath: logDir };
+  }
+  return { stale: false, missingPath: null };
+}
+
+function inspectServiceEntryPoint(platform: Platform, servicePath: string): { entryPoint: string | null; stale: boolean; mode: ServiceMode | null; staleReason: string | null } {
   if (!fs.existsSync(servicePath)) {
-    return { entryPoint: null, stale: false, mode: null };
+    return { entryPoint: null, stale: false, mode: null, staleReason: null };
   }
 
   try {
@@ -78,10 +94,24 @@ function inspectServiceEntryPoint(platform: Platform, servicePath: string): { en
     }
 
     const currentEntryPoint = getServiceConfig(detectDefaultServiceMode(platform)).entryPoint;
-    const stale = !!entryPoint && (entryPoint.includes('/.npm/_npx/') || entryPoint !== currentEntryPoint);
-    return { entryPoint, stale, mode };
+    const entryPointStale = !!entryPoint && (entryPoint.includes('/.npm/_npx/') || entryPoint !== currentEntryPoint);
+
+    let logDirStale = false;
+    let staleReason: string | null = null;
+    if (platform === 'linux') {
+      const appendCheck = detectStaleAppendLogs(content);
+      if (appendCheck.stale) {
+        logDirStale = true;
+        staleReason = `unit logs to missing dir ${appendCheck.missingPath} (pre-v4.12.10 append: format)`;
+      }
+    }
+    if (entryPointStale && !staleReason) {
+      staleReason = 'unit points at a stale npm/npx entry point';
+    }
+
+    return { entryPoint, stale: entryPointStale || logDirStale, mode, staleReason };
   } catch {
-    return { entryPoint: null, stale: false, mode: null };
+    return { entryPoint: null, stale: false, mode: null, staleReason: null };
   }
 }
 
@@ -239,6 +269,9 @@ export async function serviceStatus(): Promise<void> {
     console.log(`Entry:     ${inspection.entryPoint}`);
     console.log(`Mode:      ${inspection.mode ?? 'unknown'}`);
     console.log(`Healthy:   ${inspection.stale ? 'no (repair recommended)' : 'yes'}`);
+    if (inspection.stale && inspection.staleReason) {
+      console.log(`Reason:    ${inspection.staleReason}`);
+    }
   }
 
   if (!installed) return;
