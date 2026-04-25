@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { encodeClaudeProjectDir } from './lib/claude-project-dir.mjs';
 
 // Database paths (with legacy fallback)
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
@@ -595,9 +596,7 @@ function readSessionConversation(cwd) {
   if (!cwd) return '';
 
   try {
-    // Claude Code uses the absolute path with slashes replaced by dashes as the project folder name
-    const projectSlug = cwd.replace(/^\//, '').replace(/\//g, '-');
-    const projectDir = join(homedir(), '.claude', 'projects', `-${projectSlug}`);
+    const projectDir = join(homedir(), '.claude', 'projects', encodeClaudeProjectDir(cwd));
 
     if (!existsSync(projectDir)) {
       console.error(`[auto-extract] Session dir not found: ${projectDir}`);

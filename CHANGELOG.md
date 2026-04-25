@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.4 — 25 April 2026
+
+**Fix: silent zero-memory issue when running under dotfile-prefixed working directories (e.g. `~/.openclaw/`, `~/.config/`).**
+
+The pre-compact hook builds the path to Claude Code's session transcript by encoding the cwd into a project-folder slug. Earlier versions only replaced `/` with `-` and left dots intact, but Claude Code itself replaces BOTH `/` AND `.` with `-` (and `:` for Windows drive letters). Net effect: every session under a dotfile-prefixed directory looked at the wrong folder, found no files, read 0 messages, and silently extracted 0 memories.
+
+Reproduced on Jarvis 2026-04-25 inside an OpenClaw workspace at `~/.openclaw/workspace`:
+
+```text
+[auto-extract] Session dir not found: /home/ubuntu/.claude/projects/-home-ubuntu-.openclaw-workspace
+[auto-extract] Read 0 messages from transcript (0 chars)
+[shieldcortex] Pre-compact complete: 0 memories auto-extracted
+```
+
+The actual folder was `-home-ubuntu--openclaw-workspace` (note the double dash where the `.` should have become `-`).
+
+### Fix
+
+`scripts/lib/claude-project-dir.mjs` — new pure ESM util exporting `encodeClaudeProjectDir(cwd)` that mirrors Claude Code's encoding exactly: replace `/`, `\`, `.`, `:` with `-`, with a leading `-` separator. `scripts/pre-compact-hook.mjs` imports it and uses it instead of the broken inline regex.
+
+### Tests
+
+6 new cases in `src/__tests__/claude-project-dir-encoding.test.ts` covering the original repro plus dot-inside-component and Windows path scenarios:
+
+| Input                                     | Expected                                |
+|-------------------------------------------|-----------------------------------------|
+| `/home/u/.openclaw/workspace`             | `-home-u--openclaw-workspace`           |
+| `/home/u/foo.bar/baz`                     | `-home-u-foo-bar-baz`                   |
+| `/home/u/regular/path`                    | `-home-u-regular-path`                  |
+| `C:\Users\u\.openclaw\workspace`          | `-C--Users-u--openclaw-workspace`       |
+
+### Why it matters
+
+Until this release, **every fleet host running ShieldCortex from inside `~/.openclaw/workspace`** was producing 0 auto-extracted memories on every pre-compact event — silently. Doctor was green, hooks were "configured", but the actual work product (memory capture during long sessions) was zero. Other hooks weren't affected because they receive `transcript_path` directly from Claude Code via the hook payload; only pre-compact's auto-extract path computed the slug itself.
+
 ## v4.12.3 — 25 April 2026
 
 **Fix: doctor recognises native-package installs (Mac homebrew, npm-global discovery).**
