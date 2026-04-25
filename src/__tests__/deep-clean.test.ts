@@ -465,4 +465,50 @@ describe('deep-clean — orphan detection (doctor path)', () => {
     expect(report.installState.pluginInstalled).toBe(true);
     expect(report.orphanCount).toBe(0);
   });
+
+  it('honours installPath/dist/openclaw.plugin.json fallback (pre-v4.12.7 wrong-path bug)', async () => {
+    // Reproduces Friday/mikes-mac (Mac homebrew) on v4.12.3–v4.12.6.
+    // The native-package install code wrote `installPath = .../plugins/openclaw`
+    // (the package root, one level too high), but the manifest lives at
+    // `.../plugins/openclaw/dist/openclaw.plugin.json`. detectInstallState
+    // checked only `installPath/openclaw.plugin.json` and returned false
+    // → false-positive orphans on every Mac install.
+    //
+    // v4.12.7 fixes the writer AND adds the dist/ fallback so existing
+    // fleet hosts with the bad installPath stop false-flagging on next
+    // doctor run, even before re-installing.
+    const wrongInstallPath = path.join(tempHome, 'fake-homebrew', 'shieldcortex', 'plugins', 'openclaw');
+    const realManifestDir = path.join(wrongInstallPath, 'dist');
+    fs.mkdirSync(realManifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(realManifestDir, 'openclaw.plugin.json'),
+      '{"id":"shieldcortex-realtime","version":"4.12.6"}\n',
+      'utf-8',
+    );
+
+    fs.writeFileSync(
+      path.join(tempHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          installs: {
+            'shieldcortex-realtime': {
+              source: 'path',
+              installPath: wrongInstallPath, // package root, NOT the dist dir
+              version: '4.12.6',
+            },
+          },
+          entries: { 'shieldcortex-realtime': { enabled: true } },
+          allow: ['shieldcortex-realtime'],
+        },
+      }, null, 2),
+      'utf-8',
+    );
+    installHookDir();
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.installState.pluginInstalled).toBe(true);
+    expect(report.orphanCount).toBe(0);
+  });
 });

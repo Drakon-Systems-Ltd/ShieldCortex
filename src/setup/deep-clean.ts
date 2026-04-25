@@ -288,13 +288,20 @@ function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolea
   const home = resolveHome();
 
   // 1. Honour whatever path the installer recorded in openclaw.json.
+  //    Defensive: also check `installPath/dist/openclaw.plugin.json` because
+  //    pre-v4.12.7 native-package installs (Mac homebrew) recorded the
+  //    package root instead of the dir containing the manifest. Without this
+  //    fallback, fleet hosts with the bad installPath continue to false-flag
+  //    until their next `shieldcortex openclaw install` overwrites it.
   const cfg = readJsonOrNull(path.join(home, '.openclaw', 'openclaw.json')) ?? {};
   const recorded = getPath(cfg, ['plugins', 'installs', PLUGIN_ID]);
   let pluginInstalled = false;
   if (recorded && typeof recorded === 'object') {
     const installPath = (recorded as Record<string, unknown>).installPath;
     if (typeof installPath === 'string' && installPath.length > 0) {
-      pluginInstalled = fs.existsSync(path.join(installPath, 'openclaw.plugin.json'));
+      pluginInstalled =
+        fs.existsSync(path.join(installPath, 'openclaw.plugin.json')) ||
+        fs.existsSync(path.join(installPath, 'dist', 'openclaw.plugin.json'));
     }
   }
 

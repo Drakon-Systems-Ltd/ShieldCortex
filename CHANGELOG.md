@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.7 — 25 April 2026
+
+**Fix: false-positive doctor "orphans" on Mac homebrew installs (root cause of the v4.12.3–v4.12.6 Mac regression).**
+
+Reproduced on Friday/mikes-mac on every release v4.12.3 → v4.12.6: `shieldcortex install` succeeded, plugin landed on disk, hooks installed, but `shieldcortex doctor` kept flagging `.plugins.installs/entries/allow["shieldcortex-realtime"]` as orphans. Linux fleet hosts never hit it.
+
+### Root cause
+
+`installPlugin()`'s native-package code path (the one that fires when npm-global lives in OpenClaw's search path — i.e. `/opt/homebrew/lib/node_modules` on Mac) recorded the WRONG `installPath` in `openclaw.json`:
+
+```text
+path.dirname(path.dirname(globalPluginPath))   ← package root  (wrong)
+path.dirname(globalPluginPath)                 ← dist dir      (right — manifest's parent)
+```
+
+The `trusted-local-copy` code path used the correct convention; only native-package was off. `detectInstallState()` checked `installPath/openclaw.plugin.json`, found nothing (the manifest is in `dist/`), and returned `pluginInstalled = false` → false-positive orphans every time.
+
+### Fix
+
+- `src/setup/openclaw.ts` — `installPlugin()`'s native-package branch now passes `pluginDir = path.dirname(globalPluginPath)` to `trustLocalPlugin()`. Matches the convention used by every other code path. Same value is logged to the user as is recorded in config — no install/log mismatch any more.
+- `src/setup/deep-clean.ts` — `detectInstallState()` now also checks `installPath/dist/openclaw.plugin.json` as a fallback. This means fleet hosts that already have the bad `installPath` written from v4.12.3–v4.12.6 stop false-flagging on the next doctor run, even before they re-install.
+
+### Tests
+
+4 new cases:
+
+- `src/__tests__/deep-clean.test.ts` — "honours installPath/dist fallback" reproduces the Friday scenario with the wrong-path config and asserts `pluginInstalled = true`, `orphanCount = 0`.
+- `src/__tests__/openclaw-install-path.test.ts` (new file, 3 cases) — locks in that the writer passes `pluginDir` to `trustLocalPlugin`, never the double-dirname pattern, and the logged path matches the recorded path.
+
+54/54 release-track tests green.
+
 ## v4.12.6 — 25 April 2026
 
 **Fix: `shieldcortex openclaw install` now auto-restarts the OpenClaw gateway** so freshly-copied plugin/hook files take effect immediately without manual intervention. Symmetric with `uninstall --deep`'s gateway-restart, which has been live since v4.12.0.
