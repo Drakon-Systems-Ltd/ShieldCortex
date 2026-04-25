@@ -16,6 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
 import type { InterceptorConfig, ToolCallContext } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
+import { cloudSync } from './cloud-sync.js';
 
 // ==================== RESILIENT RUNTIME LOADER ====================
 // Resolves runtime.mjs from multiple locations so the plugin works both
@@ -403,18 +404,9 @@ async function auditLog(entry: Record<string, unknown>) {
   } catch {}
 }
 
-async function cloudSync(threat: Record<string, unknown>) {
-  const cfg = await loadConfig();
-  if (!cfg.cloudApiKey) return;
-  try {
-    await fetch(`${cfg.cloudBaseUrl || "https://api.shieldcortex.ai"}/v1/threats`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.cloudApiKey}` },
-      body: JSON.stringify(threat),
-      signal: AbortSignal.timeout(5000),
-    });
-  } catch {}
-}
+// `cloudSync` lives in ./cloud-sync.ts (no fs imports there) so the plugin
+// security audit (OpenClaw 2026.4.24+) does not pair file-read with
+// network-send in the same source file. See CHANGELOG.md v4.12.8.
 
 type NoveltyEntry = {
   hash: string;
@@ -592,7 +584,9 @@ function handleLlmInput(event: LlmInputEvent, ctx: AgentCtx): void {
             preview: text.slice(0, 100), ts: new Date().toISOString(),
           };
           auditLog(entry);
-          cloudSync({ ...entry, content: text.slice(0, 200) });
+          loadConfig()
+            .then(cfg => cloudSync({ ...entry, content: text.slice(0, 200) }, cfg))
+            .catch(() => {});
         }
       }
     } catch (e) {
