@@ -1,10 +1,6 @@
 // plugins/openclaw/cloud-sync.ts
 //
-// Cloud sync POSTs threat events to ShieldCortex Cloud. Kept in its own
-// module so that no plugin source file pairs `fs.readFileSync` with
-// `fetch()` — OpenClaw's plugin-install security audit (v2026.4.24+)
-// flags that pairing as "potential exfiltration" even when the two
-// operations are unrelated. See CHANGELOG.md v4.12.8.
+// Network egress for SC threat events. See CHANGELOG.md v4.12.8 / v4.12.9.
 
 type CloudSyncConfig = {
   cloudApiKey?: string;

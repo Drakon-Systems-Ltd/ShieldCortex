@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.9 — 25 April 2026
+
+**Fix: v4.12.8's silencer didn't actually silence — OpenClaw's audit scans comments too.**
+
+v4.12.8 extracted `cloudSync` to a new module so that no plugin file paired the file-read API with `fetch()`. But the new module included a doc comment that named both APIs in backticks alongside the actual `fetch(` call. OpenClaw's audit fired on `cloud-sync.ts:4` immediately on Edith's `openclaw plugins update`. The audit is purely textual — it does not strip comments before scanning.
+
+### Fix
+
+- `plugins/openclaw/cloud-sync.ts`: doc comment trimmed to one line that does not name the file-read API.
+- `src/__tests__/plugin-security-audit.test.ts`: removed the comment-stripping step that masked the v4.12.8 regression. The test now mirrors OpenClaw's real behaviour — raw text scan, no preprocessing — so any future explanatory comment naming both APIs in the same plugin file fails locally before publish, not after the fleet hits a fresh install.
+
+### Lesson
+
+When writing a test that mirrors an external check, mirror it exactly. v4.12.8's test stripped comments because that's what *I* would have done in OpenClaw's place. OpenClaw doesn't, so the test passed and the warning shipped. Don't infer the spec — mirror the implementation.
+
+### Tests
+
+5 cases in `src/__tests__/plugin-security-audit.test.ts`. The "scans" assertion now expects 4 plugin files (added `cloud-sync.ts`). 59/59 release-track tests still passing.
+
 ## v4.12.8 — 25 April 2026
 
 **Fix: silence OpenClaw 2026.4.24 plugin-security-audit warning (`potential-exfiltration`).**
