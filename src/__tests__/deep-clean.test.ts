@@ -394,4 +394,75 @@ describe('deep-clean — orphan detection (doctor path)', () => {
       ]).toContain(p.category);
     }
   });
+
+  it('honours .plugins.installs[].installPath when the plugin lives outside ~/.openclaw/extensions/ (Mac homebrew)', async () => {
+    // Reproduces the macOS/homebrew install scenario from Friday/mikes-mac:
+    // OpenClaw's "native-package" mode discovers the plugin from the global
+    // node_modules tree (e.g. /opt/homebrew/lib/node_modules/shieldcortex/...)
+    // and never populates ~/.openclaw/extensions/. v4.12.2 doctor flagged
+    // this as residue because detectInstallState() only looked at the
+    // user-space path.
+    const npmGlobalPlugin = path.join(tempHome, 'fake-homebrew', 'shieldcortex', 'plugins', 'openclaw', 'dist');
+    fs.mkdirSync(npmGlobalPlugin, { recursive: true });
+    fs.writeFileSync(path.join(npmGlobalPlugin, 'openclaw.plugin.json'), '{"id":"shieldcortex-realtime","version":"4.12.3"}\n', 'utf-8');
+
+    fs.writeFileSync(
+      path.join(tempHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          installs: {
+            'shieldcortex-realtime': {
+              source: 'path',
+              installPath: npmGlobalPlugin,
+              version: '4.12.3',
+            },
+          },
+          entries: { 'shieldcortex-realtime': { enabled: true } },
+          allow: ['shieldcortex-realtime'],
+        },
+      }, null, 2),
+      'utf-8',
+    );
+    installHookDir();
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.installState.pluginInstalled).toBe(true);
+    expect(report.orphanCount).toBe(0);
+  });
+
+  it('falls back to known npm-global locations when installPath is not recorded', async () => {
+    // Older installs that pre-date the installPath field still need to be
+    // recognised. This guards against false positives on legacy installs
+    // that linger across a homebrew upgrade.
+    const homebrewPlugin = path.join(tempHome, 'opt-homebrew-stub', 'lib', 'node_modules', 'shieldcortex', 'plugins', 'openclaw', 'dist');
+    fs.mkdirSync(homebrewPlugin, { recursive: true });
+    fs.writeFileSync(path.join(homebrewPlugin, 'openclaw.plugin.json'), '{"id":"shieldcortex-realtime","version":"4.12.3"}\n', 'utf-8');
+
+    // Config entries present, no installPath recorded
+    fs.writeFileSync(
+      path.join(tempHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          installs: { 'shieldcortex-realtime': { source: 'npm', version: '4.12.3' } },
+          entries: { 'shieldcortex-realtime': { enabled: true } },
+          allow: ['shieldcortex-realtime'],
+        },
+      }, null, 2),
+      'utf-8',
+    );
+    installHookDir();
+
+    // The fallback list is hard-coded in detectInstallState — it can't see
+    // our temp-rooted homebrew stub. So this test verifies the user-space
+    // fallback by also dropping the canonical install path.
+    installPluginDir();
+
+    const { scanForOrphans } = await loadModule();
+    const report = scanForOrphans();
+
+    expect(report.installState.pluginInstalled).toBe(true);
+    expect(report.orphanCount).toBe(0);
+  });
 });

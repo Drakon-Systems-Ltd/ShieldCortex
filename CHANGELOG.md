@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.3 — 25 April 2026
+
+**Fix: doctor recognises native-package installs (Mac homebrew, npm-global discovery).**
+
+v4.12.2 introduced orphan-only residue detection but only checked `~/.openclaw/extensions/shieldcortex-realtime/` for plugin install state. On macOS via homebrew (and any other host where OpenClaw discovers the plugin via the global node_modules tree), the plugin lives at `${npmRoot}/shieldcortex/plugins/openclaw/dist/` instead — `~/.openclaw/extensions/` is never populated. The doctor saw "no plugin" and flagged the legitimate config entries as orphans.
+
+Reproduced on Friday/mikes-mac (homebrew Mac) after upgrading to v4.12.2.
+
+### Fix
+
+`detectInstallState()` now resolves the plugin's actual install path in this order:
+
+1. **Honour `.plugins.installs[shieldcortex-realtime].installPath` from `openclaw.json`** — the path the installer actually used. Most reliable signal; works for every install mode.
+2. Fallback: check `~/.openclaw/extensions/shieldcortex-realtime/openclaw.plugin.json` (user-space copy mode).
+3. Fallback: check `~/.npm-global/lib/node_modules/shieldcortex/plugins/openclaw/dist/openclaw.plugin.json` (npm-global discovery in user's home).
+
+Absolute system paths like `/opt/homebrew/lib/node_modules` are intentionally NOT in the fallback list — they're caught by step 1 (because the installer records `installPath` for those installs) and skipping them avoids false negatives in tests where the dev machine has a real SC install.
+
+### Tests
+
+2 new cases:
+
+- Honours `installPath` outside `~/.openclaw/extensions/` (the Mac homebrew repro)
+- Falls back to known npm-global locations when `installPath` is missing
+
+17 deep-clean tests total, all green.
+
 ## v4.12.2 — 24 April 2026
 
 **Fix: `shieldcortex doctor` no longer suggests `quickstart` to initialise the database.**

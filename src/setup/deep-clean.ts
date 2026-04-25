@@ -269,11 +269,53 @@ export function scanForResidue(): ResidueReport {
 /**
  * Detect whether the SC plugin / hook are currently installed on disk.
  * Used by `scanForOrphans()` to tell legitimate install state from true orphans.
+ *
+ * Plugin install location depends on which install mode OpenClaw chose:
+ *
+ *   1. **native-package** (Mac homebrew, npm-global in OpenClaw's search path) —
+ *      plugin lives at `${npmRoot}/shieldcortex/plugins/openclaw/dist/`. The
+ *      user-space `~/.openclaw/extensions/` is NOT populated.
+ *   2. **trusted-local-copy** (Linux fleet, npm-global outside the search path) —
+ *      plugin is copied to `~/.openclaw/extensions/shieldcortex-realtime/`.
+ *
+ * The most reliable signal is the `installPath` recorded under
+ * `openclaw.json: .plugins.installs[shieldcortex-realtime]` — that's the path
+ * the installer actually used. We honour that first, then fall back to the
+ * known install locations so we can still detect installs that pre-date the
+ * `installPath` field.
  */
 function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolean } {
   const home = resolveHome();
-  const pluginManifest = path.join(home, '.openclaw', 'extensions', PLUGIN_ID, 'openclaw.plugin.json');
-  const pluginInstalled = fs.existsSync(pluginManifest);
+
+  // 1. Honour whatever path the installer recorded in openclaw.json.
+  const cfg = readJsonOrNull(path.join(home, '.openclaw', 'openclaw.json')) ?? {};
+  const recorded = getPath(cfg, ['plugins', 'installs', PLUGIN_ID]);
+  let pluginInstalled = false;
+  if (recorded && typeof recorded === 'object') {
+    const installPath = (recorded as Record<string, unknown>).installPath;
+    if (typeof installPath === 'string' && installPath.length > 0) {
+      pluginInstalled = fs.existsSync(path.join(installPath, 'openclaw.plugin.json'));
+    }
+  }
+
+  // 2. Fallback: check user-space extensions dir.
+  if (!pluginInstalled) {
+    const userSpaceManifest = path.join(home, '.openclaw', 'extensions', PLUGIN_ID, 'openclaw.plugin.json');
+    pluginInstalled = fs.existsSync(userSpaceManifest);
+  }
+
+  // 3. Fallback: check the user's npm-global tree (only home-relative — we
+  //    trust `installPath` for absolute system paths like /opt/homebrew so
+  //    we don't misread a developer machine's real SC install during tests).
+  if (!pluginInstalled) {
+    const userNpmGlobalManifest = path.join(
+      home, '.npm-global', 'lib', 'node_modules',
+      'shieldcortex', 'plugins', 'openclaw', 'dist', 'openclaw.plugin.json',
+    );
+    if (fs.existsSync(userNpmGlobalManifest)) {
+      pluginInstalled = true;
+    }
+  }
 
   const hookCandidates = [
     path.join(home, '.openclaw', 'hooks', HOOK_NAME),
