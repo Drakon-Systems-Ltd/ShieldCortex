@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { encodeClaudeProjectDir } from './lib/claude-project-dir.mjs';
+import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
 
 // Database paths (with legacy fallback)
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
@@ -485,24 +486,11 @@ function calculateOverlap(text1, text2) {
 
 // ==================== DATABASE OPERATIONS ====================
 
+// Thin wrapper to keep the existing call sites unchanged. The actual
+// write lives in scripts/lib/save-memory.mjs so pre-compact and
+// session-end share one code path (and one regression test).
 function saveMemory(db, memory, project) {
-  const timestamp = new Date().toISOString();
-
-  const stmt = db.prepare(`
-    INSERT INTO memories (title, content, type, category, salience, tags, project, created_at, last_accessed)
-    VALUES (?, ?, 'short_term', ?, ?, ?, ?, ?, ?)
-  `);
-
-  stmt.run(
-    memory.title,
-    memory.content,
-    memory.category,
-    memory.salience,
-    JSON.stringify(memory.tags),
-    project || null,
-    timestamp,
-    timestamp
-  );
+  saveAutoExtractedMemory(db, memory, project);
 }
 
 
