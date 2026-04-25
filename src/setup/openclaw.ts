@@ -500,8 +500,17 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
             fs.rmSync(staleDir, { recursive: true, force: true });
           }
         }
-        console.log(`Installed real-time plugin to ${path.dirname(globalPluginPath)}`);
-        trustLocalPlugin(path.dirname(path.dirname(globalPluginPath)), '');
+        // Record the dir that ACTUALLY contains the manifest as `installPath`
+        // — that's the convention the trusted-local-copy path uses, and what
+        // `detectInstallState()` in deep-clean.ts checks. Earlier versions
+        // wrote `path.dirname(path.dirname(globalPluginPath))` (the package
+        // root, one level too high), so the manifest existence check failed
+        // and doctor flagged the legitimate config entries as orphans on
+        // every Mac homebrew install. Reproduced on Friday/mikes-mac on
+        // every release v4.12.3 → v4.12.6.
+        const pluginDir = path.dirname(globalPluginPath);
+        console.log(`Installed real-time plugin to ${pluginDir}`);
+        trustLocalPlugin(pluginDir, '');
         return 'native-package';
       }
     } catch { /* npm not available or no global install — fall through */ }
