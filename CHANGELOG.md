@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.5 — 25 April 2026
+
+**Fix: auto-extracted memories were silently failing every INSERT with `NOT NULL constraint failed: memories.uuid`.**
+
+v4.12.4 unblocked the read side (the path-encoding fix), but the write side still failed. The pre-compact and session-end hooks' `saveMemory()` functions built INSERT statements that omitted the `uuid` column. The schema declares `uuid TEXT NOT NULL UNIQUE` with no default, so every insert errored out — silently from the user's perspective:
+
+```text
+[auto-extract] Read 4 messages from session JSONL (5186 chars)
+[auto-extract] Failed to save "Decision: X, fix Y, prefer Z":
+  NOT NULL constraint failed: memories.uuid
+[shieldcortex] Pre-compact complete: 0 memories auto-extracted
+```
+
+Reproduced on TARS 2026-04-25 immediately after upgrading to v4.12.4.
+
+### Fix
+
+- New `scripts/lib/save-memory.mjs` — single source of truth for hook-side memory writes. Generates a `crypto.randomUUID()` and binds it to the INSERT.
+- `scripts/pre-compact-hook.mjs` and `scripts/session-end-hook.mjs` both delegate to it via thin wrappers, so they can no longer drift apart and produce "one hook works, the other silently fails" bugs.
+
+### Tests
+
+5 new cases in `src/__tests__/save-auto-extracted-memory.test.ts` against a fresh SQLite DB built from the real `src/database/schema.sql`:
+
+- Inserts a memory row (the v4.12.4 NOT NULL bug repro)
+- Generates a unique UUID per insert (no collision on bulk auto-extract)
+- Respects the `uuid UNIQUE` constraint over multiple writes
+- Accepts `null` project (sessions without a scoped project)
+- Persists `tags` as JSON-encoded text (matches existing reader contract)
+
+### Why it matters
+
+This was the second silent zero-memory bug in 24 hours (v4.12.4 closed the path-encoding side; v4.12.5 closes the write side). Both shipped because the original auto-extract path had no end-to-end test exercising the actual SQLite schema. The new shared `save-memory.mjs` lib gives every hook one tested write path so the next bug in this area can't hide in two places.
+
 ## v4.12.4 — 25 April 2026
 
 **Fix: silent zero-memory issue when running under dotfile-prefixed working directories (e.g. `~/.openclaw/`, `~/.config/`).**
