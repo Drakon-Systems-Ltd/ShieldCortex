@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.11 — 26 April 2026
+
+**Fix: the suspected fleet-wide context-killer + openclaw.json install churn.**
+
+Two surgical fixes in the install/uninstall paths. One is the suspected root cause of weeks of cross-fleet Claude Code context loss; the other stops `shieldcortex update` from rewriting OpenClaw's config every time it runs.
+
+### Bug A: `mcpServers.memory` orphaned in `~/.claude.json` after uninstall (the context-killer)
+
+`setupClaudeMd()` writes `mcpServers.memory = { type: "stdio", command: "<resolved-path>/shieldcortex", args: [] }` to `~/.claude.json` so Claude Code can spawn the SC MCP server on demand. But `uninstallSetup()` and `uninstallAll()` never touched `~/.claude.json` — they only cleaned `~/.claude/settings.json` (hooks) and `~/.claude/CLAUDE.md` (instructions block). After uninstall, the orphaned MCP entry pointed at a now-missing binary. Every Claude Code session that loaded `~/.claude.json` tried to spawn it, failed, and the failure cascaded into the context loss the user has been tracking across the fleet for weeks.
+
+A peer agent (Edith) discovered the orphan and confirmed manually removing the entry stabilised an affected host within minutes. That's the empirical evidence pointing at this exact orphan as the context-killer.
+
+**Fix:**
+
+- New exported `removeMcpEntry()` in `src/setup/uninstall.ts` reads `~/.claude.json`, removes `mcpServers.memory` only when the entry looks ShieldCortex-owned (command path or args contain `shieldcortex` / `shield-cortex`), writes the file back. No-op if missing, malformed, or not SC-owned.
+- New private `looksLikeShieldcortex()` ownership check. Critical safety guard: `mcpServers.memory` is a generic key — the official `@modelcontextprotocol/server-memory` registers under the same name. Unconditional deletion would clobber a user's unrelated MCP server.
+- Wired into BOTH `uninstallSetup()` AND `uninstallAll()`. The `--deep` uninstall path (most-used flow) goes through `uninstallAll()`. Wiring only to `uninstallSetup()` would leave the orphan in the worst-case path.
+
+### Bug B: `~/.openclaw/openclaw.json` rewritten on every install (config churn)
+
+`trustLocalPlugin()` always set `installs[shieldcortex-realtime].installedAt = new Date().toISOString()` on every call, regardless of whether anything had actually changed. Every `shieldcortex openclaw install` (and every `npm install -g shieldcortex` via `postinstall.mjs`'s auto-refresh) bumped a fresh timestamp into the file, churning the gateway's config-watcher and bumping every backup file in the chain. Same shape in `uninstallPlugin()` — it always wrote even when no SC entries existed.
+
+**Fix:**
+
+- New exported `pluginInstallNeedsWrite()` pure helper in `src/setup/openclaw.ts` returns true only when at least one of the load-bearing fields differs from the desired state (source, installPath, version, allow membership, entries presence). Treats `installedAt` as transient — only-differs-on-installedAt returns false (otherwise the function would always trip on its own previous timestamp).
+- `trustLocalPlugin()` calls the helper and returns early when no write is needed. When a write IS needed, preserves any existing `installedAt` rather than overwriting unconditionally.
+- `uninstallPlugin()` computes a `needsWrite` flag from current state and skips the config write when nothing matched. Disk plugin removal still happens unconditionally.
+- `cleanupLegacyPlugin()` was unconditionally deleting `entries['shieldcortex-realtime']` on every install — including the current-format entry that `trustLocalPlugin` had just written. So even with `pluginInstallNeedsWrite` working correctly, the next install would see a missing entry and re-write the file. Caught by the loop test on Friday Mac (mtime advanced 2s on every back-to-back install). Fixed by removing the entry-deletion logic; the only meaningful legacy cleanup left is stripping pre-v2026.3 full-path entries from `plugins.allow`.
+
+### Tests
+
+17 new cases across two files:
+
+- `src/__tests__/uninstall-mcp-cleanup.test.ts` — 7 cases: SC-owned global-bin form removed, SC-owned npx form removed, official `@modelcontextprotocol/server-memory` preserved, `shield-cortex` (hyphenated) variant matched, no-ops on missing file / missing entry / malformed JSON.
+- `src/__tests__/openclaw-install-idempotency.test.ts` — 10 cases proving the comparison helper is strict on load-bearing fields and forgiving on `installedAt`.
+
+84/84 release-track tests passing (was 67 + 17 new).
+
+### Disproven claims (not investigated again)
+
+Three Explore agents investigated four claims this morning. Two were confirmed (above). Two were disproven and are documented here so they don't get re-investigated:
+
+- **"SC ships a SKILL.md path it claims but doesn't actually ship."** Disproven. SC does not declare or ship any SKILL.md. The SKILL.md references found in the codebase are SC's own skill-scanner module, which scans third-party skills for threats — not SC's own manifest.
+- **"Memory extraction returning 0 in FLEET-STATUS."** SC's memory-extraction code path was verified correct end-to-end: UUID generation in `scripts/lib/save-memory.mjs`, project-dir encoding in `scripts/lib/claude-project-dir.mjs`, MCP write path in `src/memory/store.ts`, OpenClaw plugin chain through `callCortex("remember")` — all correct since v4.12.5. FLEET-STATUS doesn't even contain a memory-count metric. The "still returning 0" observation was anecdotal — most likely a host on pre-v4.12.4 (deployment lag) or a session with genuinely 0-salience content (valid 0).
+
+### Credit
+
+Edith (peer agent) for finding the mcpServers orphan and the empirical proof that removing it stabilised an affected host. The four-claim investigation that scoped this release was triggered by Edith's "drawing board" report.
+
 ## v4.12.10 — 25 April 2026
 
 **Fix: `shieldcortex-dashboard.service` crash-loops with exit 209/STDOUT after `~/.shieldcortex/logs/` is removed.**
