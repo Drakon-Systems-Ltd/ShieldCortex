@@ -160,6 +160,64 @@ export function removeClaudeMdBlock(): void {
   console.log('CLAUDE.md: removed ShieldCortex memory instructions block.');
 }
 
+/**
+ * Ownership check: an mcpServers entry "looks like ShieldCortex" if its
+ * command path or args contain a shieldcortex / shield-cortex token.
+ * `mcpServers.memory` is a generic key — the official upstream
+ * `@modelcontextprotocol/server-memory` registers under the same name —
+ * so we MUST verify ownership before deletion or risk clobbering an
+ * unrelated MCP server the user installed.
+ */
+function looksLikeShieldcortex(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as { command?: unknown; args?: unknown };
+  const tokens: string[] = [];
+  if (typeof e.command === 'string') tokens.push(e.command);
+  if (Array.isArray(e.args)) for (const a of e.args) if (typeof a === 'string') tokens.push(a);
+  return tokens.some((t) => /shield[-]?cortex/i.test(t));
+}
+
+/**
+ * Remove the ShieldCortex MCP server entry from ~/.claude.json.
+ *
+ * Pre-v4.12.11 uninstall left this entry in place. Every Claude Code
+ * session then tried to spawn the now-missing shieldcortex binary, and
+ * the failure cascaded into fleet-wide context loss — confirmed by a
+ * peer agent (Edith) who saw an affected host stabilise within minutes
+ * after manually removing the entry.
+ *
+ * Safe: only deletes entries that look ShieldCortex-owned. No-op if the
+ * file is missing, JSON is malformed, the entry is absent, or the entry
+ * belongs to another MCP server.
+ */
+export function removeMcpEntry(): void {
+  const mcpPath = path.join(os.homedir(), '.claude.json');
+  if (!fs.existsSync(mcpPath)) return;
+
+  let config: any;
+  try {
+    config = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+  } catch (err: any) {
+    console.warn(`MCP: could not parse ~/.claude.json — leaving it untouched: ${err.message}`);
+    return;
+  }
+
+  const entry = config?.mcpServers?.memory;
+  if (!entry) {
+    console.log('MCP: no shieldcortex entry found in ~/.claude.json.');
+    return;
+  }
+
+  if (!looksLikeShieldcortex(entry)) {
+    console.warn('MCP: ~/.claude.json mcpServers.memory does not look ShieldCortex-owned — leaving it alone.');
+    return;
+  }
+
+  delete config.mcpServers.memory;
+  fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  console.log('MCP: removed shieldcortex entry from ~/.claude.json.');
+}
+
 export async function uninstallSetup(): Promise<void> {
   if (blockAgentUninstall()) return;
 
@@ -181,6 +239,12 @@ export async function uninstallSetup(): Promise<void> {
     removeClaudeMdBlock();
   } catch (err: any) {
     console.error(`Failed to remove CLAUDE.md block: ${err.message}`);
+  }
+
+  try {
+    removeMcpEntry();
+  } catch (err: any) {
+    console.error(`Failed to remove MCP entry: ${err.message}`);
   }
 
   console.log('\nSetup removal complete.');
@@ -232,7 +296,17 @@ export async function uninstallAll(options?: {
     console.error(`Failed to remove CLAUDE.md block: ${err.message}`);
   }
 
-  // 5. Deep clean: purge all known OpenClaw residue locations that the
+  // 5. Remove the MCP entry from ~/.claude.json. This is THE
+  //    pre-v4.12.11 context-killer — every Claude Code session loaded
+  //    the orphaned entry, tried to spawn the missing binary, and the
+  //    failure cascaded into context loss across the fleet.
+  try {
+    removeMcpEntry();
+  } catch (err: any) {
+    console.error(`Failed to remove MCP entry: ${err.message}`);
+  }
+
+  // 6. Deep clean: purge all known OpenClaw residue locations that the
   //    version-specific uninstall paths miss, then (best-effort) restart
   //    the gateway so the purged config takes effect immediately.
   if (options?.deep) {
