@@ -272,9 +272,19 @@ function detectLegacyHookVariants(hooksDir: string): string[] {
 // ==================== Cleanup Legacy Plugin ====================
 
 /**
- * Remove the shieldcortex-realtime plugin entry from openclaw.json
- * if it exists. Earlier versions incorrectly registered a plugin
- * that caused OpenClaw config validation errors.
+ * Remove genuinely-legacy plugin registration shapes from openclaw.json.
+ *
+ * The only known legacy shape that caused OpenClaw config validation
+ * errors was `plugins.allow` entries containing full file paths to the
+ * plugin (pre-v2026.3 format) rather than the bare plugin id. This
+ * function strips those.
+ *
+ * v4.12.11 — used to also unconditionally delete
+ * `plugins.entries['shieldcortex-realtime']` here. That key holds the
+ * CURRENT-format registration (`{ enabled: true }`) that `trustLocalPlugin`
+ * writes; deleting it on every install meant `trustLocalPlugin`'s
+ * idempotency check always saw a missing entry and re-wrote the file —
+ * defeating the v4.12.11 idempotency fix entirely. Removed.
  */
 function cleanupLegacyPlugin(): void {
   const home = resolveUserHome();
@@ -285,13 +295,6 @@ function cleanupLegacyPlugin(): void {
     const raw = fs.readFileSync(configPath, 'utf-8');
     const config = JSON.parse(raw);
     let changed = false;
-
-    // Remove legacy entries (old format before native installs)
-    if (config.plugins?.entries?.['shieldcortex-realtime']) {
-      delete config.plugins.entries['shieldcortex-realtime'];
-      if (Object.keys(config.plugins.entries).length === 0) delete config.plugins.entries;
-      changed = true;
-    }
 
     // Remove stale full-path entries from plugins.allow
     // (pre-v2026.3 format used raw file paths instead of plugin IDs)
@@ -318,6 +321,48 @@ function openClawConfigPath(): string {
   return path.join(resolveUserHome(), '.openclaw', 'openclaw.json');
 }
 
+/**
+ * Pure idempotency check for the openclaw.json plugin registration.
+ *
+ * Returns true if the config needs to be rewritten — i.e. ANY of the
+ * load-bearing fields differ from the desired state. Returns false when
+ * the config already matches and a re-install would otherwise produce a
+ * no-op write (which churned the gateway's config-watcher every
+ * `shieldcortex openclaw install` pre-v4.12.11).
+ *
+ * Intentionally treats `installedAt` as transient — only differing on
+ * that field does NOT force a write, otherwise this function would
+ * always trip on its own previous timestamp.
+ *
+ * Exported for direct unit testing without booting the full installer.
+ */
+export function pluginInstallNeedsWrite(
+  config: unknown,
+  pluginId: string,
+  installDir: string,
+  version: string,
+): boolean {
+  if (!config || typeof config !== 'object') return true;
+  const c = config as { plugins?: unknown };
+  if (!c.plugins || typeof c.plugins !== 'object') return true;
+  const plugins = c.plugins as { allow?: unknown; installs?: unknown; entries?: unknown };
+
+  const install = (plugins.installs as Record<string, unknown> | undefined)?.[pluginId];
+  if (!install || typeof install !== 'object') return true;
+  const i = install as { source?: unknown; installPath?: unknown; version?: unknown };
+  if (i.source !== 'path' || i.installPath !== installDir || i.version !== version) return true;
+
+  const allow = Array.isArray(plugins.allow) ? (plugins.allow as unknown[]) : [];
+  if (!allow.includes(pluginId)) return true;
+  const hasStale = allow.some((e) => typeof e === 'string' && e !== pluginId && e.includes(pluginId));
+  if (hasStale) return true;
+
+  const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+  if (!entries[pluginId]) return true;
+
+  return false;
+}
+
 function trustLocalPlugin(installDir: string, version: string): boolean {
   const configPath = openClawConfigPath();
   const configDir = path.dirname(configPath);
@@ -330,6 +375,15 @@ function trustLocalPlugin(installDir: string, version: string): boolean {
 
     const raw = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf-8') : '{}';
     const config = JSON.parse(raw);
+
+    // Idempotency: skip the write if everything is already correct.
+    // This stops `shieldcortex openclaw install` (and postinstall.mjs's
+    // auto-refresh) from bumping a fresh installedAt timestamp on every
+    // invocation when nothing has actually changed.
+    if (!pluginInstallNeedsWrite(config, pluginId, installDir, version)) {
+      return true;
+    }
+
     const plugins = typeof config.plugins === 'object' && config.plugins !== null ? config.plugins : {};
     const allow = Array.isArray((plugins as { allow?: unknown }).allow)
       ? ((plugins as { allow?: string[] }).allow ?? [])
@@ -343,15 +397,18 @@ function trustLocalPlugin(installDir: string, version: string): boolean {
       cleaned.push(pluginId);
     }
 
-    // Add installs entry so OpenClaw recognises the plugin
+    // Preserve the existing installedAt if present — we only land here
+    // when something genuine changed, but if the existing entry's path
+    // was wrong (say) we don't need to invent a new install timestamp.
     const installs = typeof plugins.installs === 'object' && plugins.installs !== null
       ? plugins.installs
       : {};
+    const existingInstall = (installs as Record<string, { installedAt?: string }>)[pluginId];
     (installs as Record<string, unknown>)[pluginId] = {
       source: 'path',
       installPath: installDir,
       version,
-      installedAt: new Date().toISOString(),
+      installedAt: existingInstall?.installedAt ?? new Date().toISOString(),
     };
 
     // Add entries to enable the plugin
@@ -641,19 +698,32 @@ function uninstallPlugin(): boolean {
       const raw = fs.readFileSync(configPath, 'utf-8');
       const config = JSON.parse(raw);
       const pluginId = PLUGIN_DIR_NAME;
-      if (Array.isArray(config.plugins?.allow)) {
-        // Remove both old file-path entries and new short-name entries
-        config.plugins.allow = config.plugins.allow.filter(
-          (entry: string) => !entry.includes(pluginId),
-        );
+
+      // Idempotency: only write the config if there's actually something
+      // to remove. Pre-v4.12.11 this rewrote openclaw.json every time
+      // even when no SC entries existed (e.g. a re-run of `uninstall
+      // --deep` after a previous successful uninstall).
+      const allowHasIt = Array.isArray(config.plugins?.allow)
+        && config.plugins.allow.some((e: unknown) => typeof e === 'string' && e.includes(pluginId));
+      const installsHasIt = !!config.plugins?.installs?.[pluginId];
+      const entriesHasIt = !!config.plugins?.entries?.[pluginId];
+      const needsWrite = allowHasIt || installsHasIt || entriesHasIt;
+
+      if (needsWrite) {
+        if (Array.isArray(config.plugins?.allow)) {
+          // Remove both old file-path entries and new short-name entries
+          config.plugins.allow = config.plugins.allow.filter(
+            (entry: string) => !entry.includes(pluginId),
+          );
+        }
+        if (config.plugins?.installs?.[pluginId]) {
+          delete config.plugins.installs[pluginId];
+        }
+        if (config.plugins?.entries?.[pluginId]) {
+          delete config.plugins.entries[pluginId];
+        }
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
       }
-      if (config.plugins?.installs?.[pluginId]) {
-        delete config.plugins.installs[pluginId];
-      }
-      if (config.plugins?.entries?.[pluginId]) {
-        delete config.plugins.entries[pluginId];
-      }
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
     }
     fs.rmSync(destDir, { recursive: true });
     console.log(`Removed real-time plugin from ${destDir}`);
