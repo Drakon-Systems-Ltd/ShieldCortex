@@ -534,44 +534,19 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
     return 'skipped';
   }
 
-  // If the plugin is already discoverable by OpenClaw via npm global install,
-  // skip the extensions copy to avoid "duplicate plugin id" warnings.
-  // OpenClaw auto-discovers from standard global node_modules paths only.
-  if (!process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV]) {
-    try {
-      const npmRoot = execSync('npm root -g', { encoding: 'utf-8', timeout: 5000 }).trim();
-      const globalPluginPath = path.join(npmRoot, 'shieldcortex', 'plugins', 'openclaw', 'dist', 'openclaw.plugin.json');
-      // Only skip extensions copy if npm global is in a path OpenClaw searches
-      const openclawSearchPaths = [
-        '/usr/lib/node_modules',
-        '/usr/local/lib/node_modules',
-        '/opt/homebrew/lib/node_modules',
-      ];
-      const isInOpenClawSearchPath = openclawSearchPaths.some((p) => npmRoot.startsWith(p));
-      if (fs.existsSync(globalPluginPath) && isInOpenClawSearchPath) {
-        // Clean up any existing extensions copy that would cause duplicates
-        const extDir = findExtensionsDir();
-        if (extDir) {
-          const staleDir = path.join(extDir, PLUGIN_DIR_NAME);
-          if (fs.existsSync(staleDir)) {
-            fs.rmSync(staleDir, { recursive: true, force: true });
-          }
-        }
-        // Record the dir that ACTUALLY contains the manifest as `installPath`
-        // — that's the convention the trusted-local-copy path uses, and what
-        // `detectInstallState()` in deep-clean.ts checks. Earlier versions
-        // wrote `path.dirname(path.dirname(globalPluginPath))` (the package
-        // root, one level too high), so the manifest existence check failed
-        // and doctor flagged the legitimate config entries as orphans on
-        // every Mac homebrew install. Reproduced on Friday/mikes-mac on
-        // every release v4.12.3 → v4.12.6.
-        const pluginDir = path.dirname(globalPluginPath);
-        console.log(`Installed real-time plugin to ${pluginDir}`);
-        trustLocalPlugin(pluginDir, '');
-        return 'native-package';
-      }
-    } catch { /* npm not available or no global install — fall through */ }
-  }
+  // Previously this branch tried to "skip the extensions copy" when the npm
+  // global path was on a list of "OpenClaw-searched" paths
+  // (/usr/lib/node_modules, /usr/local/lib/node_modules,
+  // /opt/homebrew/lib/node_modules). That premise was false: OpenClaw only
+  // discovers plugins from its own stock dir and ~/.openclaw/extensions/, not
+  // from arbitrary global node_modules entries. The branch deleted the
+  // working extension dir and pointed `trustLocalPlugin` at a path OpenClaw
+  // never reads, leaving every Mac homebrew (and Linux global) install with
+  // an unregistered plugin and a "plugin not found" doctor warning.
+  //
+  // Now we always go through `tryNativeOpenClawPluginInstall()` first
+  // (`openclaw plugins install <pkg>` registers correctly), then fall back
+  // to copying into the extensions dir.
 
   const nativeInstall = tryNativeOpenClawPluginInstall();
   if (nativeInstall) {

@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.14 — 2 May 2026
+
+**Fix: `shieldcortex openclaw install` left the real-time plugin unregistered on Mac homebrew and Linux global installs.**
+
+`installPlugin()` had a code branch that checked `npm root -g` against a hardcoded list of "OpenClaw-searched" paths (`/usr/lib/node_modules`, `/usr/local/lib/node_modules`, `/opt/homebrew/lib/node_modules`). On a hit it deleted the working extension dir at `~/.openclaw/extensions/shieldcortex-realtime/`, pointed `trustLocalPlugin` at the npm-install path, and reported success. The premise was wrong: OpenClaw only discovers plugins from its own stock dir and `~/.openclaw/extensions/`, never from arbitrary global node_modules trees. Every Mac homebrew install and every Linux global install ended up with an unregistered plugin and a "plugin not found" doctor warning. The MCP-side path was unaffected; only the OpenClaw plugin side broke.
+
+### Fixed
+
+- Removed the npm-global-path "fast path" from `installPlugin()`. The function now always calls `tryNativeOpenClawPluginInstall()` first (which registers via `openclaw plugins install <pkg>` — the path OpenClaw actually reads) and falls back to copying into `~/.openclaw/extensions/` if native install fails.
+
+### Tests
+
+- Replaced the v4.12.7 install-path regression suite with a v4.12.14 regression suite that pins the broken branch's removal: no `npm root -g` call inside `installPlugin`, no hardcoded `openclawSearchPaths` list, no inline `return 'native-package'`, no extension-dir deletion outside `tryNativeOpenClawPluginInstall()`.
+
 ## v4.12.13 — 2 May 2026
 
 **OpenClaw plugin compatibility hotfix.**
