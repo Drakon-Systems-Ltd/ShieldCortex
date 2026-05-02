@@ -11,6 +11,8 @@ import {
 import { getLicense, getLicenseTier, getTrialStatus, activateLicense, deactivateLicense } from '../../license/store.js';
 import { listFeatures } from '../../license/gate.js';
 import type { GatedFeature } from '../../license/gate.js';
+import { isFeatureEnabled } from '../../license/gate.js';
+import type { LocalAiExplainSubject, LocalAiExplainSubjectKind } from '../../defence/explainer/types.js';
 import { validateOnceNow } from '../../license/validate.js';
 import type { BrainWorker } from '../../worker/brain-worker.js';
 import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
@@ -39,6 +41,82 @@ interface InterceptAuditEntry {
   outcome: string;
   preview: string;
   ts: string;
+}
+
+function parseAnnotationJson(value: unknown): unknown | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function readTailLines(path: string, count: number): string[] {
+  try {
+    if (!existsSync(path)) return [];
+    return readFileSync(path, 'utf-8').trim().split('\n').filter(Boolean).slice(-count);
+  } catch {
+    return [];
+  }
+}
+
+function isModelCacheReady(cacheDir: string): boolean {
+  try {
+    return existsSync(cacheDir) && readdirSync(cacheDir).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+const LOCAL_AI_SUBJECT_KINDS = new Set<LocalAiExplainSubjectKind>([
+  'memory',
+  'memory_file',
+  'xray_finding',
+  'quarantine_item',
+  'audit_event',
+  'generic',
+]);
+
+function cleanString(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+function cleanStringArray(value: unknown, maxItems: number, maxLength: number): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .map((item) => cleanString(item, maxLength))
+    .filter((item): item is string => Boolean(item))
+    .slice(0, maxItems);
+}
+
+function cleanMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>).slice(0, 40);
+  return Object.fromEntries(entries);
+}
+
+function parseLocalAiSubject(value: unknown): LocalAiExplainSubject | null {
+  if (!value || typeof value !== 'object') return null;
+  const body = value as Record<string, unknown>;
+  const kind = body.kind;
+  const title = cleanString(body.title, 240);
+  const content = cleanString(body.content, 20_000);
+
+  if (typeof kind !== 'string' || !LOCAL_AI_SUBJECT_KINDS.has(kind as LocalAiExplainSubjectKind)) return null;
+  if (!title || !content) return null;
+
+  return {
+    kind: kind as LocalAiExplainSubjectKind,
+    title,
+    content,
+    project: cleanString(body.project, 160) ?? null,
+    source: cleanString(body.source, 240) ?? null,
+    signals: cleanStringArray(body.signals, 20, 120),
+    metadata: cleanMetadata(body.metadata),
+  };
 }
 
 export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
@@ -205,22 +283,230 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
   app.get('/api/v1/quarantine', (req: Request, res: Response) => {
     try {
       const db = getDatabase();
-      const status = req.query.status ?? 'pending';
+      const status = typeof req.query.status === 'string' && req.query.status.trim()
+        ? req.query.status.trim()
+        : 'pending';
       const limit = parseInt(req.query.limit as string, 10) || 50;
-      const project = req.query.project as string | undefined;
-      const sql = project
-        ? 'SELECT * FROM quarantine WHERE status = ? AND project = ? ORDER BY created_at DESC LIMIT ?'
-        : 'SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT ?';
-      const params = project ? [status, project, limit] : [status, limit];
-      const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+      const project = typeof req.query.project === 'string' && req.query.project.trim()
+        ? req.query.project.trim()
+        : undefined;
+      const sourceType = typeof req.query.sourceType === 'string' && req.query.sourceType.trim()
+        ? req.query.sourceType.trim()
+        : undefined;
+      const clauses = ['status = ?'];
+      const params: Array<string | number> = [status];
+      if (project) {
+        clauses.push('project = ?');
+        params.push(project);
+      }
+      if (sourceType) {
+        clauses.push('source_type = ?');
+        params.push(sourceType);
+      }
+      const whereSql = clauses.join(' AND ');
+      const rows = db.prepare(`SELECT * FROM quarantine WHERE ${whereSql} ORDER BY created_at DESC LIMIT ?`)
+        .all(...params, limit) as Record<string, unknown>[];
+      const countSql = `SELECT COUNT(*) as count FROM quarantine WHERE ${whereSql}`;
+      const countParams = params;
+      const countRow = db.prepare(countSql).get(...countParams) as { count: number } | undefined;
+      const annotationByItem = new Map<number, unknown>();
+      const ids = rows
+        .map((row) => Number(row.id))
+        .filter((id) => Number.isInteger(id) && id > 0);
+
+      if (ids.length > 0) {
+        const placeholders = ids.map(() => '?').join(',');
+        const annotationRows = db.prepare(`
+          SELECT qa.item_id, qa.annotation_json
+          FROM quarantine_annotations qa
+          JOIN (
+            SELECT item_id, MAX(generated_at) AS generated_at
+            FROM quarantine_annotations
+            WHERE item_id IN (${placeholders})
+            GROUP BY item_id
+          ) latest
+            ON latest.item_id = qa.item_id
+           AND latest.generated_at = qa.generated_at
+        `).all(...ids) as Array<{ item_id: number; annotation_json: string }>;
+
+        for (const annotationRow of annotationRows) {
+          annotationByItem.set(annotationRow.item_id, parseAnnotationJson(annotationRow.annotation_json));
+        }
+      }
+
       res.json({
         items: rows.map((row) => ({
           ...row,
           title: row.original_title,
           content: row.original_content,
+          annotation: annotationByItem.get(Number(row.id)) ?? null,
         })),
-        total: rows.length,
+        total: countRow?.count ?? rows.length,
       });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.get('/api/v1/review-copilot/status', async (_req: Request, res: Response) => {
+    try {
+      const { getReviewCopilotConfig } = await import('../../cloud/config.js');
+      const config = getReviewCopilotConfig();
+      const cacheReady = isModelCacheReady(config.modelCacheDir);
+      const recentTelemetry = readTailLines(config.telemetryPath, 10)
+        .map((line) => {
+          try { return JSON.parse(line) as Record<string, unknown>; }
+          catch { return null; }
+        })
+        .filter(Boolean);
+
+      res.json({
+        enabled: config.enabled,
+        featureEnabled: isFeatureEnabled('local_ai_explainer'),
+        modelId: config.modelId,
+        modelCacheDir: config.modelCacheDir,
+        modelCached: cacheReady,
+        telemetryPath: config.telemetryPath,
+        inferenceTimeoutMs: config.inferenceTimeoutMs,
+        workerHeapMB: config.workerHeapMB,
+        recentTelemetry,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.get('/api/v1/local-ai/status', async (_req: Request, res: Response) => {
+    try {
+      const { getReviewCopilotConfig } = await import('../../cloud/config.js');
+      const config = getReviewCopilotConfig();
+      const cacheReady = isModelCacheReady(config.modelCacheDir);
+      const recentTelemetry = readTailLines(config.telemetryPath, 10)
+        .map((line) => {
+          try { return JSON.parse(line) as Record<string, unknown>; }
+          catch { return null; }
+        })
+        .filter(Boolean);
+
+      res.json({
+        enabled: config.enabled,
+        featureEnabled: isFeatureEnabled('local_ai_explainer'),
+        modelId: config.modelId,
+        modelCacheDir: config.modelCacheDir,
+        modelCached: cacheReady,
+        telemetryPath: config.telemetryPath,
+        inferenceTimeoutMs: config.inferenceTimeoutMs,
+        workerHeapMB: config.workerHeapMB,
+        recentTelemetry,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/v1/local-ai/explain', requireNotLocked, requireProFeature('local_ai_explainer'), async (req: Request, res: Response) => {
+    try {
+      const subject = parseLocalAiSubject(req.body);
+      if (!subject) {
+        return res.status(400).json({ error: 'Invalid explanation subject' });
+      }
+
+      const { getReviewCopilotConfig } = await import('../../cloud/config.js');
+      const config = getReviewCopilotConfig();
+      if (!config.enabled) {
+        return res.status(409).json({ error: 'Local AI Explainer is disabled', code: 'LOCAL_AI_EXPLAINER_DISABLED' });
+      }
+      if (!isModelCacheReady(config.modelCacheDir)) {
+        return res.status(409).json({ error: 'Local AI Explainer model is not cached', code: 'LOCAL_AI_EXPLAINER_MODEL_NOT_CACHED' });
+      }
+
+      const { explainLocalAiSubject } = await import('../../defence/explainer/index.js');
+      const explanation = await explainLocalAiSubject(subject);
+      res.json({ success: true, explanation });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/v1/memory-files/scan', requireNotLocked, requireProFeature('memory_file_scan'), async (_req: Request, res: Response) => {
+    try {
+      const { queueMemoryFileScanFindings, scanMemoryFilesDetailed } = await import('../../audit/memory-scanner.js');
+      const result = scanMemoryFilesDetailed();
+      const quarantine = queueMemoryFileScanFindings(result);
+      res.json({
+        success: true,
+        scannedAt: result.scannedAt,
+        summary: result.summary,
+        quarantine,
+        files: result.files,
+      });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.get('/api/v1/quarantine/:id/annotation', (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid quarantine id' });
+      }
+      const db = getDatabase();
+      const row = db.prepare(`
+        SELECT annotation_json
+        FROM quarantine_annotations
+        WHERE item_id = ?
+        ORDER BY generated_at DESC
+        LIMIT 1
+      `).get(id) as { annotation_json: string } | undefined;
+      res.json({ annotation: row ? parseAnnotationJson(row.annotation_json) : null });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/v1/quarantine/:id/annotate', requireNotLocked, requireProFeature('local_ai_explainer'), async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid quarantine id' });
+      }
+      const { getReviewCopilotConfig } = await import('../../cloud/config.js');
+      const config = getReviewCopilotConfig();
+      if (!config.enabled) {
+        return res.status(409).json({ error: 'Local AI Explainer is disabled', code: 'LOCAL_AI_EXPLAINER_DISABLED' });
+      }
+      if (!isModelCacheReady(config.modelCacheDir)) {
+        return res.status(409).json({ error: 'Local AI Explainer model is not cached', code: 'LOCAL_AI_EXPLAINER_MODEL_NOT_CACHED' });
+      }
+      const { annotateQuarantineItem } = await import('../../defence/judge/annotate.js');
+      const annotation = await annotateQuarantineItem(id);
+      res.json({ success: Boolean(annotation), annotation });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/v1/quarantine/annotate-pending', requireNotLocked, requireProFeature('local_ai_explainer'), async (req: Request, res: Response) => {
+    try {
+      const limit = Number(req.body?.limit ?? 25);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({ error: 'limit must be an integer between 1 and 100' });
+      }
+      const { getReviewCopilotConfig } = await import('../../cloud/config.js');
+      const config = getReviewCopilotConfig();
+      if (!config.enabled) {
+        return res.status(409).json({ error: 'Local AI Explainer is disabled', code: 'LOCAL_AI_EXPLAINER_DISABLED' });
+      }
+      if (!isModelCacheReady(config.modelCacheDir)) {
+        return res.status(409).json({ error: 'Local AI Explainer model is not cached', code: 'LOCAL_AI_EXPLAINER_MODEL_NOT_CACHED' });
+      }
+      const project = typeof req.body?.project === 'string' && req.body.project.trim()
+        ? req.body.project.trim()
+        : undefined;
+      const { annotatePendingQuarantineItems } = await import('../../defence/judge/annotate.js');
+      const result = await annotatePendingQuarantineItems({ limit, project });
+      res.json({ success: true, ...result });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Clock3,
   Database,
+  FileText,
   ScanSearch,
   Shield,
   ShieldAlert,
@@ -28,6 +29,7 @@ export default function OverviewPage() {
   const { data: stats } = useStats();
   const { data: auditStats } = useAuditStats('24h');
   const { data: quarantineData } = useQuarantine('pending', 10);
+  const { data: memoryFileQuarantineData } = useQuarantine('pending', 1, undefined, 'memory_file');
   const { data: quality } = useQuality();
   const { data: contradictionsData } = useContradictions();
   const { data: license } = useLicenseStatus();
@@ -42,6 +44,8 @@ export default function OverviewPage() {
     : 0;
   const contradictionCount = contradictionsData?.count ?? contradictionsData?.contradictions?.length ?? 0;
   const pendingQuarantine = quarantineData?.total ?? 0;
+  const pendingMemoryFileFindings = memoryFileQuarantineData?.total ?? 0;
+  const pendingMemoryWriteQuarantine = Math.max(0, pendingQuarantine - pendingMemoryFileFindings);
   const blockedCount = auditStats?.blockedCount ?? 0;
   const duplicateCount = quality?.duplicates?.count ?? 0;
   const staleCount = quality?.stale?.count ?? 0;
@@ -51,13 +55,23 @@ export default function OverviewPage() {
   const urgentItems = useMemo(() => {
     const items: { title: string; detail: string; severity: 'critical' | 'high' | 'medium' | 'low' | 'safe'; href: string; cta: string }[] = [];
 
-    if (pendingQuarantine > 0) {
+    if (pendingMemoryFileFindings > 0) {
       items.push({
-        title: `${pendingQuarantine} item${pendingQuarantine === 1 ? '' : 's'} in quarantine`,
-        detail: 'Review blocked writes before they become silent operator debt.',
-        severity: pendingQuarantine > 10 ? 'critical' : 'medium',
+        title: `${pendingMemoryFileFindings} memory file finding${pendingMemoryFileFindings === 1 ? '' : 's'} need review`,
+        detail: 'These are scanned agent memory files, not stored ShieldCortex memories. Review or dismiss them without editing files.',
+        severity: pendingMemoryFileFindings > 10 ? 'critical' : 'medium',
         href: '/protection?tab=quarantine',
-        cta: 'Review queue',
+        cta: 'Review files',
+      });
+    }
+
+    if (pendingMemoryWriteQuarantine > 0) {
+      items.push({
+        title: `${pendingMemoryWriteQuarantine} memory write${pendingMemoryWriteQuarantine === 1 ? '' : 's'} in quarantine`,
+        detail: 'Review blocked writes before they become silent operator debt.',
+        severity: pendingMemoryWriteQuarantine > 10 ? 'critical' : 'medium',
+        href: '/protection?tab=quarantine',
+        cta: 'Review writes',
       });
     }
 
@@ -92,7 +106,13 @@ export default function OverviewPage() {
     }
 
     return items.slice(0, 4);
-  }, [pendingQuarantine, contradictionCount, blockedCount, staleCount, duplicateCount, neverAccessedCount]);
+  }, [pendingMemoryFileFindings, pendingMemoryWriteQuarantine, contradictionCount, blockedCount, staleCount, duplicateCount, neverAccessedCount]);
+
+  const quarantineDetail = pendingMemoryFileFindings > 0 && pendingMemoryWriteQuarantine > 0
+    ? `${pendingMemoryFileFindings} file finding${pendingMemoryFileFindings === 1 ? '' : 's'}, ${pendingMemoryWriteQuarantine} write${pendingMemoryWriteQuarantine === 1 ? '' : 's'} pending.`
+    : pendingMemoryFileFindings > 0
+      ? `${pendingMemoryFileFindings} memory-file finding${pendingMemoryFileFindings === 1 ? '' : 's'} pending.`
+      : `${pendingQuarantine} item${pendingQuarantine === 1 ? '' : 's'} pending review.`;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -101,17 +121,23 @@ export default function OverviewPage() {
         <PageHeader
           eyebrow="ShieldCortex"
           title="Command Centre"
-          subtitle="Memory health, threat pressure, and operational status at a glance."
+          subtitle="Stored-memory health, memory-file findings, threat pressure, and operational status at a glance."
         />
 
         {/* Stats row */}
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <StatCard
-            label="Total Memories"
+            label="Stored Memories"
             value={totalMemories.toLocaleString()}
             icon={Database}
             accent="cyan"
             trend={healthPercent > 0 ? { value: healthPercent, label: 'healthy' } : undefined}
+          />
+          <StatCard
+            label="Memory Files Flagged"
+            value={pendingMemoryFileFindings.toLocaleString()}
+            icon={FileText}
+            accent={pendingMemoryFileFindings > 0 ? 'amber' : 'muted'}
           />
           <StatCard
             label="Threats Blocked"
@@ -137,9 +163,9 @@ export default function OverviewPage() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_1fr]">
           {/* Health breakdown */}
           <GlassCard className="p-6">
-            <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Memory Health</h3>
+            <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Stored Memory Health</h3>
             <p className="mt-1 text-sm text-[var(--sc-text-muted)]">
-              Decay distribution across your memory base.
+              Decay distribution across ShieldCortex stored memories.
             </p>
 
             <div className="mt-6 flex items-center justify-center">
@@ -240,7 +266,7 @@ export default function OverviewPage() {
             <GlassCard hover className="p-5">
               <AlertTriangle size={20} className="text-[var(--sc-amber)]" />
               <p className="mt-3 text-sm font-semibold text-[var(--sc-text-primary)]">Review Quarantine</p>
-              <p className="mt-1 text-xs text-[var(--sc-text-muted)]">{pendingQuarantine} items pending review.</p>
+              <p className="mt-1 text-xs text-[var(--sc-text-muted)]">{quarantineDetail}</p>
             </GlassCard>
           </Link>
           <Link href="/memory?tab=recall">

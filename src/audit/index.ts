@@ -5,7 +5,24 @@
  * AI agent environments.
  */
 
-export { scanMemories } from './memory-scanner.js';
+export {
+  discoverMemoryFiles,
+  isShieldCortexOwnMemoryPath,
+  queueMemoryFileScanFindings,
+  scanMemories,
+  scanMemoryFilesDetailed,
+} from './memory-scanner.js';
+export type {
+  DetailedMemoryFileScanResult,
+  DiscoveredMemoryFile,
+  MemoryFileDiscoveryOptions,
+  MemoryFileEvidence,
+  MemoryFileQuarantineQueueItem,
+  MemoryFileQuarantineQueueResult,
+  MemoryFileRisk,
+  MemoryFileScanRecord,
+  MemoryFileScanSummary,
+} from './memory-scanner.js';
 export { scanMcpConfigs } from './mcp-config-scanner.js';
 export { scanEnvFiles } from './env-scanner.js';
 export { scanRulesFiles } from './rules-file-scanner.js';

@@ -768,6 +768,24 @@ function runMigrations(database: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_quarantine_status ON quarantine(status);
       CREATE INDEX IF NOT EXISTS idx_quarantine_created ON quarantine(created_at DESC);
 
+      CREATE TABLE IF NOT EXISTS quarantine_annotations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL,
+        category TEXT NOT NULL,
+        suggested_action TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        similar_group_key TEXT,
+        copilot_version TEXT NOT NULL,
+        annotation_json TEXT NOT NULL,
+        generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (item_id) REFERENCES quarantine(id) ON DELETE CASCADE,
+        UNIQUE(item_id, copilot_version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_item ON quarantine_annotations(item_id);
+      CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_category ON quarantine_annotations(category);
+      CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_action ON quarantine_annotations(suggested_action);
+      CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_group ON quarantine_annotations(similar_group_key);
+
       CREATE TABLE IF NOT EXISTS fragmentation_entities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         memory_id INTEGER NOT NULL,
@@ -1395,6 +1413,25 @@ function getInlineSchema(): string {
 
     CREATE INDEX IF NOT EXISTS idx_quarantine_status ON quarantine(status);
     CREATE INDEX IF NOT EXISTS idx_quarantine_created ON quarantine(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS quarantine_annotations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id INTEGER NOT NULL,
+      category TEXT NOT NULL,
+      suggested_action TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      similar_group_key TEXT,
+      copilot_version TEXT NOT NULL,
+      annotation_json TEXT NOT NULL,
+      generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (item_id) REFERENCES quarantine(id) ON DELETE CASCADE,
+      UNIQUE(item_id, copilot_version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_item ON quarantine_annotations(item_id);
+    CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_category ON quarantine_annotations(category);
+    CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_action ON quarantine_annotations(suggested_action);
+    CREATE INDEX IF NOT EXISTS idx_quarantine_annotations_group ON quarantine_annotations(similar_group_key);
 
     CREATE TABLE IF NOT EXISTS fragmentation_entities (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

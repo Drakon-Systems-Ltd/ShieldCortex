@@ -31,6 +31,14 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
   return (
     <div
       onClick={() => onSelect(memory)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect(memory);
+        }
+      }}
+      role="button"
+      tabIndex={0}
       className={`bg-[var(--sc-bg-surface)] border rounded-lg p-3 hover:border-[var(--sc-border)] cursor-pointer transition-colors relative ${
         isSelected ? 'border-[var(--sc-cyan)]' : 'border-[var(--sc-border)]'
       }`}

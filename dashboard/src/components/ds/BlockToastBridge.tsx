@@ -10,7 +10,7 @@ interface DefenceEventData {
   firewall_result?: 'ALLOW' | 'BLOCK' | 'QUARANTINE';
   trust_score?: number;
   reason?: string | null;
-  threat_indicators?: string[];
+  threat_indicators?: string[] | string | null;
   timestamp?: string;
 }
 
@@ -29,9 +29,24 @@ function shouldSuppress(key: string): boolean {
   return false;
 }
 
-function summariseIndicators(indicators?: string[]): string {
-  if (!indicators?.length) return '';
-  return indicators
+function normaliseIndicators(indicators: DefenceEventData['threat_indicators']): string[] {
+  if (Array.isArray(indicators)) return indicators.filter((item): item is string => typeof item === 'string');
+  if (typeof indicators !== 'string' || !indicators.trim()) return [];
+
+  try {
+    const parsed = JSON.parse(indicators) as unknown;
+    if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === 'string');
+  } catch {
+    return [indicators];
+  }
+
+  return [];
+}
+
+function summariseIndicators(indicators: DefenceEventData['threat_indicators']): string {
+  const normalised = normaliseIndicators(indicators);
+  if (!normalised.length) return '';
+  return normalised
     .slice(0, 3)
     .map((i) => i.replace(/_/g, ' '))
     .join(', ');

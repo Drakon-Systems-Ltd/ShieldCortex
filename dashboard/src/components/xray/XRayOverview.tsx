@@ -21,6 +21,7 @@ import { PageHeader } from '@/components/ds/PageHeader';
 import { StatCard } from '@/components/ds/StatCard';
 import { TrustGauge } from '@/components/xray/TrustGauge';
 import { FindingActions } from '@/components/xray/FindingActions';
+import { LocalAiFindingExplainer } from '@/components/xray/LocalAiFindingExplainer';
 import {
   useXRayActivity,
   useXRayHistory,
@@ -290,6 +291,13 @@ export function XRayOverview() {
                                 {finding.evidence && <div>Evidence: {finding.evidence}</div>}
                               </div>
                             )}
+                            <LocalAiFindingExplainer
+                              finding={{
+                                ...finding,
+                                id: persistedFindings[i]?.id,
+                                status: persistedFindings[i]?.status,
+                              }}
+                            />
                             {persistedFindings[i] && (
                               <div className="mt-3 border-t border-[var(--sc-border)] pt-3">
                                 <FindingActions
@@ -465,6 +473,7 @@ export function XRayOverview() {
                             <span className="text-sm font-medium text-[var(--sc-text-primary)]">{f.title}</span>
                           </div>
                           <p className="mt-1 text-xs text-[var(--sc-text-secondary)]">{f.description}</p>
+                          <LocalAiFindingExplainer finding={f} />
                         </GlassCard>
                       ))
                     )}
@@ -784,6 +793,8 @@ export function XRayOverview() {
                         {finding.evidence && <div>Evidence: {finding.evidence}</div>}
                       </div>
                     )}
+
+                    <LocalAiFindingExplainer finding={finding} />
 
                     {/* Timestamp */}
                     <div className="mt-2 text-xs text-[var(--sc-text-muted)]">

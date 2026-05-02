@@ -1,9 +1,21 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import { useQuarantine, useApproveQuarantine, useRejectQuarantine, useBulkApproveQuarantine, useBulkRejectQuarantine, QuarantineItem } from '@/hooks/useDefence';
+import { useState, useCallback, useMemo } from 'react';
+import {
+  useQuarantine,
+  useApproveQuarantine,
+  useRejectQuarantine,
+  useBulkApproveQuarantine,
+  useBulkRejectQuarantine,
+  useReviewCopilotStatus,
+  useAnnotateQuarantine,
+  useAnnotatePendingQuarantine,
+  QuarantineItem,
+  ReviewAnnotation,
+} from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
-import { AlertTriangle, Check, X, CheckSquare, Square, MinusSquare } from 'lucide-react';
+import { AlertTriangle, Bot, Check, Loader2, Sparkles, Tags, Wand2, X, CheckSquare, Square, MinusSquare } from 'lucide-react';
+import { ProFeatureGate } from '@/components/shield/ProFeatureGate';
 
 function ConfirmationDialog({
   action,
@@ -18,6 +30,7 @@ function ConfirmationDialog({
 }) {
   const [input, setInput] = useState('');
   const isValid = input.trim().toLowerCase() === 'yes';
+  const isMemoryFile = item.source_type === 'memory_file';
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
@@ -30,8 +43,12 @@ function ConfirmationDialog({
         </p>
         <p className="text-xs text-[var(--sc-text-muted)] mb-4">
           {action === 'approve'
-            ? 'This will approve the item and promote it into memory.'
-            : 'This will permanently discard the memory.'}
+            ? isMemoryFile
+              ? 'This will mark the memory-file finding as reviewed. The source file is not modified.'
+              : 'This will approve the item and promote it into memory.'
+            : isMemoryFile
+              ? 'This will dismiss the memory-file finding. The source file is not deleted or edited.'
+              : 'This will permanently discard the memory.'}
         </p>
 
         <div className="mb-4">
@@ -69,10 +86,59 @@ function ConfirmationDialog({
                 : 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-muted)] cursor-not-allowed'
             }`}
           >
-            {action === 'approve' ? 'Approve' : 'Reject'}
+            {action === 'approve' && isMemoryFile ? 'Mark reviewed' : action === 'approve' ? 'Approve' : 'Reject'}
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function actionTone(action: ReviewAnnotation['suggestedAction']): string {
+  if (action === 'approve') return 'text-[var(--sc-cyan)] bg-[var(--sc-cyan)]/10 border-[var(--sc-cyan)]/25';
+  if (action === 'reject') return 'text-[var(--sc-coral)] bg-[var(--sc-coral)]/10 border-[var(--sc-coral)]/25';
+  if (action === 'create_rule') return 'text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 border-[var(--sc-amber)]/25';
+  return 'text-[var(--sc-text-secondary)] bg-[var(--sc-surface-interactive)] border-[var(--sc-border)]';
+}
+
+function categoryLabel(category: string): string {
+  return category.replace(/_/g, ' ');
+}
+
+function LocalAiQuarantineAnnotation({ annotation }: { annotation: ReviewAnnotation }) {
+  return (
+    <div className="mb-3 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)]/70 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--sc-cyan)]">
+          <Bot size={12} /> Local AI Explainer
+        </span>
+        <span className="rounded border border-[var(--sc-border)] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--sc-text-secondary)]">
+          {categoryLabel(annotation.category)}
+        </span>
+        <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${actionTone(annotation.suggestedAction)}`}>
+          {annotation.suggestedAction.replace(/_/g, ' ')}
+        </span>
+        <span className="text-[10px] text-[var(--sc-text-muted)]">
+          {Math.round(annotation.confidence * 100)}% confidence
+        </span>
+        {annotation.similarGroupKey && (
+          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--sc-text-muted)]">
+            <Tags size={11} /> {annotation.similarGroupKey}
+          </span>
+        )}
+      </div>
+      <p className="mt-2 text-xs leading-5 text-[var(--sc-text-primary)]">{annotation.summary}</p>
+      <p className="mt-1 text-[11px] leading-5 text-[var(--sc-text-secondary)]">{annotation.reasoning}</p>
+      {annotation.evidence.length > 0 && (
+        <div className="mt-2 space-y-1.5">
+          {annotation.evidence.map((entry, index) => (
+            <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-2 py-1.5">
+              <div className="text-[10px] text-[var(--sc-text-muted)]">{entry.reason}</div>
+              <div className="mt-0.5 text-[11px] text-[var(--sc-text-primary)] break-words">"{entry.snippet}"</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -81,10 +147,13 @@ export function QuarantineView() {
   const { projectFilter } = useDashboardStore();
   const [statusFilter, setStatusFilter] = useState<string>('pending');
   const { data, isLoading } = useQuarantine(statusFilter, 100, projectFilter || undefined);
+  const { data: copilotStatus } = useReviewCopilotStatus();
   const approveMutation = useApproveQuarantine();
   const rejectMutation = useRejectQuarantine();
   const bulkApproveMutation = useBulkApproveQuarantine();
   const bulkRejectMutation = useBulkRejectQuarantine();
+  const annotateMutation = useAnnotateQuarantine();
+  const annotatePendingMutation = useAnnotatePendingQuarantine();
 
   const [confirmAction, setConfirmAction] = useState<{
     action: 'approve' | 'reject';
@@ -97,12 +166,29 @@ export function QuarantineView() {
     (rejectMutation.error as Error | null)?.message ||
     (bulkApproveMutation.error as Error | null)?.message ||
     (bulkRejectMutation.error as Error | null)?.message ||
+    (annotateMutation.error as Error | null)?.message ||
+    (annotatePendingMutation.error as Error | null)?.message ||
     null;
 
   const items = data?.items ?? [];
   const pendingItems = items.filter(i => i.status === 'pending');
+  const annotatedItems = items.filter(i => i.annotation);
+  const needsAiReviewItems = pendingItems.filter(i => !i.annotation);
+  const selectedItems = pendingItems.filter(i => selectedIds.has(i.id));
+  const selectedMemoryFileCount = selectedItems.filter(i => i.source_type === 'memory_file').length;
+  const annotationGroups = useMemo(() => {
+    const groups = new Map<string, number>();
+    for (const item of annotatedItems) {
+      const key = item.annotation?.similarGroupKey;
+      if (!key) continue;
+      groups.set(key, (groups.get(key) ?? 0) + 1);
+    }
+    return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+  }, [annotatedItems]);
   const allSelected = pendingItems.length > 0 && pendingItems.every(i => selectedIds.has(i.id));
   const someSelected = pendingItems.some(i => selectedIds.has(i.id));
+  const copilotBusy = annotateMutation.isPending || annotatePendingMutation.isPending;
+  const canAnnotate = Boolean(copilotStatus?.enabled && copilotStatus.featureEnabled && copilotStatus.modelCached);
 
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds(prev => {
@@ -143,6 +229,13 @@ export function QuarantineView() {
     setBulkConfirm(null);
   };
 
+  const handleAnnotatePending = () => {
+    annotatePendingMutation.mutate({
+      limit: Math.min(Math.max(needsAiReviewItems.length, 1), 100),
+      project: projectFilter || undefined,
+    });
+  };
+
   return (
     <div className="space-y-6">
       {/* Confirmation dialog */}
@@ -164,8 +257,12 @@ export function QuarantineView() {
             </h3>
             <p className="text-xs text-[var(--sc-text-secondary)] mb-4">
               {bulkConfirm === 'approve'
-                ? 'This will approve all selected items and promote them into memory.'
-                : 'This will permanently discard all selected memories.'}
+                ? selectedMemoryFileCount > 0
+                  ? 'Memory-file findings will be marked reviewed without editing files. Other selected items will be promoted into memory.'
+                  : 'This will approve all selected items and promote them into memory.'
+                : selectedMemoryFileCount > 0
+                  ? 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
+                  : 'This will permanently discard all selected memories.'}
             </p>
             <div className="flex gap-2 justify-end">
               <button
@@ -188,6 +285,63 @@ export function QuarantineView() {
           </div>
         </div>
       )}
+
+      <ProFeatureGate feature="local_ai_explainer" label="Use a local model to explain and group quarantined items without sending content to the cloud.">
+        <div className="glass-card p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--sc-text-primary)]">
+                  <Sparkles size={16} className="text-[var(--sc-cyan)]" />
+                  Local AI Explainer
+                </h3>
+                <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                  copilotStatus?.enabled
+                    ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
+                    : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
+                }`}>
+                  {copilotStatus?.enabled ? 'enabled' : 'disabled'}
+                </span>
+                <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                  copilotStatus?.modelCached
+                    ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
+                    : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
+                }`}>
+                  {copilotStatus?.modelCached ? 'model cached' : 'model not cached'}
+                </span>
+              </div>
+              <div className="mt-2 text-xs leading-5 text-[var(--sc-text-secondary)]">
+                {!copilotStatus?.enabled
+                  ? 'Enable from the CLI first: shieldcortex review-copilot enable'
+                  : !copilotStatus.modelCached
+                    ? 'Download the local model first: shieldcortex review-copilot download-model'
+                    : 'Explain unreviewed quarantine items locally; approve and reject decisions stay manual.'}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-[var(--sc-text-muted)]">
+                <span className={needsAiReviewItems.length > 0 ? 'text-[var(--sc-amber)]' : ''}>
+                  {needsAiReviewItems.length} need explanation
+                </span>
+                <span>{annotatedItems.length} explained in this view</span>
+                {annotationGroups.map(([key, count]) => (
+                  <span key={key} className="inline-flex items-center gap-1">
+                    <Tags size={11} /> {key}: {count}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleAnnotatePending}
+                disabled={!canAnnotate || copilotBusy || needsAiReviewItems.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--sc-cyan)]/10 px-3 py-1.5 text-xs font-semibold text-[var(--sc-cyan)] transition-colors hover:bg-[var(--sc-cyan)]/20 disabled:pointer-events-none disabled:opacity-45"
+              >
+                {annotatePendingMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
+                Explain all
+              </button>
+            </div>
+          </div>
+        </div>
+      </ProFeatureGate>
 
       {/* Filters and bulk actions */}
       <div className="glass-card p-5">
@@ -261,11 +415,18 @@ export function QuarantineView() {
               const indicators = (() => {
                 try { return JSON.parse(item.threat_indicators); } catch { return []; }
               })();
+              const isMemoryFile = item.source_type === 'memory_file';
 
               return (
                 <div
                   key={item.id}
-                  className={`glass-card p-5 ${selectedIds.has(item.id) ? 'border-[var(--sc-cyan)]/50' : ''}`}
+                  className={`glass-card p-5 ${
+                    selectedIds.has(item.id)
+                      ? 'border-[var(--sc-cyan)]/50'
+                      : item.status === 'pending' && !item.annotation
+                        ? 'border-[var(--sc-amber)]/35'
+                        : ''
+                  }`}
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex items-start gap-2.5">
@@ -278,9 +439,16 @@ export function QuarantineView() {
                         </button>
                       )}
                       <div>
-                        <h4 className="text-sm font-medium text-[var(--sc-text-primary)]">
-                          {item.title || 'Untitled'}
-                        </h4>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h4 className="text-sm font-medium text-[var(--sc-text-primary)]">
+                            {item.title || 'Untitled'}
+                          </h4>
+                          {item.status === 'pending' && !item.annotation && (
+                            <span className="inline-flex items-center gap-1 rounded border border-[var(--sc-amber)]/25 bg-[var(--sc-amber)]/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--sc-amber)]">
+                              <Bot size={10} /> Needs explanation
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[10px] text-[var(--sc-text-muted)] mt-0.5">
                           {item.source_type} &middot; {new Date(item.created_at).toLocaleString()}
                           {item.anomaly_score > 0 && (
@@ -289,6 +457,11 @@ export function QuarantineView() {
                             </span>
                           )}
                         </div>
+                        {isMemoryFile && (
+                          <div className="mt-1 break-all font-mono text-[10px] text-[var(--sc-text-muted)]">
+                            {item.source_identifier}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <span className="text-[10px] text-[var(--sc-coral)] bg-[var(--sc-coral)]/10 px-2 py-0.5 rounded">
@@ -312,15 +485,25 @@ export function QuarantineView() {
                     </div>
                   )}
 
+                  {item.annotation && <LocalAiQuarantineAnnotation annotation={item.annotation} />}
+
                   {/* Actions (only for pending) */}
                   {item.status === 'pending' && (
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => annotateMutation.mutate(item.id)}
+                        disabled={!canAnnotate || annotateMutation.isPending || annotatePendingMutation.isPending}
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)] rounded-lg hover:text-[var(--sc-cyan)] transition-colors disabled:pointer-events-none disabled:opacity-45"
+                      >
+                        {annotateMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+                        {item.annotation ? 'Re-explain' : 'Explain'}
+                      </button>
                       <button
                         onClick={() => setConfirmAction({ action: 'approve', item })}
                         disabled={approveMutation.isPending || bulkApproveMutation.isPending}
                         className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)] rounded-lg hover:bg-[var(--sc-cyan)]/20 transition-colors"
                       >
-                        <Check size={12} /> Approve
+                        <Check size={12} /> {isMemoryFile ? 'Mark reviewed' : 'Approve'}
                       </button>
                       <button
                         onClick={() => setConfirmAction({ action: 'reject', item })}

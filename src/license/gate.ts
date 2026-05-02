@@ -30,6 +30,9 @@ export type GatedFeature =
   | 'dream_mode'
   | 'llm_reranking'
   | 'positive_feedback'
+  | 'local_ai_explainer'
+  | 'memory_file_scan'
+  | 'review_copilot'
   | 'xray_deep';
 
 const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
@@ -51,6 +54,9 @@ const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
   dream_mode: 'pro',
   llm_reranking: 'pro',
   positive_feedback: 'pro',
+  local_ai_explainer: 'pro',
+  memory_file_scan: 'pro',
+  review_copilot: 'pro',
   xray_deep: 'pro',
 };
 
@@ -73,6 +79,9 @@ const FEATURE_DESCRIPTIONS: Record<GatedFeature, string> = {
   dream_mode: 'Background memory consolidation — merge duplicates, archive stale, detect contradictions.',
   llm_reranking: 'LLM-powered memory reranking for precision recall.',
   positive_feedback: 'Capture what worked, not just what failed — learn from success.',
+  local_ai_explainer: 'Local AI explanations for memories, X-Ray findings, and quarantine review without sending content to the cloud.',
+  memory_file_scan: 'Scan persistent agent memory files for poisoned instructions and credential leaks.',
+  review_copilot: 'Local AI quarantine review annotations, grouping, and batch triage.',
   xray_deep: 'Deep X-Ray scanning: npm registry analysis, binary file inspection, dependency graph risk, and AI-directive detection in metadata and filenames.',
 };
 

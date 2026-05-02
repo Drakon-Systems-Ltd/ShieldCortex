@@ -6,6 +6,7 @@ import { PageSkeleton } from '@/components/ds/Skeleton';
 import dynamic from 'next/dynamic';
 import {
   Database,
+  FileText,
   GitBranch,
   Inbox,
   Search,
@@ -17,7 +18,8 @@ import { useStats, useContradictions, useQuality } from '@/hooks/useMemories';
 import { useReviewQueue } from '@/hooks/useReviewQueue';
 import { RecallWorkspace } from '@/components/recall/RecallWorkspace';
 import { ReviewQueueView } from '@/components/review/ReviewQueueView';
-import CaptureTab from './capture-tab';
+import { MemoriesView } from '@/components/memories/MemoriesView';
+import { MemoryFilesView } from '@/components/memories/MemoryFilesView';
 
 const UnifiedGraph = dynamic(
   () => import('@/components/graph/UnifiedGraph'),
@@ -31,13 +33,19 @@ const UnifiedGraph = dynamic(
   },
 );
 
-type MemoryTab = 'recall' | 'review' | 'capture' | 'graph';
+type MemoryTab = 'library' | 'files' | 'recall' | 'review' | 'graph';
+
+function normaliseTab(tab: string | null): MemoryTab | null {
+  if (tab === 'capture') return 'library';
+  return tab && ['library', 'files', 'recall', 'review', 'graph'].includes(tab)
+    ? (tab as MemoryTab)
+    : null;
+}
 
 function MemoryContent() {
   const searchParams = useSearchParams();
-  const urlTab = searchParams.get('tab') as MemoryTab | null;
-  const validUrlTab = urlTab && ['recall', 'review', 'capture', 'graph'].includes(urlTab) ? urlTab : null;
-  const [userTab, setTab] = useState<MemoryTab>('recall');
+  const validUrlTab = normaliseTab(searchParams.get('tab'));
+  const [userTab, setTab] = useState<MemoryTab>('library');
   const tab = validUrlTab ?? userTab;
 
   const { data: stats } = useStats();
@@ -56,9 +64,10 @@ function MemoryContent() {
     : 0;
 
   const tabs = [
+    { id: 'library', label: 'Library', icon: <Database size={14} />, count: totalMemories || undefined },
+    { id: 'files', label: 'Files', icon: <FileText size={14} /> },
     { id: 'recall', label: 'Recall', icon: <Search size={14} /> },
     { id: 'review', label: 'Review', count: reviewTotal || undefined },
-    { id: 'capture', label: 'Capture', icon: <Sparkles size={14} /> },
     { id: 'graph', label: 'Graph', icon: <GitBranch size={14} /> },
   ];
 
@@ -68,23 +77,24 @@ function MemoryContent() {
         <PageHeader
           eyebrow="Memory"
           title="Memory Operations"
-          subtitle="Search, review, capture, and explore your knowledge base."
+          subtitle="Search stored memories, scan agent memory files, and inspect recall quality."
           tabs={tabs}
           activeTab={tab}
           onTabChange={(id) => setTab(id as MemoryTab)}
         />
 
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatCard label="Total Memories" value={totalMemories.toLocaleString()} icon={Database} accent="cyan" />
+          <StatCard label="Stored Memories" value={totalMemories.toLocaleString()} icon={Database} accent="cyan" />
           <StatCard label="Healthy" value={healthyCount.toLocaleString()} icon={Sparkles} accent="cyan" />
           <StatCard label="Contradictions" value={contradictionCount} icon={Inbox} accent={contradictionCount > 0 ? 'coral' : 'muted'} />
           <StatCard label="Duplicates" value={duplicateCount} icon={GitBranch} accent={duplicateCount > 0 ? 'amber' : 'muted'} />
         </div>
 
         <div>
+          {tab === 'library' && <MemoriesView />}
+          {tab === 'files' && <MemoryFilesView />}
           {tab === 'recall' && <RecallWorkspace />}
           {tab === 'review' && <ReviewQueueView />}
-          {tab === 'capture' && <CaptureTab />}
           {tab === 'graph' && (
             <div className="h-[600px] rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)]">
               <UnifiedGraph />

@@ -47,6 +47,42 @@ export interface QuarantineItem {
   created_at: string;
   reviewed_at: string | null;
   reviewed_by: string | null;
+  annotation: ReviewAnnotation | null;
+}
+
+export type ReviewCopilotSuggestion = 'approve' | 'reject' | 'keep_quarantined' | 'create_rule';
+
+export interface ReviewAnnotation {
+  itemId: string;
+  category: string;
+  summary: string;
+  evidence: Array<{ snippet: string; reason: string }>;
+  suggestedAction: ReviewCopilotSuggestion;
+  confidence: number;
+  similarGroupKey: string | null;
+  reasoning: string;
+  copilotVersion: string;
+  generatedAt: string;
+}
+
+export interface ReviewCopilotStatus {
+  enabled: boolean;
+  featureEnabled: boolean;
+  modelId: string;
+  modelCacheDir: string;
+  modelCached: boolean;
+  telemetryPath: string;
+  inferenceTimeoutMs: number;
+  workerHeapMB: number;
+  recentTelemetry: Array<Record<string, unknown>>;
+}
+
+export interface AnnotationRunResult {
+  success: boolean;
+  attempted: number;
+  annotated: number;
+  skipped: number;
+  failed: number;
 }
 
 // ── Fetch Functions ──
@@ -80,9 +116,10 @@ async function fetchAuditStats(timeRange: '24h' | '7d' | '30d', project?: string
   return response.json();
 }
 
-async function fetchQuarantine(status: string = 'pending', limit: number = 50, project?: string): Promise<{ items: QuarantineItem[]; total: number }> {
+async function fetchQuarantine(status: string = 'pending', limit: number = 50, project?: string, sourceType?: string): Promise<{ items: QuarantineItem[]; total: number }> {
   const params = new URLSearchParams({ status, limit: limit.toString() });
   if (project) params.set('project', project);
+  if (sourceType) params.set('sourceType', sourceType);
   const response = await authFetch(`${API_BASE}/api/v1/quarantine?${params}`);
   if (!response.ok) throw new Error(await readApiError(response, 'Failed to fetch quarantine'));
   return response.json();
@@ -128,6 +165,31 @@ async function bulkRejectQuarantine(ids: number[]): Promise<{ success: boolean; 
   return response.json();
 }
 
+async function fetchReviewCopilotStatus(): Promise<ReviewCopilotStatus> {
+  const response = await authFetch(`${API_BASE}/api/v1/review-copilot/status`);
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to fetch Local AI status'));
+  return response.json();
+}
+
+async function annotateQuarantine(id: number): Promise<{ success: boolean; annotation: ReviewAnnotation | null }> {
+  const response = await authFetch(`${API_BASE}/api/v1/quarantine/${id}/annotate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to explain quarantined item'));
+  return response.json();
+}
+
+async function annotatePendingQuarantine(input: { limit?: number; project?: string }): Promise<AnnotationRunResult> {
+  const response = await authFetch(`${API_BASE}/api/v1/quarantine/annotate-pending`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await readApiError(response, 'Failed to explain pending quarantine'));
+  return response.json();
+}
+
 // ── Hooks ──
 
 export function useAuditLogs(options?: {
@@ -155,10 +217,19 @@ export function useAuditStats(timeRange: '24h' | '7d' | '30d' = '24h', project?:
   });
 }
 
-export function useQuarantine(status: string = 'pending', limit: number = 50, project?: string) {
+export function useQuarantine(status: string = 'pending', limit: number = 50, project?: string, sourceType?: string) {
   return useQuery({
-    queryKey: ['quarantine', status, limit, project],
-    queryFn: () => fetchQuarantine(status, limit, project),
+    queryKey: ['quarantine', status, limit, project, sourceType],
+    queryFn: () => fetchQuarantine(status, limit, project, sourceType),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useReviewCopilotStatus() {
+  return useQuery({
+    queryKey: ['review-copilot-status'],
+    queryFn: fetchReviewCopilotStatus,
     refetchInterval: 30000,
     retry: 2,
   });
@@ -216,6 +287,28 @@ export function useBulkRejectQuarantine() {
       queryClient.invalidateQueries({ queryKey: ['quarantine'] });
       queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
       queryClient.invalidateQueries({ queryKey: ['review-queue'] });
+    },
+  });
+}
+
+export function useAnnotateQuarantine() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: annotateQuarantine,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['quarantine'] });
+      queryClient.invalidateQueries({ queryKey: ['review-copilot-status'] });
+    },
+  });
+}
+
+export function useAnnotatePendingQuarantine() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: annotatePendingQuarantine,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['quarantine'] });
+      queryClient.invalidateQueries({ queryKey: ['review-copilot-status'] });
     },
   });
 }

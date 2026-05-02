@@ -16,10 +16,33 @@ export interface CloudSyncControls {
   excludeSensitive: boolean;
 }
 
-const CONFIG_DIR = join(homedir(), '.shieldcortex');
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
-const SIG_FILE = join(CONFIG_DIR, '.config-sig');
-const INTEGRITY_KEY_FILE = join(CONFIG_DIR, '.integrity-key');
+export interface ReviewCopilotConfig {
+  enabled: boolean;
+  modelId: string;
+  modelCacheDir: string;
+  telemetryPath: string;
+  inferenceTimeoutMs: number;
+  workerHeapMB: number;
+}
+
+function getConfigDir(): string {
+  const override = process.env.SHIELDCORTEX_CONFIG_DIR?.trim();
+  if (override) return override;
+  return join(homedir(), '.shieldcortex');
+}
+
+function getConfigFile(): string {
+  return join(getConfigDir(), 'config.json');
+}
+
+function getSigFile(): string {
+  return join(getConfigDir(), '.config-sig');
+}
+
+function getIntegrityKeyFile(): string {
+  return join(getConfigDir(), '.integrity-key');
+}
+
 const DEFAULT_BASE_URL = 'https://api.shieldcortex.ai';
 const DEFAULT_SYNC_CONTROLS: CloudSyncControls = {
   projectMode: 'all',
@@ -27,29 +50,43 @@ const DEFAULT_SYNC_CONTROLS: CloudSyncControls = {
   contentMode: 'full',
   excludeSensitive: false,
 };
+const DEFAULT_REVIEW_COPILOT_CONFIG: ReviewCopilotConfig = {
+  enabled: false,
+  modelId: 'onnx-community/Qwen2.5-0.5B-Instruct',
+  modelCacheDir: '',
+  telemetryPath: '',
+  inferenceTimeoutMs: 10000,
+  workerHeapMB: 2048,
+};
 
 // Cache to avoid repeated file reads
 let cachedConfig: CloudConfig | null = null;
+let cachedConfigFile: string | null = null;
 
 // ── Config Integrity (HMAC) ──────────────────────────────
 
 let cachedIntegrityKey: string | null = null;
+let cachedIntegrityKeyFile: string | null = null;
 let configTampered = false;
 
 function getIntegrityKey(): string {
-  if (cachedIntegrityKey) return cachedIntegrityKey;
+  const integrityKeyFile = getIntegrityKeyFile();
+  const configDir = getConfigDir();
+  if (cachedIntegrityKey && cachedIntegrityKeyFile === integrityKeyFile) return cachedIntegrityKey;
   try {
-    if (existsSync(INTEGRITY_KEY_FILE)) {
-      cachedIntegrityKey = readFileSync(INTEGRITY_KEY_FILE, 'utf-8').trim();
+    if (existsSync(integrityKeyFile)) {
+      cachedIntegrityKey = readFileSync(integrityKeyFile, 'utf-8').trim();
+      cachedIntegrityKeyFile = integrityKeyFile;
       return cachedIntegrityKey;
     }
   } catch { /* ignore */ }
   // Generate new key on first run
   const key = randomBytes(32).toString('hex');
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(INTEGRITY_KEY_FILE, key, { mode: 0o600 });
-  try { chmodSync(INTEGRITY_KEY_FILE, 0o600); } catch { /* best-effort */ }
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(integrityKeyFile, key, { mode: 0o600 });
+  try { chmodSync(integrityKeyFile, 0o600); } catch { /* best-effort */ }
   cachedIntegrityKey = key;
+  cachedIntegrityKeyFile = integrityKeyFile;
   return key;
 }
 
@@ -59,18 +96,20 @@ function signConfig(jsonContent: string): string {
 
 function writeConfigSignature(jsonContent: string): void {
   const sig = signConfig(jsonContent);
-  writeFileSync(SIG_FILE, sig, { mode: 0o600 });
-  try { chmodSync(SIG_FILE, 0o600); } catch { /* best-effort */ }
+  const sigFile = getSigFile();
+  writeFileSync(sigFile, sig, { mode: 0o600 });
+  try { chmodSync(sigFile, 0o600); } catch { /* best-effort */ }
 }
 
 function verifyConfigIntegrity(jsonContent: string): boolean {
   try {
-    if (!existsSync(SIG_FILE)) {
+    const sigFile = getSigFile();
+    if (!existsSync(sigFile)) {
       // First run after upgrade — create signature, don't flag tamper
       writeConfigSignature(jsonContent);
       return true;
     }
-    const storedSig = readFileSync(SIG_FILE, 'utf-8').trim();
+    const storedSig = readFileSync(sigFile, 'utf-8').trim();
     const computedSig = signConfig(jsonContent);
     const a = Buffer.from(storedSig, 'utf-8');
     const b = Buffer.from(computedSig, 'utf-8');
@@ -87,18 +126,20 @@ export function isConfigTampered(): boolean {
 }
 
 export function getCloudConfig(): CloudConfig {
-  if (cachedConfig) return cachedConfig;
+  const configFile = getConfigFile();
+  if (cachedConfig && cachedConfigFile === configFile) return cachedConfig;
 
   try {
-    if (!existsSync(CONFIG_FILE)) {
+    if (!existsSync(configFile)) {
       return { cloudApiKey: null, cloudBaseUrl: DEFAULT_BASE_URL, cloudEnabled: false };
     }
-    const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    const raw = JSON.parse(readFileSync(configFile, 'utf-8'));
     cachedConfig = {
       cloudApiKey: raw.cloudApiKey ?? null,
       cloudBaseUrl: raw.cloudBaseUrl ?? DEFAULT_BASE_URL,
       cloudEnabled: raw.cloudEnabled ?? false,
     };
+    cachedConfigFile = configFile;
     return cachedConfig;
   } catch {
     return { cloudApiKey: null, cloudBaseUrl: DEFAULT_BASE_URL, cloudEnabled: false };
@@ -108,8 +149,9 @@ export function getCloudConfig(): CloudConfig {
 export function setCloudConfig(updates: Partial<CloudConfig>): void {
   let existing: Record<string, unknown> = {};
   try {
-    if (existsSync(CONFIG_FILE)) {
-      existing = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    const configFile = getConfigFile();
+    if (existsSync(configFile)) {
+      existing = JSON.parse(readFileSync(configFile, 'utf-8'));
     }
   } catch {
     // Start fresh if parse fails
@@ -119,19 +161,23 @@ export function setCloudConfig(updates: Partial<CloudConfig>): void {
   if (updates.cloudBaseUrl !== undefined) existing.cloudBaseUrl = updates.cloudBaseUrl;
   if (updates.cloudEnabled !== undefined) existing.cloudEnabled = updates.cloudEnabled;
 
-  mkdirSync(CONFIG_DIR, { recursive: true });
+  const configDir = getConfigDir();
+  const configFile = getConfigFile();
+  mkdirSync(configDir, { recursive: true });
   const content = JSON.stringify(existing, null, 2) + '\n';
-  writeFileSync(CONFIG_FILE, content);
+  writeFileSync(configFile, content);
   writeConfigSignature(content);
 
   // Invalidate cache
   cachedConfig = null;
+  cachedConfigFile = null;
   configTampered = false;
 }
 
 /** Reset the in-memory cache (useful for testing) */
 export function clearCloudConfigCache(): void {
   cachedConfig = null;
+  cachedConfigFile = null;
 }
 
 function normalizeProjectList(value: unknown): string[] {
@@ -189,8 +235,9 @@ export function isSensitiveLevel(level: string | null | undefined): boolean {
 
 export function readRawConfig(): Record<string, unknown> {
   try {
-    if (existsSync(CONFIG_FILE)) {
-      const content = readFileSync(CONFIG_FILE, 'utf-8');
+    const configFile = getConfigFile();
+    if (existsSync(configFile)) {
+      const content = readFileSync(configFile, 'utf-8');
       const data = JSON.parse(content);
 
       // Verify HMAC integrity
@@ -208,12 +255,15 @@ export function readRawConfig(): Record<string, unknown> {
 }
 
 function writeRawConfig(raw: Record<string, unknown>): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
+  const configDir = getConfigDir();
+  const configFile = getConfigFile();
+  mkdirSync(configDir, { recursive: true });
   const content = JSON.stringify(raw, null, 2) + '\n';
-  writeFileSync(CONFIG_FILE, content);
+  writeFileSync(configFile, content);
   // Sign the config after writing
   writeConfigSignature(content);
   cachedConfig = null;
+  cachedConfigFile = null;
   // Clear tamper flag on legitimate write
   configTampered = false;
 }
@@ -346,6 +396,67 @@ export function setVerifyConfig(updates: Partial<VerifyConfig>): void {
   if (updates.verifyMode !== undefined) raw.verifyMode = updates.verifyMode;
   if (updates.verifyTriggers !== undefined) raw.verifyTriggers = updates.verifyTriggers;
   if (updates.verifyTimeoutMs !== undefined) raw.verifyTimeoutMs = updates.verifyTimeoutMs;
+  writeRawConfig(raw);
+}
+
+// ── Review Copilot Config ───────────────────────────────
+
+function readReviewCopilotRaw(): Record<string, unknown> {
+  const raw = readRawConfig();
+  return raw.reviewCopilot && typeof raw.reviewCopilot === 'object'
+    ? raw.reviewCopilot as Record<string, unknown>
+    : {};
+}
+
+function positiveNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+/**
+ * Returns local Review Copilot config.
+ * Disabled by default regardless of cloud key presence; users must opt in.
+ */
+export function getReviewCopilotConfig(): ReviewCopilotConfig {
+  const raw = readReviewCopilotRaw();
+  return {
+    enabled: raw.enabled === true,
+    modelId: typeof raw.modelId === 'string' && raw.modelId.trim()
+      ? raw.modelId.trim()
+      : DEFAULT_REVIEW_COPILOT_CONFIG.modelId,
+    modelCacheDir: typeof raw.modelCacheDir === 'string' && raw.modelCacheDir.trim()
+      ? raw.modelCacheDir.trim()
+      : join(getConfigDir(), 'models', 'review-copilot'),
+    telemetryPath: typeof raw.telemetryPath === 'string' && raw.telemetryPath.trim()
+      ? raw.telemetryPath.trim()
+      : join(getConfigDir(), 'review-copilot-telemetry.jsonl'),
+    inferenceTimeoutMs: positiveNumber(
+      raw.inferenceTimeoutMs,
+      DEFAULT_REVIEW_COPILOT_CONFIG.inferenceTimeoutMs,
+      1000,
+      60000,
+    ),
+    workerHeapMB: positiveNumber(
+      raw.workerHeapMB,
+      DEFAULT_REVIEW_COPILOT_CONFIG.workerHeapMB,
+      256,
+      8192,
+    ),
+  };
+}
+
+/**
+ * Persists local Review Copilot config.
+ */
+export function setReviewCopilotConfig(updates: Partial<ReviewCopilotConfig>): void {
+  const raw = readRawConfig();
+  const existing = raw.reviewCopilot && typeof raw.reviewCopilot === 'object'
+    ? raw.reviewCopilot as Record<string, unknown>
+    : {};
+  raw.reviewCopilot = {
+    ...existing,
+    ...updates,
+  };
   writeRawConfig(raw);
 }
 

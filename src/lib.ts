@@ -59,6 +59,45 @@ export type {
 } from './defence/types.js';
 export type { VerifyConfig } from './cloud/config.js';
 
+// ── Review Copilot ───────────────────────────────────────
+export { getReviewCopilotConfig, setReviewCopilotConfig } from './cloud/config.js';
+export {
+  reviewQuarantineItem,
+  groupReviewAnnotations,
+  groupSimilarItems,
+  parseReviewAnnotation,
+  validateReviewAnnotation,
+  fallbackAnnotation,
+} from './defence/judge/index.js';
+export {
+  annotateQuarantineItem,
+  annotatePendingQuarantineItems,
+  getAnnotationForItem,
+} from './defence/judge/annotate.js';
+export type { ReviewCopilotConfig } from './cloud/config.js';
+export type {
+  ReviewAnnotation,
+  ReviewBatch,
+  ReviewCopilotCategory,
+  ReviewCopilotSuggestion,
+  ReviewQuarantineItem,
+  AnnotationRunResult,
+} from './defence/judge/index.js';
+
+// ── Local AI Explainer ────────────────────────────────────
+export {
+  explainLocalAiSubject,
+  buildLocalAiExplainPrompt,
+  parseLocalAiExplanation,
+  fallbackLocalAiExplanation,
+} from './defence/explainer/index.js';
+export type {
+  LocalAiEvidence,
+  LocalAiExplanation,
+  LocalAiExplainSubject,
+  LocalAiExplainSubjectKind,
+} from './defence/explainer/index.js';
+
 // ── Tool Response Scanner ─────────────────────────────────
 export { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
 export type { ToolResponseScanResult } from './defence/types.js';
@@ -167,8 +206,25 @@ export { backfillGraph } from './graph/backfill.js';
 export { initDatabase } from './database/init.js';
 
 // ── Audit ──────────────────────────────────────────────────
-export { scanMemories, scanMcpConfigs, scanEnvFiles, scanRulesFiles } from './audit/index.js';
+export {
+  discoverMemoryFiles,
+  isShieldCortexOwnMemoryPath,
+  scanMemories,
+  scanMemoryFilesDetailed,
+  scanMcpConfigs,
+  scanEnvFiles,
+  scanRulesFiles,
+} from './audit/index.js';
 export { formatTerminalReport, formatMarkdownReport, formatJsonReport } from './audit/index.js';
+export type {
+  DetailedMemoryFileScanResult,
+  DiscoveredMemoryFile,
+  MemoryFileDiscoveryOptions,
+  MemoryFileEvidence,
+  MemoryFileRisk,
+  MemoryFileScanRecord,
+  MemoryFileScanSummary,
+} from './audit/index.js';
 export type { AuditFinding, AuditSeverity } from './audit/types.js';
 
 // ── License ────────────────────────────────────────────────
