@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.12 — 2 May 2026
+
+**Add Local AI Explainer, Memory File Scanner, and a package executable-bit fix.**
+
+This release adds the first paid-tier local AI workflow in the bundled dashboard: deterministic ShieldCortex defence still makes the security decision, while the local model is used only to explain, summarise, and group review context.
+
+### Added
+
+- New Local AI Explainer service and dashboard panels for explaining X-Ray, audit, quarantine, and memory-file findings.
+- New review-copilot runtime pieces: schema validation, guarded fallback handling, grouping, telemetry, worker/runner flow, CLI entrypoint, and contract tests.
+- New Pro-gated `memory_file_scan` feature.
+- New Memory page file scanner for persistent agent memory files, including `memory.md`, `MEMORY.md`, `.memory.md`, `.claude/memory.md`, `.claude/memories/**/*.md`, and existing Claude/Cursor/Windsurf memory and rules locations.
+- New detailed memory-file scan API returning path, source, size, modified time, deterministic firewall result, risk, reason, indicators, evidence snippets, findings, and content excerpts for explainability.
+
+### Changed
+
+- Memory-file scan findings now queue flagged files into quarantine as `memory_file` items without mutating the underlying files.
+- Quarantine review now distinguishes memory-file findings from stored memory writes; approving a memory-file item marks it reviewed rather than promoting file content into memory.
+- Overview and Memory page wording now distinguishes stored memories from scanned memory files to reduce confusion.
+- Quarantine filtering/counts now support source-type filtering so memory-file findings and memory writes can be shown separately.
+- Audit and X-Ray detail views can request Local AI explanations with deterministic scan context.
+
+### Fixed
+
+- Global npm installs now preserve the executable bit on `dist/index.js` during build and pack via a prepack/post-build guard. This fixes MCP launch failures where Claude Code tried to exec the `shieldcortex` bin symlink but the real JS entrypoint was not executable.
+- Env detector tests now clear Codex-specific environment variables so local agent sessions do not break the expected fallback case.
+
+### Tests
+
+- Added tests for memory-file discovery/scanning, memory-file API gating and response shape, quarantine annotation integration, review-copilot contracts, decisions, and runner behaviour.
+- Full local validation: `npm run build`, `npm test`, and `npm pack` executable-mode verification.
+
 ## v4.12.11 — 26 April 2026
 
 **Fix: the suspected fleet-wide context-killer + openclaw.json install churn.**

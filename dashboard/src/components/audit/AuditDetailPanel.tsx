@@ -4,6 +4,9 @@ import { useState, useCallback } from 'react';
 import { AuditEntry } from '@/hooks/useDefence';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { LocalAiExplanationPanel } from '@/components/local-ai/LocalAiExplanationPanel';
+import { useLocalAiExplain } from '@/hooks/useLocalAiExplainer';
+import { Loader2, Sparkles } from 'lucide-react';
 
 interface AuditDetailPanelProps {
   entry: AuditEntry;
@@ -64,8 +67,25 @@ function getAnomalyColor(score: number): string {
   return '#94a3b8';
 }
 
+function buildAuditExplainContent(entry: AuditEntry, threats: string[], blockedPatterns: string[]): string {
+  return [
+    `Audit ID: ${entry.id}`,
+    `Result: ${entry.firewall_result}`,
+    `Source: ${entry.source_type}:${entry.source_identifier}`,
+    entry.project ? `Project: ${entry.project}` : '',
+    `Trust score: ${entry.trust_score}`,
+    `Anomaly score: ${entry.anomaly_score}`,
+    `Sensitivity: ${entry.sensitivity_level}`,
+    entry.fragmentation_score !== null ? `Fragmentation score: ${entry.fragmentation_score}` : '',
+    threats.length ? `Threat indicators: ${threats.join(', ')}` : '',
+    blockedPatterns.length ? `Blocked patterns:\n${blockedPatterns.join('\n')}` : '',
+    entry.reason ? `Reason:\n${entry.reason}` : '',
+  ].filter(Boolean).join('\n\n');
+}
+
 export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPanelProps) {
   const [copied, setCopied] = useState(false);
+  const explainMutation = useLocalAiExplain();
 
   const resultConfig = RESULT_CONFIG[entry.firewall_result] || RESULT_CONFIG.ALLOW;
   const sensitivityConfig = SENSITIVITY_CONFIG[entry.sensitivity_level] || SENSITIVITY_CONFIG.PUBLIC;
@@ -79,6 +99,28 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
       setTimeout(() => setCopied(false), 1500);
     });
   }, [entry]);
+
+  const handleExplain = useCallback(() => {
+    explainMutation.mutate({
+      kind: 'audit_event',
+      title: `${entry.firewall_result} audit event`,
+      content: buildAuditExplainContent(entry, threats, blockedPatterns),
+      project: entry.project,
+      source: `${entry.source_type}:${entry.source_identifier}`,
+      signals: [
+        entry.firewall_result,
+        entry.sensitivity_level,
+        ...threats,
+      ],
+      metadata: {
+        auditId: entry.id,
+        memoryId: entry.memory_id,
+        trustScore: entry.trust_score,
+        anomalyScore: entry.anomaly_score,
+        pipelineDurationMs: entry.pipeline_duration_ms,
+      },
+    });
+  }, [blockedPatterns, entry, explainMutation, threats]);
 
   return (
     <Card className="bg-[var(--sc-bg-surface)] border-[var(--sc-border)] overflow-hidden">
@@ -251,6 +293,16 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
           </div>
         )}
 
+        {explainMutation.data?.explanation && (
+          <LocalAiExplanationPanel explanation={explainMutation.data.explanation} />
+        )}
+
+        {explainMutation.error && (
+          <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-xs text-[var(--sc-coral)]">
+            {explainMutation.error instanceof Error ? explainMutation.error.message : 'Local explanation failed'}
+          </div>
+        )}
+
         {/* Actions */}
         <div className="flex gap-2 pt-2">
           {entry.memory_id && onViewMemory && (
@@ -263,6 +315,16 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
               View Memory
             </Button>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExplain}
+            disabled={explainMutation.isPending}
+            className="flex-1 border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:text-white"
+          >
+            {explainMutation.isPending ? <Loader2 size={13} className="mr-1 animate-spin" /> : <Sparkles size={13} className="mr-1" />}
+            Explain
+          </Button>
           <Button
             variant="outline"
             size="sm"

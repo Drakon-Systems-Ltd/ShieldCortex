@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "4.12.11",
+  "version": "4.12.12",
   "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -43,6 +43,7 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
     "build:ts": "node -e \"fs.rmSync('dist', { recursive: true, force: true }); fs.rmSync('plugins/openclaw/dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && tsc -p tsconfig.openclaw-plugin.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/ && cp src/database/schema.sql dist/database/",
+    "postbuild:ts": "node scripts/ensure-bin-executable.mjs",
     "bootstrap:dashboard": "node -e \"if (!require('fs').existsSync('dashboard/node_modules')) { process.exit(1); }\" || (cd dashboard && npm ci --no-audit --no-fund)",
     "build:dashboard": "npm run bootstrap:dashboard && cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true) && cd .. && node scripts/prune-dashboard-standalone.mjs",
     "build": "npm run build:ts && npm run build:dashboard",
@@ -57,6 +58,7 @@
     "test:watch": "node scripts/run-jest.mjs --watch",
     "test:coverage": "node scripts/run-jest.mjs --coverage",
     "audit:security": "npm audit --audit-level=moderate",
+    "prepack": "node scripts/ensure-bin-executable.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -139,6 +141,7 @@
     "hooks/openclaw",
     "plugins/openclaw/dist",
     "scripts/postinstall.mjs",
+    "scripts/ensure-bin-executable.mjs",
     "scripts/pre-compact-hook.mjs",
     "scripts/run-jest.mjs",
     "scripts/session-end-hook.mjs",

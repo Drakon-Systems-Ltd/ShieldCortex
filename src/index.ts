@@ -38,6 +38,7 @@
  *   shieldcortex config --openclaw-auto-memory true   # Enable OpenClaw auto-memory extraction
  *   shieldcortex config --openclaw-auto-memory false  # Disable OpenClaw auto-memory extraction
  *   shieldcortex cloud sync --full      # Backfill local memories + graph to ShieldCortex Cloud
+ *   shieldcortex review-copilot status  # Local AI Explainer status (Pro)
  *   shieldcortex copilot install         # Configure MCP server for VS Code + Cursor
  *   shieldcortex copilot uninstall       # Remove MCP server configuration
  *   shieldcortex copilot status          # Check MCP server configuration
@@ -502,6 +503,7 @@ ${bold}COMMANDS${reset}
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
+  ${cyan}review-copilot${reset} <action> Local AI Explainer for quarantine review (Pro)
   ${cyan}cortex${reset} <command>       Mistake learning & pre-flight checks (Pro)
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
@@ -529,6 +531,7 @@ ${bold}EXAMPLES${reset}
   shieldcortex license activate sc_pro_...
   shieldcortex config --cloud-enable --cloud-api-key <key>
   shieldcortex cloud sync --full
+  shieldcortex review-copilot status
 
 ${bold}DOCS${reset}
   https://shieldcortex.ai/docs
@@ -635,6 +638,13 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'cloud') {
     const { handleCloudCommand } = await import('./cloud/cli.js');
     await handleCloudCommand(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "review-copilot" subcommand (backwards-compatible Local AI Explainer command)
+  if (process.argv[2] === 'review-copilot') {
+    const { handleReviewCopilotCommand } = await import('./cli/review-copilot.js');
+    await handleReviewCopilotCommand(process.argv.slice(3), parsedArgs.dbPath);
     return;
   }
 
@@ -1054,7 +1064,7 @@ ${bold}DOCS${reset}
 
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
-    'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud',
+    'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
   ]);
   const arg = process.argv[2];

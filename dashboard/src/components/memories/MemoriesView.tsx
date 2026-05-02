@@ -7,13 +7,14 @@ import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge } from '@/components/ds/Badge';
 import { SessionCard } from './SessionCard';
 import { MemoryCard } from './MemoryCard';
+import { MemoryActionModal } from './MemoryActionModal';
 import type { Memory } from '@/types/memory';
 
 type ViewTab = 'sessions' | 'all';
 type SortKey = 'salience' | 'recent' | 'oldest';
 
 export function MemoriesView() {
-  const [viewTab, setViewTab] = useState<ViewTab>('sessions');
+  const [viewTab, setViewTab] = useState<ViewTab>('all');
   const [sortKey, setSortKey] = useState<SortKey>('recent');
   const [search, setSearch] = useState('');
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
@@ -147,6 +148,13 @@ export function MemoriesView() {
             />
           ))}
         </div>
+      )}
+
+      {selectedMemory && (
+        <MemoryActionModal
+          memory={selectedMemory}
+          onClose={() => handleSelectMemory(null)}
+        />
       )}
     </div>
   );

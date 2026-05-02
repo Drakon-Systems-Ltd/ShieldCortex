@@ -76,6 +76,7 @@ describe('Feature Gating', () => {
         'custom_firewall_rules',
         'audit_export',
         'skill_scanner_deep',
+        'memory_file_scan',
       ] as const;
 
       for (const feature of proFeatures) {
@@ -97,6 +98,7 @@ describe('Feature Gating', () => {
       expect(() => requireFeature('custom_firewall_rules')).toThrow(FeatureGatedError);
       expect(() => requireFeature('audit_export')).toThrow(FeatureGatedError);
       expect(() => requireFeature('skill_scanner_deep')).toThrow(FeatureGatedError);
+      expect(() => requireFeature('memory_file_scan')).toThrow(FeatureGatedError);
       expect(() => requireFeature('custom_injection_patterns')).toThrow(FeatureGatedError);
       expect(() => requireFeature('custom_iron_dome_policies')).toThrow(FeatureGatedError);
     });
@@ -115,17 +117,19 @@ describe('Feature Gating', () => {
       expect(() => requireFeature('custom_firewall_rules')).not.toThrow();
       expect(() => requireFeature('audit_export')).not.toThrow();
       expect(() => requireFeature('skill_scanner_deep')).not.toThrow();
+      expect(() => requireFeature('memory_file_scan')).not.toThrow();
     });
   });
 
   describe('getRequiredTier', () => {
-    it('should return pro for all 5 Pro features', async () => {
+    it('should return pro for Pro features', async () => {
       const { getRequiredTier } = await import('../gate.js');
       expect(getRequiredTier('custom_injection_patterns')).toBe('pro');
       expect(getRequiredTier('custom_iron_dome_policies')).toBe('pro');
       expect(getRequiredTier('custom_firewall_rules')).toBe('pro');
       expect(getRequiredTier('audit_export')).toBe('pro');
       expect(getRequiredTier('skill_scanner_deep')).toBe('pro');
+      expect(getRequiredTier('memory_file_scan')).toBe('pro');
     });
 
     it('should return team for team features', async () => {

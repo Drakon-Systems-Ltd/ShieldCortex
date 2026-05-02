@@ -9,7 +9,10 @@ export type GatedFeature =
   | 'skill_scanner_deep'
   | 'cloud_sync'
   | 'team_management'
-  | 'shared_patterns';
+  | 'shared_patterns'
+  | 'local_ai_explainer'
+  | 'memory_file_scan'
+  | 'review_copilot';
 
 export const TIER_LABELS: Record<LicenseTier, string> = {
   free: 'Free',

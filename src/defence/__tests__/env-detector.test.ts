@@ -12,6 +12,9 @@ describe('Environment-Based Source Inference', () => {
     // Clear all relevant env vars
     delete process.env.CLAUDE_CODE_ENTRYPOINT;
     delete process.env.CLAUDE_AGENT_CONTEXT;
+    delete process.env.CODEX_CI;
+    delete process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE;
+    delete process.env.CODEX_THREAD_ID;
     delete process.env.SHIELDCORTEX_AGENT_SOURCE;
   });
 

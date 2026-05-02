@@ -75,17 +75,29 @@ function promoteApprovedQuarantineRow(row: QuarantineRow, reviewedBy: string): M
   });
 }
 
-function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): QuarantineReviewResult {
+function markPendingRowReviewed(id: number, status: 'approved' | 'rejected', reviewedBy: string): void {
   const db = getDatabase();
-  const memory = promoteApprovedQuarantineRow(row, reviewedBy);
   const reviewedAt = new Date().toISOString();
   const result = db.prepare(
     'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?'
-  ).run('approved', reviewedAt, reviewedBy, row.id, 'pending');
+  ).run(status, reviewedAt, reviewedBy, id, 'pending');
 
   if (result.changes === 0) {
     throw new Error('Quarantine entry not found or already reviewed');
   }
+}
+
+function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): QuarantineReviewResult {
+  if (row.source_type === 'memory_file') {
+    markPendingRowReviewed(row.id, 'approved', reviewedBy);
+    return {
+      id: row.id,
+      status: 'approved',
+    };
+  }
+
+  const memory = promoteApprovedQuarantineRow(row, reviewedBy);
+  markPendingRowReviewed(row.id, 'approved', reviewedBy);
 
   return {
     id: row.id,
@@ -95,16 +107,12 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): Quar
 }
 
 function rejectPendingQuarantineRow(id: number, reviewedBy: string): QuarantineReviewResult | null {
-  const db = getDatabase();
-  const reviewedAt = new Date().toISOString();
-  const result = db.prepare(
-    'UPDATE quarantine SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE id = ? AND status = ?'
-  ).run('rejected', reviewedAt, reviewedBy, id, 'pending');
-
-  if (result.changes === 0) {
+  const row = getPendingQuarantineRow(id);
+  if (!row) {
     return null;
   }
 
+  markPendingRowReviewed(row.id, 'rejected', reviewedBy);
   return { id, status: 'rejected' };
 }
 

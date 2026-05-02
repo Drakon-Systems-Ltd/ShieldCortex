@@ -5,6 +5,7 @@ import {
   setDefenceMode,
   getVerifyConfig,
   setVerifyConfig,
+  getReviewCopilotConfig,
   getOpenClawAutoMemory,
   setOpenClawAutoMemory,
   isProactiveRecallEnabled,
@@ -26,6 +27,7 @@ export function handleCloudConfig(args: string[]): void {
     const config = getCloudConfig();
     const mode = getDefenceMode();
     const verify = getVerifyConfig();
+    const reviewCopilot = getReviewCopilotConfig();
     const openclawAutoMemory = getOpenClawAutoMemory();
     console.log('\nShieldCortex Configuration:');
     console.log(`  Defence Mode: ${mode}`);
@@ -34,6 +36,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log(`  Base URL: ${config.cloudBaseUrl}`);
     console.log(`  LLM Verify:   ${verify.verifyEnabled ? 'Enabled' : 'Disabled'} (${verify.verifyMode}, ${verify.verifyTimeoutMs}ms timeout)`);
     console.log(`  Verify Triggers: ${verify.verifyTriggers.join(', ')}`);
+    console.log(`  Local AI Explainer: ${reviewCopilot.enabled ? 'Enabled' : 'Disabled'} (${reviewCopilot.modelId})`);
     console.log(`  OpenClaw Auto-Memory: ${openclawAutoMemory ? 'Enabled' : 'Disabled'}`);
     console.log(`  Proactive Recall: ${isProactiveRecallEnabled() ? 'Enabled' : 'Disabled'}`);
     console.log('');
