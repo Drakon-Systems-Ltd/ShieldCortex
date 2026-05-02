@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState } from 'react';
 import {
   useQuarantine,
   useApproveQuarantine,
@@ -134,7 +134,7 @@ function LocalAiQuarantineAnnotation({ annotation }: { annotation: ReviewAnnotat
           {annotation.evidence.map((entry, index) => (
             <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-2 py-1.5">
               <div className="text-[10px] text-[var(--sc-text-muted)]">{entry.reason}</div>
-              <div className="mt-0.5 text-[11px] text-[var(--sc-text-primary)] break-words">"{entry.snippet}"</div>
+              <div className="mt-0.5 text-[11px] text-[var(--sc-text-primary)] break-words">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>
@@ -176,7 +176,7 @@ export function QuarantineView() {
   const needsAiReviewItems = pendingItems.filter(i => !i.annotation);
   const selectedItems = pendingItems.filter(i => selectedIds.has(i.id));
   const selectedMemoryFileCount = selectedItems.filter(i => i.source_type === 'memory_file').length;
-  const annotationGroups = useMemo(() => {
+  const annotationGroups = (() => {
     const groups = new Map<string, number>();
     for (const item of annotatedItems) {
       const key = item.annotation?.similarGroupKey;
@@ -184,28 +184,28 @@ export function QuarantineView() {
       groups.set(key, (groups.get(key) ?? 0) + 1);
     }
     return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
-  }, [annotatedItems]);
+  })();
   const allSelected = pendingItems.length > 0 && pendingItems.every(i => selectedIds.has(i.id));
   const someSelected = pendingItems.some(i => selectedIds.has(i.id));
   const copilotBusy = annotateMutation.isPending || annotatePendingMutation.isPending;
   const canAnnotate = Boolean(copilotStatus?.enabled && copilotStatus.featureEnabled && copilotStatus.modelCached);
 
-  const toggleSelect = useCallback((id: number) => {
+  const toggleSelect = (id: number) => {
     setSelectedIds(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }, []);
+  };
 
-  const toggleSelectAll = useCallback(() => {
+  const toggleSelectAll = () => {
     if (allSelected) {
       setSelectedIds(new Set());
     } else {
       setSelectedIds(new Set(pendingItems.map(i => i.id)));
     }
-  }, [allSelected, pendingItems]);
+  };
 
   const handleConfirm = () => {
     if (!confirmAction) return;

@@ -38,7 +38,7 @@ export function LocalAiExplanationPanel({ explanation }: LocalAiExplanationPanel
           {explanation.evidence.map((entry, index) => (
             <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-2 py-1.5">
               <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">{entry.reason}</div>
-              <div className="mt-1 break-words text-xs text-[var(--sc-text-primary)]">"{entry.snippet}"</div>
+              <div className="mt-1 break-words text-xs text-[var(--sc-text-primary)]">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>

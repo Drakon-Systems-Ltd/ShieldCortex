@@ -128,7 +128,7 @@ function MemoryFileCard({
           {file.evidence.map((entry, index) => (
             <div key={`${entry.reason}-${index}`} className="text-xs leading-5">
               <div className="font-semibold text-[var(--sc-text-primary)]">{entry.reason}</div>
-              <div className="mt-0.5 break-words text-[var(--sc-text-secondary)]">"{entry.snippet}"</div>
+              <div className="mt-0.5 break-words text-[var(--sc-text-secondary)]">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>
