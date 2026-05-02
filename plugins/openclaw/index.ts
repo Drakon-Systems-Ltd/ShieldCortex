@@ -280,9 +280,12 @@ function extractPluginConfig(rootConfig: unknown): SCConfig {
 }
 
 function applyPluginConfigOverride(api: PluginApi): void {
-  const runtimeConfig = typeof api.runtime?.config?.loadConfig === "function"
-    ? api.runtime.config.loadConfig()
-    : api.config;
+  const runtimeConfigApi = api.runtime?.config;
+  const runtimeConfig = typeof runtimeConfigApi?.current === "function"
+    ? runtimeConfigApi.current()
+    : typeof runtimeConfigApi?.loadConfig === "function"
+      ? runtimeConfigApi.loadConfig()
+      : api.config;
   const pluginConfig = extractPluginConfig(runtimeConfig);
   if (Object.keys(pluginConfig).length === 0) return;
   _configOverride = {

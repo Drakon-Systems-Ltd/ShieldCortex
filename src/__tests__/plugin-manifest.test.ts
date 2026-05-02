@@ -50,6 +50,10 @@ describe('shieldcortex-realtime plugin manifest', () => {
     );
   });
 
+  it('declares explicit startup activation policy for OpenClaw compatibility', () => {
+    expect(manifest.activation.onStartup).toBe(false);
+  });
+
   it('plugin package version matches the root package version', () => {
     const rootPkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8'));
     expect(pkg.version).toBe(rootPkg.version);
