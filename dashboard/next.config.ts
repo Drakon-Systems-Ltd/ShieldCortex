@@ -11,6 +11,17 @@ const nextConfig: NextConfig = {
   // full absolute filesystem path from the build machine.
   // build:dashboard runs from the dashboard/ directory, so cwd/.. = package root
   outputFileTracingRoot: path.join(process.cwd(), ".."),
+
+  // Exclude Sharp's per-platform native binaries from the standalone bundle.
+  // The dashboard does not call Sharp directly; Next.js only needs it at
+  // build-time for image optimization. Without this, the published npm
+  // tarball ships ~16 MB of Mac-only libvips per release.
+  outputFileTracingExcludes: {
+    "*": [
+      "**/node_modules/sharp/**",
+      "**/node_modules/@img/**",
+    ],
+  },
 };
 
 export default nextConfig;
