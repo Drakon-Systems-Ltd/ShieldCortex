@@ -123,6 +123,11 @@ export function startVisualizationServer(dbPath?: string): void {
   // Auth middleware: require Bearer token on all requests except public paths
   const publicPaths = ['/api/health', '/api/auth/session-token'];
   app.use((req: Request, res: Response, next) => {
+    // Dashboard pages and static assets must load before the client can fetch
+    // its API session token. Protect API routes, not the Next.js shell.
+    if (!req.path.startsWith('/api/')) {
+      return next();
+    }
     // Allow OPTIONS/HEAD for CORS preflight
     if (['OPTIONS', 'HEAD'].includes(req.method)) {
       return next();
