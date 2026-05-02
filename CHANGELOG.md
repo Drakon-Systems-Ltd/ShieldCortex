@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.12.13 — 2 May 2026
+
+**OpenClaw plugin compatibility hotfix.**
+
+### Fixed
+
+- The OpenClaw plugin manifest now declares `activation.onStartup: false`. Newer OpenClaw runtimes treat the absence of this field as ambiguous, which surfaced as warnings during install. The plugin has never required startup activation; it activates on hooks and commands only.
+- The plugin runtime config loader now prefers `api.runtime.config.current()` and falls back to `loadConfig()` only on older OpenClaw versions. `loadConfig()` was deprecated upstream.
+
+### Tests
+
+- Added an assertion to `plugin-manifest.test.ts` that pins the explicit `onStartup: false` declaration so it can't regress silently.
+
 ## v4.12.12 — 2 May 2026
 
 **Add Local AI Explainer, Memory File Scanner, and a package executable-bit fix.**
