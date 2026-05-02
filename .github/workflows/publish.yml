@@ -100,6 +100,22 @@ jobs:
             echo "already_published=false" >> $GITHUB_OUTPUT
           fi
 
+      # Resolve the release tag for downstream steps. Push-of-tag uses the
+      # tag name directly. workflow_dispatch from a branch (e.g. re-running a
+      # failed publish) falls back to package.json so the GitHub Release and
+      # ClawHub publish don't get a branch name like "main" as their version.
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v$(node -p "require('./package.json').version")"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          echo "Resolved release tag: ${TAG}"
+
       - name: Publish to npm
         if: steps.version_check.outputs.already_published == 'false'
         run: npm publish
@@ -145,7 +161,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.tag.outputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -158,18 +174,16 @@ jobs:
         continue-on-error: true
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          # Derive version from the tag (v4.10.1 → 4.10.1). Avoid `node -p` with
-          # nested quotes inside a YAML run block — the previous form tripped
-          # 'syntax error near unexpected token `('' and silently failed.
-          VERSION="${GITHUB_REF_NAME#v}"
           clawhub login --token "$CLAWHUB_TOKEN" --no-browser
           clawhub whoami
           clawhub publish ./skills/shieldcortex \
             --slug shieldcortex \
             --name "ShieldCortex" \
-            --version "$VERSION" \
-            --changelog "Auto-sync from npm publish ${GITHUB_REF_NAME}"
+            --version "$RELEASE_VERSION" \
+            --changelog "Auto-sync from npm publish ${RELEASE_TAG}"
 
       - name: Skip ClawHub sync (missing token)
         if: steps.version_check.outputs.already_published == 'false' && env.HAS_CLAWHUB_TOKEN != 'true'
