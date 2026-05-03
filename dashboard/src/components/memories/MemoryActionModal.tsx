@@ -5,6 +5,7 @@ import { useMutation } from '@tanstack/react-query';
 import {
   ArrowUpCircle,
   Database,
+  ExternalLink,
   FileScan,
   ShieldAlert,
   Sparkles,
@@ -14,7 +15,18 @@ import {
 import { toast } from 'sonner';
 import { Badge, riskVariant } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
-import { LocalAiExplanationPanel } from '@/components/local-ai/LocalAiExplanationPanel';
+import { LocalAiExplanationPanel, type ExplainAction } from '@/components/local-ai/LocalAiExplanationPanel';
+import { buildEditorUrl } from '@/lib/editor-url';
+
+// Memories sometimes carry a file path in `source` (e.g. memory_file scans,
+// agent skill scans). Show "Open in editor" when the heuristic matches.
+function detectFilePath(source: string | null | undefined): string | null {
+  if (!source) return null;
+  const trimmed = source.trim();
+  if (!trimmed.includes('/')) return null;
+  if (!/\.[A-Za-z0-9]{1,8}$/.test(trimmed)) return null;
+  return trimmed;
+}
 import { authFetch, readApiError } from '@/lib/auth';
 import {
   useAccessMemory,
@@ -276,7 +288,28 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
                 </pre>
               </section>
 
-              {explainMutation.data?.explanation && <LocalAiExplanationPanel explanation={explainMutation.data.explanation} />}
+              {explainMutation.data?.explanation && (
+                <LocalAiExplanationPanel
+                  explanation={explainMutation.data.explanation}
+                  actions={(() => {
+                    const filePath = detectFilePath(memory.source);
+                    if (!filePath) return [];
+                    const actions: ExplainAction[] = [
+                      {
+                        key: 'open',
+                        label: 'Open in editor',
+                        icon: <ExternalLink size={13} />,
+                        variant: 'outline',
+                        onClick: () => {
+                          const url = buildEditorUrl(filePath);
+                          if (url) window.location.href = url;
+                        },
+                      },
+                    ];
+                    return actions;
+                  })()}
+                />
+              )}
 
               {explainMutation.error && (
                 <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">

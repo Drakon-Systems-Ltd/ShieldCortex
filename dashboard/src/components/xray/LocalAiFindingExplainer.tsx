@@ -1,10 +1,12 @@
 'use client';
 
-import { Sparkles } from 'lucide-react';
+import { ExternalLink, ShieldAlert, ShieldCheck, ShieldX, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ds/Button';
-import { LocalAiExplanationPanel } from '@/components/local-ai/LocalAiExplanationPanel';
+import { LocalAiExplanationPanel, type ExplainAction } from '@/components/local-ai/LocalAiExplanationPanel';
 import { useLocalAiExplain } from '@/hooks/useLocalAiExplainer';
+import { useQuarantineFinding, useUpdateFindingStatus } from '@/hooks/useXRayFindings';
+import { buildEditorUrl } from '@/lib/editor-url';
 
 export interface ExplainableXRayFinding {
   id?: string;
@@ -40,6 +42,8 @@ function buildFindingContent(finding: ExplainableXRayFinding): string {
 
 export function LocalAiFindingExplainer({ finding }: { finding: ExplainableXRayFinding }) {
   const explainMutation = useLocalAiExplain();
+  const updateStatus = useUpdateFindingStatus();
+  const quarantine = useQuarantineFinding();
 
   const handleExplain = () => {
     explainMutation.mutate(
@@ -76,6 +80,76 @@ export function LocalAiFindingExplainer({ finding }: { finding: ExplainableXRayF
     );
   };
 
+  const buildActions = (): ExplainAction[] => {
+    const actions: ExplainAction[] = [];
+
+    if (finding.file) {
+      const url = buildEditorUrl(finding.file, finding.line);
+      actions.push({
+        key: 'open',
+        label: 'Open in editor',
+        icon: <ExternalLink size={13} />,
+        variant: 'outline',
+        onClick: () => {
+          if (url) window.location.href = url;
+        },
+      });
+    }
+
+    // The status/quarantine actions all need a finding id to call the API.
+    if (!finding.id) return actions;
+
+    const id = finding.id;
+    const isPending = updateStatus.isPending || quarantine.isPending;
+
+    actions.push({
+      key: 'reviewed',
+      label: 'Mark reviewed',
+      icon: <ShieldCheck size={13} />,
+      variant: 'outline',
+      pending: updateStatus.isPending && updateStatus.variables?.status === 'reviewed',
+      disabled: isPending,
+      onClick: () => {
+        updateStatus.mutate({ id, status: 'reviewed' }, {
+          onSuccess: () => toast.success('Marked as reviewed'),
+          onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to mark reviewed'),
+        });
+      },
+    });
+
+    actions.push({
+      key: 'dismiss',
+      label: 'Dismiss',
+      icon: <ShieldX size={13} />,
+      variant: 'ghost',
+      pending: updateStatus.isPending && updateStatus.variables?.status === 'ignored',
+      disabled: isPending,
+      onClick: () => {
+        updateStatus.mutate({ id, status: 'ignored' }, {
+          onSuccess: () => toast.success('Finding dismissed'),
+          onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to dismiss'),
+        });
+      },
+    });
+
+    actions.push({
+      key: 'quarantine',
+      label: 'Quarantine file',
+      icon: <ShieldAlert size={13} />,
+      variant: 'coral',
+      pending: quarantine.isPending,
+      disabled: isPending,
+      onClick: () => {
+        quarantine.mutate({ id }, {
+          onSuccess: () => toast.success('File quarantined'),
+          onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to quarantine'),
+        });
+      },
+    });
+
+    return actions;
+  };
+
   return (
     <div className="mt-3 space-y-3">
       <Button variant="outline" size="sm" onClick={handleExplain} disabled={explainMutation.isPending}>
@@ -84,7 +158,10 @@ export function LocalAiFindingExplainer({ finding }: { finding: ExplainableXRayF
       </Button>
 
       {explainMutation.data?.explanation && (
-        <LocalAiExplanationPanel explanation={explainMutation.data.explanation} />
+        <LocalAiExplanationPanel
+          explanation={explainMutation.data.explanation}
+          actions={buildActions()}
+        />
       )}
 
       {explainMutation.error && (

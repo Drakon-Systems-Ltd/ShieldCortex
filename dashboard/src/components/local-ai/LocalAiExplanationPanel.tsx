@@ -1,13 +1,28 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import { Badge } from '@/components/ds/Badge';
+import { Button } from '@/components/ds/Button';
 import type { LocalAiExplanation } from '@/hooks/useLocalAiExplainer';
+
+export interface ExplainAction {
+  key: string;
+  label: string;
+  icon?: ReactNode;
+  variant?: 'coral' | 'cyan' | 'ghost' | 'outline';
+  onClick: () => void;
+  disabled?: boolean;
+  pending?: boolean;
+}
 
 interface LocalAiExplanationPanelProps {
   explanation: LocalAiExplanation;
+  actions?: ExplainAction[];
 }
 
-export function LocalAiExplanationPanel({ explanation }: LocalAiExplanationPanelProps) {
+export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplanationPanelProps) {
+  const visibleActions = actions?.filter(Boolean) ?? [];
+
   return (
     <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -54,6 +69,23 @@ export function LocalAiExplanationPanel({ explanation }: LocalAiExplanationPanel
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {visibleActions.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2 border-t border-[var(--sc-border)] pt-3">
+          {visibleActions.map((action) => (
+            <Button
+              key={action.key}
+              variant={action.variant ?? 'outline'}
+              size="sm"
+              onClick={action.onClick}
+              disabled={action.disabled || action.pending}
+            >
+              {action.icon}
+              {action.pending ? 'Working' : action.label}
+            </Button>
+          ))}
         </div>
       )}
     </div>

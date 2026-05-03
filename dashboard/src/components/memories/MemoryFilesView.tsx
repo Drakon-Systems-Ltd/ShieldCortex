@@ -1,15 +1,16 @@
 'use client';
 
 import { useState } from 'react';
-import { AlertTriangle, CheckCircle2, Clock, FileText, Loader2, ScanLine, Sparkles } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Clock, ExternalLink, FileText, Loader2, ScanLine, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge, riskVariant } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
 import { GlassCard } from '@/components/ds/GlassCard';
-import { LocalAiExplanationPanel } from '@/components/local-ai/LocalAiExplanationPanel';
+import { LocalAiExplanationPanel, type ExplainAction } from '@/components/local-ai/LocalAiExplanationPanel';
 import { ProFeatureGate } from '@/components/shield/ProFeatureGate';
 import { useLocalAiExplain, type LocalAiExplanation } from '@/hooks/useLocalAiExplainer';
 import { useMemoryFileScan, type MemoryFileScanRecord } from '@/hooks/useMemoryFiles';
+import { buildEditorUrl } from '@/lib/editor-url';
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -136,7 +137,23 @@ function MemoryFileCard({
 
       {isActive && (
         <div className="mt-4 space-y-3">
-          {explanation && <LocalAiExplanationPanel explanation={explanation} />}
+          {explanation && (
+            <LocalAiExplanationPanel
+              explanation={explanation}
+              actions={file.path
+                ? [{
+                  key: 'open',
+                  label: 'Open in editor',
+                  icon: <ExternalLink size={13} />,
+                  variant: 'outline',
+                  onClick: () => {
+                    const url = buildEditorUrl(file.path);
+                    if (url) window.location.href = url;
+                  },
+                } satisfies ExplainAction]
+                : []}
+            />
+          )}
           {Boolean(explainError) && (
             <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">
               {explainError instanceof Error ? explainError.message : 'Local explanation failed'}

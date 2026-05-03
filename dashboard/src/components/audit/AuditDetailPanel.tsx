@@ -4,9 +4,21 @@ import { useState, useCallback } from 'react';
 import { AuditEntry } from '@/hooks/useDefence';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { LocalAiExplanationPanel } from '@/components/local-ai/LocalAiExplanationPanel';
+import { LocalAiExplanationPanel, type ExplainAction } from '@/components/local-ai/LocalAiExplanationPanel';
 import { useLocalAiExplain } from '@/hooks/useLocalAiExplainer';
-import { Loader2, Sparkles } from 'lucide-react';
+import { buildEditorUrl } from '@/lib/editor-url';
+import { ExternalLink, Loader2, Sparkles } from 'lucide-react';
+
+// Audit entries don't have a dedicated `file` field. Some `source_identifier`
+// values *are* file paths (memory-file scans, agent skill scans). Heuristic:
+// looks like a path if it contains a slash and a file extension.
+function detectFilePath(source: string | null | undefined): string | null {
+  if (!source) return null;
+  const trimmed = source.trim();
+  if (!trimmed.includes('/')) return null;
+  if (!/\.[A-Za-z0-9]{1,8}(?::\d+)?$/.test(trimmed)) return null;
+  return trimmed;
+}
 
 interface AuditDetailPanelProps {
   entry: AuditEntry;
@@ -294,7 +306,27 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
         )}
 
         {explainMutation.data?.explanation && (
-          <LocalAiExplanationPanel explanation={explainMutation.data.explanation} />
+          <LocalAiExplanationPanel
+            explanation={explainMutation.data.explanation}
+            actions={(() => {
+              const filePath = detectFilePath(entry.source_identifier);
+              if (!filePath) return [];
+              const actions: ExplainAction[] = [
+                {
+                  key: 'open',
+                  label: 'Open in editor',
+                  icon: <ExternalLink size={13} />,
+                  variant: 'outline',
+                  onClick: () => {
+                    const url = buildEditorUrl(filePath.replace(/:\d+$/, ''),
+                      Number(filePath.match(/:(\d+)$/)?.[1]) || undefined);
+                    if (url) window.location.href = url;
+                  },
+                },
+              ];
+              return actions;
+            })()}
+          />
         )}
 
         {explainMutation.error && (
