@@ -26,7 +26,6 @@ import {
   findDuplicateMemoryPairs,
   formatContextSummary,
   generateContextSummary,
-  consolidateMemories,
 } from '../../memory/consolidate.js';
 import { getActivationStats, getActiveMemories } from '../../memory/activation.js';
 import { detectContradictions, getContradictionsFor } from '../../memory/contradiction.js';
@@ -959,10 +958,15 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
     }
   });
 
+  // Consolidation is a maintenance operation (STM→LTM promotion + low-salience
+  // dedupe), not arbitrary delete. Use 'modify_records' (AMBER) so the
+  // dashboard can trigger it without the RED 'delete' gate that always blocks.
+  // Mirrors the action used by /api/worker/trigger-{light,medium}.
   app.post('/api/consolidate', requireNotLocked, requireIronDomeAction({
-    action: 'delete',
+    action: 'modify_records',
     channel: 'dashboard',
     sourceIdentifier: 'dashboard:consolidate',
+    enforceAmber: true,
   }), (_req: Request, res: Response) => {
     try {
       const result = consolidate();
@@ -1306,18 +1310,10 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
     }
   });
 
-
-  // v4.0.0: Dream Mode — comprehensive memory consolidation
-  app.post('/api/consolidate', requireNotLocked, (_req: Request, res: Response) => {
-    try {
-      const result = consolidateMemories();
-      res.json({
-        success: true,
-        ...result,
-      });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
+  // (Note: there used to be a second, ungated `app.post('/api/consolidate', ...)`
+  // here calling `consolidateMemories()`. It was dead code — Express dispatches
+  // to the first matching route and the gated one above won. Removed in
+  // favour of the gated route to avoid future contributors thinking either
+  // would actually run.)
 
 }
