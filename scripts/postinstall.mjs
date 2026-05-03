@@ -9,7 +9,7 @@
  *   - SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1 is set
  *   - Running as a local/dev install (npm_config_global !== 'true')
  */
-import { existsSync, copyFileSync, mkdirSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { spawnSync } from 'child_process';
@@ -18,6 +18,37 @@ import { fileURLToPath } from 'url';
 const isGlobal = process.env.npm_config_global === 'true';
 const isCI = process.env.CI === 'true' || process.env.CONTINUOUS_INTEGRATION === 'true';
 const skipAutoOpenClaw = process.env.SHIELDCORTEX_SKIP_AUTO_OPENCLAW === '1';
+
+/**
+ * Write integration defaults for fresh installs only.
+ * Returns true if defaults were written (fresh install), false if config already exists.
+ *
+ * Why: as of v4.13.x ShieldCortex ships flagship integrations ON by default for new
+ * users so they see value within the first session. Existing users keep their current
+ * settings — we never overwrite a config file that already exists.
+ *
+ * The v4.11.0 latency concern (200-500ms + 100-400 tokens/turn for proactive recall)
+ * is real but only matters for fast OpenClaw agent loops; for interactive Claude Code
+ * sessions the value > latency. Users can opt out via dashboard or CLI.
+ */
+function writeFreshInstallDefaults() {
+  const configDir = join(homedir(), '.shieldcortex');
+  const configFile = join(configDir, 'config.json');
+
+  if (existsSync(configFile)) return false;
+
+  try {
+    mkdirSync(configDir, { recursive: true });
+    const defaults = {
+      openclawAutoMemory: true,
+      proactiveRecall: true,
+    };
+    writeFileSync(configFile, JSON.stringify(defaults, null, 2) + '\n');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Detect Docker/container environment — mirrors the logic in src/setup/openclaw.ts.
@@ -100,6 +131,7 @@ if (isGlobal && !isCI) {
   const __dirname = dirname(__filename);
   const cliPath = join(__dirname, '..', 'dist', 'index.js');
 
+  const isFreshInstall = writeFreshInstallDefaults();
   const state = getOpenClawState();
   const inDocker = isDockerEnvironment();
 
@@ -153,11 +185,18 @@ if (isGlobal && !isCI) {
   console.log('\x1b[36m│\x1b[0m  sessions, compactions, and projects.                \x1b[36m│\x1b[0m');
   console.log('\x1b[36m╰───────────────────────────────────────────────────────╯\x1b[0m');
   console.log('');
-  console.log('\x1b[2mHeads up — integration toggles are off by default:\x1b[0m');
-  console.log('\x1b[2m  • OpenClaw Auto-Memory  — capture memories from agent LLM output\x1b[0m');
-  console.log('\x1b[2m  • Proactive Recall      — inject memory into prompts\x1b[0m');
-  console.log('\x1b[2mTurn them on in the dashboard Settings → Integrations tab, or:\x1b[0m');
-  console.log('\x1b[2m  shieldcortex config --openclaw-auto-memory true\x1b[0m');
-  console.log('\x1b[2m  shieldcortex config --proactive-recall true\x1b[0m');
+  if (isFreshInstall) {
+    console.log('\x1b[2mFresh install — flagship integrations enabled by default:\x1b[0m');
+    console.log('\x1b[2m  • OpenClaw Auto-Memory  — captures memories from agent LLM output\x1b[0m');
+    console.log('\x1b[2m  • Proactive Recall      — injects relevant memory into prompts\x1b[0m');
+    console.log('\x1b[2mTo opt out (e.g. for fast agent loops): dashboard Settings → Integrations, or:\x1b[0m');
+    console.log('\x1b[2m  shieldcortex config --openclaw-auto-memory false\x1b[0m');
+    console.log('\x1b[2m  shieldcortex config --proactive-recall false\x1b[0m');
+  } else {
+    console.log('\x1b[2mIntegration toggles preserved from your existing config.\x1b[0m');
+    console.log('\x1b[2mManage in dashboard Settings → Integrations, or:\x1b[0m');
+    console.log('\x1b[2m  shieldcortex config --openclaw-auto-memory true|false\x1b[0m');
+    console.log('\x1b[2m  shieldcortex config --proactive-recall true|false\x1b[0m');
+  }
   console.log('');
 }

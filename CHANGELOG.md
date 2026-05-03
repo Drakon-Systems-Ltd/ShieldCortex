@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+**Strategic posture change: flagship integrations now ON by default for fresh installs.**
+
+The v4.11.0 decision to default both `openclawAutoMemory` and `proactiveRecall` to `false` was made on real evidence (200–500ms per-turn latency, 100–400 tokens/turn, net-negative for fast OpenClaw agent loops). The cure made the product invisible: most users never discovered the toggles, and ShieldCortex sat silent in the background producing no observable value during the first session. This release reverses the default for true fresh installs only — existing users keep their current configuration. Fast-loop users who notice the latency can opt out with one CLI command, but the default user (interactive Claude Code session) now sees memory capture and recall working from the first prompt.
+
+### Changed
+
+- `scripts/postinstall.mjs` writes `{ openclawAutoMemory: true, proactiveRecall: true }` to `~/.shieldcortex/config.json` only when the file does not already exist. Existing users are never overwritten — their current preferences are preserved exactly as-is.
+- Postinstall message now distinguishes fresh install (defaults are ON, here's how to opt out) from upgrade (your existing settings are preserved, here's how to manage them).
+
 ## v4.12.14 — 2 May 2026
 
 **Fix: `shieldcortex openclaw install` left the real-time plugin unregistered on Mac homebrew and Linux global installs.**
