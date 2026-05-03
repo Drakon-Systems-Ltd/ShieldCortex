@@ -7,6 +7,8 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'coral' | 'cyan' | 'ghost' | 'outline';
   size?: 'sm' | 'md' | 'lg';
   glow?: boolean;
+  /** Pulsing cyan edge ring; use to signal a button is "working" without a spinner. */
+  pulse?: boolean;
 }
 
 const VARIANT_STYLES = {
@@ -23,7 +25,7 @@ const SIZE_STYLES = {
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ variant = 'coral', size = 'md', glow = false, className, children, ...props }, ref) => {
+  ({ variant = 'coral', size = 'md', glow = false, pulse = false, className, children, ...props }, ref) => {
     return (
       <button
         ref={ref}
@@ -31,11 +33,14 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           'inline-flex items-center justify-center gap-2 font-semibold transition-all',
           'hover:-translate-y-0.5 active:translate-y-0',
           'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--sc-cyan)]',
-          'disabled:pointer-events-none disabled:opacity-50',
+          // Pulse should remain visible even when disabled (we disable buttons
+          // during the in-flight mutation), so override the disabled opacity.
+          pulse ? 'disabled:pointer-events-none' : 'disabled:pointer-events-none disabled:opacity-50',
           VARIANT_STYLES[variant],
           SIZE_STYLES[size],
           glow && variant === 'coral' && 'glow-coral-subtle',
           glow && variant === 'cyan' && 'glow-cyan-subtle',
+          pulse && 'glow-cyan-pulse',
           className,
         )}
         type="button"

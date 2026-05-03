@@ -352,7 +352,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             size="sm"
             onClick={handleExplain}
             disabled={explainMutation.isPending}
-            className="flex-1 border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:text-white"
+            className={`flex-1 border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:text-white ${explainMutation.isPending ? 'glow-cyan-pulse' : ''}`}
           >
             {explainMutation.isPending ? <Loader2 size={13} className="mr-1 animate-spin" /> : <Sparkles size={13} className="mr-1" />}
             Explain

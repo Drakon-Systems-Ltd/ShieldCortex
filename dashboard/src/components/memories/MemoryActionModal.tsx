@@ -422,7 +422,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
           )}
 
           <div className="flex flex-wrap justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={handleExplain} disabled={busy}>
+            <Button variant="outline" size="sm" onClick={handleExplain} disabled={busy} pulse={explainMutation.isPending}>
               <Sparkles size={14} />
               {explainMutation.isPending ? 'Explaining' : 'Explain'}
             </Button>

@@ -198,6 +198,20 @@
   box-shadow: 0 4px 20px var(--sc-glow-cyan);
 }
 
+/* Pulsing edge ring — used by buttons to signal "working" without a spinner. */
+@keyframes sc-glow-pulse-cyan {
+  0%, 100% {
+    box-shadow: 0 0 6px var(--sc-glow-cyan), 0 0 12px var(--sc-glow-cyan);
+  }
+  50% {
+    box-shadow: 0 0 14px var(--sc-glow-cyan-mid), 0 0 28px var(--sc-glow-cyan-mid);
+  }
+}
+
+.glow-cyan-pulse {
+  animation: sc-glow-pulse-cyan 1.4s ease-in-out infinite;
+}
+
 /* ── Severity left-border accents ── */
 
 .severity-critical { border-left: 3px solid var(--sc-coral); }

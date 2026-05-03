@@ -102,7 +102,7 @@ function MemoryFileCard({
             <Clock size={12} />
             {formatDate(file.modifiedAt)}
           </span>
-          <Button variant="outline" size="sm" onClick={() => onExplain(file)} disabled={explaining}>
+          <Button variant="outline" size="sm" onClick={() => onExplain(file)} disabled={explaining} pulse={explaining}>
             {explaining ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
             {explaining ? 'Explaining' : 'Explain'}
           </Button>

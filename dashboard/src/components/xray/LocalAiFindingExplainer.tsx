@@ -217,7 +217,13 @@ export function LocalAiFindingExplainer({ finding, target }: { finding: Explaina
 
   return (
     <div className="mt-3 space-y-3">
-      <Button variant="outline" size="sm" onClick={handleExplain} disabled={explainMutation.isPending}>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={handleExplain}
+        disabled={explainMutation.isPending}
+        pulse={explainMutation.isPending}
+      >
         <Sparkles size={13} />
         {explainMutation.isPending ? 'Explaining' : 'Explain'}
       </Button>
