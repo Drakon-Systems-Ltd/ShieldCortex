@@ -4,9 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-**Strategic posture change: flagship integrations now ON by default for fresh installs.**
+**Strategic posture change: flagship integrations now ON by default for fresh installs, plus a Daily Moment dashboard widget so the product stops being invisible.**
 
 The v4.11.0 decision to default both `openclawAutoMemory` and `proactiveRecall` to `false` was made on real evidence (200–500ms per-turn latency, 100–400 tokens/turn, net-negative for fast OpenClaw agent loops). The cure made the product invisible: most users never discovered the toggles, and ShieldCortex sat silent in the background producing no observable value during the first session. This release reverses the default for true fresh installs only — existing users keep their current configuration. Fast-loop users who notice the latency can opt out with one CLI command, but the default user (interactive Claude Code session) now sees memory capture and recall working from the first prompt.
+
+The new Daily Moment bar at the top of every dashboard page is the in-app equivalent of "Cloudflare blocked 47k threats this week" — one dense row showing scans / blocks / captures / recalls in the last 24h (or 7d / 30d), with a delta vs the previous equivalent window and a click-to-expand top moments feed. Without this, ShieldCortex earned no credit for the work it actually does.
+
+### Added
+
+- `GET /api/digest?window=24h|7d|30d&project=<name>` returns counts (scanned / allowed / blocked / quarantined / memoriesCaptured / memoriesRecalled / highSalienceCaptures), deltas vs the previous equivalent window, top 5 moments (blocks, quarantines, high-salience captures, top recalls), and top threat patterns by frequency. Project filter optional; no project filter returns the global digest.
+- New `DailyMomentBar` component mounted in `AppShell` above `ProjectFilterBar`. Headline row shows scanned / blocked / captured / recalled with delta arrows; click-to-expand reveals top moments and top threat patterns. Window selector (24h / 7d / 30d) inline in the bar. Refreshes every 60 seconds.
+- New `useDigest()` React Query hook with 30s stale time and 60s refetch interval.
+- Digest builder test suite (`src/api/__tests__/digest.test.ts`, 8 tests): zero state, audit counts in window, memory captures inside vs outside window, recall detection (last_accessed > created_at), high-salience moments + threat pattern aggregation, deltas vs previous window, project scoping, and 7d/30d window support. All passing on `:memory:` SQLite.
 
 ### Changed
 

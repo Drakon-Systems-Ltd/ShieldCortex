@@ -48,6 +48,7 @@ import { registerRecallRoutes } from './routes/recall.js';
 import { registerSystemRoutes } from './routes/system.js';
 import { registerXRayRoutes } from './routes/xray.js';
 import { registerXRayFindingRoutes } from './routes/xray-findings.js';
+import { registerDigestRoutes } from './routes/digest.js';
 import { createIronDomeRouteGuard } from './iron-dome-route-guard.js';
 import { readAndClearDetectionEvents } from '../xray/activity.js';
 
@@ -214,6 +215,7 @@ export function startVisualizationServer(dbPath?: string): void {
     clients,
     requireIronDomeAction: createIronDomeRouteGuard,
   });
+  registerDigestRoutes(app);
 
   // ============================================
   // INSIGHTS ENDPOINTS
