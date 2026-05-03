@@ -188,8 +188,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-enable         Enable cloud sync');
     console.log('  --cloud-disable        Disable cloud sync');
     console.log('  --cloud-status         Show current configuration');
-    console.log('  --openclaw-auto-memory <true|false>  Enable or disable OpenClaw auto-memory extraction');
-    console.log('  --proactive-recall <true|false>  Enable or disable proactive memory recall on prompts');
+    console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (default: off)');
+    console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (default: off — adds latency)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('');
     console.log('LLM Verification:');

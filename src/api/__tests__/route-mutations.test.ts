@@ -117,6 +117,7 @@ describe('API route mutation regressions', () => {
           noveltyThreshold: 0.88,
           maxRecent: 300,
         },
+        proactiveRecall: false,
       };
 
       jest.unstable_mockModule('../../cloud/config.js', () => ({
@@ -174,6 +175,10 @@ describe('API route mutation regressions', () => {
           };
         },
         setOpenClawAutoMemory: jest.fn(),
+        isProactiveRecallEnabled: () => state.proactiveRecall,
+        setProactiveRecall: (enabled: boolean) => {
+          state.proactiveRecall = enabled;
+        },
       }));
 
       jest.unstable_mockModule('../../cloud/sync-queue.js', () => ({
@@ -284,6 +289,69 @@ describe('API route mutation regressions', () => {
         noveltyThreshold: 0.7,
         maxRecent: 50,
       });
+    });
+
+    it('exposes proactiveRecall in the GET response', async () => {
+      const { routeModule, state } = await loadSystemRouteModule();
+      const { app, routes } = createFakeApp();
+
+      routeModule.registerSystemRoutes(app as never, {
+        broadcast: jest.fn(),
+        clients: new Set(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      state.proactiveRecall = true;
+      const handlers = routes.get.get('/api/cloud/config');
+      expect(handlers).toBeDefined();
+
+      const res = await invokeHandlers(handlers!, {});
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual(expect.objectContaining({ proactiveRecall: true }));
+    });
+
+    it('rejects non-boolean proactiveRecall', async () => {
+      const { routeModule } = await loadSystemRouteModule();
+      const { app, routes } = createFakeApp();
+
+      routeModule.registerSystemRoutes(app as never, {
+        broadcast: jest.fn(),
+        clients: new Set(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.post.get('/api/cloud/config');
+      const res = await invokeHandlers(handlers!, {
+        body: { proactiveRecall: 'yes' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({ error: 'proactiveRecall must be a boolean' });
+    });
+
+    it('round-trips proactiveRecall through POST and persists alongside openclawAutoMemory', async () => {
+      const { routeModule, state } = await loadSystemRouteModule();
+      const { app, routes } = createFakeApp();
+
+      routeModule.registerSystemRoutes(app as never, {
+        broadcast: jest.fn(),
+        clients: new Set(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.post.get('/api/cloud/config');
+      const res = await invokeHandlers(handlers!, {
+        body: { openclawAutoMemory: true, proactiveRecall: true },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual(expect.objectContaining({
+        proactiveRecall: true,
+        openclawMemory: expect.objectContaining({ autoMemory: true }),
+      }));
+      expect(state.proactiveRecall).toBe(true);
+      expect(state.openclawMemory.autoMemory).toBe(true);
     });
   });
 

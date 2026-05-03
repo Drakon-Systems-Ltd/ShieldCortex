@@ -12,11 +12,13 @@ import {
   getDefenceMode,
   getOpenClawMemoryConfig,
   isConfigTampered,
+  isProactiveRecallEnabled,
   readRawConfig,
   setCloudConfig,
   setCloudSyncControls,
   setDefenceMode,
   setOpenClawMemoryConfig,
+  setProactiveRecall,
   type DefenceMode,
 } from '../../cloud/config.js';
 import { getQueueStats, reconcileSyncQueue } from '../../cloud/sync-queue.js';
@@ -144,6 +146,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         baseUrl: config.cloudBaseUrl,
         syncControls: getCloudSyncControls(),
         openclawMemory: getOpenClawMemoryConfig(),
+        proactiveRecall: isProactiveRecallEnabled(),
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
@@ -170,6 +173,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         openclawAutoMemoryDedupe,
         openclawAutoMemoryNoveltyThreshold,
         openclawAutoMemoryMaxRecent,
+        proactiveRecall,
       } = req.body;
 
       if (cloudApiKey !== undefined && typeof cloudApiKey !== 'string') {
@@ -226,6 +230,9 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
       ) {
         return res.status(400).json({ error: 'cloudSyncProjects must be an array of strings' });
       }
+      if (proactiveRecall !== undefined && typeof proactiveRecall !== 'boolean') {
+        return res.status(400).json({ error: 'proactiveRecall must be a boolean' });
+      }
 
       const normalizedApiKey =
         cloudApiKey !== undefined
@@ -277,6 +284,10 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         ...(openclawAutoMemoryMaxRecent !== undefined && { maxRecent: openclawAutoMemoryMaxRecent }),
       });
 
+      if (proactiveRecall !== undefined) {
+        setProactiveRecall(proactiveRecall);
+      }
+
       const updated = getCloudConfig();
       res.json({
         success: true,
@@ -285,6 +296,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         baseUrl: updated.cloudBaseUrl,
         syncControls: getCloudSyncControls(),
         openclawMemory: getOpenClawMemoryConfig(),
+        proactiveRecall: isProactiveRecallEnabled(),
       });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

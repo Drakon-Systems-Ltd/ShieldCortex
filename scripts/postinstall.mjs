@@ -153,4 +153,11 @@ if (isGlobal && !isCI) {
   console.log('\x1b[36m│\x1b[0m  sessions, compactions, and projects.                \x1b[36m│\x1b[0m');
   console.log('\x1b[36m╰───────────────────────────────────────────────────────╯\x1b[0m');
   console.log('');
+  console.log('\x1b[2mHeads up — integration toggles are off by default:\x1b[0m');
+  console.log('\x1b[2m  • OpenClaw Auto-Memory  — capture memories from agent LLM output\x1b[0m');
+  console.log('\x1b[2m  • Proactive Recall      — inject memory into prompts\x1b[0m');
+  console.log('\x1b[2mTurn them on in the dashboard Settings → Integrations tab, or:\x1b[0m');
+  console.log('\x1b[2m  shieldcortex config --openclaw-auto-memory true\x1b[0m');
+  console.log('\x1b[2m  shieldcortex config --proactive-recall true\x1b[0m');
+  console.log('');
 }

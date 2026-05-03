@@ -3,28 +3,30 @@
 import { useSearchParams } from 'next/navigation';
 import { useState, Suspense } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
-import { Cloud, CreditCard, Settings } from 'lucide-react';
+import { Cloud, CreditCard, Plug, Settings } from 'lucide-react';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
 import { CloudSyncDiagnosticsView } from '@/components/cloud/CloudSyncDiagnosticsView';
+import { IntegrationsView } from '@/components/settings/IntegrationsView';
 import { LicenseStatusCard } from '@/components/shield/LicenseStatusCard';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_LABELS } from '@/lib/license';
 
-type SettingsTab = 'cloud' | 'licence' | 'admin';
+type SettingsTab = 'cloud' | 'integrations' | 'licence' | 'admin';
 
 function SettingsContent() {
   const searchParams = useSearchParams();
   const urlTab = searchParams.get('tab') as SettingsTab | null;
-  const validUrlTab = urlTab && ['cloud', 'licence', 'admin'].includes(urlTab) ? urlTab : null;
+  const validUrlTab = urlTab && ['cloud', 'integrations', 'licence', 'admin'].includes(urlTab) ? urlTab : null;
   const [userTab, setTab] = useState<SettingsTab>('cloud');
   const tab = validUrlTab ?? userTab;
   const { data: license } = useLicenseStatus();
 
   const tabs = [
     { id: 'cloud', label: 'Cloud Sync', icon: <Cloud size={14} /> },
+    { id: 'integrations', label: 'Integrations', icon: <Plug size={14} /> },
     { id: 'licence', label: 'Licence', icon: <CreditCard size={14} /> },
     { id: 'admin', label: 'Admin', icon: <Settings size={14} /> },
   ];
@@ -48,6 +50,7 @@ function SettingsContent() {
 
         <div>
           {tab === 'cloud' && <CloudSyncDiagnosticsView />}
+          {tab === 'integrations' && <IntegrationsView />}
           {tab === 'licence' && (
             <div className="space-y-6">
               <LicenseStatusCard />
