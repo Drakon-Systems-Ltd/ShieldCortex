@@ -10,6 +10,7 @@ import { Badge } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
 import { CloudSyncDiagnosticsView } from '@/components/cloud/CloudSyncDiagnosticsView';
 import { IntegrationsView } from '@/components/settings/IntegrationsView';
+import { MaintenanceCard } from '@/components/settings/MaintenanceCard';
 import { LicenseStatusCard } from '@/components/shield/LicenseStatusCard';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_LABELS } from '@/lib/license';
@@ -70,6 +71,7 @@ function SettingsContent() {
           )}
           {tab === 'admin' && (
             <div className="space-y-6">
+              <MaintenanceCard />
               <GlassCard className="p-6">
                 <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">System Information</h3>
                 <div className="mt-4 space-y-3">
