@@ -14,13 +14,14 @@ interface FindingStats {
   quarantined: number;
 }
 
-export function useXRayFindingsList(filters?: { status?: string; severity?: string; limit?: number }) {
+export function useXRayFindingsList(filters?: { status?: string; severity?: string; target?: string; limit?: number }) {
   return useQuery({
     queryKey: ['xray-findings', filters],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (filters?.status) params.set('status', filters.status);
       if (filters?.severity) params.set('severity', filters.severity);
+      if (filters?.target) params.set('target', filters.target);
       if (filters?.limit) params.set('limit', String(filters.limit));
       const qs = params.toString() ? `?${params}` : '';
       const res = await gatedFetch(`${API_BASE}/api/xray/findings${qs}`);

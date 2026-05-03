@@ -5,8 +5,16 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ds/Button';
 import { LocalAiExplanationPanel, type ExplainAction } from '@/components/local-ai/LocalAiExplanationPanel';
 import { useLocalAiExplain } from '@/hooks/useLocalAiExplainer';
-import { useQuarantineFinding, useUpdateFindingStatus } from '@/hooks/useXRayFindings';
+import { useQuarantineFinding, useUpdateFindingStatus, useXRayFindingsList } from '@/hooks/useXRayFindings';
 import { buildEditorUrl } from '@/lib/editor-url';
+
+// Stable identity match used by the backend findings store (see
+// `findingDedupeKey` in src/xray/findings-store.ts). Re-implemented here so
+// the History/Scanner views can resolve a persisted id even when the rendered
+// finding came from a stored scan blob (which doesn't carry ids).
+function findingMatchKey(category: string, title: string, file?: string, line?: number): string {
+  return `${category}|${title}|${file ?? ''}|${line ?? ''}`;
+}
 
 export interface ExplainableXRayFinding {
   id?: string;
@@ -40,10 +48,27 @@ function buildFindingContent(finding: ExplainableXRayFinding): string {
   ].filter(Boolean).join('\n');
 }
 
-export function LocalAiFindingExplainer({ finding }: { finding: ExplainableXRayFinding }) {
+export function LocalAiFindingExplainer({ finding, target }: { finding: ExplainableXRayFinding; target?: string }) {
   const explainMutation = useLocalAiExplain();
   const updateStatus = useUpdateFindingStatus();
   const quarantine = useQuarantineFinding();
+
+  // If the rendered finding has no id (Scanner/History tabs render from
+  // result blobs that don't carry persisted ids), look the id up by stable
+  // identity against the findings table. The lookup only fires when an
+  // explanation has already been generated AND we have a target to scope to.
+  const needsLookup = !finding.id && Boolean(target) && Boolean(explainMutation.data);
+  const findingsLookup = useXRayFindingsList(needsLookup ? { target, limit: 200 } : undefined);
+  const resolvedId = (() => {
+    if (finding.id) return finding.id;
+    if (!findingsLookup.data?.findings) return undefined;
+    const wantKey = findingMatchKey(finding.category, finding.title, finding.file, finding.line);
+    type Persisted = { id: string; category: string; title: string; file?: string; line?: number };
+    const match = (findingsLookup.data.findings as Persisted[]).find(
+      (f) => findingMatchKey(f.category, f.title, f.file, f.line) === wantKey,
+    );
+    return match?.id;
+  })();
 
   const handleExplain = () => {
     explainMutation.mutate(
@@ -96,10 +121,27 @@ export function LocalAiFindingExplainer({ finding }: { finding: ExplainableXRayF
       });
     }
 
-    // The status/quarantine actions all need a finding id to call the API.
-    if (!finding.id) return actions;
+    // The status/quarantine actions need a persisted finding id. Use the
+    // rendered finding's id when present (Findings tab) or the lookup result
+    // (Scanner/History tabs).
+    if (!resolvedId) {
+      // While the lookup is in flight, surface a disabled placeholder so users
+      // know more buttons are coming. If the lookup finished and still no id,
+      // we just stop after Open in editor.
+      if (needsLookup && findingsLookup.isLoading) {
+        actions.push({
+          key: 'lookup',
+          label: 'Loading actions',
+          variant: 'outline',
+          disabled: true,
+          pending: true,
+          onClick: () => undefined,
+        });
+      }
+      return actions;
+    }
 
-    const id = finding.id;
+    const id = resolvedId;
     const isPending = updateStatus.isPending || quarantine.isPending;
 
     actions.push({

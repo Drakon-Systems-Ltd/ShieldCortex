@@ -297,6 +297,7 @@ export function XRayOverview() {
                                 id: persistedFindings[i]?.id,
                                 status: persistedFindings[i]?.status,
                               }}
+                              target={visibleResult.target}
                             />
                             {persistedFindings[i] && (
                               <div className="mt-3 border-t border-[var(--sc-border)] pt-3">
@@ -473,7 +474,7 @@ export function XRayOverview() {
                             <span className="text-sm font-medium text-[var(--sc-text-primary)]">{f.title}</span>
                           </div>
                           <p className="mt-1 text-xs text-[var(--sc-text-secondary)]">{f.description}</p>
-                          <LocalAiFindingExplainer finding={f} />
+                          <LocalAiFindingExplainer finding={f} target={visibleResult.target} />
                         </GlassCard>
                       ))
                     )}
