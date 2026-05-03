@@ -98,3 +98,106 @@ export function useRunConsolidation() {
     },
   });
 }
+
+// ── Prune (threshold-based) ─────────────────────────────────────────────────
+
+export interface PruneRequest {
+  salienceLte?: number;
+  ageDaysGte?: number;
+  project?: string;
+  excludePinned?: boolean;
+  dryRun?: boolean;
+}
+
+export interface PruneSampleEntry {
+  id: number;
+  title: string;
+  project: string | null;
+  salience: number;
+  ageDays: number;
+}
+
+export interface PruneResponse {
+  success: boolean;
+  options: {
+    salienceLte: number;
+    ageDaysGte: number;
+    project: string | null;
+    excludePinned: boolean;
+    dryRun: boolean;
+  };
+  matched: number;
+  sample: PruneSampleEntry[];
+  deleted?: number;
+  backupPath?: string;
+}
+
+export function useRunPrune() {
+  const qc = useQueryClient();
+  return useMutation<PruneResponse, Error, PruneRequest>({
+    mutationFn: async (req) => {
+      const res = await gatedFetch(`${API_BASE}/api/memories/prune`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to prune'));
+      return res.json();
+    },
+    onSuccess: (data) => {
+      // Only invalidate memory-stats when an actual delete ran.
+      if (typeof data.deleted === 'number') {
+        qc.invalidateQueries({ queryKey: ['memory-stats'] });
+        qc.invalidateQueries({ queryKey: ['integrations-config'] });
+      }
+    },
+  });
+}
+
+// ── Dedupe (project-scoped) ─────────────────────────────────────────────────
+
+export interface DedupeRequest {
+  project?: string;
+  dryRun?: boolean;
+  limit?: number;
+}
+
+export interface DedupeGroup {
+  keepId: number;
+  keepTitle: string;
+  removeIds: number[];
+  similarity: string;
+}
+
+export interface DedupeResponse {
+  success: boolean;
+  options: {
+    project: string | null;
+    dryRun: boolean;
+    limit: number;
+  };
+  pairsFound: number;
+  groups: DedupeGroup[];
+  merged?: number;
+  backupPath?: string;
+}
+
+export function useRunDedupe() {
+  const qc = useQueryClient();
+  return useMutation<DedupeResponse, Error, DedupeRequest>({
+    mutationFn: async (req) => {
+      const res = await gatedFetch(`${API_BASE}/api/memories/dedupe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+      if (!res.ok) throw new Error(await readApiError(res, 'Failed to dedupe'));
+      return res.json();
+    },
+    onSuccess: (data) => {
+      if (typeof data.merged === 'number') {
+        qc.invalidateQueries({ queryKey: ['memory-stats'] });
+      }
+    },
+  });
+}

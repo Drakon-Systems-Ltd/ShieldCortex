@@ -459,4 +459,137 @@ describe('API route mutation regressions', () => {
       expect(updated?.reviewedBy).toBe('operator');
     });
   });
+
+  describe('/api/memories/prune', () => {
+    it('rejects salienceLte outside [0, 1]', async () => {
+      const initModule = await import('../../database/init.js');
+      const routeModule = await import('../routes/memories.js');
+      initModule.initDatabase(':memory:');
+
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.post.get('/api/memories/prune');
+      expect(handlers).toBeDefined();
+
+      const res = await invokeHandlers(handlers!, { body: { salienceLte: 1.5 } });
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({ error: 'salienceLte must be a number 0..1' });
+    });
+
+    it('returns matched count and sample without deleting on dryRun', async () => {
+      const initModule = await import('../../database/init.js');
+      const storeModule = await import('../../memory/store.js');
+      const routeModule = await import('../routes/memories.js');
+      initModule.initDatabase(':memory:');
+
+      // Three low-salience old memories should match.
+      const lowAndOld = storeModule.addMemory({
+        title: 'Old low memory', content: 'fading away', project: 'p1', salience: 0.1,
+      });
+      // Force created_at to ~60 days ago (default ageDaysGte=30 should match).
+      initModule.getDatabase().prepare("UPDATE memories SET created_at = datetime('now', '-60 days') WHERE id = ?").run(lowAndOld.id);
+      const recent = storeModule.addMemory({
+        title: 'Recent low memory', content: 'just made', project: 'p1', salience: 0.1,
+      });
+      const highSal = storeModule.addMemory({
+        title: 'Important', content: 'keep me', project: 'p1', salience: 0.9,
+      });
+      initModule.getDatabase().prepare("UPDATE memories SET created_at = datetime('now', '-60 days') WHERE id = ?").run(highSal.id);
+
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.post.get('/api/memories/prune');
+      const res = await invokeHandlers(handlers!, {
+        body: { salienceLte: 0.2, ageDaysGte: 30, dryRun: true },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.matched).toBe(1);
+      expect(res.body.deleted).toBeUndefined(); // dryRun
+      expect(res.body.sample[0].id).toBe(lowAndOld.id);
+
+      // Recent + high-salience untouched.
+      expect(storeModule.getMemoryById(lowAndOld.id)).not.toBeNull();
+      expect(storeModule.getMemoryById(recent.id)).not.toBeNull();
+      expect(storeModule.getMemoryById(highSal.id)).not.toBeNull();
+    });
+
+    it('skips pinned memories when excludePinned is true (default)', async () => {
+      const initModule = await import('../../database/init.js');
+      const storeModule = await import('../../memory/store.js');
+      const routeModule = await import('../routes/memories.js');
+      initModule.initDatabase(':memory:');
+
+      const pinned = storeModule.addMemory({
+        title: 'Pinned old low', content: 'protect me', project: 'p1', salience: 0.1,
+      });
+      initModule.getDatabase()
+        .prepare("UPDATE memories SET pinned = 1, created_at = datetime('now', '-60 days') WHERE id = ?")
+        .run(pinned.id);
+
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.post.get('/api/memories/prune');
+      const res = await invokeHandlers(handlers!, {
+        body: { salienceLte: 0.2, ageDaysGte: 30, dryRun: true },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.matched).toBe(0); // pinned excluded
+    });
+  });
+
+  describe('/api/memories/dedupe', () => {
+    it('rejects out-of-range limit', async () => {
+      const initModule = await import('../../database/init.js');
+      const routeModule = await import('../routes/memories.js');
+      initModule.initDatabase(':memory:');
+
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.post.get('/api/memories/dedupe');
+      expect(handlers).toBeDefined();
+
+      const res = await invokeHandlers(handlers!, { body: { limit: 9999 } });
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({ error: 'limit must be a number 1..1000' });
+    });
+
+    it('returns groups + pairsFound without deleting on dryRun', async () => {
+      const initModule = await import('../../database/init.js');
+      const routeModule = await import('../routes/memories.js');
+      initModule.initDatabase(':memory:');
+
+      // Empty DB → zero groups, zero pairs, no error.
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.post.get('/api/memories/dedupe');
+      const res = await invokeHandlers(handlers!, { body: { dryRun: true } });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.pairsFound).toBe(0);
+      expect(res.body.groups).toEqual([]);
+      expect(res.body.merged).toBeUndefined();
+    });
+  });
 });

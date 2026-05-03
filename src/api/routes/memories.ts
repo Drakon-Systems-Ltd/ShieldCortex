@@ -977,6 +977,80 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
     }
   });
 
+  // Threshold-based prune: delete memories below salience X older than Y days.
+  // dryRun:true (default) returns counts + sample without touching the DB.
+  // Auto-backs-up the DB before any destructive write — backupPath returned.
+  app.post('/api/memories/prune', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:memories-prune',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
+    try {
+      const { salienceLte, ageDaysGte, project, excludePinned, dryRun } = req.body ?? {};
+      if (salienceLte !== undefined && (typeof salienceLte !== 'number' || salienceLte < 0 || salienceLte > 1)) {
+        return res.status(400).json({ error: 'salienceLte must be a number 0..1' });
+      }
+      if (ageDaysGte !== undefined && (typeof ageDaysGte !== 'number' || ageDaysGte < 0)) {
+        return res.status(400).json({ error: 'ageDaysGte must be a number >= 0' });
+      }
+      if (project !== undefined && project !== null && typeof project !== 'string') {
+        return res.status(400).json({ error: 'project must be a string when provided' });
+      }
+      if (excludePinned !== undefined && typeof excludePinned !== 'boolean') {
+        return res.status(400).json({ error: 'excludePinned must be a boolean' });
+      }
+      if (dryRun !== undefined && typeof dryRun !== 'boolean') {
+        return res.status(400).json({ error: 'dryRun must be a boolean' });
+      }
+
+      const { pruneMemories } = await import('../../memory/prune.js');
+      const result = await pruneMemories({
+        salienceLte,
+        ageDaysGte,
+        project: project ?? undefined,
+        excludePinned,
+        dryRun,
+      });
+      res.json({ success: true, ...result });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Project-scoped dedupe: cluster near-duplicate long-term memories and keep
+  // the highest-salience representative. dryRun:true (default) returns the
+  // groups without merging. Auto-backs-up the DB before any merge.
+  app.post('/api/memories/dedupe', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:memories-dedupe',
+    enforceAmber: true,
+  }), async (req: Request, res: Response) => {
+    try {
+      const { project, dryRun, limit } = req.body ?? {};
+      if (project !== undefined && project !== null && typeof project !== 'string') {
+        return res.status(400).json({ error: 'project must be a string when provided' });
+      }
+      if (dryRun !== undefined && typeof dryRun !== 'boolean') {
+        return res.status(400).json({ error: 'dryRun must be a boolean' });
+      }
+      if (limit !== undefined && (typeof limit !== 'number' || limit < 1 || limit > 1000)) {
+        return res.status(400).json({ error: 'limit must be a number 1..1000' });
+      }
+
+      const { dedupeMemories } = await import('../../memory/dedupe-runner.js');
+      const result = await dedupeMemories({
+        project: project ?? undefined,
+        dryRun,
+        limit,
+      });
+      res.json({ success: true, ...result });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   app.get('/api/context', requireNotLocked, async (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;

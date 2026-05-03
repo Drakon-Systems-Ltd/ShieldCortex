@@ -252,6 +252,103 @@ function printReport(report: MigrationReport): void {
   }
 }
 
+function flagValue(args: string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  if (idx === -1) return undefined;
+  const v = args[idx + 1];
+  if (!v || v.startsWith('--')) return undefined;
+  return v;
+}
+
+async function runPrune(args: string[]): Promise<void> {
+  const { initDatabase } = await import('../database/init.js');
+  const { pruneMemories } = await import('../memory/prune.js');
+  initDatabase();
+
+  const dryRun = !args.includes('--execute');
+  const salienceLte = Number(flagValue(args, '--salience-lte') ?? 0.2);
+  const ageDaysGte = Number(flagValue(args, '--older-than') ?? 30);
+  const project = flagValue(args, '--project');
+  const includePinned = args.includes('--include-pinned');
+
+  const result = await pruneMemories({
+    salienceLte,
+    ageDaysGte,
+    project,
+    excludePinned: !includePinned,
+    dryRun,
+  });
+
+  const banner = dryRun ? '[DRY RUN] ' : '';
+  console.log(`${banner}Prune memories where salience <= ${salienceLte} AND age >= ${ageDaysGte}d`);
+  console.log(`  Project: ${project ?? '(all)'} · ExcludePinned: ${!includePinned}`);
+  console.log(`  Matched: ${result.matched}`);
+  if (result.sample.length > 0) {
+    console.log('  Sample:');
+    for (const s of result.sample) {
+      console.log(`    #${s.id} [${s.project ?? '-'}] sal ${s.salience.toFixed(2)} · ${s.ageDays}d · ${s.title.slice(0, 60)}`);
+    }
+  }
+  if (!dryRun) {
+    console.log(`  Deleted: ${result.deleted ?? 0}`);
+    if (result.backupPath) console.log(`  Backup:  ${result.backupPath}`);
+  } else if (result.matched > 0) {
+    console.log('  Re-run with --execute to delete.');
+  }
+}
+
+async function runDedupe(args: string[]): Promise<void> {
+  const { initDatabase } = await import('../database/init.js');
+  const { dedupeMemories } = await import('../memory/dedupe-runner.js');
+  initDatabase();
+
+  const dryRun = !args.includes('--execute');
+  const project = flagValue(args, '--project');
+  const limit = Number(flagValue(args, '--limit') ?? 200);
+
+  const result = await dedupeMemories({ project, dryRun, limit });
+
+  const banner = dryRun ? '[DRY RUN] ' : '';
+  console.log(`${banner}Dedupe long-term memories${project ? ` in project ${project}` : ' (all projects)'}`);
+  console.log(`  Pairs scanned: ${result.pairsFound}`);
+  console.log(`  Clusters: ${result.groups.length}`);
+  const totalRemovable = result.groups.reduce((sum, g) => sum + g.removeIds.length, 0);
+  console.log(`  Removable: ${totalRemovable}`);
+  if (result.groups.length > 0) {
+    console.log('  Groups:');
+    for (const g of result.groups.slice(0, 10)) {
+      console.log(`    keep #${g.keepId} [${g.removeIds.length} dup] ${g.similarity} — "${g.keepTitle.slice(0, 50)}"`);
+    }
+    if (result.groups.length > 10) console.log(`    … and ${result.groups.length - 10} more`);
+  }
+  if (!dryRun) {
+    console.log(`  Merged: ${result.merged ?? 0}`);
+    if (result.backupPath) console.log(`  Backup: ${result.backupPath}`);
+  } else if (totalRemovable > 0) {
+    console.log('  Re-run with --execute to merge.');
+  }
+}
+
+function printUsage(): void {
+  console.log('Usage: shieldcortex memories <subcommand> [options]');
+  console.log('');
+  console.log('Subcommands:');
+  console.log('  migrate-legacy [--dry-run] [--source <path>]');
+  console.log('      Import memories from ~/.claude-memory/ and ~/.claude-cortex/');
+  console.log('      into the current ~/.shieldcortex/memories.db.');
+  console.log('');
+  console.log('  prune [--salience-lte 0.2] [--older-than 30] [--project X]');
+  console.log('        [--include-pinned] [--execute]');
+  console.log('      Delete memories below salience X older than N days.');
+  console.log('      DRY-RUN BY DEFAULT — pass --execute to actually delete.');
+  console.log('      Backup auto-saved before any delete.');
+  console.log('');
+  console.log('  dedupe [--project X] [--limit 200] [--execute]');
+  console.log('      Cluster near-duplicate long-term memories and keep the highest-');
+  console.log('      salience representative. DRY-RUN BY DEFAULT — pass --execute.');
+  console.log('      Backup auto-saved before any merge.');
+}
+
 export async function handleMemoriesCommand(args: string[]): Promise<void> {
   const sub = args[0];
   if (sub === 'migrate-legacy') {
@@ -264,12 +361,14 @@ export async function handleMemoriesCommand(args: string[]): Promise<void> {
     printReport(report);
     return;
   }
-  console.log('Usage: shieldcortex memories migrate-legacy [--dry-run] [--source <path>]');
-  console.log('');
-  console.log('Imports memories from legacy ~/.claude-memory/ and ~/.claude-cortex/');
-  console.log('databases into the current ~/.shieldcortex/memories.db.');
-  console.log('');
-  console.log('  --dry-run        Count rows without writing.');
-  console.log('  --source <path>  Override the default legacy source paths (single source).');
+  if (sub === 'prune') {
+    await runPrune(args.slice(1));
+    return;
+  }
+  if (sub === 'dedupe') {
+    await runDedupe(args.slice(1));
+    return;
+  }
+  printUsage();
   process.exit(1);
 }
