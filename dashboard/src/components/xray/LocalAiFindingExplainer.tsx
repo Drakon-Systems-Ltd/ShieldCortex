@@ -1,6 +1,7 @@
 'use client';
 
-import { ExternalLink, ShieldAlert, ShieldCheck, ShieldX, Sparkles } from 'lucide-react';
+import { useState } from 'react';
+import { Check, ExternalLink, ShieldAlert, ShieldCheck, ShieldX, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ds/Button';
 import { LocalAiExplanationPanel, type ExplainAction } from '@/components/local-ai/LocalAiExplanationPanel';
@@ -52,6 +53,16 @@ export function LocalAiFindingExplainer({ finding, target }: { finding: Explaina
   const explainMutation = useLocalAiExplain();
   const updateStatus = useUpdateFindingStatus();
   const quarantine = useQuarantineFinding();
+  // Track which actions completed so the buttons can show a permanent "done"
+  // state — the API call succeeds and the toast flashes, but the underlying
+  // finding card on Scanner/History tabs renders from a result blob that
+  // doesn't refetch, so the user can't otherwise tell the action stuck.
+  const [completed, setCompleted] = useState<Set<string>>(new Set());
+  const markCompleted = (key: string) => setCompleted((prev) => {
+    const next = new Set(prev);
+    next.add(key);
+    return next;
+  });
 
   // If the rendered finding has no id (Scanner/History tabs render from
   // result blobs that don't carry persisted ids), look the id up by stable
@@ -144,46 +155,58 @@ export function LocalAiFindingExplainer({ finding, target }: { finding: Explaina
     const id = resolvedId;
     const isPending = updateStatus.isPending || quarantine.isPending;
 
+    const reviewedDone = completed.has('reviewed');
     actions.push({
       key: 'reviewed',
-      label: 'Mark reviewed',
-      icon: <ShieldCheck size={13} />,
-      variant: 'outline',
+      label: reviewedDone ? 'Reviewed' : 'Mark reviewed',
+      icon: reviewedDone ? <Check size={13} /> : <ShieldCheck size={13} />,
+      variant: reviewedDone ? 'cyan' : 'outline',
       pending: updateStatus.isPending && updateStatus.variables?.status === 'reviewed',
-      disabled: isPending,
+      disabled: isPending || reviewedDone,
       onClick: () => {
         updateStatus.mutate({ id, status: 'reviewed' }, {
-          onSuccess: () => toast.success('Marked as reviewed'),
+          onSuccess: () => {
+            markCompleted('reviewed');
+            toast.success('Marked as reviewed');
+          },
           onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to mark reviewed'),
         });
       },
     });
 
+    const dismissDone = completed.has('dismiss');
     actions.push({
       key: 'dismiss',
-      label: 'Dismiss',
-      icon: <ShieldX size={13} />,
-      variant: 'ghost',
+      label: dismissDone ? 'Dismissed' : 'Dismiss',
+      icon: dismissDone ? <Check size={13} /> : <ShieldX size={13} />,
+      variant: dismissDone ? 'cyan' : 'ghost',
       pending: updateStatus.isPending && updateStatus.variables?.status === 'ignored',
-      disabled: isPending,
+      disabled: isPending || dismissDone,
       onClick: () => {
         updateStatus.mutate({ id, status: 'ignored' }, {
-          onSuccess: () => toast.success('Finding dismissed'),
+          onSuccess: () => {
+            markCompleted('dismiss');
+            toast.success('Finding dismissed');
+          },
           onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to dismiss'),
         });
       },
     });
 
+    const quarantineDone = completed.has('quarantine');
     actions.push({
       key: 'quarantine',
-      label: 'Quarantine file',
-      icon: <ShieldAlert size={13} />,
-      variant: 'coral',
+      label: quarantineDone ? 'Quarantined' : 'Quarantine file',
+      icon: quarantineDone ? <Check size={13} /> : <ShieldAlert size={13} />,
+      variant: quarantineDone ? 'cyan' : 'coral',
       pending: quarantine.isPending,
-      disabled: isPending,
+      disabled: isPending || quarantineDone,
       onClick: () => {
         quarantine.mutate({ id }, {
-          onSuccess: () => toast.success('File quarantined'),
+          onSuccess: () => {
+            markCompleted('quarantine');
+            toast.success('File quarantined');
+          },
           onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to quarantine'),
         });
       },
