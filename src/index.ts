@@ -648,6 +648,13 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "memories" subcommand (memory database operations: migrate-legacy, ...)
+  if (process.argv[2] === 'memories') {
+    const { handleMemoriesCommand } = await import('./cli/migrate-legacy.js');
+    await handleMemoriesCommand(process.argv.slice(3));
+    return;
+  }
+
   // Handle "status" subcommand
   if (process.argv[2] === 'status') {
     const { handleStatusCommand } = await import('./setup/status.js');
