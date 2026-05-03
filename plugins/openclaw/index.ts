@@ -210,6 +210,11 @@ const PLUGIN_CONFIG_JSON_SCHEMA = {
 };
 
 let _config: SCConfig | null = null;
+// Identity of the shield config we last merged from. The runtime's
+// loadShieldConfig() returns the same parsed object until the file's mtime
+// advances; using reference equality lets us re-merge precisely when the
+// underlying config has actually changed (dashboard / CLI write).
+let _lastShieldConfigRef: unknown = null;
 let _configOverride: SCConfig | null = null;
 let _version = "0.0.0";
 try {
@@ -292,16 +297,17 @@ function applyPluginConfigOverride(api: PluginApi): void {
     ...(_configOverride ?? {}),
     ...pluginConfig,
   };
-  if (_config) {
-    _config = { ..._config, ...pluginConfig };
-  }
+  // Override changed — invalidate so loadConfig() re-merges with new override.
+  _config = null;
+  _lastShieldConfigRef = null;
 }
 
 async function loadConfig(): Promise<SCConfig> {
-  if (_config) return _config;
-  const shieldConfig = normaliseConfig(await (await getRuntime()).loadShieldConfig());
+  const shieldConfigRaw = await (await getRuntime()).loadShieldConfig();
+  if (_config && shieldConfigRaw === _lastShieldConfigRef) return _config;
+  _lastShieldConfigRef = shieldConfigRaw;
   _config = {
-    ...shieldConfig,
+    ...normaliseConfig(shieldConfigRaw),
     ...(_configOverride ?? {}),
   };
   return _config;

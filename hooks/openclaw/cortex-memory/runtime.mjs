@@ -3,21 +3,35 @@ import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
-export function createOpenClawRuntime({ logPrefix = "[shieldcortex]" } = {}) {
+export function createOpenClawRuntime({
+  logPrefix = "[shieldcortex]",
+  configPath = path.join(homedir(), ".shieldcortex", "config.json"),
+} = {}) {
   let shieldConfig = null;
+  let shieldConfigMtime = 0;
   let resolvedServerCmd = null;
   let lastCallErrorType = null;
 
+  // mtime-gated cache: re-read on every call if the config file's modified
+  // time has advanced. Lets dashboard / CLI toggles take effect on the next
+  // event without an OpenClaw gateway restart.
   async function loadShieldConfig() {
-    if (shieldConfig) return shieldConfig;
+    let mtime = 0;
+    try {
+      const stats = await fs.stat(configPath);
+      mtime = stats.mtimeMs;
+    } catch {
+      mtime = 0;
+    }
+
+    if (shieldConfig && mtime === shieldConfigMtime) return shieldConfig;
 
     try {
-      const configPath = path.join(homedir(), ".shieldcortex", "config.json");
       shieldConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
     } catch {
       shieldConfig = {};
     }
-
+    shieldConfigMtime = mtime;
     return shieldConfig;
   }
 
