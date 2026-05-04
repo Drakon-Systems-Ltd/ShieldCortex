@@ -811,6 +811,18 @@ function runMigrations(database: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_frag_entities_memory ON fragmentation_entities(memory_id);
       CREATE INDEX IF NOT EXISTS idx_frag_entities_text ON fragmentation_entities(entity_value);
       CREATE INDEX IF NOT EXISTS idx_frag_entities_type ON fragmentation_entities(entity_type);
+
+      CREATE TABLE IF NOT EXISTS hook_invocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hook_name TEXT NOT NULL,
+        invoked_at TEXT NOT NULL DEFAULT (datetime('now')),
+        exit_code INTEGER,
+        duration_ms INTEGER,
+        memories_extracted INTEGER DEFAULT 0,
+        transcript_bytes INTEGER,
+        notes TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_hook_invocations_name_time ON hook_invocations(hook_name, invoked_at DESC);
     `);
   } catch {
     // Tables may already exist - safe to ignore

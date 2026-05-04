@@ -7,6 +7,13 @@ import os from 'os';
 import fs from 'fs';
 import { initDatabase, getDatabase } from '../database/init.js';
 
+interface HookActivity {
+  hookName: string;
+  invocationCount: number;
+  lastInvokedAt: string | null;
+  memoriesExtracted: number;
+}
+
 interface StatusInfo {
   dbPath: string;
   dbSize: string;
@@ -18,6 +25,7 @@ interface StatusInfo {
   lastActivity: string | null;
   quarantined: number;
   threatsBlocked: number;
+  hookActivity: HookActivity[];
 }
 
 function formatBytes(bytes: number): string {
@@ -83,6 +91,33 @@ function getStatusInfo(dbPath: string): StatusInfo {
     // Quarantine table doesn't exist - that's fine
   }
 
+  // Per-hook invocation telemetry (last 7 days). Disambiguates the
+  // "fires but produces nothing" vs "never fires" failure modes that
+  // both showed as "Last activity: never" in older releases.
+  const hookActivity: HookActivity[] = [];
+  try {
+    const rows = db.prepare(`
+      SELECT hook_name AS hookName,
+             COUNT(*)             AS invocationCount,
+             MAX(invoked_at)      AS lastInvokedAt,
+             SUM(memories_extracted) AS memoriesExtracted
+      FROM hook_invocations
+      WHERE invoked_at >= datetime('now', '-7 days')
+      GROUP BY hook_name
+      ORDER BY hook_name
+    `).all() as Array<{ hookName: string; invocationCount: number; lastInvokedAt: string | null; memoriesExtracted: number | null }>;
+    for (const r of rows) {
+      hookActivity.push({
+        hookName: r.hookName,
+        invocationCount: r.invocationCount,
+        lastInvokedAt: r.lastInvokedAt,
+        memoriesExtracted: r.memoriesExtracted ?? 0,
+      });
+    }
+  } catch {
+    // hook_invocations table doesn't exist on pre-4.13 installs - leave empty
+  }
+
   return {
     dbPath,
     dbSize,
@@ -94,6 +129,7 @@ function getStatusInfo(dbPath: string): StatusInfo {
     lastActivity,
     quarantined,
     threatsBlocked,
+    hookActivity,
   };
 }
 
@@ -166,6 +202,18 @@ export async function handleStatusCommand(): Promise<void> {
   Defence:       ${info.quarantined} quarantined, ${info.threatsBlocked} threats blocked
   Hooks:         ${hooksConfigured ? 'configured' : '⚠️  not configured'}
 `);
+
+    if (info.hookActivity.length > 0) {
+      console.log('  Hook activity (last 7 days):');
+      for (const h of info.hookActivity) {
+        const last = h.lastInvokedAt ? formatRelativeTime(h.lastInvokedAt) : 'never';
+        const extracted = h.memoriesExtracted > 0
+          ? `, extracted ${h.memoriesExtracted} memor${h.memoriesExtracted === 1 ? 'y' : 'ies'}`
+          : '';
+        console.log(`    ${h.hookName.padEnd(14)} fired ${h.invocationCount}× — last ${last}${extracted}`);
+      }
+      console.log('');
+    }
 
     if (!hooksConfigured) {
       console.log(`  ⚠️  Claude Code hooks are not set up. Memory won't auto-save or inject context.`);

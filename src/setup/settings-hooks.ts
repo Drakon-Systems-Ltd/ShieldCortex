@@ -39,6 +39,14 @@ const STOP_HOOK: HookEntry = {
   hooks: [{ type: 'command', command: 'shieldcortex hook stop', timeout: 10 }],
 };
 
+// SessionEnd is opt-in. The hook script gates execution behind
+// `autoMemory.enableSessionEnd` in ~/.shieldcortex/config.json AND a
+// process.env-based OpenClaw context detector, so wiring it via this flag
+// does NOT regress the v4.10 OpenClaw-crash class on its own.
+const SESSION_END_HOOK: HookEntry = {
+  hooks: [{ type: 'command', command: 'shieldcortex hook session-end', timeout: 10 }],
+};
+
 function hasCortexHook(entries: HookEntry[]): boolean {
   return entries.some((e) =>
     e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('shieldcortex'))
@@ -86,7 +94,7 @@ function migrateNpxHooks(settings: Record<string, any>): number {
   return migrated;
 }
 
-export function setupHooks(options?: { stopHook?: boolean }): void {
+export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean }): void {
   const settings = readSettings();
   if (!settings.hooks) {
     settings.hooks = {};
@@ -95,21 +103,25 @@ export function setupHooks(options?: { stopHook?: boolean }): void {
   // First: migrate any stale npx commands to direct binary
   const migrated = migrateNpxHooks(settings);
 
-  // Remove SessionEnd hook — causes fatal failures in OpenClaw agents
-  if (settings.hooks.SessionEnd) {
+  // SessionEnd handling is now bidirectional:
+  //   - if --with-session-end was passed, install it (the .mjs gates execution
+  //     by config + OpenClaw env so it's safe to wire here);
+  //   - otherwise, remove any existing ShieldCortex SessionEnd entry to keep
+  //     the OpenClaw-safe default for users who don't explicitly opt in.
+  if (!options?.sessionEnd && settings.hooks.SessionEnd) {
     const hadCortex = hasCortexHook(settings.hooks.SessionEnd);
     if (hadCortex) {
       settings.hooks.SessionEnd = settings.hooks.SessionEnd.filter(
         (e: HookEntry) => !e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('shieldcortex'))
       );
       if (settings.hooks.SessionEnd.length === 0) delete settings.hooks.SessionEnd;
-      console.log('  - Hook: SessionEnd (removed — causes agent crashes, PreCompact handles this)');
+      console.log('  - Hook: SessionEnd (removed — opt in with `--with-session-end`)');
     }
   }
 
   let added = 0;
 
-  // Install command hooks (PreCompact, SessionStart, SessionEnd, UserPromptSubmit)
+  // Install command hooks (PreCompact, SessionStart, UserPromptSubmit)
   for (const [name, entry] of Object.entries(CORTEX_HOOKS)) {
     if (!Array.isArray(settings.hooks[name])) {
       settings.hooks[name] = [];
@@ -123,6 +135,20 @@ export function setupHooks(options?: { stopHook?: boolean }): void {
     }
   }
 
+  // Optionally install SessionEnd hook
+  if (options?.sessionEnd) {
+    if (!Array.isArray(settings.hooks.SessionEnd)) {
+      settings.hooks.SessionEnd = [];
+    }
+    if (!hasCortexHook(settings.hooks.SessionEnd)) {
+      settings.hooks.SessionEnd.push(SESSION_END_HOOK);
+      added++;
+      console.log(`  + Hook: SessionEnd (opt-in — gated by autoMemory.enableSessionEnd)`);
+    } else {
+      console.log(`  = Hook: SessionEnd (already configured)`);
+    }
+  }
+
   // Optionally install Stop hook
   if (options?.stopHook) {
     if (!Array.isArray(settings.hooks.Stop)) {
@@ -131,7 +157,7 @@ export function setupHooks(options?: { stopHook?: boolean }): void {
     if (!hasCortexHook(settings.hooks.Stop)) {
       settings.hooks.Stop.push(STOP_HOOK);
       added++;
-      console.log(`  + Hook: Stop (opt-in)`);
+      console.log(`  + Hook: Stop (opt-in — gated by autoMemory.enableStop)`);
     } else {
       console.log(`  = Hook: Stop (already configured)`);
     }

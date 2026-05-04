@@ -22,10 +22,13 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
+import { readTranscriptText } from './lib/transcript-reader.mjs';
+import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
+import { recordHookInvocation } from './lib/telemetry.mjs';
 
 // Database paths (with legacy fallback)
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
@@ -405,57 +408,6 @@ function saveMemory(db, memory, project) {
   saveAutoExtractedMemory(db, memory, project);
 }
 
-// ==================== TRANSCRIPT READING ====================
-
-/**
- * Read conversation text from the session transcript JSONL file.
- */
-function readTranscript(transcriptPath) {
-  if (!transcriptPath) return '';
-
-  // Expand ~ to homedir
-  const resolvedPath = transcriptPath.replace(/^~/, homedir());
-
-  if (!existsSync(resolvedPath)) {
-    console.error(`[session-end] Transcript not found: ${resolvedPath}`);
-    return '';
-  }
-
-  try {
-    const content = readFileSync(resolvedPath, 'utf-8');
-    const lines = content.trim().split('\n');
-
-    // Read last 50 lines to get recent conversation
-    const recentLines = lines.slice(-50);
-    const messages = [];
-
-    for (const line of recentLines) {
-      try {
-        const entry = JSON.parse(line);
-        const role = entry.type || entry.message?.role;
-        const msgContent = entry.message?.content;
-        if ((role === 'user' || role === 'assistant') && msgContent) {
-          const text = Array.isArray(msgContent)
-            ? msgContent.filter(c => c.type === 'text').map(c => c.text).join('\n')
-            : msgContent;
-          if (text && !text.startsWith('/')) {
-            messages.push(text);
-          }
-        }
-      } catch {
-        // Skip invalid lines
-      }
-    }
-
-    const result = messages.join('\n\n');
-    console.error(`[session-end] Read ${messages.length} messages from transcript (${result.length} chars)`);
-    return result;
-  } catch (err) {
-    console.error(`[session-end] Failed to read transcript: ${err.message}`);
-    return '';
-  }
-}
-
 // ==================== MAIN HOOK LOGIC ====================
 
 let input = '';
@@ -468,69 +420,122 @@ process.stdin.on('readable', () => {
   }
 });
 
+function looksLikeOpenClawContext() {
+  // OpenClaw spawns Claude Code agents as subprocesses. When SessionEnd fires
+  // inside that subprocess, the OpenClaw runtime has often already torn down
+  // shared state (lock files, IPC channels) — extracting from there has caused
+  // fatal failures historically (settings-hooks.ts:23-25). Detect via env.
+  if (process.env.OPENCLAW_AGENT_ID) return true;
+  if (process.env.OPENCLAW_SESSION_ID) return true;
+  if (process.env.OPENCLAW_PARENT_PID) return true;
+  if (typeof process.env.OPENCLAW === 'string' && process.env.OPENCLAW.length > 0) return true;
+  return false;
+}
+
 process.stdin.on('end', () => {
+  const startedAt = Date.now();
+  let db = null;
+  let autoExtractedCount = 0;
+  let bytesRead = 0;
+  let notes = null;
   try {
     const hookData = JSON.parse(input || '{}');
 
     const reason = hookData.reason || 'unknown';
     const project = extractProjectFromPath(hookData.cwd);
+    const autoMemConfig = getAutoMemoryConfig();
+
+    // Config gate: opt-in (default off). Preserves the historical default
+    // that protected OpenClaw users. We exit before touching the DB so a
+    // disabled hook never opens better-sqlite3 — telemetry stays silent too.
+    if (!autoMemConfig.enableSessionEnd) {
+      console.error('[session-end] Disabled by config (autoMemory.enableSessionEnd=false)');
+      process.exit(0);
+    }
+
+    // OpenClaw subprocess guard (extra defence on top of the config gate).
+    if (looksLikeOpenClawContext()) {
+      console.error('[session-end] OpenClaw context detected, skipping extraction');
+      process.exit(0);
+    }
 
     // Skip extraction on /clear — session is being intentionally wiped
     if (reason === 'clear') {
       console.error('[session-end] Session cleared, skipping extraction');
-      process.exit(0);
-    }
+      notes = 'reason=clear';
+      // fall through to telemetry record so 'fired but skipped' is visible
+    } else {
+      // Read conversation from transcript_path (provided by Claude Code)
+      const transcriptOut = readTranscriptText(hookData.transcript_path, {
+        maxBytes: autoMemConfig.maxTranscriptBytes,
+        maxLines: autoMemConfig.maxTranscriptLines,
+        keepSlashCommandProse: autoMemConfig.keepSlashCommandProse,
+      });
+      const conversationText = transcriptOut.text;
+      bytesRead = transcriptOut.bytesRead;
+      if (transcriptOut.messageCount > 0) {
+        console.error(`[session-end] Read ${transcriptOut.messageCount} messages from transcript (${conversationText.length} chars, ${bytesRead} bytes scanned)`);
+      }
 
-    // Read conversation from transcript_path (provided by Claude Code)
-    const conversationText = readTranscript(hookData.transcript_path);
+      if (conversationText && conversationText.length >= 100) {
+        // Ensure database directory exists
+        if (!existsSync(DB_DIR)) {
+          mkdirSync(DB_DIR, { recursive: true });
+        }
 
-    if (!conversationText || conversationText.length < 100) {
-      console.error('[session-end] Not enough conversation content to extract from');
-      process.exit(0);
-    }
+        if (!existsSync(DB_PATH)) {
+          console.error('[session-end] Memory database not found, skipping extraction');
+          notes = 'no-database';
+          process.exit(0);
+        }
 
-    // Ensure database directory exists
-    if (!existsSync(DB_DIR)) {
-      mkdirSync(DB_DIR, { recursive: true });
-    }
+        db = new Database(DB_PATH, { timeout: 5000 });
 
-    if (!existsSync(DB_PATH)) {
-      console.error('[session-end] Memory database not found, skipping extraction');
-      process.exit(0);
-    }
+        const stats = getMemoryStats(db);
+        const totalMemories = stats.shortTerm + stats.longTerm;
+        const maxMemories = MAX_SHORT_TERM_MEMORIES + MAX_LONG_TERM_MEMORIES;
+        const dynamicThreshold = getDynamicThreshold(totalMemories, maxMemories);
 
-    const db = new Database(DB_PATH, { timeout: 5000 });
+        console.error(`[session-end] Memory status: ${totalMemories}/${maxMemories} (${(totalMemories/maxMemories*100).toFixed(0)}% full)`);
+        console.error(`[session-end] Reason: ${reason}, Dynamic threshold: ${dynamicThreshold.toFixed(2)}`);
 
-    const stats = getMemoryStats(db);
-    const totalMemories = stats.shortTerm + stats.longTerm;
-    const maxMemories = MAX_SHORT_TERM_MEMORIES + MAX_LONG_TERM_MEMORIES;
-    const dynamicThreshold = getDynamicThreshold(totalMemories, maxMemories);
+        // Extract memorable segments
+        const segments = extractMemorableSegments(conversationText);
+        const processedSegments = processSegments(segments, dynamicThreshold);
 
-    console.error(`[session-end] Memory status: ${totalMemories}/${maxMemories} (${(totalMemories/maxMemories*100).toFixed(0)}% full)`);
-    console.error(`[session-end] Reason: ${reason}, Dynamic threshold: ${dynamicThreshold.toFixed(2)}`);
+        for (const memory of processedSegments) {
+          try {
+            saveMemory(db, memory, project);
+            autoExtractedCount++;
+            const boostInfo = memory.frequencyBoost > 0 ? ` +${memory.frequencyBoost.toFixed(2)} boost` : '';
+            console.error(`[session-end] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}${boostInfo}, category: ${memory.category})`);
+          } catch (err) {
+            console.error(`[session-end] Failed to save "${memory.title}": ${err.message}`);
+          }
+        }
 
-    // Extract memorable segments
-    const segments = extractMemorableSegments(conversationText);
-    const processedSegments = processSegments(segments, dynamicThreshold);
-
-    let autoExtractedCount = 0;
-    for (const memory of processedSegments) {
-      try {
-        saveMemory(db, memory, project);
-        autoExtractedCount++;
-        const boostInfo = memory.frequencyBoost > 0 ? ` +${memory.frequencyBoost.toFixed(2)} boost` : '';
-        console.error(`[session-end] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}${boostInfo}, category: ${memory.category})`);
-      } catch (err) {
-        console.error(`[session-end] Failed to save "${memory.title}": ${err.message}`);
+        console.error(`[session-end] Complete: ${autoExtractedCount} memories auto-extracted on session ${reason}`);
+      } else {
+        console.error('[session-end] Not enough conversation content to extract from');
+        notes = 'no-content';
       }
     }
-
-    console.error(`[session-end] Complete: ${autoExtractedCount} memories auto-extracted on session ${reason}`);
-
-    db.close();
-    process.exit(0);
   } catch (error) {
     console.error(`[session-end] Error: ${error.message}`);
-    process.exit(0); // Don't block session exit on errors
+    notes = `error: ${error.message}`;
+    // Don't block session exit on errors
+  } finally {
+    if (db) {
+      recordHookInvocation(db, {
+        hookName: 'session-end',
+        exitCode: 0,
+        durationMs: Date.now() - startedAt,
+        memoriesExtracted: autoExtractedCount,
+        transcriptBytes: bytesRead,
+        notes,
+      });
+      try { db.close(); } catch { /* ignore */ }
+    }
+    process.exit(0);
   }
 });

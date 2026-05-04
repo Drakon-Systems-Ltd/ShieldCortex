@@ -12,11 +12,14 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { encodeClaudeProjectDir } from './lib/claude-project-dir.mjs';
 import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
+import { readTranscriptText } from './lib/transcript-reader.mjs';
+import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
+import { recordHookInvocation } from './lib/telemetry.mjs';
 
 // Database paths (with legacy fallback)
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
@@ -507,15 +510,24 @@ process.stdin.on('readable', () => {
 });
 
 process.stdin.on('end', () => {
+  const startedAt = Date.now();
+  let db = null;
+  let autoExtractedCount = 0;
+  let bytesRead = 0;
+  let exitCode = 0;
+  let notes = null;
   try {
     const hookData = JSON.parse(input || '{}');
 
     const trigger = hookData.trigger || 'unknown';
     const project = extractProjectFromPath(hookData.cwd);
+    const autoMemConfig = getAutoMemoryConfig();
 
     // Extract conversation text from hook data
     // Claude Code passes conversation in various formats
-    const conversationText = extractConversationText(hookData);
+    const conversationOut = extractConversationText(hookData, autoMemConfig);
+    const conversationText = conversationOut.text;
+    bytesRead = conversationOut.bytesRead;
 
     // Ensure database directory exists
     if (!existsSync(DB_DIR)) {
@@ -526,12 +538,13 @@ process.stdin.on('end', () => {
     if (!existsSync(DB_PATH)) {
       console.error('[pre-compact] Memory database not found, skipping auto-extraction');
       outputReminder(0, BASE_THRESHOLD);
+      notes = 'no-database';
       process.exit(0);
     }
 
     // Connect to database with timeout to handle concurrent access
     // timeout: 5000ms prevents hook from hanging if DB is locked
-    const db = new Database(DB_PATH, { timeout: 5000 });
+    db = new Database(DB_PATH, { timeout: 5000 });
 
     // Get current memory stats for dynamic threshold calculation
     const stats = getMemoryStats(db);
@@ -541,8 +554,6 @@ process.stdin.on('end', () => {
 
     console.error(`[auto-extract] Memory status: ${totalMemories}/${maxMemories} (${(totalMemories/maxMemories*100).toFixed(0)}% full)`);
     console.error(`[auto-extract] Dynamic threshold: ${dynamicThreshold.toFixed(2)}`);
-
-    let autoExtractedCount = 0;
 
     // Only attempt extraction if we have conversation content
     if (conversationText && conversationText.length > 100) {
@@ -561,142 +572,79 @@ process.stdin.on('end', () => {
           console.error(`[auto-extract] Failed to save "${memory.title}": ${err.message}`);
         }
       }
+    } else {
+      notes = 'no-content';
     }
 
     console.error(`[shieldcortex] Pre-compact complete: ${autoExtractedCount} memories auto-extracted`);
 
     outputReminder(autoExtractedCount, dynamicThreshold);
-
-    db.close();
-    process.exit(0);
   } catch (error) {
     console.error(`[pre-compact] Error: ${error.message}`);
+    notes = `error: ${error.message}`;
+    exitCode = 0; // Don't block compaction on errors
     outputReminder(0, BASE_THRESHOLD);
-    process.exit(0); // Don't block compaction on errors
+  } finally {
+    if (db) {
+      recordHookInvocation(db, {
+        hookName: 'pre-compact',
+        exitCode,
+        durationMs: Date.now() - startedAt,
+        memoriesExtracted: autoExtractedCount,
+        transcriptBytes: bytesRead,
+        notes,
+      });
+      try { db.close(); } catch { /* ignore */ }
+    }
+    process.exit(exitCode);
   }
 });
 
 /**
- * Read conversation text from the current session's JSONL file.
- * Claude Code stores sessions in ~/.claude/projects/<project-slug>/<session-id>.jsonl
+ * Resolve the most-recently-modified JSONL transcript for the given cwd
+ * (Claude Code stores sessions under ~/.claude/projects/<encoded-cwd>/).
  */
-function readSessionConversation(cwd) {
-  if (!cwd) return '';
-
+function findLatestTranscriptForCwd(cwd) {
+  if (!cwd) return null;
+  const projectDir = join(homedir(), '.claude', 'projects', encodeClaudeProjectDir(cwd));
+  if (!existsSync(projectDir)) return null;
+  let files;
   try {
-    const projectDir = join(homedir(), '.claude', 'projects', encodeClaudeProjectDir(cwd));
-
-    if (!existsSync(projectDir)) {
-      console.error(`[auto-extract] Session dir not found: ${projectDir}`);
-      return '';
-    }
-
-    // Find the most recently modified .jsonl file (= current session)
-    const files = readdirSync(projectDir)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({ name: f, mtime: statSync(join(projectDir, f)).mtimeMs }))
+    files = readdirSync(projectDir)
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => ({ name: f, mtime: statSync(join(projectDir, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime);
-
-    if (files.length === 0) {
-      console.error('[auto-extract] No session JSONL files found');
-      return '';
-    }
-
-    const sessionFile = join(projectDir, files[0].name);
-    const content = readFileSync(sessionFile, 'utf-8');
-    const lines = content.trim().split('\n');
-
-    // Read last 50 lines to get recent conversation
-    const recentLines = lines.slice(-50);
-    const messages = [];
-
-    for (const line of recentLines) {
-      try {
-        const entry = JSON.parse(line);
-        // Claude Code JSONL: entry.type is "user"|"assistant", entry.message has API content
-        const role = entry.type || entry.message?.role;
-        const content = entry.message?.content;
-        if ((role === 'user' || role === 'assistant') && content) {
-          const text = Array.isArray(content)
-            ? content.filter(c => c.type === 'text').map(c => c.text).join('\n')
-            : content;
-          if (text && !text.startsWith('/')) {
-            messages.push(text);
-          }
-        }
-      } catch {
-        // Skip invalid lines
-      }
-    }
-
-    const result = messages.join('\n\n');
-    console.error(`[auto-extract] Read ${messages.length} messages from session JSONL (${result.length} chars)`);
-    return result;
-  } catch (err) {
-    console.error(`[auto-extract] Failed to read session: ${err.message}`);
-    return '';
+  } catch {
+    return null;
   }
+  if (files.length === 0) return null;
+  return join(projectDir, files[0].name);
 }
 
 /**
- * Read conversation text from a specific transcript JSONL path.
- * Used when Claude Code provides transcript_path in hook data.
+ * Extract conversation text from hook data, with three fallbacks:
+ *   1. transcript_path supplied by Claude Code
+ *   2. inline payload fields (conversation, messages, etc.)
+ *   3. auto-detect latest JSONL under ~/.claude/projects/<encoded cwd>/
+ *
+ * Delegates JSONL parsing to scripts/lib/transcript-reader.mjs so the
+ * byte-cap and slash-command rules are shared with session-end-hook.
  */
-function readTranscriptFromPath(transcriptPath) {
-  if (!transcriptPath) return '';
+function extractConversationText(hookData, autoMemConfig) {
+  const readerOpts = {
+    maxBytes: autoMemConfig.maxTranscriptBytes,
+    maxLines: autoMemConfig.maxTranscriptLines,
+    keepSlashCommandProse: autoMemConfig.keepSlashCommandProse,
+  };
 
-  const resolvedPath = transcriptPath.replace(/^~/, homedir());
-  if (!existsSync(resolvedPath)) {
-    console.error(`[auto-extract] Transcript not found: ${resolvedPath}`);
-    return '';
-  }
-
-  try {
-    const content = readFileSync(resolvedPath, 'utf-8');
-    const lines = content.trim().split('\n');
-    const recentLines = lines.slice(-50);
-    const messages = [];
-
-    for (const line of recentLines) {
-      try {
-        const entry = JSON.parse(line);
-        const role = entry.type || entry.message?.role;
-        const msgContent = entry.message?.content;
-        if ((role === 'user' || role === 'assistant') && msgContent) {
-          const text = Array.isArray(msgContent)
-            ? msgContent.filter(c => c.type === 'text').map(c => c.text).join('\n')
-            : msgContent;
-          if (text && !text.startsWith('/')) {
-            messages.push(text);
-          }
-        }
-      } catch {
-        // Skip invalid lines
-      }
-    }
-
-    const result = messages.join('\n\n');
-    console.error(`[auto-extract] Read ${messages.length} messages from transcript (${result.length} chars)`);
-    return result;
-  } catch (err) {
-    console.error(`[auto-extract] Failed to read transcript: ${err.message}`);
-    return '';
-  }
-}
-
-/**
- * Extract conversation text from hook data, falling back to session JSONL
- */
-function extractConversationText(hookData) {
-  // Primary: use transcript_path provided by Claude Code
   if (hookData.transcript_path) {
-    const transcript = readTranscriptFromPath(hookData.transcript_path);
-    if (transcript && transcript.length > 0) {
-      return transcript;
+    const out = readTranscriptText(hookData.transcript_path, readerOpts);
+    if (out.text) {
+      console.error(`[auto-extract] Read ${out.messageCount} messages from transcript_path (${out.text.length} chars, ${out.bytesRead} bytes scanned)`);
+      return { text: out.text, bytesRead: out.bytesRead };
     }
   }
 
-  // Secondary: try other possible locations for conversation content
   const sources = [
     hookData.conversation,
     hookData.messages,
@@ -705,25 +653,29 @@ function extractConversationText(hookData) {
     hookData.context,
     hookData.text,
   ];
-
   for (const source of sources) {
-    if (typeof source === 'string' && source.length > 0) {
-      return source;
-    }
+    if (typeof source === 'string' && source.length > 0) return { text: source, bytesRead: 0 };
     if (Array.isArray(source)) {
-      return source
-        .map(msg => {
+      const text = source
+        .map((msg) => {
           if (typeof msg === 'string') return msg;
           if (msg.content) return msg.content;
           if (msg.text) return msg.text;
           return '';
         })
         .join('\n');
+      return { text, bytesRead: 0 };
     }
   }
 
-  // Fallback: auto-detect session JSONL from cwd
-  return readSessionConversation(hookData.cwd);
+  const latest = findLatestTranscriptForCwd(hookData.cwd);
+  if (!latest) {
+    console.error('[auto-extract] No transcript located for cwd');
+    return { text: '', bytesRead: 0 };
+  }
+  const out = readTranscriptText(latest, readerOpts);
+  console.error(`[auto-extract] Read ${out.messageCount} messages from session JSONL (${out.text.length} chars, ${out.bytesRead} bytes scanned)`);
+  return { text: out.text, bytesRead: out.bytesRead };
 }
 
 /**

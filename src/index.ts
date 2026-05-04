@@ -575,7 +575,8 @@ ${bold}DOCS${reset}
       return;
     }
     const stopHook = process.argv.includes('--with-stop-hook');
-    await setupClaudeMd({ stopHook });
+    const sessionEnd = process.argv.includes('--with-session-end');
+    await setupClaudeMd({ stopHook, sessionEnd });
     return;
   }
 

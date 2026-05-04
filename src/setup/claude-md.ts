@@ -190,7 +190,7 @@ function setupGlobalMcp(): void {
   console.log(`✓ MCP: created global server config at ~/.claude.json (${ideal.command})`);
 }
 
-export async function setupClaudeMd(options?: { stopHook?: boolean }): Promise<void> {
+export async function setupClaudeMd(options?: { stopHook?: boolean; sessionEnd?: boolean }): Promise<void> {
   console.log('Setting up ShieldCortex...\n');
 
   // 1. Claude Code CLAUDE.md — always
