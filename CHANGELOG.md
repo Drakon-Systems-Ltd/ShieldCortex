@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.13.0] - 2026-05-04
+
 **Auto-memory pipeline: capture rate fix + Stop hook becomes a sampling extractor + per-hook telemetry.**
 
 Field diagnosis on a fleet host showed `~/.shieldcortex/memories.db` empty after weeks despite hooks being installed. Three causes in `pre-compact-hook.mjs`: PreCompact rarely fires (compaction is rare); when it does, only the last 50 transcript lines were scanned (`slice(-50)` ceiling); and a `startsWith('/')` filter silently dropped slash-invoked turns. Same bugs duplicated in `session-end-hook.mjs`. This release replaces three duplicated transcript readers with one shared helper, rewrites the Stop hook from "block Claude with exit-2 to nudge a remember call" to a silent sampling extractor that fires every Nth turn, gates SessionEnd behind an OpenClaw-aware opt-in (the v4.10 OpenClaw-crash class is still defended against), and adds a `hook_invocations` telemetry table so `shieldcortex status` can finally distinguish "hook fired but extracted nothing" from "hook never fires" — both of which previously showed as `Last activity: never`.
