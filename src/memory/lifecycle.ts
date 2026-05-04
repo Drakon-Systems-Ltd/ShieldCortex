@@ -12,11 +12,12 @@
  * paths keep working.
  *
  * Imports from store.ts (getMemoryById, rowToMemory, getMemoriesByType,
- * MAX_CONTENT_SIZE) form a module cycle, mirrored by store.ts importing
- * reinforceFromSearch + enrichMemory back from here for use inside
- * searchMemoriesInternal. Both directions only invoke the imported
- * symbols inside function bodies — ESM live bindings handle this
- * correctly at runtime.
+ * MAX_CONTENT_SIZE) form a module cycle. Both directions only invoke
+ * the imported symbols inside function bodies — ESM live bindings
+ * handle this correctly at runtime. As of phase 3, reinforceFromSearch
+ * and enrichMemory are consumed by search-recall.ts (not store.ts);
+ * that import is non-cyclic since search-recall.ts is a leaf consumer
+ * of lifecycle.ts.
  */
 
 import { getDatabase } from '../database/init.js';

@@ -28,14 +28,7 @@ import {
   extractTags,
   analyzeSalienceFactors,
 } from './salience.js';
-import {
-  calculateDecayedScore,
-  calculatePriority,
-} from './decay.js';
-import {
-  getActivationBoost,
-  pruneActivationCache,
-} from './activation.js';
+import { calculateDecayedScore } from './decay.js';
 import {
   emitMemoryCreated,
   emitMemoryDeleted,
@@ -56,26 +49,12 @@ import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
 import { logAudit } from '../defence/audit/logger.js';
 import { dispatchWebhook } from '../events/webhooks.js';
-import { getCachedQueryEmbedding, findSimilarMemories } from './embedding.js';
-import {
-  buildSearchExplanation,
-  calculateLinkBoost,
-  calculateTagScore,
-  detectQueryCategory,
-  extractQueryTags,
-  SearchExecutionOptions,
-  SearchScoringContext,
-  vectorSearch,
-} from './search.js';
-import { escapeFts5Query, safeJsonParse } from './fts.js';
+import { safeJsonParse } from './fts.js';
 // Internal use of the link API. links.ts also imports from store.ts (getMemoryById,
 // rowToMemory) — the cycle is safe because both directions only invoke the imported
 // symbols inside function bodies, never at module load. ESM live bindings handle it.
+// Same function-body-only cycle pattern applies to lifecycle.ts and search-recall.ts.
 import { createMemoryLink, detectRelationships } from './links.js';
-// Internal use of the lifecycle API for search-time reinforcement and enrichment.
-// lifecycle.ts also imports from store.ts (getMemoryById, rowToMemory,
-// getMemoriesByType, MAX_CONTENT_SIZE) — same function-body-only cycle pattern.
-import { reinforceFromSearch, enrichMemory } from './lifecycle.js';
 
 // Anti-bloat: Maximum content size per memory (10KB).
 // Exported because lifecycle.ts also enforces this budget inside enrichMemory.
@@ -277,7 +256,9 @@ function checkRateLimit(source: DefenceSource): boolean {
 
 // ── Read-Time Access Control ──
 
-function logAccessDenial(memoryId: number, source: DefenceSource, reason: string): void {
+// Exported because search-recall.ts also calls logAccessDenial inside its
+// post-search ACL filter (cycle artifact, not intended public API).
+export function logAccessDenial(memoryId: number, source: DefenceSource, reason: string): void {
   const trust = scoreSource(source).score;
   logAudit({
     memory_id: memoryId,
@@ -985,400 +966,6 @@ export function deleteMemory(id: number, source?: DefenceSource): boolean {
   return result.changes > 0;
 }
 
-async function searchMemoriesInternal(
-  options: SearchOptions,
-  config: MemoryConfig,
-  source: DefenceSource | undefined,
-  execution: SearchExecutionOptions,
-): Promise<SearchResult[]> {
-  if (++searchCount % 100 === 0) {
-    pruneActivationCache();
-  }
-  const db = getDatabase();
-  const limit = options.limit || 20;
-  const includeGlobal = options.includeGlobal ?? true;
-
-  const detectedCategory = options.query ? detectQueryCategory(options.query) : null;
-  const queryTags = options.query ? extractQueryTags(options.query) : [];
-
-  let queryEmbedding: Float32Array | null = null;
-  const vectorResults: Map<number, number> = new Map();
-  if (options.query && options.query.trim()) {
-    try {
-      queryEmbedding = await getCachedQueryEmbedding(options.query);
-      if (!queryEmbedding) {
-        throw new Error('query embedding unavailable');
-      }
-      const vectorHits = vectorSearch(db, rowToMemory, queryEmbedding, limit * 2, options.project, includeGlobal);
-      for (const hit of vectorHits) {
-        vectorResults.set(hit.memory.id, hit.similarity);
-      }
-    } catch {
-      if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
-        console.log('[shieldcortex] Vector search unavailable, using FTS only');
-      }
-    }
-  }
-
-  let sql: string;
-  const params: unknown[] = [];
-
-  if (options.query && options.query.trim()) {
-    const escapedQuery = escapeFts5Query(options.query.trim());
-    sql = `
-      SELECT m.*, fts.rank
-      FROM memories m
-      JOIN memories_fts fts ON m.id = fts.rowid
-      WHERE memories_fts MATCH ?
-    `;
-    params.push(escapedQuery);
-  } else {
-    sql = `SELECT *, 0 as rank FROM memories m WHERE 1=1`;
-  }
-
-  if (options.project) {
-    if (includeGlobal) {
-      sql += ` AND (m.project = ? OR m.scope = 'global')`;
-    } else {
-      sql += ' AND m.project = ?';
-    }
-    params.push(options.project);
-  }
-  if (options.category) {
-    sql += ' AND m.category = ?';
-    params.push(options.category);
-  }
-  if (options.type) {
-    sql += ' AND m.type = ?';
-    params.push(options.type);
-  }
-  if (!options.includeArchived) {
-    sql += ` AND m.status != 'archived'`;
-  }
-  if (!options.includeSuppressed) {
-    sql += ` AND m.status != 'suppressed'`;
-  }
-  if (options.minSalience) {
-    sql += ' AND m.salience >= ?';
-    params.push(options.minSalience);
-  }
-  if (options.tags && options.tags.length > 0) {
-    const tagPlaceholders = options.tags.map(() => '?').join(',');
-    sql += ` AND EXISTS (
-      SELECT 1 FROM json_each(m.tags)
-      WHERE json_each.value IN (${tagPlaceholders})
-    )`;
-    params.push(...options.tags);
-  }
-
-  sql += ' ORDER BY m.salience DESC, m.last_accessed DESC LIMIT ?';
-  params.push(limit);
-
-  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-  const scoringContext: SearchScoringContext = {
-    db,
-    config,
-    detectedCategory,
-    queryTags,
-    vectorResults,
-    query: options.query,
-  };
-
-  const results: SearchResult[] = rows.map((row) => {
-    const memory = rowToMemory(row);
-    const decayedScore = calculateDecayedScore(memory, config);
-    memory.decayedScore = decayedScore;
-
-    const rawRank = row.rank as number;
-    const ftsScore = rawRank ? 1 / (1 + Math.abs(rawRank)) : 0.3;
-    const hoursSinceAccess = (Date.now() - new Date(memory.lastAccessed).getTime()) / (1000 * 60 * 60);
-    const recencyBoost = hoursSinceAccess < 1 ? 0.1 : (hoursSinceAccess < 24 ? 0.05 : 0);
-    const categoryBoost = detectedCategory && memory.category === detectedCategory ? 0.1 : 0;
-    const linkBoost = calculateLinkBoost(memory.id, db);
-    const tagBoost = calculateTagScore(queryTags, memory.tags);
-    const activationBoost = getActivationBoost(memory.id);
-    const vectorSimilarity = vectorResults.get(memory.id) || 0;
-    const vectorBoost = vectorSimilarity * 0.3;
-    const priorityBoost = calculatePriority(memory) * 0.05;
-    const contradictionCount = (db.prepare(
-      `SELECT COUNT(*) as count FROM memory_links WHERE relationship = 'contradicts' AND (source_id = ? OR target_id = ?)`
-    ).get(memory.id, memory.id) as { count: number }).count;
-    const contradictionPenalty = Math.min(0.12, contradictionCount * 0.03);
-    const eligibilityReasons: string[] = [];
-    if (memory.status === 'archived') eligibilityReasons.push('Archived memories are excluded from normal recall');
-    if (memory.status === 'suppressed') eligibilityReasons.push('Suppressed memories are excluded from normal recall');
-    if (memory.cloudExcluded) eligibilityReasons.push('Excluded from cloud sync');
-    if (memory.trustScore < 0.7) eligibilityReasons.push(`Low trust source (${memory.trustScore.toFixed(2)})`);
-    if (contradictionCount > 0) eligibilityReasons.push(`${contradictionCount} contradiction link${contradictionCount === 1 ? '' : 's'} attached`);
-    const relevanceScore = (
-      ftsScore * 0.25 +
-      vectorBoost +
-      decayedScore * 0.2 +
-      priorityBoost +
-      recencyBoost + categoryBoost + linkBoost + tagBoost + activationBoost -
-      contradictionPenalty
-    );
-
-    const result: SearchResult = {
-      memory,
-      relevanceScore,
-      recallEligibility: {
-        eligible: eligibilityReasons.length === 0,
-        reasons: eligibilityReasons,
-      },
-    };
-    if (execution.includeExplanation) {
-      result.explanation = buildSearchExplanation(memory, scoringContext, {
-        ftsScore,
-        vectorSimilarity,
-        vectorBoost,
-        decayedScore,
-        priorityBoost,
-        recencyBoost,
-        categoryBoost,
-        linkBoost,
-        tagBoost,
-        activationBoost,
-        contradictionPenalty,
-        finalScore: relevanceScore,
-      });
-      if (result.explanation) {
-        result.explanation.eligibility = result.recallEligibility;
-      }
-    }
-    return result;
-  });
-
-  const sortedResults = results
-    .filter((result) => options.includeDecayed || result.memory.decayedScore >= config.salienceThreshold)
-    .sort((a, b) => b.relevanceScore - a.relevanceScore);
-
-  if (execution.enableSideEffects) {
-    const topResults = sortedResults.slice(0, 5);
-    for (const result of topResults) {
-      reinforceFromSearch(result.memory.id);
-    }
-
-    if (topResults.length >= 2) {
-      for (let i = 0; i < topResults.length; i++) {
-        for (let j = i + 1; j < topResults.length; j++) {
-          const idA = topResults[i].memory.id;
-          const idB = topResults[j].memory.id;
-          const existing = db.prepare(
-            'SELECT strength FROM memory_links WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
-          ).get(idA, idB, idB, idA) as { strength: number } | undefined;
-
-          if (existing) {
-            const newStrength = Math.min(1.0, existing.strength + 0.03);
-            db.prepare(
-              'UPDATE memory_links SET strength = ? WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
-            ).run(newStrength, idA, idB, idB, idA);
-          } else {
-            try {
-              db.prepare(
-                'INSERT INTO memory_links (source_id, target_id, relationship, strength) VALUES (?, ?, ?, ?)'
-              ).run(idA, idB, 'related', 0.2);
-            } catch (e) {
-              if (!(e instanceof Error && e.message.includes('UNIQUE constraint'))) {
-                console.warn('[shieldcortex] Unexpected error linking co-returned memories:', e);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    if (sortedResults.length > 0 && options.query && options.query.length > 30) {
-      const topResult = sortedResults[0];
-      const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-      const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
-      const newWords = [...queryWords].filter(w => !contentWords.has(w));
-
-      if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
-        try {
-          enrichMemory(topResult.memory.id, options.query, 'search');
-        } catch {
-          // enrichment is best-effort
-        }
-      }
-    }
-  }
-
-  const finalResults = sortedResults.slice(0, limit);
-  for (const result of finalResults) {
-    const contradictions = db.prepare(`
-      SELECT ml.strength,
-        CASE WHEN ml.source_id = ? THEN ml.target_id ELSE ml.source_id END as other_id
-      FROM memory_links ml
-      WHERE ml.relationship = 'contradicts'
-        AND (ml.source_id = ? OR ml.target_id = ?)
-    `).all(result.memory.id, result.memory.id, result.memory.id) as Array<{ strength: number; other_id: number }>;
-
-    if (contradictions.length > 0) {
-      result.contradictions = contradictions.map((contradiction) => {
-        const other = db.prepare('SELECT title FROM memories WHERE id = ?').get(contradiction.other_id) as { title?: string } | undefined;
-        return { memoryId: contradiction.other_id, title: other?.title || 'Unknown', score: contradiction.strength };
-      });
-      if (result.explanation) {
-        result.explanation.reasons.push(`${contradictions.length} contradiction link${contradictions.length === 1 ? '' : 's'} attached`);
-      }
-    }
-  }
-
-  if (source) {
-    const db2 = getDatabase();
-    return finalResults.filter(result => {
-      const row = db2.prepare('SELECT source, sensitivity_level FROM memories WHERE id = ?').get(result.memory.id) as Record<string, unknown> | undefined;
-      const policy = checkAccess(
-        { id: result.memory.id, source: row?.source as string | null, sensitivity_level: row?.sensitivity_level as string | null },
-        source,
-        'read',
-      );
-      if (!policy.canRead) {
-        logAccessDenial(result.memory.id, source, policy.reason);
-        return false;
-      }
-      return true;
-    });
-  }
-
-  return finalResults;
-}
-
-/**
- * Search memories using full-text search, vector similarity, and filters
- * Now uses hybrid search combining FTS5 keywords with semantic vector matching
- */
-let searchCount = 0;
-
-export async function searchMemories(
-  options: SearchOptions,
-  config: MemoryConfig = DEFAULT_CONFIG,
-  source?: DefenceSource,
-): Promise<SearchResult[]> {
-  return searchMemoriesInternal(options, config, source, {
-    enableSideEffects: true,
-    includeExplanation: false,
-  });
-}
-
-export async function searchMemoriesExplained(
-  options: SearchOptions,
-  config: MemoryConfig = DEFAULT_CONFIG,
-  source?: DefenceSource,
-): Promise<SearchResult[]> {
-  return searchMemoriesInternal(options, config, source, {
-    enableSideEffects: false,
-    includeExplanation: true,
-  });
-}
-
-/**
- * Recall with embedding-based vector similarity fallback.
- *
- * 1. First tries FTS5 search (existing searchMemories)
- * 2. If FTS5 returns < 3 results, also runs embedding similarity search
- * 3. Merges results (FTS5 first, then embedding results not already in FTS5 set)
- * 4. Caps at `limit` (default 15)
- * 5. The `threshold` (default 0.3) filters out low-similarity embedding results
- */
-export async function recallWithEmbeddings(
-  query: string,
-  options?: {
-    limit?: number;
-    project?: string;
-    threshold?: number;
-    existingResults?: SearchResult[];
-    queryEmbedding?: Float32Array | null;
-  },
-): Promise<Memory[]> {
-  const limit = options?.limit ?? 15;
-  const threshold = options?.threshold ?? 0.3;
-
-  // Step 1: Try FTS5 search first
-  let ftsResults: SearchResult[] = options?.existingResults ?? [];
-  if (ftsResults.length === 0) {
-    try {
-      ftsResults = await searchMemories({
-        query,
-        project: options?.project,
-        limit,
-        includeGlobal: true,
-      });
-    } catch (e) {
-      // FTS search failed — continue to embedding fallback
-      console.warn('[shieldcortex] FTS search failed in recallWithEmbeddings:', (e as Error).message);
-    }
-  }
-
-  const ftsMemories = ftsResults.map(r => r.memory);
-
-  // Step 2: If FTS5 returns >= 3 results, no need for embedding fallback
-  if (ftsMemories.length >= 3) {
-    return ftsMemories.slice(0, limit);
-  }
-
-  // Step 3: Run embedding similarity search as fallback
-  try {
-    const { initEmbeddings } = await import('./embedding.js');
-
-    const ready = await initEmbeddings();
-    if (!ready) {
-      return ftsMemories.slice(0, limit);
-    }
-
-    // Get candidate memories from the database (not already in FTS results)
-    const ftsIds = new Set(ftsMemories.map(m => m.id));
-    const db = getDatabase();
-
-    let sql = 'SELECT id, title, content FROM memories WHERE 1=1';
-    const params: unknown[] = [];
-
-    if (options?.project) {
-      sql += ` AND (project = ? OR scope = 'global')`;
-      params.push(options.project);
-    }
-
-    sql += ' ORDER BY salience DESC, last_accessed DESC LIMIT 200';
-
-    const candidates = db.prepare(sql).all(...params) as Array<{ id: number; title: string; content: string }>;
-
-    // Filter out memories already returned by FTS
-    const newCandidates = candidates.filter(c => !ftsIds.has(c.id));
-
-    if (newCandidates.length === 0) {
-      return ftsMemories.slice(0, limit);
-    }
-
-    const queryEmbedding = options?.queryEmbedding ?? await getCachedQueryEmbedding(query);
-    if (!queryEmbedding) {
-      return ftsMemories.slice(0, limit);
-    }
-
-    // Find similar memories using embeddings
-    const remainingSlots = limit - ftsMemories.length;
-    const similar = await findSimilarMemories(query, newCandidates, remainingSlots, queryEmbedding);
-
-    // Filter by threshold and fetch full Memory objects
-    const embeddingMemories: Memory[] = [];
-    for (const hit of similar) {
-      if (hit.score < threshold) continue;
-
-      const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(hit.id) as Record<string, unknown> | undefined;
-      if (row) {
-        embeddingMemories.push(rowToMemory(row));
-      }
-    }
-
-    // Step 4: Merge — FTS results first, then embedding results
-    const merged = [...ftsMemories, ...embeddingMemories];
-    return merged.slice(0, limit);
-  } catch (e) {
-    // Embedding fallback failed — return whatever FTS found
-    console.warn('[shieldcortex] Embedding fallback failed:', (e as Error).message);
-    return ftsMemories.slice(0, limit);
-  }
-}
 
 /**
  * Get all memories for a project
@@ -1562,3 +1149,21 @@ export {
   cleanupDecayedMemories,
   type EnrichmentResult,
 } from './lifecycle.js';
+
+// ============================================================================
+// MEMORY SEARCH / RECALL — moved to ./search-recall.ts
+// ============================================================================
+// Phase 3 of the store.ts split. The search/recall group (the public
+// `searchMemories`, `searchMemoriesExplained`, `recallWithEmbeddings`
+// entry points plus the internal `searchMemoriesInternal` pipeline and
+// the module-level `searchCount` activation-cache pruner) lives in
+// src/memory/search-recall.ts. Re-exported here so every existing
+// `import { ... } from '.../store.js'` path keeps working with zero
+// behaviour change. search-recall.ts imports `rowToMemory` and
+// `logAccessDenial` back from store.ts via the same function-body-only
+// cycle pattern used by links.ts and lifecycle.ts.
+export {
+  searchMemories,
+  searchMemoriesExplained,
+  recallWithEmbeddings,
+} from './search-recall.js';
