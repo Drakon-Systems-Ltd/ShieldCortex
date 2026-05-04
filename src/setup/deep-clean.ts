@@ -284,6 +284,28 @@ export function scanForResidue(): ResidueReport {
  * known install locations so we can still detect installs that pre-date the
  * `installPath` field.
  */
+/**
+ * The plugin counts as installed when OpenClaw has registered it in BOTH
+ * `plugins.entries[<id>]` AND `plugins.allow[]`.
+ *
+ * Background: when the plugin was installed via `openclaw plugins install <pkg>`
+ * (native-package mode — Mac homebrew, Linux global), OpenClaw stores the plugin
+ * in its own internal tree, NOT under `~/.openclaw/extensions/`. From the doctor's
+ * perspective there are no plugin bytes on disk in any of the paths it checks.
+ * Without this check the doctor false-flags `plugins.entries[<id>]` and
+ * `plugins.allow[<id>]` as "OpenClaw residue" on every Mac homebrew install
+ * (the user-reported symptom on 4 May 2026 that triggered this fix).
+ *
+ * Exported for direct unit testing without having to mock fs / os.homedir().
+ */
+export function isPluginRegisteredInOpenClawConfig(cfg: unknown): boolean {
+  const entryEnabled = !!getPath(cfg, ['plugins', 'entries', PLUGIN_ID]);
+  const allowList = getPath(cfg, ['plugins', 'allow']);
+  const inAllow = Array.isArray(allowList)
+    && allowList.some((e) => typeof e === 'string' && e === PLUGIN_ID);
+  return entryEnabled && inAllow;
+}
+
 function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolean } {
   const home = resolveHome();
 
@@ -322,6 +344,12 @@ function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolea
     if (fs.existsSync(userNpmGlobalManifest)) {
       pluginInstalled = true;
     }
+  }
+
+  // 4. Fallback: trust OpenClaw's own plugin registry — see
+  //    `isPluginRegisteredInOpenClawConfig` below for the rationale.
+  if (!pluginInstalled && isPluginRegisteredInOpenClawConfig(cfg)) {
+    pluginInstalled = true;
   }
 
   const hookCandidates = [
