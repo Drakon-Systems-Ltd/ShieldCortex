@@ -26,6 +26,12 @@ The new Daily Moment bar at the top of every dashboard page is the in-app equiva
 - Postinstall message now distinguishes fresh install (defaults are ON, here's how to opt out) from upgrade (your existing settings are preserved, here's how to manage them).
 - New `src/__tests__/openclaw-install-mode-contract.test.ts` (6 tests) pins the current install-mode contract: exact mode list, native-before-local fallback order, package-before-link attempt order, --no-plugins early-return, Docker check before any install attempt, and per-mode user-facing log line. Exists so the planned consolidation (5 modes → 3) can be verified from outside before/after — the install layer has been the unstable surface (9 patch releases in 8 days, every one a fix), so the structural refactor needs daylight + a real OpenClaw machine, not 1am vibes. Inline `REFACTOR` marker added to `src/setup/openclaw.ts` so the next pass picks it up immediately.
 
+### Deprecated
+
+- The `~/.claude-memory/memories.db` and `~/.claude-cortex/memories.db` legacy fallback paths will be **removed in v5.0.0 (target Q3 2026)**. ShieldCortex has been carrying three rename eras (`.claude-memory` → `.claude-cortex` → `.shieldcortex`) and the migration code is load-bearing tech debt — `src/cli/migrate-legacy.ts` (374 lines), three `existsSync` branches in `src/database/init.ts`/`src/setup/doctor.ts`/`src/cli/doctor.ts`, and several "table may not exist yet in legacy DBs" branches in `src/memory/store.ts`. To remove safely, every existing user on a legacy path needs to migrate first.
+- Existing users running off the legacy DB now get a one-time-per-process warning to stderr when the fallback is used (`src/database/init.ts:getDefaultDbPath()`), pointing them at `shieldcortex migrate-legacy`. The doctor command now reports legacy DBs as `WARN` (was `PASS`) with the same migration hint, so anyone checking system health sees the deprecation in front of them.
+- Migration is one command, idempotent, and dry-run-safe: `shieldcortex migrate-legacy` (use `--dry-run` first to preview).
+
 ## v4.12.14 — 2 May 2026
 
 **Fix: `shieldcortex openclaw install` left the real-time plugin unregistered on Mac homebrew and Linux global installs.**

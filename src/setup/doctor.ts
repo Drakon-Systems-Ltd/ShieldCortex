@@ -57,7 +57,7 @@ function checkDatabase(): void {
     return;
   }
 
-  const label = db.isLegacy ? '~/.claude-memory/memories.db (legacy)' : '~/.shieldcortex/memories.db';
+  const label = db.isLegacy ? `${db.path} (legacy)` : '~/.shieldcortex/memories.db';
 
   try {
     const stat = fs.statSync(db.path);
@@ -65,7 +65,11 @@ function checkDatabase(): void {
     const conn = new Database(db.path, { readonly: true });
     const row = conn.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number };
     conn.close();
-    add('PASS', `Database: ${label} (${row.count} memories, ${formatBytes(stat.size)})`);
+    if (db.isLegacy) {
+      add('WARN', `Database: ${label} (${row.count} memories, ${formatBytes(stat.size)}) — DEPRECATED, removed in v5.0.0; run: shieldcortex migrate-legacy`);
+    } else {
+      add('PASS', `Database: ${label} (${row.count} memories, ${formatBytes(stat.size)})`);
+    }
   } catch (err: any) {
     add('FAIL', `Database: ${label} — ${err.message}`);
   }

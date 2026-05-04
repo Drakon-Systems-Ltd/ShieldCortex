@@ -37,7 +37,14 @@ function expandPath(path: string): string {
  * Get the database path with legacy fallback
  * - New installs use ~/.shieldcortex/
  * - Existing users with ~/.claude-memory/ continue to work
+ *
+ * DEPRECATION: the .claude-memory fallback will be removed in v5.0.0 (target
+ * Q3 2026). Existing users on the legacy path get a one-time-per-process
+ * warning pointing them at `shieldcortex migrate-legacy` so they can move to
+ * ~/.shieldcortex/ before the cut. Same applies to .claude-cortex (separate
+ * legacy DB read by the CLI migrate command).
  */
+let _legacyFallbackWarned = false;
 function getDefaultDbPath(): string {
   const newPath = join(homedir(), '.shieldcortex', 'memories.db');
   const legacyPath = join(homedir(), '.claude-memory', 'memories.db');
@@ -46,7 +53,13 @@ function getDefaultDbPath(): string {
   if (existsSync(newPath) || !existsSync(legacyPath)) {
     return newPath;
   }
-  // Fall back to legacy path for existing users
+  // Fall back to legacy path for existing users — warn once.
+  if (!_legacyFallbackWarned) {
+    _legacyFallbackWarned = true;
+    console.warn('[shieldcortex] DEPRECATED: reading from ~/.claude-memory/memories.db.');
+    console.warn('[shieldcortex] This fallback will be removed in v5.0.0 (target Q3 2026).');
+    console.warn('[shieldcortex] To migrate now: shieldcortex migrate-legacy');
+  }
   return legacyPath;
 }
 
