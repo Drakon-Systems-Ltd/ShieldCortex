@@ -308,14 +308,38 @@ describe('deep-clean — orphan detection (doctor path)', () => {
   });
 
   it('flags plugin-config entries as orphans when the plugin dir is gone', async () => {
-    // Partial uninstall — config still references the plugin but the dir is gone.
-    writeHealthyInstallConfig();
+    // True partial uninstall: plugin file gone AND OpenClaw never finished
+    // registering it (no `allow[]` entry). The c16ccc1 fix added a 4th
+    // fallback that treats `entries[id]` + `allow[]` as proof of a native
+    // install, so a healthy-config-without-plugin-bytes scenario is no
+    // longer flagged. To still catch real partial uninstalls, this test
+    // writes a config with `installs`/`entries` but NO `allow` membership —
+    // breaking the entries+allow rule and pushing the plugin back into
+    // orphan territory.
+    fs.writeFileSync(
+      path.join(tempHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          installs: { 'shieldcortex-realtime': { source: 'npm', version: '4.12.1' } },
+          entries: { 'shieldcortex-realtime': { enabled: true } },
+          // No `allow: [...]` — the new helper now treats this as not-registered.
+        },
+        hooks: {
+          internal: {
+            installs: { shieldcortex: { version: '4.12.1' } },
+            entries: { shieldcortex: { enabled: true } },
+            allow: ['shieldcortex'],
+          },
+        },
+      }, null, 2),
+      'utf-8',
+    );
     installHookDir(); // keep hook installed to isolate plugin-config detection
 
     const { scanForOrphans } = await loadModule();
     const report = scanForOrphans();
 
-    expect(report.orphanCount).toBeGreaterThanOrEqual(3); // installs, entries, allow
+    expect(report.orphanCount).toBeGreaterThanOrEqual(2); // installs + entries
     expect(report.paths.every((p) => p.category !== 'hook-config')).toBe(true);
     expect(report.paths.some((p) => p.category === 'plugin-config')).toBe(true);
   });
