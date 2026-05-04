@@ -21,9 +21,9 @@ const red = '\x1b[31m';
 const cyan = '\x1b[36m';
 const dim = '\x1b[2m';
 
-type CheckStatus = 'pass' | 'warn' | 'fail' | 'info';
+export type CheckStatus = 'pass' | 'warn' | 'fail' | 'info';
 
-interface CheckResult {
+export interface CheckResult {
   label: string;
   status: CheckStatus;
   message: string;
@@ -228,6 +228,93 @@ async function checkMemoryStats(): Promise<CheckResult> {
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Memories', status: 'warn', message: `check failed — ${msg}` };
   }
+}
+
+// ── Check 3b: Write-path smoke test ───────────────────────
+/**
+ * The honest "is it working?" check.
+ *
+ * Doctor checks have historically gone green while writes were silently
+ * failing (v4.12.4 path-encoding bug, v4.12.5 NOT NULL UUID schema gap).
+ * The pattern: schema introspection passed (columns existed) but actual
+ * INSERTs threw constraint violations during real workloads.
+ *
+ * This check does a real round-trip — INSERT a tagged probe memory,
+ * SELECT it back, DELETE it. If any step fails, doctor reports the
+ * actual error string instead of "all green". The probe is tagged with
+ * a unique source identifier so it can never be confused with real data
+ * and gets deleted at the end of the check.
+ */
+/**
+ * Pure helper for the write-path round-trip. Exported so tests can
+ * exercise it against any database path (in-memory or temp file)
+ * without going through doctor's homedir-derived getDbPath().
+ */
+export function runWritePathProbe(dbPath: string): CheckResult {
+  if (!fs.existsSync(dbPath)) {
+    return { label: 'Write path', status: 'warn', message: 'skipped (no database)' };
+  }
+
+  let db: any = null;
+  const probeUuid = `doctor-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const probeTitle = '__shieldcortex_doctor_probe__';
+
+  try {
+    const Database = require('better-sqlite3');
+    db = new Database(dbPath);
+
+    // INSERT — exercises NOT NULL columns + CHECK constraints. The schema
+    // adds these silently across versions; an INSERT against a stale schema
+    // is the exact failure mode v4.12.5 had.
+    db.prepare(`
+      INSERT INTO memories (uuid, type, category, title, content, salience, source, capture_method)
+      VALUES (?, 'short_term', 'note', ?, 'doctor probe — safe to delete', 0.01, 'cli:doctor', 'doctor-probe')
+    `).run(probeUuid, probeTitle);
+
+    // SELECT — exercises the FTS5 + index path
+    const row = db.prepare('SELECT id, title FROM memories WHERE uuid = ?').get(probeUuid) as { id: number; title: string } | undefined;
+    if (!row || row.title !== probeTitle) {
+      return {
+        label: 'Write path',
+        status: 'fail',
+        message: 'wrote a probe row but could not read it back',
+        fix: 'Database may be corrupted. Run `shieldcortex consolidate` then re-run doctor.',
+      };
+    }
+
+    // DELETE — exercises the cascade triggers (FTS5 cleanup)
+    const deleteResult = db.prepare('DELETE FROM memories WHERE uuid = ?').run(probeUuid);
+    if (deleteResult.changes !== 1) {
+      return {
+        label: 'Write path',
+        status: 'warn',
+        message: `probe row written + read OK but delete affected ${deleteResult.changes} rows (expected 1)`,
+        fix: 'Manual cleanup may be needed. Check ~/.shieldcortex/memories.db for orphaned rows.',
+      };
+    }
+
+    return { label: 'Write path', status: 'pass', message: 'INSERT/SELECT/DELETE round-trip OK' };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Best-effort cleanup so we don't leave probe rows behind on a partial failure
+    if (db) {
+      try { db.prepare('DELETE FROM memories WHERE uuid = ?').run(probeUuid); } catch { /* ignore */ }
+    }
+    return {
+      label: 'Write path',
+      status: 'fail',
+      message: `round-trip failed — ${msg}`,
+      fix: 'This is the smoking gun for a stale schema or migration drift. Try restarting the MCP server (auto-migrates), or re-install: shieldcortex install',
+    };
+  } finally {
+    if (db) {
+      try { db.close(); } catch { /* ignore */ }
+    }
+  }
+}
+
+async function checkWritePath(): Promise<CheckResult> {
+  return runWritePathProbe(getDbPath());
 }
 
 // ── Check 4: Hook installation ────────────────────────────
@@ -552,6 +639,7 @@ export async function runDoctor(): Promise<void> {
   const checks: Array<() => Promise<CheckResult | CheckResult[]>> = [
     checkDatabase,
     checkSchema,
+    checkWritePath, // Smoke test: real INSERT/SELECT/DELETE round-trip — catches silent schema drift
     checkMemoryStats,
     checkHooks,
     checkProcesses,

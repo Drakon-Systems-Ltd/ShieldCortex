@@ -35,6 +35,12 @@ The new Daily Moment bar at the top of every dashboard page is the in-app equiva
 ### Tests
 
 - New `src/cloud/__tests__/sync-queue.test.ts` (12 tests) covers the highest-risk untested surface in the code base. The cloud sync queue persists every paying customer's audit/quarantine/memory/graph syncs to disk; a regression here silently corrupts cloud data with no client-side error. Tests pin: enqueue contract for all four payload kinds, payload envelope shape (kind+entry), `getQueueStats` accuracy across status + kind buckets, lastError surfacing, `reconcileSyncQueue` default behaviour and custom filters, `purgeOldEntries` 7-day cutoff. The HTTP retry loop (`processRetryQueue`) is intentionally not yet covered — needs fetch mocking; follow-up.
+- New `src/cli/__tests__/doctor-write-probe.test.ts` (3 tests) pins the new doctor write-path smoke check against three scenarios: missing database file (warn/skipped), healthy database (pass + leaves zero probe rows behind), broken schema (fail with the actual sqlite error and a fix hint that calls out schema/migration). The contract these tests enforce: a green doctor must mean memory writes actually work — the inverse of the v4.12.4/v4.12.5 bugs where doctor was green while production writes silently failed.
+
+### Fixed
+
+- **Doctor honesty pass.** Doctor checks have historically gone green while writes were silently failing. v4.12.4 (path encoding) and v4.12.5 (NOT NULL UUID schema gap) both shipped with doctor reporting all-green for weeks while every memory write threw a constraint violation in production. The pattern is the same in both: schema introspection passes (columns exist) but real INSERTs fail. New `Write path` doctor check (`src/cli/doctor.ts:checkWritePath`) does a real round-trip — INSERTs a tagged probe memory, reads it back, deletes it. If any step throws, the doctor reports the actual sqlite error string instead of "all green", and the fix hint points at schema/migration drift as the suspect. The probe is uniquely tagged (`source = 'cli:doctor'`, `capture_method = 'doctor-probe'`) so it can never be confused with real data, and is best-effort cleaned up even on partial failure.
+- Legacy DB at `~/.claude-memory/memories.db` now reports as `WARN` in doctor (was `PASS`) with the v5.0.0 deprecation hint and the migrate-legacy command.
 
 ## v4.12.14 — 2 May 2026
 
