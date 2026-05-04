@@ -15,6 +15,7 @@ import { IronDomeCard } from './IronDomeCard';
 import { OpenClawMemoryPanel } from './OpenClawMemoryPanel';
 import { LicenseStatusCard } from './LicenseStatusCard';
 import { CustomFirewallRulesPanel } from './CustomFirewallRulesPanel';
+import { WeeklyRollupCard } from './WeeklyRollupCard';
 
 export function ShieldOverview() {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d'>('24h');
@@ -52,6 +53,9 @@ export function ShieldOverview() {
             </div>
           </div>
         </section>
+
+        {/* Weekly story — the "you got value" moment */}
+        <WeeklyRollupCard />
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.05fr_0.95fr]">
           <div className="space-y-4">

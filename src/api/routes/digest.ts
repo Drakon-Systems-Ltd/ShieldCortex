@@ -276,6 +276,79 @@ export function buildDigest(window: DigestWindow, project?: string): DigestRespo
   };
 }
 
+export interface TimelineDay {
+  date: string; // YYYY-MM-DD (UTC)
+  scanned: number;
+  blocked: number;
+  quarantined: number;
+  captured: number;
+  recalled: number;
+}
+
+/**
+ * Returns one row per day for the last `days` days, oldest first.
+ * Days with zero activity are still included (gives a clean sparkline shape).
+ */
+export function buildTimeline(days: number, project?: string): TimelineDay[] {
+  const db = getDatabase();
+  const projectAudit = project ? 'AND da.project = @project' : '';
+  const projectMem = project ? 'AND m.project = @project' : '';
+  const since = isoSinceHoursAgo(days * 24);
+
+  const params: Record<string, string> = { since };
+  if (project) params.project = project;
+
+  // Audit counts grouped by day (UTC)
+  const auditRows = db.prepare(`
+    SELECT substr(da.timestamp, 1, 10) AS day, da.firewall_result AS result, COUNT(*) AS cnt
+    FROM defence_audit da
+    WHERE da.timestamp >= @since ${projectAudit}
+    GROUP BY day, da.firewall_result
+  `).all(params) as Array<{ day: string; result: string; cnt: number }>;
+
+  const captureRows = db.prepare(`
+    SELECT substr(m.created_at, 1, 10) AS day, COUNT(*) AS cnt
+    FROM memories m
+    WHERE m.created_at >= @since ${projectMem}
+    GROUP BY day
+  `).all(params) as Array<{ day: string; cnt: number }>;
+
+  const recallRows = db.prepare(`
+    SELECT substr(m.last_accessed, 1, 10) AS day, COUNT(*) AS cnt
+    FROM memories m
+    WHERE m.last_accessed >= @since
+      AND m.last_accessed > m.created_at
+      ${projectMem}
+    GROUP BY day
+  `).all(params) as Array<{ day: string; cnt: number }>;
+
+  // Build a complete day map with zero defaults
+  const byDay: Record<string, TimelineDay> = {};
+  const today = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    byDay[key] = { date: key, scanned: 0, blocked: 0, quarantined: 0, captured: 0, recalled: 0 };
+  }
+
+  for (const row of auditRows) {
+    const day = byDay[row.day];
+    if (!day) continue;
+    if (row.result === 'BLOCK') day.blocked = row.cnt;
+    else if (row.result === 'QUARANTINE') day.quarantined = row.cnt;
+    day.scanned += row.cnt;
+  }
+  for (const row of captureRows) {
+    if (byDay[row.day]) byDay[row.day].captured = row.cnt;
+  }
+  for (const row of recallRows) {
+    if (byDay[row.day]) byDay[row.day].recalled = row.cnt;
+  }
+
+  return Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date));
+}
+
 export function registerDigestRoutes(app: Express): void {
   app.get('/api/digest', (req: Request, res: Response) => {
     try {
@@ -289,6 +362,23 @@ export function registerDigestRoutes(app: Express): void {
         : undefined;
       const digest = buildDigest(window, project);
       res.json(digest);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get('/api/digest/timeline', (req: Request, res: Response) => {
+    try {
+      if (!isDatabaseInitialized()) {
+        return res.status(503).json({ error: 'Database not initialised' });
+      }
+      const daysRaw = parseInt(String(req.query.days ?? '7'), 10);
+      const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(90, daysRaw)) : 7;
+      const project = typeof req.query.project === 'string' && req.query.project.trim()
+        ? req.query.project.trim()
+        : undefined;
+      const timeline = buildTimeline(days, project);
+      res.json({ days, project: project ?? null, timeline });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

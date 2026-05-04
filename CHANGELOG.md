@@ -15,7 +15,10 @@ The new Daily Moment bar at the top of every dashboard page is the in-app equiva
 - `GET /api/digest?window=24h|7d|30d&project=<name>` returns counts (scanned / allowed / blocked / quarantined / memoriesCaptured / memoriesRecalled / highSalienceCaptures), deltas vs the previous equivalent window, top 5 moments (blocks, quarantines, high-salience captures, top recalls), and top threat patterns by frequency. Project filter optional; no project filter returns the global digest.
 - New `DailyMomentBar` component mounted in `AppShell` above `ProjectFilterBar`. Headline row shows scanned / blocked / captured / recalled with delta arrows; click-to-expand reveals top moments and top threat patterns. Window selector (24h / 7d / 30d) inline in the bar. Refreshes every 60 seconds.
 - New `useDigest()` React Query hook with 30s stale time and 60s refetch interval.
-- Digest builder test suite (`src/api/__tests__/digest.test.ts`, 8 tests): zero state, audit counts in window, memory captures inside vs outside window, recall detection (last_accessed > created_at), high-salience moments + threat pattern aggregation, deltas vs previous window, project scoping, and 7d/30d window support. All passing on `:memory:` SQLite.
+- `GET /api/digest/timeline?days=N&project=<name>` returns a per-day breakdown (oldest first) of scans / blocks / quarantines / captures / recalls. Days with zero activity still appear so the sparkline keeps its shape.
+- New `WeeklyRollupCard` mounted on the Shield overview page above "Act Now". Headline metrics with `% vs prior week` deltas, a 7-day sparkline of daily scans, busiest-day callout, and the most blocked patterns this week. This is the dashboard equivalent of the Cloudflare weekly email.
+- New `useDigestTimeline()` hook (5-minute refetch, 1-minute stale).
+- Digest builder test suite (`src/api/__tests__/digest.test.ts`, 11 tests): zero state, audit counts in window, memory captures inside vs outside window, recall detection (last_accessed > created_at), high-salience moments + threat pattern aggregation, deltas vs previous window, project scoping, 7d/30d window support, plus timeline coverage (zero state, day-bucket aggregation, project filter). All passing on `:memory:` SQLite.
 
 ### Changed
 

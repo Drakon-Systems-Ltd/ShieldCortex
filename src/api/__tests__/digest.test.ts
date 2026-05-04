@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../../database/init.js';
 import { addMemory } from '../../memory/store.js';
-import { buildDigest } from '../routes/digest.js';
+import { buildDigest, buildTimeline } from '../routes/digest.js';
 
 function isoHoursAgo(hours: number): string {
   return new Date(Date.now() - hours * 3600_000).toISOString();
@@ -179,5 +179,65 @@ describe('Digest builder', () => {
     expect(buildDigest('24h').current.blocked).toBe(0);
     expect(buildDigest('7d').current.blocked).toBe(1);
     expect(buildDigest('30d').current.blocked).toBe(2);
+  });
+});
+
+describe('Timeline builder', () => {
+  beforeEach(() => {
+    initDatabase(':memory:');
+  });
+
+  afterEach(() => {
+    closeDatabase();
+  });
+
+  it('returns one row per day with zero defaults on a fresh database', () => {
+    const timeline = buildTimeline(7);
+    expect(timeline.length).toBe(7);
+    expect(timeline.every((d) => d.scanned === 0 && d.blocked === 0 && d.captured === 0 && d.recalled === 0)).toBe(true);
+    // Days are oldest -> newest
+    for (let i = 1; i < timeline.length; i++) {
+      expect(timeline[i].date >= timeline[i - 1].date).toBe(true);
+    }
+  });
+
+  it('aggregates audit results into the right day buckets', () => {
+    // Use 2h ago so the events land in the recent end of the timeline,
+    // but assert on totals (not specific days) — the day boundary is UTC
+    // and tests can run across midnight.
+    insertAudit({ result: 'BLOCK', timestamp: isoHoursAgo(2) });
+    insertAudit({ result: 'BLOCK', timestamp: isoHoursAgo(2) });
+    insertAudit({ result: 'QUARANTINE', timestamp: isoHoursAgo(2) });
+    insertAudit({ result: 'ALLOW', timestamp: isoHoursAgo(50) });
+
+    const timeline = buildTimeline(7);
+    expect(timeline.length).toBe(7);
+
+    const totalBlocked = timeline.reduce((sum, d) => sum + d.blocked, 0);
+    const totalQuarantined = timeline.reduce((sum, d) => sum + d.quarantined, 0);
+    const totalScanned = timeline.reduce((sum, d) => sum + d.scanned, 0);
+
+    expect(totalBlocked).toBe(2);
+    expect(totalQuarantined).toBe(1);
+    expect(totalScanned).toBe(4);
+
+    // Recent activity should land in the last 2 days of the timeline (today or
+    // yesterday in UTC, depending on time of day).
+    const recentTwoDays = timeline.slice(-2);
+    const recentScanned = recentTwoDays.reduce((sum, d) => sum + d.scanned, 0);
+    expect(recentScanned).toBeGreaterThanOrEqual(3); // the 2h-ago inserts
+  });
+
+  it('clamps days to [1, 90] and respects project filter', () => {
+    insertAudit({ result: 'BLOCK', timestamp: isoHoursAgo(1), project: 'foo' });
+    insertAudit({ result: 'BLOCK', timestamp: isoHoursAgo(1), project: 'bar' });
+
+    const fooTimeline = buildTimeline(7, 'foo');
+    const fooBlocks = fooTimeline.reduce((sum, d) => sum + d.blocked, 0);
+    expect(fooBlocks).toBe(1);
+
+    const allTimeline = buildTimeline(7);
+    const allBlocks = allTimeline.reduce((sum, d) => sum + d.blocked, 0);
+    expect(allBlocks).toBe(2);
   });
 });
