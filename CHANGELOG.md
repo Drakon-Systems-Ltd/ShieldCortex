@@ -32,6 +32,10 @@ The new Daily Moment bar at the top of every dashboard page is the in-app equiva
 - Existing users running off the legacy DB now get a one-time-per-process warning to stderr when the fallback is used (`src/database/init.ts:getDefaultDbPath()`), pointing them at `shieldcortex migrate-legacy`. The doctor command now reports legacy DBs as `WARN` (was `PASS`) with the same migration hint, so anyone checking system health sees the deprecation in front of them.
 - Migration is one command, idempotent, and dry-run-safe: `shieldcortex migrate-legacy` (use `--dry-run` first to preview).
 
+### Tests
+
+- New `src/cloud/__tests__/sync-queue.test.ts` (12 tests) covers the highest-risk untested surface in the code base. The cloud sync queue persists every paying customer's audit/quarantine/memory/graph syncs to disk; a regression here silently corrupts cloud data with no client-side error. Tests pin: enqueue contract for all four payload kinds, payload envelope shape (kind+entry), `getQueueStats` accuracy across status + kind buckets, lastError surfacing, `reconcileSyncQueue` default behaviour and custom filters, `purgeOldEntries` 7-day cutoff. The HTTP retry loop (`processRetryQueue`) is intentionally not yet covered — needs fetch mocking; follow-up.
+
 ## v4.12.14 — 2 May 2026
 
 **Fix: `shieldcortex openclaw install` left the real-time plugin unregistered on Mac homebrew and Linux global installs.**
