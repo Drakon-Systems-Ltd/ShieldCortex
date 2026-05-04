@@ -28,6 +28,11 @@ const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
 const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
 const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL';
 
+// REFACTOR (May 2026 audit): consolidate to 'native' | 'local' (with trusted boolean) | 'skipped'.
+// Five modes is a smell — every one is a distinct state the doctor command must recognise.
+// Don't ship blind: cross-cuts the install command's "What was installed" log + the
+// postinstall script + doctor.ts. See src/__tests__/openclaw-install-mode-contract.test.ts
+// for the contract that has to be migrated atomically.
 type PluginInstallMode = 'native-package' | 'native-link' | 'trusted-local-copy' | 'untrusted-local-copy' | 'skipped';
 
 // ==================== Docker/Container Detection ====================

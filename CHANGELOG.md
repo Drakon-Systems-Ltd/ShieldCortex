@@ -24,6 +24,7 @@ The new Daily Moment bar at the top of every dashboard page is the in-app equiva
 
 - `scripts/postinstall.mjs` writes `{ openclawAutoMemory: true, proactiveRecall: true }` to `~/.shieldcortex/config.json` only when the file does not already exist. Existing users are never overwritten — their current preferences are preserved exactly as-is.
 - Postinstall message now distinguishes fresh install (defaults are ON, here's how to opt out) from upgrade (your existing settings are preserved, here's how to manage them).
+- New `src/__tests__/openclaw-install-mode-contract.test.ts` (6 tests) pins the current install-mode contract: exact mode list, native-before-local fallback order, package-before-link attempt order, --no-plugins early-return, Docker check before any install attempt, and per-mode user-facing log line. Exists so the planned consolidation (5 modes → 3) can be verified from outside before/after — the install layer has been the unstable surface (9 patch releases in 8 days, every one a fix), so the structural refactor needs daylight + a real OpenClaw machine, not 1am vibes. Inline `REFACTOR` marker added to `src/setup/openclaw.ts` so the next pass picks it up immediately.
 
 ## v4.12.14 — 2 May 2026
 
