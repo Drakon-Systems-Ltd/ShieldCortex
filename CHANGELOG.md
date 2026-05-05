@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.13.2] - 2026-05-05
+
+**Fix — doctor: stale-lock check produced false positives for long-running daemons.**
+
+Field-filed against a local install. `shieldcortex doctor` reported `⚠️ Lock: stale lock file found: memories.db.lock` and instructed deletion, despite the recorded PID (`shieldcortex dashboard`, started 36+ hours earlier under launchd) being alive and actively holding the lock. Following the suggested fix would have broken the dashboard's coordination with the database. Symptom traced to [src/cli/doctor.ts](src/cli/doctor.ts) `checkLockFile` flagging any lock with `mtime > 1h` as stale — a heuristic that is wrong for daemons launched at boot.
+
+### Fixed
+
+- **PID liveness, not mtime age, decides staleness.** [src/cli/doctor.ts](src/cli/doctor.ts) `checkLockFile` now parses the lock file's JSON payload, reads the recorded `pid`, and runs `process.kill(pid, 0)`. `ESRCH` ⇒ stale, `EPERM` ⇒ active (process exists, owned by another user), success ⇒ active. Matches the semantics already in `acquireStartupLock` ([src/database/init.ts:212-269](src/database/init.ts#L212-L269)) so doctor and runtime agree on what "stale" means. The 1-hour mtime fallback is replaced by a 24-hour fallback used only when the lock file is unparseable or missing a PID field.
+- **Testable surface.** `checkLockFile` accepts an optional `scDir` argument (defaults to `~/.shieldcortex`) so the staleness logic can be exercised against temp directories.
+
+### Tests
+
+- `src/__tests__/doctor-lock-check.test.ts` (5 tests) — covers the live-PID-with-old-mtime case (the bug), an `ESRCH` PID (truly stale), unparseable-and-old, unparseable-and-recent, and the empty-directory pass case.
+
 ## [4.13.1] - 2026-05-05
 
 **Fix #41 — auto-memory hooks: triple-gating produced silent-amnesia.**

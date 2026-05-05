@@ -1,6 +1,6 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "4.13.1",
+  "version": "4.13.2",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
