@@ -599,8 +599,12 @@ async function checkDiskUsage(): Promise<CheckResult> {
 }
 
 // ── Check 7: Lock file ───────────────────────────────────
-async function checkLockFile(): Promise<CheckResult> {
-  const scDir = getShieldCortexDir();
+//
+// A lock is stale only if its recorded PID is no longer running. Pure mtime age
+// is unreliable: a long-running daemon (e.g. `shieldcortex dashboard` started
+// at boot) holds the same lock for days, and flagging it stale tells the user
+// to delete a file that is still in active use.
+export async function checkLockFile(scDir: string = getShieldCortexDir()): Promise<CheckResult> {
 
   if (!fs.existsSync(scDir)) {
     return { label: 'Lock', status: 'pass', message: 'clean' };
@@ -620,18 +624,43 @@ async function checkLockFile(): Promise<CheckResult> {
       return { label: 'Lock', status: 'pass', message: 'clean' };
     }
 
-    // Check if lock files are stale (older than 1 hour)
     const stale: string[] = [];
     const active: string[] = [];
-    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    // Fallback only used when the lock file is unparseable or has no PID.
+    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
 
     for (const lockFile of lockFiles) {
       const lockPath = path.join(scDir, lockFile);
-      const stat = fs.statSync(lockPath);
-      if (stat.mtimeMs < oneHourAgo) {
-        stale.push(lockFile);
+
+      let pid: number | null = null;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(lockPath, 'utf-8')) as { pid?: unknown };
+        if (typeof parsed.pid === 'number' && Number.isFinite(parsed.pid)) {
+          pid = parsed.pid;
+        }
+      } catch {
+        // Unparseable lock — fall through to mtime fallback below.
+      }
+
+      if (pid !== null) {
+        try {
+          process.kill(pid, 0);
+          active.push(lockFile);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
+            stale.push(lockFile);
+          } else {
+            // EPERM = process exists, owned by another user. Treat as active.
+            active.push(lockFile);
+          }
+        }
       } else {
-        active.push(lockFile);
+        const stat = fs.statSync(lockPath);
+        if (stat.mtimeMs < oneDayAgo) {
+          stale.push(lockFile);
+        } else {
+          active.push(lockFile);
+        }
       }
     }
 
