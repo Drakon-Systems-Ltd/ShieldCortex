@@ -153,6 +153,71 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Verify both packages actually landed on npm at the expected version,
+      # AND that the plugin tarball has the shape OpenClaw 2026.5.4+ requires
+      # (compiled dist/ + openclaw.hooks in package.json). Catches the
+      # silent-publish-skip class of bug we hit in v4.13.0 / v4.13.1 where
+      # CI failures earlier in the pipeline silently bypassed plugin publish
+      # and left the plugin sub-package on a stale (and broken) version while
+      # the main package shipped fine — and the OpenClaw-validator class of
+      # bug where the plugin technically published but couldn't be installed.
+      # Registry propagation lags metadata by up to 3 min after publish; poll.
+      - name: Verify both packages landed on npm at the expected version
+        if: steps.version_check.outputs.already_published == 'false'
+        env:
+          MAIN_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -e
+          MAIN=$(node -p "require('./package.json').version")
+          PLUGIN=$(node -p "require('./plugins/openclaw/package.json').version")
+          echo "Expected main:   $MAIN"
+          echo "Expected plugin: $PLUGIN"
+
+          # Poll npm until both packages report the expected version (max ~3min).
+          # Tarball replication lags published metadata, so poll the published
+          # tag too — a missing tarball is the actual blocker for `npm install`.
+          for i in $(seq 1 18); do
+            MAIN_LATEST=$(npm view shieldcortex@$MAIN version 2>/dev/null || echo "")
+            PLUGIN_LATEST=$(npm view @drakon-systems/shieldcortex-realtime@$PLUGIN version 2>/dev/null || echo "")
+            if [ "$MAIN_LATEST" = "$MAIN" ] && [ "$PLUGIN_LATEST" = "$PLUGIN" ]; then
+              echo "Both packages visible on npm after ${i}0s"
+              break
+            fi
+            echo "Waiting for npm propagation (${i}/18) — main=$MAIN_LATEST plugin=$PLUGIN_LATEST"
+            sleep 10
+          done
+
+          # Final assertion — fail loudly if anything is still missing.
+          MAIN_LATEST=$(npm view shieldcortex@$MAIN version 2>/dev/null || echo "")
+          PLUGIN_LATEST=$(npm view @drakon-systems/shieldcortex-realtime@$PLUGIN version 2>/dev/null || echo "")
+          if [ "$MAIN_LATEST" != "$MAIN" ]; then
+            echo "::error::Main package not on npm at expected version (got: '$MAIN_LATEST')"
+            exit 1
+          fi
+          if [ "$PLUGIN_LATEST" != "$PLUGIN" ]; then
+            echo "::error::Plugin sub-package not on npm at expected version (got: '$PLUGIN_LATEST'). Lockstep broken — main published without plugin."
+            exit 1
+          fi
+
+          # Pull the just-published plugin tarball and confirm OpenClaw 2026.5.4+
+          # will accept it (we hit both of these silently in plugin v4.12.14):
+          #   - dist/index.js must be present (validator demands compiled output)
+          #   - package.json must declare openclaw.hooks (hook-pack contract)
+          mkdir -p /tmp/plugin-verify
+          cd /tmp/plugin-verify
+          npm pack @drakon-systems/shieldcortex-realtime@$PLUGIN >/dev/null
+          TARBALL=$(ls drakon-systems-shieldcortex-realtime-*.tgz | head -1)
+          if ! tar -tf "$TARBALL" | grep -q '^package/dist/index\.js$'; then
+            echo "::error::Plugin tarball is missing dist/index.js — OpenClaw 2026.5.4 will reject this install"
+            exit 1
+          fi
+          PLUGIN_PKG_HOOKS=$(tar -xOf "$TARBALL" package/package.json | node -e "let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{const p=JSON.parse(d); console.log(JSON.stringify(p.openclaw?.hooks ?? null));})")
+          if [ "$PLUGIN_PKG_HOOKS" = "null" ]; then
+            echo "::error::Plugin package.json is missing openclaw.hooks — OpenClaw 2026.5.4 will reject this install"
+            exit 1
+          fi
+          echo "Plugin tarball shape OK: dist/index.js present, openclaw.hooks=${PLUGIN_PKG_HOOKS}"
+
       # Create the GitHub Release immediately after npm publish so a later
       # ClawHub auth failure can't skip it. (Hit this on v4.10.0 — CLAWHUB_TOKEN
       # was stale, Release step was skipped, had to be created manually.)

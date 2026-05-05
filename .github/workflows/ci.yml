@@ -25,6 +25,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fail-fast on plugin-version drift. The OpenClaw plugin sub-package
+      # (plugins/openclaw/package.json) MUST be version-bumped in lockstep
+      # with the main package on every release — drift here was the silent
+      # mode-of-failure behind v4.13.0/v4.13.1 shipping main while the
+      # plugin sub-package stayed stuck on broken-on-OpenClaw-2026.5.4
+      # 4.12.14. Catching it at CI rather than publish-time means a PR
+      # that bumps main without the plugin can't merge.
+      - name: Verify plugin version matches main
+        run: |
+          MAIN=$(node -p "require('./package.json').version")
+          PLUGIN=$(node -p "require('./plugins/openclaw/package.json').version")
+          if [ "$MAIN" != "$PLUGIN" ]; then
+            echo "::error::Plugin version drift: main=$MAIN plugin=$PLUGIN. Bump plugins/openclaw/package.json to $MAIN before merging."
+            exit 1
+          fi
+          echo "Plugin version matches main: $MAIN"
+
       - name: Build
         run: npm run build:ts
 
