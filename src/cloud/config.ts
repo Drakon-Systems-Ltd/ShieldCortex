@@ -587,6 +587,51 @@ export function restore410Defaults(): void {
   writeRawConfig(raw);
 }
 
+// ── Auto-Memory Hook Config ───────────────────────────
+
+export interface AutoMemoryEnableConfig {
+  enableStop: boolean;
+  enableSessionEnd: boolean;
+}
+
+/**
+ * Returns the resolved on/off state of the opt-in auto-memory hooks.
+ *
+ * Default is false for both — preserves the OpenClaw-safe default that
+ * shipped in v4.13.0. The install flags (`--with-stop-hook` /
+ * `--with-session-end`) flip these to true so that wiring the hook in
+ * settings.json and enabling the runtime gate are a single user action.
+ */
+export function getAutoMemoryEnableConfig(): AutoMemoryEnableConfig {
+  const raw = readRawConfig();
+  const am = raw.autoMemory && typeof raw.autoMemory === 'object'
+    ? raw.autoMemory as Record<string, unknown>
+    : {};
+  return {
+    enableStop: am.enableStop === true,
+    enableSessionEnd: am.enableSessionEnd === true,
+  };
+}
+
+/**
+ * Persists the on/off state of the opt-in auto-memory hooks.
+ *
+ * Lives in `autoMemory.enableStop` / `autoMemory.enableSessionEnd` under
+ * `~/.shieldcortex/config.json` — the same namespace `auto-memory-config.mjs`
+ * reads from at hook fire time. Single source of truth: install flag +
+ * runtime gate cannot disagree.
+ */
+export function setAutoMemoryEnableConfig(updates: Partial<AutoMemoryEnableConfig>): void {
+  const raw = readRawConfig();
+  const existing = raw.autoMemory && typeof raw.autoMemory === 'object'
+    ? raw.autoMemory as Record<string, unknown>
+    : {};
+  if (updates.enableStop !== undefined) existing.enableStop = updates.enableStop;
+  if (updates.enableSessionEnd !== undefined) existing.enableSessionEnd = updates.enableSessionEnd;
+  raw.autoMemory = existing;
+  writeRawConfig(raw);
+}
+
 // ── Tool Response Scan Config ─────────────────────────
 
 export interface ToolResponseScanConfig {

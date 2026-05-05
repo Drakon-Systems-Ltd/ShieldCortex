@@ -17,13 +17,42 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, openSync, readSync, closeSync, statSync } from 'fs';
+import { existsSync, mkdirSync, openSync, readSync, closeSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
 import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
+
+// Sentinel directory for once-per-session "disabled" log lines. Without this
+// the stop hook bails silently on every turn when autoMemory.enableStop is
+// false — the user-visible symptom is "ShieldCortex never captured anything"
+// with zero feedback (filed in #41 as silent-amnesia). One sentinel file
+// per session keeps the log to a single line for the lifetime of the session.
+const SC_LOG_DIR = join(homedir(), '.shieldcortex', 'logs');
+const STOP_DISABLED_SENTINEL_DIR = join(SC_LOG_DIR, 'stop-hook-disabled-sessions');
+
+function logDisabledOnceForSession(sessionId, reason) {
+  // Always print the line — stderr is the existing channel for hook diagnostics
+  // (mirrors session-end-hook). Then plant a sentinel so subsequent fires in
+  // the same session stay quiet.
+  if (!sessionId) {
+    console.error(`[shieldcortex stop-hook] ${reason}`);
+    return;
+  }
+  try {
+    mkdirSync(STOP_DISABLED_SENTINEL_DIR, { recursive: true });
+    const sentinel = join(STOP_DISABLED_SENTINEL_DIR, sessionId.replace(/[^a-zA-Z0-9_.-]/g, '_'));
+    if (existsSync(sentinel)) return;
+    writeFileSync(sentinel, new Date().toISOString(), { mode: 0o600 });
+    console.error(`[shieldcortex stop-hook] ${reason}`);
+  } catch {
+    // Sentinel write failed — fall back to printing once per fire rather than
+    // staying silent. Better noisy-but-discoverable than silent-amnesia.
+    console.error(`[shieldcortex stop-hook] ${reason}`);
+  }
+}
 
 // ==================== DB ====================
 
@@ -303,8 +332,15 @@ process.stdin.on('end', () => {
 
     const autoMemConfig = getAutoMemoryConfig();
     if (!autoMemConfig.enableStop) {
-      // Opt-in by config (or by `--with-stop-hook` install flag, which only
-      // wires the hook in settings.json — config still gates execution).
+      // Opt-in by config. As of v4.13.1 the install flag (`--with-stop-hook`)
+      // flips this gate at install time so wiring the hook and enabling it are
+      // a single user action. If the gate is still false here, the user wired
+      // the hook by hand without setting autoMemory.enableStop=true. Log once
+      // per session so the failure is visible (was silent-amnesia in #41).
+      logDisabledOnceForSession(
+        hookData.session_id,
+        `disabled — set autoMemory.enableStop=true in ~/.shieldcortex/config.json (or re-run \`shieldcortex setup --with-stop-hook\`)`,
+      );
       process.exit(0);
     }
 
@@ -313,8 +349,11 @@ process.stdin.on('end', () => {
 
     const turnCount = countAssistantTurns(hookData.transcript_path, windowBytes);
     if (turnCount === 0 || turnCount % samplingTurns !== 0) {
-      // Off-sample. Exit silently — but record the firing so telemetry shows
-      // the hook is actually wired and active.
+      // Off-sample. Surface the sampling decision to stderr so the
+      // "1-in-N turns" behaviour stops being invisible (was a discoverability
+      // gap flagged in #41) — and still record telemetry so the dashboard
+      // shows the hook is actually wired and active.
+      console.error(`[shieldcortex stop-hook] telemetry-only turn=${turnCount}/${samplingTurns}`);
       if (existsSync(DB_PATH)) {
         try {
           const tdb = new Database(DB_PATH, { timeout: 1500 });

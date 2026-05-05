@@ -5,6 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { setAutoMemoryEnableConfig } from '../cloud/config.js';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 
@@ -143,7 +144,7 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
     if (!hasCortexHook(settings.hooks.SessionEnd)) {
       settings.hooks.SessionEnd.push(SESSION_END_HOOK);
       added++;
-      console.log(`  + Hook: SessionEnd (opt-in — gated by autoMemory.enableSessionEnd)`);
+      console.log(`  + Hook: SessionEnd (opt-in — flipping autoMemory.enableSessionEnd=true)`);
     } else {
       console.log(`  = Hook: SessionEnd (already configured)`);
     }
@@ -157,7 +158,7 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
     if (!hasCortexHook(settings.hooks.Stop)) {
       settings.hooks.Stop.push(STOP_HOOK);
       added++;
-      console.log(`  + Hook: Stop (opt-in — gated by autoMemory.enableStop)`);
+      console.log(`  + Hook: Stop (opt-in — flipping autoMemory.enableStop=true)`);
     } else {
       console.log(`  = Hook: Stop (already configured)`);
     }
@@ -169,5 +170,23 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
     console.log(`Hooks: ${added} added, ${migrated} migrated in ~/.claude/settings.json`);
   } else {
     console.log('Hooks: all hooks already configured in ~/.claude/settings.json');
+  }
+
+  // Single source of truth: the install flag IS the runtime gate. Wiring the
+  // hook in settings.json without flipping autoMemory.enable* was the
+  // silent-amnesia failure mode in #41 — passing --with-stop-hook wrote the
+  // hook but the runtime gate (default false) made it bail on every fire.
+  // Always sync gate to install flag — including the false case, so removing
+  // a hook by re-running install without the flag also disables the gate.
+  if (options?.stopHook !== undefined || options?.sessionEnd !== undefined) {
+    const updates: { enableStop?: boolean; enableSessionEnd?: boolean } = {};
+    if (options.stopHook !== undefined) updates.enableStop = options.stopHook;
+    if (options.sessionEnd !== undefined) updates.enableSessionEnd = options.sessionEnd;
+    try {
+      setAutoMemoryEnableConfig(updates);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`Hooks: could not update autoMemory enable config — ${msg}`);
+    }
   }
 }

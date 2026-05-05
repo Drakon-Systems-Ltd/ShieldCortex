@@ -378,6 +378,104 @@ async function checkHooks(): Promise<CheckResult> {
   }
 }
 
+// ── Check 4b: Auto-memory hook gates ──────────────────────
+/**
+ * Surfaces the resolved on/off state of the opt-in Stop and SessionEnd
+ * auto-memory hooks. Pre-v4.13.1 these were triple-gated (install flag,
+ * runtime config, sampling) with the runtime gate failing silently —
+ * users who wired the hook saw zero captures and zero feedback (#41).
+ *
+ * The check looks at both layers:
+ *   - settings.json: is the hook wired so Claude Code will fire it?
+ *   - autoMemory.enableStop / enableSessionEnd: will the hook actually run?
+ *
+ * Both layers must agree for the hook to do work. v4.13.1 onwards, the
+ * install flag flips both — if they disagree here, the user edited one
+ * side by hand and should re-run setup.
+ */
+export async function checkAutoMemoryHooks(): Promise<CheckResult[]> {
+  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  let wiredStop = false;
+  let wiredSessionEnd = false;
+  try {
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      const hooks = settings?.hooks || {};
+      const isCortexWired = (entries: unknown): boolean =>
+        Array.isArray(entries) && entries.some(
+          (entry: { hooks?: Array<{ command?: string }> }) =>
+            Array.isArray(entry?.hooks) && entry.hooks.some(
+              (h) => typeof h?.command === 'string' && h.command.includes('shieldcortex'),
+            ),
+        );
+      wiredStop = isCortexWired(hooks.Stop);
+      wiredSessionEnd = isCortexWired(hooks.SessionEnd);
+    }
+  } catch { /* fall through — both stay false, user gets a clean info row */ }
+
+  // Lazy-import to avoid pulling cloud/config into doctor's static graph
+  // when the user hasn't configured anything yet.
+  let gateStop = false;
+  let gateSessionEnd = false;
+  let samplingTurns = 10;
+  try {
+    const cfg = await import('../cloud/config.js');
+    const enable = cfg.getAutoMemoryEnableConfig();
+    gateStop = enable.enableStop;
+    gateSessionEnd = enable.enableSessionEnd;
+    const raw = cfg.readRawConfig();
+    const am = raw.autoMemory && typeof raw.autoMemory === 'object'
+      ? raw.autoMemory as Record<string, unknown>
+      : {};
+    if (typeof am.stopHookSamplingTurns === 'number' && am.stopHookSamplingTurns > 0) {
+      samplingTurns = Math.floor(am.stopHookSamplingTurns);
+    }
+  } catch { /* defaults already set */ }
+
+  const rowFor = (
+    label: string,
+    wired: boolean,
+    gate: boolean,
+    flag: string,
+    extra?: string,
+  ): CheckResult => {
+    if (!wired && !gate) {
+      return {
+        label,
+        status: 'info',
+        message: 'opt-in (not installed)',
+      };
+    }
+    if (wired && gate) {
+      return {
+        label,
+        status: 'pass',
+        message: extra ? `enabled (${extra})` : 'enabled',
+      };
+    }
+    if (wired && !gate) {
+      return {
+        label,
+        status: 'warn',
+        message: 'wired in settings.json but runtime gate is off — hook will exit silently every turn',
+        fix: `Run \`shieldcortex setup ${flag}\` to flip the gate, or set autoMemory.enableStop/enableSessionEnd=true in ~/.shieldcortex/config.json`,
+      };
+    }
+    // gate && !wired
+    return {
+      label,
+      status: 'warn',
+      message: 'runtime gate is on but hook is not wired in settings.json — hook will never fire',
+      fix: `Run \`shieldcortex setup ${flag}\` to wire the hook`,
+    };
+  };
+
+  return [
+    rowFor('Auto-memory: Stop hook', wiredStop, gateStop, '--with-stop-hook', `samples turn % ${samplingTurns} == 0`),
+    rowFor('Auto-memory: SessionEnd hook', wiredSessionEnd, gateSessionEnd, '--with-session-end'),
+  ];
+}
+
 // ── Check 5: Process check ────────────────────────────────
 async function checkProcesses(): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
@@ -642,6 +740,7 @@ export async function runDoctor(): Promise<void> {
     checkWritePath, // Smoke test: real INSERT/SELECT/DELETE round-trip — catches silent schema drift
     checkMemoryStats,
     checkHooks,
+    checkAutoMemoryHooks,
     checkProcesses,
     checkDiskUsage,
     checkLockFile,

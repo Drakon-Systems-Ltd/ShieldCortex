@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.13.1] - 2026-05-05
+
+**Fix #41 — auto-memory hooks: triple-gating produced silent-amnesia.**
+
+Field-filed by Jarvis within 24 hours of v4.13.0 going live. v4.13.0 shipped opt-in `Stop` and `SessionEnd` hooks gated in three independent places: an install flag (`--with-stop-hook` / `--with-session-end`) that wires the hook in `~/.claude/settings.json`, a runtime gate (`autoMemory.enableStop` / `enableSessionEnd`, default `false`) that the hook re-checks every fire, and a sampling counter (`stopHookSamplingTurns: 10`). The two layers had no link — passing `--with-stop-hook` wired the hook but left the runtime gate at its default-false, so the hook fired on every turn and immediately `process.exit(0)`ed with no log line. User-visible symptom was zero captures and zero feedback; looked indistinguishable from "the model forgot."
+
+### Fixed
+
+- **Single source of truth: install flag IS the runtime gate.** `setupHooks({ stopHook: true, sessionEnd: true })` ([src/setup/settings-hooks.ts:139-181](src/setup/settings-hooks.ts#L139-L181)) now writes `autoMemory.enableStop: true` / `autoMemory.enableSessionEnd: true` to `~/.shieldcortex/config.json` alongside the settings.json wiring. Explicit `false` is also synced — re-running `setup` without the flag disables both layers symmetrically. Reuses the HMAC-signed config write path via the new `setAutoMemoryEnableConfig` helper in [src/cloud/config.ts](src/cloud/config.ts), so config integrity stays intact.
+- **Loud bail, once per session.** [scripts/stop-hook.mjs:305-318](scripts/stop-hook.mjs#L305-L318) prints `[shieldcortex stop-hook] disabled — set autoMemory.enableStop=true …` to stderr the first time it bails in a given session and plants a sentinel file under `~/.shieldcortex/logs/stop-hook-disabled-sessions/<session_id>` so subsequent fires stay quiet. Recovers gracefully if the sentinel directory isn't writable (logs every fire instead of staying silent — better noisy than silent-amnesia).
+- **Surfaced sampling cadence.** [scripts/stop-hook.mjs:325](scripts/stop-hook.mjs#L325) now logs `[shieldcortex stop-hook] telemetry-only turn=N/M` on off-sample fires so the 1-in-10 behaviour is visible in real time, not just hidden in the telemetry table.
+- **Doctor surfaces resolved gate state.** New `checkAutoMemoryHooks` ([src/cli/doctor.ts:382-477](src/cli/doctor.ts#L382-L477)) emits `Auto-memory: Stop hook` and `Auto-memory: SessionEnd hook` rows that report the resolved state: wired+gate-on → pass, wired+gate-off → warn with the silent-amnesia hint and a `setup` fix command, gate-on+not-wired → warn (inverse mismatch), neither → info "opt-in (not installed)". Runs in the existing doctor flow.
+- **Runtime config honours `SHIELDCORTEX_CONFIG_DIR`.** [scripts/lib/auto-memory-config.mjs:5-11](scripts/lib/auto-memory-config.mjs#L5-L11) now resolves the same env override that the rest of the system uses, so the hook fire path and `cloud/config.ts` always read from the same file (and tests can isolate via temp dirs).
+
+### Tests
+
+- `src/setup/__tests__/auto-memory-gate-sync.test.ts` (5 tests) pins the install-flag → runtime-gate sync contract: `--with-stop-hook` flips `enableStop=true`, `--with-session-end` flips `enableSessionEnd=true`, explicit `false` flips both off, no-arg `setupHooks()` leaves the namespace untouched, and a round-trip through `getAutoMemoryConfig` reads back what `setupHooks` wrote (proves runtime gate and install-time write resolve to the same file).
+- `src/cli/__tests__/doctor-auto-memory-gates.test.ts` (4 tests) cover all four cells of the `wired × gate-on` matrix — the silent-amnesia warning is the load-bearing case here.
+
 ## [4.13.0] - 2026-05-04
 
 **Auto-memory pipeline: capture rate fix + Stop hook becomes a sampling extractor + per-hook telemetry.**
