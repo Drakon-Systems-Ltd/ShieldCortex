@@ -23,6 +23,14 @@ Field-filed by Jarvis within 24 hours of v4.13.0 going live. v4.13.0 shipped opt
 - `src/setup/__tests__/auto-memory-gate-sync.test.ts` (5 tests) pins the install-flag → runtime-gate sync contract: `--with-stop-hook` flips `enableStop=true`, `--with-session-end` flips `enableSessionEnd=true`, explicit `false` flips both off, no-arg `setupHooks()` leaves the namespace untouched, and a round-trip through `getAutoMemoryConfig` reads back what `setupHooks` wrote (proves runtime gate and install-time write resolve to the same file).
 - `src/cli/__tests__/doctor-auto-memory-gates.test.ts` (4 tests) cover all four cells of the `wired × gate-on` matrix — the silent-amnesia warning is the load-bearing case here.
 
+### Fixed — OpenClaw plugin sub-package
+
+- **`@drakon-systems/shieldcortex-realtime` was unusable on OpenClaw 2026.5.4+** (root cause for Jarvis's first post-upgrade install failure). The plugin sub-package was published with TypeScript source only (`index.ts` etc.) and no compiled output, with `main: "index.ts"` and no `openclaw.hooks` key in `package.json`. OpenClaw 2026.5.4 introduced stricter hook-pack validation that rejects this shape with two errors:
+  - `package install requires compiled runtime output for TypeScript entry ./index.ts: expected ./dist/index.js …`
+  - `not a valid hook pack: Error: package.json missing openclaw.hooks`
+  This affected every published plugin version back through 4.12.14 — not a v4.13.x regression but a long-standing gap that the OpenClaw validator finally caught. v4.13.0/4.13.1 of the main package never republished the plugin sub-package, so even users on the latest main were stuck on plugin 4.12.14 (also broken).
+- **Fix.** [plugins/openclaw/package.json](plugins/openclaw/package.json) now ships `dist/` in `files:` (the `tsc -p tsconfig.openclaw-plugin.json` step already produced it but it was excluded from the tarball), points `main` and `openclaw.extensions` at `./dist/index.js`, and declares `openclaw.hooks: ["llm_input", "llm_output", "before_tool_call", "session_end"]` mirroring the activation list in `openclaw.plugin.json`. Plugin sub-package republished as `@drakon-systems/shieldcortex-realtime@4.13.1`, closing the publish-lockstep gap with the main `shieldcortex@4.13.1` package. `peerDependencies.shieldcortex` bumped to `^4.13.1` so the install path enforces the version pair.
+
 ## [4.13.0] - 2026-05-04
 
 **Auto-memory pipeline: capture rate fix + Stop hook becomes a sampling extractor + per-hook telemetry.**
