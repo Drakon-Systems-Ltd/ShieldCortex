@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.7] - 2026-05-06
+
+**`shieldcortex update --force` — re-run the update flow even when already on latest.**
+
+The v4.14.6 release shipped the new animated update flow, but anyone updating *to* v4.14.6 from v4.14.5 ran the OLD flow because `shieldcortex update` invokes the binary already on disk. The new flow only kicks in on the *next* update — a structural timing trap. `--force` bypasses the "already on latest" early-return so users can exercise the new flow without waiting for another release, and doubles as a useful debugging tool when something is wedged and the user wants to reinstall everything from scratch.
+
+### Added
+
+- **`shieldcortex update --force`** (alias `-f`) ([src/cli/update.ts](src/cli/update.ts)). When set, the npm-package step reinstalls `shieldcortex@latest` even if the local version matches the registry, rendering as `v4.14.7 (reinstalled)` in the spinner summary instead of `v4.14.7 (current)`. The header prints a `! --force: reinstall everything regardless of version` notice so the choice is visible. OpenClaw plugin / skill / Claude hooks reconcile pass already runs on every invocation; `--force` only changes the npm-step gate.
+
+No other behaviour changes. Functionally identical to v4.14.6 for invocations without the flag.
+
 ## [4.14.6] - 2026-05-06
 
 **UX — `shieldcortex update` is no longer a wall of text.**

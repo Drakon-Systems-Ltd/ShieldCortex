@@ -182,14 +182,25 @@ async function fetchLatestVersion(): Promise<string | null> {
   }
 }
 
-async function stepNpmPackage(currentVersion: string, latestVersion: string | null): Promise<{ updated: boolean; result: StepResult }> {
+async function stepNpmPackage(
+  currentVersion: string,
+  latestVersion: string | null,
+  force: boolean,
+): Promise<{ updated: boolean; result: StepResult }> {
   if (!latestVersion) {
     const result = await step('npm package', async () => ({ status: 'warn' as const, summary: 'registry unreachable' }));
     return { updated: false, result };
   }
-  if (latestVersion === currentVersion) {
+  if (latestVersion === currentVersion && !force) {
     const result = await step('npm package', async () => `v${currentVersion} (current)`);
     return { updated: false, result };
+  }
+  if (latestVersion === currentVersion && force) {
+    const result = await step('npm package', async () => {
+      runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
+      return `v${currentVersion} (reinstalled)`;
+    });
+    return { updated: true, result };
   }
   const result = await step('npm package', async () => {
     runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
@@ -295,15 +306,19 @@ export async function runUpdate(): Promise<void> {
   const home = homedir();
   const currentVersion = readPackageVersion();
   const flowStart = Date.now();
+  const force = process.argv.includes('--force') || process.argv.includes('-f');
 
   // Header — show current version immediately, then update with latest once we know it.
   // (We resolve `latest` before drawing the arrow so the banner is correct.)
   const latestVersion = await fetchLatestVersion();
   header(currentVersion, latestVersion);
+  if (force) {
+    process.stdout.write(`  ${paint('yellow', '!')}  ${paint('gray', '--force: reinstall everything regardless of version')}\n\n`);
+  }
 
   let mainUpdated = false;
   try {
-    const npmStep = await stepNpmPackage(currentVersion, latestVersion);
+    const npmStep = await stepNpmPackage(currentVersion, latestVersion, force);
     mainUpdated = npmStep.updated;
   } catch {
     // npm failure already surfaced by step(); continue with reconcile.
