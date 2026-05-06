@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.4] - 2026-05-06
+
+**Fix — doctor `Disk` check counted local-AI model cache against the 100 MB safety limit.**
+
+The 100 MB limit was added long before the local Review Copilot AI Explainer feature shipped. Once a user opts into local AI, ShieldCortex caches the Qwen2.5-0.5B-Instruct ONNX weights (~750 MB) under `~/.shieldcortex/models/review-copilot/onnx-community/Qwen2.5-0.5B-Instruct/onnx/model_q4.onnx`. Doctor's `checkDiskUsage` walked the entire `~/.shieldcortex/` tree, so users with the model cached saw a permanent `❌ Disk: 761.4 MB / 100 MB limit — at limit!` plus a fix command (`Run consolidation or delete old memories`) that would never recover the bytes — `memories prune` / `dedupe` only operate on rows in `memories.db`, never on model files.
+
+### Fixed
+
+- **`models/` is now excluded from the 100 MB DB-bloat limit** ([src/cli/doctor.ts:560-636](src/cli/doctor.ts#L560-L636)). The check splits the directory into a `data` bucket (DB, state, audit, logs, telemetry, quarantine — everything except `models/`) and a `models` bucket. The 100 MB limit applies only to `data`. The `models` total is still reported as a parenthetical (`2.0 MB / 100 MB limit + 750.0 MB models`) so users can see it but it doesn't drive the warning.
+- **Fix message updated** to point at the actual recovery commands (`shieldcortex memories prune --execute` / `memories dedupe --execute`) instead of the vague `Run consolidation or delete old memories`.
+- **`checkDiskUsage` now exported and accepts an optional `scDir`** so the logic can be unit-tested against a temp directory without mocking `os.homedir()`.
+
+### Tests
+
+- `src/cli/__tests__/doctor-disk-models-exclusion.test.ts` (6 tests) — pins the contract: small data + small models → pass; small data + 200 MB models → still pass (the bug); 99 MB data + 1 MB models → fail with DB-trimming fix message; 85 MB data → warn; no `models/` subtree → models suffix omitted; missing scDir → directory-not-yet-created pass.
+
 ## [4.14.3] - 2026-05-06
 
 **Fix — `shieldcortex update` couldn't reconcile the OpenClaw plugin on 2026.5.5+; doctor reported the wrong sampling cadence on stale defaults.**

@@ -557,25 +557,35 @@ async function checkProcesses(): Promise<CheckResult[]> {
 }
 
 // ── Check 6: Disk usage ───────────────────────────────────
-async function checkDiskUsage(): Promise<CheckResult> {
-  const scDir = getShieldCortexDir();
-
+/**
+ * The 100 MB safety limit applies to the data portion of `~/.shieldcortex/`
+ * — DB, state, audit logs, telemetry. The `models/` subtree (local Review
+ * Copilot weights, embedding caches) can legitimately reach hundreds of MB
+ * for users who opted into local AI inference, and should not trip the same
+ * warning as runaway memory growth. v4.14.3 and earlier counted everything
+ * under `~/.shieldcortex/`, producing a false `Disk: at limit!` for any
+ * user with a local AI model cached.
+ */
+export async function checkDiskUsage(scDir: string = getShieldCortexDir()): Promise<CheckResult> {
   if (!fs.existsSync(scDir)) {
     return { label: 'Disk', status: 'pass', message: '0 B / 100 MB limit (directory not yet created)' };
   }
 
   try {
-    let totalSize = 0;
+    let dataSize = 0;
+    let modelsSize = 0;
 
-    function walkDir(dir: string): void {
+    function walkInto(dir: string, bucket: 'data' | 'models'): void {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
         try {
           if (entry.isDirectory()) {
-            walkDir(fullPath);
+            walkInto(fullPath, bucket);
           } else if (entry.isFile()) {
-            totalSize += fs.statSync(fullPath).size;
+            const size = fs.statSync(fullPath).size;
+            if (bucket === 'models') modelsSize += size;
+            else dataSize += size;
           }
         } catch {
           // Skip inaccessible files
@@ -583,17 +593,41 @@ async function checkDiskUsage(): Promise<CheckResult> {
       }
     }
 
-    walkDir(scDir);
-    const limit = 100 * 1024 * 1024; // 100 MB
-    const pct = (totalSize / limit) * 100;
-    const sizeStr = `${formatBytes(totalSize)} / 100 MB limit`;
+    const topLevel = fs.readdirSync(scDir, { withFileTypes: true });
+    for (const entry of topLevel) {
+      const fullPath = path.join(scDir, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          walkInto(fullPath, entry.name === 'models' ? 'models' : 'data');
+        } else if (entry.isFile()) {
+          dataSize += fs.statSync(fullPath).size;
+        }
+      } catch {
+        // Skip inaccessible top-level entries
+      }
+    }
+
+    const limit = 100 * 1024 * 1024; // 100 MB applies to the data portion only
+    const pct = (dataSize / limit) * 100;
+    const dataStr = `${formatBytes(dataSize)} / 100 MB limit`;
+    const modelsStr = modelsSize > 0 ? ` + ${formatBytes(modelsSize)} models` : '';
 
     if (pct >= 95) {
-      return { label: 'Disk', status: 'fail', message: `${sizeStr} — at limit!`, fix: 'Run consolidation or delete old memories' };
+      return {
+        label: 'Disk',
+        status: 'fail',
+        message: `${dataStr}${modelsStr} — at limit!`,
+        fix: 'Run `shieldcortex memories prune --execute` or `memories dedupe --execute` to trim the DB',
+      };
     } else if (pct >= 80) {
-      return { label: 'Disk', status: 'warn', message: `${sizeStr} — approaching limit`, fix: 'Consider running consolidation to free space' };
+      return {
+        label: 'Disk',
+        status: 'warn',
+        message: `${dataStr}${modelsStr} — approaching limit`,
+        fix: 'Consider running `shieldcortex memories prune` or `memories dedupe`',
+      };
     } else {
-      return { label: 'Disk', status: 'pass', message: sizeStr };
+      return { label: 'Disk', status: 'pass', message: `${dataStr}${modelsStr}` };
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
