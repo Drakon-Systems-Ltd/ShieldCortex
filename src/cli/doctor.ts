@@ -417,7 +417,10 @@ export async function checkAutoMemoryHooks(): Promise<CheckResult[]> {
   // when the user hasn't configured anything yet.
   let gateStop = false;
   let gateSessionEnd = false;
-  let samplingTurns = 10;
+  // Default lowered 10 → 5 in v4.14.0 — keep this fallback in sync with
+  // scripts/lib/auto-memory-config.mjs so doctor reports the same value
+  // the runtime gate would resolve to when no override is present.
+  let samplingTurns = 5;
   try {
     const cfg = await import('../cloud/config.js');
     const enable = cfg.getAutoMemoryEnableConfig();

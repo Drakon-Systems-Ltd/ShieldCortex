@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.3] - 2026-05-06
+
+**Fix — `shieldcortex update` couldn't reconcile the OpenClaw plugin on 2026.5.5+; doctor reported the wrong sampling cadence on stale defaults.**
+
+Two unrelated regressions surfaced after v4.14.2 went live:
+
+1. Fleet hosts running `shieldcortex update` to pick up v4.14.2 saw the plugin step bail with `plugin already exists: ~/.openclaw/npm/node_modules/@drakon-systems/shieldcortex-realtime (delete it first) … Use \`openclaw plugins update <id-or-npm-spec>\` to upgrade the tracked plugin, or rerun install with \`--force\` to replace it.` OpenClaw 2026.5.5 added a guard that refuses `plugins install` against an already-present plugin. Our reconcile flow only deleted the legacy `~/.openclaw/extensions/shieldcortex-realtime` path (the pre-2026.5 location), which is now empty on most fleet hosts — the actual plugin lives under `~/.openclaw/npm/node_modules/@drakon-systems/shieldcortex-realtime` and is owned by the OpenClaw installer.
+2. Doctor's `Auto-memory: Stop hook: enabled` line still reported `(samples turn % 10 == 0)` even after the v4.14.0 default lowered to 5. The fallback in [src/cli/doctor.ts:420](src/cli/doctor.ts#L420) was hardcoded to `10`, ignoring both the new default and the actual config value.
+
+### Fixed
+
+- **`shieldcortex update` passes `--force` to `openclaw plugins install`.** [src/index.ts:713-740](src/index.ts#L713-L740). Reconcile is by definition an overwrite — the user wants the latest plugin, not the existing one. `--force` also handles fresh-install cases (no-op when nothing to replace). Reconcile detection extended to include the `~/.openclaw/npm/node_modules/...` path so the step actually runs on 2026.5.x installs.
+- **Doctor's stop-hook fallback default lowered 10 → 5.** [src/cli/doctor.ts:420](src/cli/doctor.ts#L420). Matches the canonical default in `scripts/lib/auto-memory-config.mjs`. Users without an `autoMemory.stopHookSamplingTurns` override now see the correct value in the `Auto-memory: Stop hook` row.
+
 ## [4.14.2] - 2026-05-06
 
 **Fix — `shieldcortex install` ignored timeout drift on existing hook entries.**

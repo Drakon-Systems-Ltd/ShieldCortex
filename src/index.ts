@@ -714,13 +714,24 @@ ${bold}DOCS${reset}
     // own release cadences; skipping them when main is current caused v4.9 → v4.10
     // users to be stuck on v4.9 of the plugin until they manually removed the
     // extension dir and re-ran `openclaw plugins install`.
+    //
+    // OpenClaw 2026.5.5 added a guard that refuses `plugins install` when the
+    // plugin is already present at ~/.openclaw/npm/node_modules/<scope>/<name>
+    // and tells the caller to use `update` or `--force`. Our reconcile always
+    // *wants* to overwrite — that's the entire point of the step — so we pass
+    // --force unconditionally. Works for fresh installs too (no-op when no
+    // existing plugin to replace).
     try {
       const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
-      if (fs.existsSync(extDir)) {
+      const npmDir = path.join(home, '.openclaw', 'npm', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+      if (fs.existsSync(extDir) || fs.existsSync(npmDir)) {
         console.log('Reconciling OpenClaw plugin...');
-        fs.rmSync(extDir, { recursive: true, force: true });
+        // Best-effort cleanup of the legacy extensions/ path so 2026.5.x doesn't
+        // see two install records. The npm/node_modules/ path is owned by the
+        // OpenClaw installer and `--force` will replace it.
+        try { fs.rmSync(extDir, { recursive: true, force: true }); } catch { /* ignore */ }
         try {
-          execSync('openclaw plugins install @drakon-systems/shieldcortex-realtime@latest', {
+          execSync('openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest', {
             stdio: 'inherit',
             timeout: 60000,
             env: { ...process.env, HOME: home },
@@ -728,7 +739,7 @@ ${bold}DOCS${reset}
           console.log('✓ OpenClaw plugin reconciled');
         } catch {
           console.warn('⚠ OpenClaw plugin reinstall failed — run manually:');
-          console.warn('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
+          console.warn('  openclaw plugins install --force @drakon-systems/shieldcortex-realtime');
         }
       }
     } catch {
