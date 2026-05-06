@@ -16,6 +16,7 @@ import {
   LightTickResult,
   MediumTickResult,
   WorkerStatus,
+  MCP_LIGHT_TICK_INTERVAL_MS,
 } from './types.js';
 import { getDatabase } from '../database/init.js';
 import { pruneActivationCache } from '../memory/activation.js';
@@ -36,6 +37,25 @@ import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 import { sendHeartbeat } from '../cloud/sync.js';
 import { refreshCloudIronDome, applyCachedCloudPatterns } from '../cloud/iron-dome-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+
+const WORKER_STATE_DIR = join(homedir(), '.shieldcortex', 'state');
+const WORKER_STATE_FILE = join(WORKER_STATE_DIR, 'worker.json');
+
+function persistWorkerState(profile: string, lastLightTick: Date): void {
+  try {
+    if (!existsSync(WORKER_STATE_DIR)) mkdirSync(WORKER_STATE_DIR, { recursive: true });
+    writeFileSync(
+      WORKER_STATE_FILE,
+      JSON.stringify({ pid: process.pid, profile, lastLightTick: lastLightTick.toISOString() }, null, 2),
+      'utf-8'
+    );
+  } catch {
+    // Best-effort: doctor will warn if the file is stale or missing
+  }
+}
 
 /**
  * Brain Worker Class
@@ -65,10 +85,17 @@ export class BrainWorker {
   /**
    * Create a new BrainWorker
    *
-   * @param config - Partial configuration to override defaults
+   * @param config - Partial configuration to override defaults. When `profile`
+   *                is 'mcp' and no explicit `lightTickIntervalMs` is provided,
+   *                the lite 15-minute cadence is applied so MCP-server-mode
+   *                workers don't run as often as dashboard-mode ones.
    */
   constructor(config: Partial<WorkerConfig> = {}) {
-    this.config = { ...DEFAULT_WORKER_CONFIG, ...config };
+    const merged = { ...DEFAULT_WORKER_CONFIG, ...config };
+    if (merged.profile === 'mcp' && config.lightTickIntervalMs === undefined) {
+      merged.lightTickIntervalMs = MCP_LIGHT_TICK_INTERVAL_MS;
+    }
+    this.config = merged;
   }
 
   /**
@@ -82,26 +109,34 @@ export class BrainWorker {
     }
 
     this.isRunning = true;
-    console.log('[BrainWorker] Starting background worker');
+    console.log(`[BrainWorker] Starting background worker (profile=${this.config.profile} pid=${process.pid})`);
     console.log(`[BrainWorker] Light tick interval: ${this.config.lightTickIntervalMs / 1000}s`);
-    console.log(`[BrainWorker] Medium tick interval: ${this.config.mediumTickIntervalMs / 1000}s`);
+    if (this.config.profile === 'full') {
+      console.log(`[BrainWorker] Medium tick interval: ${this.config.mediumTickIntervalMs / 1000}s`);
+    } else {
+      console.log('[BrainWorker] MCP profile — medium tick + cloud sync disabled');
+    }
 
-    // Light tick every 5 minutes (by default)
+    // Light tick — every 5 min (full) or every 15 min (mcp)
     this.lightTimer = setInterval(
       () => this.lightTick(),
       this.config.lightTickIntervalMs
     );
     this.lightTimer.unref();
 
-    // Medium tick every 30 minutes (by default)
-    this.mediumTimer = setInterval(
-      () => this.mediumTick(),
-      this.config.mediumTickIntervalMs
-    );
-    this.mediumTimer.unref();
+    // Medium tick — full profile only. mcp-mode skips link discovery,
+    // contradiction scans, graph maintenance, and sync-queue purging — those
+    // are dashboard concerns and shouldn't multiply across N MCP windows.
+    if (this.config.profile === 'full') {
+      this.mediumTimer = setInterval(
+        () => this.mediumTick(),
+        this.config.mediumTickIntervalMs
+      );
+      this.mediumTimer.unref();
+    }
 
-    // Apply cached cloud Iron Dome patterns immediately on start (requires Pro+)
-    if (isFeatureEnabled('custom_injection_patterns')) {
+    // Apply cached cloud Iron Dome patterns immediately on start (Pro+, full only)
+    if (this.config.profile === 'full' && isFeatureEnabled('custom_injection_patterns')) {
       try {
         applyCachedCloudPatterns();
       } catch {
@@ -192,40 +227,45 @@ export class BrainWorker {
         });
       }
 
-      // 3. Process cloud sync retry queue
-      try {
-        const retryResult = await processRetryQueue();
-        if (retryResult.processed > 0) {
-          console.log(
-            `[BrainWorker] Sync retry queue: processed ${retryResult.processed} ` +
-            `(${retryResult.succeeded} ok, ${retryResult.failed} retry, ${retryResult.permanentlyFailed} failed)`
-          );
-        }
-      } catch (retryError) {
-        console.error('[BrainWorker] Sync retry queue failed:', retryError);
-      }
-
-      // 4. Send cloud heartbeat (keeps device status "Online") — Team+ only
-      if (isFeatureEnabled('cloud_sync')) {
+      // 3-5: cloud sync (retry queue, heartbeat, Iron Dome) — full profile only.
+      // Skipped under MCP profile so we don't fan out N concurrent network calls
+      // from N open Claude Code windows.
+      if (this.config.profile === 'full') {
         try {
-          sendHeartbeat();
-        } catch {
-          // Truly silent — heartbeat is best-effort
+          const retryResult = await processRetryQueue();
+          if (retryResult.processed > 0) {
+            console.log(
+              `[BrainWorker] Sync retry queue: processed ${retryResult.processed} ` +
+              `(${retryResult.succeeded} ok, ${retryResult.failed} retry, ${retryResult.permanentlyFailed} failed)`
+            );
+          }
+        } catch (retryError) {
+          console.error('[BrainWorker] Sync retry queue failed:', retryError);
         }
-      }
 
-      // 5. Refresh Iron Dome cloud patterns + policy — Pro+ only
-      if (isFeatureEnabled('custom_injection_patterns')) {
-        try {
-          await refreshCloudIronDome();
-        } catch {
-          // Non-critical — cloud Iron Dome sync is best-effort
+        if (isFeatureEnabled('cloud_sync')) {
+          try {
+            sendHeartbeat();
+          } catch {
+            // Truly silent — heartbeat is best-effort
+          }
+        }
+
+        if (isFeatureEnabled('custom_injection_patterns')) {
+          try {
+            await refreshCloudIronDome();
+          } catch {
+            // Non-critical — cloud Iron Dome sync is best-effort
+          }
         }
       }
 
       // Update stats
       this.lastLightTick = result.timestamp;
       this.stats.lightTicks++;
+
+      // Persist worker freshness for `shieldcortex doctor` to detect stalls.
+      persistWorkerState(this.config.profile, result.timestamp);
 
       // Emit light tick event
       emitWorkerLightTick(result);
@@ -382,20 +422,25 @@ export class BrainWorker {
 let defaultWorker: BrainWorker | null = null;
 
 /**
- * Get or create the default worker instance
+ * Get or create the default worker instance.
+ * The first call wins — subsequent calls return the existing singleton even
+ * if a different config is passed. That's intentional: it prevents accidental
+ * re-instantiation from creating two competing timer sets within one process.
  */
-export function getDefaultWorker(): BrainWorker {
+export function getDefaultWorker(config?: Partial<WorkerConfig>): BrainWorker {
   if (!defaultWorker) {
-    defaultWorker = new BrainWorker();
+    defaultWorker = new BrainWorker(config);
   }
   return defaultWorker;
 }
 
 /**
- * Start the default worker if not already running
+ * Start the default worker if not already running. Forwards config to the
+ * underlying constructor on first call (used by MCP-server mode to start
+ * with `profile: 'mcp'`).
  */
-export function startDefaultWorker(): BrainWorker {
-  const worker = getDefaultWorker();
+export function startDefaultWorker(config?: Partial<WorkerConfig>): BrainWorker {
+  const worker = getDefaultWorker(config);
   if (!worker.isActive()) {
     worker.start();
   }

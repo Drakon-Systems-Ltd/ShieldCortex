@@ -2,12 +2,13 @@
  * Project Context Module
  * Automatically detects and manages the active project scope for memory operations.
  *
- * Detection priority:
- * 1. CLAUDE_MEMORY_PROJECT environment variable
- * 2. Extract from process.cwd() (working directory)
+ * Project key derivation is delegated to deriveProjectKey (mirroring
+ * scripts/lib/project-key.mjs) so reads and writes share one source of truth.
  *
  * The "*" sentinel means "global/all projects" (no filtering).
  */
+
+import { deriveProjectKey, basenameFromCwd } from './derive-project-key.js';
 
 /** Sentinel value meaning "all projects" - no project filtering */
 export const GLOBAL_PROJECT_SENTINEL = '*';
@@ -18,44 +19,27 @@ let activeProject: string | null = null;
 /** How the project was detected */
 let projectDetectionSource: 'env' | 'cwd' | 'none' = 'none';
 
-/** Directories to skip when extracting project name from path */
-const SKIP_DIRECTORIES = [
-  'src', 'lib', 'dist', 'build', 'out',
-  'node_modules', '.git', '.next', '.cache',
-  'test', 'tests', '__tests__', 'spec',
-  'bin', 'scripts', 'config', 'public', 'static',
-];
-
 /**
- * Extract project name from a file path.
- * Skips common directory names that don't represent projects.
+ * Extract project name from a file path (basename only, with noise-dir skip).
+ * Retained for backwards compatibility with consumers that need just the
+ * basename component. New code should call deriveProjectKey instead.
  */
 export function extractProjectFromPath(path: string): string | null {
-  if (!path) return null;
-
-  const segments = path.split(/[/\\]/).filter(Boolean);
-  if (segments.length === 0) return null;
-
-  // Start from the end and find first non-skipped segment
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const segment = segments[i];
-    if (!SKIP_DIRECTORIES.includes(segment.toLowerCase())) {
-      // Skip hidden directories (starting with .)
-      if (segment.startsWith('.')) continue;
-      return segment;
-    }
-  }
-
-  return null;
+  return basenameFromCwd(path);
 }
 
 /**
  * Initialize project context from environment or working directory.
  * Call this once at server startup.
+ *
+ * Uses the shared deriveProjectKey helper, so the resolved key is identical
+ * to whatever the .mjs hooks would resolve from the same cwd / env / config.
  */
 export function initProjectContext(): void {
-  // Priority 1: Environment variable (explicit override)
-  const envProject = process.env.CLAUDE_MEMORY_PROJECT;
+  // Env overrides — match deriveProjectKey's order. We track these separately
+  // so projectDetectionSource keeps reporting 'env' when the user pinned the
+  // project explicitly (visible in get_project / dashboard).
+  const envProject = process.env.SHIELDCORTEX_PROJECT_KEY || process.env.CLAUDE_MEMORY_PROJECT;
   if (envProject) {
     const trimmed = envProject.trim();
     if (trimmed === GLOBAL_PROJECT_SENTINEL) {
@@ -68,9 +52,9 @@ export function initProjectContext(): void {
     return;
   }
 
-  // Priority 2: Extract from current working directory
+  // Otherwise: config override → projectAliases → git origin → basename.
   const cwd = process.cwd();
-  const detected = extractProjectFromPath(cwd);
+  const detected = deriveProjectKey(cwd);
   if (detected) {
     activeProject = detected;
     projectDetectionSource = 'cwd';

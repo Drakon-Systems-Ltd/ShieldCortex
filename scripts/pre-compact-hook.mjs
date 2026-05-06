@@ -20,6 +20,7 @@ import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
 import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
+import { deriveProjectKey } from './lib/project-key.mjs';
 
 // Database paths (with legacy fallback)
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
@@ -61,39 +62,6 @@ const CATEGORY_EXTRACTION_THRESHOLDS = {
   relationship: 0.45,
   custom: 0.45,
 };
-
-// ==================== PROJECT DETECTION (Mirrors src/context/project-context.ts) ====================
-
-/** Directories to skip when extracting project name from path */
-const SKIP_DIRECTORIES = [
-  'src', 'lib', 'dist', 'build', 'out',
-  'node_modules', '.git', '.next', '.cache',
-  'test', 'tests', '__tests__', 'spec',
-  'bin', 'scripts', 'config', 'public', 'static',
-];
-
-/**
- * Extract project name from a file path.
- * Skips common directory names that don't represent projects.
- */
-function extractProjectFromPath(path) {
-  if (!path) return null;
-
-  const segments = path.split(/[/\\]/).filter(Boolean);
-  if (segments.length === 0) return null;
-
-  // Start from the end and find first non-skipped segment
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const segment = segments[i];
-    if (!SKIP_DIRECTORIES.includes(segment.toLowerCase())) {
-      // Skip hidden directories (starting with .)
-      if (segment.startsWith('.')) continue;
-      return segment;
-    }
-  }
-
-  return null;
-}
 
 // Maximum memories to auto-create per compaction.
 // Dropped 5 → 2 in v4.11.0 for the same reason thresholds were raised.
@@ -520,7 +488,7 @@ process.stdin.on('end', () => {
     const hookData = JSON.parse(input || '{}');
 
     const trigger = hookData.trigger || 'unknown';
-    const project = extractProjectFromPath(hookData.cwd);
+    const project = deriveProjectKey(hookData.cwd);
     const autoMemConfig = getAutoMemoryConfig();
 
     // Extract conversation text from hook data

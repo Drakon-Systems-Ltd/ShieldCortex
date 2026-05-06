@@ -10,6 +10,18 @@
 import { ConsolidationResult } from '../memory/types.js';
 
 /**
+ * Worker profile.
+ *   - 'full': dashboard / api / worker modes — runs medium tick, cloud sync,
+ *     link discovery, the works.
+ *   - 'mcp':  default MCP-server mode (one process per Claude Code window) —
+ *     keeps consolidation alive but skips heavy/networked work so we don't
+ *     multiply background load by the number of open windows. Without this,
+ *     hooks-only installs never run consolidation and STM never graduates
+ *     to LTM (#45).
+ */
+export type WorkerProfile = 'full' | 'mcp';
+
+/**
  * Configuration for the brain worker
  */
 export interface WorkerConfig {
@@ -36,6 +48,9 @@ export interface WorkerConfig {
 
   /** High activity threshold - memories created in 30 min (default: 5) */
   highActivityThreshold: number;
+
+  /** Worker profile - 'full' (default) or 'mcp' (lite, see WorkerProfile docs) */
+  profile: WorkerProfile;
 }
 
 /**
@@ -50,7 +65,15 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
   maxLinksPerCycle: 10,
   contradictionScanLimit: 50,
   highActivityThreshold: 5,
+  profile: 'full',
 };
+
+/**
+ * MCP-profile interval override. 15 min vs full's 5 min — one MCP server runs
+ * per Claude Code window, so we want lower per-window cadence to keep total
+ * background work in check across many windows.
+ */
+export const MCP_LIGHT_TICK_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
  * Result of a light tick operation

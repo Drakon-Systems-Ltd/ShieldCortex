@@ -29,6 +29,7 @@ import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
 import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
+import { deriveProjectKey } from './lib/project-key.mjs';
 
 // Database paths (with legacy fallback)
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
@@ -63,29 +64,6 @@ const CATEGORY_EXTRACTION_THRESHOLDS = {
   relationship: 0.35,
   custom: 0.35,
 };
-
-// ==================== PROJECT DETECTION ====================
-
-const SKIP_DIRECTORIES = [
-  'src', 'lib', 'dist', 'build', 'out',
-  'node_modules', '.git', '.next', '.cache',
-  'test', 'tests', '__tests__', 'spec',
-  'bin', 'scripts', 'config', 'public', 'static',
-];
-
-function extractProjectFromPath(path) {
-  if (!path) return null;
-  const segments = path.split(/[/\\]/).filter(Boolean);
-  if (segments.length === 0) return null;
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const segment = segments[i];
-    if (!SKIP_DIRECTORIES.includes(segment.toLowerCase())) {
-      if (segment.startsWith('.')) continue;
-      return segment;
-    }
-  }
-  return null;
-}
 
 // ==================== DYNAMIC THRESHOLD ====================
 
@@ -442,7 +420,7 @@ process.stdin.on('end', () => {
     const hookData = JSON.parse(input || '{}');
 
     const reason = hookData.reason || 'unknown';
-    const project = extractProjectFromPath(hookData.cwd);
+    const project = deriveProjectKey(hookData.cwd);
     const autoMemConfig = getAutoMemoryConfig();
 
     // Config gate: opt-in (default off). Preserves the historical default

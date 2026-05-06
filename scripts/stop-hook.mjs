@@ -24,6 +24,7 @@ import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
 import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
+import { deriveProjectKey } from './lib/project-key.mjs';
 
 // Sentinel directory for once-per-session "disabled" log lines. Without this
 // the stop hook bails silently on every turn when autoMemory.enableStop is
@@ -88,28 +89,6 @@ const CATEGORY_EXTRACTION_THRESHOLDS = {
   relationship: 0.45,
   custom: 0.45,
 };
-
-// ==================== PROJECT DETECTION ====================
-
-const SKIP_DIRECTORIES = [
-  'src', 'lib', 'dist', 'build', 'out',
-  'node_modules', '.git', '.next', '.cache',
-  'test', 'tests', '__tests__', 'spec',
-  'bin', 'scripts', 'config', 'public', 'static',
-];
-
-function extractProjectFromPath(p) {
-  if (!p) return null;
-  const segments = p.split(/[/\\]/).filter(Boolean);
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const segment = segments[i];
-    if (!SKIP_DIRECTORIES.includes(segment.toLowerCase())) {
-      if (segment.startsWith('.')) continue;
-      return segment;
-    }
-  }
-  return null;
-}
 
 // ==================== SALIENCE (mirrors pre-compact) ====================
 
@@ -273,18 +252,17 @@ function getDynamicThreshold(count, max) {
   return 0.25;
 }
 
-// ==================== TURN COUNT (cheap, partial-read) ====================
+// ==================== TRANSCRIPT PEEK (cheap, partial-read) ====================
 
 /**
- * Count assistant turns in the last `windowBytes` of the transcript.
- * Doesn't parse — just counts occurrences of the assistant role marker.
- * That's a very rough approximation but it's enough for sample-every-N
- * decisions and an order of magnitude cheaper than full JSON parse.
+ * Read the last `windowBytes` of the transcript as raw text and count
+ * assistant-role markers. Used for both the modulo sampling gate and the
+ * salience-bypass probe — one disk read serves both decisions.
  */
-function countAssistantTurns(transcriptPath, windowBytes) {
-  if (!transcriptPath) return 0;
+function peekRecentTranscript(transcriptPath, windowBytes) {
+  if (!transcriptPath) return { turnCount: 0, raw: '' };
   const resolved = transcriptPath.replace(/^~/, homedir());
-  if (!existsSync(resolved)) return 0;
+  if (!existsSync(resolved)) return { turnCount: 0, raw: '' };
   try {
     const stat = statSync(resolved);
     const bytes = Math.min(stat.size, windowBytes);
@@ -297,12 +275,31 @@ function countAssistantTurns(transcriptPath, windowBytes) {
     } finally {
       closeSync(fd);
     }
-    // Each assistant message line carries `"role":"assistant"` (or `"type":"assistant"`).
-    // Count occurrences of either marker — close enough for sampling decisions.
-    return (raw.match(/"role":"assistant"|"type":"assistant"/g) || []).length;
+    const turnCount = (raw.match(/"role":"assistant"|"type":"assistant"/g) || []).length;
+    return { turnCount, raw };
   } catch {
-    return 0;
+    return { turnCount: 0, raw: '' };
   }
+}
+
+/**
+ * Cheap salience probe over the recent transcript window. A turn is "salient"
+ * (and worth bypassing the modulo gate for) when:
+ *   - it carries a fenced code block — strong signal of code work / errors / diffs
+ *   - or ≥2 keyword categories hit (architecture, error, decision, learning,
+ *     pattern, code-reference)
+ */
+function isSalientWindow(rawText) {
+  if (!rawText) return false;
+  if (/```/.test(rawText)) return true;
+  let hits = 0;
+  if (detectKeywords(rawText, ARCHITECTURE_KEYWORDS)) hits++;
+  if (detectKeywords(rawText, ERROR_KEYWORDS)) hits++;
+  if (detectKeywords(rawText, DECISION_KEYWORDS)) hits++;
+  if (detectKeywords(rawText, LEARNING_KEYWORDS)) hits++;
+  if (detectKeywords(rawText, PATTERN_KEYWORDS)) hits++;
+  if (detectCodeReferences(rawText)) hits++;
+  return hits >= 2;
 }
 
 // ==================== MAIN ====================
@@ -346,13 +343,20 @@ process.stdin.on('end', () => {
 
     const samplingTurns = autoMemConfig.stopHookSamplingTurns;
     const windowBytes = autoMemConfig.stopHookWindowBytes;
+    const salienceBypassEnabled = autoMemConfig.stopHookSalienceBypass;
 
-    const turnCount = countAssistantTurns(hookData.transcript_path, windowBytes);
-    if (turnCount === 0 || turnCount % samplingTurns !== 0) {
-      // Off-sample. Surface the sampling decision to stderr so the
-      // "1-in-N turns" behaviour stops being invisible (was a discoverability
-      // gap flagged in #41) — and still record telemetry so the dashboard
-      // shows the hook is actually wired and active.
+    // Use a smaller window for the cheap peek so off-sample turns stay fast.
+    // The full extraction below still uses the configured windowBytes.
+    const peekBytes = Math.min(32 * 1024, windowBytes);
+    const peek = peekRecentTranscript(hookData.transcript_path, peekBytes);
+    const turnCount = peek.turnCount;
+    const onSample = turnCount > 0 && turnCount % samplingTurns === 0;
+    const salientBypass = salienceBypassEnabled && !onSample && isSalientWindow(peek.raw);
+
+    if (!onSample && !salientBypass) {
+      // Off-sample, no salience bypass. Surface the sampling decision to stderr
+      // so the "1-in-N turns" behaviour stops being invisible (#41), and still
+      // record telemetry so the dashboard shows the hook is wired and active.
       console.error(`[shieldcortex stop-hook] telemetry-only turn=${turnCount}/${samplingTurns}`);
       if (existsSync(DB_PATH)) {
         try {
@@ -371,7 +375,7 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
 
-    const project = extractProjectFromPath(hookData.cwd);
+    const project = deriveProjectKey(hookData.cwd);
     const transcriptOut = readTranscriptText(hookData.transcript_path, {
       maxBytes: windowBytes,
       maxLines: autoMemConfig.maxTranscriptLines,
@@ -409,7 +413,8 @@ process.stdin.on('end', () => {
             console.error(`[stop] Failed to save "${memory.title}": ${err.message}`);
           }
         }
-        console.error(`[stop] Sampled turn=${turnCount}: ${extractedCount} memories extracted`);
+        const sampleReason = salientBypass ? `bypass=salience turn=${turnCount}` : `turn=${turnCount}`;
+        console.error(`[stop] Sampled ${sampleReason}: ${extractedCount} memories extracted`);
       }
     }
   } catch (err) {

@@ -79,7 +79,7 @@ import { handleCodexCommand } from './setup/codex.js';
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { disposeModel, preloadModel } from './embeddings/index.js';
-import { stopDefaultWorker } from './worker/brain-worker.js';
+import { startDefaultWorker, stopDefaultWorker } from './worker/brain-worker.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
@@ -189,6 +189,21 @@ async function startMcpServer(dbPath?: string): Promise<void> {
 
   // Connect via stdio transport
   await server.connect(transport);
+
+  // Start the brain worker in MCP-lite profile so STM→LTM consolidation runs
+  // even on hooks-only installs (no dashboard, no `service install`). Without
+  // this, MCP-only deployments accumulate STM forever and never promote (#45).
+  // The MCP profile uses a 15 min cadence and skips medium-tick + cloud-sync
+  // work to keep total background load bounded across many open windows.
+  // Disabled via SHIELDCORTEX_DISABLE_WORKER=1 for forensics / debugging.
+  if (process.env.SHIELDCORTEX_DISABLE_WORKER !== '1') {
+    try {
+      startDefaultWorker({ profile: 'mcp' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[shieldcortex] Brain worker autostart failed (continuing without):', msg);
+    }
+  }
 
   // Preload embedding model in background so first tool call doesn't hang.
   // Fire-and-forget: failure is fine — searchMemories falls back to FTS-only.

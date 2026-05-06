@@ -15,7 +15,14 @@ const DEFAULTS = Object.freeze({
   maxTranscriptBytes: 1024 * 1024,
   maxTranscriptLines: 5000,
   keepSlashCommandProse: true,
-  stopHookSamplingTurns: 10,
+  // Lowered 10 → 5 in v4.14.0. At 1-in-10 the realistic capture rate over
+  // typical sessions was ~7%, which left LTM near-empty (#44). Salience
+  // bypass below catches high-signal turns at any cadence.
+  stopHookSamplingTurns: 5,
+  // Bypass the modulo gate when the last assistant turn carries a fenced
+  // code block or hits multiple keyword categories — those turns are
+  // disproportionately what we want to remember.
+  stopHookSalienceBypass: true,
   stopHookWindowBytes: 256 * 1024,
   enableSessionEnd: false,
   enableStop: false,
@@ -39,6 +46,9 @@ export function getAutoMemoryConfig() {
       ? overrides.keepSlashCommandProse
       : DEFAULTS.keepSlashCommandProse,
     stopHookSamplingTurns: pickPositiveInt(overrides.stopHookSamplingTurns, DEFAULTS.stopHookSamplingTurns),
+    stopHookSalienceBypass: typeof overrides.stopHookSalienceBypass === 'boolean'
+      ? overrides.stopHookSalienceBypass
+      : DEFAULTS.stopHookSalienceBypass,
     stopHookWindowBytes: pickPositiveInt(overrides.stopHookWindowBytes, DEFAULTS.stopHookWindowBytes),
     enableSessionEnd: overrides.enableSessionEnd === true,
     enableStop: overrides.enableStop === true,

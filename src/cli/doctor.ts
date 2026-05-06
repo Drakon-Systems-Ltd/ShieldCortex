@@ -720,6 +720,209 @@ async function checkOpenClawResidue(): Promise<CheckResult> {
   }
 }
 
+// ── Check 9: Auto-memory sampling rate (#44) ──────────────
+/**
+ * Reports the resolved `autoMemory.stopHookSamplingTurns` and salience-bypass
+ * setting. Defaults dropped 10 → 5 (and salience bypass added) in v4.14.0;
+ * warn if a user pinned a sparser cadence likely to under-feed LTM.
+ *
+ * Reads the config file directly rather than importing the .mjs helper so
+ * doctor doesn't depend on path layout between dist/ and scripts/.
+ */
+async function checkAutoMemorySampling(): Promise<CheckResult> {
+  try {
+    const configPath = path.join(getShieldCortexDir(), 'config.json');
+    let raw: { autoMemory?: { stopHookSamplingTurns?: number; stopHookSalienceBypass?: boolean } } = {};
+    if (fs.existsSync(configPath)) {
+      try {
+        raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      } catch {
+        /* fall through to defaults */
+      }
+    }
+    const overrides = raw.autoMemory ?? {};
+    const sampling =
+      typeof overrides.stopHookSamplingTurns === 'number' &&
+      Number.isFinite(overrides.stopHookSamplingTurns) &&
+      overrides.stopHookSamplingTurns > 0
+        ? Math.floor(overrides.stopHookSamplingTurns)
+        : 5; // default in auto-memory-config.mjs as of v4.14.0
+    const bypassEnabled =
+      typeof overrides.stopHookSalienceBypass === 'boolean' ? overrides.stopHookSalienceBypass : true;
+    const bypass = bypassEnabled ? 'on' : 'off';
+    if (sampling <= 5) {
+      return {
+        label: 'Auto-memory sampling',
+        status: 'pass',
+        message: `every ${sampling} turn(s), salience-bypass ${bypass}`,
+      };
+    }
+    return {
+      label: 'Auto-memory sampling',
+      status: 'warn',
+      message: `every ${sampling} turn(s), salience-bypass ${bypass} — sparser than recommended`,
+      fix: 'Edit ~/.shieldcortex/config.json autoMemory.stopHookSamplingTurns (≤ 5 recommended)',
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label: 'Auto-memory sampling', status: 'info', message: `check skipped — ${msg}` };
+  }
+}
+
+// ── Check 10: Brain-worker freshness (#45) ────────────────
+/**
+ * The MCP server starts a lite-profile brain worker on connect (v4.14.0).
+ * Each light tick writes to ~/.shieldcortex/state/worker.json. If the
+ * timestamp is missing or older than 30 min, consolidation has likely
+ * stalled — STM won't graduate to LTM.
+ */
+async function checkBrainWorker(): Promise<CheckResult> {
+  if (process.env.SHIELDCORTEX_DISABLE_WORKER === '1') {
+    return {
+      label: 'Brain worker',
+      status: 'info',
+      message: 'disabled via SHIELDCORTEX_DISABLE_WORKER=1',
+    };
+  }
+  const statePath = path.join(getShieldCortexDir(), 'state', 'worker.json');
+  if (!fs.existsSync(statePath)) {
+    return {
+      label: 'Brain worker',
+      status: 'warn',
+      message: 'no worker.json — worker has not run yet',
+      fix: 'Start an MCP-bound session (Claude Code) or run `shieldcortex worker` to drive consolidation',
+    };
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as {
+      pid?: number;
+      profile?: string;
+      lastLightTick?: string;
+    };
+    const last = raw.lastLightTick ? new Date(raw.lastLightTick) : null;
+    if (!last || Number.isNaN(last.getTime())) {
+      return {
+        label: 'Brain worker',
+        status: 'warn',
+        message: 'worker.json present but lastLightTick missing/invalid',
+        fix: 'Restart Claude Code to spawn a fresh MCP server',
+      };
+    }
+    const ageMs = Date.now() - last.getTime();
+    const ageMin = Math.round(ageMs / 60000);
+    if (ageMs > 30 * 60 * 1000) {
+      return {
+        label: 'Brain worker',
+        status: 'warn',
+        message: `last tick ${ageMin}m ago (profile=${raw.profile ?? '?'}, pid=${raw.pid ?? '?'})`,
+        fix: 'Restart Claude Code or run `shieldcortex worker` to resume consolidation',
+      };
+    }
+    return {
+      label: 'Brain worker',
+      status: 'pass',
+      message: `last tick ${ageMin}m ago (profile=${raw.profile ?? '?'}, pid=${raw.pid ?? '?'})`,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label: 'Brain worker', status: 'warn', message: `check failed — ${msg}` };
+  }
+}
+
+// ── Check 11: Project-key consistency (#42) ───────────────
+/**
+ * Detects rows tagged with both legacy basename keys and canonical
+ * owner-repo keys (the symptom of pre-v4.14.0 stop-hook writes). If any
+ * basename collides with a `<something>-<basename>` form already in the
+ * DB, point the user at `repair-project-keys`.
+ */
+async function checkProjectKeyConsistency(): Promise<CheckResult> {
+  const dbPath = getDbPath();
+  if (!fs.existsSync(dbPath)) {
+    return { label: 'Project keys', status: 'info', message: 'skipped (no DB yet)' };
+  }
+  try {
+    const Database = require('better-sqlite3');
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const rows = db
+        .prepare("SELECT DISTINCT project FROM memories WHERE project IS NOT NULL AND project != ''")
+        .all() as Array<{ project: string }>;
+      const keys = rows.map((r) => r.project);
+      const collisions: Array<{ legacy: string; canonical: string }> = [];
+      for (const candidate of keys) {
+        // A candidate is "legacy-looking" if it has no hyphen (cwd basename).
+        if (candidate.includes('-')) continue;
+        const suffix = `-${candidate}`;
+        const matched = keys.find((k) => k !== candidate && k.endsWith(suffix));
+        if (matched) collisions.push({ legacy: candidate, canonical: matched });
+      }
+      if (collisions.length === 0) {
+        return { label: 'Project keys', status: 'pass', message: `${keys.length} distinct, no legacy/canonical collisions` };
+      }
+      const example = collisions.slice(0, 3).map((c) => `${c.legacy} ↔ ${c.canonical}`).join('; ');
+      const more = collisions.length > 3 ? ` (+${collisions.length - 3} more)` : '';
+      return {
+        label: 'Project keys',
+        status: 'warn',
+        message: `${collisions.length} legacy/canonical collision(s): ${example}${more}`,
+        fix: 'Run `shieldcortex memories repair-project-keys --scan-paths <root>` (dry-run by default)',
+      };
+    } finally {
+      db.close();
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label: 'Project keys', status: 'warn', message: `check failed — ${msg}` };
+  }
+}
+
+// ── Check 12: Hook timeouts (#43) ─────────────────────────
+/**
+ * Compares each ShieldCortex hook's timeout in ~/.claude/settings.json
+ * against the canonical values written by `shieldcortex setup`. Catches
+ * the v4.13.x silent-recall failure mode where users on a hand-edited
+ * settings.json still ran with `UserPromptSubmit.timeout: 2`.
+ */
+async function checkHookTimeouts(): Promise<CheckResult> {
+  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  if (!fs.existsSync(settingsPath)) {
+    return { label: 'Hook timeouts', status: 'info', message: 'skipped (settings.json not found)' };
+  }
+  try {
+    const { CANONICAL_HOOK_TIMEOUTS } = await import('../setup/settings-hooks.js');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      hooks?: Record<string, Array<{ hooks?: Array<{ command?: string; timeout?: number }> }>>;
+    };
+    const hooks = settings.hooks ?? {};
+    const drift: string[] = [];
+    for (const [name, expected] of Object.entries(CANONICAL_HOOK_TIMEOUTS)) {
+      const entries = hooks[name];
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        for (const h of entry.hooks ?? []) {
+          if (typeof h.command !== 'string' || !h.command.includes('shieldcortex')) continue;
+          if (typeof h.timeout === 'number' && h.timeout < expected) {
+            drift.push(`${name}=${h.timeout}s (canonical ${expected}s)`);
+          }
+        }
+      }
+    }
+    if (drift.length === 0) {
+      return { label: 'Hook timeouts', status: 'pass', message: 'all canonical' };
+    }
+    return {
+      label: 'Hook timeouts',
+      status: 'warn',
+      message: `below canonical: ${drift.join(', ')}`,
+      fix: 'Re-run `shieldcortex install` to restore canonical timeouts',
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label: 'Hook timeouts', status: 'info', message: `check skipped — ${msg}` };
+  }
+}
+
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
   const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
@@ -769,7 +972,11 @@ export async function runDoctor(): Promise<void> {
     checkWritePath, // Smoke test: real INSERT/SELECT/DELETE round-trip — catches silent schema drift
     checkMemoryStats,
     checkHooks,
+    checkHookTimeouts,
     checkAutoMemoryHooks,
+    checkAutoMemorySampling,
+    checkBrainWorker,
+    checkProjectKeyConsistency,
     checkProcesses,
     checkDiskUsage,
     checkLockFile,

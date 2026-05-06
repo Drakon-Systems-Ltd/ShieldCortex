@@ -25,7 +25,11 @@ const CORTEX_HOOKS: Record<string, HookEntry> = {
   // agents when the session is already gone. PreCompact handles memory
   // extraction. The cortex-memory hook handles session-end for OpenClaw.
   UserPromptSubmit: {
-    hooks: [{ type: 'command', command: 'shieldcortex hook prompt-recall', timeout: 2 }],
+    // Cold-spawn floor for the recall hook is ~1.5 s (Node + better-sqlite3 +
+    // FTS query). The previous 2 s ceiling SIGKILLed the hook silently under
+    // any IO pressure, dropping recall context with no user-visible error
+    // (#43). 5 s leaves ~3 s headroom on a busy host.
+    hooks: [{ type: 'command', command: 'shieldcortex hook prompt-recall', timeout: 5 }],
   },
 };
 
@@ -35,6 +39,20 @@ const CORTEX_HOOKS: Record<string, HookEntry> = {
  * Keep this alongside CORTEX_HOOKS — drift between the two is what caused #23.
  */
 export const REQUIRED_HOOK_NAMES: readonly string[] = Object.freeze(Object.keys(CORTEX_HOOKS));
+
+/**
+ * Canonical timeout (seconds) for each ShieldCortex hook. Used by
+ * `shieldcortex doctor` to flag drift in hand-edited settings.json files —
+ * a too-tight UserPromptSubmit timeout silently dropped recall pre-#43.
+ */
+export const CANONICAL_HOOK_TIMEOUTS: Readonly<Record<string, number>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(CORTEX_HOOKS).map(([name, entry]) => [
+      name,
+      entry.hooks?.[0]?.timeout ?? 0,
+    ]),
+  ),
+);
 
 const STOP_HOOK: HookEntry = {
   hooks: [{ type: 'command', command: 'shieldcortex hook stop', timeout: 10 }],

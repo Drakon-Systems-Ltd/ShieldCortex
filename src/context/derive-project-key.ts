@@ -1,15 +1,17 @@
 /**
- * Shared project-key derivation for ShieldCortex hooks.
+ * TypeScript port of scripts/lib/project-key.mjs.
+ *
+ * Both the MCP-server side (this module) and the hook scripts must agree on
+ * how a cwd maps to a project key — otherwise writes and reads fall under
+ * different scopes and recall silently misses (issue #42).
  *
  * Resolution order:
- *   1. Env override: SHIELDCORTEX_PROJECT_KEY
- *   2. Config override: ~/.shieldcortex/config.json → projectKey (string)
- *   3. Config alias: ~/.shieldcortex/config.json → projectAliases[basename]
- *   4. Git origin remote: walk up from cwd, parse owner/repo from origin URL
- *   5. Cwd basename (legacy behaviour), skipping noise directories
- *
- * Returns `null` if no project can be derived (hooks should treat that as
- * "don't emit project-scoped output").
+ *   1. SHIELDCORTEX_PROJECT_KEY env override
+ *   2. CLAUDE_MEMORY_PROJECT env override (legacy alias for SC env var)
+ *   3. ~/.shieldcortex/config.json projectKey
+ *   4. ~/.shieldcortex/config.json projectAliases[basename]
+ *   5. Git origin owner-repo (walk up from cwd)
+ *   6. Cwd basename (legacy behaviour), skipping noise directories
  */
 
 import { existsSync, readFileSync, statSync } from 'fs';
@@ -23,20 +25,15 @@ const SKIP_DIRECTORIES = [
   'bin', 'scripts', 'config', 'public', 'static',
 ];
 
-function resolveHome() {
-  // Prefer env vars over os.homedir(): on POSIX Node ignores $HOME mutations
-  // because libuv uses getpwuid. Tests (and users who `env HOME=...`) rely on
-  // the env var path.
+function resolveHome(): string {
   return process.env.HOME || process.env.USERPROFILE || homedir();
 }
 
-function configPath() {
-  // Resolved per-call so tests that swap HOME between assertions get a fresh
-  // path without having to re-import the module.
+function configPath(): string {
   return join(resolveHome(), '.shieldcortex', 'config.json');
 }
 
-function loadConfig() {
+function loadConfig(): Record<string, unknown> {
   try {
     const p = configPath();
     if (!existsSync(p)) return {};
@@ -46,7 +43,7 @@ function loadConfig() {
   }
 }
 
-function basenameFromCwd(path) {
+export function basenameFromCwd(path: string | null | undefined): string | null {
   if (!path) return null;
   const segments = path.split(/[/\\]/).filter(Boolean);
   for (let i = segments.length - 1; i >= 0; i--) {
@@ -58,7 +55,7 @@ function basenameFromCwd(path) {
   return null;
 }
 
-function findGitDir(startPath) {
+function findGitDir(startPath: string): string | null {
   let current = startPath;
   const root = '/';
   for (let i = 0; i < 40 && current && current !== root; i++) {
@@ -71,25 +68,18 @@ function findGitDir(startPath) {
   return null;
 }
 
-function parseOriginUrl(url) {
+function parseOriginUrl(url: string): { owner: string; repo: string } | null {
   if (!url) return null;
   const trimmed = url.trim();
-
-  // git@host:owner/repo(.git)
   const sshMatch = trimmed.match(/^[^@]+@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/);
   if (sshMatch) return { owner: sshMatch[1], repo: sshMatch[2] };
-
-  // https://host/owner/repo(.git) or ssh://git@host/owner/repo(.git)
   const urlMatch = trimmed.match(/^[a-z]+:\/\/[^/]+\/(.+?)\/([^/]+?)(?:\.git)?$/i);
   if (urlMatch) return { owner: urlMatch[1], repo: urlMatch[2] };
-
   return null;
 }
 
-function readOriginFromGitConfig(gitPath) {
+function readOriginFromGitConfig(gitPath: string): { owner: string; repo: string } | null {
   try {
-    // Handle worktree / submodule: .git may be a FILE pointing at the real
-    // gitdir. When it's a directory (normal repo), just use it as-is.
     let realGitDir = gitPath;
     const stats = statSync(gitPath);
     if (stats.isFile()) {
@@ -100,9 +90,9 @@ function readOriginFromGitConfig(gitPath) {
         return null;
       }
     }
-    const configPath = join(realGitDir, 'config');
-    if (!existsSync(configPath)) return null;
-    const content = readFileSync(configPath, 'utf-8');
+    const cfgPath = join(realGitDir, 'config');
+    if (!existsSync(cfgPath)) return null;
+    const content = readFileSync(cfgPath, 'utf-8');
     const section = content.match(/\[remote\s+"origin"\][^[]*/);
     if (!section) return null;
     const urlMatch = section[0].match(/\burl\s*=\s*(.+)/);
@@ -114,24 +104,30 @@ function readOriginFromGitConfig(gitPath) {
 }
 
 /**
- * Derive the project key for a given working directory.
- * @param {string} cwd
- * @returns {string | null}
+ * Derive the project key for a given working directory. Mirrors
+ * scripts/lib/project-key.mjs::deriveProjectKey so MCP-server-side and
+ * hook-side keys agree.
  */
-export function deriveProjectKey(cwd) {
+export function deriveProjectKey(cwd: string | null | undefined): string | null {
   if (process.env.SHIELDCORTEX_PROJECT_KEY) {
     return process.env.SHIELDCORTEX_PROJECT_KEY;
   }
+  if (process.env.CLAUDE_MEMORY_PROJECT) {
+    const v = process.env.CLAUDE_MEMORY_PROJECT.trim();
+    if (v) return v;
+  }
 
   const config = loadConfig();
-  if (typeof config.projectKey === 'string' && config.projectKey.trim()) {
-    return config.projectKey.trim();
+  const projectKey = (config as { projectKey?: unknown }).projectKey;
+  if (typeof projectKey === 'string' && projectKey.trim()) {
+    return projectKey.trim();
   }
 
   const basename = basenameFromCwd(cwd);
 
-  if (config.projectAliases && typeof config.projectAliases === 'object' && basename) {
-    const alias = config.projectAliases[basename];
+  const aliases = (config as { projectAliases?: Record<string, unknown> }).projectAliases;
+  if (aliases && typeof aliases === 'object' && basename) {
+    const alias = aliases[basename];
     if (typeof alias === 'string' && alias.trim()) return alias.trim();
   }
 
@@ -143,16 +139,9 @@ export function deriveProjectKey(cwd) {
     }
   }
 
-  // Hot path post-#42 fix: this branch should only fire outside any git repo
-  // or when origin parsing fails. If users see this often after upgrading,
-  // the helper itself needs another look.
-  if (process.env.SHIELDCORTEX_DEBUG) {
-    process.stderr.write(`[shieldcortex deriveProjectKey] basename fallback for cwd=${cwd}\n`);
-  }
   return basename;
 }
 
-// Exposed for tests
 export const __internal = {
   parseOriginUrl,
   basenameFromCwd,

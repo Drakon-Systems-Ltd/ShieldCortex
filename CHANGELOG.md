@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.0] - 2026-05-06
+
+**Auto-memory hardening — fixes #42, #43, #44, #45 in one coordinated release.**
+
+Field-filed by Jarvis after observing 7 days of effectively empty memory on a stock install: 5 STM rows, 0 LTM, 0 episodic. Investigation surfaced four faults in the auto-memory pipeline, all real, all stacking — silent-amnesia from a project-key mismatch (#42), recall drops from a too-tight hook timeout (#43), 90% sampling loss from a too-sparse modulo gate (#44), and STM→LTM promotion never running because the brain worker never autostarted under the default MCP-only install shape (#45). Each issue's fix on its own would still have left the others producing the same user-visible symptom ("memory doesn't work"), so they ship together as 4.14.0 instead of split-tracking.
+
+### Fixed — silent amnesia from project-key mismatch (#42)
+
+- **All hook writers now derive project keys via the shared `deriveProjectKey()` helper.** `scripts/stop-hook.mjs`, `scripts/session-end-hook.mjs`, and `scripts/pre-compact-hook.mjs` each carried their own local `extractProjectFromPath()` (cwd-basename only) while every reader (`prompt-recall-hook.mjs`, `session-start-hook.mjs`, MCP tools) used the canonical helper at [scripts/lib/project-key.mjs](scripts/lib/project-key.mjs) with its 5-tier fallback (env override → config override → `projectAliases` → git origin → basename). When cwd basename ≠ git-origin slug — common in worktrees and renamed checkouts — writes were tagged with the basename and reads queried the canonical key. Captured memories were physically saved but invisible to recall.
+- **TypeScript port of the helper.** New [src/context/derive-project-key.ts](src/context/derive-project-key.ts) mirrors the .mjs helper for the MCP-server side, so `getProjectContext`'s init path agrees with the hook scripts on every cwd. Both `SHIELDCORTEX_PROJECT_KEY` (preferred) and `CLAUDE_MEMORY_PROJECT` (legacy alias) are honoured.
+- **Diagnostic stderr line on basename fallback.** [scripts/lib/project-key.mjs:151-155](scripts/lib/project-key.mjs#L151-L155) emits a one-line debug warning when `SHIELDCORTEX_DEBUG=1` and resolution falls all the way through to the cwd basename. After this fix that path should be cold; if users see it in logs, the helper itself has another gap.
+
+### Added — `shieldcortex memories repair-project-keys` (#42 data recovery)
+
+Existing users have orphaned rows tagged with cwd basenames. Ship a non-destructive repair tool so they can reclaim them.
+
+- **`shieldcortex memories repair-project-keys [flags]`.** New subcommand at [src/cli/migrate-legacy.ts](src/cli/migrate-legacy.ts) with explicit `--map basename=canonical` overrides, `--scan-paths <dir,dir>` to walk dev roots one level deep and propose mappings against existing legacy DB keys, `--project <key>` to limit the rewrite to one key, and `--include-stm` to extend the rewrite to short-term rows (default: long-term + episodic only). **Dry-run by default** — `--execute` is required to write. Auto-backs the DB up to `<db>.bak.<timestamp>` before writing, and emits a JSON log to `~/.shieldcortex/logs/project-key-repair-<timestamp>.json` with every rewrite. Idempotent — second run after success is a no-op.
+
+### Fixed — recall hook timeout dropped under IO pressure (#43)
+
+- **`UserPromptSubmit` hook timeout bumped 2 s → 5 s.** [src/setup/settings-hooks.ts:27-33](src/setup/settings-hooks.ts#L27-L33). Cold-spawn floor on the recall hook is ~1.5 s (Node + better-sqlite3 + FTS query); the previous 2 s ceiling SIGKILLed the hook silently under any concurrent IO and dropped recall context with no user-visible error. 5 s leaves ~3 s headroom on a busy host. The hook itself does not load the embedding model, so this is purely Node startup + sqlite open headroom.
+
+### Fixed — stop-hook 1-in-10 sampling left LTM under-fed (#44)
+
+- **Default `stopHookSamplingTurns` lowered 10 → 5.** [scripts/lib/auto-memory-config.mjs:14-26](scripts/lib/auto-memory-config.mjs#L14-L26). At 1-in-10 the realistic capture rate over typical sessions was ~7%; combined with #45 below this left LTM near-empty after a week of normal use.
+- **Salience-aware bypass.** New `autoMemory.stopHookSalienceBypass` (default `true`) lets the stop-hook skip the modulo gate when the recent transcript window contains a fenced code block or hits ≥2 keyword categories (architecture, error, decision, learning, pattern, code-reference). High-signal turns get captured at any cadence; low-signal turns still throttle. Implementation in [scripts/stop-hook.mjs](scripts/stop-hook.mjs) reuses the existing salience constants. Telemetry tags bypassed turns with `bypass=salience` so `shieldcortex status` can show how often each path fires.
+- **Existing user pins are preserved.** Users who explicitly set `stopHookSamplingTurns: 10` keep that value — config wins over the new default.
+
+### Fixed — STM→LTM promotion never ran on hooks-only installs (#45)
+
+- **Brain worker now autostarts in MCP-server mode** under a new lightweight `'mcp'` profile. [src/index.ts:191-207](src/index.ts#L191-L207) calls `startDefaultWorker({ profile: 'mcp' })` after the MCP transport connects, gated by `SHIELDCORTEX_DISABLE_WORKER` for forensics. Pre-4.14, the worker was only instantiated by `--mode dashboard` / `--mode api` / `--mode worker` — typical hooks-only installs never reached it, and `consolidate()` (the only place STM rows graduate to LTM) never fired.
+- **`'mcp'` profile is a strict subset of `'full'`.** [src/worker/brain-worker.ts](src/worker/brain-worker.ts) gates the heavy paths so MCP-spawned workers don't multiply background work across many open Claude Code windows: `lightTickIntervalMs` is 15 min (vs full's 5), `mediumTick` is skipped entirely (link discovery + contradiction scan are dashboard concerns), and cloud-sync calls (retry queue, heartbeat, Iron Dome refresh, cached pattern apply) are skipped. What remains: predictive consolidation, activation-cache pruning, and `consolidate()` cadence — exactly what STM→LTM graduation needs. All timers are `.unref()`'d so MCP exit isn't blocked.
+- **Worker freshness is now observable.** Each light tick persists `{pid, profile, lastLightTick}` to `~/.shieldcortex/state/worker.json` so `shieldcortex doctor` can flag stalls.
+
+### Added — `shieldcortex doctor` checks for the four issues
+
+Four new checks in [src/cli/doctor.ts](src/cli/doctor.ts):
+
+- **Auto-memory sampling.** Reports the resolved `stopHookSamplingTurns` and salience-bypass setting; warns if cadence > 5 with a fix command.
+- **Brain-worker freshness.** Reads `~/.shieldcortex/state/worker.json`; pass when `lastLightTick < 30 min`, warn otherwise with a "restart Claude Code" fix. Surfaces `SHIELDCORTEX_DISABLE_WORKER` when set.
+- **Project-key consistency.** Detects rows tagged under both a bare basename and a `<owner>-<basename>` form (the symptom of pre-4.14 stop-hook writes); points the user at `repair-project-keys`.
+- **Hook timeouts.** Compares each hook's `timeout` in `~/.claude/settings.json` against the canonical values exported as `CANONICAL_HOOK_TIMEOUTS` from [src/setup/settings-hooks.ts](src/setup/settings-hooks.ts); warns on drift below canonical (catches users still on hand-edited 2 s recall timeouts).
+
+### Tests
+
+- `src/__tests__/hooks-project-key-alignment.test.ts` (10 tests) — regression guard. Asserts every hook script imports `deriveProjectKey` and does not redefine a local `extractProjectFromPath`. Catches any future hook reverting to a private helper.
+- `src/__tests__/brain-worker-mcp-profile.test.ts` (3 tests) — pins the `'full'` default, the lite 15-min cadence under `'mcp'`, and explicit `lightTickIntervalMs` overrides.
+- `src/__tests__/repair-project-keys.test.ts` (5 tests) — seeds a hand-rolled DB with mixed legacy + canonical project keys, runs the repair tool with a `--map`, and asserts: dry-run is a no-op, `--execute` rewrites the right rows, `--include-stm` extends to short-term, the second run is idempotent, and `--project` limits the scope.
+- Existing 84 test suites (936 tests) all pass against the updated code paths — no regressions.
+
 ## [4.13.2] - 2026-05-05
 
 **Fix — doctor: stale-lock check produced false positives for long-running daemons.**
