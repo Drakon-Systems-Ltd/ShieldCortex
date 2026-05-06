@@ -113,6 +113,39 @@ function migrateNpxHooks(settings: Record<string, any>): number {
   return migrated;
 }
 
+/**
+ * Reconcile timeouts on existing ShieldCortex hook entries. Doctor warns
+ * users when an existing settings.json has a timeout below canonical (e.g.
+ * pre-#43 hand-edited 2 s UserPromptSubmit) and tells them to re-run
+ * `shieldcortex install` to fix it. Without this reconciliation the install
+ * step was a lie — it only added missing hooks. Now it also bumps timeouts
+ * on existing shieldcortex entries to match the canonical values declared
+ * alongside CORTEX_HOOKS.
+ */
+function reconcileHookTimeouts(settings: Record<string, any>): number {
+  let updated = 0;
+  if (!settings.hooks) return 0;
+
+  for (const [eventName, expectedTimeout] of Object.entries(CANONICAL_HOOK_TIMEOUTS)) {
+    if (!expectedTimeout) continue;
+    const entries = settings.hooks[eventName];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries as HookEntry[]) {
+      if (!entry.hooks || !Array.isArray(entry.hooks)) continue;
+      for (const hook of entry.hooks) {
+        if (typeof hook.command !== 'string' || !hook.command.includes('shieldcortex')) continue;
+        if (typeof hook.timeout === 'number' && hook.timeout < expectedTimeout) {
+          const previous = hook.timeout;
+          hook.timeout = expectedTimeout;
+          updated++;
+          console.log(`  ↑ Hook: ${eventName} (timeout ${previous}s → ${expectedTimeout}s)`);
+        }
+      }
+    }
+  }
+  return updated;
+}
+
 export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean }): void {
   const settings = readSettings();
   if (!settings.hooks) {
@@ -121,6 +154,10 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
 
   // First: migrate any stale npx commands to direct binary
   const migrated = migrateNpxHooks(settings);
+
+  // Second: reconcile timeouts on existing shieldcortex entries so doctor's
+  // "re-run install to restore canonical timeouts" suggestion actually works.
+  const timeoutsUpdated = reconcileHookTimeouts(settings);
 
   // SessionEnd handling is now bidirectional:
   //   - if --with-session-end was passed, install it (the .mjs gates execution
@@ -182,10 +219,12 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
     }
   }
 
-  const changed = added + migrated;
+  const changed = added + migrated + timeoutsUpdated;
   if (changed > 0) {
     writeSettings(settings);
-    console.log(`Hooks: ${added} added, ${migrated} migrated in ~/.claude/settings.json`);
+    const parts = [`${added} added`, `${migrated} migrated`];
+    if (timeoutsUpdated > 0) parts.push(`${timeoutsUpdated} timeout${timeoutsUpdated === 1 ? '' : 's'} updated`);
+    console.log(`Hooks: ${parts.join(', ')} in ~/.claude/settings.json`);
   } else {
     console.log('Hooks: all hooks already configured in ~/.claude/settings.json');
   }

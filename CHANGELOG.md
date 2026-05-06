@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.2] - 2026-05-06
+
+**Fix — `shieldcortex install` ignored timeout drift on existing hook entries.**
+
+Field-filed minutes after v4.14.1: `shieldcortex doctor` correctly flagged a too-low `UserPromptSubmit=2s (canonical 5s)` timeout (the v4.14.0 #43 check working as intended) and pointed users at `Re-run \`shieldcortex install\` to restore canonical timeouts`. But running install logged `= Hook: UserPromptSubmit (already configured)` and exited without updating the timeout — re-running doctor showed the same warning. The `setupHooks()` reconciliation only added missing hooks; existing shieldcortex entries were treated as immutable, regardless of stale timeout values.
+
+### Fixed
+
+- **`setupHooks` now reconciles timeouts on existing shieldcortex hook entries** ([src/setup/settings-hooks.ts](src/setup/settings-hooks.ts)). After the npx-migration pass, `reconcileHookTimeouts()` walks every hook event in `~/.claude/settings.json` and, for any entry whose `command` references shieldcortex AND whose `timeout` is *below* the canonical value in `CANONICAL_HOOK_TIMEOUTS`, bumps it to canonical. Entries with a higher-than-canonical timeout are left alone (user override wins). Non-shieldcortex entries are never touched. The install summary now reports `N timeout(s) updated` alongside `added` / `migrated` counts.
+- The doctor's `Hook timeouts` warning fix command now actually works: warn → install → no warn. Idempotent on re-run.
+
+### Tests
+
+- `src/setup/__tests__/hook-timeout-reconcile.test.ts` (4 tests) — pins the contract: legacy 2 s → 5 s bump, idempotent on canonical, leaves non-shieldcortex entries untouched, preserves user-set above-canonical values.
+
 ## [4.14.1] - 2026-05-06
 
 **Fix — `@drakon-systems/shieldcortex-realtime` plugin install fails on OpenClaw 2026.5.5+.**
