@@ -375,6 +375,27 @@ async function startWorkerMode(dbPath?: string): Promise<void> {
   initDatabase(dbPath);
   startDefaultWorker();
 
+  // Resilience handlers (v4.14.8). Without these, any throw outside a tick's
+  // try/catch — module load errors from optional integrations, fetch socket
+  // errors that leak past best-effort wrappers, transient SQLite errors during
+  // schema migration on startup — would crash the entire worker process and
+  // leave a stale `worker.json` (pid recorded, no further ticks). systemd
+  // would restart it under `service install`, but users running
+  // `shieldcortex worker` interactively had no supervisor.
+  process.on('uncaughtException', (err) => {
+    console.error('[BrainWorker] uncaughtException — continuing:', err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[BrainWorker] unhandledRejection — continuing:', reason);
+  });
+  // Ignore SIGHUP so SSH disconnect doesn't kill an interactive
+  // `shieldcortex worker` session. systemd users get this for free, but
+  // anyone running it from a terminal previously lost the worker the moment
+  // they logged out.
+  process.on('SIGHUP', () => {
+    console.error('[BrainWorker] SIGHUP ignored — keeping worker alive');
+  });
+
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║             ShieldCortex Worker Service                     ║
@@ -383,6 +404,10 @@ async function startWorkerMode(dbPath?: string): Promise<void> {
 ║  Heartbeats keep this device online in ShieldCortex Cloud   ║
 ║  Sync retries and graph maintenance remain active           ║
 ╚══════════════════════════════════════════════════════════════╝
+
+  For persistence across reboots, run:
+    shieldcortex service install --headless
+  (otherwise this process dies when the parent shell exits)
   `);
 
   const keepAlive = setInterval(() => {

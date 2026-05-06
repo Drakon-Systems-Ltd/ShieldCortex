@@ -813,6 +813,30 @@ async function checkAutoMemorySampling(): Promise<CheckResult> {
  * timestamp is missing or older than 30 min, consolidation has likely
  * stalled — STM won't graduate to LTM.
  */
+function isPidAlive(pid: number): boolean | null {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false; // No such process — definitely dead
+    if (code === 'EPERM') return true;  // Process exists but owned by another user
+    return null;                         // Unknown — don't make claims
+  }
+}
+
+function workerRecoveryFix(): string {
+  // The right recovery is platform-dependent. On a headless Linux host (most
+  // common shape: OpenClaw + bot user, no Claude Code), the durable answer
+  // is `service install --headless` plus `loginctl enable-linger`. On macOS
+  // and on dev machines running Claude Code, restarting the editor spawns
+  // a fresh MCP-bound worker.
+  if (process.platform === 'linux') {
+    return 'For persistence, run `shieldcortex service install --headless` (recommended on headless hosts) or restart Claude Code';
+  }
+  return 'Restart Claude Code or run `shieldcortex service install` to supervise the worker';
+}
+
 async function checkBrainWorker(): Promise<CheckResult> {
   if (process.env.SHIELDCORTEX_DISABLE_WORKER === '1') {
     return {
@@ -827,7 +851,7 @@ async function checkBrainWorker(): Promise<CheckResult> {
       label: 'Brain worker',
       status: 'warn',
       message: 'no worker.json — worker has not run yet',
-      fix: 'Start an MCP-bound session (Claude Code) or run `shieldcortex worker` to drive consolidation',
+      fix: workerRecoveryFix(),
     };
   }
   try {
@@ -842,23 +866,41 @@ async function checkBrainWorker(): Promise<CheckResult> {
         label: 'Brain worker',
         status: 'warn',
         message: 'worker.json present but lastLightTick missing/invalid',
-        fix: 'Restart Claude Code to spawn a fresh MCP server',
+        fix: workerRecoveryFix(),
       };
     }
     const ageMs = Date.now() - last.getTime();
     const ageMin = Math.round(ageMs / 60000);
+    const pid = typeof raw.pid === 'number' ? raw.pid : null;
+    const profile = raw.profile ?? '?';
+
+    // Pid liveness changes the meaning of staleness. A stale tick from a
+    // *dead* process is a different failure mode than a stale tick from a
+    // *running* process — only the first means "the worker crashed and
+    // nothing's coming". The fix-hint diverges accordingly.
+    const alive = pid != null ? isPidAlive(pid) : null;
+    if (pid != null && alive === false) {
+      return {
+        label: 'Brain worker',
+        status: 'warn',
+        message: `process gone (pid ${pid} dead, last tick ${ageMin}m ago, profile=${profile})`,
+        fix: workerRecoveryFix(),
+      };
+    }
     if (ageMs > 30 * 60 * 1000) {
       return {
         label: 'Brain worker',
         status: 'warn',
-        message: `last tick ${ageMin}m ago (profile=${raw.profile ?? '?'}, pid=${raw.pid ?? '?'})`,
-        fix: 'Restart Claude Code or run `shieldcortex worker` to resume consolidation',
+        message: `last tick ${ageMin}m ago (profile=${profile}, pid=${pid ?? '?'}${alive === true ? ', alive' : ''})`,
+        fix: alive === true
+          ? 'Worker process alive but ticks stalled — restart Claude Code or `shieldcortex service repair`'
+          : workerRecoveryFix(),
       };
     }
     return {
       label: 'Brain worker',
       status: 'pass',
-      message: `last tick ${ageMin}m ago (profile=${raw.profile ?? '?'}, pid=${raw.pid ?? '?'})`,
+      message: `last tick ${ageMin}m ago (profile=${profile}, pid=${pid ?? '?'})`,
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

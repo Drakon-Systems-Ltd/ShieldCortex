@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.8] - 2026-05-06
+
+**Worker resilience — `shieldcortex worker` survives SSH disconnect, uncaught throws, and the doctor knows when the process is actually dead.**
+
+Field report from a headless OpenClaw bot host: `shieldcortex doctor` reported `Brain worker: last tick 109m ago` repeatedly, with the only suggested fix being "run `shieldcortex worker`" — which kept dying. Three compounding causes: (1) the worker had no `uncaughtException` / `unhandledRejection` handlers, so anything thrown outside a tick's try/catch crashed the whole process; (2) interactive `shieldcortex worker` sessions were killed by SIGHUP on SSH disconnect; (3) the doctor's freshness check looked at `lastLightTick` but never verified the recorded pid was still alive, so a long-dead process and a busy-but-stalled process produced identical "stale tick" warnings with the same unhelpful fix.
+
+### Fixed
+
+- **`startWorkerMode`** ([src/index.ts](src/index.ts)). Adds `process.on('uncaughtException')` and `process.on('unhandledRejection')` handlers that log and continue rather than letting the process die. Adds `process.on('SIGHUP', () => …)` to ignore the signal so SSH disconnect doesn't take the worker with it. Startup banner now points users at `shieldcortex service install --headless` for durable supervision.
+
+### Changed
+
+- **`shieldcortex doctor` brain-worker check** ([src/cli/doctor.ts](src/cli/doctor.ts)). Now calls `process.kill(pid, 0)` against the recorded pid to distinguish three states: process gone (`pid X dead, last tick Nm ago`), process alive but ticks stalled (`alive` annotated in the message), and healthy. Fix-hints diverge accordingly — dead-process gets `service install --headless` on Linux; alive-but-stalled gets `service repair`. The "no worker.json yet" branch picks up the same platform-aware hint.
+
+No protocol or API changes. Functionally additive — every previous workflow keeps working, just with better observability and crash resilience.
+
 ## [4.14.7] - 2026-05-06
 
 **`shieldcortex update --force` — re-run the update flow even when already on latest.**
