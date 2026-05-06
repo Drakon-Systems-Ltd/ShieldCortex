@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.6] - 2026-05-06
+
+**UX — `shieldcortex update` is no longer a wall of text.**
+
+The old update flow streamed every line of `npm install` deprecation noise, every `Linked peerDependency` repetition from the OpenClaw installer, and a generic "Reconciling…" log per stage with no progress feedback. Field-filed: "make this functional, informative, and cool to watch — not boring."
+
+### Changed
+
+- **Progress-style update flow** ([src/cli/update.ts](src/cli/update.ts)). On a TTY, each stage shows an animated braille-frame spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) that gets overwritten in place with `✓ / ⚠ / ✗`, a one-line summary, and per-step duration on completion. Off TTY (CI, piped output) it falls back to plain `◦` / `✓` / `✗` lines.
+- **Header banner** shows the version delta `v4.14.5 → v4.14.6` rendered with colour and an arrow, replacing the old `Current version: vX / New version available: vY / Updating npm package…` triple.
+- **npm and openclaw output captured, not streamed.** `npm install -g` runs with `--silent --no-audit --no-fund` and `spawnSync` with piped stdio; no more `npm warn deprecated prebuild-install@7.1.3` spam, no more `51 packages are looking for funding`. Same for `openclaw plugins install`. On failure, the captured stdout+stderr is dumped between divider lines so the user sees what went wrong.
+- **`setupHooks()` output condensed** from four lines per run to a single status (`all canonical`, or `1 added, 2 timeout fix`, etc.). The verbose per-hook log lines are intercepted and parsed for the summary.
+- **Footer** shows total elapsed time and the next-step hint (`restart Claude Code / OpenClaw gateway`) on a single line, only when an update actually happened. No-op runs end with `done in 0.4s · already on latest`.
+- **Skipped stages render as `· OpenClaw plugin: not installed`** instead of being silently absent — users can see the full pipeline at a glance.
+- **v4.11.0 boundary notice** preserved (still printed once when crossing from <4.11.0) but reformatted to match the new visual style.
+
+Functionally identical to v4.14.5 — same four steps, same fallbacks, same v4.11.0 notice. Only the rendering changed.
+
 ## [4.14.5] - 2026-05-06
 
 **Doc fix — `--with-stop-hook` and `--with-session-end` install flags were missing from the CLI help.**
