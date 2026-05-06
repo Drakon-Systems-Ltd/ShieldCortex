@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.1] - 2026-05-06
+
+**Fix — `@drakon-systems/shieldcortex-realtime` plugin install fails on OpenClaw 2026.5.5+.**
+
+Field-filed by Jarvis within minutes of v4.14.0 going live: every fleet host running `shieldcortex update` saw the npm package install successfully but the OpenClaw plugin reinstall step bail with `HOOK.md missing in /tmp/openclaw-hook-…/extract/package/llm_input` from `validateHookDir`. OpenClaw 2026.5.5 introduced a new install-time hook-pack validator that, for every entry declared in `package.json` `openclaw.hooks`, requires a directory of that name at the package root containing a `HOOK.md` file plus one of `handler.{ts,js}` / `index.{ts,js}`. The plugin shipped only `dist/index.js` (registered via `openclaw.extensions`) and the `openclaw.hooks` array of strings — no per-hook directories. Same shape worked on 2026.5.4; broke on 2026.5.5.
+
+### Fixed
+
+- **Per-hook stub directories.** Added [plugins/openclaw/llm_input/](plugins/openclaw/llm_input), [plugins/openclaw/llm_output/](plugins/openclaw/llm_output), [plugins/openclaw/before_tool_call/](plugins/openclaw/before_tool_call), and [plugins/openclaw/session_end/](plugins/openclaw/session_end) — each containing a `HOOK.md` with YAML frontmatter (`name:`, `description:`) and a minimal `handler.js` stub. `validateHookDir` only checks file existence at install time; it doesn't load or invoke the stubs. The actual hook handlers are still registered at plugin init via `register(api)` in `dist/index.js` (referenced by `openclaw.extensions`), so runtime behaviour is unchanged.
+- **Plugin `files:` array extended** to include the four new directories so they ship in the published tarball.
+- **Plugin peerDependency** bumped to `shieldcortex: ^4.14.1`.
+
+Both `shieldcortex` and `@drakon-systems/shieldcortex-realtime` published to npm at 4.14.1. Users on 4.14.0 should pick this up automatically via `shieldcortex update`; the next OpenClaw plugin reinstall step will succeed against 2026.5.5+ runtimes.
+
 ## [4.14.0] - 2026-05-06
 
 **Auto-memory hardening — fixes #42, #43, #44, #45 in one coordinated release.**
