@@ -11,7 +11,7 @@
  * Behaviour-preserving — every step does what the old inline flow did.
  */
 
-import { spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { homedir } from 'os';
@@ -117,22 +117,59 @@ interface RunOpts {
   env?: NodeJS.ProcessEnv;
 }
 
-function runQuiet(cmd: string, args: string[], opts: RunOpts = {}): { stdout: string; stderr: string } {
-  const result = spawnSync(cmd, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf-8',
-    timeout: opts.timeout,
-    env: opts.env ?? process.env,
-    shell: false,
+function runQuiet(cmd: string, args: string[], opts: RunOpts = {}): Promise<{ stdout: string; stderr: string }> {
+  // Async on purpose: spawnSync blocks the event loop, which froze the spinner
+  // for the full duration of `npm install` (30–60s). Using `spawn` lets the
+  // setInterval-driven braille animation keep ticking while the child runs.
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: opts.env ?? process.env,
+      shell: false,
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    child.stdout?.setEncoding('utf-8');
+    child.stderr?.setEncoding('utf-8');
+    child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
+    child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+
+    if (opts.timeout) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        // Grace period before SIGKILL — long npm tarball extracts can take
+        // a few seconds to wind down even after SIGTERM.
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 5000).unref();
+      }, opts.timeout);
+      timer.unref();
+    }
+
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
+
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        const err = new Error(`timeout: ${cmd} ${args.join(' ')}`) as Error & { stdout?: string; stderr?: string };
+        err.stdout = stdout;
+        err.stderr = stderr;
+        return reject(err);
+      }
+      if (typeof code === 'number' && code !== 0) {
+        const err = new Error(`exit ${code}: ${cmd} ${args.join(' ')}`) as Error & { stdout?: string; stderr?: string };
+        err.stdout = stdout;
+        err.stderr = stderr;
+        return reject(err);
+      }
+      resolve({ stdout, stderr });
+    });
   });
-  if (result.error) throw result.error;
-  if (typeof result.status === 'number' && result.status !== 0) {
-    const err = new Error(`exit ${result.status}: ${cmd} ${args.join(' ')}`) as Error & { stdout?: string; stderr?: string };
-    err.stdout = result.stdout;
-    err.stderr = result.stderr;
-    throw err;
-  }
-  return { stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
 // ── Header / footer ─────────────────────────────────────────
@@ -175,7 +212,7 @@ function readPackageVersion(): string {
 
 async function fetchLatestVersion(): Promise<string | null> {
   try {
-    const { stdout } = runQuiet('npm', ['view', 'shieldcortex', 'version'], { timeout: 10000 });
+    const { stdout } = await runQuiet('npm', ['view', 'shieldcortex', 'version'], { timeout: 10000 });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -197,13 +234,13 @@ async function stepNpmPackage(
   }
   if (latestVersion === currentVersion && force) {
     const result = await step('npm package', async () => {
-      runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
+      await runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
       return `v${currentVersion} (reinstalled)`;
     });
     return { updated: true, result };
   }
   const result = await step('npm package', async () => {
-    runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
+    await runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
     return `v${currentVersion} → v${latestVersion}`;
   });
   return { updated: true, result };
@@ -218,7 +255,7 @@ async function stepOpenClawPlugin(home: string): Promise<StepResult> {
   return await step('OpenClaw plugin', async () => {
     try { fs.rmSync(extDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try {
-      runQuiet(
+      await runQuiet(
         'openclaw',
         ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'],
         { timeout: 60000, env: { ...process.env, HOME: home } },
@@ -243,7 +280,7 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
   }
   return await step('OpenClaw skill', async () => {
     try {
-      runQuiet('openclaw', ['skills', 'install', 'shieldcortex', '--force'], {
+      await runQuiet('openclaw', ['skills', 'install', 'shieldcortex', '--force'], {
         timeout: 60000,
         env: { ...process.env, HOME: home },
       });

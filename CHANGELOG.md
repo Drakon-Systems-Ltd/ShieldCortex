@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.9] - 2026-05-06
+
+**Update spinner now actually animates during npm install.**
+
+The v4.14.6 animated update flow used `spawnSync` to capture child output. Synchronous spawn blocks the Node event loop entirely — so the `setInterval`-driven braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) froze on a single frame for the full 30–60s of `npm install -g shieldcortex@latest`. Users on slower connections saw the spinner stop dead the moment the npm step started, then snap to ✓ when it finished — looked like the flow had hung.
+
+### Fixed
+
+- **`runQuiet` is now async** ([src/cli/update.ts](src/cli/update.ts)). Switched from `spawnSync` to `spawn` with stream-collected stdout/stderr and a Promise return. Manual timeout handling via `setTimeout` + `child.kill('SIGTERM')` (with a 5s grace period before SIGKILL) preserves the previous timeout semantics. All four call sites — `npm view`, `npm install` ×2, `openclaw plugins install`, `openclaw skills install` — now `await`. Event loop stays free, spinner ticks continuously through every step including the long ones.
+
+No behavioural change beyond the animation actually working.
+
 ## [4.14.8] - 2026-05-06
 
 **Worker resilience — `shieldcortex worker` survives SSH disconnect, uncaught throws, and the doctor knows when the process is actually dead.**
