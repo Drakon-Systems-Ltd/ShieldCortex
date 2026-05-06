@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.5] - 2026-05-06
+
+**Doc fix — `--with-stop-hook` and `--with-session-end` install flags were missing from the CLI help.**
+
+Both opt-in install flags have shipped since v4.13.0 and are referenced in doctor's fix-hint output (`--with-stop-hook` to wire the Stop hook + flip `autoMemory.enableStop=true`), but neither appeared in `shieldcortex --help` or in the top-of-file usage banner. Users hitting the doctor info line `Auto-memory: Stop hook: opt-in (not installed)` had to grep the source to discover the flag name.
+
+### Fixed
+
+- **CLI help (`shieldcortex --help`)** now lists both flags inline under the `setup` command and includes a combined-flag example in the EXAMPLES section. The top-of-file usage banner adds three new entries showing the single-flag and combined-flag invocations.
+
+No code-path changes — the flags themselves and the runtime gate sync (the v4.13.1 #41 fix) are unchanged. This is a doc-only release.
+
 ## [4.14.4] - 2026-05-06
 
 **Fix — doctor `Disk` check counted local-AI model cache against the 100 MB safety limit.**

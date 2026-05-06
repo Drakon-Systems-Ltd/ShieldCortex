@@ -24,6 +24,9 @@
  *   shieldcortex quickstart --yes        # Install across all detected integrations
  *   shieldcortex setup                   # Configure Claude for proactive memory use
  *   shieldcortex install                 # Alias for setup
+ *   shieldcortex install --with-stop-hook        # Opt in to the Stop hook (sampled per-turn extraction)
+ *   shieldcortex install --with-session-end      # Opt in to the SessionEnd hook (final extraction on session exit)
+ *   shieldcortex install --with-stop-hook --with-session-end   # Both at once
  *   shieldcortex hook pre-compact        # Run pre-compact hook (for settings.json)
  *   shieldcortex hook session-start      # Run session-start hook (for settings.json)
  *   shieldcortex hook session-end        # Run session-end hook (for settings.json)
@@ -524,6 +527,9 @@ ${bold}COMMANDS${reset}
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
   ${cyan}setup${reset}                 Install ShieldCortex into your project
+                        Flags: --with-stop-hook (sampled per-turn extraction)
+                               --with-session-end (extraction on session exit)
+                               Pass either to opt in; re-run without to opt out.
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
   ${cyan}copilot${reset} <action>      Set up VS Code / Cursor MCP integration
@@ -542,6 +548,7 @@ ${bold}EXAMPLES${reset}
   shieldcortex scan-skill ~/.claude/skills/my-skill/SKILL.md
   shieldcortex dashboard
   shieldcortex worker
+  shieldcortex install --with-stop-hook --with-session-end
   shieldcortex cortex preflight --task "deploy site"
   shieldcortex license activate sc_pro_...
   shieldcortex config --cloud-enable --cloud-api-key <key>
