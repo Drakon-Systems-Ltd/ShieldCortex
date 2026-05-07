@@ -7,46 +7,62 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'coral' | 'cyan' | 'ghost' | 'outline';
   size?: 'sm' | 'md' | 'lg';
   glow?: boolean;
-  /** Pulsing cyan edge ring; use to signal a button is "working" without a spinner. */
+  /** Pulsing edge — kept as a prop for API compatibility; renders a left-side
+      blinking caret instead of a glow ring. */
   pulse?: boolean;
 }
 
-const VARIANT_STYLES = {
-  coral: 'bg-gradient-to-br from-[var(--sc-coral)] to-[var(--sc-coral-dark)] text-white hover:shadow-[0_8px_30px_var(--sc-glow-coral-mid)] active:translate-y-0',
-  cyan: 'bg-[var(--sc-cyan)] text-[var(--sc-bg-deep)] hover:bg-[var(--sc-cyan-mid)] hover:shadow-[0_8px_30px_var(--sc-glow-cyan-mid)]',
-  ghost: 'bg-transparent text-[var(--sc-text-secondary)] hover:bg-[var(--sc-surface-interactive)] hover:text-[var(--sc-text-primary)]',
-  outline: 'bg-transparent border border-[var(--sc-border)] text-[var(--sc-text-secondary)] hover:border-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)]',
+// All four legacy variants map onto a smaller terminal vocabulary:
+//   coral / cyan → primary (electric)
+//   ghost / outline → ghost (muted bracket)
+const VARIANT_STYLES: Record<NonNullable<ButtonProps['variant']>, string> = {
+  coral:
+    'border border-[var(--term-electric)] text-[var(--term-electric-fg)] bg-transparent hover:bg-[var(--term-electric)]/10',
+  cyan:
+    'border border-[var(--term-neon)] text-[var(--term-neon-fg)] bg-transparent hover:bg-[var(--term-neon)]/10',
+  ghost:
+    'border border-transparent text-[var(--term-text-muted)] bg-transparent hover:text-[var(--term-text)] hover:border-[var(--term-border)]',
+  outline:
+    'border border-[var(--term-border)] text-[var(--term-text-dim)] bg-transparent hover:border-[var(--term-text-muted)] hover:text-[var(--term-text)]',
 };
 
 const SIZE_STYLES = {
-  sm: 'px-3 py-1.5 text-xs rounded-lg',
-  md: 'px-4 py-2 text-sm rounded-xl',
-  lg: 'px-6 py-3 text-sm rounded-xl',
+  sm: 'px-2 py-1 text-xs',
+  md: 'px-3 py-1.5 text-sm',
+  lg: 'px-4 py-2 text-sm',
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ variant = 'coral', size = 'md', glow = false, pulse = false, className, children, ...props }, ref) => {
+  (
+    {
+      variant = 'coral',
+      size = 'md',
+      glow: _glow = false,
+      pulse = false,
+      className,
+      children,
+      ...props
+    },
+    ref,
+  ) => {
     return (
       <button
         ref={ref}
         className={cn(
-          'inline-flex items-center justify-center gap-2 font-semibold transition-all',
-          'hover:-translate-y-0.5 active:translate-y-0',
-          'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--sc-cyan)]',
-          // Pulse should remain visible even when disabled (we disable buttons
-          // during the in-flight mutation), so override the disabled opacity.
+          'inline-flex items-center justify-center gap-2 rounded-md font-mono transition-colors',
+          'focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[var(--term-electric)]',
           pulse ? 'disabled:pointer-events-none' : 'disabled:pointer-events-none disabled:opacity-50',
           VARIANT_STYLES[variant],
           SIZE_STYLES[size],
-          glow && variant === 'coral' && 'glow-coral-subtle',
-          glow && variant === 'cyan' && 'glow-cyan-subtle',
-          pulse && 'glow-cyan-pulse',
           className,
         )}
         type="button"
         {...props}
       >
-        {children}
+        {pulse && <span className="cli-cursor" aria-hidden />}
+        <span className="text-[var(--term-text-muted)]" aria-hidden>[</span>
+        <span className="leading-none">{children}</span>
+        <span className="text-[var(--term-text-muted)]" aria-hidden>]</span>
       </button>
     );
   },

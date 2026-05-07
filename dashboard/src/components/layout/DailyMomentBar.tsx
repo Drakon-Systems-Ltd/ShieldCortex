@@ -115,10 +115,10 @@ export function DailyMomentBar() {
   const noActivity = c.scanned === 0 && c.memoriesCaptured === 0 && c.memoriesRecalled === 0;
 
   return (
-    <div className="border-b border-[var(--sc-border)] bg-[var(--sc-bg-surface)]/30 backdrop-blur-sm">
+    <div className="border-b border-[var(--term-border)] bg-[var(--term-surface)] font-mono">
       {/* Headline row */}
       <div
-        className="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2 cursor-pointer hover:bg-[var(--sc-bg-surface)]/50 transition-colors"
+        className="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2 cursor-pointer hover:bg-[var(--term-surface-2)] transition-colors"
         onClick={() => setExpanded((v) => !v)}
         role="button"
         tabIndex={0}
@@ -147,13 +147,13 @@ export function DailyMomentBar() {
               key={w.id}
               type="button"
               onClick={(e) => { e.stopPropagation(); setWindow(w.id); }}
-              className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] transition ${
+              className={`px-1.5 py-0.5 text-[11px] font-mono transition-colors ${
                 w.id === window
-                  ? 'bg-[var(--sc-cyan)]/20 text-[var(--sc-cyan)]'
-                  : 'text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)]'
+                  ? 'text-[var(--term-electric-fg)]'
+                  : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)]'
               }`}
             >
-              {w.label}
+              [{w.label}]
             </button>
           ))}
         </div>

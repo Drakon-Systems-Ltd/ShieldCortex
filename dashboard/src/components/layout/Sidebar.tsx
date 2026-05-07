@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Menu, Pin, PinOff, Shield, X } from 'lucide-react';
+import { Menu, Pin, PinOff, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { NAV_ITEMS } from '@/components/layout/route-config';
 import { useDashboardStore } from '@/lib/store';
@@ -26,7 +26,6 @@ function checkWs() {
   } catch { _wsConnected = false; _notifyWs(); }
 }
 
-// Start polling once at module level
 if (typeof window !== 'undefined') {
   checkWs();
   setInterval(checkWs, 15000);
@@ -52,49 +51,47 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile hamburger — visible only on small screens */}
+      {/* Mobile hamburger */}
       <button
+        type="button"
         onClick={() => setMobileOpenFor(pathname)}
-        className="fixed left-3 top-3 z-50 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] text-[var(--sc-text-secondary)] md:hidden"
+        className="fixed left-3 top-3 z-50 flex h-10 w-10 items-center justify-center rounded-md bg-[var(--term-surface)] border border-[var(--term-border)] text-[var(--term-text-muted)] md:hidden"
         aria-label="Open navigation"
       >
         <Menu size={18} />
       </button>
 
-      {/* Mobile backdrop */}
       {mobileOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
+        <button
+          type="button"
+          aria-label="Close navigation backdrop"
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
           onClick={() => setMobileOpenFor(null)}
         />
       )}
 
-      {/* Sidebar */}
       <aside
         className={cn(
-          'z-50 flex shrink-0 flex-col border-r border-[var(--sc-border)] bg-[var(--sc-bg-deep)] transition-all duration-300',
-          // Mobile: fixed overlay, hidden by default
+          'z-50 flex shrink-0 flex-col border-r border-[var(--term-border)] bg-[var(--term-bg)] transition-[width] duration-200',
           'fixed inset-y-0 left-0 md:relative',
           mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
-          expanded ? 'w-60' : 'w-16',
+          expanded ? 'w-60' : 'w-14',
         )}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       >
-        {/* Logo */}
-        <div className="flex h-16 items-center gap-3 border-b border-[var(--sc-border)] px-4">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[var(--sc-coral)] to-[var(--sc-coral-dark)]">
-            <Shield size={16} className="text-white" />
+        {/* Header — terminal prompt */}
+        <div className="flex h-12 items-center gap-2 border-b border-[var(--term-border)] px-3">
+          <span className="text-[var(--term-electric-fg)] font-mono text-sm" aria-hidden>$</span>
+          <div className={cn('overflow-hidden whitespace-nowrap transition-opacity duration-200', expanded ? 'opacity-100' : 'opacity-0')}>
+            <span className="font-mono text-sm text-[var(--term-text)]">shieldcortex</span>
+            <span className="cli-cursor text-[var(--term-electric-fg)] ml-1" aria-hidden />
           </div>
-          <div className={cn('overflow-hidden whitespace-nowrap transition-all duration-300', expanded ? 'w-auto opacity-100' : 'w-0 opacity-0')}>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--sc-coral)]">ShieldCortex</div>
-            <div className="text-xs text-[var(--sc-text-muted)]">Dashboard</div>
-          </div>
-          {/* Mobile close button */}
           {mobileOpen && (
             <button
+              type="button"
               onClick={() => setMobileOpenFor(null)}
-              className="ml-auto text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)] md:hidden"
+              className="ml-auto text-[var(--term-text-muted)] hover:text-[var(--term-text)] md:hidden"
               aria-label="Close navigation"
             >
               <X size={18} />
@@ -102,8 +99,8 @@ export function Sidebar() {
           )}
         </div>
 
-        {/* Nav items */}
-        <nav className="flex-1 space-y-1 px-2 py-4" role="navigation" aria-label="Main navigation">
+        {/* Nav items — mono list, `>` prefix on active */}
+        <nav className="flex-1 overflow-y-auto py-3 px-1.5 font-mono text-sm" role="navigation" aria-label="Main navigation">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = isActive(pathname, item.href);
@@ -113,20 +110,21 @@ export function Sidebar() {
                 href={item.href}
                 aria-current={active ? 'page' : undefined}
                 className={cn(
-                  'relative flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--sc-cyan)]',
+                  'group flex items-center gap-2 rounded-sm px-2 py-1.5 transition-colors',
+                  'focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-[var(--term-electric)]',
                   active
-                    ? 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-primary)]'
-                    : 'text-[var(--sc-text-muted)] hover:bg-[var(--sc-surface-interactive)] hover:text-[var(--sc-text-secondary)]',
+                    ? 'text-[var(--term-electric-fg)] bg-[var(--term-surface-2)]'
+                    : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)]',
                 )}
               >
-                {active && (
-                  <div className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-[var(--sc-coral)]" />
-                )}
-                <Icon size={18} className={cn('shrink-0', active && 'text-[var(--sc-coral)]')} />
-                <span className={cn(
-                  'overflow-hidden whitespace-nowrap text-sm font-medium transition-all duration-300',
-                  expanded ? 'w-auto opacity-100' : 'w-0 opacity-0',
-                )}>
+                <span
+                  className={cn('w-3 shrink-0 select-none', active ? 'text-[var(--term-electric-fg)]' : 'text-transparent')}
+                  aria-hidden
+                >
+                  {active ? '>' : ' '}
+                </span>
+                <Icon size={14} className="shrink-0" aria-hidden />
+                <span className={cn('overflow-hidden whitespace-nowrap transition-opacity duration-200', expanded ? 'opacity-100' : 'opacity-0')}>
                   {item.label}
                 </span>
               </Link>
@@ -134,40 +132,34 @@ export function Sidebar() {
           })}
         </nav>
 
-        {/* Bottom section */}
-        <div className="space-y-2 border-t border-[var(--sc-border)] px-2 py-3">
-          {/* Pin toggle */}
+        {/* Bottom — pin toggle, ws status, version */}
+        <div className="space-y-1 border-t border-[var(--term-border)] px-1.5 py-2 font-mono">
           {expanded && (
             <button
+              type="button"
               onClick={toggleSidebarPinned}
-              className="hidden w-full items-center gap-3 rounded-xl px-3 py-2 text-[var(--sc-text-muted)] transition-colors hover:bg-[var(--sc-surface-interactive)] hover:text-[var(--sc-text-secondary)] md:flex"
+              className="hidden w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-[var(--term-text-muted)] transition-colors hover:text-[var(--term-text)] md:flex"
               aria-label={sidebarPinned ? 'Unpin sidebar' : 'Pin sidebar'}
             >
-              {sidebarPinned ? <PinOff size={16} /> : <Pin size={16} />}
-              <span className="text-xs">{sidebarPinned ? 'Unpin' : 'Pin sidebar'}</span>
+              {sidebarPinned ? <PinOff size={12} /> : <Pin size={12} />}
+              <span>{sidebarPinned ? 'unpin' : 'pin'}</span>
             </button>
           )}
 
-          {/* WebSocket status */}
-          <div className="flex items-center gap-3 px-3 py-1">
+          <div className="flex items-center gap-2 px-2 py-1 text-[11px]">
             <span
               className={cn(
-                'h-2 w-2 shrink-0 rounded-full',
-                wsConnected ? 'bg-[var(--sc-cyan)] pulse-cyan' : 'bg-[var(--sc-coral)] pulse-coral',
+                'h-1.5 w-1.5 shrink-0 rounded-full',
+                wsConnected ? 'bg-[var(--term-neon)] pulse-cyan' : 'bg-[var(--term-danger)] pulse-coral',
               )}
               aria-label={wsConnected ? 'Real-time connected' : 'Real-time disconnected'}
             />
-            <span className={cn(
-              'overflow-hidden whitespace-nowrap text-[11px] text-[var(--sc-text-muted)] transition-all duration-300',
-              expanded ? 'w-auto opacity-100' : 'w-0 opacity-0',
-            )}>
-              {wsConnected ? 'Connected' : 'Disconnected'}
+            <span className={cn('overflow-hidden whitespace-nowrap text-[var(--term-text-muted)] transition-opacity duration-200', expanded ? 'opacity-100' : 'opacity-0')}>
+              ws={wsConnected ? 'connected' : 'down'}
             </span>
           </div>
-          <div className={cn(
-            'overflow-hidden whitespace-nowrap px-3 font-mono text-[10px] text-[var(--sc-text-muted)] transition-all duration-300',
-            expanded ? 'opacity-100' : 'h-0 opacity-0',
-          )}>
+
+          <div className={cn('overflow-hidden whitespace-nowrap px-2 text-[10px] text-[var(--term-text-faint)] transition-opacity duration-200', expanded ? 'opacity-100' : 'opacity-0')}>
             v{versionData?.version ?? '...'}
           </div>
         </div>

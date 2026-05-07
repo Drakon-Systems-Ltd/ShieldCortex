@@ -6,14 +6,23 @@ interface SkeletonProps {
   className?: string;
 }
 
+// Terminal-loading-bar style: a row of decreasing-density block characters
+// pulsing at low opacity. Falls back to a flat surface when collapsed to a
+// height too small for text rendering.
 export function Skeleton({ className }: SkeletonProps) {
   return (
     <div
       className={cn(
-        'animate-pulse rounded-xl bg-[var(--sc-surface-interactive)]',
+        'flex items-center overflow-hidden rounded-md bg-[var(--term-surface-2)] text-[var(--term-text-muted)] text-xs leading-none animate-pulse px-2',
         className,
       )}
-    />
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <span className="select-none whitespace-nowrap tracking-tighter">
+        █▓▓▓▒▒▒░░░░ ▓▓▒▒░░ █▓▒░ ▓▓▒░░ █▓▓▒░░░ ▓▒░░ █▒▒░
+      </span>
+    </div>
   );
 }
 

@@ -8,10 +8,12 @@ export function ToastProvider() {
       position="bottom-right"
       toastOptions={{
         style: {
-          background: 'var(--sc-bg-surface)',
-          border: '1px solid var(--sc-border)',
-          color: 'var(--sc-text-primary)',
-          fontFamily: 'system-ui, sans-serif',
+          background: 'var(--term-surface)',
+          border: '1px solid var(--term-border)',
+          color: 'var(--term-text)',
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+          fontSize: '13px',
+          borderRadius: '6px',
         },
       }}
       theme="dark"

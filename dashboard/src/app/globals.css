@@ -46,74 +46,97 @@
   --radius-4xl: calc(var(--radius) + 16px);
 }
 
-/* ── ShieldCortex Design System (OpenClaw-inspired) ── */
+/* ── ShieldCortex Terminal Design System ── */
+/* Aesthetic reference: shieldcortex-site/src/pages/customizer.astro */
 
 :root {
   --radius: 0.625rem;
 
-  /* Core palette */
-  --sc-bg-deep: #050810;
-  --sc-bg-surface: #0a0f1a;
-  --sc-bg-elevated: #111827;
-  --sc-text-primary: #f0f4ff;
-  --sc-text-secondary: #8892b0;
-  --sc-text-muted: #5a6480;
-  --sc-coral: #ff4d4d;
-  --sc-coral-mid: #e63946;
-  --sc-coral-dark: #991b1b;
-  --sc-cyan: #00e5cc;
-  --sc-cyan-mid: #14b8a6;
-  --sc-amber: #f59e0b;
+  /* Core terminal palette */
+  --term-bg: #0a0e1a;
+  --term-surface: #0d1321;
+  --term-surface-2: #141c30;
+  --term-border: #1e2a45;
+  --term-border-strong: #2a3a5e;
 
-  /* Surfaces */
-  --sc-border: rgba(136, 146, 176, 0.15);
-  --sc-border-accent: rgba(255, 77, 77, 0.3);
-  --sc-card-bg: rgba(10, 15, 26, 0.65);
-  --sc-card-bg-strong: rgba(10, 15, 26, 0.8);
-  --sc-surface-interactive: rgba(255, 255, 255, 0.06);
-  --sc-surface-interactive-hover: rgba(255, 255, 255, 0.1);
+  --term-text: #e5e7eb;
+  --term-text-dim: #d1d5db;
+  --term-text-muted: #6b7280;
+  --term-text-faint: #4b5563;
 
-  /* Glows */
-  --sc-glow-coral: rgba(255, 77, 77, 0.15);
-  --sc-glow-coral-mid: rgba(255, 77, 77, 0.25);
-  --sc-glow-cyan: rgba(0, 229, 204, 0.15);
-  --sc-glow-cyan-mid: rgba(0, 229, 204, 0.25);
+  --term-electric: #3b82f6;
+  --term-electric-fg: #60a5fa;
+  --term-neon: #22c55e;
+  --term-neon-fg: #4ade80;
+  --term-warn: #fbbf24;
+  --term-danger: #ef4444;
 
-  /* Transitions */
-  --sc-transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Traffic-light dots (window chrome) */
+  --term-light-red: rgba(239, 68, 68, 0.7);
+  --term-light-yellow: rgba(245, 158, 11, 0.7);
+  --term-light-green: rgba(34, 197, 94, 0.7);
 
-  /* shadcn overrides — dark by default */
-  --background: #050810;
-  --foreground: #f0f4ff;
-  --card: #0a0f1a;
-  --card-foreground: #f0f4ff;
-  --popover: #0a0f1a;
-  --popover-foreground: #f0f4ff;
-  --primary: #ff4d4d;
+  /* Legacy aliases — keep so existing class-name consumers keep rendering.
+     Every --sc-* below maps to its terminal-palette equivalent. */
+  --sc-bg-deep: var(--term-bg);
+  --sc-bg-surface: var(--term-surface);
+  --sc-bg-elevated: var(--term-surface-2);
+  --sc-text-primary: var(--term-text);
+  --sc-text-secondary: var(--term-text-dim);
+  --sc-text-muted: var(--term-text-muted);
+  --sc-coral: var(--term-electric);          /* primary-action role moved to electric */
+  --sc-coral-mid: var(--term-electric-fg);
+  --sc-coral-dark: #1e3a8a;
+  --sc-cyan: var(--term-neon);                /* live / accent role moved to neon */
+  --sc-cyan-mid: var(--term-neon-fg);
+  --sc-amber: var(--term-warn);
+
+  --sc-border: var(--term-border);
+  --sc-border-accent: var(--term-electric);
+  --sc-card-bg: var(--term-surface);
+  --sc-card-bg-strong: var(--term-surface);
+  --sc-surface-interactive: var(--term-surface-2);
+  --sc-surface-interactive-hover: var(--term-border);
+
+  --sc-glow-coral: rgba(59, 130, 246, 0.18);
+  --sc-glow-coral-mid: rgba(59, 130, 246, 0.28);
+  --sc-glow-cyan: rgba(34, 197, 94, 0.18);
+  --sc-glow-cyan-mid: rgba(34, 197, 94, 0.28);
+
+  --sc-transition: 0.15s linear;
+
+  /* shadcn overrides — terminal dark by default */
+  --background: var(--term-bg);
+  --foreground: var(--term-text);
+  --card: var(--term-surface);
+  --card-foreground: var(--term-text);
+  --popover: var(--term-surface);
+  --popover-foreground: var(--term-text);
+  --primary: var(--term-electric);
   --primary-foreground: #ffffff;
-  --secondary: #111827;
-  --secondary-foreground: #f0f4ff;
-  --muted: #111827;
-  --muted-foreground: #8892b0;
-  --accent: #111827;
-  --accent-foreground: #f0f4ff;
-  --destructive: #ff4d4d;
-  --border: rgba(136, 146, 176, 0.15);
-  --input: rgba(136, 146, 176, 0.15);
-  --ring: #00e5cc;
-  --chart-1: #ff4d4d;
-  --chart-2: #00e5cc;
-  --chart-3: #14b8a6;
-  --chart-4: #f59e0b;
-  --chart-5: #8892b0;
-  --sidebar: #050810;
-  --sidebar-foreground: #f0f4ff;
-  --sidebar-primary: #ff4d4d;
+  --secondary: var(--term-surface-2);
+  --secondary-foreground: var(--term-text);
+  --muted: var(--term-surface-2);
+  --muted-foreground: var(--term-text-muted);
+  --accent: var(--term-surface-2);
+  --accent-foreground: var(--term-text);
+  --destructive: var(--term-danger);
+  --border: var(--term-border);
+  --input: var(--term-surface-2);
+  --ring: var(--term-electric);
+  --chart-1: var(--term-electric);
+  --chart-2: var(--term-neon);
+  --chart-3: var(--term-warn);
+  --chart-4: var(--term-electric-fg);
+  --chart-5: var(--term-text-muted);
+  --sidebar: var(--term-bg);
+  --sidebar-foreground: var(--term-text);
+  --sidebar-primary: var(--term-electric);
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #111827;
-  --sidebar-accent-foreground: #f0f4ff;
-  --sidebar-border: rgba(136, 146, 176, 0.15);
-  --sidebar-ring: #00e5cc;
+  --sidebar-accent: var(--term-surface);
+  --sidebar-accent-foreground: var(--term-text);
+  --sidebar-border: var(--term-border);
+  --sidebar-ring: var(--term-electric);
 }
 
 @layer base {
@@ -122,136 +145,70 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: system-ui, -apple-system, sans-serif;
+    /* Terminal aesthetic: monospace by default. Geist Sans remains available
+       as the `font-sans` Tailwind class for one-off prose blocks. */
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-feature-settings: "ss01", "cv01", "cv11";
   }
 }
 
-/* ── Glass Card ── */
+/* ── Glass card (legacy class — restyled as a flat terminal panel) ──
+   Old consumers keep their class name, get terminal styling.
+   New consumers should use the GlassCard component which now renders
+   full terminal-window chrome. */
 
 .glass-card {
-  background: var(--sc-card-bg);
-  border: 1px solid var(--sc-border);
-  border-radius: 16px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  transition: all var(--sc-transition);
+  background: var(--term-surface);
+  border: 1px solid var(--term-border);
+  border-radius: var(--radius);
+  transition: border-color var(--sc-transition);
 }
 
 .glass-card-strong {
-  background: var(--sc-card-bg-strong);
-  border: 1px solid var(--sc-border);
-  border-radius: 16px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  transition: all var(--sc-transition);
+  background: var(--term-surface);
+  border: 1px solid var(--term-border);
+  border-radius: var(--radius);
+  transition: border-color var(--sc-transition);
 }
 
 .glass-card-hover:hover {
-  transform: translateY(-4px);
-  border-color: var(--sc-border-accent);
-  box-shadow: 0 12px 40px var(--sc-glow-coral);
+  border-color: var(--term-electric);
 }
 
 .glass-card-hover-cyan:hover {
-  transform: translateY(-4px);
-  border-color: rgba(0, 229, 204, 0.3);
-  box-shadow: 0 12px 40px var(--sc-glow-cyan);
+  border-color: var(--term-neon);
 }
 
-/* ── Review card transitions ── */
+/* ── CLI cursor ── */
 
-.sc-card-exit {
-  opacity: 0;
-  transform: translateX(-30px) scale(0.97);
+@keyframes cli-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
 }
 
-.sc-card-enter {
-  animation: sc-card-slide-in 250ms ease forwards;
+.cli-cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  background-color: currentColor;
+  vertical-align: text-bottom;
+  animation: cli-blink 1s steps(2, end) infinite;
 }
 
-@keyframes sc-card-slide-in {
-  from {
-    opacity: 0;
-    transform: translateX(30px) scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0) scale(1);
-  }
-}
+/* ── Severity left-border accents (kept — semantic, used widely) ── */
 
-/* ── Glow effects ── */
+.severity-critical { border-left: 3px solid var(--term-danger); }
+.severity-high { border-left: 3px solid var(--term-danger); }
+.severity-medium { border-left: 3px solid var(--term-warn); }
+.severity-low { border-left: 3px solid var(--term-electric); }
+.severity-safe { border-left: 3px solid var(--term-neon); }
+.severity-info { border-left: 3px solid var(--term-text-muted); }
 
-.glow-coral {
-  box-shadow: 0 0 20px var(--sc-glow-coral), 0 0 60px var(--sc-glow-coral);
-}
-
-.glow-cyan {
-  box-shadow: 0 0 20px var(--sc-glow-cyan), 0 0 60px var(--sc-glow-cyan);
-}
-
-.glow-coral-subtle {
-  box-shadow: 0 4px 20px var(--sc-glow-coral);
-}
-
-.glow-cyan-subtle {
-  box-shadow: 0 4px 20px var(--sc-glow-cyan);
-}
-
-/* Pulsing edge ring — used by buttons to signal "working" without a spinner. */
-@keyframes sc-glow-pulse-cyan {
-  0%, 100% {
-    box-shadow: 0 0 6px var(--sc-glow-cyan), 0 0 12px var(--sc-glow-cyan);
-  }
-  50% {
-    box-shadow: 0 0 14px var(--sc-glow-cyan-mid), 0 0 28px var(--sc-glow-cyan-mid);
-  }
-}
-
-.glow-cyan-pulse {
-  animation: sc-glow-pulse-cyan 1.4s ease-in-out infinite;
-}
-
-/* ── Severity left-border accents ── */
-
-.severity-critical { border-left: 3px solid var(--sc-coral); }
-.severity-high { border-left: 3px solid var(--sc-coral-mid); }
-.severity-medium { border-left: 3px solid var(--sc-amber); }
-.severity-low { border-left: 3px solid var(--sc-cyan-mid); }
-.severity-safe { border-left: 3px solid var(--sc-cyan); }
-.severity-info { border-left: 3px solid var(--sc-text-muted); }
-
-/* ── Scanning animation ── */
-
-@keyframes scanSweep {
-  0% { transform: translateX(-100%); opacity: 0; }
-  10% { opacity: 1; }
-  90% { opacity: 1; }
-  100% { transform: translateX(100%); opacity: 0; }
-}
-
-.scan-sweep {
-  position: relative;
-  overflow: hidden;
-}
-
-.scan-sweep::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, var(--sc-glow-cyan-mid), transparent);
-  animation: scanSweep 2s ease-in-out infinite;
-  pointer-events: none;
-}
-
-/* ── Pulse animations ── */
+/* ── Pulse — kept for status dots, sober terminal version ── */
 
 @keyframes pulseGlow {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  50% { opacity: 0.45; }
 }
 
 .pulse-cyan {
@@ -262,13 +219,35 @@
   animation: pulseGlow 1.5s ease-in-out infinite;
 }
 
+/* ── Card-slide transitions (used by review queue) — kept ── */
+
+.sc-card-exit {
+  opacity: 0;
+  transform: translateX(-30px);
+}
+
+.sc-card-enter {
+  animation: sc-card-slide-in 200ms ease forwards;
+}
+
+@keyframes sc-card-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
 /* ── Trust gauge animation ── */
 
 @keyframes gaugeReveal {
   from { stroke-dashoffset: 282.7; }
 }
 
-/* ── Scrollbar ── */
+/* ── Scrollbar — terminal-thin ── */
 
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
@@ -284,24 +263,19 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--sc-text-muted);
+  background: var(--term-border-strong);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--sc-text-secondary);
+  background: var(--term-text-muted);
 }
 
-/* ── Focus ring ── */
+/* ── Focus ring — single style now, electric ── */
 
-.focus-ring-cyan:focus {
-  outline: none;
-  border-color: var(--sc-cyan);
-  box-shadow: 0 0 0 3px var(--sc-glow-cyan);
-}
-
+.focus-ring-cyan:focus,
 .focus-ring-coral:focus {
   outline: none;
-  border-color: var(--sc-coral);
-  box-shadow: 0 0 0 3px var(--sc-glow-coral);
+  border-color: var(--term-electric);
+  box-shadow: 0 0 0 1px var(--term-electric);
 }

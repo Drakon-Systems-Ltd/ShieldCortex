@@ -261,14 +261,34 @@ export function BrainControlCentre({
 
         {/* Centre: 3D Brain + Activity Feed */}
         <div className="flex-1 flex flex-col relative">
-          <div className="flex-1 relative">
-            <BrainScene
-              memories={memories}
-              links={links}
-              selectedMemory={selectedMemory}
-              onSelectMemory={handleSelectMemory}
-              categoryFilter={categoryFilter}
-            />
+          <div className="flex-1 relative flex flex-col border border-[var(--term-border)] rounded-md overflow-hidden m-2">
+            {/* Terminal-window title bar over the canvas */}
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--term-border)] bg-[var(--term-surface-2)] font-mono">
+              <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-red)]" />
+              <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-yellow)]" />
+              <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-green)]" />
+              <span className="ml-2 text-xs text-[var(--term-text-muted)] select-none">memory-map · {memories.length} entit{memories.length === 1 ? 'y' : 'ies'}</span>
+            </div>
+            <div className="flex-1 relative">
+              <BrainScene
+                memories={memories}
+                links={links}
+                selectedMemory={selectedMemory}
+                onSelectMemory={handleSelectMemory}
+                categoryFilter={categoryFilter}
+              />
+            </div>
+            <div className="px-3 py-1 border-t border-[var(--term-border)] bg-[var(--term-surface-2)] font-mono text-[10px] text-[var(--term-text-muted)] flex items-center gap-3">
+              <span>links={links.length}</span>
+              <span aria-hidden>·</span>
+              <span>quarantine={quarantineCount}</span>
+              {selectedMemory && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span className="text-[var(--term-electric-fg)] truncate">selected: #{selectedMemory.id} {selectedMemory.title}</span>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Bottom: Activity Feed */}

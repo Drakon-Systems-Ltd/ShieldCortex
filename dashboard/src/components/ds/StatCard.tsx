@@ -12,51 +12,37 @@ interface StatCardProps {
   className?: string;
 }
 
-const ACCENT_STYLES = {
-  coral: {
-    icon: 'text-[var(--sc-coral)]',
-    iconBg: 'bg-[var(--sc-coral)]/10',
-    trendUp: 'text-[var(--sc-coral)]',
-    trendDown: 'text-[var(--sc-cyan)]',
-  },
-  cyan: {
-    icon: 'text-[var(--sc-cyan)]',
-    iconBg: 'bg-[var(--sc-cyan)]/10',
-    trendUp: 'text-[var(--sc-cyan)]',
-    trendDown: 'text-[var(--sc-coral)]',
-  },
-  amber: {
-    icon: 'text-[var(--sc-amber)]',
-    iconBg: 'bg-[var(--sc-amber)]/10',
-    trendUp: 'text-[var(--sc-amber)]',
-    trendDown: 'text-[var(--sc-text-muted)]',
-  },
-  muted: {
-    icon: 'text-[var(--sc-text-secondary)]',
-    iconBg: 'bg-[var(--sc-surface-interactive)]',
-    trendUp: 'text-[var(--sc-cyan)]',
-    trendDown: 'text-[var(--sc-coral)]',
-  },
-};
+const ACCENT_VALUE = {
+  coral: 'text-[var(--term-electric-fg)]',
+  cyan: 'text-[var(--term-neon-fg)]',
+  amber: 'text-[var(--term-warn)]',
+  muted: 'text-[var(--term-text)]',
+} as const;
+
+const TREND_UP = 'text-[var(--term-neon-fg)]';
+const TREND_DOWN = 'text-[var(--term-danger)]';
 
 export function StatCard({ label, value, icon: Icon, trend, accent = 'cyan', className }: StatCardProps) {
-  const styles = ACCENT_STYLES[accent];
-
   return (
-    <div className={cn('glass-card p-5', className)}>
-      <div className="flex items-start justify-between">
-        <div className="min-w-0">
-          <p className="text-xs font-medium uppercase tracking-wider text-[var(--sc-text-muted)]">{label}</p>
-          <p className="mt-2 text-2xl font-bold text-[var(--sc-text-primary)]">{value}</p>
-          {trend && (
-            <p className={cn('mt-1 text-xs', trend.value >= 0 ? styles.trendUp : styles.trendDown)}>
-              {trend.value >= 0 ? '+' : ''}{trend.value}% {trend.label}
-            </p>
-          )}
-        </div>
-        <div className={cn('rounded-xl p-2.5', styles.iconBg)}>
-          <Icon size={20} className={styles.icon} />
-        </div>
+    <div
+      className={cn(
+        'flex items-center justify-between gap-3 px-4 py-2 border-b border-[var(--term-border)] last:border-0',
+        className,
+      )}
+    >
+      <div className="flex items-center gap-3 min-w-0">
+        <Icon size={14} className="text-[var(--term-text-muted)] shrink-0" aria-hidden />
+        <span className="text-xs uppercase tracking-wider text-[var(--term-text-muted)] truncate">
+          {label}
+        </span>
+      </div>
+      <div className="flex items-baseline gap-2 shrink-0">
+        <span className={cn('text-base tabular-nums', ACCENT_VALUE[accent])}>{value}</span>
+        {trend && (
+          <span className={cn('text-xs tabular-nums', trend.value >= 0 ? TREND_UP : TREND_DOWN)}>
+            {trend.value >= 0 ? '+' : ''}{trend.value}%
+          </span>
+        )}
       </div>
     </div>
   );

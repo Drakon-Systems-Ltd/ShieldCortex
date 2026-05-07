@@ -2,7 +2,6 @@
 
 import { cn } from '@/lib/utils';
 import { Lock } from 'lucide-react';
-import { motion } from 'framer-motion';
 
 export interface TabItem {
   id: string;
@@ -21,41 +20,42 @@ interface TabBarProps {
 
 export function TabBar({ tabs, activeTab, onChange, className }: TabBarProps) {
   return (
-    <div className={cn('flex items-center gap-1 overflow-x-auto rounded-xl bg-[var(--sc-bg-surface)] p-1 scrollbar-hide', className)} role="tablist">
+    <div
+      className={cn(
+        'flex items-center gap-4 overflow-x-auto border-b border-[var(--term-border)] px-1 scrollbar-hide',
+        className,
+      )}
+      role="tablist"
+    >
       {tabs.map((tab) => {
         const active = tab.id === activeTab;
         return (
           <button
             key={tab.id}
+            type="button"
             role="tab"
-            aria-selected={active}
+            aria-selected={active ? 'true' : 'false'}
             onClick={() => onChange(tab.id)}
             className={cn(
-              'relative flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-all sm:px-4 sm:text-sm',
-              'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--sc-cyan)]',
+              'relative flex shrink-0 items-center gap-2 px-1 py-2 text-xs font-mono transition-colors',
+              'focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[var(--term-electric)]',
               active
-                ? 'text-[var(--sc-text-primary)]'
-                : 'text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)]',
+                ? 'text-[var(--term-electric-fg)]'
+                : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)]',
             )}
           >
+            {tab.icon}
+            <span>{tab.label}</span>
+            {tab.locked && <Lock size={11} className="text-[var(--term-warn)]" />}
+            {tab.count !== undefined && tab.count > 0 && (
+              <span className="text-[var(--term-text-muted)]">({tab.count})</span>
+            )}
             {active && (
-              <motion.div
-                layoutId="activeTab"
-                className="absolute inset-0 rounded-lg bg-[var(--sc-bg-elevated)]"
-                style={{ borderRadius: 8 }}
-                transition={{ type: 'spring', bounce: 0.2, duration: 0.4 }}
+              <span
+                aria-hidden
+                className="absolute -bottom-px left-0 right-0 h-px bg-[var(--term-electric)]"
               />
             )}
-            <span className="relative z-10 flex items-center gap-2">
-              {tab.icon}
-              {tab.label}
-              {tab.locked && <Lock size={12} className="text-[var(--sc-coral)]" />}
-              {tab.count !== undefined && tab.count > 0 && (
-                <span className="ml-0.5 rounded-full bg-[var(--sc-coral)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--sc-coral)]">
-                  {tab.count}
-                </span>
-              )}
-            </span>
           </button>
         );
       })}

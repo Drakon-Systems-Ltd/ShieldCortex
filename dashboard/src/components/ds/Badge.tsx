@@ -12,45 +12,53 @@ interface BadgeProps {
   pulse?: boolean;
 }
 
+// Bracket-wrapped terminal status labels: [INFO], [BLOCK], [ALLOW] etc.
+// Colours map onto the terminal palette — danger red for critical/high,
+// warn yellow for medium, neon for safe/cyan, electric for low/info.
 const VARIANT_STYLES: Record<BadgeVariant, string> = {
-  critical: 'bg-[var(--sc-coral)]/15 text-[var(--sc-coral)] border-[var(--sc-coral)]/30',
-  high: 'bg-[var(--sc-coral-mid)]/15 text-[var(--sc-coral-mid)] border-[var(--sc-coral-mid)]/30',
-  medium: 'bg-[var(--sc-amber)]/15 text-[var(--sc-amber)] border-[var(--sc-amber)]/30',
-  low: 'bg-[var(--sc-cyan-mid)]/15 text-[var(--sc-cyan-mid)] border-[var(--sc-cyan-mid)]/30',
-  safe: 'bg-[var(--sc-cyan)]/15 text-[var(--sc-cyan)] border-[var(--sc-cyan)]/30',
-  info: 'bg-[var(--sc-text-muted)]/15 text-[var(--sc-text-secondary)] border-[var(--sc-text-muted)]/30',
-  coral: 'bg-[var(--sc-coral)]/15 text-[var(--sc-coral)] border-[var(--sc-coral)]/30',
-  cyan: 'bg-[var(--sc-cyan)]/15 text-[var(--sc-cyan)] border-[var(--sc-cyan)]/30',
-  amber: 'bg-[var(--sc-amber)]/15 text-[var(--sc-amber)] border-[var(--sc-amber)]/30',
-  muted: 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-secondary)] border-[var(--sc-border)]',
+  critical: 'text-[var(--term-danger)]',
+  high: 'text-[var(--term-danger)]',
+  medium: 'text-[var(--term-warn)]',
+  low: 'text-[var(--term-electric-fg)]',
+  safe: 'text-[var(--term-neon-fg)]',
+  info: 'text-[var(--term-text-muted)]',
+  coral: 'text-[var(--term-electric-fg)]',
+  cyan: 'text-[var(--term-neon-fg)]',
+  amber: 'text-[var(--term-warn)]',
+  muted: 'text-[var(--term-text-muted)]',
 };
 
 const DOT_COLOURS: Record<BadgeVariant, string> = {
-  critical: 'bg-[var(--sc-coral)]',
-  high: 'bg-[var(--sc-coral-mid)]',
-  medium: 'bg-[var(--sc-amber)]',
-  low: 'bg-[var(--sc-cyan-mid)]',
-  safe: 'bg-[var(--sc-cyan)]',
-  info: 'bg-[var(--sc-text-muted)]',
-  coral: 'bg-[var(--sc-coral)]',
-  cyan: 'bg-[var(--sc-cyan)]',
-  amber: 'bg-[var(--sc-amber)]',
-  muted: 'bg-[var(--sc-text-muted)]',
+  critical: 'bg-[var(--term-danger)]',
+  high: 'bg-[var(--term-danger)]',
+  medium: 'bg-[var(--term-warn)]',
+  low: 'bg-[var(--term-electric)]',
+  safe: 'bg-[var(--term-neon)]',
+  info: 'bg-[var(--term-text-muted)]',
+  coral: 'bg-[var(--term-electric)]',
+  cyan: 'bg-[var(--term-neon)]',
+  amber: 'bg-[var(--term-warn)]',
+  muted: 'bg-[var(--term-text-muted)]',
 };
 
 export function Badge({ children, variant = 'muted', className, dot = false, pulse = false }: BadgeProps) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider',
+        'inline-flex items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap',
         VARIANT_STYLES[variant],
         className,
       )}
     >
       {dot && (
-        <span className={cn('h-1.5 w-1.5 rounded-full', DOT_COLOURS[variant], pulse && 'animate-pulse')} />
+        <span
+          className={cn('h-1.5 w-1.5 rounded-full', DOT_COLOURS[variant], pulse && 'animate-pulse')}
+          aria-hidden
+        />
       )}
-      {children}
+      <span className="text-[var(--term-text-muted)]" aria-hidden>[</span>
+      <span>{children}</span>
+      <span className="text-[var(--term-text-muted)]" aria-hidden>]</span>
     </span>
   );
 }

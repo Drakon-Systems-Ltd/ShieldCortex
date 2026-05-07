@@ -1,17 +1,54 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
-import { useOpenClawSessions, useMemoriesWithRealtime, useAccessMemory } from '@/hooks/useMemories';
+import { useOpenClawSessions, useMemoriesWithRealtime } from '@/hooks/useMemories';
 import { useDashboardStore } from '@/lib/store';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge } from '@/components/ds/Badge';
 import { SessionCard } from './SessionCard';
-import { MemoryCard } from './MemoryCard';
 import { MemoryActionModal } from './MemoryActionModal';
-import type { Memory } from '@/types/memory';
+import type { Memory, MemoryType, MemoryCategory } from '@/types/memory';
+import { cn } from '@/lib/utils';
 
 type ViewTab = 'sessions' | 'all';
 type SortKey = 'salience' | 'recent' | 'oldest';
+
+const TYPE_LABEL: Record<MemoryType, string> = {
+  short_term: 'STM',
+  long_term: 'LTM',
+  episodic: 'EPI',
+};
+
+const TYPE_VARIANT: Record<MemoryType, 'cyan' | 'safe' | 'low'> = {
+  short_term: 'low',
+  long_term: 'safe',
+  episodic: 'cyan',
+};
+
+const CATEGORY_SHORT: Record<MemoryCategory, string> = {
+  architecture: 'arch',
+  pattern: 'patt',
+  preference: 'pref',
+  error: 'err ',
+  context: 'ctx ',
+  learning: 'lrn ',
+  todo: 'todo',
+  note: 'note',
+  relationship: 'rel ',
+  custom: 'cust',
+};
+
+function salienceBar(s: number): string {
+  // 10-cell bar using density-graded blocks.
+  const filled = Math.round(s * 10);
+  const blocks = '█'.repeat(Math.max(0, filled));
+  const dots = '░'.repeat(Math.max(0, 10 - filled));
+  return blocks + dots;
+}
+
+function fmtDate(iso: string): string {
+  return iso.replace('T', ' ').replace(/:\d{2}\.\d+Z$/, 'Z').slice(0, 16);
+}
 
 export function MemoriesView() {
   const [viewTab, setViewTab] = useState<ViewTab>('all');
@@ -31,7 +68,6 @@ export function MemoriesView() {
     mode: search ? 'search' : 'recent',
     query: search || undefined,
   });
-  const accessMutation = useAccessMemory();
 
   const sessions = useMemo(() => openClawData?.sessions ?? [], [openClawData?.sessions]);
 
@@ -63,58 +99,66 @@ export function MemoriesView() {
   return (
     <div className="space-y-4">
       {/* Controls */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center overflow-hidden rounded-lg border border-[var(--sc-border)]">
+      <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
+        <div className="flex items-center gap-1">
           <button
+            type="button"
             onClick={() => setViewTab('sessions')}
-            className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={cn(
+              'px-2 py-1 transition-colors',
               viewTab === 'sessions'
-                ? 'bg-[var(--sc-border)] text-[var(--sc-text-primary)]'
-                : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
-            }`}
+                ? 'text-[var(--term-electric-fg)]'
+                : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)]',
+            )}
           >
-            Sessions{' '}
-            <span className="ml-1 text-[var(--sc-text-muted)]">{sessions.length}</span>
+            [sessions ({sessions.length})]
           </button>
           <button
+            type="button"
             onClick={() => setViewTab('all')}
-            className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={cn(
+              'px-2 py-1 transition-colors',
               viewTab === 'all'
-                ? 'bg-[var(--sc-border)] text-[var(--sc-text-primary)]'
-                : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
-            }`}
+                ? 'text-[var(--term-electric-fg)]'
+                : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)]',
+            )}
           >
-            All{' '}
-            <span className="ml-1 text-[var(--sc-text-muted)]">{memories.length}</span>
+            [all ({memories.length})]
           </button>
         </div>
 
+        <span className="text-[var(--term-text-muted)] ml-2">sort</span>
+        <span className="text-[var(--term-text-muted)]" aria-hidden>=</span>
         <select
+          aria-label="Sort memories"
           value={sortKey}
           onChange={(e) => setSortKey(e.target.value as SortKey)}
-          className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-2 py-1.5 text-xs text-[var(--sc-text-primary)]"
+          className="rounded-sm border border-[var(--term-border)] bg-[var(--term-surface-2)] px-2 py-0.5 text-[var(--term-text)] font-mono focus:outline-none focus:border-[var(--term-electric)]"
         >
-          <option value="salience">Salience</option>
-          <option value="recent">Recent</option>
-          <option value="oldest">Oldest</option>
+          <option value="salience">salience</option>
+          <option value="recent">recent</option>
+          <option value="oldest">oldest</option>
         </select>
 
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search memories..."
-          className="ml-auto w-56 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-3 py-1.5 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:border-[var(--sc-cyan)] focus:outline-none"
-        />
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-[var(--term-electric-fg)]" aria-hidden>›</span>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="grep memories…"
+            aria-label="Search memories"
+            className="w-64 rounded-sm border border-[var(--term-border)] bg-[var(--term-surface-2)] px-2 py-0.5 text-[var(--term-text)] placeholder:text-[var(--term-text-muted)] font-mono focus:border-[var(--term-electric)] focus:outline-none"
+          />
+        </div>
       </div>
 
-      {/* Sessions view */}
       {viewTab === 'sessions' && (
         <div className="space-y-3">
           {sessions.length === 0 && (
-            <GlassCard className="p-6">
-              <p className="text-sm text-[var(--sc-text-secondary)]">
-                No OpenClaw sessions found. Sessions appear after OpenClaw hooks capture memories.
+            <GlassCard title="memory.sessions">
+              <p className="text-sm font-mono text-[var(--term-text-muted)]">
+                # no OpenClaw sessions found. sessions appear after OpenClaw hooks capture memories.
               </p>
             </GlassCard>
           )}
@@ -129,25 +173,60 @@ export function MemoriesView() {
         </div>
       )}
 
-      {/* All memories view */}
       {viewTab === 'all' && (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
-          {sorted.length === 0 && (
-            <GlassCard className="col-span-full p-6">
-              <p className="text-sm text-[var(--sc-text-secondary)]">
-                {search ? 'No memories match your search.' : 'No memories found.'}
-              </p>
-            </GlassCard>
+        <GlassCard
+          title="memory.list"
+          bodyPadding={false}
+          statusLine={`${sorted.length} memor${sorted.length === 1 ? 'y' : 'ies'} · sort=${sortKey}${search ? ` · q="${search}"` : ''}`}
+        >
+          {sorted.length === 0 ? (
+            <div className="p-6 font-mono text-sm text-[var(--term-text-muted)]">
+              # {search ? 'no memories match your search' : 'no memories found'}
+            </div>
+          ) : (
+            <ul className="font-mono text-xs">
+              {sorted.map((memory) => {
+                const isSelected = selectedMemory?.id === memory.id;
+                return (
+                  <li key={memory.id}>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectMemory(memory)}
+                      className={cn(
+                        'flex w-full items-center gap-3 px-3 py-1.5 text-left border-b border-[var(--term-border)] last:border-0 transition-colors',
+                        isSelected
+                          ? 'bg-[var(--term-surface-2)]'
+                          : 'hover:bg-[var(--term-surface-2)]',
+                      )}
+                    >
+                      <span className="shrink-0 text-[var(--term-text-muted)] tabular-nums w-32 truncate">
+                        {fmtDate(memory.createdAt)}
+                      </span>
+                      <span className="shrink-0 w-14">
+                        <Badge variant={TYPE_VARIANT[memory.type]}>{TYPE_LABEL[memory.type]}</Badge>
+                      </span>
+                      <span className="shrink-0 w-12 text-[var(--term-text-muted)]">
+                        {CATEGORY_SHORT[memory.category]}
+                      </span>
+                      <span className="shrink-0 w-32 truncate text-[var(--term-text-muted)]">
+                        {memory.project ?? '—'}
+                      </span>
+                      <span className="flex-1 truncate text-[var(--term-text)]">
+                        {memory.title}
+                      </span>
+                      <span className="shrink-0 text-[var(--term-electric-fg)] tracking-tighter select-none">
+                        {salienceBar(memory.salience)}
+                      </span>
+                      <span className="shrink-0 w-10 text-right text-[var(--term-text-dim)] tabular-nums">
+                        {memory.salience.toFixed(2)}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           )}
-          {sorted.map((memory) => (
-            <MemoryCard
-              key={memory.id}
-              memory={memory}
-              isSelected={selectedMemory?.id === memory.id}
-              onSelect={handleSelectMemory}
-            />
-          ))}
-        </div>
+        </GlassCard>
       )}
 
       {selectedMemory && (
