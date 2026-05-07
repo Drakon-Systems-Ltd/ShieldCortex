@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Activity, ArrowDown, ArrowUp, Brain, Minus, ShieldAlert, ShieldCheck, Sparkles } from 'lucide-react';
 import { useDigest, type DigestMoment, type DigestWindow } from '@/hooks/useDigest';
 import { useDashboardStore } from '@/lib/store';
+import { ThemeToggle } from './ThemeToggle';
 
 const WINDOWS: Array<{ id: DigestWindow; label: string }> = [
   { id: '24h', label: '24h' },
@@ -141,21 +142,26 @@ export function DailyMomentBar() {
           </>
         )}
 
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-3">
+          <ThemeToggle />
+          <span aria-hidden className="text-[var(--term-text-muted)] theme-glass:text-[var(--sc-text-muted)]">·</span>
+          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
           {WINDOWS.map((w) => (
             <button
               key={w.id}
               type="button"
               onClick={(e) => { e.stopPropagation(); setWindow(w.id); }}
-              className={`px-1.5 py-0.5 text-[11px] font-mono transition-colors ${
+              className={`px-1.5 py-0.5 text-[11px] font-mono transition-colors theme-glass:rounded theme-glass:uppercase theme-glass:tracking-[0.12em] ${
                 w.id === window
-                  ? 'text-[var(--term-electric-fg)]'
-                  : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)]'
+                  ? 'text-[var(--term-electric-fg)] theme-glass:bg-[var(--sc-cyan)]/20 theme-glass:text-[var(--sc-cyan)]'
+                  : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)] theme-glass:hover:text-[var(--sc-text-primary)]'
               }`}
             >
-              [{w.label}]
+              <span className="theme-glass:hidden">[{w.label}]</span>
+              <span className="hidden theme-glass:inline">{w.label}</span>
             </button>
           ))}
+          </div>
         </div>
       </div>
 

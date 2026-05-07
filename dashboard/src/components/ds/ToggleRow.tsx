@@ -55,7 +55,8 @@ export function ToggleRow({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-2 self-start pt-0.5">
+      {/* Terminal: [on]/[off] text pill. */}
+      <div className="flex shrink-0 items-center gap-2 self-start pt-0.5 theme-glass:hidden">
         {pending && (
           <Loader2 size={12} className="animate-spin text-[var(--term-text-muted)]" aria-hidden />
         )}
@@ -67,6 +68,25 @@ export function ToggleRow({
         >
           {checked ? '[on]' : '[off]'}
         </span>
+      </div>
+
+      {/* Glass: original animated slider toggle. */}
+      <div className="relative hidden h-6 w-11 shrink-0 items-center theme-glass:flex" aria-hidden="true">
+        {pending && (
+          <Loader2 size={12} className="absolute -left-5 top-1.5 animate-spin text-[var(--sc-text-muted)]" />
+        )}
+        <span
+          className={cn(
+            'absolute inset-0 rounded-full transition-colors',
+            checked ? 'bg-[var(--sc-cyan)]' : 'bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)]',
+          )}
+        />
+        <span
+          className={cn(
+            'absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform',
+            checked ? 'translate-x-5' : 'translate-x-0.5',
+          )}
+        />
       </div>
 
       <input

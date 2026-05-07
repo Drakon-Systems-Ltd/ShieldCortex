@@ -18,13 +18,30 @@ export const metadata: Metadata = {
   description: "AI Memory Security Dashboard — Defence pipeline, audit logs, quarantine review",
 };
 
+// Inline theme bootstrap — runs before React hydration to set
+// <html data-theme="…"> from localStorage. Prevents flash-of-wrong-theme
+// when the user has chosen `glass` on a previous visit.
+const themeBootstrap = `
+try {
+  var t = localStorage.getItem('sc-theme');
+  if (t !== 'glass' && t !== 'terminal') t = 'terminal';
+  document.documentElement.dataset.theme = t;
+} catch (e) {
+  document.documentElement.dataset.theme = 'terminal';
+}
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className="dark" data-theme="terminal">
+      <head>
+        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-slate-950`}
       >

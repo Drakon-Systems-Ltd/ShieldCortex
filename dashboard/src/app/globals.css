@@ -2,6 +2,8 @@
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
+@custom-variant theme-terminal (&:where(:where([data-theme="terminal"]) *, [data-theme="terminal"]));
+@custom-variant theme-glass (&:where(:where([data-theme="glass"]) *, [data-theme="glass"]));
 
 @theme inline {
   --color-background: var(--background);
@@ -139,6 +141,88 @@
   --sidebar-ring: var(--term-electric);
 }
 
+/* ── Glass theme — original ShieldCortex aesthetic ──
+   Activated by `<html data-theme="glass">`. Restores the coral/cyan
+   neon glass-morphic palette. The terminal palette (default) remains
+   the source of truth above; this block only overrides values where
+   the two themes diverge. */
+
+[data-theme="glass"] {
+  /* Original core palette */
+  --sc-bg-deep: #050810;
+  --sc-bg-surface: #0a0f1a;
+  --sc-bg-elevated: #111827;
+  --sc-text-primary: #f0f4ff;
+  --sc-text-secondary: #8892b0;
+  --sc-text-muted: #5a6480;
+  --sc-coral: #ff4d4d;
+  --sc-coral-mid: #e63946;
+  --sc-coral-dark: #991b1b;
+  --sc-cyan: #00e5cc;
+  --sc-cyan-mid: #14b8a6;
+  --sc-amber: #f59e0b;
+
+  --sc-border: rgba(136, 146, 176, 0.15);
+  --sc-border-accent: rgba(255, 77, 77, 0.3);
+  --sc-card-bg: rgba(10, 15, 26, 0.65);
+  --sc-card-bg-strong: rgba(10, 15, 26, 0.8);
+  --sc-surface-interactive: rgba(255, 255, 255, 0.06);
+  --sc-surface-interactive-hover: rgba(255, 255, 255, 0.1);
+
+  --sc-glow-coral: rgba(255, 77, 77, 0.15);
+  --sc-glow-coral-mid: rgba(255, 77, 77, 0.25);
+  --sc-glow-cyan: rgba(0, 229, 204, 0.15);
+  --sc-glow-cyan-mid: rgba(0, 229, 204, 0.25);
+
+  --sc-transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Mirror the new --term-* tokens onto glass values so terminal-mode
+     components passing through tokens still pick the right colour. */
+  --term-bg: var(--sc-bg-deep);
+  --term-surface: var(--sc-bg-surface);
+  --term-surface-2: var(--sc-bg-elevated);
+  --term-border: var(--sc-border);
+  --term-border-strong: rgba(136, 146, 176, 0.25);
+  --term-text: var(--sc-text-primary);
+  --term-text-dim: var(--sc-text-secondary);
+  --term-text-muted: var(--sc-text-muted);
+  --term-text-faint: rgba(90, 100, 128, 0.7);
+  --term-electric: var(--sc-coral);
+  --term-electric-fg: var(--sc-coral);
+  --term-neon: var(--sc-cyan);
+  --term-neon-fg: var(--sc-cyan);
+  --term-warn: var(--sc-amber);
+  --term-danger: var(--sc-coral);
+
+  /* shadcn overrides */
+  --background: #050810;
+  --foreground: #f0f4ff;
+  --card: #0a0f1a;
+  --card-foreground: #f0f4ff;
+  --popover: #0a0f1a;
+  --popover-foreground: #f0f4ff;
+  --primary: #ff4d4d;
+  --primary-foreground: #ffffff;
+  --secondary: #111827;
+  --secondary-foreground: #f0f4ff;
+  --muted: #111827;
+  --muted-foreground: #8892b0;
+  --accent: #111827;
+  --accent-foreground: #f0f4ff;
+  --destructive: #ff4d4d;
+  --border: rgba(136, 146, 176, 0.15);
+  --input: rgba(136, 146, 176, 0.15);
+  --ring: #00e5cc;
+  --chart-1: #ff4d4d;
+  --chart-2: #00e5cc;
+  --chart-3: #14b8a6;
+  --chart-4: #f59e0b;
+  --chart-5: #8892b0;
+  --sidebar: #050810;
+  --sidebar-primary: #ff4d4d;
+  --sidebar-ring: #00e5cc;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -150,6 +234,92 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-feature-settings: "ss01", "cv01", "cv11";
   }
+  [data-theme="glass"] body {
+    /* Glass theme uses Geist Sans system stack instead of mono. */
+    font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* ── Glass theme component overrides — restore card blur, hover lift,
+   glow, scan animations that the terminal aesthetic dropped. ── */
+
+[data-theme="glass"] .glass-card {
+  background: var(--sc-card-bg);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-radius: 16px;
+}
+
+[data-theme="glass"] .glass-card-strong {
+  background: var(--sc-card-bg-strong);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-radius: 16px;
+}
+
+[data-theme="glass"] .glass-card-hover:hover {
+  transform: translateY(-4px);
+  border-color: var(--sc-border-accent);
+  box-shadow: 0 12px 40px var(--sc-glow-coral);
+}
+
+[data-theme="glass"] .glass-card-hover-cyan:hover {
+  transform: translateY(-4px);
+  border-color: rgba(0, 229, 204, 0.3);
+  box-shadow: 0 12px 40px var(--sc-glow-cyan);
+}
+
+[data-theme="glass"] .glow-coral {
+  box-shadow: 0 0 20px var(--sc-glow-coral), 0 0 60px var(--sc-glow-coral);
+}
+
+[data-theme="glass"] .glow-cyan {
+  box-shadow: 0 0 20px var(--sc-glow-cyan), 0 0 60px var(--sc-glow-cyan);
+}
+
+[data-theme="glass"] .glow-coral-subtle {
+  box-shadow: 0 4px 20px var(--sc-glow-coral);
+}
+
+[data-theme="glass"] .glow-cyan-subtle {
+  box-shadow: 0 4px 20px var(--sc-glow-cyan);
+}
+
+@keyframes sc-glow-pulse-cyan {
+  0%, 100% {
+    box-shadow: 0 0 6px var(--sc-glow-cyan), 0 0 12px var(--sc-glow-cyan);
+  }
+  50% {
+    box-shadow: 0 0 14px var(--sc-glow-cyan-mid), 0 0 28px var(--sc-glow-cyan-mid);
+  }
+}
+
+[data-theme="glass"] .glow-cyan-pulse {
+  animation: sc-glow-pulse-cyan 1.4s ease-in-out infinite;
+}
+
+@keyframes scanSweep {
+  0% { transform: translateX(-100%); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateX(100%); opacity: 0; }
+}
+
+[data-theme="glass"] .scan-sweep {
+  position: relative;
+  overflow: hidden;
+}
+
+[data-theme="glass"] .scan-sweep::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, var(--sc-glow-cyan-mid), transparent);
+  animation: scanSweep 2s ease-in-out infinite;
+  pointer-events: none;
 }
 
 /* ── Glass card (legacy class — restyled as a flat terminal panel) ──

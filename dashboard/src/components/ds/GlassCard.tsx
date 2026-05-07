@@ -66,8 +66,10 @@ export function GlassCard({
       role={onClick ? 'button' : undefined}
       tabIndex={onClick ? 0 : undefined}
     >
+      {/* Title bar — terminal mode only. Glass mode renders no chrome,
+          so the children sit directly inside the card body. */}
       {title !== undefined && (
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--term-border)] bg-[var(--term-surface-2)]">
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--term-border)] bg-[var(--term-surface-2)] theme-glass:hidden">
           <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-red)]" />
           <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-yellow)]" />
           <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-green)]" />
@@ -78,7 +80,7 @@ export function GlassCard({
       )}
       <div className={cn(bodyPadding ? 'p-5' : '')}>{children}</div>
       {statusLine !== undefined && (
-        <div className="px-4 py-2 text-xs border-t border-[var(--term-border)] bg-[var(--term-surface-2)] text-[var(--term-text-muted)]">
+        <div className="px-4 py-2 text-xs border-t border-[var(--term-border)] bg-[var(--term-surface-2)] text-[var(--term-text-muted)] theme-glass:hidden">
           {statusLine}
         </div>
       )}

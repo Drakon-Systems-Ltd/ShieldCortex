@@ -11,18 +11,30 @@ interface SkeletonProps {
 // height too small for text rendering.
 export function Skeleton({ className }: SkeletonProps) {
   return (
-    <div
-      className={cn(
-        'flex items-center overflow-hidden rounded-md bg-[var(--term-surface-2)] text-[var(--term-text-muted)] text-xs leading-none animate-pulse px-2',
-        className,
-      )}
-      aria-busy="true"
-      aria-live="polite"
-    >
-      <span className="select-none whitespace-nowrap tracking-tighter">
-        █▓▓▓▒▒▒░░░░ ▓▓▒▒░░ █▓▒░ ▓▓▒░░ █▓▓▒░░░ ▓▒░░ █▒▒░
-      </span>
-    </div>
+    <>
+      {/* Terminal: animated block characters in a flat surface. */}
+      <div
+        className={cn(
+          'theme-glass:hidden flex items-center overflow-hidden rounded-md bg-[var(--term-surface-2)] text-[var(--term-text-muted)] text-xs leading-none animate-pulse px-2',
+          className,
+        )}
+        aria-busy="true"
+        aria-live="polite"
+      >
+        <span className="select-none whitespace-nowrap tracking-tighter">
+          █▓▓▓▒▒▒░░░░ ▓▓▒▒░░ █▓▒░ ▓▓▒░░ █▓▓▒░░░ ▓▒░░ █▒▒░
+        </span>
+      </div>
+      {/* Glass: gradient shimmer pill (original). */}
+      <div
+        className={cn(
+          'hidden theme-glass:block animate-pulse rounded-xl bg-[var(--sc-surface-interactive)]',
+          className,
+        )}
+        aria-busy="true"
+        aria-live="polite"
+      />
+    </>
   );
 }
 
