@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
+import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
 
 // ==================== CONFIG ====================
 
@@ -158,8 +159,14 @@ process.stdin.on('end', () => {
     }
 
     const hookData = JSON.parse(input || '{}');
-    const prompt = hookData.prompt || '';
+    const rawPrompt = hookData.prompt || '';
     const cwd = hookData.cwd || process.cwd();
+
+    // Strip OpenClaw / framework metadata wrappers (e.g. Telegram channel
+    // headers) before any prompt-based decisions. Without this, the FTS5
+    // query is built from "Conversation info untrusted metadata json" tokens
+    // instead of the user's actual words and recall returns 0 relevant rows.
+    const prompt = sanitisePromptForRecall(rawPrompt);
 
     if (prompt.length < MIN_PROMPT_LENGTH) {
       process.exit(0);

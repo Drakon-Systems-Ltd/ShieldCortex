@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.10] - 2026-05-07
+
+**Critical recall fix — proactive recall returns relevant memories on Telegram / OpenClaw channels.**
+
+Field report: agents running on OpenClaw with the Telegram channel (e.g. Edith) appeared to "lose" prior conversation context — short follow-up messages like "Reboot it" after a clear referent were met with "Reboot what?". Investigation tracked the symptom to the prompt-recall hook silently failing for every Telegram turn.
+
+OpenClaw wraps every incoming Telegram message in a metadata header before passing it to the underlying agent runtime:
+
+```
+Conversation info (untrusted metadata):
+```json
+{ "chat_id": "telegram:…", "message_id": "…" }
+```
+[real user text]
+```
+
+The recall hook builds its FTS5 query from the first 6 words (>2 chars) of the prompt — which for a Telegram message resolves to `Conversation OR info OR untrusted OR metadata OR json OR chat_id`. The query never sees the actual user text, FTS5 returns no relevant rows, and the model gets no recalled context to compensate for the channel-level loss of conversational state. Net effect on production agents: every Telegram turn is starved of historical context.
+
+### Added
+
+- **`scripts/lib/prompt-sanitiser.mjs`** — new conservative module exposing `sanitisePromptForRecall(prompt)`. Strips a verified-in-the-wild OpenClaw Telegram metadata wrapper (header line + leading fenced JSON block) and returns the bare user text. Safe for non-wrapped prompts: returns input unchanged. Refuses to eat code-block fences when no metadata header is present, so users asking about a code snippet keep the snippet in the recall query.
+- **8 unit tests** at `src/__tests__/prompt-sanitiser.test.ts` covering: bare prompt passthrough, full wrapper strip, multi-line user text, wrapper-only input → empty, header without parenthetical qualifier, code-snippet preservation, null/undefined safety, and the bug-fix demonstration (first 6 words after sanitise are user words, not metadata).
+
+### Fixed
+
+- **`scripts/prompt-recall-hook.mjs`** ([scripts/prompt-recall-hook.mjs](scripts/prompt-recall-hook.mjs)) — calls `sanitisePromptForRecall(rawPrompt)` before the `MIN_PROMPT_LENGTH` gate, the short-prompt regex, and the FTS5 query builder. The downstream `escapeFts5()` / `MIN_PROMPT_LENGTH` / `categoryBoost` logic is unchanged — they now see the user's actual words on Telegram-channel agents.
+
+No protocol or API changes; existing Claude Code installs (no metadata wrapper) keep their previous behaviour bit-for-bit. OpenClaw + Telegram installs immediately gain working recall on the next prompt after upgrading.
+
 ## [4.14.9] - 2026-05-06
 
 **Update spinner now actually animates during npm install.**
