@@ -1,7 +1,7 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
-import { useState, Suspense } from 'react';
+import { useSearchParams, usePathname, useRouter } from 'next/navigation';
+import { useState, Suspense, useCallback } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import dynamic from 'next/dynamic';
 import {
@@ -44,9 +44,27 @@ function normaliseTab(tab: string | null): MemoryTab | null {
 
 function MemoryContent() {
   const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
   const validUrlTab = normaliseTab(searchParams.get('tab'));
-  const [userTab, setTab] = useState<MemoryTab>('library');
+  const [userTab, setUserTab] = useState<MemoryTab>('library');
   const tab = validUrlTab ?? userTab;
+
+  // When the user clicks a tab, replace the URL search param so the URL stays
+  // canonical and validUrlTab follows the click. Without this, a click only
+  // updates `userTab` but `validUrlTab` keeps winning and the active tab
+  // appears stuck.
+  const setTab = useCallback((next: MemoryTab) => {
+    setUserTab(next);
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === 'library') {
+      params.delete('tab');
+    } else {
+      params.set('tab', next);
+    }
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }, [pathname, router, searchParams]);
 
   const { data: stats } = useStats();
   const { data: contradictions } = useContradictions();
