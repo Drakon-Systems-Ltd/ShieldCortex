@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# Git worktrees (feature branches checked out alongside main)
+.worktrees/
+
 # Database files
 *.db
 *.db-wal
