@@ -14,30 +14,31 @@ import { pluginInstallNeedsWrite } from '../setup/openclaw';
  *
  * The fix factors the comparison into a pure helper so we can prove
  * "no-op when state matches" cheaply, without booting the full installer
- * (which shells out to npm). `trustLocalPlugin` now skips its write when
+ * (which shells out to npm). `trustLocalPlugin` skips its write when
  * `pluginInstallNeedsWrite` returns false.
  *
- * The comparison is intentionally strict — any drift in source,
- * installPath, version, allow membership, or entries presence forces a
- * fresh write so the installer can correct corrupted/partial config.
+ * v4.15 — OpenClaw 2026.5.x migrated `plugins.installs` out of
+ * `openclaw.json` into `~/.openclaw/plugins/installs.json`. The contract
+ * is now:
+ *   - `plugins.allow` must contain the bare pluginId (no stale full-path
+ *     entries beside it).
+ *   - `plugins.entries[pluginId].enabled === true`.
+ *   - `plugins.installs[pluginId]` MUST be absent — its presence is a
+ *     legacy artefact that trips OpenClaw's migration-block on next
+ *     config write.
+ *
+ * The `installDir` and `version` parameters are accepted for API
+ * compatibility but no longer participate in the comparison.
  */
-describe('pluginInstallNeedsWrite — idempotency comparison (v4.12.11)', () => {
+describe('pluginInstallNeedsWrite — idempotency comparison (v4.15 contract)', () => {
   const PLUGIN_ID = 'shieldcortex-realtime';
   const INSTALL_DIR = '/home/u/.openclaw/extensions/shieldcortex-realtime';
-  const VERSION = '4.12.11';
+  const VERSION = '4.15.0';
 
   function correctConfig() {
     return {
       plugins: {
         allow: [PLUGIN_ID],
-        installs: {
-          [PLUGIN_ID]: {
-            source: 'path',
-            installPath: INSTALL_DIR,
-            version: VERSION,
-            installedAt: '2026-04-25T00:00:00.000Z',  // any prior timestamp
-          },
-        },
         entries: {
           [PLUGIN_ID]: { enabled: true },
         },
@@ -47,24 +48,6 @@ describe('pluginInstallNeedsWrite — idempotency comparison (v4.12.11)', () => 
 
   it('returns false when config already matches (no write needed)', () => {
     expect(pluginInstallNeedsWrite(correctConfig(), PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(false);
-  });
-
-  it('returns true when version changed', () => {
-    const cfg = correctConfig();
-    cfg.plugins.installs[PLUGIN_ID].version = '4.12.10';
-    expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
-  });
-
-  it('returns true when installPath changed', () => {
-    const cfg = correctConfig();
-    cfg.plugins.installs[PLUGIN_ID].installPath = '/different/path';
-    expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
-  });
-
-  it('returns true when source drifted from "path" (e.g. corrupted to "npm")', () => {
-    const cfg = correctConfig();
-    (cfg.plugins.installs[PLUGIN_ID] as any).source = 'npm';
-    expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
   });
 
   it('returns true when allow list is missing the plugin', () => {
@@ -81,13 +64,19 @@ describe('pluginInstallNeedsWrite — idempotency comparison (v4.12.11)', () => 
 
   it('returns true when entries[pluginId] is missing', () => {
     const cfg = correctConfig();
-    delete (cfg.plugins.entries as any)[PLUGIN_ID];
+    delete (cfg.plugins.entries as Record<string, unknown>)[PLUGIN_ID];
     expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
   });
 
-  it('returns true when installs.* is entirely missing', () => {
+  it('returns true when entries[pluginId].enabled is false (drift)', () => {
     const cfg = correctConfig();
-    cfg.plugins.installs = {};
+    cfg.plugins.entries[PLUGIN_ID] = { enabled: false };
+    expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
+  });
+
+  it('returns true when entries[pluginId] lacks the enabled key entirely', () => {
+    const cfg = correctConfig();
+    cfg.plugins.entries[PLUGIN_ID] = {} as { enabled: true };
     expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
   });
 
@@ -95,9 +84,30 @@ describe('pluginInstallNeedsWrite — idempotency comparison (v4.12.11)', () => 
     expect(pluginInstallNeedsWrite({}, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
   });
 
-  it('treats installedAt as transient — does not force a write when only it differs', () => {
+  it('returns true when a legacy plugins.installs[shieldcortex-realtime] entry is present', () => {
+    // Even with allow + entries correct, an existing installs entry must
+    // trigger a write so trustLocalPlugin can clean it up before OpenClaw
+    // migration blocks the next config write.
+    const cfg = correctConfig() as { plugins: Record<string, unknown> };
+    cfg.plugins.installs = {
+      [PLUGIN_ID]: { source: 'path', installPath: INSTALL_DIR, version: VERSION },
+    };
+    expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(true);
+  });
+
+  it('returns false when plugins.installs has unrelated entries but not ours', () => {
+    const cfg = correctConfig() as { plugins: Record<string, unknown> };
+    cfg.plugins.installs = {
+      'other-plugin': { source: 'npm', version: '1.0.0' },
+    };
+    expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(false);
+  });
+
+  it('preserves additional fields in entries[pluginId] (forward-compatible)', () => {
+    // OpenClaw may add `config: {}`, `hooks`, `subagent`, etc. to the entry.
+    // These shouldn't trigger a write as long as `enabled === true`.
     const cfg = correctConfig();
-    cfg.plugins.installs[PLUGIN_ID].installedAt = 'literally any other value';
+    cfg.plugins.entries[PLUGIN_ID] = { enabled: true, config: {} } as { enabled: true };
     expect(pluginInstallNeedsWrite(cfg, PLUGIN_ID, INSTALL_DIR, VERSION)).toBe(false);
   });
 });

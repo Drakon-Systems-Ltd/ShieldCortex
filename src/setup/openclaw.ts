@@ -21,8 +21,12 @@ const HOOK_NAME = 'cortex-memory';
 // From dist/setup/, go up two levels to project root
 const HOOK_SOURCE = path.resolve(__dirname, '..', '..', 'hooks', 'openclaw', HOOK_NAME);
 
-// Plugin compiled output in plugins/openclaw/dist/ relative to project root
-const PLUGIN_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'dist');
+// Plugin compiled output in plugins/openclaw/dist/ relative to project root.
+// `SHIELDCORTEX_PLUGIN_SOURCE` overrides for hermetic tests so the install
+// path doesn't need a prior `npm run build`.
+const PLUGIN_SOURCE = process.env.SHIELDCORTEX_PLUGIN_SOURCE
+  ? path.resolve(process.env.SHIELDCORTEX_PLUGIN_SOURCE)
+  : path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'dist');
 const PLUGIN_PACKAGE_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw');
 const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
 const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
@@ -344,18 +348,21 @@ function openClawConfigPath(): string {
 export function pluginInstallNeedsWrite(
   config: unknown,
   pluginId: string,
-  installDir: string,
-  version: string,
+  _installDir: string,
+  _version: string,
 ): boolean {
   if (!config || typeof config !== 'object') return true;
   const c = config as { plugins?: unknown };
   if (!c.plugins || typeof c.plugins !== 'object') return true;
   const plugins = c.plugins as { allow?: unknown; installs?: unknown; entries?: unknown };
 
-  const install = (plugins.installs as Record<string, unknown> | undefined)?.[pluginId];
-  if (!install || typeof install !== 'object') return true;
-  const i = install as { source?: unknown; installPath?: unknown; version?: unknown };
-  if (i.source !== 'path' || i.installPath !== installDir || i.version !== version) return true;
+  // `plugins.installs` is no longer user-authored config in OpenClaw 2026.5.x —
+  // it migrated to `~/.openclaw/plugins/installs.json`. If a stale entry remains
+  // in `openclaw.json`, OpenClaw will try to migrate it on the next config
+  // write and (when state-dir permissions block migration) refuse the write
+  // entirely. Treat its presence as drift so trustLocalPlugin can clean it up.
+  const installs = plugins.installs as Record<string, unknown> | undefined;
+  if (installs && pluginId in installs) return true;
 
   const allow = Array.isArray(plugins.allow) ? (plugins.allow as unknown[]) : [];
   if (!allow.includes(pluginId)) return true;
@@ -363,12 +370,33 @@ export function pluginInstallNeedsWrite(
   if (hasStale) return true;
 
   const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
-  if (!entries[pluginId]) return true;
+  const entry = entries[pluginId] as { enabled?: unknown } | undefined;
+  if (!entry || entry.enabled !== true) return true;
 
   return false;
 }
 
-function trustLocalPlugin(installDir: string, version: string): boolean {
+/**
+ * Register a locally-copied plugin in OpenClaw's user config.
+ *
+ * Writes (or updates) `plugins.allow` and `plugins.entries[pluginId]`. Does
+ * NOT write `plugins.installs[pluginId]` — that key is OpenClaw-managed in
+ * 2026.5.x+ (kept under `~/.openclaw/plugins/installs.json`). If we authored
+ * it and OpenClaw can't migrate (state-dir permission edge case), it
+ * refuses the next config write entirely; see
+ * `dist/io-E69J4lLI.js:18897` in OpenClaw 2026.5.6 for the migration-block
+ * error. Plugin discovery remains correct without `installs`: OpenClaw
+ * picks up plugin files from `~/.openclaw/extensions/<id>/` and uses
+ * `plugins.allow + plugins.entries[id].enabled` to gate execution.
+ *
+ * The `installDir` and `version` parameters are accepted for backward
+ * compatibility with the old call sites but are no longer persisted.
+ *
+ * Also actively cleans any legacy `plugins.installs[shieldcortex-realtime]`
+ * entry left over from older ShieldCortex versions, so customers upgrading
+ * through us never trip OpenClaw's migration-block.
+ */
+function trustLocalPlugin(_installDir: string, _version: string): boolean {
   const configPath = openClawConfigPath();
   const configDir = path.dirname(configPath);
   const pluginId = PLUGIN_DIR_NAME; // "shieldcortex-realtime"
@@ -382,10 +410,7 @@ function trustLocalPlugin(installDir: string, version: string): boolean {
     const config = JSON.parse(raw);
 
     // Idempotency: skip the write if everything is already correct.
-    // This stops `shieldcortex openclaw install` (and postinstall.mjs's
-    // auto-refresh) from bumping a fresh installedAt timestamp on every
-    // invocation when nothing has actually changed.
-    if (!pluginInstallNeedsWrite(config, pluginId, installDir, version)) {
+    if (!pluginInstallNeedsWrite(config, pluginId, _installDir, _version)) {
       return true;
     }
 
@@ -394,7 +419,7 @@ function trustLocalPlugin(installDir: string, version: string): boolean {
       ? ((plugins as { allow?: string[] }).allow ?? [])
       : [];
 
-    // Remove any stale full-path entries for this plugin
+    // Remove any stale full-path entries for this plugin in `allow`.
     const cleaned = allow.filter(
       (e: string) => !e.includes(PLUGIN_DIR_NAME) || e === pluginId,
     );
@@ -402,34 +427,45 @@ function trustLocalPlugin(installDir: string, version: string): boolean {
       cleaned.push(pluginId);
     }
 
-    // Preserve the existing installedAt if present — we only land here
-    // when something genuine changed, but if the existing entry's path
-    // was wrong (say) we don't need to invent a new install timestamp.
-    const installs = typeof plugins.installs === 'object' && plugins.installs !== null
-      ? plugins.installs
-      : {};
-    const existingInstall = (installs as Record<string, { installedAt?: string }>)[pluginId];
-    (installs as Record<string, unknown>)[pluginId] = {
-      source: 'path',
-      installPath: installDir,
-      version,
-      installedAt: existingInstall?.installedAt ?? new Date().toISOString(),
-    };
-
-    // Add entries to enable the plugin
-    const entries = typeof plugins.entries === 'object' && plugins.entries !== null
-      ? plugins.entries
-      : {};
-    if (!(entries as Record<string, unknown>)[pluginId]) {
-      (entries as Record<string, unknown>)[pluginId] = { enabled: true };
+    // Cleanup of legacy `plugins.installs[shieldcortex-realtime]` from
+    // pre-v4.15 ShieldCortex versions. Other plugins' installs entries are
+    // not touched — their migration is OpenClaw's concern.
+    const existingInstalls = typeof plugins.installs === 'object' && plugins.installs !== null
+      ? (plugins.installs as Record<string, unknown>)
+      : null;
+    let installsAfter: Record<string, unknown> | undefined;
+    if (existingInstalls) {
+      const { [pluginId]: _removed, ...rest } = existingInstalls;
+      installsAfter = rest;
     }
 
-    config.plugins = {
+    // Add entries to enable the plugin (preserving any user-set `config`
+    // or other fields OpenClaw may have added).
+    const entries = typeof plugins.entries === 'object' && plugins.entries !== null
+      ? { ...(plugins.entries as Record<string, unknown>) }
+      : {};
+    const existingEntry = entries[pluginId];
+    entries[pluginId] = (typeof existingEntry === 'object' && existingEntry !== null)
+      ? { ...(existingEntry as Record<string, unknown>), enabled: true }
+      : { enabled: true };
+
+    const newPlugins: Record<string, unknown> = {
       ...plugins,
       allow: cleaned,
-      installs,
       entries,
     };
+    if (installsAfter !== undefined) {
+      // Only carry `installs` forward if there were OTHER plugins under it.
+      // If our cleanup left the object empty, drop it entirely so OpenClaw
+      // doesn't see a vestigial `installs: {}`.
+      if (Object.keys(installsAfter).length > 0) {
+        newPlugins.installs = installsAfter;
+      } else {
+        delete newPlugins.installs;
+      }
+    }
+
+    config.plugins = newPlugins;
 
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
     return true;
@@ -743,20 +779,26 @@ function pluginStatus(): { installed: boolean; path?: string; entry?: 'index.ts'
  * Check whether the plugin is registered in OpenClaw's config, independently
  * of what's on disk. A discrepancy between disk and config surfaces clearly
  * in `shieldcortex openclaw status`.
+ *
+ * `inLegacyInstalls` reports the presence of a stale
+ * `plugins.installs[shieldcortex-realtime]` entry from pre-v4.15 ShieldCortex
+ * versions. It's never load-bearing in OpenClaw 2026.5.x — `trustLocalPlugin`
+ * cleans it up on the next install — but surfacing it helps users diagnose
+ * config-write failures on the OpenClaw side until they re-run setup.
  */
-function pluginConfigStatus(): { inAllow: boolean; inInstalls: boolean; inEntries: boolean } {
+function pluginConfigStatus(): { inAllow: boolean; inLegacyInstalls: boolean; inEntries: boolean } {
   const configPath = openClawConfigPath();
-  if (!fs.existsSync(configPath)) return { inAllow: false, inInstalls: false, inEntries: false };
+  if (!fs.existsSync(configPath)) return { inAllow: false, inLegacyInstalls: false, inEntries: false };
   try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     const plugins = config.plugins ?? {};
     const allow = Array.isArray(plugins.allow) ? plugins.allow : [];
     const inAllow = allow.some((e: unknown) => typeof e === 'string' && (e === PLUGIN_DIR_NAME || e.endsWith(`/${PLUGIN_DIR_NAME}`) || e.endsWith(`/${PLUGIN_DIR_NAME}/index.js`) || e.endsWith(`/${PLUGIN_DIR_NAME}/index.ts`)));
-    const inInstalls = typeof plugins.installs === 'object' && plugins.installs !== null && PLUGIN_DIR_NAME in plugins.installs;
+    const inLegacyInstalls = typeof plugins.installs === 'object' && plugins.installs !== null && PLUGIN_DIR_NAME in plugins.installs;
     const inEntries = typeof plugins.entries === 'object' && plugins.entries !== null && PLUGIN_DIR_NAME in plugins.entries;
-    return { inAllow, inInstalls, inEntries };
+    return { inAllow, inLegacyInstalls, inEntries };
   } catch {
-    return { inAllow: false, inInstalls: false, inEntries: false };
+    return { inAllow: false, inLegacyInstalls: false, inEntries: false };
   }
 }
 
@@ -1033,7 +1075,7 @@ export async function openClawHookStatus(): Promise<void> {
   console.log('');
   const plugin = pluginStatus();
   const configState = pluginConfigStatus();
-  const anyConfig = configState.inAllow || configState.inInstalls || configState.inEntries;
+  const anyConfig = configState.inAllow || configState.inLegacyInstalls || configState.inEntries;
 
   if (!plugin.installed && !anyConfig) {
     console.log('  Real-time plugin: not installed');
@@ -1044,7 +1086,7 @@ export async function openClawHookStatus(): Promise<void> {
     // Config says yes, disk says no — the drift case that caused #20.
     const refs = [
       configState.inAllow ? 'plugins.allow' : null,
-      configState.inInstalls ? 'plugins.installs' : null,
+      configState.inLegacyInstalls ? 'plugins.installs (legacy — will be cleaned on next install)' : null,
       configState.inEntries ? 'plugins.entries' : null,
     ].filter(Boolean).join(' + ');
     console.log(`  Real-time plugin: config references (${refs}) but no files on disk — run \`openclaw plugins install @drakon-systems/shieldcortex-realtime\` to reinstall`);
@@ -1061,9 +1103,14 @@ export async function openClawHookStatus(): Promise<void> {
   const entrySuffix = plugin.entry ? ` [${plugin.entry}]` : '';
   console.log(`  Real-time plugin: installed (${plugin.path})${entrySuffix} — ${trustSuffix}`);
 
-  // Surface any config/disk drift even when installed.
-  if (!configState.inInstalls && !configState.inEntries && !configState.inAllow) {
+  // Surface any config/disk drift even when installed. A legacy `installs`
+  // entry alone is not sufficient for OpenClaw to load the plugin — it needs
+  // `allow` + `entries[id].enabled` — so don't count `inLegacyInstalls` here.
+  if (!configState.inEntries && !configState.inAllow) {
     console.log('    warning: on disk but missing from openclaw.json — OpenClaw may not load it');
+  }
+  if (configState.inLegacyInstalls) {
+    console.log('    note: legacy `plugins.installs` entry detected — will be cleaned on next `shieldcortex openclaw install`');
   }
 }
 

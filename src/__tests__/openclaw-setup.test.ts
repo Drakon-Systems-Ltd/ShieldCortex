@@ -7,7 +7,9 @@ describe('OpenClaw setup', () => {
   const originalHome = process.env.HOME;
   const originalUserProfile = process.env.USERPROFILE;
   const originalSkipNative = process.env.SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL;
+  const originalPluginSource = process.env.SHIELDCORTEX_PLUGIN_SOURCE;
   let tempHome: string;
+  let tempPluginSource: string;
   let homedirSpy: jest.SpiedFunction<typeof os.homedir>;
   let logSpy: jest.SpiedFunction<typeof console.log>;
   let warnSpy: jest.SpiedFunction<typeof console.warn>;
@@ -20,6 +22,31 @@ describe('OpenClaw setup', () => {
     process.env.USERPROFILE = tempHome;
     delete process.env.SUDO_USER;
     process.env.SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL = '1';
+
+    // Hermetic plugin-source: stub a fake `plugins/openclaw/dist/` so the
+    // fallback install path doesn't depend on a prior `npm run build`.
+    tempPluginSource = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-plugin-src-'));
+    fs.writeFileSync(
+      path.join(tempPluginSource, 'index.js'),
+      'export default {};\n',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(tempPluginSource, 'interceptor.js'),
+      'export {};\n',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(tempPluginSource, 'intercept-ingest.js'),
+      'export {};\n',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(tempPluginSource, 'openclaw.plugin.json'),
+      '{"id":"shieldcortex-realtime","version":"0.0.0-test"}\n',
+      'utf-8',
+    );
+    process.env.SHIELDCORTEX_PLUGIN_SOURCE = tempPluginSource;
 
     fs.mkdirSync(path.join(tempHome, '.openclaw', 'hooks', 'internal', 'cortex-memory'), { recursive: true });
     fs.mkdirSync(path.join(tempHome, '.openclaw', 'extensions'), { recursive: true });
@@ -50,7 +77,13 @@ describe('OpenClaw setup', () => {
     } else {
       process.env.SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL = originalSkipNative;
     }
+    if (originalPluginSource === undefined) {
+      delete process.env.SHIELDCORTEX_PLUGIN_SOURCE;
+    } else {
+      process.env.SHIELDCORTEX_PLUGIN_SOURCE = originalPluginSource;
+    }
     fs.rmSync(tempHome, { recursive: true, force: true });
+    fs.rmSync(tempPluginSource, { recursive: true, force: true });
   });
 
   function preferredHookDir(): string {
@@ -108,7 +141,7 @@ describe('OpenClaw setup', () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('rerun `shieldcortex openclaw install` to migrate'));
   });
 
-  it('registers plugin ID in plugins.allow and installs on fallback install', async () => {
+  it('registers plugin in plugins.allow + plugins.entries[id].enabled on fallback install (no plugins.installs write)', async () => {
     const { installOpenClawHook } = await loadOpenClawModule();
     fs.writeFileSync(openClawConfigPath(), JSON.stringify({}, null, 2) + '\n', 'utf-8');
 
@@ -116,10 +149,71 @@ describe('OpenClaw setup', () => {
 
     const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
     expect(config.plugins.allow).toContain('shieldcortex-realtime');
-    expect(config.plugins.installs['shieldcortex-realtime']).toBeDefined();
-    expect(config.plugins.installs['shieldcortex-realtime'].source).toBe('path');
     expect(config.plugins.entries['shieldcortex-realtime']).toEqual({ enabled: true });
+    // OpenClaw 2026.5.x manages plugins.installs in
+    // ~/.openclaw/plugins/installs.json. Authoring it from openclaw.json
+    // can trip OpenClaw's migration-block on next config write. We must
+    // NOT write it from trustLocalPlugin.
+    expect(config.plugins.installs?.['shieldcortex-realtime']).toBeUndefined();
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Registered plugin in OpenClaw config'));
+  });
+
+  it('cleans up legacy plugins.installs[shieldcortex-realtime] from pre-v4.15 config', async () => {
+    const { installOpenClawHook } = await loadOpenClawModule();
+    fs.writeFileSync(
+      openClawConfigPath(),
+      JSON.stringify(
+        {
+          plugins: {
+            installs: {
+              'shieldcortex-realtime': {
+                source: 'path',
+                installPath: '/legacy/path/shieldcortex-realtime',
+                version: '4.10.0',
+                installedAt: '2026-04-01T00:00:00.000Z',
+              },
+              'other-plugin': { source: 'npm', version: '1.0.0' },
+            },
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+      'utf-8',
+    );
+
+    await installOpenClawHook();
+
+    const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
+    expect(config.plugins.installs?.['shieldcortex-realtime']).toBeUndefined();
+    // Other plugins' installs entries are NOT touched — their migration is OpenClaw's concern.
+    expect(config.plugins.installs?.['other-plugin']).toEqual({ source: 'npm', version: '1.0.0' });
+    expect(config.plugins.allow).toContain('shieldcortex-realtime');
+    expect(config.plugins.entries['shieldcortex-realtime'].enabled).toBe(true);
+  });
+
+  it('drops plugins.installs entirely if removing our entry leaves it empty', async () => {
+    const { installOpenClawHook } = await loadOpenClawModule();
+    fs.writeFileSync(
+      openClawConfigPath(),
+      JSON.stringify(
+        {
+          plugins: {
+            installs: {
+              'shieldcortex-realtime': { source: 'path', installPath: '/legacy', version: '4.10.0' },
+            },
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+      'utf-8',
+    );
+
+    await installOpenClawHook();
+
+    const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
+    expect(config.plugins.installs).toBeUndefined();
   });
 
   it('reports trusted local fallback clearly in status output', async () => {
