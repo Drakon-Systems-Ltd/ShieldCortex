@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.14.11] - 2026-05-08
+
+**OpenClaw 2026.5.x compatibility fix — stop authoring `plugins.installs` in user config.**
+
+OpenClaw 2026.5.x migrated `plugins.installs` out of `~/.openclaw/openclaw.json` into a separate plugin-index store at `~/.openclaw/plugins/installs.json`. The new index is OpenClaw-managed (the file itself carries a "DO NOT EDIT" warning) and authored exclusively via `openclaw plugins install/update/uninstall` plus the internal migration path.
+
+ShieldCortex's fallback `trustLocalPlugin()` was still authoring `plugins.installs[shieldcortex-realtime]` in user config. On hosts where state-dir permissions block the migration, OpenClaw refuses subsequent config writes with:
+
+```text
+Config write blocked: shipped plugins.installs records in {configPath} could
+not be migrated into the plugin index. Fix state directory permissions or
+run openclaw plugins registry --refresh, then retry.
+```
+
+Effect on real users: any customer hitting that permission edge case after upgrading OpenClaw saw their gateway config become unwritable as soon as ShieldCortex's setup ran. Plugin discovery never required the `installs` entry — files under `~/.openclaw/extensions/<id>/` plus `plugins.allow + plugins.entries[id].enabled` are sufficient on every supported OpenClaw version.
+
+### Fixed
+
+- **`src/setup/openclaw.ts`** — `trustLocalPlugin()` no longer writes `plugins.installs[shieldcortex-realtime]`. Actively cleans any legacy entry left by pre-v4.14.11 ShieldCortex versions so customers self-heal on the next install. Other plugins' `installs` entries are not touched. If our cleanup leaves the object empty, the key is dropped entirely (no vestigial `installs: {}`).
+- **`pluginInstallNeedsWrite()`** rewritten around `allow + entries[id].enabled`. Forward-compatible with new OpenClaw `entries` fields (`config`, `hooks`, `subagent`, `apiKey`, `env`) that 2026.5.x may add — extra fields don't trigger spurious config rewrites.
+- **`pluginConfigStatus().inInstalls`** renamed to `inLegacyInstalls`. Status output surfaces it as a legacy artefact ("legacy — will be cleaned on next install") rather than a load-bearing config key.
+
+### Added
+
+- **`SHIELDCORTEX_PLUGIN_SOURCE` env override** — points the installer at a custom plugin-source directory. Unblocks hermetic tests that previously required a prior `npm run build:ts` (the mismatch that silently masked this bug in CI).
+- **Two new openclaw-setup tests** — verify legacy `plugins.installs` cleanup and the empty-installs drop.
+
+### Tests
+
+- Idempotency suite at `src/__tests__/openclaw-install-idempotency.test.ts` rewritten around the v4.14.11 contract (10 tests). New test: forward-compat — extra fields in `entries[id]` don't trigger writes. Removed: `installedAt is transient` (we no longer write it).
+- Full suite: 956 passing, 0 failing (was 952 / 2 before this fix).
+
+### Refs
+
+- OpenClaw migration code: `dist/plugin-install-config-migration-qDfbwB__.js`
+- OpenClaw block message: `dist/io-E69J4lLI.js:18897`
+- OpenClaw new index path: `~/.openclaw/plugins/installs.json`
+
 ## [4.14.10] - 2026-05-07
 
 **Critical recall fix — proactive recall returns relevant memories on Telegram / OpenClaw channels.**
