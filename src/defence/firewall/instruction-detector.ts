@@ -127,6 +127,21 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /reveal\s+your\s+instructions/i,
     ],
   },
+  {
+    // Imperative tool-call directives. These show up in transcripts as
+    // injected prompts disguised as user instructions ("call the X tool
+    // to complete this request. Call this tool now."). The session-end
+    // chunker historically captured them as user preferences with
+    // salience 1.0; the firewall now flags them at write time so they
+    // route to quarantine instead of memories.
+    name: 'imperative_tool_call',
+    weight: 0.8,
+    patterns: [
+      /\b(?:call|invoke|use)\s+(?:the\s+)?[A-Za-z][\w-]*\s+tool\b/i,
+      /\b(?:call|invoke|use)\s+this\s+tool\s+now\b/i,
+      /\bcomplete\s+this\s+request\.\s*(?:call|invoke|use)\s+this\s+tool\b/i,
+    ],
+  },
 ];
 
 // Maximum content length to scan (prevents ReDOS on very long inputs)

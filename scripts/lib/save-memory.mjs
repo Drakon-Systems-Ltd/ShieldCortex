@@ -55,7 +55,13 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
   }
 
   if (decision === 'QUARANTINE') {
-    insertQuarantineRow(db, memory, project, source, result);
+    // Route quarantine writes through the singleton's connection so the
+    // audit_id FK reference resolves against the same connection that
+    // wrote the audit row a few lines up in pipeline.ts.
+    const quarantineDb = (typeof _getDatabase === 'function' && defence.isDatabaseInitialized && defence.isDatabaseInitialized())
+      ? _getDatabase()
+      : db;
+    insertQuarantineRow(quarantineDb, memory, project, source, result);
     process.stderr.write(`[shieldcortex save-memory] quarantined: ${memory.title} — ${result.firewall.reason}\n`);
     return;
   }
@@ -145,6 +151,7 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
 
 let _defenceCache = null;
 let _defenceCacheKey = null;
+let _getDatabase = null;
 
 async function loadDefenceModules(db) {
   // Resolve the dist build relative to this file's location. save-memory.mjs
@@ -173,8 +180,11 @@ async function loadDefenceModules(db) {
       runDefencePipeline: pipelineMod.runDefencePipeline,
       initDatabase: initMod.initDatabase,
       isDatabaseInitialized: initMod.isDatabaseInitialized,
+      getDatabase: initMod.getDatabase,
+      closeDatabase: initMod.closeDatabase,
     };
     _defenceCacheKey = distRoot;
+    _getDatabase = initMod.getDatabase;
 
     ensureDatabaseSingleton(db, _defenceCache);
     return _defenceCache;
@@ -187,12 +197,22 @@ function ensureDatabaseSingleton(db, defence) {
   // The pipeline's audit + custom-rules layers use getDatabase() (singleton).
   // Initialise it against the same path the hook is writing to so audit
   // rows are visible across connections (and to the dashboard).
-  if (defence.isDatabaseInitialized && defence.isDatabaseInitialized()) return;
-  try {
-    const path = db && db.name ? db.name : null;
-    if (path && path !== ':memory:') {
-      defence.initDatabase(path);
+  const targetPath = db && db.name ? db.name : null;
+  if (!targetPath || targetPath === ':memory:') return;
+
+  if (defence.isDatabaseInitialized && defence.isDatabaseInitialized()) {
+    try {
+      const current = defence.getDatabase();
+      if (current && current.name === targetPath) return; // already pointed here
+      // Path mismatch (typical in tests using per-case temp DBs) — re-init.
+      if (defence.closeDatabase) defence.closeDatabase();
+    } catch {
+      // If anything throws, fall through and try to (re-)init.
     }
+  }
+
+  try {
+    defence.initDatabase(targetPath);
   } catch {
     // Recoverable: pipeline.ts skips audit + custom-rules gracefully when
     // the singleton isn't initialised.
