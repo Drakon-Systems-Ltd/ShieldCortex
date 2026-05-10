@@ -28,6 +28,7 @@ import {
   Memory,
   MemoryConfig,
   DEFAULT_CONFIG,
+  RankerConfig,
   SearchOptions,
   SearchResult,
 } from './types.js';
@@ -57,6 +58,9 @@ import { reinforceFromSearch, enrichMemory } from './lifecycle.js';
 // Cyclic import — see header. rowToMemory and logAccessDenial live in store.ts;
 // both are only invoked inside function bodies below, never at module load.
 import { rowToMemory, logAccessDenial } from './store.js';
+import { runHybridRanker } from './ranker/index.js';
+import { graphRankFromQuery } from './ranker/graph-rank.js';
+import { getRankerConfig } from '../cloud/config.js';
 
 let searchCount = 0;
 
@@ -159,74 +163,46 @@ async function searchMemoriesInternal(
     query: options.query,
   };
 
-  const results: SearchResult[] = rows.map((row) => {
-    const memory = rowToMemory(row);
-    const decayedScore = calculateDecayedScore(memory, config);
-    memory.decayedScore = decayedScore;
-
+  // FTS-derived per-row scores (legacy: used directly; RRF: kept for explanations)
+  const ftsScores = new Map<number, number>();
+  for (const row of rows) {
+    const id = row.id as number;
     const rawRank = row.rank as number;
-    const ftsScore = rawRank ? 1 / (1 + Math.abs(rawRank)) : 0.3;
-    const hoursSinceAccess = (Date.now() - new Date(memory.lastAccessed).getTime()) / (1000 * 60 * 60);
-    const recencyBoost = hoursSinceAccess < 1 ? 0.1 : (hoursSinceAccess < 24 ? 0.05 : 0);
-    const categoryBoost = detectedCategory && memory.category === detectedCategory ? 0.1 : 0;
-    const linkBoost = calculateLinkBoost(memory.id, db);
-    const tagBoost = calculateTagScore(queryTags, memory.tags);
-    const activationBoost = getActivationBoost(memory.id);
-    const vectorSimilarity = vectorResults.get(memory.id) || 0;
-    const vectorBoost = vectorSimilarity * 0.3;
-    const priorityBoost = calculatePriority(memory) * 0.05;
-    const contradictionCount = (db.prepare(
-      `SELECT COUNT(*) as count FROM memory_links WHERE relationship = 'contradicts' AND (source_id = ? OR target_id = ?)`
-    ).get(memory.id, memory.id) as { count: number }).count;
-    const contradictionPenalty = Math.min(0.12, contradictionCount * 0.03);
-    const eligibilityReasons: string[] = [];
-    if (memory.status === 'archived') eligibilityReasons.push('Archived memories are excluded from normal recall');
-    if (memory.status === 'suppressed') eligibilityReasons.push('Suppressed memories are excluded from normal recall');
-    if (memory.cloudExcluded) eligibilityReasons.push('Excluded from cloud sync');
-    if (memory.trustScore < 0.7) eligibilityReasons.push(`Low trust source (${memory.trustScore.toFixed(2)})`);
-    if (contradictionCount > 0) eligibilityReasons.push(`${contradictionCount} contradiction link${contradictionCount === 1 ? '' : 's'} attached`);
-    const relevanceScore = (
-      ftsScore * 0.25 +
-      vectorBoost +
-      decayedScore * 0.2 +
-      priorityBoost +
-      recencyBoost + categoryBoost + linkBoost + tagBoost + activationBoost -
-      contradictionPenalty
-    );
+    ftsScores.set(id, rawRank ? 1 / (1 + Math.abs(rawRank)) : 0.3);
+  }
 
-    const result: SearchResult = {
-      memory,
-      relevanceScore,
-      recallEligibility: {
-        eligible: eligibilityReasons.length === 0,
-        reasons: eligibilityReasons,
-      },
-    };
-    if (execution.includeExplanation) {
-      result.explanation = buildSearchExplanation(memory, scoringContext, {
-        ftsScore,
-        vectorSimilarity,
-        vectorBoost,
-        decayedScore,
-        priorityBoost,
-        recencyBoost,
-        categoryBoost,
-        linkBoost,
-        tagBoost,
-        activationBoost,
-        contradictionPenalty,
-        finalScore: relevanceScore,
-      });
-      if (result.explanation) {
-        result.explanation.eligibility = result.recallEligibility;
-      }
-    }
-    return result;
-  });
+  // Resolve ranker engine. Honour caller-supplied config.ranker if present
+  // (tests and explicit callers can pin engine), otherwise fall back to the
+  // env/file resolver in cloud/config.
+  const rankerConfig: RankerConfig = config.ranker ?? getRankerConfig();
 
-  const sortedResults = results
-    .filter((result) => options.includeDecayed || result.memory.decayedScore >= config.salienceThreshold)
-    .sort((a, b) => b.relevanceScore - a.relevanceScore);
+  let sortedResults: SearchResult[];
+  if (rankerConfig.engine === 'rrf') {
+    sortedResults = scoreWithRrf({
+      rows,
+      ftsScores,
+      vectorResults,
+      query: options.query,
+      options,
+      db,
+      config,
+      rankerConfig,
+      limit,
+      includeExplanation: execution.includeExplanation,
+    });
+  } else {
+    sortedResults = scoreLegacy({
+      rows,
+      vectorResults,
+      detectedCategory,
+      queryTags,
+      db,
+      config,
+      includeDecayed: options.includeDecayed ?? false,
+      includeExplanation: execution.includeExplanation,
+      scoringContext,
+    });
+  }
 
   if (execution.enableSideEffects) {
     const topResults = sortedResults.slice(0, 5);
@@ -318,6 +294,201 @@ async function searchMemoriesInternal(
   }
 
   return finalResults;
+}
+
+// ── Scoring backends ─────────────────────────────────────────────────────
+//
+// `scoreLegacy` and `scoreWithRrf` produce the same shape (`SearchResult[]`,
+// already filtered by salience and sorted by relevanceScore) so the rest of
+// `searchMemoriesInternal` (side effects, contradiction enrichment, ACL
+// filter) can stay engine-agnostic.
+
+interface ScoreLegacyInput {
+  rows: Record<string, unknown>[];
+  vectorResults: Map<number, number>;
+  detectedCategory: ReturnType<typeof detectQueryCategory>;
+  queryTags: string[];
+  db: ReturnType<typeof getDatabase>;
+  config: MemoryConfig;
+  includeDecayed: boolean;
+  includeExplanation: boolean;
+  scoringContext: SearchScoringContext;
+}
+
+function scoreLegacy(input: ScoreLegacyInput): SearchResult[] {
+  const {
+    rows, vectorResults, detectedCategory, queryTags, db, config,
+    includeDecayed, includeExplanation, scoringContext,
+  } = input;
+
+  const results: SearchResult[] = rows.map((row) => {
+    const memory = rowToMemory(row);
+    const decayedScore = calculateDecayedScore(memory, config);
+    memory.decayedScore = decayedScore;
+
+    const rawRank = row.rank as number;
+    const ftsScore = rawRank ? 1 / (1 + Math.abs(rawRank)) : 0.3;
+    const hoursSinceAccess = (Date.now() - new Date(memory.lastAccessed).getTime()) / (1000 * 60 * 60);
+    const recencyBoost = hoursSinceAccess < 1 ? 0.1 : (hoursSinceAccess < 24 ? 0.05 : 0);
+    const categoryBoost = detectedCategory && memory.category === detectedCategory ? 0.1 : 0;
+    const linkBoost = calculateLinkBoost(memory.id, db);
+    const tagBoost = calculateTagScore(queryTags, memory.tags);
+    const activationBoost = getActivationBoost(memory.id);
+    const vectorSimilarity = vectorResults.get(memory.id) || 0;
+    const vectorBoost = vectorSimilarity * 0.3;
+    const priorityBoost = calculatePriority(memory) * 0.05;
+    const contradictionCount = (db.prepare(
+      `SELECT COUNT(*) as count FROM memory_links WHERE relationship = 'contradicts' AND (source_id = ? OR target_id = ?)`,
+    ).get(memory.id, memory.id) as { count: number }).count;
+    const contradictionPenalty = Math.min(0.12, contradictionCount * 0.03);
+    const eligibilityReasons: string[] = [];
+    if (memory.status === 'archived') eligibilityReasons.push('Archived memories are excluded from normal recall');
+    if (memory.status === 'suppressed') eligibilityReasons.push('Suppressed memories are excluded from normal recall');
+    if (memory.cloudExcluded) eligibilityReasons.push('Excluded from cloud sync');
+    if (memory.trustScore < 0.7) eligibilityReasons.push(`Low trust source (${memory.trustScore.toFixed(2)})`);
+    if (contradictionCount > 0) eligibilityReasons.push(`${contradictionCount} contradiction link${contradictionCount === 1 ? '' : 's'} attached`);
+    const relevanceScore = (
+      ftsScore * 0.25 +
+      vectorBoost +
+      decayedScore * 0.2 +
+      priorityBoost +
+      recencyBoost + categoryBoost + linkBoost + tagBoost + activationBoost -
+      contradictionPenalty
+    );
+
+    const result: SearchResult = {
+      memory,
+      relevanceScore,
+      recallEligibility: {
+        eligible: eligibilityReasons.length === 0,
+        reasons: eligibilityReasons,
+      },
+    };
+    if (includeExplanation) {
+      result.explanation = buildSearchExplanation(memory, scoringContext, {
+        ftsScore,
+        vectorSimilarity,
+        vectorBoost,
+        decayedScore,
+        priorityBoost,
+        recencyBoost,
+        categoryBoost,
+        linkBoost,
+        tagBoost,
+        activationBoost,
+        contradictionPenalty,
+        finalScore: relevanceScore,
+      });
+      if (result.explanation) {
+        result.explanation.eligibility = result.recallEligibility;
+      }
+    }
+    return result;
+  });
+
+  return results
+    .filter((result) => includeDecayed || result.memory.decayedScore >= config.salienceThreshold)
+    .sort((a, b) => b.relevanceScore - a.relevanceScore);
+}
+
+interface ScoreWithRrfInput {
+  rows: Record<string, unknown>[];
+  ftsScores: Map<number, number>;
+  vectorResults: Map<number, number>;
+  query: string;
+  options: SearchOptions;
+  db: ReturnType<typeof getDatabase>;
+  config: MemoryConfig;
+  rankerConfig: RankerConfig;
+  limit: number;
+  includeExplanation: boolean;
+}
+
+/**
+ * RRF retrieval path: build per-retriever rank lists from the FTS rows
+ * already produced by the SQL prelude, the cosine-similarity vector hits,
+ * and a fresh `graphRankFromQuery` call. Hand them to `runHybridRanker`,
+ * which fuses with RRF and applies post-fusion multiplicative boosts.
+ *
+ * Vector and graph rank lists may surface ids the FTS WHERE clause would
+ * have filtered out (category/type/status/tags/minSalience). Those are
+ * dropped at memory-map build time so the same filters apply across all
+ * three retrievers, keeping search behaviour predictable.
+ */
+function scoreWithRrf(input: ScoreWithRrfInput): SearchResult[] {
+  const {
+    rows, ftsScores, vectorResults, query, options, db,
+    config, rankerConfig, limit, includeExplanation,
+  } = input;
+
+  // Memory map starts with FTS rows (already passed all SQL filters).
+  const memoryMap = new Map<number, Memory>();
+  const ftsIds: number[] = [];
+  for (const row of rows) {
+    const memory = rowToMemory(row);
+    memoryMap.set(memory.id, memory);
+    ftsIds.push(memory.id);
+  }
+
+  // Vector and graph rank lists may contain ids the FTS WHERE would have
+  // filtered out — fetch + filter to enforce the same constraints.
+  const considerCandidate = (id: number): boolean => {
+    if (memoryMap.has(id)) return true;
+    const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return false;
+    const memory = rowToMemory(row);
+    if (!candidatePassesFilters(memory, options)) return false;
+    memoryMap.set(memory.id, memory);
+    return true;
+  };
+
+  const vectorIds = Array.from(vectorResults.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id)
+    .filter(considerCandidate);
+
+  const graphLimit = Math.max(limit * 3, 50);
+  const graphResults = query && query.trim()
+    ? graphRankFromQuery(query, db, { project: options.project, limit: graphLimit })
+    : [];
+  const graphIds = graphResults.map((r) => r.memoryId).filter(considerCandidate);
+
+  return runHybridRanker({
+    rankLists: [
+      { name: 'fts', ids: ftsIds, weight: rankerConfig.weights.fts },
+      { name: 'vector', ids: vectorIds, weight: rankerConfig.weights.vector },
+      { name: 'graph', ids: graphIds, weight: rankerConfig.weights.graph },
+    ],
+    memories: memoryMap,
+    vectorSimilarities: vectorResults,
+    ftsScores,
+    query,
+    db,
+    config,
+    rrfK: rankerConfig.rrfK,
+    includeExplanation,
+    includeDecayed: options.includeDecayed ?? false,
+    limit,
+  });
+}
+
+/**
+ * Mirror the WHERE-clause filters from the FTS SQL so that vector/graph
+ * candidates not returned by FTS are held to the same standard. Project
+ * scoping is already handled at the source (`vectorSearch` and
+ * `graphRankFromQuery`) so it isn't duplicated here.
+ */
+function candidatePassesFilters(memory: Memory, options: SearchOptions): boolean {
+  if (options.category && memory.category !== options.category) return false;
+  if (options.type && memory.type !== options.type) return false;
+  if (!options.includeArchived && memory.status === 'archived') return false;
+  if (!options.includeSuppressed && memory.status === 'suppressed') return false;
+  if (options.minSalience !== undefined && memory.salience < options.minSalience) return false;
+  if (options.tags && options.tags.length > 0) {
+    const hasTag = options.tags.some((tag) => memory.tags.includes(tag));
+    if (!hasTag) return false;
+  }
+  return true;
 }
 
 /**

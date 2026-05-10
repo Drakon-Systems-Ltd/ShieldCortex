@@ -162,6 +162,25 @@ export interface SalienceFactors {
   emotionalMarkers: boolean;     // Frustration, success indicators
 }
 
+/**
+ * Hybrid retrieval engine selection. RRF is the v4.15 default; `legacy`
+ * keeps the pre-v4.15 weighted-sum scoring as a one-release safety belt.
+ */
+export type RankerEngine = 'rrf' | 'legacy';
+
+export interface RankerWeights {
+  fts: number;
+  vector: number;
+  graph: number;
+}
+
+export interface RankerConfig {
+  engine: RankerEngine;
+  /** RRF smoothing constant. Cormack et al. (2009) recommend 60. */
+  rrfK: number;
+  weights: RankerWeights;
+}
+
 // Configuration for the memory system
 export interface MemoryConfig {
   dbPath: string;
@@ -172,7 +191,14 @@ export interface MemoryConfig {
   maxShortTermMemories: number;
   maxLongTermMemories: number;
   autoConsolidateHours: number; // Auto-consolidate after N hours
+  ranker: RankerConfig;
 }
+
+export const DEFAULT_RANKER_CONFIG: RankerConfig = {
+  engine: 'rrf',
+  rrfK: 60,
+  weights: { fts: 0.4, vector: 0.6, graph: 0.3 },
+};
 
 export const DEFAULT_CONFIG: MemoryConfig = {
   dbPath: '~/.shieldcortex/memories.db', // Note: actual path auto-detected with legacy fallback
@@ -183,6 +209,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
   maxShortTermMemories: 100,
   maxLongTermMemories: 1000,
   autoConsolidateHours: 4,
+  ranker: DEFAULT_RANKER_CONFIG,
 };
 
 /**

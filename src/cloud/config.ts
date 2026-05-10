@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'f
 import { join } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
+import type { RankerConfig, RankerEngine, RankerWeights } from '../memory/types.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -457,6 +458,83 @@ export function setReviewCopilotConfig(updates: Partial<ReviewCopilotConfig>): v
     ...existing,
     ...updates,
   };
+  writeRawConfig(raw);
+}
+
+// ── Ranker Config ─────────────────────────────────────
+
+const DEFAULT_RANKER_CONFIG: RankerConfig = {
+  engine: 'rrf',
+  rrfK: 60,
+  weights: { fts: 0.4, vector: 0.6, graph: 0.3 },
+};
+
+const VALID_RANKER_ENGINES: RankerEngine[] = ['rrf', 'legacy'];
+
+function parseEngine(value: unknown): RankerEngine | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return VALID_RANKER_ENGINES.includes(normalized as RankerEngine)
+    ? (normalized as RankerEngine)
+    : null;
+}
+
+function parseWeights(value: unknown): RankerWeights | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  const fts = typeof v.fts === 'number' ? v.fts : null;
+  const vector = typeof v.vector === 'number' ? v.vector : null;
+  const graph = typeof v.graph === 'number' ? v.graph : null;
+  if (fts === null || vector === null || graph === null) return null;
+  return { fts, vector, graph };
+}
+
+/**
+ * Resolved ranker configuration.
+ *
+ * Resolution order (env wins so it can be flipped per-process without
+ * editing config.json):
+ *   1. `SHIELDCORTEX_RANKER` env var (`rrf` | `legacy`)
+ *   2. `ranker.engine` in `~/.shieldcortex/config.json`
+ *   3. Default (`rrf`)
+ *
+ * `rrfK` and `weights` only come from config.json (no env override) —
+ * tuning these is a deliberate config change, not a per-process knob.
+ */
+export function getRankerConfig(): RankerConfig {
+  const raw = readRawConfig();
+  const fileRanker = raw.ranker && typeof raw.ranker === 'object'
+    ? raw.ranker as Record<string, unknown>
+    : null;
+
+  const envEngine = parseEngine(process.env.SHIELDCORTEX_RANKER);
+  const fileEngine = fileRanker ? parseEngine(fileRanker.engine) : null;
+  const engine = envEngine ?? fileEngine ?? DEFAULT_RANKER_CONFIG.engine;
+
+  const fileK = fileRanker && typeof fileRanker.rrfK === 'number' && fileRanker.rrfK > 0
+    ? fileRanker.rrfK
+    : null;
+  const rrfK = fileK ?? DEFAULT_RANKER_CONFIG.rrfK;
+
+  const fileWeights = fileRanker ? parseWeights(fileRanker.weights) : null;
+  const weights = fileWeights ?? DEFAULT_RANKER_CONFIG.weights;
+
+  return { engine, rrfK, weights };
+}
+
+/**
+ * Persists ranker config to `~/.shieldcortex/config.json`. Only the
+ * fields supplied in `updates` are written; other fields are preserved.
+ */
+export function setRankerConfig(updates: Partial<RankerConfig>): void {
+  const raw = readRawConfig();
+  const existing = raw.ranker && typeof raw.ranker === 'object'
+    ? raw.ranker as Record<string, unknown>
+    : {};
+  if (updates.engine !== undefined) existing.engine = updates.engine;
+  if (updates.rrfK !== undefined) existing.rrfK = updates.rrfK;
+  if (updates.weights !== undefined) existing.weights = updates.weights;
+  raw.ranker = existing;
   writeRawConfig(raw);
 }
 

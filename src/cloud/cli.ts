@@ -11,8 +11,13 @@ import {
   isProactiveRecallEnabled,
   setProactiveRecall,
   restore410Defaults,
+  getRankerConfig,
+  setRankerConfig,
   type DefenceMode,
 } from './config.js';
+import type { RankerEngine } from '../memory/types.js';
+
+const VALID_RANKER_ENGINES: RankerEngine[] = ['rrf', 'legacy'];
 import { syncAllGraphToCloud } from './graph-sync.js';
 import { syncAllMemoriesToCloud } from './memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
@@ -29,6 +34,8 @@ export function handleCloudConfig(args: string[]): void {
     const verify = getVerifyConfig();
     const reviewCopilot = getReviewCopilotConfig();
     const openclawAutoMemory = getOpenClawAutoMemory();
+    const ranker = getRankerConfig();
+    const rankerOverridden = !!process.env.SHIELDCORTEX_RANKER;
     console.log('\nShieldCortex Configuration:');
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
@@ -39,6 +46,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log(`  Local AI Explainer: ${reviewCopilot.enabled ? 'Enabled' : 'Disabled'} (${reviewCopilot.modelId})`);
     console.log(`  OpenClaw Auto-Memory: ${openclawAutoMemory ? 'Enabled' : 'Disabled'}`);
     console.log(`  Proactive Recall: ${isProactiveRecallEnabled() ? 'Enabled' : 'Disabled'}`);
+    console.log(`  Retrieval Ranker: ${ranker.engine}${rankerOverridden ? ' (env override)' : ''} (k=${ranker.rrfK}, weights fts=${ranker.weights.fts} vector=${ranker.weights.vector} graph=${ranker.weights.graph})`);
     console.log('');
     return;
   }
@@ -160,6 +168,26 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  const rankerIdx = args.indexOf('--ranker');
+  if (rankerIdx !== -1) {
+    const value = args[rankerIdx + 1];
+    if (!value) {
+      console.error('Missing value for --ranker. Use rrf or legacy.');
+      process.exit(1);
+    }
+    const engine = value.toLowerCase();
+    if (!VALID_RANKER_ENGINES.includes(engine as RankerEngine)) {
+      console.error(`Invalid ranker engine: ${value}. Must be one of: ${VALID_RANKER_ENGINES.join(', ')}`);
+      process.exit(1);
+    }
+    setRankerConfig({ engine: engine as RankerEngine });
+    console.log(`Ranker engine set to: ${engine}`);
+    if (process.env.SHIELDCORTEX_RANKER) {
+      console.log('Note: SHIELDCORTEX_RANKER env var is set and will override config.json at runtime.');
+    }
+    changed = true;
+  }
+
   const proactiveRecallIdx = args.indexOf('--proactive-recall');
   if (proactiveRecallIdx !== -1) {
     const value = args[proactiveRecallIdx + 1];
@@ -190,6 +218,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-status         Show current configuration');
     console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (default: off)');
     console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (default: off — adds latency)');
+    console.log('  --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('');
     console.log('LLM Verification:');
