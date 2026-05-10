@@ -51,8 +51,8 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     } as { title: string; content: string; category: string; salience: number; tags: string[] };
   }
 
-  it('inserts a memory row (the v4.12.4 NOT NULL uuid bug repro)', () => {
-    expect(() => saveAutoExtractedMemory(db, makeMemory(), 'shieldcortex')).not.toThrow();
+  it('inserts a memory row (the v4.12.4 NOT NULL uuid bug repro)', async () => {
+    await expect(saveAutoExtractedMemory(db, makeMemory(), 'shieldcortex')).resolves.not.toThrow();
 
     const row = db.prepare('SELECT uuid, title, project, type FROM memories WHERE title = ?')
       .get('Decision: chose Drizzle for the SaaS schema') as { uuid: string; title: string; project: string; type: string };
@@ -63,31 +63,31 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(row.type).toBe('short_term');
   });
 
-  it('generates a unique UUID per insert (no collision on bulk auto-extract)', () => {
+  it('generates a unique UUID per insert (no collision on bulk auto-extract)', async () => {
     for (let i = 0; i < 5; i++) {
-      saveAutoExtractedMemory(db, makeMemory({ title: `Memory ${i}` }), 'p');
+      await saveAutoExtractedMemory(db, makeMemory({ title: `Memory ${i}` }), 'p');
     }
     const uuids = db.prepare('SELECT uuid FROM memories').all() as Array<{ uuid: string }>;
     expect(uuids).toHaveLength(5);
     expect(new Set(uuids.map((r) => r.uuid)).size).toBe(5);
   });
 
-  it('respects the uuid UNIQUE constraint by always producing fresh values', () => {
-    saveAutoExtractedMemory(db, makeMemory({ title: 'A' }), 'p');
-    saveAutoExtractedMemory(db, makeMemory({ title: 'B' }), 'p');
+  it('respects the uuid UNIQUE constraint by always producing fresh values', async () => {
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'A' }), 'p');
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'B' }), 'p');
     const count = (db.prepare('SELECT COUNT(*) AS c FROM memories').get() as { c: number }).c;
     expect(count).toBe(2);
   });
 
-  it('accepts null project (Claude Code session without a scoped project)', () => {
-    expect(() => saveAutoExtractedMemory(db, makeMemory(), null)).not.toThrow();
+  it('accepts null project (Claude Code session without a scoped project)', async () => {
+    await expect(saveAutoExtractedMemory(db, makeMemory(), null)).resolves.not.toThrow();
     const row = db.prepare('SELECT project FROM memories WHERE title = ?')
       .get('Decision: chose Drizzle for the SaaS schema') as { project: string | null };
     expect(row.project).toBeNull();
   });
 
-  it('persists tags as JSON-encoded text (matches existing reader contract)', () => {
-    saveAutoExtractedMemory(db, makeMemory({ tags: ['decision', 'architecture'] }), 'p');
+  it('persists tags as JSON-encoded text (matches existing reader contract)', async () => {
+    await saveAutoExtractedMemory(db, makeMemory({ tags: ['decision', 'architecture'] }), 'p');
     const row = db.prepare('SELECT tags FROM memories WHERE title = ?')
       .get('Decision: chose Drizzle for the SaaS schema') as { tags: string };
     expect(JSON.parse(row.tags)).toEqual(['decision', 'architecture']);

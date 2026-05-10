@@ -174,7 +174,7 @@ process.stdin.on('readable', () => {
   while ((chunk = process.stdin.read()) !== null) input += chunk;
 });
 
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   const startedAt = Date.now();
   let db = null;
   let extractedCount = 0;
@@ -274,7 +274,7 @@ process.stdin.on('end', () => {
 
         for (const memory of processed) {
           try {
-            saveAutoExtractedMemory(db, memory, project);
+            await saveAutoExtractedMemory(db, memory, project, { source: 'stop-hook' });
             extractedCount++;
             console.error(`[stop] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}, category: ${memory.category})`);
           } catch (err) {

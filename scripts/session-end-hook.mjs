@@ -85,9 +85,11 @@ function getDynamicThreshold(memoryCount, maxMemories) {
 
 // ==================== DATABASE OPERATIONS ====================
 
-// Thin wrapper to keep the existing call sites unchanged.
+// Thin wrapper that stamps this hook's source identifier so defence_audit
+// rows are attributable. saveAutoExtractedMemory is async (it loads the
+// dist'd pipeline lazily and routes through it).
 function saveMemory(db, memory, project) {
-  saveAutoExtractedMemory(db, memory, project);
+  return saveAutoExtractedMemory(db, memory, project, { source: 'session-end-hook' });
 }
 
 // ==================== MAIN HOOK LOGIC ====================
@@ -114,7 +116,7 @@ function looksLikeOpenClawContext() {
   return false;
 }
 
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   const startedAt = Date.now();
   let db = null;
   let autoExtractedCount = 0;
@@ -187,7 +189,7 @@ process.stdin.on('end', () => {
 
         for (const memory of processedSegments) {
           try {
-            saveMemory(db, memory, project);
+            await saveMemory(db, memory, project);
             autoExtractedCount++;
             const boostInfo = memory.frequencyBoost > 0 ? ` +${memory.frequencyBoost.toFixed(2)} boost` : '';
             console.error(`[session-end] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}${boostInfo}, category: ${memory.category})`);

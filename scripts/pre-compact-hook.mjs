@@ -101,7 +101,7 @@ function getDynamicThreshold(memoryCount, maxMemories) {
 // write lives in scripts/lib/save-memory.mjs so pre-compact and
 // session-end share one code path (and one regression test).
 function saveMemory(db, memory, project) {
-  saveAutoExtractedMemory(db, memory, project);
+  return saveAutoExtractedMemory(db, memory, project, { source: 'pre-compact-hook' });
 }
 
 
@@ -117,7 +117,7 @@ process.stdin.on('readable', () => {
   }
 });
 
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   const startedAt = Date.now();
   let db = null;
   let autoExtractedCount = 0;
@@ -175,7 +175,7 @@ process.stdin.on('end', () => {
       // Save auto-extracted memories
       for (const memory of processedSegments) {
         try {
-          saveMemory(db, memory, project);
+          await saveMemory(db, memory, project);
           autoExtractedCount++;
           const boostInfo = memory.frequencyBoost > 0 ? ` +${memory.frequencyBoost.toFixed(2)} boost` : '';
           console.error(`[auto-extract] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}${boostInfo}, category: ${memory.category})`);
