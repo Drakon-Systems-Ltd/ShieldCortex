@@ -11,6 +11,7 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+!src/__fixtures__/*.db
 
 # Environment
 .env

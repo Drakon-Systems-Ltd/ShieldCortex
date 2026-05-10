@@ -15,3 +15,13 @@ The handler is registered at runtime by the plugin's main entry point
 `api.registerHook("session_end", ...)` during plugin init. This directory and
 its `handler.js` exist to satisfy OpenClaw 2026.5.5+'s install-time hook-pack
 validation; the file in this directory is not what gets invoked at runtime.
+
+## Defence audit guarantees
+
+The auto-extract path (`scripts/session-end-hook.mjs`) routes every
+captured candidate through the full defence pipeline before insert. ALLOW
+rows produce a `defence_audit` row with `source_type = 'hook'` and land
+in `memories`. QUARANTINE rows go to the `quarantine` table for review.
+BLOCK rows are dropped with an audit trail. Pipeline failures are also
+audited so no capture is silently lost. See
+`hooks/openclaw/cortex-memory/HOOK.md` for the full guarantees.

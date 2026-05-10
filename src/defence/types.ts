@@ -21,7 +21,8 @@ export type ThreatIndicator =
   | 'restricted_content'
   | 'pipeline_error'
   | 'custom_rule'
-  | 'custom_pattern';
+  | 'custom_pattern'
+  | 'builtin_rule';
 
 // ── Core Interfaces ──
 

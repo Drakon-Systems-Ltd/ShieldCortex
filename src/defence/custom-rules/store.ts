@@ -12,14 +12,17 @@ export interface FirewallRule {
   condition_value: string;
   action: 'block' | 'allow' | 'quarantine';
   enabled: number;
+  built_in: number;
   created_at: string;
 }
 
 const MAX_RULES = 25;
 
-export function listFirewallRules(): FirewallRule[] {
+export function listFirewallRules(opts: { includeBuiltin?: boolean } = {}): FirewallRule[] {
+  const includeBuiltin = opts.includeBuiltin ?? true;
   const db = getDatabase();
-  return db.prepare('SELECT * FROM firewall_rules ORDER BY priority ASC').all() as FirewallRule[];
+  const where = includeBuiltin ? '' : 'WHERE built_in = 0';
+  return db.prepare(`SELECT * FROM firewall_rules ${where} ORDER BY priority ASC`).all() as FirewallRule[];
 }
 
 export function getFirewallRule(id: number): FirewallRule | undefined {
@@ -35,7 +38,9 @@ export function createFirewallRule(rule: {
   action: 'block' | 'allow' | 'quarantine';
 }): FirewallRule {
   const db = getDatabase();
-  const count = (db.prepare('SELECT COUNT(*) as cnt FROM firewall_rules').get() as { cnt: number }).cnt;
+  // The MAX_RULES cap applies only to user-defined rules. Built-in rules
+  // (built_in=1) are seeded by the database layer and don't count.
+  const count = (db.prepare('SELECT COUNT(*) as cnt FROM firewall_rules WHERE built_in = 0').get() as { cnt: number }).cnt;
   if (count >= MAX_RULES) {
     throw new Error(`Maximum of ${MAX_RULES} custom firewall rules reached.`);
   }

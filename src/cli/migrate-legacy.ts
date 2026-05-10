@@ -357,6 +357,15 @@ function printUsage(): void {
   console.log('      to their canonical owner-repo key (#42). DRY-RUN BY DEFAULT.');
   console.log('      Backup auto-saved before any rewrite; per-rewrite log written');
   console.log('      to ~/.shieldcortex/logs/project-key-repair-<ts>.json.');
+  console.log('');
+  console.log('  purge --malformed [--dry-run] [--execute]');
+  console.log('                    [--backup-dir <path>]');
+  console.log('      Scan the memories table and delete rows that match the');
+  console.log('      hardened chunker rejection rules — imperative tool-call');
+  console.log('      directives, bare-imperative starts (negation drop), email-');
+  console.log('      body bleed, path-label fragments, etc. Use --dry-run to');
+  console.log('      preview matches; --execute writes a full DB copy to the');
+  console.log('      backup dir (default ~/.shieldcortex/backups/) before delete.');
 }
 
 export async function handleMemoriesCommand(args: string[]): Promise<void> {
@@ -383,8 +392,134 @@ export async function handleMemoriesCommand(args: string[]): Promise<void> {
     await runRepairProjectKeys(args.slice(1));
     return;
   }
+  if (sub === 'purge') {
+    await runPurge(args.slice(1));
+    return;
+  }
   printUsage();
   process.exit(1);
+}
+
+// ============================================================
+// purge --malformed (defect 3 cleanup)
+// ============================================================
+
+interface PurgeMalformedOptions {
+  dbPath?: string;
+  backupDir?: string;
+  dryRun: boolean;
+}
+
+interface PurgeMatch {
+  id: number;
+  title: string;
+  reason: string;
+}
+
+interface PurgeReport {
+  dryRun: boolean;
+  scanned: number;
+  matched: PurgeMatch[];
+  deleted: number;
+  backupPath?: string;
+}
+
+export async function purgeMalformed(opts: PurgeMalformedOptions): Promise<PurgeReport> {
+  const dbPath = opts.dbPath ?? DEFAULT_TARGET;
+  const backupDir = opts.backupDir ?? path.join(os.homedir(), '.shieldcortex', 'backups');
+
+  if (!fs.existsSync(dbPath)) {
+    throw new Error(`memories DB not found at ${dbPath}`);
+  }
+
+  // @ts-expect-error -- importing a .mjs hook util
+  const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
+  const shouldRejectCandidate = mod.shouldRejectCandidate as (seg: { title: string; content: string }) => { rejected: boolean; reason: string };
+
+  const db = new Database(dbPath);
+  db.pragma('busy_timeout = 10000');
+
+  const matches: PurgeMatch[] = [];
+  let scanned = 0;
+
+  try {
+    const rows = db.prepare('SELECT id, title, content FROM memories').all() as Array<{ id: number; title: string; content: string }>;
+    scanned = rows.length;
+
+    for (const row of rows) {
+      const verdict = shouldRejectCandidate({ title: row.title ?? '', content: row.content ?? '' });
+      if (verdict.rejected) {
+        matches.push({ id: row.id, title: row.title ?? '', reason: verdict.reason });
+      }
+    }
+
+    const report: PurgeReport = {
+      dryRun: opts.dryRun,
+      scanned,
+      matched: matches,
+      deleted: 0,
+    };
+
+    if (opts.dryRun || matches.length === 0) {
+      return report;
+    }
+
+    // Write a full DB backup before any delete.
+    fs.mkdirSync(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = path.join(backupDir, `memories-purge-${stamp}.db`);
+    db.exec(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
+    report.backupPath = backupPath;
+
+    const placeholders = matches.map(() => '?').join(',');
+    const txn = db.transaction(() => {
+      const r = db.prepare(`DELETE FROM memories WHERE id IN (${placeholders})`).run(...matches.map(m => m.id));
+      report.deleted = r.changes;
+    });
+    txn();
+
+    return report;
+  } finally {
+    db.close();
+  }
+}
+
+async function runPurge(args: string[]): Promise<void> {
+  if (!args.includes('--malformed')) {
+    console.error('Usage: shieldcortex memories purge --malformed [--dry-run] [--execute] [--backup-dir <path>]');
+    process.exit(1);
+  }
+
+  // Default to dry-run unless --execute is explicitly passed. --dry-run is
+  // accepted for symmetry / scriptability.
+  const execute = args.includes('--execute');
+  const dryRun = !execute;
+  const backupDir = flagValue(args, '--backup-dir');
+
+  const report = await purgeMalformed({ dryRun, backupDir });
+
+  const banner = report.dryRun ? '[DRY RUN] ' : '';
+  console.log(`${banner}Scanned ${report.scanned} memories; flagged ${report.matched.length}.`);
+
+  if (report.matched.length > 0) {
+    console.log('');
+    console.log('Matches:');
+    for (const m of report.matched.slice(0, 50)) {
+      console.log(`  #${String(m.id).padStart(5)}  ${m.reason.padEnd(28)}  ${m.title.slice(0, 80)}`);
+    }
+    if (report.matched.length > 50) {
+      console.log(`  … and ${report.matched.length - 50} more`);
+    }
+  }
+
+  if (report.dryRun && report.matched.length > 0) {
+    console.log('');
+    console.log('Re-run with --execute to delete (a full DB backup is written first).');
+  } else if (!report.dryRun) {
+    console.log('');
+    console.log(`Deleted: ${report.deleted}`);
+    if (report.backupPath) console.log(`Backup:  ${report.backupPath}`);
+  }
 }
 
 // ============================================================

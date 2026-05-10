@@ -127,39 +127,44 @@ export function runDefencePipeline(
       }
     }
 
-    // 6b. Apply custom firewall rules (Pro feature, additive only — can tighten, never weaken)
-    if (allowed && isFeatureEnabled('custom_firewall_rules') && isDatabaseInitialized()) {
+    // 6b. Apply firewall rules (built-in rules always evaluated; user-added
+    // custom rules require the Pro `custom_firewall_rules` feature). Both
+    // are additive only — can tighten, never weaken.
+    if (allowed && isDatabaseInitialized()) {
       try {
         const { getEnabledFirewallRules } = require('./custom-rules/store.js');
-        const customRules = getEnabledFirewallRules();
-        for (const rule of customRules) {
+        const userRulesAllowed = isFeatureEnabled('custom_firewall_rules');
+        const allRules = getEnabledFirewallRules();
+        for (const rule of allRules) {
+          if (!rule.built_in && !userRulesAllowed) continue;
           try {
             const regex = new RegExp(rule.condition_value, 'gi');
             if (regex.test(cleanContent) || regex.test(title)) {
+              const indicator = rule.built_in ? 'builtin_rule' : 'custom_rule';
               if (rule.action === 'block') {
                 allowed = false;
-                reason = `Blocked by custom rule: ${rule.name}`;
+                reason = `Blocked by ${rule.built_in ? 'built-in' : 'custom'} rule: ${rule.name}`;
                 firewall.result = 'BLOCK';
-                if (!firewall.threatIndicators.includes('custom_rule')) {
-                  firewall.threatIndicators.push('custom_rule');
+                if (!firewall.threatIndicators.includes(indicator)) {
+                  firewall.threatIndicators.push(indicator);
                 }
                 break; // Block is final
               } else if (rule.action === 'quarantine' && firewall.result !== 'BLOCK') {
                 allowed = false;
-                reason = `Quarantined by custom rule: ${rule.name}`;
+                reason = `Quarantined by ${rule.built_in ? 'built-in' : 'custom'} rule: ${rule.name}`;
                 firewall.result = 'QUARANTINE';
-                if (!firewall.threatIndicators.includes('custom_rule')) {
-                  firewall.threatIndicators.push('custom_rule');
+                if (!firewall.threatIndicators.includes(indicator)) {
+                  firewall.threatIndicators.push(indicator);
                 }
               }
-              // 'allow' action: no-op — custom rules cannot weaken built-in decisions
+              // 'allow' action: no-op — rules cannot weaken built-in decisions
             }
           } catch {
-            // Skip invalid regex in custom rules
+            // Skip invalid regex in rules
           }
         }
       } catch {
-        // Custom rules store not available — skip silently
+        // Rules store not available — skip silently
       }
     }
 

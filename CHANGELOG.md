@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.16.0] - 2026-05-10
+
+**Auto-capture hardening — closes three coupled defects in the OpenClaw / pre-compact / stop hook write path.**
+
+- **Defence pipeline bypass (defect 1)** — the auto-extract hooks now route every captured candidate through `runDefencePipeline()` before insert. `defence_audit` gains a row with `source_type='hook'` for every capture (good or bad). Injection-shaped content lands in `quarantine` instead of `memories`. BLOCK decisions and pipeline errors produce a synthetic audit row so no capture is silently lost. Single splice point in `scripts/lib/save-memory.mjs` covers session-end, pre-compact, and stop hooks.
+- **Empty firewall rules (defect 2)** — `firewall_rules` ships with 9 seeded built-in rules (instruction injection, hidden instruction, imperative tool-call directives, memory manipulation, command injection, delimiter attacks, credential leaks for AWS / JWT / private keys). Schema gains a `built_in INTEGER NOT NULL DEFAULT 0` column with an idempotent `ALTER TABLE` migration. Built-in rules evaluate on every tier (the Pro `custom_firewall_rules` gate applies only to user-added rules) and are excluded from the user-facing 25-rule cap. The `instruction-detector` PATTERN_GROUPS also gains an `imperative_tool_call` group so detection works without a database.
+- **Malformed chunker output (defect 3)** — the regex extractors now reject candidates that match six structural malformations: imperative tool-call directives, bare-imperative starts (catches the "never commit secrets" → "commit secrets" negation drop), email-body bleed, path-label fragments, "be" imperatives, and subordinate-clause sentence fragments. With original conversation context, a 3-token negation-scope check fires too. Auto-extract salience cap reduced from 1.0 to 0.6 — regex extractors don't carry semantic confidence and shouldn't shadow LLM-rated user input.
+- **`shieldcortex memories purge --malformed`** — new CLI subcommand to clean up live databases that accumulated malformed rows before this fix. Dry-run by default; `--execute` writes a full DB copy via `VACUUM INTO` to `~/.shieldcortex/backups/` before deleting.
+- **Refactor** — chunker logic consolidated from three near-duplicate hook scripts into `scripts/lib/extract-memorable-segments.mjs`. Each hook keeps its existing thresholds, max-memories cap, and tag set via opts.
+
+Test surface: 91 suites, 970 tests, all green. Three new regression tests against `src/__fixtures__/sc_defect_fixture.db` covering each defect.
+
 ## [4.15.0] - 2026-05-10
 
 **Hybrid retrieval with Reciprocal Rank Fusion + LongMemEval-S benchmark harness.**

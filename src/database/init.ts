@@ -9,6 +9,7 @@ import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { randomUUID } from 'crypto';
+import { seedDefaultFirewallRules } from './seed-firewall-rules.js';
 
 const _currentFile = fileURLToPath(import.meta.url);
 const _currentDir = dirname(_currentFile);
@@ -984,10 +985,12 @@ function runMigrations(database: Database.Database): void {
         condition_value TEXT NOT NULL,
         action TEXT NOT NULL CHECK(action IN ('block', 'allow', 'quarantine')),
         enabled INTEGER NOT NULL DEFAULT 1,
+        built_in INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
       CREATE INDEX IF NOT EXISTS idx_firewall_rules_priority ON firewall_rules(priority);
       CREATE INDEX IF NOT EXISTS idx_firewall_rules_enabled ON firewall_rules(enabled);
+      CREATE INDEX IF NOT EXISTS idx_firewall_rules_built_in ON firewall_rules(built_in);
 
       CREATE TABLE IF NOT EXISTS rate_limits (
         source_key TEXT PRIMARY KEY,
@@ -997,6 +1000,24 @@ function runMigrations(database: Database.Database): void {
     `);
   } catch {
     // Tables may already exist - safe to ignore
+  }
+
+  // Migration: built_in column on pre-existing firewall_rules (added in v4.15)
+  try {
+    const cols = database.prepare("PRAGMA table_info(firewall_rules)").all() as { name: string }[];
+    if (!cols.some(c => c.name === 'built_in')) {
+      database.exec('ALTER TABLE firewall_rules ADD COLUMN built_in INTEGER NOT NULL DEFAULT 0');
+      database.exec('CREATE INDEX IF NOT EXISTS idx_firewall_rules_built_in ON firewall_rules(built_in)');
+    }
+  } catch {
+    // Best-effort migration; pipeline handles missing column gracefully.
+  }
+
+  // Seed default built-in firewall rules on first init.
+  try {
+    seedDefaultFirewallRules(database);
+  } catch {
+    // Seeder runs idempotently; failures here should never block startup.
   }
 }
 

@@ -25,6 +25,18 @@ import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
+import {
+  extractMemorableSegments,
+  processSegments,
+  PRE_COMPACT_CATEGORY_THRESHOLDS,
+  ARCHITECTURE_KEYWORDS,
+  ERROR_KEYWORDS,
+  DECISION_KEYWORDS,
+  LEARNING_KEYWORDS,
+  PATTERN_KEYWORDS,
+  detectKeywords,
+  detectCodeReferences,
+} from './lib/extract-memorable-segments.mjs';
 
 // Sentinel directory for once-per-session "disabled" log lines. Without this
 // the stop hook bails silently on every turn when autoMemory.enableStop is
@@ -74,163 +86,14 @@ const { dir: DB_DIR, path: DB_PATH } = getDbPath();
 // Memory limits (kept in sync with pre-compact)
 const MAX_SHORT_TERM_MEMORIES = 100;
 const MAX_LONG_TERM_MEMORIES = 1000;
-const BASE_THRESHOLD = 0.35;
 const MAX_AUTO_MEMORIES = 2;
+// Stop-hook uses pre-compact's tighter category thresholds — see
+// PRE_COMPACT_CATEGORY_THRESHOLDS in scripts/lib/extract-memorable-segments.mjs.
 
-const CATEGORY_EXTRACTION_THRESHOLDS = {
-  architecture: 0.38,
-  error: 0.40,
-  context: 0.42,
-  learning: 0.42,
-  pattern: 0.45,
-  preference: 0.48,
-  note: 0.52,
-  todo: 0.50,
-  relationship: 0.45,
-  custom: 0.45,
-};
-
-// ==================== SALIENCE (mirrors pre-compact) ====================
-
-const ARCHITECTURE_KEYWORDS = ['architecture','design','pattern','structure','system','database','api','schema','model','framework','stack','microservice','monolith','serverless','infrastructure'];
-const ERROR_KEYWORDS = ['error','bug','fix','issue','problem','crash','fail','exception','debug','resolve','solution','workaround'];
-const PREFERENCE_KEYWORDS = ['prefer','always','never','style','convention','standard','like','want','should','must','require'];
-const PATTERN_KEYWORDS = ['pattern','practice','approach','method','technique','implementation','strategy','algorithm','workflow'];
-const DECISION_KEYWORDS = ['decided','decision','chose','chosen','selected','going with','will use','opted for','settled on','agreed'];
-const LEARNING_KEYWORDS = ['learned','discovered','realized','found out','turns out','TIL','now know','understand now','figured out'];
-const EMOTIONAL_MARKERS = ['important','critical','crucial','essential','key','finally','breakthrough','eureka','aha','got it','frustrating','annoying','tricky','remember'];
-const CODE_REFERENCE_PATTERNS = [
-  /\b[A-Z][a-zA-Z]*\.[a-zA-Z]+\b/,
-  /\b[a-z_][a-zA-Z0-9_]*\.(ts|js|py|go|rs)\b/,
-  /`[^`]+`/,
-  /\b(function|class|interface|type|const|let|var)\s+\w+/i,
-  /\bline\s*\d+\b/i,
-  /\b(src|lib|app|components?)\/\S+/,
-];
-
-function detectKeywords(text, keywords) {
-  const lower = text.toLowerCase();
-  return keywords.some((k) => lower.includes(k.toLowerCase()));
-}
-function detectCodeReferences(c) {
-  return CODE_REFERENCE_PATTERNS.some((p) => p.test(c));
-}
-function detectExplicitRequest(t) {
-  const patterns = [
-    /\bremember\s+(this|that)\b/i, /\bdon'?t\s+forget\b/i, /\bkeep\s+(in\s+)?mind\b/i,
-    /\bnote\s+(this|that)\b/i, /\bsave\s+(this|that)\b/i, /\bimportant[:\s]/i,
-    /\bfor\s+future\s+reference\b/i,
-  ];
-  return patterns.some((p) => p.test(t));
-}
-function calculateSalience(text) {
-  let score = 0.25;
-  if (detectExplicitRequest(text)) score += 0.5;
-  if (detectKeywords(text, ARCHITECTURE_KEYWORDS)) score += 0.4;
-  if (detectKeywords(text, ERROR_KEYWORDS)) score += 0.35;
-  if (detectKeywords(text, DECISION_KEYWORDS)) score += 0.35;
-  if (detectKeywords(text, LEARNING_KEYWORDS)) score += 0.3;
-  if (detectKeywords(text, PATTERN_KEYWORDS)) score += 0.25;
-  if (detectKeywords(text, PREFERENCE_KEYWORDS)) score += 0.25;
-  if (detectCodeReferences(text)) score += 0.15;
-  if (detectKeywords(text, EMOTIONAL_MARKERS)) score += 0.2;
-  return Math.min(1.0, score);
-}
-function suggestCategory(text) {
-  const lower = text.toLowerCase();
-  if (detectKeywords(lower, ARCHITECTURE_KEYWORDS)) return 'architecture';
-  if (detectKeywords(lower, ERROR_KEYWORDS)) return 'error';
-  if (detectKeywords(lower, DECISION_KEYWORDS)) return 'context';
-  if (detectKeywords(lower, LEARNING_KEYWORDS)) return 'learning';
-  if (detectKeywords(lower, PREFERENCE_KEYWORDS)) return 'preference';
-  if (detectKeywords(lower, PATTERN_KEYWORDS)) return 'pattern';
-  if (/\b(todo|fixme|hack|xxx)\b/i.test(lower)) return 'todo';
-  return 'note';
-}
-function extractTags(text, extractorName) {
-  const tags = new Set();
-  const hashtags = text.match(/#[a-zA-Z][a-zA-Z0-9_-]*/g);
-  if (hashtags) hashtags.forEach((t) => tags.add(t.slice(1).toLowerCase()));
-  ['react','vue','angular','node','python','typescript','javascript','api','database','sql','mongodb','postgresql','mysql','docker','kubernetes','aws','git','testing','auth','security']
-    .forEach((t) => { if (text.toLowerCase().includes(t)) tags.add(t); });
-  tags.add('auto-extracted');
-  tags.add('source:stop-hook');
-  if (extractorName) tags.add(`source:${extractorName}`);
-  return Array.from(tags).slice(0, 12);
-}
-
-// ==================== EXTRACTORS ====================
-
-function extractMemorableSegments(text) {
-  const segments = [];
-  const extractors = [
-    { name: 'decision', titlePrefix: 'Decision: ', patterns: [
-      /(?:we\s+)?decided\s+(?:to\s+)?(.{15,200})/gi,
-      /(?:going|went)\s+with\s+(.{15,150})/gi,
-      /(?:chose|chosen|selected)\s+(.{15,150})/gi,
-      /the\s+(?:approach|solution|fix)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:using|will\s+use)\s+(.{15,150})/gi,
-      /(?:opted\s+for|settled\s+on)\s+(.{15,150})/gi,
-    ]},
-    { name: 'error-fix', titlePrefix: 'Fix: ', patterns: [
-      /(?:fixed|solved|resolved)\s+(?:by\s+)?(.{15,200})/gi,
-      /the\s+(?:fix|solution|workaround)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:root\s+cause|issue)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:error|bug)\s+(?:was\s+)?caused\s+by\s+(.{15,200})/gi,
-    ]},
-    { name: 'learning', titlePrefix: 'Learned: ', patterns: [
-      /(?:learned|discovered|realized|found\s+out)\s+(?:that\s+)?(.{15,200})/gi,
-      /turns\s+out\s+(?:that\s+)?(.{15,200})/gi,
-      /(?:figured\s+out|worked\s+out)\s+(.{15,150})/gi,
-    ]},
-    { name: 'preference', titlePrefix: 'Preference: ', patterns: [
-      /(?:always|never)\s+(.{10,150})/gi,
-      /(?:prefer|want)\s+to\s+(.{10,150})/gi,
-    ]},
-  ];
-  for (const ex of extractors) {
-    for (const p of ex.patterns) {
-      let m;
-      while ((m = p.exec(text)) !== null) {
-        const content = m[1].trim();
-        if (content.length >= 20) {
-          const titleContent = content.slice(0, 50).replace(/\s+/g, ' ').trim();
-          const title = ex.titlePrefix + (titleContent.length < 50 ? titleContent : titleContent + '...');
-          segments.push({ title, content: content.slice(0, 500), extractorType: ex.name });
-        }
-      }
-    }
-  }
-  return segments;
-}
-
-function calculateOverlap(t1, t2) {
-  const w1 = new Set(t1.toLowerCase().split(/\s+/));
-  const w2 = new Set(t2.toLowerCase().split(/\s+/));
-  const inter = new Set([...w1].filter((w) => w2.has(w)));
-  const union = new Set([...w1, ...w2]);
-  return inter.size / Math.max(1, union.size);
-}
-
-function processSegments(segments, dynamicThreshold) {
-  const unique = [];
-  for (const seg of segments) {
-    if (unique.some((u) => calculateOverlap(u.content, seg.content) > 0.8)) continue;
-    const text = seg.title + ' ' + seg.content;
-    unique.push({
-      ...seg,
-      salience: calculateSalience(text),
-      category: suggestCategory(text),
-      tags: extractTags(text, seg.extractorType),
-    });
-  }
-  unique.sort((a, b) => b.salience - a.salience);
-  const filtered = unique.filter((s) => {
-    const cat = CATEGORY_EXTRACTION_THRESHOLDS[s.category] ?? BASE_THRESHOLD;
-    return s.salience >= Math.min(cat, dynamicThreshold);
-  });
-  return filtered.slice(0, MAX_AUTO_MEMORIES);
-}
+// Salience detection, content extraction, and segment processing live in
+// scripts/lib/extract-memorable-segments.mjs. Stop-hook uses the lighter
+// 'stop' extractor set (no architecture / important-note) for backward
+// compatibility with its pre-refactor behaviour.
 
 function getMemoryStats(db) {
   try {
@@ -311,7 +174,7 @@ process.stdin.on('readable', () => {
   while ((chunk = process.stdin.read()) !== null) input += chunk;
 });
 
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   const startedAt = Date.now();
   let db = null;
   let extractedCount = 0;
@@ -401,12 +264,18 @@ process.stdin.on('end', () => {
         const max = MAX_SHORT_TERM_MEMORIES + MAX_LONG_TERM_MEMORIES;
         const dyn = getDynamicThreshold(total, max);
 
-        const segments = extractMemorableSegments(transcriptOut.text);
-        const processed = processSegments(segments, dyn);
+        const segments = extractMemorableSegments(transcriptOut.text, { mode: 'stop' });
+        const processed = processSegments(segments, dyn, {
+          hookTag: 'source:stop-hook',
+          maxMemories: MAX_AUTO_MEMORIES,
+          categoryThresholds: PRE_COMPACT_CATEGORY_THRESHOLDS,
+          applyFrequencyBoost: false,
+          conversationText: transcriptOut.text,
+        });
 
         for (const memory of processed) {
           try {
-            saveAutoExtractedMemory(db, memory, project);
+            await saveAutoExtractedMemory(db, memory, project, { source: 'stop-hook' });
             extractedCount++;
             console.error(`[stop] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}, category: ${memory.category})`);
           } catch (err) {
