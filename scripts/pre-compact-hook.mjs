@@ -170,6 +170,7 @@ process.stdin.on('end', async () => {
       const processedSegments = processSegments(segments, dynamicThreshold, {
         maxMemories: MAX_AUTO_MEMORIES,
         categoryThresholds: PRE_COMPACT_CATEGORY_THRESHOLDS,
+        conversationText,
       });
 
       // Save auto-extracted memories

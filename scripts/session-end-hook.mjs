@@ -185,7 +185,10 @@ process.stdin.on('end', async () => {
 
         // Extract memorable segments
         const segments = extractMemorableSegments(conversationText);
-        const processedSegments = processSegments(segments, dynamicThreshold, { hookTag: 'session-end' });
+        const processedSegments = processSegments(segments, dynamicThreshold, {
+          hookTag: 'session-end',
+          conversationText,
+        });
 
         for (const memory of processedSegments) {
           try {

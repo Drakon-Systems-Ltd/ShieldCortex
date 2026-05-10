@@ -270,6 +270,7 @@ process.stdin.on('end', async () => {
           maxMemories: MAX_AUTO_MEMORIES,
           categoryThresholds: PRE_COMPACT_CATEGORY_THRESHOLDS,
           applyFrequencyBoost: false,
+          conversationText: transcriptOut.text,
         });
 
         for (const memory of processed) {

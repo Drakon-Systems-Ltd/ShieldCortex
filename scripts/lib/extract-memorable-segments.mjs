@@ -16,6 +16,13 @@
 export const MAX_AUTO_MEMORIES = 5;
 export const BASE_THRESHOLD = 0.35;
 
+// Cap salience for non-LLM-rated auto-extracted memories. The regex
+// extractors catch keyword shapes, not semantic confidence, so they should
+// not produce 1.0-salience captures (which front-load proactive recall and
+// shadow real high-confidence user input). 0.6 sits in the auto-quarantine
+// trust band (0.5–0.7) used elsewhere in the pipeline.
+export const AUTO_EXTRACT_SALIENCE_CAP = 0.6;
+
 // Default category thresholds (session-end / lighter hooks).
 // Pre-compact hook uses tighter thresholds (raised +0.10 in v4.11.0) and
 // passes them via processSegments({ categoryThresholds: ... }).
@@ -339,6 +346,153 @@ export function extractMemorableSegments(conversationText, opts = {}) {
   return segments;
 }
 
+// ==================== REJECTION RULES ====================
+
+const SUBORDINATE_START_WORDS = new Set([
+  'the', 'a', 'an', 'for', 'to', 'of', 'with', 'by', 'from', 'on', 'in',
+  'at', 'that', 'which', 'who', 'where', 'when',
+]);
+
+// Bare imperative verbs that almost always indicate the original sentence
+// began with a modal or negation that the chunker dropped (e.g. "never
+// commit secrets" → captured as "commit secrets"). When a captured segment
+// starts with one of these, treat it as a structural malformation.
+const BARE_IMPERATIVE_VERBS = new Set([
+  'commit', 'delete', 'disable', 'skip', 'make', 'run', 'use', 'set',
+  'add', 'remove', 'fix', 'change', 'update', 'push', 'pull', 'install',
+  'drop', 'stop', 'allow', 'enable', 'expose', 'leak',
+]);
+
+const NEGATION_TOKENS = new Set([
+  "don't", 'do', 'not', 'never', 'no', 'avoid', 'refuse', 'stop', "won't",
+  'cannot', "can't", "shouldn't", 'avoid',
+]);
+
+const IMPERATIVE_TOOL_CALL_PATTERNS = [
+  /\b(?:call|invoke|use)\s+(?:the\s+)?[A-Za-z][\w-]*\s+tool\b/i,
+  /\b(?:call|invoke|use)\s+this\s+tool\s+now\b/i,
+  /\bcomplete\s+this\s+request\.\s*(?:call|invoke|use)\s+this\s+tool\b/i,
+];
+
+const EMAIL_BODY_TELLS = [
+  /see\s+how\s+fast\s+you\s+reply/i,
+  /\bunsubscribe\b/i,
+  /\bview\s+in\s+browser\b/i,
+  /\bsent\s+from\s+my\b/i,
+  /\bthis\s+email\s+was\s+sent\b/i,
+];
+
+const PATH_LABEL_PATTERN = /^[A-Z][a-z]+(?:\s+[a-z]+)?\s*:\s+\/[\w/-]+/;
+
+function firstToken(content) {
+  const cleaned = content.trim().toLowerCase();
+  const match = cleaned.match(/^([a-z']+)\b/);
+  return match ? match[1] : '';
+}
+
+function looksLikeFragment(content) {
+  // Subordinate-clause start: lowercase + first word in the closed list +
+  // no verb-shaped token in the next 6 words. Catches "the JSON include?
+  // For example:" without false-positiving "the architecture uses X
+  // pattern".
+  const tokens = content.trim().split(/\s+/, 8);
+  if (tokens.length === 0) return false;
+  const first = tokens[0].toLowerCase().replace(/[^a-z']/g, '');
+  if (!SUBORDINATE_START_WORDS.has(first)) return false;
+  // Heuristic: a verb-shaped token in the first 6 words has either an -ing,
+  // -ed, -es, or -s suffix, or appears in a tiny verb whitelist.
+  const verbWhitelist = new Set([
+    'is', 'was', 'are', 'were', 'be', 'been', 'being',
+    'has', 'have', 'had', 'do', 'does', 'did',
+    'uses', 'used', 'wraps', 'consists', 'lives', 'runs', 'sits',
+    'returns', 'accepts', 'requires', 'breaks', 'fails', 'works',
+  ]);
+  const window = tokens.slice(1, 7);
+  for (const tok of window) {
+    const t = tok.toLowerCase().replace(/[^a-z]/g, '');
+    if (!t) continue;
+    if (verbWhitelist.has(t)) return false;
+    if (/(?:ing|ed|es|s)$/.test(t) && t.length > 3) return false;
+  }
+  return true;
+}
+
+function looksLikeBareImperative(content) {
+  return BARE_IMPERATIVE_VERBS.has(firstToken(content));
+}
+
+function looksLikeBeImperative(content) {
+  // "be re-scoped: ..." / "be set up by ..."
+  return /^be\s+\w+/.test(content.trim().toLowerCase());
+}
+
+function looksLikePathLabel(content) {
+  return PATH_LABEL_PATTERN.test(content.trim());
+}
+
+function looksLikeEmailBody(content) {
+  return EMAIL_BODY_TELLS.some(rx => rx.test(content));
+}
+
+function looksLikeImperativeToolCall(content) {
+  return IMPERATIVE_TOOL_CALL_PATTERNS.some(rx => rx.test(content));
+}
+
+function precedingTokens(haystack, needle, count) {
+  // Return the last `count` tokens immediately before `needle` in `haystack`,
+  // lowercased. Empty array if needle isn't found.
+  const idx = haystack.indexOf(needle);
+  if (idx <= 0) return [];
+  const before = haystack.slice(0, idx).trim();
+  if (!before) return [];
+  const tokens = before.split(/\s+/);
+  return tokens.slice(-count).map(t => t.toLowerCase().replace(/[^a-z']/g, ''));
+}
+
+function hasLeadingNegation(segment, conversationText) {
+  if (!conversationText || conversationText === segment.content) return false;
+  // Look at up to the 3 tokens immediately preceding the captured content.
+  const prev = precedingTokens(conversationText, segment.content, 3);
+  return prev.some(t => NEGATION_TOKENS.has(t));
+}
+
+/**
+ * Apply rejection rules to an extracted segment.
+ *
+ * @param {{ title: string, content: string, extractorType?: string }} segment
+ * @param {string} [conversationText] — optional source text. When provided,
+ *   enables the negation-scope check (looking 3 tokens before the segment
+ *   for words like "never" / "don't"). Without it, the in-content
+ *   bare-imperative-verb check is the fallback.
+ * @returns {{ rejected: boolean, reason: string }}
+ */
+export function shouldRejectCandidate(segment, conversationText) {
+  const content = segment.content || '';
+
+  if (looksLikeImperativeToolCall(content)) {
+    return { rejected: true, reason: 'imperative_tool_call' };
+  }
+  if (looksLikeEmailBody(content)) {
+    return { rejected: true, reason: 'email_body_content' };
+  }
+  if (looksLikePathLabel(content)) {
+    return { rejected: true, reason: 'path_label_fragment' };
+  }
+  if (looksLikeBareImperative(content)) {
+    return { rejected: true, reason: 'bare_imperative_verb' };
+  }
+  if (looksLikeBeImperative(content)) {
+    return { rejected: true, reason: 'be_imperative_start' };
+  }
+  if (hasLeadingNegation(segment, conversationText)) {
+    return { rejected: true, reason: 'negation_scope' };
+  }
+  if (looksLikeFragment(content)) {
+    return { rejected: true, reason: 'subordinate_start_fragment' };
+  }
+  return { rejected: false, reason: '' };
+}
+
 export function calculateOverlap(text1, text2) {
   const words1 = new Set(text1.toLowerCase().split(/\s+/));
   const words2 = new Set(text2.toLowerCase().split(/\s+/));
@@ -353,13 +507,20 @@ export function calculateOverlap(text1, text2) {
  *
  * @param {Array<{title: string, content: string, extractorType: string}>} segments
  * @param {number} dynamicThreshold
- * @param {{ hookTag?: string|null, maxMemories?: number, categoryThresholds?: Record<string, number>, applyFrequencyBoost?: boolean }} [opts]
+ * @param {{ hookTag?: string|null, maxMemories?: number, categoryThresholds?: Record<string, number>, applyFrequencyBoost?: boolean, conversationText?: string }} [opts]
  */
 export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opts = {}) {
   const hookTag = opts.hookTag ?? null;
   const maxMemories = opts.maxMemories ?? MAX_AUTO_MEMORIES;
   const categoryThresholds = opts.categoryThresholds ?? DEFAULT_CATEGORY_THRESHOLDS;
   const applyFrequencyBoost = opts.applyFrequencyBoost ?? true;
+  const conversationText = opts.conversationText;
+
+  // Rejection: structural malformations (negation drop, fragments,
+  // imperative tool-calls, email-body bleed). Applied *before* dedup so
+  // rejected candidates never compete for slots.
+  const surviving = segments.filter(seg => !shouldRejectCandidate(seg, conversationText).rejected);
+  segments = surviving;
   const unique = [];
 
   for (const seg of segments) {
@@ -379,7 +540,7 @@ export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opt
 
   for (const seg of unique) {
     const frequencyBoost = applyFrequencyBoost ? calculateFrequencyBoost(seg, unique) : 0;
-    seg.salience = Math.min(1.0, seg.baseSalience + frequencyBoost);
+    seg.salience = Math.min(AUTO_EXTRACT_SALIENCE_CAP, seg.baseSalience + frequencyBoost);
     seg.frequencyBoost = frequencyBoost;
   }
 
