@@ -64,6 +64,43 @@ Say any of these phrases to trigger an instant save to Cortex memory:
 
 Content after the trigger phrase is extracted and saved as the memory content.
 
+## Defence Audit Guarantees
+
+Every byte that lands in `memories` from the auto-extract path passes the
+6-layer defence pipeline first. The hook write path is no longer the
+bypass it once was:
+
+- **ALLOW** → row inserted into `memories`; a corresponding row appears in
+  `defence_audit` with `source_type = 'hook'` and the hook's identifier
+  (`session-end-hook` / `pre-compact-hook` / `stop-hook`).
+- **QUARANTINE** → row inserted into `quarantine` (not `memories`), linked
+  to the audit row via `audit_id`. Visible in the dashboard for review.
+- **BLOCK** → dropped. The audit row written by the pipeline carries the
+  block reason; nothing reaches `memories`.
+- **Pipeline error** → dropped + a synthetic audit row with reason
+  `pipeline_error: <msg>`. Never silently lose data.
+
+Built-in firewall rules covering instruction injection, hidden
+instruction, imperative tool-call directives ("call X tool now"), command
+injection, and credential leaks (AWS / JWT / private keys) are seeded
+into `firewall_rules` on first run with `built_in = 1`. They are
+evaluated on every tier (the Pro `custom_firewall_rules` gate applies
+only to user-added rules) and excluded from the user-facing 25-rule cap.
+
+The chunker also rejects malformed candidates *before* they reach the
+write path: imperative tool-calls, bare-imperative starts ("commit
+secrets" with the negation dropped), email-body bleed, and path-label
+fragments. Auto-extracted memories are now capped at salience 0.6
+(reserved 1.0 for LLM-rated future paths).
+
+To audit an existing database for malformed rows accumulated before this
+fix:
+
+```bash
+shieldcortex memories purge --malformed --dry-run    # preview
+shieldcortex memories purge --malformed --execute    # delete (writes a backup first)
+```
+
 ## Auto-Memory
 
 Auto-memory extraction is enabled by default. ShieldCortex complements your existing memory system by capturing decisions, fixes, and learnings with built-in deduplication to avoid noise.

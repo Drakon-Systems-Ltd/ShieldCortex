@@ -473,6 +473,10 @@ Listens for session events and keyword triggers throughout the agent lifecycle:
 - 🧠 **Auto-extraction** — when a session ends, high-salience content (decisions, bug fixes, learnings, architecture notes) is automatically saved to memory
 - 💬 **Keyword triggers** — say "remember this:", "don't forget:", or "this is important:" and the content is captured immediately with the right category and importance
 - 🔄 **Novelty filtering** — Jaccard similarity deduplication prevents the same insight from being saved twice
+- 🛡️ **Audit guarantees** — every captured candidate passes the full 6-layer defence pipeline before reaching `memories`. ALLOW writes a `defence_audit` row with `source_type='hook'` and inserts the memory; QUARANTINE routes to the quarantine table for review; BLOCK drops with an audit trail. Built-in firewall rules (instruction injection, hidden instruction, imperative tool-call directives, credential leaks) are seeded on first run and visible in the dashboard.
+
+> [!TIP]
+> If you ran ShieldCortex before the auto-capture audit fix, run `shieldcortex memories purge --malformed --dry-run` to see which existing rows the hardened chunker would now reject (negation drops, imperative tool-calls, email-body bleed). Re-run with `--execute` to delete them — a full DB backup is written first.
 
 ### Plugin — Real-Time Defence
 
