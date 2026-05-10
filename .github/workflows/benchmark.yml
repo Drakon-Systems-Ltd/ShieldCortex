@@ -1,0 +1,90 @@
+name: Retrieval benchmark
+
+# Runs the LongMemEval-S harness on every tagged release and uploads the
+# resulting SCORECARD.md / report.json as release artifacts. The job is
+# deliberately not gating CI — it's a transparency tool, not a regression
+# gate. If RRF underperforms, the release ships and the scorecard tells
+# the story honestly. The plan rule is: publish numbers, don't fabricate.
+#
+# Smoke mode is the default — it runs against the toy fixture in <1s so
+# every release gets a sanity check that the harness still executes. To
+# run the real LongMemEval-S, set the LONGMEMEVAL_DATASET_URL secret
+# (must be a fetchable URL with the question file) and the workflow will
+# download it before scoring. This avoids redistributing the dataset
+# from this repo, which has its own licensing terms.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'smoke (toy fixture) or full (LongMemEval-S URL)'
+        required: false
+        default: 'smoke'
+        type: choice
+        options:
+          - smoke
+          - full
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript (so harness can import compiled paths if needed)
+        run: npm run build:ts
+
+      - name: Choose dataset
+        id: dataset
+        run: |
+          MODE="${{ github.event.inputs.mode || 'smoke' }}"
+          if [ "$MODE" = "full" ] && [ -n "${LONGMEMEVAL_URL}" ]; then
+            curl -sSL "$LONGMEMEVAL_URL" -o longmemeval-s.jsonl
+            echo "path=longmemeval-s.jsonl" >> "$GITHUB_OUTPUT"
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=benchmark/longmemeval/fixtures/toy-dataset.jsonl" >> "$GITHUB_OUTPUT"
+            echo "mode=smoke" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          LONGMEMEVAL_URL: ${{ secrets.LONGMEMEVAL_DATASET_URL }}
+
+      - name: Run benchmark
+        run: |
+          SHIELDCORTEX_SKIP_EMBEDDINGS=1 \
+            npx tsx benchmark/longmemeval/run.ts \
+              --dataset "${{ steps.dataset.outputs.path }}" \
+              --top-k 10 \
+              --quiet
+
+      - name: Print headline
+        run: |
+          if [ -f benchmark/longmemeval/SCORECARD.md ]; then
+            head -25 benchmark/longmemeval/SCORECARD.md
+          fi
+
+      - name: Upload scorecard artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: longmemeval-scorecard-${{ steps.dataset.outputs.mode }}
+          path: |
+            benchmark/longmemeval/SCORECARD.md
+            benchmark/longmemeval/report.json
+          if-no-files-found: error
+          retention-days: 90

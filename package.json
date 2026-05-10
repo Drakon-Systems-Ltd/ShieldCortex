@@ -57,6 +57,8 @@
     "test": "node scripts/run-jest.mjs",
     "test:watch": "node scripts/run-jest.mjs --watch",
     "test:coverage": "node scripts/run-jest.mjs --coverage",
+    "bench": "tsx benchmark/longmemeval/run.ts",
+    "bench:smoke": "SHIELDCORTEX_SKIP_EMBEDDINGS=1 tsx benchmark/longmemeval/run.ts --quiet",
     "audit:security": "npm audit --audit-level=moderate",
     "prepack": "node scripts/ensure-bin-executable.mjs",
     "prepublishOnly": "npm run build"

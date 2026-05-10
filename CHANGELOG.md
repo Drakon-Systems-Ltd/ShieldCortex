@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Hybrid retrieval with Reciprocal Rank Fusion (RRF).** New default ranker fuses FTS5 keyword search, vector cosine similarity, and graph-walk retrieval via Cormack et al. (2009) RRF (k=60). Multiplicative post-fusion multipliers (recency, category match, link boost, tag boost, activation, contradiction penalty) modulate the rank-fused score without drowning the underlying retrieval signal. Switchable per-process via `SHIELDCORTEX_RANKER=rrf|legacy` or persisted via `shieldcortex config --ranker rrf|legacy`. Legacy weighted-sum kept verbatim as a one-release safety belt.
+- **LongMemEval-S benchmark harness.** `npm run bench` runs the public 500-question retrieval benchmark (Wu et al., ICLR 2025) against both engines, producing `benchmark/longmemeval/SCORECARD.md` (R@5, R@10, MRR, per-question diff) plus a machine-readable `report.json`. Smoke mode (`npm run bench:smoke`) runs the toy fixture in <1s for CI. GitHub workflow uploads scorecard as a release artifact on every tagged push so the audit trail is public-by-default.
+- **`benchmark/longmemeval/`** — reusable harness pieces: pure scoring functions (`recallAtK`, `reciprocalRank`, `summarise`), JSONL/JSON-array dataset loader, ingest pipeline (turns → memories with `metadata.session_id`), and markdown scorecard renderer.
+
+### Changed
+
+- **`searchMemoriesInternal`** now branches on `config.ranker.engine`. Default is `rrf` for fresh installs. The post-fusion code path (side-effect reinforcement, contradiction enrichment, ACL filter) stays engine-agnostic.
+
+### Tests
+
+- 1003 → 1044 passing (+41 new, 0 regressions).
+  - 15 RRF unit tests (`rrf.test.ts`)
+  - 16 graph retriever tests (`graph-rank.test.ts`)
+  - 16 hybrid orchestrator tests (`hybrid-ranker.test.ts`)
+  - 9 ranker-config resolver tests (`ranker-config.test.ts`)
+  - 2 engine-selection integration tests (`search-recall-engine.test.ts`)
+  - 21 scoring + 9 loader tests for the benchmark harness (`benchmark-score.test.ts`, `benchmark-load.test.ts`)
+
 ## [4.14.11] - 2026-05-08
 
 **OpenClaw 2026.5.x compatibility fix — stop authoring `plugins.installs` in user config.**
