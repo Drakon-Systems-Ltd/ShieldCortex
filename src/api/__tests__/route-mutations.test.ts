@@ -179,6 +179,12 @@ describe('API route mutation regressions', () => {
         setProactiveRecall: (enabled: boolean) => {
           state.proactiveRecall = enabled;
         },
+        getRankerConfig: () => ({
+          engine: 'rrf' as const,
+          rrfK: 60,
+          weights: { fts: 0.4, vector: 0.6, graph: 0.3 },
+        }),
+        setRankerConfig: jest.fn(),
       }));
 
       jest.unstable_mockModule('../../cloud/sync-queue.js', () => ({

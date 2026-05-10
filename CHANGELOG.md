@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.16.0] - 2026-05-10
+
 **Auto-capture hardening — closes three coupled defects in the OpenClaw / pre-compact / stop hook write path.**
 
 - **Defence pipeline bypass (defect 1)** — the auto-extract hooks now route every captured candidate through `runDefencePipeline()` before insert. `defence_audit` gains a row with `source_type='hook'` for every capture (good or bad). Injection-shaped content lands in `quarantine` instead of `memories`. BLOCK decisions and pipeline errors produce a synthetic audit row so no capture is silently lost. Single splice point in `scripts/lib/save-memory.mjs` covers session-end, pre-compact, and stop hooks.
@@ -13,6 +15,36 @@ All notable changes to this project will be documented in this file.
 - **Refactor** — chunker logic consolidated from three near-duplicate hook scripts into `scripts/lib/extract-memorable-segments.mjs`. Each hook keeps its existing thresholds, max-memories cap, and tag set via opts.
 
 Test surface: 91 suites, 970 tests, all green. Three new regression tests against `src/__fixtures__/sc_defect_fixture.db` covering each defect.
+
+## [4.15.0] - 2026-05-10
+
+**Hybrid retrieval with Reciprocal Rank Fusion + LongMemEval-S benchmark harness.**
+
+ShieldCortex's recall pipeline now fuses three retrievers (FTS5 keyword, vector cosine, graph-walk) using Cormack et al. (2009) Reciprocal Rank Fusion — the same algorithm `rohitg00/agentmemory` uses to publish 95.2% R@5 on LongMemEval-S. Recall, category-match, link, tag, activation, and contradiction signals become *post-fusion multipliers* on the RRF score rather than additive components in a fixed-weight sum, so retrieval signal isn't drowned by heuristics with mismatched scales.
+
+The legacy weighted-sum scoring stays available verbatim as a one-release safety belt (`SHIELDCORTEX_RANKER=legacy` or `shieldcortex config --ranker legacy`). v4.16 deletes legacy if no regressions surface against the LongMemEval scorecard.
+
+This release also lands the `npm run bench` harness — a reproducible LongMemEval-S runner that produces `benchmark/longmemeval/SCORECARD.md` with R@5, R@10, MRR, plus per-question diff between engines. The toy-fixture smoke run (`npm run bench:smoke`) shows RRF beating legacy on the multi-session-synthesis question — exactly the case rank fusion was designed for.
+
+### Added
+
+- **Hybrid retrieval with Reciprocal Rank Fusion (RRF).** New default ranker fuses FTS5 keyword search, vector cosine similarity, and graph-walk retrieval via Cormack et al. (2009) RRF (k=60). Multiplicative post-fusion multipliers (recency, category match, link boost, tag boost, activation, contradiction penalty) modulate the rank-fused score without drowning the underlying retrieval signal. Switchable per-process via `SHIELDCORTEX_RANKER=rrf|legacy` or persisted via `shieldcortex config --ranker rrf|legacy`. Legacy weighted-sum kept verbatim as a one-release safety belt.
+- **LongMemEval-S benchmark harness.** `npm run bench` runs the public 500-question retrieval benchmark (Wu et al., ICLR 2025) against both engines, producing `benchmark/longmemeval/SCORECARD.md` (R@5, R@10, MRR, per-question diff) plus a machine-readable `report.json`. Smoke mode (`npm run bench:smoke`) runs the toy fixture in <1s for CI. GitHub workflow uploads scorecard as a release artifact on every tagged push so the audit trail is public-by-default.
+- **`benchmark/longmemeval/`** — reusable harness pieces: pure scoring functions (`recallAtK`, `reciprocalRank`, `summarise`), JSONL/JSON-array dataset loader, ingest pipeline (turns → memories with `metadata.session_id`), and markdown scorecard renderer.
+
+### Changed
+
+- **`searchMemoriesInternal`** now branches on `config.ranker.engine`. Default is `rrf` for fresh installs. The post-fusion code path (side-effect reinforcement, contradiction enrichment, ACL filter) stays engine-agnostic.
+
+### Tests
+
+- 1003 → 1044 passing (+41 new, 0 regressions).
+  - 15 RRF unit tests (`rrf.test.ts`)
+  - 16 graph retriever tests (`graph-rank.test.ts`)
+  - 16 hybrid orchestrator tests (`hybrid-ranker.test.ts`)
+  - 9 ranker-config resolver tests (`ranker-config.test.ts`)
+  - 2 engine-selection integration tests (`search-recall-engine.test.ts`)
+  - 21 scoring + 9 loader tests for the benchmark harness (`benchmark-score.test.ts`, `benchmark-load.test.ts`)
 
 ## [4.14.11] - 2026-05-08
 
