@@ -703,6 +703,14 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "import-jsonl" subcommand — import Claude Code session transcripts
+  // into session_events for dashboard replay.
+  if (process.argv[2] === 'import-jsonl') {
+    const { handleImportJsonlCommand } = await import('./cli/import-jsonl.js');
+    await handleImportJsonlCommand(process.argv.slice(3));
+    return;
+  }
+
   // Handle "status" subcommand
   if (process.argv[2] === 'status') {
     const { handleStatusCommand } = await import('./setup/status.js');
@@ -998,6 +1006,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
+    'memories', 'import-jsonl',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {

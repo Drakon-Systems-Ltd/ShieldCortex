@@ -1,0 +1,8 @@
+{"type":"user","sessionId":"sess-001","timestamp":"2026-05-10T17:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"What database should we use?"}]}}
+{"type":"assistant","sessionId":"sess-001","timestamp":"2026-05-10T17:00:01.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"User is asking about database choice. Should recommend PostgreSQL."}]}}
+{"type":"assistant","sessionId":"sess-001","timestamp":"2026-05-10T17:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"PostgreSQL is a solid choice for JSONB support."}]}}
+{"type":"assistant","sessionId":"sess-001","timestamp":"2026-05-10T17:00:03.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc123","name":"Bash","input":{"command":"ls -la"}}]}}
+{"type":"user","sessionId":"sess-001","timestamp":"2026-05-10T17:00:04.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc123","content":"total 8\ndrwxr-xr-x  3 user  staff  96 May 10 17:00 ."}]}}
+{"type":"ai-title","sessionId":"sess-001","aiTitle":"Database choice discussion"}
+{"type":"attachment","sessionId":"sess-001","timestamp":"2026-05-10T17:00:05.000Z"}
+{"type":"user","sessionId":"sess-001","timestamp":"2026-05-10T17:00:06.000Z","message":{"role":"user","content":[{"type":"text","text":"Cool, let's go with that."}]}}

@@ -1019,6 +1019,30 @@ function runMigrations(database: Database.Database): void {
   } catch {
     // Seeder runs idempotently; failures here should never block startup.
   }
+
+  // Migration: session_events.content_hash + dedupe UNIQUE index (v4.17).
+  // DBs created between the foundation commit and the importer commit have
+  // session_events but no content_hash column. ALTER + idempotent index
+  // upgrades them without touching fresh installs (schema.sql handles those).
+  try {
+    const sessionEventsTable = database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_events'")
+      .get();
+    if (sessionEventsTable) {
+      const sessionCols = database
+        .prepare("PRAGMA table_info(session_events)")
+        .all() as { name: string }[];
+      const sessionColNames = new Set(sessionCols.map((c) => c.name));
+      if (!sessionColNames.has('content_hash')) {
+        database.exec('ALTER TABLE session_events ADD COLUMN content_hash TEXT');
+      }
+      database.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_dedupe ON session_events(session_id, ts, kind, content_hash)',
+      );
+    }
+  } catch {
+    // Best-effort; importer-side INSERT OR IGNORE handles missing index gracefully.
+  }
 }
 
 /**
@@ -1561,11 +1585,14 @@ function getInlineSchema(): string {
       payload TEXT NOT NULL,
       duration_ms INTEGER,
       audit_id INTEGER,
+      content_hash TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
     );
     CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_session_events_project ON session_events(project, ts DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_dedupe
+      ON session_events(session_id, ts, kind, content_hash);
   `;
 }
 

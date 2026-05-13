@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- Populated by the hook capture pipeline + JSONL importer. Read by the
 -- timeline reader powering the dashboard replay UI. Distinct from the
 -- summary `sessions` table above — this is the full event stream.
+--
+-- `content_hash` powers idempotent re-import. The JSONL importer writes
+-- a SHA-256 of `kind + payload`; live capture leaves it NULL. SQLite
+-- treats NULL as distinct in UNIQUE indexes by default, so live rows
+-- never conflict with each other while imported rows are de-duplicated
+-- across reruns of the same transcript.
 CREATE TABLE IF NOT EXISTS session_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
@@ -111,11 +117,14 @@ CREATE TABLE IF NOT EXISTS session_events (
   payload TEXT NOT NULL,
   duration_ms INTEGER,
   audit_id INTEGER,
+  content_hash TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_session_events_project ON session_events(project, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_dedupe
+  ON session_events(session_id, ts, kind, content_hash);
 
 -- Memory relationships (for linked memories)
 CREATE TABLE IF NOT EXISTS memory_links (
