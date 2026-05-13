@@ -1547,6 +1547,25 @@ function getInlineSchema(): string {
       write_count INTEGER NOT NULL DEFAULT 1,
       window_start_ms INTEGER NOT NULL
     );
+
+    -- v4.17 Session capture (mirrors schema.sql; bundled fallback only).
+    CREATE TABLE IF NOT EXISTS session_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      project TEXT,
+      ts TIMESTAMP NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN (
+        'prompt', 'response', 'tool_call', 'tool_result', 'tool_error', 'hook_fire'
+      )),
+      actor TEXT,
+      payload TEXT NOT NULL,
+      duration_ms INTEGER,
+      audit_id INTEGER,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_session_events_project ON session_events(project, ts DESC);
   `;
 }
 

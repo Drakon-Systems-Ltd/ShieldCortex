@@ -95,6 +95,28 @@ CREATE TABLE IF NOT EXISTS sessions (
   memories_accessed INTEGER DEFAULT 0
 );
 
+-- v4.17 Session capture: turn-by-turn events for replay.
+-- Populated by the hook capture pipeline + JSONL importer. Read by the
+-- timeline reader powering the dashboard replay UI. Distinct from the
+-- summary `sessions` table above — this is the full event stream.
+CREATE TABLE IF NOT EXISTS session_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  project TEXT,
+  ts TIMESTAMP NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN (
+    'prompt', 'response', 'tool_call', 'tool_result', 'tool_error', 'hook_fire'
+  )),
+  actor TEXT,
+  payload TEXT NOT NULL,
+  duration_ms INTEGER,
+  audit_id INTEGER,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_session_events_project ON session_events(project, ts DESC);
+
 -- Memory relationships (for linked memories)
 CREATE TABLE IF NOT EXISTS memory_links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
