@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.17.0] - 2026-05-10
+
+**Session capture backend — turn-by-turn event store + Claude Code JSONL importer + live hook capture + HTTP API.**
+
+ShieldCortex now records every prompt, response, tool call/result, and hook fire into a dedicated `session_events` table with enough fidelity to scrub/replay a session end-to-end. The v4.18 dashboard replay UI will consume these directly; until then power users can query the table or hit `/api/sessions/:id/events` directly.
+
+Two ingestion paths in lockstep: **live capture** (hook scripts write events as they fire — `prompt-recall`, `session-end`, `pre-compact`) and **batch import** (`shieldcortex import-jsonl [path-or-glob]`, defaulting to `~/.claude/projects/**/*.jsonl` for the user's existing transcript archive). Both write to the same table; a `content_hash + UNIQUE` index makes re-imports idempotent.
+
+This is the foundation slice from the v4.17 plan. The dashboard replay UI ships in v4.18.
+
+### Added
+
+- **`session_events` table** — `(id, session_id, project, ts, kind, actor, payload, duration_ms, audit_id, content_hash, created_at)` with `CHECK kind IN (prompt|response|tool_call|tool_result|tool_error|hook_fire)`. Three indexes: `idx_session_events_session(session_id, ts)`, `idx_session_events_project(project, ts DESC)`, and `idx_session_events_dedupe UNIQUE(session_id, ts, kind, content_hash)`. FK to `defence_audit(id) ON DELETE SET NULL` so events outlive their audit rows. Migration block handles in-place upgrades from v4.16.x.
+- **TS write API** — `recordEvent`, `recordEvents` in `src/sessions/capture.ts`. Batch insert is wrapped in a single transaction; a CHECK violation rolls the whole batch back so the table never holds half a turn.
+- **TS read API** — `getTimeline(sessionId)` in `src/sessions/timeline.ts`. Returns events sorted by `ts` ascending with `payload` JSON-parsed (raw-string fallback for non-JSON payloads).
+- **JSONL importer** — `importJsonlTranscript(path)` in `src/sessions/import-jsonl.ts` plus pure `parseTranscriptLine()` mapper. Maps Anthropic SDK content blocks (`text`/`thinking`/`tool_use`/`tool_result`) to event kinds. SHA-256 `content_hash` + `INSERT OR IGNORE` makes re-imports of the same transcript no-ops.
+- **CLI** — `shieldcortex import-jsonl [path-or-glob]`. Default glob: `~/.claude/projects/**/*.jsonl`. Literal paths bypass glob expansion. Per-file stats reported.
+- **JS hook wrapper** — `scripts/lib/session-capture.mjs` mirrors the TS API for `.mjs` hook scripts that can't reach into the TS module without a build step.
+- **Live hook capture** — `prompt-recall-hook.mjs` records `prompt` events before the recall gate; `session-end-hook.mjs` records `hook_fire` markers; `pre-compact-hook.mjs` records `hook_fire` markers. Opt-out via `config.captureEvents=false` (default ON).
+- **HTTP API** — `src/api/routes/sessions.ts` registers four routes through `requireNotLocked`:
+  - `GET /api/sessions` — paginated session list, optional `?project=` filter
+  - `GET /api/sessions/:id` — session metadata + kind histogram
+  - `GET /api/sessions/:id/events?offset&limit` — paginated event stream (cap 500)
+  - `POST /api/sessions/import-jsonl` — body `{ path }` invokes the importer
+
+### Tests
+
+- 1051 → 1111 passing (+60 new tests, 0 regressions, full suite green)
+  - 17 schema + capture + timeline tests (`session-capture.test.ts`)
+  - 15 parseTranscriptLine + importJsonlTranscript tests (`session-import-jsonl.test.ts`)
+  - 8 hook-side wrapper tests (`session-capture-mjs.test.ts`)
+  - 13 sessions HTTP route tests (`sessions-routes.test.ts`)
+
 ## [4.16.0] - 2026-05-10
 
 **Auto-capture hardening — closes three coupled defects in the OpenClaw / pre-compact / stop hook write path.**
