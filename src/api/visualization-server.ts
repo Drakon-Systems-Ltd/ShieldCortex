@@ -49,6 +49,7 @@ import { registerSystemRoutes } from './routes/system.js';
 import { registerXRayRoutes } from './routes/xray.js';
 import { registerXRayFindingRoutes } from './routes/xray-findings.js';
 import { registerDigestRoutes } from './routes/digest.js';
+import { registerSessionRoutes } from './routes/sessions.js';
 import { createIronDomeRouteGuard } from './iron-dome-route-guard.js';
 import { readAndClearDetectionEvents } from '../xray/activity.js';
 
@@ -301,6 +302,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   registerGraphRoutes(app, requireNotLocked);
+  registerSessionRoutes(app, requireNotLocked);
 
   // ============================================
   // SKILL SCANNER
