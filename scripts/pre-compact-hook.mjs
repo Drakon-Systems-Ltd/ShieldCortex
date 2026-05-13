@@ -21,6 +21,7 @@ import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
+import { recordSessionEvent } from './lib/session-capture.mjs';
 import {
   extractMemorableSegments,
   processSegments,
@@ -153,6 +154,24 @@ process.stdin.on('end', async () => {
     // Connect to database with timeout to handle concurrent access
     // timeout: 5000ms prevents hook from hanging if DB is locked
     db = new Database(DB_PATH, { timeout: 5000 });
+
+    // ── Session capture (v4.17): mark the compaction boundary in the
+    //    replay timeline. Reuses the already-open write connection so
+    //    no extra better-sqlite3 handle is created.
+    {
+      const sessionId = hookData.session_id || hookData.sessionId || null;
+      if (sessionId) {
+        try {
+          recordSessionEvent(db, {
+            session_id: sessionId,
+            ts: new Date().toISOString(),
+            kind: 'hook_fire',
+            payload: { hook: 'pre-compact', trigger, transcript_path: hookData.transcript_path ?? null },
+            project: project || null,
+          });
+        } catch { /* best-effort */ }
+      }
+    }
 
     // Get current memory stats for dynamic threshold calculation
     const stats = getMemoryStats(db);

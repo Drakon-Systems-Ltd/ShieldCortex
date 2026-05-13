@@ -15,6 +15,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
+import { recordSessionEvent } from './lib/session-capture.mjs';
 
 // ==================== CONFIG ====================
 
@@ -153,14 +154,39 @@ process.stdin.on('readable', () => {
 process.stdin.on('end', () => {
   try {
     const config = loadConfig();
+    const hookData = JSON.parse(input || '{}');
+    const rawPrompt = hookData.prompt || '';
+    const cwd = hookData.cwd || process.cwd();
+    const sessionId = hookData.session_id || hookData.sessionId || null;
+
+    // ── Session capture (v4.17): record the user prompt regardless of
+    //    proactiveRecall config so the dashboard replay timeline gets a
+    //    complete event stream. Opt-out via captureEvents=false. Failures
+    //    are swallowed — capture must never block the user prompt.
+    if (config.captureEvents !== false && sessionId && rawPrompt) {
+      try {
+        const project = deriveProjectKey(cwd);
+        const dbPath = getDbPath();
+        if (existsSync(dbPath)) {
+          const captureDb = new Database(dbPath, { timeout: 1000 });
+          recordSessionEvent(captureDb, {
+            session_id: sessionId,
+            ts: new Date().toISOString(),
+            kind: 'prompt',
+            payload: { text: rawPrompt },
+            project: project || null,
+            actor: 'user',
+          });
+          captureDb.close();
+        }
+      } catch {
+        // Capture is best-effort.
+      }
+    }
 
     if (config.proactiveRecall !== true) {
       process.exit(0);
     }
-
-    const hookData = JSON.parse(input || '{}');
-    const rawPrompt = hookData.prompt || '';
-    const cwd = hookData.cwd || process.cwd();
 
     // Strip OpenClaw / framework metadata wrappers (e.g. Telegram channel
     // headers) before any prompt-based decisions. Without this, the FTS5

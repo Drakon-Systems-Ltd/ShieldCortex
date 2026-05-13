@@ -30,6 +30,7 @@ import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
+import { recordSessionEvent } from './lib/session-capture.mjs';
 import {
   extractMemorableSegments,
   processSegments,
@@ -128,6 +129,24 @@ process.stdin.on('end', async () => {
     const reason = hookData.reason || 'unknown';
     const project = deriveProjectKey(hookData.cwd);
     const autoMemConfig = getAutoMemoryConfig();
+    const sessionId = hookData.session_id || hookData.sessionId || null;
+
+    // ── Session capture (v4.17): record a `hook_fire` marker so the
+    //    replay timeline shows where sessions end. Best-effort — never
+    //    blocks memory extraction below.
+    if (sessionId && existsSync(DB_PATH)) {
+      try {
+        const captureDb = new Database(DB_PATH, { timeout: 1000 });
+        recordSessionEvent(captureDb, {
+          session_id: sessionId,
+          ts: new Date().toISOString(),
+          kind: 'hook_fire',
+          payload: { hook: 'session-end', reason, transcript_path: hookData.transcript_path ?? null },
+          project: project || null,
+        });
+        captureDb.close();
+      } catch { /* best-effort */ }
+    }
 
     // Config gate: opt-in (default off). Preserves the historical default
     // that protected OpenClaw users. We exit before touching the DB so a
