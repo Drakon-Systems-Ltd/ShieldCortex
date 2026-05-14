@@ -88,6 +88,9 @@ Your agent does not just store text. It gives you operator-grade visibility into
 - 🧹 **Memory save filtering** — auto-filters derivable information (file paths, git refs, imports, env vars, shell commands) from being saved as memories
 - 📁 **Project isolation** — memories scoped per project by default, with cross-project queries when you need them
 - 🎞️ **Incident replay** — reconstruct memory and defence timelines from audit, quarantine, and retained event history
+- 🎬 **Session replay (v4.18)** — scrubbable timeline of every prompt, response, tool call, and tool result captured live from your hooks or imported from `~/.claude/projects/*.jsonl`. Play/pause, 0.5×–4× speed, keyboard shortcuts (`space`, `←`/`→`, `[`/`]`)
+- 🧮 **Hybrid retrieval with RRF (v4.15)** — fuses FTS5 keyword search, vector cosine similarity, and graph-walk retrieval through Reciprocal Rank Fusion (`k=60`, the algorithm `rohitg00/agentmemory` uses for its 95.2% R@5 LongMemEval result). Falls back to legacy weighted-sum via `SHIELDCORTEX_RANKER=legacy`
+- 📊 **Reproducible retrieval benchmark** — `npm run bench` produces `SCORECARD.md` with R@5, R@10, MRR, and per-question diff between RRF and legacy engines on LongMemEval-S
 - 🔔 **Webhooks** — POST notifications on memory events, HMAC-SHA256 signed
 - 📅 **Expiry rules** — auto-delete TODOs after 30 days, keep architecture decisions forever
 - 🧠 **Mistake learning** — capture mistakes, run pre-flight checks, graduate mastered rules (Pro)
@@ -610,6 +613,52 @@ The key shift is that memory is no longer a black box:
 ![X-Ray Scanner](docs/images/dashboard-xray.png)
 
 **Cloud Diagnostics** — inspect local-to-cloud queue health, retry pressure, sync policy, device identity, and Team-gated cloud replica controls from the local dashboard.
+
+**Replay (v4.18)** — scrubbable timeline of every captured session. Three-column layout: sessions on the left (sortable by recency or event count), centred timeline with kind-coloured ticks and a draggable playhead, focused event detail on the right with payload pretty-printed. Transport controls: prev/play-pause/next, 0.5×–4× speed segmented control, jump-to-start/end. Keyboard: `space` toggle, `←`/`→` step, `shift+arrows` jump, `[`/`]` speed cycle. Live capture wires in via the `prompt-recall`, `session-end`, and `pre-compact` hooks; existing transcripts at `~/.claude/projects/**/*.jsonl` are backfillable via the dashboard's "Import JSONL" button or `shieldcortex import-jsonl` CLI. Idempotent: `content_hash + UNIQUE` index means re-imports are no-ops.
+
+<br>
+
+## 🎬 Session Capture and Replay
+
+ShieldCortex now records the full event stream of every agent session into a `session_events` table — every prompt, response, tool call, tool result, and hook fire, with enough fidelity to scrub/replay end-to-end.
+
+**Two ingestion paths in lockstep:**
+
+```bash
+# 1) Live capture (zero config; opt-out via captureEvents=false)
+#    Hooks already installed by `shieldcortex install` write events
+#    as the agent runs. Default ON.
+
+# 2) Batch import of existing Claude Code transcripts
+shieldcortex import-jsonl                              # all sessions
+shieldcortex import-jsonl ~/.claude/projects/my-proj/*.jsonl
+shieldcortex import-jsonl ./session.jsonl
+```
+
+Then open the dashboard at `/memory/replay` and scrub. Or hit the API directly:
+
+```text
+GET  /api/sessions                            list (paginated, filter by project)
+GET  /api/sessions/:id                        metadata + kind histogram
+GET  /api/sessions/:id/events?offset&limit    paginated event stream
+POST /api/sessions/import-jsonl               body { path } or {} for default glob
+```
+
+`content_hash` (SHA-256 of `kind|payload`) plus a unique `(session_id, ts, kind, content_hash)` index makes re-imports idempotent. Live capture writes a NULL hash; SQLite treats NULL as distinct in UNIQUE indexes by default, so live rows never collide with each other.
+
+<br>
+
+## 🧮 Hybrid Retrieval and Benchmarks
+
+v4.15 fused FTS + vector + graph retrievers through Reciprocal Rank Fusion (Cormack et al. 2009, `k=60`), matching the algorithm `rohitg00/agentmemory` uses to publish 95.2% R@5 on LongMemEval-S. Switchable per-process:
+
+```bash
+shieldcortex config --ranker rrf       # default since v4.15
+shieldcortex config --ranker legacy    # one-release safety belt
+SHIELDCORTEX_RANKER=rrf shieldcortex recall "auth bug"
+```
+
+`npm run bench` runs the harness against LongMemEval-S and produces `benchmark/longmemeval/SCORECARD.md` with R@5, R@10, MRR, and a per-question diff between RRF and legacy engines. The GitHub workflow uploads the scorecard as a release artifact on every tagged push so the audit trail is public-by-default.
 
 <br>
 
