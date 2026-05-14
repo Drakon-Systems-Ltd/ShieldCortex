@@ -58,18 +58,29 @@ function newRes(): FakeRes {
 async function invoke(handlers: Handler[], req: Record<string, unknown> = {}): Promise<FakeRes> {
   const reqWithDefaults = { query: {}, params: {}, body: {}, ...req };
   const res = newRes();
-  // Walk middleware list — requireNotLocked is the first handler.
+  // Walk middleware list. requireNotLocked is the first handler; calling
+  // next() chains into the real route handler. Track the handler's return
+  // value so we can await it when the handler is async.
   let idx = 0;
+  let handlerReturn: unknown = undefined;
   const next = (err?: unknown) => {
     if (err) {
       res.status(500).json({ error: (err as Error).message ?? 'error' });
       return;
     }
     idx++;
-    if (idx < handlers.length) handlers[idx](reqWithDefaults, res, next);
+    if (idx < handlers.length) {
+      handlerReturn = handlers[idx](reqWithDefaults, res, next);
+    }
   };
-  handlers[0](reqWithDefaults, res, next);
-  // Allow microtasks to settle for async handlers.
+  const firstReturn = handlers[0](reqWithDefaults, res, next);
+  if (firstReturn && typeof (firstReturn as Promise<unknown>).then === 'function') {
+    await firstReturn;
+  }
+  if (handlerReturn && typeof (handlerReturn as Promise<unknown>).then === 'function') {
+    await handlerReturn;
+  }
+  // Final tick for any setImmediate-scheduled work.
   await new Promise((r) => setImmediate(r));
   return res;
 }
@@ -230,14 +241,7 @@ describe('POST /api/sessions/import-jsonl', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('returns 400 when path is missing or not a string', async () => {
-    const res1 = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, { body: {} });
-    expect(res1.statusCode).toBe(400);
-    const res2 = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, { body: { path: 123 } });
-    expect(res2.statusCode).toBe(400);
-  });
-
-  it('returns 404 when the file does not exist', async () => {
+  it('returns 404 when explicit file path does not exist', async () => {
     const res = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, {
       body: { path: join(tempDir, 'nope.jsonl') },
     });
@@ -255,15 +259,53 @@ describe('POST /api/sessions/import-jsonl', () => {
     );
     const res = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, { body: { path } });
     expect(res.statusCode).toBe(200);
-    const body = res.body as { sessionId: string; eventCount: number };
+    const body = res.body as {
+      sessionId: string;
+      eventCount: number;
+      filesImported: number;
+      filesMatched: number;
+    };
     expect(body.sessionId).toBe('sX');
     expect(body.eventCount).toBe(2);
+    expect(body.filesImported).toBe(1);
+    expect(body.filesMatched).toBe(1);
 
-    // Verify rows actually landed in the table — proves the route uses
-    // the real importer, not a stub.
     const count = (
       getDatabase().prepare("SELECT COUNT(*) AS c FROM session_events WHERE session_id = 'sX'").get() as { c: number }
     ).c;
     expect(count).toBe(2);
+  });
+
+  it('expands a glob pattern and imports all matching files', async () => {
+    writeFileSync(
+      join(tempDir, 'a.jsonl'),
+      '{"type":"user","sessionId":"sA","timestamp":"2026-05-10T20:00:00Z","message":{"role":"user","content":[{"type":"text","text":"q"}]}}',
+    );
+    writeFileSync(
+      join(tempDir, 'b.jsonl'),
+      '{"type":"user","sessionId":"sB","timestamp":"2026-05-10T20:00:00Z","message":{"role":"user","content":[{"type":"text","text":"q"}]}}',
+    );
+    const res = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, {
+      body: { path: join(tempDir, '*.jsonl') },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.body as {
+      filesMatched: number;
+      filesImported: number;
+      eventCount: number;
+      sessionId: string | null;
+    };
+    expect(body.filesMatched).toBe(2);
+    expect(body.filesImported).toBe(2);
+    expect(body.eventCount).toBe(2);
+    // Multi-file imports don't pin sessionId to one of them.
+    expect(body.sessionId).toBeNull();
+  });
+
+  it('returns 404 when glob matches nothing', async () => {
+    const res = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, {
+      body: { path: join(tempDir, 'never-matches-*.jsonl') },
+    });
+    expect(res.statusCode).toBe(404);
   });
 });

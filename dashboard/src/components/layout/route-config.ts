@@ -2,6 +2,7 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Database,
   Home,
+  PlayCircle,
   ScanSearch,
   Settings,
   Shield,
@@ -16,6 +17,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { href: '/overview', label: 'Overview', icon: Home },
   { href: '/memory', label: 'Memory', icon: Database },
+  { href: '/memory/replay', label: 'Replay', icon: PlayCircle },
   { href: '/protection', label: 'Protection', icon: Shield },
   { href: '/xray', label: 'X-Ray', icon: ScanSearch },
   { href: '/settings', label: 'Settings', icon: Settings },

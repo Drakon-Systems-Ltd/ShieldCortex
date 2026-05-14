@@ -15,6 +15,9 @@
  */
 
 import type { Express, Request, Response } from 'express';
+import { homedir } from 'os';
+import { join } from 'path';
+import { glob } from 'fs/promises';
 import { getDatabase } from '../../database/init.js';
 import { getTimeline } from '../../sessions/timeline.js';
 import { importJsonlTranscript } from '../../sessions/import-jsonl.js';
@@ -175,20 +178,86 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
     }
   });
 
-  // ── POST /api/sessions/import-jsonl — body: { path } ────────────────
-  app.post('/api/sessions/import-jsonl', requireNotLocked, (req: Request, res: Response) => {
+  // ── POST /api/sessions/import-jsonl ────────────────────────────────
+  //
+  // Body forms:
+  //   { path: "/abs/path/to/file.jsonl" }  — import one file
+  //   { path: "/glob/pattern/*.jsonl" }    — import all matching files
+  //   { } or { path: null }                — default: ~/.claude/projects/**/*.jsonl
+  //
+  // Default glob exists so the dashboard's "Import JSONL" button has a
+  // useful zero-arg action. The CLI exposes the same behaviour.
+  app.post('/api/sessions/import-jsonl', requireNotLocked, async (req: Request, res: Response) => {
     try {
       const body = (req.body ?? {}) as { path?: unknown };
-      if (typeof body.path !== 'string' || body.path.length === 0) {
-        res.status(400).json({ error: 'path required (string)' });
+      const explicit = typeof body.path === 'string' && body.path.length > 0 ? body.path : null;
+      const target = explicit ?? join(homedir(), '.claude', 'projects', '**', '*.jsonl');
+
+      const files = await resolveImportFiles(target);
+      if (files.length === 0) {
+        res.status(404).json({ error: `no JSONL files matched: ${target}` });
         return;
       }
-      const result = importJsonlTranscript(body.path);
-      res.json(result);
+
+      let eventCount = 0;
+      let skipped = 0;
+      let malformed = 0;
+      let imported = 0;
+      let failed = 0;
+      let lastSessionId: string | null = null;
+      const errors: Array<{ path: string; error: string }> = [];
+
+      for (const file of files) {
+        try {
+          const r = importJsonlTranscript(file);
+          eventCount += r.eventCount;
+          skipped += r.skipped;
+          malformed += r.malformed;
+          if (r.sessionId) lastSessionId = r.sessionId;
+          imported++;
+        } catch (err) {
+          failed++;
+          errors.push({ path: file, error: (err as Error).message });
+        }
+      }
+
+      // Special case: a single literal path that doesn't exist → 404. The
+      // glob path already 404'd above when nothing matched; this covers
+      // the "user typed a wrong path" UX.
+      if (
+        files.length === 1 &&
+        imported === 0 &&
+        errors.length === 1 &&
+        /not found|ENOENT/i.test(errors[0].error)
+      ) {
+        res.status(404).json({ error: errors[0].error });
+        return;
+      }
+
+      res.json({
+        filesMatched: files.length,
+        filesImported: imported,
+        filesFailed: failed,
+        eventCount,
+        skipped,
+        malformed,
+        sessionId: files.length === 1 ? lastSessionId : null,
+        errors: errors.slice(0, 10), // cap at 10 to keep response small
+      });
     } catch (err) {
       const message = (err as Error).message;
       const status = /not found|ENOENT/i.test(message) ? 404 : 500;
       res.status(status).json({ error: message });
     }
   });
+}
+
+async function resolveImportFiles(target: string): Promise<string[]> {
+  // No glob characters → literal path. Importer's existsSync check handles missing.
+  if (!/[*?[\]]/.test(target)) return [target];
+  const matches: string[] = [];
+  for await (const entry of glob(target)) {
+    matches.push(entry);
+  }
+  return matches.sort();
 }
