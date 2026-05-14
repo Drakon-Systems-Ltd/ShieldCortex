@@ -6,6 +6,13 @@ import type { ReplayEvent, ReplayKind } from '@/hooks/useReplaySession';
 interface EventDetailProps {
   event: ReplayEvent | null;
   indexLabel?: string;
+  /**
+   * When true, the parent's event query is still fetching for the
+   * currently-selected session — typically right after the user clicks a
+   * new session and the previous session's events are about to be replaced.
+   * Render a quiet skeleton instead of holding onto stale `event` content.
+   */
+  loading?: boolean;
 }
 
 /**
@@ -23,7 +30,23 @@ const KIND_BG: Record<ReplayKind, string> = {
   hook_fire: 'bg-[var(--term-border)] text-[var(--term-text-muted)] theme-glass:bg-[var(--sc-border)] theme-glass:text-[var(--sc-text-secondary)]',
 };
 
-export function EventDetail({ event, indexLabel }: EventDetailProps) {
+export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
+  if (loading) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex items-center justify-between gap-2 border-b border-[var(--term-border)] theme-glass:border-[var(--sc-border)] px-3 py-2">
+          <div className="h-4 w-20 animate-pulse rounded bg-[var(--term-border)]/60" />
+          <div className="h-3 w-16 animate-pulse rounded bg-[var(--term-border)]/40" />
+        </div>
+        <div className="flex-1 space-y-2 p-3">
+          <div className="h-3 w-3/4 animate-pulse rounded bg-[var(--term-border)]/40" />
+          <div className="h-3 w-1/2 animate-pulse rounded bg-[var(--term-border)]/40" />
+          <div className="h-3 w-5/6 animate-pulse rounded bg-[var(--term-border)]/40" />
+        </div>
+      </div>
+    );
+  }
+
   if (!event) {
     return (
       <div className="flex h-full items-center justify-center">

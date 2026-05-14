@@ -29,7 +29,8 @@
  *     args + result, and timestamps.
  */
 
-import { readFileSync, existsSync } from 'fs';
+import { openSync, readSync, closeSync, existsSync } from 'fs';
+import { StringDecoder } from 'string_decoder';
 import { createHash } from 'crypto';
 import { getDatabase } from '../database/init.js';
 import type { SessionEventInput, SessionEventKind } from './capture.js';
@@ -162,68 +163,38 @@ const INSERT_OR_IGNORE_SQL = `
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
+/** 64 KB read chunks — small enough to bound peak memory on huge transcripts, big enough to keep syscall overhead negligible. */
+const READ_CHUNK_BYTES = 64 * 1024;
+
 /**
- * Import one JSONL file. Wraps the whole import in a single transaction
- * so a mid-file error rolls back cleanly — better-sqlite3's transaction
- * helper restores DB state if the callback throws. Malformed lines do
- * NOT throw — they're counted and skipped so a single bad row never
- * blocks the rest of the file.
+ * Flush rows to disk in transaction batches of this size. The full file is
+ * NOT held in memory; instead we keep at most one chunk-worth of parsed
+ * rows pending. Mid-file failure leaves earlier chunks committed, which is
+ * fine because `INSERT OR IGNORE` makes a re-run idempotent.
+ */
+const FLUSH_BATCH_ROWS = 2000;
+
+/**
+ * Import one JSONL file. Streams the file in 64 KB chunks via `readSync`
+ * and a `StringDecoder` (which handles UTF-8 sequences that span chunk
+ * boundaries) so a 500 MB transcript archive doesn't load into a single
+ * string. Parsed rows flush to SQLite in {@link FLUSH_BATCH_ROWS}-sized
+ * transactional batches.
+ *
+ * Malformed lines do NOT throw — they're counted and skipped so a single
+ * bad row never blocks the rest of the file. Idempotent on re-import via
+ * the `INSERT OR IGNORE` + `idx_session_events_dedupe` UNIQUE index.
  */
 export function importJsonlTranscript(path: string): ImportResult {
   if (!existsSync(path)) {
     throw new Error(`JSONL transcript not found: ${path}`);
   }
 
-  const raw = readFileSync(path, 'utf-8');
-  const lines = raw.split(/\r?\n/);
-
-  const rows: ImportRow[] = [];
-  let sessionId: string | null = null;
-  let skipped = 0;
-  let malformed = 0;
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-    if (trimmed.length === 0) continue; // blank lines aren't skipped — they're just whitespace
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      malformed++;
-      skipped++;
-      continue;
-    }
-
-    const events = parseTranscriptLine(parsed);
-    if (events.length === 0) {
-      skipped++;
-      continue;
-    }
-
-    if (sessionId === null && events[0]?.session_id) {
-      sessionId = events[0].session_id;
-    }
-
-    for (const event of events) {
-      rows.push({
-        ...event,
-        content_hash: hashEvent(event.kind, event.payload),
-      });
-    }
-  }
-
-  if (rows.length === 0) {
-    return { sessionId, eventCount: 0, skipped, malformed };
-  }
-
   const db = getDatabase();
   const stmt = db.prepare(INSERT_OR_IGNORE_SQL);
-  const before = (
-    db.prepare('SELECT COUNT(*) AS c FROM session_events').get() as { c: number }
-  ).c;
+  const countStmt = db.prepare('SELECT COUNT(*) AS c FROM session_events');
 
-  const tx = db.transaction((batch: readonly ImportRow[]) => {
+  const flush = db.transaction((batch: readonly ImportRow[]) => {
     for (const row of batch) {
       stmt.run(
         row.session_id,
@@ -238,20 +209,96 @@ export function importJsonlTranscript(path: string): ImportResult {
       );
     }
   });
-  tx(rows);
 
-  const after = (
-    db.prepare('SELECT COUNT(*) AS c FROM session_events').get() as { c: number }
-  ).c;
-  const inserted = after - before;
+  let sessionId: string | null = null;
+  let eventCount = 0;
+  let skipped = 0;
+  let malformed = 0;
+  let inserted = 0;
+
+  const pending: ImportRow[] = [];
+
+  const drain = (): void => {
+    if (pending.length === 0) return;
+    const before = (countStmt.get() as { c: number }).c;
+    flush(pending);
+    const after = (countStmt.get() as { c: number }).c;
+    inserted += after - before;
+    pending.length = 0;
+  };
+
+  const processLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return; // blank — not counted as skipped
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      malformed++;
+      skipped++;
+      return;
+    }
+    const events = parseTranscriptLine(parsed);
+    if (events.length === 0) {
+      skipped++;
+      return;
+    }
+    if (sessionId === null && events[0]?.session_id) {
+      sessionId = events[0].session_id;
+    }
+    for (const event of events) {
+      pending.push({ ...event, content_hash: hashEvent(event.kind, event.payload) });
+      eventCount++;
+    }
+  };
+
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(READ_CHUNK_BYTES);
+    const decoder = new StringDecoder('utf8');
+    let leftover = '';
+    let position = 0;
+
+    while (true) {
+      const bytesRead = readSync(fd, buf, 0, READ_CHUNK_BYTES, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+
+      // StringDecoder buffers partial UTF-8 sequences across chunk boundaries.
+      const text = leftover + decoder.write(buf.subarray(0, bytesRead));
+      const lastNewline = text.lastIndexOf('\n');
+      if (lastNewline === -1) {
+        leftover = text;
+        continue;
+      }
+      const complete = text.slice(0, lastNewline);
+      leftover = text.slice(lastNewline + 1);
+      for (const rawLine of complete.split('\n')) {
+        processLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
+      }
+      if (pending.length >= FLUSH_BATCH_ROWS) drain();
+    }
+    // Anything decoder still has buffered (impossible for valid UTF-8, but
+    // handle the malformed-bytes-at-EOF case gracefully).
+    const tail = leftover + decoder.end();
+    if (tail.length > 0) {
+      for (const rawLine of tail.split('\n')) {
+        processLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
+
+  drain();
 
   // `eventCount` reflects the total events parsed from this file regardless
-  // of whether the dedupe index dropped them. Caller can compare to
-  // `inserted` (via row count diff) to see how many were duplicates.
+  // of whether the dedupe index dropped them. Duplicates surface in `skipped`
+  // so callers see one consistent "anything not inserted" tally.
   return {
     sessionId,
-    eventCount: rows.length,
-    skipped: skipped + (rows.length - inserted),
+    eventCount,
+    skipped: skipped + (eventCount - inserted),
     malformed,
   };
 }

@@ -11,9 +11,18 @@ interface SessionListProps {
   selectedSessionId: string | null;
   onSelect(sessionId: string): void;
   loading?: boolean;
+  error?: Error | null;
+  onRetry?: () => void;
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelect, loading }: SessionListProps) {
+export function SessionList({
+  sessions,
+  selectedSessionId,
+  onSelect,
+  loading,
+  error,
+  onRetry,
+}: SessionListProps) {
   const [sort, setSort] = useState<SortKey>('recency');
 
   const sorted = useMemo(() => {
@@ -54,13 +63,35 @@ export function SessionList({ sessions, selectedSessionId, onSelect, loading }: 
 
       {/* List */}
       <div className="flex-1 overflow-y-auto">
-        {loading && sessions.length === 0 ? (
-          <div className="p-4 text-xs font-mono text-[var(--term-text-muted)]">Loading…</div>
+        {error && sessions.length === 0 ? (
+          <div className="p-4 text-xs font-mono">
+            <div className="text-[var(--term-danger)] theme-glass:text-[var(--sc-coral)]">
+              API unreachable.
+            </div>
+            <div className="mt-1 text-[var(--term-text-dim)] theme-glass:text-[var(--sc-text-secondary)] break-words">
+              {error.message || 'Failed to load sessions.'}
+            </div>
+            <div className="mt-2 text-[var(--term-text-dim)] theme-glass:text-[var(--sc-text-secondary)]">
+              Is <code className="text-[var(--term-neon-fg)] theme-glass:text-[var(--sc-cyan)]">npm run dev:api</code> running on :3001?
+            </div>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="mt-3 rounded border border-[var(--term-border)] px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--term-text-muted)] hover:text-[var(--term-text)] theme-glass:border-[var(--sc-border)] theme-glass:text-[var(--sc-text-secondary)]"
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        ) : loading && sessions.length === 0 ? (
+          <div className="p-4 text-xs font-mono text-[var(--term-text-muted)] theme-glass:text-[var(--sc-text-secondary)]">Loading…</div>
         ) : sorted.length === 0 ? (
-          <div className="p-4 text-xs font-mono text-[var(--term-text-muted)]">
-            No sessions yet.
-            <div className="mt-1 text-[var(--term-text-dim)]">
-              Run <code className="text-[var(--term-neon-fg)]">shieldcortex import-jsonl</code> to backfill.
+          <div className="p-4 text-xs font-mono text-[var(--term-text-muted)] theme-glass:text-[var(--sc-text-secondary)]">
+            <div>No sessions yet.</div>
+            <div className="mt-1 text-[var(--term-text-dim)] theme-glass:text-[var(--sc-text-secondary)]">
+              Click <span className="text-[var(--term-neon-fg)] theme-glass:text-[var(--sc-cyan)]">Import JSONL</span> above to ingest your existing Claude Code transcripts, or run{' '}
+              <code className="text-[var(--term-neon-fg)] theme-glass:text-[var(--sc-cyan)]">shieldcortex import-jsonl</code> from the CLI.
             </div>
           </div>
         ) : (

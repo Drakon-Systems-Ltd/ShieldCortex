@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.18.1] - 2026-05-14
+
+**Audit-pass patch — memory-safe JSONL imports, path-traversal hardening, replay UX polish.**
+
+Triage release after a comprehensive memory-leak + UX audit of the v4.18 surface. Two things move the needle for users with substantial transcript archives:
+
+1. **JSONL imports stream the file instead of loading it whole.** The v4.17/v4.18 importer used `readFileSync` on the input path, which on a half-gigabyte `~/.claude/projects/**/*.jsonl` archive meant the entire file landed in a single JS string before parsing. The new implementation reads 64 KB chunks via `readSync` + `StringDecoder` (UTF-8-safe across chunk boundaries) and flushes parsed rows in 2,000-row transactional batches. Peak memory is now bounded regardless of archive size.
+
+2. **`POST /api/sessions/import-jsonl` validates paths.** The endpoint accepted any absolute path and read it. A POST with `{ path: "/etc/passwd" }` would happily attempt the read. Imports are now restricted to the user's home directory or the OS temp directory, with `path.normalize` collapsing `..` before the check and a defence-in-depth re-filter on glob expansions. Out-of-bounds paths return 400.
+
+### Fixed
+
+- **JSONL importer: bounded memory under arbitrarily-large transcript archives.** Streams the file in 64 KB chunks via `readSync` + `StringDecoder`; rows flush to SQLite in 2,000-row transactional batches. Re-import idempotency unchanged (INSERT OR IGNORE + UNIQUE dedupe index). `src/sessions/import-jsonl.ts`.
+- **`POST /api/sessions/import-jsonl`: path traversal hardening.** Restricts imports to `$HOME` and `os.tmpdir()`, normalises `..` segments, and re-filters glob expansions against the trusted roots so symlink-walking `**` patterns can't escape. Out-of-bounds paths return 400 with a clear error message. `src/api/routes/sessions.ts`.
+- **Replay UI `SessionList`: surfaces API errors instead of looping on "Loading…".** When `/api/sessions` returns an error (DB locked, port 3001 unreachable, etc.) the left rail now shows the failure with a retry button instead of a perpetual loading skeleton. Empty-state copy points at the dashboard's **Import JSONL** button alongside the CLI command.
+- **Replay UI `EventDetail`: skeleton while switching sessions.** Previously the right rail held the *previous* session's last-focused event during the refetch. Now renders a skeleton when the events query is fetching and no events are available yet.
+
+### Tests
+
+- 1,125 tests pass (added 2 path-traversal cases on the import endpoint). Full backend suite green.
+- Dashboard build clean on Next.js 16.1.4 (no new warnings).
+
 ## [4.18.0] - 2026-05-14
 
 **Session Replay UI — scrubbable timeline of every captured session, in your dashboard.**

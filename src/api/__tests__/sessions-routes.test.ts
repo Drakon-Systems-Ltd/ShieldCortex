@@ -308,4 +308,23 @@ describe('POST /api/sessions/import-jsonl', () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  // Defence-in-depth: the dashboard binds to localhost, but if it gets exposed
+  // (tunnel, port-map, reverse proxy), a malicious POST should not be able to
+  // read arbitrary files. Imports are restricted to ~ and the OS temp dir.
+  it('rejects paths outside $HOME and tmpdir with 400', async () => {
+    const res = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, {
+      body: { path: '/etc/passwd' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.body as { error?: string }).error).toMatch(/must be under/i);
+  });
+
+  it('rejects `..` traversal that escapes the trusted roots', async () => {
+    // Resolves to /etc/passwd, which is outside both $HOME and tmpdir.
+    const res = await invoke(app.routes.post.get('/api/sessions/import-jsonl')!, {
+      body: { path: '~/../../../etc/passwd' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
 });

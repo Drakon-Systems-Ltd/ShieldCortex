@@ -15,8 +15,8 @@
  */
 
 import type { Express, Request, Response } from 'express';
-import { homedir } from 'os';
-import { join } from 'path';
+import { homedir, tmpdir } from 'os';
+import { isAbsolute, join, normalize, resolve, sep } from 'path';
 import { getDatabase } from '../../database/init.js';
 import { getTimeline } from '../../sessions/timeline.js';
 import { importJsonlTranscript } from '../../sessions/import-jsonl.js';
@@ -193,7 +193,18 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
       const explicit = typeof body.path === 'string' && body.path.length > 0 ? body.path : null;
       const target = explicit ?? join(homedir(), '.claude', 'projects', '**', '*.jsonl');
 
-      const files = await resolveImportFiles(target);
+      let files: string[];
+      try {
+        files = await resolveImportFiles(target);
+      } catch (err) {
+        // Path-traversal rejection from resolveImportFiles → 400 (caller error),
+        // not 500 (server bug). Any other error rethrows.
+        if (err instanceof Error && /must be under/i.test(err.message)) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        throw err;
+      }
       if (files.length === 0) {
         res.status(404).json({ error: `no JSONL files matched: ${target}` });
         return;
@@ -252,8 +263,66 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
   });
 }
 
+/**
+ * Resolve `target` into a list of absolute file paths, ensuring every
+ * result is rooted under a user-trusted directory. The dashboard binds to
+ * `localhost` by default, but constraining imports is a useful
+ * defence-in-depth measure when the dashboard is exposed via a tunnel,
+ * docker port-map, or a careless reverse proxy. A stray POST with
+ * `{ path: "/etc/secret.jsonl" }` should never read that file.
+ *
+ * Allowed roots:
+ *   - the user's home directory (where `~/.claude/projects/...` lives)
+ *   - the OS temp directory (where ad-hoc downloads + the test suite write)
+ *
+ * Both are per-user trust domains. Symlinks that point outside slip past
+ * this check because we don't `realpath()` for perf reasons — the user
+ * owns these trees, so a hostile symlink is a separate threat model.
+ */
 async function resolveImportFiles(target: string): Promise<string[]> {
-  // No glob characters → literal path. Importer's existsSync check handles missing.
-  if (!isGlobPattern(target)) return [target];
-  return expandGlob(target);
+  const roots = trustedRoots();
+
+  // Expand `~` then make absolute. `path.normalize` collapses `..` so a
+  // pattern like `~/../etc/passwd` resolves to `/etc/passwd` *before* the
+  // under-root check below catches it.
+  const expanded = expandHome(target, homedir());
+  const absolute = isAbsolute(expanded) ? expanded : resolve(process.cwd(), expanded);
+  const normalized = normalize(absolute);
+
+  if (!isUnderTrustedRoot(normalized, roots)) {
+    throw new Error(`path must be under home or temp directory: ${target}`);
+  }
+
+  if (!isGlobPattern(normalized)) return [normalized];
+
+  // Defence in depth: `**` walks symlinked subtrees, so re-filter the
+  // expansion. A symlink that escapes the trusted roots gets dropped here.
+  return expandGlob(normalized).filter((p) => isUnderTrustedRoot(normalize(p), roots));
+}
+
+interface TrustedRoots {
+  readonly entries: ReadonlyArray<{ root: string; withSep: string }>;
+}
+
+function trustedRoots(): TrustedRoots {
+  // Deduplicate — on some macOS configs `tmpdir()` is a subdir of `homedir()`.
+  const seen = new Set<string>();
+  const entries: Array<{ root: string; withSep: string }> = [];
+  for (const root of [homedir(), tmpdir()]) {
+    const n = normalize(root);
+    if (seen.has(n)) continue;
+    seen.add(n);
+    entries.push({ root: n, withSep: n.endsWith(sep) ? n : n + sep });
+  }
+  return { entries };
+}
+
+function isUnderTrustedRoot(p: string, roots: TrustedRoots): boolean {
+  return roots.entries.some((r) => p === r.root || p.startsWith(r.withSep));
+}
+
+function expandHome(p: string, home: string): string {
+  if (p === '~') return home;
+  if (p.startsWith('~/') || p.startsWith('~\\')) return join(home, p.slice(2));
+  return p;
 }

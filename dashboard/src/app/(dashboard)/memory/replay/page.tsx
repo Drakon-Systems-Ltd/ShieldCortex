@@ -124,6 +124,8 @@ function ReplayContent() {
             selectedSessionId={urlSession}
             onSelect={onSelectSession}
             loading={sessionsQuery.isLoading}
+            error={sessionsQuery.error as Error | null}
+            onRetry={() => sessionsQuery.refetch()}
           />
         </div>
 
@@ -157,6 +159,11 @@ function ReplayContent() {
                 ? `${playback.currentIndex + 1} / ${playback.events.length}`
                 : undefined
             }
+            // While the events query is fetching for a session the user just
+            // selected, render a skeleton instead of the previous session's
+            // last-focused event (which would otherwise hang around for the
+            // refetch duration).
+            loading={!!urlSession && eventsQuery.isFetching && events.length === 0}
           />
         </div>
       </div>
