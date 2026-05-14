@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.18.0] - 2026-05-14
+
+**Session Replay UI — scrubbable timeline of every captured session, in your dashboard.**
+
+The v4.17 backend records events; v4.18 makes them user-facing. A new route at `/memory/replay` renders a three-column responsive layout (session list | timeline + transport | focused event detail) that scrubs every prompt, response, tool call, and tool result. Renders cleanly in both terminal and glass themes via the existing dual-render primitives.
+
+Playback is `setTimeout`-driven with the gap between adjacent events clamped to 50ms..5s and scaled by speed (0.5×/1×/2×/4×). Long real-world pauses don't kill the scrubber, but bursts stay proportional within reason.
+
+The dashboard's **Import JSONL** button POSTs an empty body to the new glob-aware `/api/sessions/import-jsonl` endpoint, which defaults to `~/.claude/projects/**/*.jsonl` server-side — one click backfills the entire Claude Code transcript archive.
+
+### Added
+
+- **`/memory/replay` route** — three-column layout, sessions sortable by recency or event count, selected session in `?session=…` for refresh + share-by-URL.
+- **`useReplaySession` hook family** — `useReplaySessions`, `useReplaySessionDetail`, `useReplayEvents` (React Query), plus `useReplayPlayback` (state machine: play/pause/speed/scrub).
+- **Timeline component** — index-proportional SVG scrubber (1:1 event:x mapping rather than time-proportional so dense bursts don't get crushed). Per-kind colour-coded ticks. Draggable playhead with pointer-capture. ResizeObserver-driven reflow. ARIA slider semantics.
+- **EventDetail component** — kind chip + ts + actor + duration header; per-kind body (tool_call surfaces tool name + input, tool_result correlates back via tool_use_id, text payloads show `.text`, fallback pretty-prints JSON). Surfaces `audit_id` link when the event was scanned.
+- **PlayControls component** — transport (prev/play-pause/next + jump-to-ends), 0.5×/1×/2×/4× segmented speed control, keyboard shortcuts (`space` toggle, `←`/`→` step, `shift`+arrows jump, `[`/`]` cycle speed). Shortcuts skip when typing in inputs.
+- **Glob-aware `POST /api/sessions/import-jsonl`** — accepts explicit paths, glob patterns, or empty body (defaults to `~/.claude/projects/**/*.jsonl`). Returns aggregate counts plus bounded errors array.
+- **`Replay` nav entry** — `{ href: '/memory/replay', label: 'Replay', icon: PlayCircle }` added to `NAV_ITEMS`; both SidebarTerminal and SidebarGlass pick it up.
+
+### Changed
+
+- `useReplayPlayback` uses React's canonical setState-during-render pattern (tracked-events useState) to reset position when the events array identity changes, rather than refs-in-render which trips `react-hooks` lint rules.
+
+### Tests
+
+- Full backend suite green. Sessions HTTP route tests grew from 13 → 14 cases (added glob-expansion coverage).
+- Dashboard lints clean (8 pre-existing warnings unchanged).
+- Browser smoke against dev API on :3041: import → list → events → render `/memory/replay` (200 OK, 73 KB, all expected strings + theme classes present).
+
 ## [4.17.0] - 2026-05-10
 
 **Session capture backend — turn-by-turn event store + Claude Code JSONL importer + live hook capture + HTTP API.**
