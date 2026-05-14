@@ -10,10 +10,10 @@
  * (the importer relies on the singleton `getDatabase()`).
  */
 
-import { glob } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
 import { existsSync } from 'fs';
+import { expandGlob, isGlobPattern } from '../sessions/glob.js';
 
 export async function handleImportJsonlCommand(args: readonly string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
@@ -90,14 +90,9 @@ Examples:
 }
 
 async function resolveFiles(target: string): Promise<string[]> {
-  // No glob characters → treat as literal path
-  if (!/[*?[\]]/.test(target)) {
+  if (!isGlobPattern(target)) {
     if (!existsSync(target)) return [];
     return [target];
   }
-  const matches: string[] = [];
-  for await (const entry of glob(target)) {
-    matches.push(entry);
-  }
-  return matches.sort();
+  return expandGlob(target).sort();
 }

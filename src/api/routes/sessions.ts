@@ -17,10 +17,10 @@
 import type { Express, Request, Response } from 'express';
 import { homedir } from 'os';
 import { join } from 'path';
-import { glob } from 'fs/promises';
 import { getDatabase } from '../../database/init.js';
 import { getTimeline } from '../../sessions/timeline.js';
 import { importJsonlTranscript } from '../../sessions/import-jsonl.js';
+import { expandGlob, isGlobPattern } from '../../sessions/glob.js';
 
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
 
@@ -254,10 +254,6 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
 
 async function resolveImportFiles(target: string): Promise<string[]> {
   // No glob characters → literal path. Importer's existsSync check handles missing.
-  if (!/[*?[\]]/.test(target)) return [target];
-  const matches: string[] = [];
-  for await (const entry of glob(target)) {
-    matches.push(entry);
-  }
-  return matches.sort();
+  if (!isGlobPattern(target)) return [target];
+  return expandGlob(target);
 }
