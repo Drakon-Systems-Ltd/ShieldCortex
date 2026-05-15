@@ -757,6 +757,103 @@ async function checkOpenClawResidue(): Promise<CheckResult> {
   }
 }
 
+/**
+ * Detects a bare/stale `shieldcortex` package sitting in OpenClaw's plugin
+ * `node_modules`. Background: the supported OpenClaw plugin is the dedicated
+ * package `@drakon-systems/shieldcortex-realtime` (see
+ * docs/openclaw-integration.md and src/setup/openclaw.ts — the install runs
+ * `openclaw plugins install @drakon-systems/shieldcortex-realtime`). The
+ * *main* `shieldcortex` package still carries an `openclaw` key in its
+ * package.json, so if a stale/linked/transitive copy lands in
+ * `~/.openclaw/npm/node_modules/shieldcortex`, OpenClaw's npm auto-discovery
+ * picks it up and tries to load `openclaw.extensions[0]` relative to it.
+ *
+ * On Jarvis (2026-05-15) such a copy crash-looped the gateway and had to be
+ * diagnosed by hand over SSH. The exact crash exception is still under
+ * investigation, so this check does NOT claim to identify it — it surfaces
+ * the *confirmed-anomalous filesystem state* that preceded it:
+ *
+ *   - FAIL: bare `shieldcortex` present AND its declared extension entry is
+ *     missing on disk (stale/unbuilt — OpenClaw cannot load it).
+ *   - WARN: bare `shieldcortex` present with the entry intact (still the
+ *     wrong package in the wrong place; the realtime plugin is supported).
+ *
+ * Cannot false-positive on a healthy install: those carry
+ * `@drakon-systems/shieldcortex-realtime`, never bare `shieldcortex`, here.
+ *
+ * `npmModulesDir` is injectable for tests; defaults to
+ * `~/.openclaw/npm/node_modules`.
+ */
+export async function checkOpenClawPluginPackage(
+  npmModulesDir: string = path.join(os.homedir(), '.openclaw', 'npm', 'node_modules'),
+): Promise<CheckResult> {
+  const label = 'OpenClaw plugin pkg';
+
+  if (!fs.existsSync(npmModulesDir)) {
+    return { label, status: 'info', message: 'skipped (OpenClaw plugin dir not present)' };
+  }
+
+  const barePkgDir = path.join(npmModulesDir, 'shieldcortex');
+  const barePkgJson = path.join(barePkgDir, 'package.json');
+
+  if (!fs.existsSync(barePkgJson)) {
+    return {
+      label,
+      status: 'pass',
+      message: 'clean (no misplaced bare `shieldcortex`; realtime plugin is the supported path)',
+    };
+  }
+
+  // A bare `shieldcortex` here is never the supported state. Decide severity
+  // by whether its declared OpenClaw extension entry actually exists.
+  let extEntry: string | null = null;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(barePkgJson, 'utf-8')) as {
+      openclaw?: { extensions?: unknown };
+    };
+    const exts = pkg.openclaw?.extensions;
+    if (Array.isArray(exts) && typeof exts[0] === 'string') {
+      extEntry = exts[0];
+    }
+  } catch {
+    return {
+      label,
+      status: 'warn',
+      message:
+        'bare `shieldcortex` in OpenClaw plugin dir has an unreadable package.json — OpenClaw may mis-discover it',
+      fix: `Remove ${barePkgDir.replace(os.homedir(), '~')} — the supported plugin is @drakon-systems/shieldcortex-realtime`,
+    };
+  }
+
+  if (extEntry) {
+    const resolved = path.resolve(barePkgDir, extEntry);
+    if (!fs.existsSync(resolved)) {
+      return {
+        label,
+        status: 'fail',
+        message:
+          `bare \`shieldcortex\` in OpenClaw plugin dir declares extension \`${extEntry}\` ` +
+          `but ${resolved.replace(os.homedir(), '~')} is missing — OpenClaw cannot load this ` +
+          `plugin. This is the stale state behind the gateway crash-loop incident.`,
+        fix:
+          `Remove ${barePkgDir.replace(os.homedir(), '~')} then reinstall the supported plugin: ` +
+          `\`openclaw plugins install @drakon-systems/shieldcortex-realtime\``,
+      };
+    }
+  }
+
+  return {
+    label,
+    status: 'warn',
+    message:
+      'bare `shieldcortex` present in OpenClaw plugin dir — this is not the supported plugin ' +
+      'and OpenClaw will auto-discover it; the supported package is @drakon-systems/shieldcortex-realtime',
+    fix:
+      `Remove ${barePkgDir.replace(os.homedir(), '~')} (the dedicated realtime plugin handles ` +
+      `OpenClaw integration; the bare main package should not live here)`,
+  };
+}
+
 // ── Check 9: Auto-memory sampling rate (#44) ──────────────
 /**
  * Reports the resolved `autoMemory.stopHookSamplingTurns` and salience-bypass
@@ -1060,6 +1157,7 @@ export async function runDoctor(): Promise<void> {
     checkDiskUsage,
     checkLockFile,
     checkOpenClawResidue,
+    checkOpenClawPluginPackage,
     checkModelCache,
   ];
 

@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.18.2] - 2026-05-16
+
+**`doctor` now self-detects the OpenClaw plugin-package misplacement that took a fleet box's gateway down.**
+
+On 2026-05-15 an OpenClaw gateway restart-looped because a stale/bare `shieldcortex` package had landed in `~/.openclaw/npm/node_modules/` — where only the dedicated `@drakon-systems/shieldcortex-realtime` plugin belongs. Diagnosis required SSHing into the box by hand; nothing in ShieldCortex surfaced the bad state. This release closes that detection gap.
+
+This is **explicitly a detection/hardening change, not a claim about the exact crash exception** — that root cause is still under investigation pending the gateway log. What's confirmed (by reading OpenClaw 2026.5.7 discovery source + the docs + git history) is the *anomalous filesystem state* that preceded it, and `doctor` now reports it.
+
+### Added
+
+- **`shieldcortex doctor` → `OpenClaw plugin pkg` check.** Detects a bare `shieldcortex` package inside OpenClaw's plugin `node_modules` (the supported plugin is `@drakon-systems/shieldcortex-realtime`, installed via `openclaw plugins install @drakon-systems/shieldcortex-realtime`):
+  - **FAIL** when the bare package's declared `openclaw.extensions` entry is missing on disk (stale/unbuilt — OpenClaw cannot load it; this is the state behind the crash-loop incident), with exact remediation.
+  - **WARN** when the bare package is present with its entry intact (wrong package in the wrong place) or its `package.json` is unreadable.
+  - **PASS** on healthy installs (verified: those carry `@drakon-systems/shieldcortex-realtime`, never bare `shieldcortex`, here — the check cannot false-positive on a correct setup).
+
+### Tests
+
+- 1,130 passing (added 5 cases covering skip / healthy / fail-on-missing-entry / warn-on-present / warn-on-unparseable). Verified `pass` against a real healthy OpenClaw install.
+
+### Notes
+
+- Investigation explicitly **disproved** two earlier candidate "fixes": (1) adding a root `openclaw.plugin.json` to mark the main package non-plugin (OpenClaw keys off the `package.json` `openclaw` field independently); (2) "correcting" `openclaw.hooks` to event names (it is a directory path *on purpose* — consumed by the documented `openclaw hooks install` hook-pack flow; changing it would break that). No speculative package change shipped.
+
 ## [4.18.1] - 2026-05-14
 
 **Audit-pass patch — memory-safe JSONL imports, path-traversal hardening, replay UX polish.**
