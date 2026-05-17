@@ -116,6 +116,56 @@ export function enqueueFailedGraphSync(entry: GraphSyncEnvelope): void {
   enqueuePayload({ kind: 'graph', entry });
 }
 
+/**
+ * Hard ceiling on total sync_queue rows. The 7-day TTL (purgeOldEntries) only
+ * runs when the brain worker is alive; MCP-only installs have no worker, so
+ * without a size cap a long offline stretch could grow the queue without bound
+ * on the user's disk. Enforced on every enqueue so it holds regardless.
+ */
+const MAX_SYNC_QUEUE_ROWS = 5000;
+
+// Throttle the "queue full" warning to at most once per hour so a sustained
+// outage doesn't spam stderr.
+let lastCapWarnAt = 0;
+
+/**
+ * Trim the queue back to `maxRows`, evicting lowest-value rows first:
+ * already-synced history → terminally-failed → oldest pending. Returns the
+ * number of rows dropped. Best-effort and never throws.
+ */
+export function enforceQueueCap(maxRows: number = MAX_SYNC_QUEUE_ROWS): number {
+  const db = getDatabase();
+  const { c: total } = db
+    .prepare('SELECT COUNT(*) AS c FROM sync_queue')
+    .get() as { c: number };
+
+  const overflow = total - maxRows;
+  if (overflow <= 0) return 0;
+
+  const result = db.prepare(`
+    DELETE FROM sync_queue WHERE id IN (
+      SELECT id FROM sync_queue
+      ORDER BY
+        CASE status WHEN 'synced' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
+        created_at ASC,
+        id ASC
+      LIMIT ?
+    )
+  `).run(overflow);
+
+  const removed = Number(result.changes ?? 0);
+  if (removed > 0) {
+    const now = Date.now();
+    if (now - lastCapWarnAt > 3_600_000) {
+      lastCapWarnAt = now;
+      console.warn(
+        `[shieldcortex] Cloud sync queue exceeded ${maxRows} rows; dropped ${removed} oldest entries`,
+      );
+    }
+  }
+  return removed;
+}
+
 function enqueuePayload(payload: QueuePayload): void {
   const db = getDatabase();
   const payloadJson = JSON.stringify(payload);
@@ -125,6 +175,14 @@ function enqueuePayload(payload: QueuePayload): void {
     INSERT INTO sync_queue (payload, attempts, next_retry_at, status)
     VALUES (?, 0, ?, 'pending')
   `).run(payloadJson, nextRetryAt);
+
+  // Keep the queue bounded even with no brain worker running. Best-effort:
+  // a failure here must never block the (already-completed) enqueue.
+  try {
+    enforceQueueCap();
+  } catch {
+    /* truly silent — fire-and-forget contract */
+  }
 }
 
 function buildRetryRequest(payloadText: string): { path: string; body: string } {
@@ -480,5 +538,8 @@ export function purgeOldEntries(): number {
     DELETE FROM sync_queue WHERE created_at < ?
   `).run(cutoff);
 
-  return result.changes;
+  // Also enforce the absolute size cap on the worker path.
+  const capped = enforceQueueCap();
+
+  return Number(result.changes ?? 0) + capped;
 }

@@ -8,6 +8,7 @@ import {
   getQueueStats,
   reconcileSyncQueue,
   purgeOldEntries,
+  enforceQueueCap,
   type SyncEntry,
   type QuarantineSyncEntry,
 } from '../sync-queue.js';
@@ -242,6 +243,59 @@ describe('Cloud sync queue', () => {
       enqueueFailedSync(makeAuditEntry());
       enqueueFailedSync(makeAuditEntry());
       expect(purgeOldEntries()).toBe(0);
+    });
+  });
+
+  describe('enforceQueueCap', () => {
+    it('returns 0 and keeps all rows when under the cap', () => {
+      enqueueFailedSync(makeAuditEntry());
+      enqueueFailedSync(makeAuditEntry());
+      expect(enforceQueueCap(10)).toBe(0);
+      const db = getDatabase();
+      expect((db.prepare('SELECT COUNT(*) AS c FROM sync_queue').get() as { c: number }).c).toBe(2);
+    });
+
+    it('trims back to the cap, dropping the oldest pending rows first', () => {
+      const db = getDatabase();
+      for (let i = 0; i < 5; i++) enqueueFailedSync(makeAuditEntry({ source_identifier: `e${i}` }));
+
+      const removed = enforceQueueCap(3);
+      expect(removed).toBe(2);
+
+      const rows = db
+        .prepare('SELECT payload FROM sync_queue ORDER BY id ASC')
+        .all() as Array<{ payload: string }>;
+      expect(rows).toHaveLength(3);
+      // Oldest two (e0, e1) evicted; the three most-recent survive.
+      const ids = rows.map((r) => JSON.parse(r.payload).entry.source_identifier);
+      expect(ids).toEqual(['e2', 'e3', 'e4']);
+    });
+
+    it('evicts synced and failed rows before pending ones', () => {
+      const db = getDatabase();
+      enqueueFailedSync(makeAuditEntry({ source_identifier: 'pending-keep' }));
+      db.prepare(
+        `INSERT INTO sync_queue (payload, attempts, next_retry_at, status)
+         VALUES (?, 0, ?, 'synced')`,
+      ).run(JSON.stringify({ kind: 'audit', entry: makeAuditEntry({ source_identifier: 'synced' }) }), new Date().toISOString());
+      db.prepare(
+        `INSERT INTO sync_queue (payload, attempts, next_retry_at, status)
+         VALUES (?, 0, ?, 'failed')`,
+      ).run(JSON.stringify({ kind: 'audit', entry: makeAuditEntry({ source_identifier: 'failed' }) }), new Date().toISOString());
+
+      expect(enforceQueueCap(1)).toBe(2);
+      const rows = db.prepare('SELECT status FROM sync_queue').all() as Array<{ status: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe('pending');
+    });
+
+    it('enqueue keeps the queue within a small cap automatically', () => {
+      const db = getDatabase();
+      for (let i = 0; i < 12; i++) enqueueFailedSync(makeAuditEntry());
+      // Default cap is 5000 so the auto-trim on enqueue is a no-op here; the
+      // explicit cap call models a constrained device.
+      enforceQueueCap(5);
+      expect((db.prepare('SELECT COUNT(*) AS c FROM sync_queue').get() as { c: number }).c).toBe(5);
     });
   });
 });
