@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.18.4] - 2026-05-17
+
+**The cloud sync retry queue is now hard-bounded — it can't grow without limit on disk.**
+
+The 7-day TTL purge (`purgeOldEntries`) only runs while the brain worker is alive. MCP-only installs have no worker, so a long offline stretch could accumulate `sync_queue` rows indefinitely on the user's disk with nothing trimming them. This release adds an absolute size cap independent of the worker.
+
+### Fixed
+
+- **`sync_queue` is capped at 5,000 rows, enforced on every enqueue** (and on the worker purge path). When over the cap it evicts lowest-value rows first — already-synced history, then terminally-failed, then the oldest pending — and emits a once-per-hour warning. The fire-and-forget contract is preserved: cap enforcement is best-effort and never throws or blocks an enqueue.
+
+### Tests
+
+- Added 4 cases (under-cap no-op, trim-to-cap evicting oldest pending, synced/failed evicted before pending, enqueue stays bounded). Full suite green; existing `purgeOldEntries` behaviour unchanged.
+
 ## [4.18.3] - 2026-05-17
 
 **OpenClaw update no longer bricks gateways when the bare `shieldcortex` package is present in the plugin runtime.**
