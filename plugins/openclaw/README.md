@@ -10,6 +10,10 @@ OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory 
 
 OpenClaw is declared as an **optional** peer dependency, so installs on older OpenClaw keep working but miss the linking benefit.
 
+### Packaging note for OpenClaw discovery
+
+The main `shieldcortex` package and the dedicated `@drakon-systems/shieldcortex-realtime` plugin both expose OpenClaw metadata. From `4.18.3`, the main package also ships a root `openclaw.plugin.json` matching the canonical plugin manifest. This is intentional: OpenClaw's npm discovery validates packages with a `package.json.openclaw.extensions` entry by looking for a root manifest. Without it, `openclaw update` can stop the gateway and then fail config validation with `plugin manifest not found`.
+
 ### Known limitations under OpenClaw 2026.4.23
 
 - **Forked subagent context is host-owned.** OpenClaw 2026.4.23 added `ContextEngine.prepareSubagentSpawn({ contextMode: "isolated" | "fork" })` on the plugin-sdk's `ContextEngine` interface, but the spawn itself is initiated by the host runtime — plugins can only react to the lifecycle, not call `sessions_spawn` directly. Work that would benefit from an isolated scratch transcript (e.g. batch scans) therefore still runs inline in the parent session. If upstream exposes a plugin-callable spawn API, scan offloading will be revisited.

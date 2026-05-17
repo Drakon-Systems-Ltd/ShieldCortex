@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.18.3] - 2026-05-17
+
+**OpenClaw update no longer bricks gateways when the bare `shieldcortex` package is present in the plugin runtime.**
+
+Jarvis exposed the real v4.18.2 failure mode during `openclaw update`: OpenClaw installed both `shieldcortex` and `@drakon-systems/shieldcortex-realtime`, saw the bare package's `package.json.openclaw.extensions`, and then required a root `openclaw.plugin.json` at `node_modules/shieldcortex/openclaw.plugin.json`. The manifest only shipped under `plugins/openclaw/dist/`, so config validation failed after the updater had already stopped the gateway.
+
+### Fixed
+
+- **Bare package OpenClaw manifest layout.** The main `shieldcortex` npm package now ships a root `openclaw.plugin.json`, byte-identical to the canonical OpenClaw plugin manifest, so OpenClaw discovery can validate the bare package instead of aborting with `plugin manifest not found`.
+- **Build/package guard.** `build:ts` refreshes both `plugins/openclaw/dist/openclaw.plugin.json` and the root `openclaw.plugin.json`; the root manifest is included in the published package allow-list.
+- **Version alignment.** Main package, OpenClaw plugin package, and plugin manifest are aligned at `4.18.3`.
+
+### Tests
+
+- Added a regression test that runs `npm pack --dry-run --json` and asserts the published package contains the root OpenClaw manifest and resolvable extension path.
+
 ## [4.18.2] - 2026-05-16
 
 **`doctor` now self-detects the OpenClaw plugin-package misplacement that took a fleet box's gateway down.**
