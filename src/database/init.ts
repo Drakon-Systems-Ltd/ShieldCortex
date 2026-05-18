@@ -2,7 +2,8 @@
  * Database initialization and connection management
  */
 
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
+import BetterSqlite3 from './better-sqlite3-guard.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
@@ -127,7 +128,7 @@ function enforceSafeRuntimePath(expandedPath: string, explicitDbPath: boolean): 
 function inspectDatabaseFile(dbPath: string): DatabaseInspection {
   let inspectionDb: Database.Database | null = null;
   try {
-    inspectionDb = new Database(dbPath, {
+    inspectionDb = new BetterSqlite3(dbPath, {
       readonly: true,
       fileMustExist: true,
     });
@@ -320,7 +321,7 @@ function attemptDumpRecovery(dbPath: string): Database.Database | null {
     console.error(`[database] Backed up corrupt database to: ${backupPath}`);
 
     // Create fresh database and import the dump
-    const freshDb = new Database(dbPath);
+    const freshDb = new BetterSqlite3(dbPath);
     try {
       freshDb.exec(dumpOutput);
       console.error('[database] Successfully recovered data via dump/reimport.');
@@ -474,7 +475,7 @@ export function initDatabase(dbPath?: string): Database.Database {
   // Wrap the initial open in try/catch to handle corrupt files gracefully
   let database: Database.Database;
   try {
-    database = new Database(expandedPath);
+    database = new BetterSqlite3(expandedPath);
   } catch (openError) {
     // Database file is corrupt or not a valid SQLite database
     console.error(`❌ Database open failed for ${expandedPath}: ${openError}`);
@@ -483,12 +484,12 @@ export function initDatabase(dbPath?: string): Database.Database {
     if (latestHealthyBackup) {
       console.error(`[database] Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
       restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'failed-open');
-      database = new Database(expandedPath);
+      database = new BetterSqlite3(expandedPath);
     } else {
       const backupPath = backupCorruptDatabase(expandedPath);
       console.error(`   Backed up to ${backupPath}`);
       console.error('   Creating fresh database...');
-      database = new Database(expandedPath);
+      database = new BetterSqlite3(expandedPath);
     }
   }
 
@@ -505,7 +506,7 @@ export function initDatabase(dbPath?: string): Database.Database {
         if (freshIntegrityResult === 'ok') {
           console.warn('[database] Integrity failure was transient. Reopening the on-disk database without destructive recovery.');
           database.close();
-          database = new Database(expandedPath);
+          database = new BetterSqlite3(expandedPath);
         } else {
           console.warn(`[database] Fresh integrity check also failed: ${freshIntegrityResult}`);
 
@@ -521,7 +522,7 @@ export function initDatabase(dbPath?: string): Database.Database {
             if (latestHealthyBackup) {
               console.error(`[database] Recovery failed. Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
               restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'recovery-failed');
-              database = new Database(expandedPath);
+              database = new BetterSqlite3(expandedPath);
             } else {
               // Recovery failed — backup and create fresh
               if (existsSync(expandedPath)) {
@@ -529,7 +530,7 @@ export function initDatabase(dbPath?: string): Database.Database {
                 console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
               }
               console.error('[database] Creating fresh database...');
-              database = new Database(expandedPath);
+              database = new BetterSqlite3(expandedPath);
             }
           }
         }
@@ -551,7 +552,7 @@ export function initDatabase(dbPath?: string): Database.Database {
     console.error(`[database] Empty live database detected alongside a recent healthy backup (${latestHealthyBackup.count} memories). Restoring ${latestHealthyBackup.path}`);
     database.close();
     restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'empty-live');
-    database = new Database(expandedPath);
+    database = new BetterSqlite3(expandedPath);
   }
 
   db = database;
@@ -1177,7 +1178,7 @@ export function repairDatabase(): { status: 'ok' | 'repaired' | 'recreated'; mes
 
   // Full recreation
   const backupPath = backupCorruptDatabase(currentDbPath);
-  db = new Database(currentDbPath);
+  db = new BetterSqlite3(currentDbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');

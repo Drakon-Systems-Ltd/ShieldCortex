@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.18.5] - 2026-05-18
+
+**Modern Node support — no more cryptic native-module crash on Node 23/24/25/26.**
+
+`engines.node` was unbounded (`>=18`) while `better-sqlite3 ^11`'s prebuilt binaries stopped at older Node ABIs. A user on a newer Node without a C/C++ toolchain got a bare `libc++abi: terminating … Napi::Error` crash-loop with zero guidance. Node-LTS users were unaffected; this closes the gap for everyone else.
+
+### Changed
+
+- **`better-sqlite3` bumped `^11` → `^12`.** v12 ships prebuilt binaries for Node 20/22/23/24/25/26, so modern-Node installs no longer need a compiler.
+- **`engines.node` `>=18.0.0` → `>=20.0.0`** to match better-sqlite3 12's supported range (Node 18 is EOL). SKILL.md `minVersion` aligned to 20.
+
+### Added
+
+- **Guarded native loader** (`src/database/better-sqlite3-guard.ts`) — the single runtime load path for better-sqlite3. On an ABI mismatch it prints one actionable message (exact `npm rebuild better-sqlite3` command + supported Node LTS) and exits cleanly, instead of the opaque `libc++abi` abort/crash-loop.
+- **Postinstall smoke-check** — opens an in-memory DB at install time; on failure warns loudly with the same remediation rather than letting it surface later as a crash-loop.
+
+### Tests
+
+- 5 new unit cases for the load-error formatter; full suite green (1143 passing). One unrelated pre-existing `mcp-registration` timeout flake is not introduced by this change.
+
 ## [4.18.4] - 2026-05-17
 
 **The cloud sync retry queue is now hard-bounded — it can't grow without limit on disk.**

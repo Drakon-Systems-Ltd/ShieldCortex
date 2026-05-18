@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "4.18.4",
+  "version": "4.18.5",
   "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -111,12 +111,12 @@
     "url": "https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.7.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.0.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "safe-regex2": "^5.0.0",

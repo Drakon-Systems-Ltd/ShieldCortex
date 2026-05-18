@@ -14,6 +14,7 @@ import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const isGlobal = process.env.npm_config_global === 'true';
 const isCI = process.env.CI === 'true' || process.env.CONTINUOUS_INTEGRATION === 'true';
@@ -124,12 +125,40 @@ function refreshOpenClawInstall(cliPath) {
   return result.status === 0;
 }
 
+// Smoke-test the better-sqlite3 native binding at install time so an ABI
+// mismatch (Node newer than the prebuilds, no compiler) surfaces here with
+// actionable guidance — not later as a bare `libc++abi ... Napi::Error`
+// crash-loop with zero explanation. Never throws; warns and returns false.
+function verifyNativeModule() {
+  try {
+    const require = createRequire(import.meta.url);
+    const Database = require('better-sqlite3');
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE _sc_probe(x)');
+    db.close();
+    return true;
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    console.log('');
+    console.warn('\x1b[33m[shieldcortex] ⚠  Database engine (better-sqlite3) failed to load.\x1b[0m');
+    console.warn(`[shieldcortex] Node ${process.version} (ABI ${process.versions.modules}) has no matching`);
+    console.warn('[shieldcortex] prebuilt binary and it was not compiled locally.');
+    console.warn('[shieldcortex] Fix one of these before running ShieldCortex:');
+    console.warn('[shieldcortex]   • npm rebuild better-sqlite3   (needs a C/C++ toolchain)');
+    console.warn('[shieldcortex]   • or run on Node LTS 20.x / 22.x (ships prebuilt binaries)');
+    console.warn(`[shieldcortex] Underlying error: ${detail}`);
+    return false;
+  }
+}
+
 // ── Main postinstall logic ──
 
 if (isGlobal && !isCI) {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
   const cliPath = join(__dirname, '..', 'dist', 'index.js');
+
+  verifyNativeModule();
 
   const isFreshInstall = writeFreshInstallDefaults();
   const state = getOpenClawState();

@@ -8,7 +8,7 @@ description: >
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.18.4
+  version: 4.18.5
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -23,7 +23,7 @@ metadata:
 install:
   command: shieldcortex quickstart
   runtime: node
-  minVersion: "18"
+  minVersion: "20"
   note: >
     Run the installed `shieldcortex` binary directly. The quickstart command
     detects your environment and guides MCP server registration. All data stays
