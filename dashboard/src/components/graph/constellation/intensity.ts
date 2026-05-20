@@ -52,3 +52,25 @@ export function saveIntensity(level: IntensityLevel, storage?: Storage | undefin
     window.dispatchEvent(new CustomEvent('shieldcortex:intensity-changed', { detail: level }));
   }
 }
+
+/**
+ * True when the user has asked for reduced motion via the OS / browser. Safe
+ * on the server (always false) and in test environments without matchMedia.
+ */
+export function isReducedMotion(): boolean {
+  if (typeof window === 'undefined' || !window.matchMedia) return false;
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * Drop-in IntensitySettings for the reduced-motion path. Breathing collapses
+ * (infinite period → sin(0) → no excursion), particles are forbidden, and
+ * any energy spike vanishes on the next frame so nodes never appear to pulse.
+ */
+export const REDUCED_INTENSITY: IntensitySettings = {
+  breathPeriod: Number.POSITIVE_INFINITY,
+  breathAmp: 0,
+  particleCap: 0,
+  decayCreate: 0,
+  decayRecall: 0,
+};

@@ -8,7 +8,7 @@ import { paintNode } from './constellation/renderNodes';
 import { paintLink } from './constellation/renderLinks';
 import { pickAnchor, applyAnchor } from './constellation/anchor';
 import { PulseDriver } from './constellation/pulse';
-import { INTENSITY, loadIntensity, type IntensityLevel } from './constellation/intensity';
+import { INTENSITY, REDUCED_INTENSITY, isReducedMotion, loadIntensity, type IntensityLevel } from './constellation/intensity';
 import { wireControls } from './constellation/controls';
 import { useGraphPulse } from '@/hooks/useGraphPulse';
 
@@ -190,6 +190,12 @@ export function ConstellationGraph({
   const [activeCluster, setActiveCluster] = useState<string | null>(null);
   const [anchorId, setAnchorId] = useState<string | null>(null);
   const [level, setLevel] = useState<IntensityLevel>('moderate');
+
+  const reducedMotion = useMemo(() => isReducedMotion(), []);
+  const settings = useMemo(
+    () => (reducedMotion ? REDUCED_INTENSITY : INTENSITY[level]),
+    [reducedMotion, level],
+  );
 
   const entityClusterMap = useMemo(() => buildEntityClusterMap(clusters), [clusters]);
 
@@ -373,9 +379,9 @@ export function ConstellationGraph({
   useEffect(() => {
     if (hasInitialFit.current || !graphData.nodes.length) return;
     hasInitialFit.current = true;
-    const t = setTimeout(() => graphRef.current?.zoomToFit(400, 80), 1500);
+    const t = setTimeout(() => graphRef.current?.zoomToFit(reducedMotion ? 0 : 400, 80), 1500);
     return () => clearTimeout(t);
-  }, [graphData.nodes.length]);
+  }, [graphData.nodes.length, reducedMotion]);
 
   const handleZoom = useCallback(({ k }: { k: number }) => { zoomRef.current = k; }, []);
 
@@ -470,7 +476,7 @@ export function ConstellationGraph({
         ctx,
         globalScale,
         node: gn,
-        intensity: INTENSITY[level],
+        intensity: settings,
         energy,
         recallEnergy,
         isAnchor: id === anchorId,
@@ -481,7 +487,7 @@ export function ConstellationGraph({
 
       // Hover stroke ring (preserved from legacy entity paint).
       if (isHovered && !isSelected && id !== anchorId) {
-        const r = baseRadius * (1 + energy * INTENSITY[level].breathAmp);
+        const r = baseRadius * (1 + energy * settings.breathAmp);
         ctx.beginPath();
         ctx.arc(gn.x, gn.y, r, 0, 2 * Math.PI);
         ctx.strokeStyle = gn.colour;
@@ -497,7 +503,7 @@ export function ConstellationGraph({
         (zoom >= 0.8 && mc > 100);
 
       if (show) {
-        const r = baseRadius * (1 + energy * INTENSITY[level].breathAmp);
+        const r = baseRadius * (1 + energy * settings.breathAmp);
         const fs = Math.max((isSelected ? 11 : isHovered ? 10 : 8) / Math.max(zoom, 0.4), 5);
         ctx.font = `${fs}px Inter, system-ui, sans-serif`;
         ctx.textAlign = 'center';
@@ -508,7 +514,7 @@ export function ConstellationGraph({
 
       ctx.restore();
     },
-    [selectedEntityId, anchorId, level, driver],
+    [selectedEntityId, anchorId, settings, driver],
   );
 
   // ── Link paint (delegates to module; ghost/cluster links keep faded look) ──
@@ -627,7 +633,7 @@ export function ConstellationGraph({
           onEngineStop={() => {
             if (!hasInitialFit.current && graphData.nodes.length) {
               hasInitialFit.current = true;
-              graphRef.current?.zoomToFit(400, 80);
+              graphRef.current?.zoomToFit(reducedMotion ? 0 : 400, 80);
             }
           }}
         />
