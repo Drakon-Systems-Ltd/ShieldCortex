@@ -90,3 +90,35 @@ describe('PulseDriver — Layer B (memory.accessed glow)', () => {
     expect(d.getRecallEnergy('n1')).toBeGreaterThanOrEqual(0.95);    // independent
   });
 });
+
+describe('PulseDriver — particle edge ranking', () => {
+  const link = (s: string, t: string) => ({ source: s, target: t });
+
+  it('returns at most particleCap edges', () => {
+    const d = new PulseDriver({ intensity: 'subtle' });
+    d.observeNodes(['a', 'b', 'c', 'd']);
+    const links = [link('a','b'), link('b','c'), link('c','d'), link('a','d')];
+    expect(d.pickParticleEdges(links, null).length).toBeLessThanOrEqual(INTENSITY.subtle.particleCap);
+  });
+
+  it('ranks edges by max(srcEnergy, dstEnergy) descending', () => {
+    const d = new PulseDriver({ intensity: 'subtle' });
+    d.observeNodes(['hot', 'mid', 'cold']);
+    d.dispatch({ type: 'memory.created', entityId: 'hot' });
+    d.onFrame(0);
+    const links = [link('cold', 'mid'), link('hot', 'mid')];
+    const out = d.pickParticleEdges(links, null);
+    // 'hot' edge must rank first
+    expect(out[0]).toEqual(link('hot', 'mid'));
+  });
+
+  it('breaks ties in favour of edges adjacent to the anchor', () => {
+    const d = new PulseDriver({ intensity: 'subtle' });
+    d.observeNodes(['anchor', 'x', 'y', 'z']);
+    d.onFrame(0); // all energies near 0 (only breathing)
+    const links = [link('x','y'), link('anchor','z'), link('y','z')];
+    // With particleCap = 20 we'd return all three. To test tie-break, lower cap to 1:
+    const out = d.pickParticleEdges(links, 'anchor', /*overrideCap*/ 1);
+    expect(out).toEqual([link('anchor', 'z')]);
+  });
+});

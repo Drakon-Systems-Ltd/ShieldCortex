@@ -92,6 +92,40 @@ export class PulseDriver {
   getRecallEnergy(id: string): number {
     return this.knownNodes.has(id) ? this.recallEnergy.get(id) ?? 0 : 0;
   }
+
+  /**
+   * Rank edges for directional-particle rendering.
+   * @param links Edges as `{source, target}` (string ids; passed through).
+   * @param anchorId Current sun id, or null. Used as tie-break.
+   * @param overrideCap Optional explicit cap (defaults to INTENSITY[level].particleCap).
+   */
+  pickParticleEdges<L extends { source: string | { id: string }; target: string | { id: string } }>(
+    links: L[],
+    anchorId: string | null,
+    overrideCap?: number,
+  ): L[] {
+    const cap = overrideCap ?? this.settings.particleCap;
+    if (cap <= 0 || links.length === 0) return [];
+
+    const epId = (e: L['source']) => (typeof e === 'string' ? e : e.id);
+    type Scored = { link: L; score: number; anchorAdjacent: 0 | 1 };
+    const scored: Scored[] = links.map((link) => {
+      const s = epId(link.source);
+      const t = epId(link.target);
+      const sE = Math.max(this.getEnergy(s), this.getRecallEnergy(s));
+      const tE = Math.max(this.getEnergy(t), this.getRecallEnergy(t));
+      const score = Math.max(sE, tE);
+      const anchorAdjacent = anchorId !== null && (s === anchorId || t === anchorId) ? 1 : 0;
+      return { link, score, anchorAdjacent };
+    });
+
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return b.anchorAdjacent - a.anchorAdjacent;
+    });
+
+    return scored.slice(0, cap).map((s) => s.link);
+  }
 }
 
 /** Stable 0..1 hash for per-node breathing phase (full 32-bit FNV-1a range). */
