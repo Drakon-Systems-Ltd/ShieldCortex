@@ -66,3 +66,27 @@ describe('PulseDriver — Layer A (memory.created spike)', () => {
     expect(d.getEnergy('never-seen')).toBe(0);
   });
 });
+
+describe('PulseDriver — Layer B (memory.accessed glow)', () => {
+  it('spikes recall-energy to ~1.0 on dispatch and decays faster than create', () => {
+    const d = new PulseDriver({ intensity: 'moderate', now: () => 0 });
+    d.observeNodes(['n1']);
+    d.onFrame(0);
+    d.dispatch({ type: 'memory.accessed', entityId: 'n1' });
+    expect(d.getRecallEnergy('n1')).toBeGreaterThanOrEqual(0.95);
+
+    // 60 frames (~1s at 60fps) — moderate.decayRecall=0.93 → 0.93^60 ≈ 0.012
+    for (let i = 1; i <= 60; i++) d.onFrame(i * 16);
+    expect(d.getRecallEnergy('n1')).toBeLessThan(0.05);
+  });
+
+  it('keeps create-spike and recall-glow independent', () => {
+    const d = new PulseDriver({ intensity: 'moderate', now: () => 0 });
+    d.observeNodes(['n1']);
+    d.onFrame(0); // populate breath; subsequent dispatches won't be decayed
+    d.dispatch({ type: 'memory.created', entityId: 'n1' });
+    d.dispatch({ type: 'memory.accessed', entityId: 'n1' });
+    expect(d.getEnergy('n1')).toBeGreaterThanOrEqual(0.95);          // includes create
+    expect(d.getRecallEnergy('n1')).toBeGreaterThanOrEqual(0.95);    // independent
+  });
+});

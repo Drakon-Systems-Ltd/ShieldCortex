@@ -24,6 +24,7 @@ export class PulseDriver {
   private knownNodes = new Set<string>();
   private phase = new Map<string, number>();
   private spikeEnergy = new Map<string, number>(); // Layer A + B contribution
+  private recallEnergy = new Map<string, number>();
   private breathOffset = new Map<string, number>(); // last computed Layer C
   private now: () => number;
   private lastFrameAt = 0;
@@ -49,13 +50,11 @@ export class PulseDriver {
     }
   }
 
-  /** External pulse trigger (Layer A / B will be implemented in 3b / 3c). */
+  /** External pulse trigger. */
   dispatch(e: PulseEvent): void {
     if (!this.knownNodes.has(e.entityId)) return;
-    if (e.type === 'memory.created') {
-      this.spikeEnergy.set(e.entityId, 1.0);
-    }
-    // memory.accessed handled in Task 3c
+    if (e.type === 'memory.created')  this.spikeEnergy.set(e.entityId, 1.0);
+    if (e.type === 'memory.accessed') this.recallEnergy.set(e.entityId, 1.0);
   }
 
   /** Compute energies for this frame. */
@@ -74,6 +73,12 @@ export class PulseDriver {
       if (next < 1e-3) this.spikeEnergy.delete(id);
       else this.spikeEnergy.set(id, next);
     }
+    const decayR = this.settings.decayRecall;
+    for (const [id, e] of this.recallEnergy) {
+      const next = e * decayR;
+      if (next < 1e-3) this.recallEnergy.delete(id);
+      else this.recallEnergy.set(id, next);
+    }
   }
 
   /** Energy for one node — sum of breathing + spike contributions. */
@@ -82,6 +87,10 @@ export class PulseDriver {
     const breath = this.breathOffset.get(id) ?? 0;
     const spike = this.spikeEnergy.get(id) ?? 0;
     return breath + spike;
+  }
+
+  getRecallEnergy(id: string): number {
+    return this.knownNodes.has(id) ? this.recallEnergy.get(id) ?? 0 : 0;
   }
 }
 
