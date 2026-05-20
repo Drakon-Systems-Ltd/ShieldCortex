@@ -1,4 +1,4 @@
-import { computeLinkAlpha, computeLinkWidth } from './renderMath.js';
+import { computeLinkAlpha, computeLinkWidth } from './renderMath';
 
 export interface LinkPaintInput {
   ctx: CanvasRenderingContext2D;

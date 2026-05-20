@@ -1,4 +1,4 @@
-import { INTENSITY, type IntensityLevel, type IntensitySettings } from './intensity.js';
+import { INTENSITY, type IntensityLevel, type IntensitySettings } from './intensity';
 
 export type PulseEventType = 'memory.created' | 'memory.accessed';
 

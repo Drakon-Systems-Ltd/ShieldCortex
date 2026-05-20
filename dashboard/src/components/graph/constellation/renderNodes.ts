@@ -1,5 +1,5 @@
-import { computeNodeRadius } from './renderMath.js';
-import type { IntensitySettings } from './intensity.js';
+import { computeNodeRadius } from './renderMath';
+import type { IntensitySettings } from './intensity';
 
 export interface NodePaintInput {
   ctx: CanvasRenderingContext2D;
