@@ -2,7 +2,7 @@
 export default {
   preset: 'ts-jest/presets/default-esm',
   testEnvironment: 'node',
-  roots: ['<rootDir>/src', '<rootDir>/plugins'],
+  roots: ['<rootDir>/src', '<rootDir>/plugins', '<rootDir>/dashboard/src/components/graph/constellation/__tests__'],
   testMatch: ['**/__tests__/**/*.test.ts', '**/*.test.ts'],
   moduleFileExtensions: ['ts', 'js', 'json'],
   extensionsToTreatAsEsm: ['.ts'],
