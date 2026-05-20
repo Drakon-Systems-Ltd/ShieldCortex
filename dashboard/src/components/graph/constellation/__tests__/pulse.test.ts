@@ -38,3 +38,31 @@ describe('PulseDriver — breathing (Layer C)', () => {
     expect(Math.abs(d.getEnergy('n1'))).toBeLessThanOrEqual(INTENSITY.subtle.breathAmp + 1e-9);
   });
 });
+
+describe('PulseDriver — Layer A (memory.created spike)', () => {
+  it('spikes to ~1.0 immediately after dispatch and decays per frame', () => {
+    const d = new PulseDriver({ intensity: 'moderate' });
+    d.observeNodes(['n1']);
+    d.onFrame(0);
+    d.dispatch({ type: 'memory.created', entityId: 'n1' });
+    d.onFrame(0); // no time elapsed → still ~1.0
+    expect(d.getEnergy('n1')).toBeGreaterThanOrEqual(0.95);
+  });
+
+  it('decays to <0.05 within ~2 seconds at moderate', () => {
+    const d = new PulseDriver({ intensity: 'moderate', now: () => 0 });
+    d.observeNodes(['n1']);
+    d.onFrame(0);
+    d.dispatch({ type: 'memory.created', entityId: 'n1' });
+    // ~60 fps × 2s = 120 frames. moderate.decayCreate=0.96 → 0.96^120 ≈ 0.007.
+    for (let i = 1; i <= 120; i++) d.onFrame(i * 16);
+    expect(d.getEnergy('n1')).toBeLessThan(0.05 + INTENSITY.moderate.breathAmp);
+  });
+
+  it('does nothing when dispatched to an unobserved node', () => {
+    const d = new PulseDriver({ intensity: 'moderate' });
+    d.dispatch({ type: 'memory.created', entityId: 'never-seen' });
+    d.onFrame(0);
+    expect(d.getEnergy('never-seen')).toBe(0);
+  });
+});

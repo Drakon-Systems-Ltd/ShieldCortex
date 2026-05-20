@@ -50,8 +50,12 @@ export class PulseDriver {
   }
 
   /** External pulse trigger (Layer A / B will be implemented in 3b / 3c). */
-  dispatch(_e: PulseEvent): void {
-    // wired in Task 3b/3c
+  dispatch(e: PulseEvent): void {
+    if (!this.knownNodes.has(e.entityId)) return;
+    if (e.type === 'memory.created') {
+      this.spikeEnergy.set(e.entityId, 1.0);
+    }
+    // memory.accessed handled in Task 3c
   }
 
   /** Compute energies for this frame. */
@@ -62,6 +66,13 @@ export class PulseDriver {
     for (const id of this.knownNodes) {
       const phi = this.phase.get(id) ?? 0;
       this.breathOffset.set(id, Math.sin(omega * t + phi) * breathAmp);
+    }
+    // Decay all active spikes once per frame.
+    const decay = this.settings.decayCreate; // 3c will branch on event type
+    for (const [id, e] of this.spikeEnergy) {
+      const next = e * decay;
+      if (next < 1e-3) this.spikeEnergy.delete(id);
+      else this.spikeEnergy.set(id, next);
     }
   }
 
