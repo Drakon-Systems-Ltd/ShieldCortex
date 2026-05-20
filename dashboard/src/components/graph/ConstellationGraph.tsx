@@ -10,6 +10,7 @@ import { pickAnchor, applyAnchor } from './constellation/anchor';
 import { PulseDriver } from './constellation/pulse';
 import { INTENSITY, REDUCED_INTENSITY, isReducedMotion, loadIntensity, type IntensityLevel } from './constellation/intensity';
 import { wireControls } from './constellation/controls';
+import { PulseDebugPanel } from './PulseDebugPanel';
 import { useGraphPulse } from '@/hooks/useGraphPulse';
 
 // ── Types ─────────────────────────────────────────────────
@@ -583,7 +584,7 @@ export function ConstellationGraph({
         </div>
       )}
 
-      <div onDoubleClick={handleBackgroundDoubleClick}>
+      <div onDoubleClick={handleBackgroundDoubleClick} style={{ position: 'relative' }}>
         <ForceGraph2D
           ref={graphRef}
           graphData={graphData}
@@ -637,6 +638,7 @@ export function ConstellationGraph({
             }
           }}
         />
+        <PulseDebugPanel driver={driver} />
       </div>
 
       <div className="absolute bottom-3 left-0 right-0 z-10 flex items-center justify-center gap-4 text-[11px] text-[var(--sc-text-muted)]">
