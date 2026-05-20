@@ -66,8 +66,8 @@ export class PulseDriver {
       const phi = this.phase.get(id) ?? 0;
       this.breathOffset.set(id, Math.sin(omega * t + phi) * breathAmp);
     }
-    // Decay all active spikes once per frame.
-    const decay = this.settings.decayCreate; // 3c will branch on event type
+    // Decay Layer A (memory.created) spikes once per frame.
+    const decay = this.settings.decayCreate;
     for (const [id, e] of this.spikeEnergy) {
       const next = e * decay;
       if (next < 1e-3) this.spikeEnergy.delete(id);

@@ -115,9 +115,14 @@ describe('PulseDriver — particle edge ranking', () => {
   it('breaks ties in favour of edges adjacent to the anchor', () => {
     const d = new PulseDriver({ intensity: 'subtle' });
     d.observeNodes(['anchor', 'x', 'y', 'z']);
-    d.onFrame(0); // all energies near 0 (only breathing)
-    const links = [link('x','y'), link('anchor','z'), link('y','z')];
-    // With particleCap = 20 we'd return all three. To test tie-break, lower cap to 1:
+    // Force x/y/z to identical recall energy = 1.0 so all three edge scores tie.
+    // Skip onFrame so no decay applies and no breath offset enters getEnergy.
+    d.dispatch({ type: 'memory.accessed', entityId: 'x' });
+    d.dispatch({ type: 'memory.accessed', entityId: 'y' });
+    d.dispatch({ type: 'memory.accessed', entityId: 'z' });
+    const links = [link('x', 'y'), link('anchor', 'z'), link('y', 'z')];
+    // All three edges score max(srcRecall, dstRecall) = 1.0; only (anchor,z) is
+    // adjacent to the anchor — the tie-break is the only differentiator.
     const out = d.pickParticleEdges(links, 'anchor', /*overrideCap*/ 1);
     expect(out).toEqual([link('anchor', 'z')]);
   });
