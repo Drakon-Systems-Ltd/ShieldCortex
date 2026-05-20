@@ -82,12 +82,19 @@ export function pickAnchor(nodes: AnchorableNode[], links: AnchorableLink[]): st
   return bestNode?.id ?? null;
 }
 
+/** Minimal shape `applyAnchor` needs — any node carrying `id` + optional `fx`/`fy`. */
+export interface PinnableNode {
+  id: string;
+  fx?: number | null;
+  fy?: number | null;
+}
+
 /**
  * Pin the new anchor at (0,0) and release the previous one.
  * Other pinned nodes (from drag-to-pin) are untouched.
  */
-export function applyAnchor(
-  nodes: AnchorableNode[],
+export function applyAnchor<T extends PinnableNode>(
+  nodes: T[],
   newAnchorId: string,
   previousAnchorId: string | null,
 ): void {

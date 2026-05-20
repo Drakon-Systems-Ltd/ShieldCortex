@@ -74,12 +74,12 @@ export class PulseDriver {
   }
 }
 
-/** Stable 0..1 hash for per-node breathing phase. */
+/** Stable 0..1 hash for per-node breathing phase (full 32-bit FNV-1a range). */
 function hashStringTo01(s: string): number {
   let h = 2166136261 >>> 0;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
     h = (h * 16777619) >>> 0;
   }
-  return (h % 100000) / 100000;
+  return h / 0x100000000;
 }
