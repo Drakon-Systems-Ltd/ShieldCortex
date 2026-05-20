@@ -46,6 +46,13 @@ export interface MemoryCreatedEvent extends MemoryEvent {
   type: 'memory_created';
   data: {
     memory: Memory;
+    /**
+     * IDs of ontology entities linked to this memory at creation time.
+     * Required for the pulse layer (Living Constellation Graph) to map
+     * a creation event to its graph nodes. Always emitted — may be empty
+     * if no entities were extracted.
+     */
+    entity_ids: number[];
   };
 }
 
@@ -55,6 +62,12 @@ export interface MemoryAccessedEvent extends MemoryEvent {
     memoryId: number;
     memory: Memory;
     newSalience: number;
+    /**
+     * IDs of ontology entities linked to this memory at access time.
+     * Required for the pulse layer to highlight related graph nodes
+     * when a memory is touched. Always emitted — may be empty.
+     */
+    entity_ids: number[];
   };
 }
 
@@ -156,15 +169,20 @@ class MemoryEventEmitter extends EventEmitter {
 export const memoryEvents = new MemoryEventEmitter();
 
 // Helper functions to emit events
-export function emitMemoryCreated(memory: Memory): void {
-  memoryEvents.emit('memory_created', { memory });
+export function emitMemoryCreated(memory: Memory, entityIds: number[] = []): void {
+  memoryEvents.emit('memory_created', { memory, entity_ids: entityIds });
 }
 
-export function emitMemoryAccessed(memory: Memory, newSalience: number): void {
+export function emitMemoryAccessed(
+  memory: Memory,
+  newSalience: number,
+  entityIds: number[] = []
+): void {
   memoryEvents.emit('memory_accessed', {
     memoryId: memory.id,
     memory,
     newSalience,
+    entity_ids: entityIds,
   });
 }
 

@@ -308,9 +308,30 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       const total = stats.total;
       const hasMore = memories.length > offset + limit;
       const paginatedMemories = memories.slice(offset, offset + limit);
+
+      // Batch-load entity_ids per memory so the constellation graph client
+      // can map list rows to graph nodes without an N+1 fetch.
+      const ids = paginatedMemories.map((m) => m.id);
+      const linkRows =
+        ids.length === 0
+          ? []
+          : (getDatabase()
+              .prepare(
+                `SELECT memory_id, entity_id FROM memory_entities WHERE memory_id IN (${ids
+                  .map(() => '?')
+                  .join(',')})`,
+              )
+              .all(...ids) as { memory_id: number; entity_id: number }[]);
+      const byMemoryId = new Map<number, number[]>();
+      for (const row of linkRows) {
+        const arr = byMemoryId.get(row.memory_id) ?? [];
+        arr.push(row.entity_id);
+        byMemoryId.set(row.memory_id, arr);
+      }
       const memoriesWithDecay = paginatedMemories.map((memory) => ({
         ...memory,
         decayedScore: calculateDecayedScore(memory),
+        entity_ids: byMemoryId.get(memory.id) ?? [],
       }));
 
       res.json({

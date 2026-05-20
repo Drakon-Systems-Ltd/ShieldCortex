@@ -500,10 +500,34 @@ export function addMemory(
 
   const memory = getMemoryById(insertedId)!;
 
+  // ONTOLOGY: Extract entities and triples FIRST so the memory_created
+  // payload can carry entity_ids. The pulse layer (Living Constellation
+  // Graph) maps memory_created events to graph nodes via these IDs —
+  // without them, Layer A/B of PulseDriver silently never fires.
+  // processExtractionResult writes to memory_entities synchronously, so we
+  // can query it back immediately for the event payload.
+  let entityIds: number[] = [];
+  try {
+    const extraction = extractFromMemory(input.title, truncationResult.content, category);
+    if (extraction.entities.length > 0) {
+      processExtractionResult(extraction, memory.id);
+      if (isFeatureEnabled('cloud_sync')) {
+        syncGraphForMemoryToCloud(memory.id);
+      }
+    }
+    entityIds = (
+      db
+        .prepare('SELECT entity_id FROM memory_entities WHERE memory_id = ?')
+        .all(memory.id) as { entity_id: number }[]
+    ).map((r) => r.entity_id);
+  } catch (e) {
+    console.error('[shieldcortex] Entity extraction failed:', e);
+  }
+
   // Emit event for real-time dashboard (in-process)
-  emitMemoryCreated(memory);
+  emitMemoryCreated(memory, entityIds);
   // Persist event for cross-process IPC (MCP → Dashboard)
-  persistEvent('memory_created', { memory });
+  persistEvent('memory_created', { memory, entity_ids: entityIds });
 
   // Webhook notification (fire-and-forget)
   dispatchWebhook('memory_created', { id: memory.id, title: memory.title, category: memory.category });
@@ -522,19 +546,6 @@ export function addMemory(
   } catch (e) {
     // Don't fail memory creation if linking fails
     console.error('[shieldcortex] Auto-link failed:', e);
-  }
-
-  // ONTOLOGY: Extract entities and triples from this memory
-  try {
-    const extraction = extractFromMemory(input.title, truncationResult.content, category);
-    if (extraction.entities.length > 0) {
-      processExtractionResult(extraction, memory.id);
-      if (isFeatureEnabled('cloud_sync')) {
-        syncGraphForMemoryToCloud(memory.id);
-      }
-    }
-  } catch (e) {
-    console.error('[shieldcortex] Entity extraction failed:', e);
   }
 
   // DEFENCE: Store fragmentation data for cross-memory payload detection
