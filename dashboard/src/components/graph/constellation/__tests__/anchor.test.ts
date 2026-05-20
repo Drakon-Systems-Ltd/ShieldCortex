@@ -43,6 +43,10 @@ describe('pickAnchor', () => {
   it('returns null when every score is 0 (isolated nodes, no memories)', () => {
     expect(pickAnchor([n('a', 0), n('b', 0)], [])).toBeNull();
   });
+
+  it('falls back to memoryCount alone when no node has any edges (alpha tie-break)', () => {
+    expect(pickAnchor([n('zeta', 5, 'zeta'), n('alpha', 5, 'alpha')], [])).toBe('alpha');
+  });
 });
 
 describe('applyAnchor', () => {

@@ -30,9 +30,10 @@ function endpointId(e: AnchorableLink['source']): string {
 }
 
 /**
- * Returns the node id with the highest memoryCount × edgeCount, or null.
- * If no node has any edges, falls back to ranking by memoryCount alone
- * (alpha tie-break); returns null if all memoryCount are 0 as well.
+ * Returns the node id maximising `memoryCount × edgeCount`, falling back to
+ * `memoryCount` alone when no node has any edges (e.g. a lone node, or an
+ * all-isolated graph). Ties broken alphabetically by name. Returns null only
+ * when the graph is empty or every node has memoryCount === 0.
  */
 export function pickAnchor(nodes: AnchorableNode[], links: AnchorableLink[]): string | null {
   if (nodes.length === 0) return null;
