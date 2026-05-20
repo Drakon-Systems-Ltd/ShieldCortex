@@ -16,6 +16,7 @@ import { DedupePanel } from '@/components/settings/DedupePanel';
 import { LicenseStatusCard } from '@/components/shield/LicenseStatusCard';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_LABELS } from '@/lib/license';
+import { loadIntensity, saveIntensity, type IntensityLevel } from '@/components/graph/constellation/intensity';
 
 type SettingsTab = 'cloud' | 'integrations' | 'licence' | 'admin';
 
@@ -26,6 +27,11 @@ function SettingsContent() {
   const [userTab, setTab] = useState<SettingsTab>('cloud');
   const tab = validUrlTab ?? userTab;
   const { data: license } = useLicenseStatus();
+  const [intensity, setIntensity] = useState<IntensityLevel>(() => loadIntensity());
+  const onIntensityChange = (next: IntensityLevel) => {
+    setIntensity(next);
+    saveIntensity(next);
+  };
 
   const tabs = [
     { id: 'cloud', label: 'Cloud Sync', icon: <Cloud size={14} /> },
@@ -76,6 +82,40 @@ function SettingsContent() {
               <MaintenanceCard />
               <PrunePanel />
               <DedupePanel />
+              <GlassCard className="p-6">
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Graph Motion</h3>
+                <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
+                  How lively the knowledge graph feels. Per-browser.
+                </p>
+                <div
+                  role="radiogroup"
+                  aria-label="Graph motion intensity"
+                  className="mt-4 flex gap-2"
+                >
+                  {(['subtle', 'moderate', 'strong'] as const).map((level) => (
+                    <label
+                      key={level}
+                      className={`flex flex-1 cursor-pointer items-center gap-2 rounded-lg border px-4 py-3 transition-colors ${
+                        intensity === level
+                          ? 'border-[var(--sc-accent-cyan)] bg-[var(--sc-bg-elevated)]'
+                          : 'border-transparent bg-[var(--sc-bg-elevated)] hover:border-[var(--sc-border-subtle)]'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="graph-intensity"
+                        value={level}
+                        checked={intensity === level}
+                        onChange={() => onIntensityChange(level)}
+                        className="accent-[var(--sc-accent-cyan)]"
+                      />
+                      <span className="text-sm text-[var(--sc-text-primary)]">
+                        {level[0].toUpperCase() + level.slice(1)}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </GlassCard>
               <GlassCard className="p-6">
                 <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">System Information</h3>
                 <div className="mt-4 space-y-3">
