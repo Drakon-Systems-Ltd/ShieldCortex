@@ -4,8 +4,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import type { ForceGraphMethods, ForceGraphProps, NodeObject, LinkObject } from 'react-force-graph-2d';
 import type { ClusterData, GraphEntity } from '@/hooks/useGraphData';
+import { paintNode } from './constellation/renderNodes';
+import { paintLink } from './constellation/renderLinks';
+import { pickAnchor, applyAnchor } from './constellation/anchor';
+import { PulseDriver } from './constellation/pulse';
+import { INTENSITY, REDUCED_INTENSITY, isReducedMotion, loadIntensity, type IntensityLevel } from './constellation/intensity';
+import { wireControls } from './constellation/controls';
+import { PulseDebugPanel } from './PulseDebugPanel';
+import { useGraphPulse } from '@/hooks/useGraphPulse';
 
-// ── Dynamic import ────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────
 
 type GNode = {
   id: string;
@@ -16,9 +24,10 @@ type GNode = {
   isCluster?: boolean;
   clusterType?: string;
   entityCount?: number;
-  // Pre-set positions for cluster level
   fx?: number;
   fy?: number;
+  x?: number;
+  y?: number;
 };
 
 type GLink = {
@@ -34,7 +43,7 @@ type FGComponent = (props: FGProps) => React.ReactElement;
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false }) as unknown as FGComponent;
 
-// ── Colours ───────────────────────────────────────────────
+// ── Cluster colour fallback ───────────────────────────────
 
 const CLUSTER_COLOURS: Record<string, string> = {
   tool: '#00e5cc',
@@ -86,6 +95,83 @@ function countCrossClusterLinks(
   return counts;
 }
 
+/**
+ * Legacy cluster paint — verbatim halo + scatter + label rendering from the
+ * pre-modular ConstellationGraph. Preserved here so the cluster-level view
+ * keeps its visual identity while entity-level paint moves to paintNode.
+ */
+function paintClusterLegacy(
+  ctx: CanvasRenderingContext2D,
+  node: GNode & { x: number; y: number },
+  zoom: number,
+  isHovered: boolean,
+): void {
+  const entCount = node.entityCount || 5;
+  const baseR = 15 + Math.sqrt(entCount) * 3;
+  const r = Math.min(baseR, 60);
+
+  // Outer nebula
+  const nebulaR = r * 3;
+  const nebula = ctx.createRadialGradient(node.x, node.y, r * 0.5, node.x, node.y, nebulaR);
+  nebula.addColorStop(0, node.colour + '15');
+  nebula.addColorStop(0.4, node.colour + '08');
+  nebula.addColorStop(1, node.colour + '00');
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, nebulaR, 0, 2 * Math.PI);
+  ctx.fillStyle = nebula;
+  ctx.fill();
+
+  // Inner core glow
+  const core = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, r * 0.8);
+  core.addColorStop(0, node.colour + '28');
+  core.addColorStop(0.6, node.colour + '10');
+  core.addColorStop(1, node.colour + '02');
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, r * 0.8, 0, 2 * Math.PI);
+  ctx.fillStyle = core;
+  ctx.fill();
+
+  // Scatter star dots inside the halo
+  const dotCount = Math.min(entCount, 40);
+  const seed = node.id.charCodeAt(node.id.length - 1);
+  for (let i = 0; i < dotCount; i++) {
+    const angle = ((seed + i * 137.508) % 360) * (Math.PI / 180);
+    const dist = r * 0.1 + r * 0.85 * Math.pow(((seed * 7 + i * 31) % 100) / 100, 0.6);
+    const dx = node.x + Math.cos(angle) * dist;
+    const dy = node.y + Math.sin(angle) * dist;
+    const dr = 0.5 + ((i * 17 + seed) % 4) * 0.3;
+    ctx.beginPath();
+    ctx.arc(dx, dy, dr, 0, 2 * Math.PI);
+    ctx.fillStyle = node.colour + (i < 5 ? 'dd' : i < 15 ? '88' : '44');
+    ctx.fill();
+  }
+
+  // Hover dashed ring
+  if (isHovered) {
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+    ctx.strokeStyle = node.colour + '50';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Type label
+  const fontSize = Math.max(13 / Math.max(zoom, 0.3), 8);
+  ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = node.colour + 'bb';
+  ctx.fillText(node.name, node.x, node.y + r + 8);
+
+  // Entity count
+  const countSize = Math.max(10 / Math.max(zoom, 0.3), 6);
+  ctx.font = `400 ${countSize}px Inter, system-ui, sans-serif`;
+  ctx.fillStyle = '#ffffff30';
+  ctx.fillText(`${entCount} entities`, node.x, node.y + r + 8 + fontSize + 3);
+}
+
 // ── Component ─────────────────────────────────────────────
 
 export function ConstellationGraph({
@@ -101,7 +187,16 @@ export function ConstellationGraph({
   const graphRef = useRef<FGRef | undefined>(undefined);
   const hoveredRef = useRef<string | null>(null);
   const zoomRef = useRef(1);
+  const [driver, setDriver] = useState<PulseDriver | null>(null);
   const [activeCluster, setActiveCluster] = useState<string | null>(null);
+  const [anchorId, setAnchorId] = useState<string | null>(null);
+  const [level, setLevel] = useState<IntensityLevel>('moderate');
+
+  const reducedMotion = useMemo(() => isReducedMotion(), []);
+  const settings = useMemo(
+    () => (reducedMotion ? REDUCED_INTENSITY : INTENSITY[level]),
+    [reducedMotion, level],
+  );
 
   const entityClusterMap = useMemo(() => buildEntityClusterMap(clusters), [clusters]);
 
@@ -122,7 +217,6 @@ export function ConstellationGraph({
         isCluster: true,
         clusterType: c.type,
         entityCount: c.entities.length,
-        // Starting positions in a ring — forces will hold them apart
         x: Math.cos(angle) * radius,
         y: Math.sin(angle) * radius,
       } as GNode;
@@ -141,7 +235,7 @@ export function ConstellationGraph({
     }
 
     return { nodes, links };
-  }, [clusters, allTriples, entityClusterMap, width, height]);
+  }, [clusters, allTriples, entityClusterMap]);
 
   // ── Level 2: Detail data for active cluster ─────────────
 
@@ -218,6 +312,53 @@ export function ConstellationGraph({
 
   const graphData = activeCluster && detailGraphData ? detailGraphData : clusterGraphData;
 
+  // ── PulseDriver lifecycle ───────────────────────────────
+
+  useEffect(() => {
+    const initial = loadIntensity();
+    setLevel(initial);
+    const d = new PulseDriver({ intensity: initial });
+    setDriver(d);
+    const onIntensityChange = (e: Event) => {
+      const next = (e as CustomEvent<IntensityLevel>).detail;
+      if (next === 'subtle' || next === 'moderate' || next === 'strong') {
+        setLevel(next);
+        d.setIntensity(next);
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('shieldcortex:intensity-changed', onIntensityChange);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('shieldcortex:intensity-changed', onIntensityChange);
+      }
+    };
+  }, []);
+
+  // Observe nodes so breathing kicks in for the active data set.
+  useEffect(() => {
+    driver?.observeNodes(graphData.nodes.map((n) => n.id));
+  }, [driver, graphData.nodes]);
+
+  // Wire WS / polling fallback to the driver.
+  useGraphPulse(driver, true);
+
+  // ── Anchor (the sun) ────────────────────────────────────
+
+  useEffect(() => {
+    const next = pickAnchor(
+      graphData.nodes.map((n) => ({ id: n.id, name: n.name, memoryCount: n.memoryCount })),
+      graphData.links,
+    );
+    if (next !== anchorId) {
+      applyAnchor(graphData.nodes, next ?? '', anchorId);
+      setAnchorId(next);
+    }
+    // graphData.nodes intentionally a dep — anchor must re-evaluate when zooming
+    // between cluster level and entity level (different node set).
+  }, [graphData.nodes, graphData.links, anchorId]);
+
   // ── Forces ──────────────────────────────────────────────
 
   useEffect(() => {
@@ -228,7 +369,6 @@ export function ConstellationGraph({
       fg.d3Force('link')?.distance(40);
       fg.d3Force('center')?.strength(0.05);
     } else {
-      // Cluster view: strong repulsion to keep clusters well-spaced
       fg.d3Force('charge')?.strength(-2000);
       fg.d3Force('link')?.distance(180);
       fg.d3Force('center')?.strength(0.03);
@@ -240,18 +380,31 @@ export function ConstellationGraph({
   useEffect(() => {
     if (hasInitialFit.current || !graphData.nodes.length) return;
     hasInitialFit.current = true;
-    // Wait for simulation to run before fitting
-    const t = setTimeout(() => graphRef.current?.zoomToFit(400, 80), 1500);
+    const t = setTimeout(() => graphRef.current?.zoomToFit(reducedMotion ? 0 : 400, 80), 1500);
     return () => clearTimeout(t);
-  }, [graphData.nodes.length]);
+  }, [graphData.nodes.length, reducedMotion]);
 
   const handleZoom = useCallback(({ k }: { k: number }) => { zoomRef.current = k; }, []);
 
-  // ── Click handling ──────────────────────────────────────
+  // ── Controls (drag-to-pin + shift-click unpin + double-click zoom) ──
+
+  // wireControls captures the ref by closure and only reads `current` inside
+  // event handlers (post-mount), never during render. The react-hooks/refs lint
+  // rule can't statically prove that — disable for this one call. GNode's fx
+  // is `number | undefined` (matches d3); controls.ts's PinnableNode allows
+  // `null` for release, so cast through unknown.
+  const controls = useMemo(
+    // eslint-disable-next-line react-hooks/refs
+    () => wireControls(graphRef as unknown as React.MutableRefObject<ForceGraphMethods<NodeObject<{ id: string; fx?: number | null; fy?: number | null; x?: number; y?: number }>> | undefined>),
+    [],
+  );
 
   const handleNodeClick = useCallback(
-    (node: NodeObject<GNode>) => {
+    (node: NodeObject<GNode>, event: MouseEvent) => {
       const gn = node as GNode;
+      const outcome = controls.handleNodeClick(node, event);
+      if (outcome !== 'single-click') return;
+
       if (gn.isCluster) {
         const type = (gn.clusterType || gn.type).replace('ghost::', '');
         setActiveCluster(type);
@@ -260,7 +413,7 @@ export function ConstellationGraph({
         onSelectEntity?.({ id: gn.id, name: gn.name, type: gn.type, memoryCount: gn.memoryCount });
       }
     },
-    [onSelectEntity],
+    [controls, onSelectEntity],
   );
 
   const handleBackgroundClick = useCallback(() => {
@@ -270,172 +423,141 @@ export function ConstellationGraph({
     }
   }, [activeCluster, onSelectEntity]);
 
+  // Background double-click — full reset: clear active cluster + selection,
+  // then zoomToFit. The plan's intended gesture for "I'm lost, take me home."
+  const handleBackgroundDoubleClick = useCallback(() => {
+    controls.handleBackgroundDoubleClick(() => {
+      setActiveCluster(null);
+      onSelectEntity?.(null);
+    });
+  }, [controls, onSelectEntity]);
+
   const handleNodeHover = useCallback((node: NodeObject<GNode> | null) => {
     hoveredRef.current = node ? String((node as GNode).id) : null;
   }, []);
 
-  // ── Painting ────────────────────────────────────────────
+  // ── Painting (hybrid: legacy cluster paint + new entity paint) ──
 
-  const paintNode = useCallback(
-    (node: NodeObject<GNode>, ctx: CanvasRenderingContext2D) => {
-      const gn = node as GNode & { x: number; y: number };
-      if (gn.x == null || gn.y == null) return;
-
-      const isHovered = String(gn.id) === hoveredRef.current;
-      const isSelected = selectedEntityId != null && String(gn.id) === selectedEntityId;
+  const renderNode = useCallback(
+    (node: NodeObject<GNode>, ctx: CanvasRenderingContext2D, globalScale: number) => {
+      const gn = node as GNode;
+      if (gn.x === undefined || gn.y === undefined) return;
+      const id = String(node.id);
+      const isHovered = id === hoveredRef.current;
+      const isSelected = selectedEntityId != null && id === selectedEntityId;
       const zoom = zoomRef.current;
 
       ctx.save();
 
-      if (gn.isCluster) {
-        // ── Cluster halo ──
-        const entCount = gn.entityCount || 5;
-        const baseR = 15 + Math.sqrt(entCount) * 3;
-        const r = Math.min(baseR, 60);
-
-        // Outer nebula
-        const nebulaR = r * 3;
-        const nebula = ctx.createRadialGradient(gn.x, gn.y, r * 0.5, gn.x, gn.y, nebulaR);
-        nebula.addColorStop(0, gn.colour + '15');
-        nebula.addColorStop(0.4, gn.colour + '08');
-        nebula.addColorStop(1, gn.colour + '00');
-        ctx.beginPath();
-        ctx.arc(gn.x, gn.y, nebulaR, 0, 2 * Math.PI);
-        ctx.fillStyle = nebula;
-        ctx.fill();
-
-        // Inner core glow
-        const core = ctx.createRadialGradient(gn.x, gn.y, 0, gn.x, gn.y, r * 0.8);
-        core.addColorStop(0, gn.colour + '28');
-        core.addColorStop(0.6, gn.colour + '10');
-        core.addColorStop(1, gn.colour + '02');
-        ctx.beginPath();
-        ctx.arc(gn.x, gn.y, r * 0.8, 0, 2 * Math.PI);
-        ctx.fillStyle = core;
-        ctx.fill();
-
-        // Scatter star dots inside the halo
-        const dotCount = Math.min(entCount, 40);
-        const seed = gn.id.charCodeAt(gn.id.length - 1);
-        for (let i = 0; i < dotCount; i++) {
-          const angle = ((seed + i * 137.508) % 360) * (Math.PI / 180);
-          const dist = r * 0.1 + r * 0.85 * Math.pow(((seed * 7 + i * 31) % 100) / 100, 0.6);
-          const dx = gn.x + Math.cos(angle) * dist;
-          const dy = gn.y + Math.sin(angle) * dist;
-          const dr = 0.5 + ((i * 17 + seed) % 4) * 0.3;
-          ctx.beginPath();
-          ctx.arc(dx, dy, dr, 0, 2 * Math.PI);
-          ctx.fillStyle = gn.colour + (i < 5 ? 'dd' : i < 15 ? '88' : '44');
-          ctx.fill();
-        }
-
-        // Hover: bright ring
-        if (isHovered) {
-          ctx.beginPath();
-          ctx.arc(gn.x, gn.y, r, 0, 2 * Math.PI);
-          ctx.strokeStyle = gn.colour + '50';
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([4, 4]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-
-        // Type label
-        const fontSize = Math.max(13 / Math.max(zoom, 0.3), 8);
-        ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillStyle = gn.colour + 'bb';
-        ctx.fillText(gn.name, gn.x, gn.y + r + 8);
-
-        // Count
-        const countSize = Math.max(10 / Math.max(zoom, 0.3), 6);
-        ctx.font = `400 ${countSize}px Inter, system-ui, sans-serif`;
-        ctx.fillStyle = '#ffffff30';
-        ctx.fillText(`${entCount} entities`, gn.x, gn.y + r + 8 + fontSize + 3);
-
-      } else {
-        // ── Entity dot ──
+      // Selected entity bloom (legacy behaviour — large white radial fade).
+      if (isSelected && !gn.isCluster) {
         const mc = gn.memoryCount || 1;
         const r = 0.8 + Math.min(Math.log2(mc + 1) * 0.4, 2.5);
-
-        // Glow
-        const glowR = r * 3.5;
-        const glow = ctx.createRadialGradient(gn.x, gn.y, r * 0.2, gn.x, gn.y, glowR);
-        glow.addColorStop(0, gn.colour + (isSelected ? '50' : '20'));
-        glow.addColorStop(1, gn.colour + '00');
+        const bloom = ctx.createRadialGradient(gn.x, gn.y, r, gn.x, gn.y, r * 8);
+        bloom.addColorStop(0, '#ffffff18');
+        bloom.addColorStop(1, '#ffffff00');
         ctx.beginPath();
-        ctx.arc(gn.x, gn.y, glowR, 0, 2 * Math.PI);
-        ctx.fillStyle = glow;
+        ctx.arc(gn.x, gn.y, r * 8, 0, 2 * Math.PI);
+        ctx.fillStyle = bloom;
         ctx.fill();
+      }
 
-        // Selected bloom
-        if (isSelected) {
-          const bloom = ctx.createRadialGradient(gn.x, gn.y, r, gn.x, gn.y, r * 8);
-          bloom.addColorStop(0, '#ffffff18');
-          bloom.addColorStop(1, '#ffffff00');
-          ctx.beginPath();
-          ctx.arc(gn.x, gn.y, r * 8, 0, 2 * Math.PI);
-          ctx.fillStyle = bloom;
-          ctx.fill();
-        }
+      if (gn.isCluster) {
+        paintClusterLegacy(ctx, gn as GNode & { x: number; y: number }, zoom, isHovered);
+        ctx.restore();
+        return;
+      }
 
-        // Dot
+      // Entity branch — delegate to the new module.
+      const energy = driver?.getEnergy(id) ?? 0;
+      const recallEnergy = driver?.getRecallEnergy(id) ?? 0;
+      const baseRadius = 0.8 + Math.min(Math.log2((gn.memoryCount ?? 0) + 1) * 0.4, 2.5);
+
+      paintNode({
+        ctx,
+        globalScale,
+        node: gn,
+        intensity: settings,
+        energy,
+        recallEnergy,
+        isAnchor: id === anchorId,
+        isSelected,
+        isHovered,
+        baseRadius,
+      });
+
+      // Hover stroke ring (preserved from legacy entity paint).
+      if (isHovered && !isSelected && id !== anchorId) {
+        const r = baseRadius * (1 + energy * settings.breathAmp);
         ctx.beginPath();
         ctx.arc(gn.x, gn.y, r, 0, 2 * Math.PI);
-        ctx.fillStyle = isSelected ? '#ffffff' : gn.colour;
-        ctx.fill();
+        ctx.strokeStyle = gn.colour;
+        ctx.lineWidth = 0.7;
+        ctx.stroke();
+      }
 
-        if (isSelected) {
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        } else if (isHovered) {
-          ctx.strokeStyle = gn.colour;
-          ctx.lineWidth = 0.7;
-          ctx.stroke();
-        }
+      // Labels — zoom-gated, legacy thresholds.
+      const mc = gn.memoryCount || 1;
+      const show = isSelected || isHovered ||
+        (zoom >= 3) ||
+        (zoom >= 1.5 && mc > 30) ||
+        (zoom >= 0.8 && mc > 100);
 
-        // Labels
-        const show = isSelected || isHovered ||
-          (zoom >= 3) ||
-          (zoom >= 1.5 && mc > 30) ||
-          (zoom >= 0.8 && mc > 100);
-
-        if (show) {
-          const fs = Math.max((isSelected ? 11 : isHovered ? 10 : 8) / Math.max(zoom, 0.4), 5);
-          ctx.font = `${fs}px Inter, system-ui, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          ctx.fillStyle = isSelected ? '#ffffff' : isHovered ? '#f0f4ffcc' : '#f0f4ff66';
-          ctx.fillText(gn.name, gn.x, gn.y + r + 2);
-        }
+      if (show) {
+        const r = baseRadius * (1 + energy * settings.breathAmp);
+        const fs = Math.max((isSelected ? 11 : isHovered ? 10 : 8) / Math.max(zoom, 0.4), 5);
+        ctx.font = `${fs}px Inter, system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = isSelected ? '#ffffff' : isHovered ? '#f0f4ffcc' : '#f0f4ff66';
+        ctx.fillText(gn.name, gn.x, gn.y + r + 2);
       }
 
       ctx.restore();
     },
-    [selectedEntityId],
+    [selectedEntityId, anchorId, settings, driver],
   );
 
-  const linkColour = useCallback(
-    (link: LinkObject<GNode, GLink>) => {
-      if (!activeCluster) {
-        const w = (link as GLink).weight || 0.05;
-        return `rgba(136, 146, 176, ${(w * 0.12 + 0.02).toFixed(3)})`;
-      }
-      const src = typeof link.source === 'object' ? (link.source as GNode).id : String(link.source);
-      const tgt = typeof link.target === 'object' ? (link.target as GNode).id : String(link.target);
-      if (src.startsWith('ghost::') || tgt.startsWith('ghost::')) return 'rgba(136, 146, 176, 0.03)';
-      if (selectedEntityId && (src === selectedEntityId || tgt === selectedEntityId)) return 'rgba(0, 229, 204, 0.25)';
-      return 'rgba(136, 146, 176, 0.05)';
+  // ── Link paint (delegates to module; ghost/cluster links keep faded look) ──
+
+  const renderLink = useCallback(
+    (link: LinkObject<GNode, GLink>, ctx: CanvasRenderingContext2D) => {
+      const src = link.source as NodeObject<GNode>;
+      const tgt = link.target as NodeObject<GNode>;
+      if (typeof src !== 'object' || typeof tgt !== 'object') return;
+      if (src.x === undefined || src.y === undefined || tgt.x === undefined || tgt.y === undefined) return;
+
+      const srcId = String(src.id);
+      const tgtId = String(tgt.id);
+      const srcEnergy = driver?.getEnergy(srcId) ?? 0;
+      const dstEnergy = driver?.getEnergy(tgtId) ?? 0;
+
+      paintLink({
+        ctx,
+        link: {
+          source: { x: src.x, y: src.y, colour: (src as GNode).colour, id: srcId },
+          target: { x: tgt.x, y: tgt.y, colour: (tgt as GNode).colour, id: tgtId },
+        },
+        srcEnergy,
+        dstEnergy,
+      });
     },
-    [activeCluster, selectedEntityId],
+    [driver],
   );
 
-  const linkWidth = useCallback(
-    (link: LinkObject<GNode, GLink>) => activeCluster ? 0.3 : Math.max(((link as GLink).weight || 0.05) * 1.5, 0.2),
-    [activeCluster],
-  );
+  // Drive PulseDriver frames + pick particle edges each render frame.
+  const particleEdges = useRef<Set<string>>(new Set());
+  const onFramePre = useCallback(() => {
+    if (!driver) return;
+    driver.onFrame(performance.now());
+    const picks = driver.pickParticleEdges(
+      graphData.links.map((l) => ({ source: String(l.source), target: String(l.target) })),
+      anchorId,
+    );
+    const next = new Set<string>();
+    for (const p of picks) next.add(`${p.source}::${p.target}`);
+    particleEdges.current = next;
+  }, [driver, graphData.links, anchorId]);
 
   if (width < 10 || height < 10) return null;
 
@@ -462,50 +584,62 @@ export function ConstellationGraph({
         </div>
       )}
 
-      <ForceGraph2D
-        ref={graphRef}
-        graphData={graphData}
-        width={width}
-        height={height}
-        backgroundColor="rgba(0,0,0,0)"
-        nodeCanvasObjectMode={() => 'replace'}
-        nodeCanvasObject={paintNode}
-        nodePointerAreaPaint={(node, colour, ctx) => {
-          const gn = node as GNode & { x: number; y: number };
-          if (gn.x == null || gn.y == null) return;
-          let hitR: number;
-          if (gn.isCluster) {
-            const entCount = gn.entityCount || 5;
-            hitR = Math.min(15 + Math.sqrt(entCount) * 3, 60);
-          } else {
-            hitR = 4 + Math.min(Math.log2((gn.memoryCount || 1) + 1) * 0.5, 3);
-          }
-          ctx.beginPath();
-          ctx.arc(gn.x, gn.y, hitR, 0, 2 * Math.PI);
-          ctx.fillStyle = colour;
-          ctx.fill();
-        }}
-        linkColor={linkColour}
-        linkWidth={linkWidth}
-        onNodeClick={handleNodeClick}
-        onNodeHover={handleNodeHover}
-        onBackgroundClick={handleBackgroundClick}
-        onZoom={handleZoom}
-        d3AlphaDecay={0.02}
-        d3VelocityDecay={0.3}
-        cooldownTicks={300}
-        warmupTicks={80}
-        nodeRelSize={1}
-        enableNodeDrag={true}
-        enableZoomInteraction={true}
-        onEngineStop={() => {
-          // Only auto-fit on first engine stop (initial layout)
-          if (!hasInitialFit.current && graphData.nodes.length) {
-            hasInitialFit.current = true;
-            graphRef.current?.zoomToFit(400, 80);
-          }
-        }}
-      />
+      <div onDoubleClick={handleBackgroundDoubleClick} style={{ position: 'relative' }}>
+        <ForceGraph2D
+          ref={graphRef}
+          graphData={graphData}
+          width={width}
+          height={height}
+          backgroundColor="rgba(0,0,0,0)"
+          nodeCanvasObjectMode={() => 'replace'}
+          nodeCanvasObject={renderNode}
+          nodePointerAreaPaint={(node, colour, ctx) => {
+            const gn = node as GNode;
+            if (gn.x === undefined || gn.y === undefined) return;
+            let hitR: number;
+            if (gn.isCluster) {
+              const entCount = gn.entityCount || 5;
+              hitR = Math.min(15 + Math.sqrt(entCount) * 3, 60);
+            } else {
+              hitR = 4 + Math.min(Math.log2((gn.memoryCount || 1) + 1) * 0.5, 3);
+            }
+            ctx.beginPath();
+            ctx.arc(gn.x, gn.y, hitR, 0, 2 * Math.PI);
+            ctx.fillStyle = colour;
+            ctx.fill();
+          }}
+          linkCanvasObjectMode={() => 'replace'}
+          linkCanvasObject={renderLink}
+          linkDirectionalParticles={(link) => {
+            const l = link as LinkObject<GNode, GLink>;
+            const src = typeof l.source === 'object' ? (l.source as GNode).id : String(l.source);
+            const tgt = typeof l.target === 'object' ? (l.target as GNode).id : String(l.target);
+            return particleEdges.current.has(`${src}::${tgt}`) ? 2 : 0;
+          }}
+          linkDirectionalParticleWidth={1.2}
+          linkDirectionalParticleSpeed={0.005}
+          onNodeClick={handleNodeClick}
+          onNodeDragEnd={(node) => controls.handleNodeDragEnd(node as NodeObject<GNode>)}
+          onNodeHover={handleNodeHover}
+          onBackgroundClick={handleBackgroundClick}
+          onZoom={handleZoom}
+          onRenderFramePre={onFramePre}
+          d3AlphaDecay={0.02}
+          d3VelocityDecay={0.3}
+          cooldownTicks={300}
+          warmupTicks={80}
+          nodeRelSize={1}
+          enableNodeDrag={true}
+          enableZoomInteraction={true}
+          onEngineStop={() => {
+            if (!hasInitialFit.current && graphData.nodes.length) {
+              hasInitialFit.current = true;
+              graphRef.current?.zoomToFit(reducedMotion ? 0 : 400, 80);
+            }
+          }}
+        />
+        <PulseDebugPanel driver={driver} />
+      </div>
 
       <div className="absolute bottom-3 left-0 right-0 z-10 flex items-center justify-center gap-4 text-[11px] text-[var(--sc-text-muted)]">
         <span>{totalEntities.toLocaleString()} entities</span>

@@ -54,3 +54,4 @@ ROADMAP.md
 # Benchmark machine artefacts — SCORECARD.md is committed (linked from
 # README), but the per-question report is regenerated on every run.
 benchmark/longmemeval/report.json
+.superpowers/

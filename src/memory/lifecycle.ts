@@ -74,10 +74,23 @@ export function accessMemory(
 
   const updatedMemory = getMemoryById(id)!;
 
+  // Load entity_ids so the pulse layer can highlight related graph nodes
+  // on access. Mirrors the entity_ids payload extension on memory_created.
+  const entityIds = (
+    db
+      .prepare('SELECT entity_id FROM memory_entities WHERE memory_id = ?')
+      .all(id) as { entity_id: number }[]
+  ).map((r) => r.entity_id);
+
   // Emit event for real-time dashboard (in-process)
-  emitMemoryAccessed(updatedMemory, newSalience);
+  emitMemoryAccessed(updatedMemory, newSalience, entityIds);
   // Persist event for cross-process IPC (MCP → Dashboard)
-  persistEvent('memory_accessed', { memoryId: id, memory: updatedMemory, newSalience });
+  persistEvent('memory_accessed', {
+    memoryId: id,
+    memory: updatedMemory,
+    newSalience,
+    entity_ids: entityIds,
+  });
 
   // ORGANIC FEATURE: Link strengthening on co-access
   // If memory A and B are both accessed within 5 minutes, strengthen their link
