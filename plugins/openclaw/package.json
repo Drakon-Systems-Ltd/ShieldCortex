@@ -30,7 +30,7 @@
     "pack:verify": "npm pack --dry-run"
   },
   "peerDependencies": {
-    "shieldcortex": "^4.18.5",
+    "shieldcortex": "^4.19.0",
     "openclaw": ">=2026.3.22"
   },
   "peerDependenciesMeta": {
