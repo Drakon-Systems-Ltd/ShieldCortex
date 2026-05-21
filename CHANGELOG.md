@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.19.0] - 2026-05-21
+
+**Living Constellation: the knowledge graph now feels alive.**
+
+The dashboard graph used to be a static cluster of dots. Five things were missing — there was no centre, no sense of flow, no visible link between memory activity and what you saw, no glow on the connections, and the controls fought you. This release rebuilds the renderer around those gaps. A high-mass entity is pinned at the canvas centre as a "sun" you can click to re-orbit; every node breathes subtly so the graph never freezes; `memory.created` emits a short spike on the affected entities, `memory.accessed` paints a warm recall ring; the hottest few edges show drifting particles to make the data flow legible; links draw as additive-blended gradient strokes that bloom where they overlap. Drag-release pins a node where you drop it (shift-click unpins, double-click empty space refits). A Settings → Graph Motion selector lets you pick Subtle / Moderate / Strong without reload, and `prefers-reduced-motion` short-circuits the lot.
+
+The 527-line `ConstellationGraph.tsx` monolith is now a ~150-line wirer composing seven small modules under `dashboard/src/components/graph/constellation/`, each independently unit-tested (40 jest cases). Cluster nebula rendering — two-layer halo, golden-angle star scatter, hover dashed ring, type label — is preserved verbatim inside the wirer so cluster mode looks unchanged.
+
+### Added
+
+- **`PulseDriver` energy model** (`dashboard/src/components/graph/constellation/pulse.ts`) — three composable layers: A (memory-created spike, `decayCreate`), B (memory-accessed warm glow, `decayRecall`), C (always-on sinusoidal breathing). Per-node breathing phase is derived from a stable FNV-1a hash so the same id always lands in the same phase. `pickParticleEdges(links, anchorId, overrideCap?)` ranks edges by `max(srcEnergy, dstEnergy)` with anchor-adjacency as the tie-break.
+- **Anchor selection + pin** (`anchor.ts`) — `pickAnchor` ranks by `memoryCount × edgeCount` with a `memoryCount`-only fallback for lone or all-isolated graphs; `applyAnchor<T extends PinnableNode>` pins the new sun at `(0, 0)` and releases the previous one without touching user drag-pins.
+- **Pure render math** (`renderMath.ts`) — `computeNodeRadius`, `computeLinkAlpha`, `computeLinkWidth`. Unit-tested without any canvas.
+- **Canvas drawers** — `renderNodes.ts` (entity + anchor sun + recall ring + breathing modulation, exposes `_paintHook` for future RTL tests) and `renderLinks.ts` (gradient stroke with `globalCompositeOperation = 'lighter'`).
+- **Controls** (`controls.ts`) — `wireControls(graphRef, opts)` exposes `handleNodeDragEnd` (drag-to-pin), `handleNodeClick` (single/double/shift-click verdicts), `handleBackgroundDoubleClick` (reset + zoom-to-fit). 300ms synthesised double-click on nodes triggers a smooth zoom.
+- **`useGraphPulse(driver)` hook** (`dashboard/src/hooks/useGraphPulse.ts`) — subscribes the driver to `/ws/events` and dispatches `memory.created` / `memory.accessed` pulses, with `GET /api/memories?mode=recent&limit=50` polling at 10s as the fallback when WS closes or errors.
+- **Settings → Graph Motion selector** — 3-radio Subtle / Moderate / Strong, per-browser via `localStorage`, broadcasts a `shieldcortex:intensity-changed` CustomEvent so the live graph updates without reload.
+- **`prefers-reduced-motion` support** — when the OS-level setting is on, breathing stops, particles disappear (`particleCap: 0`), spike/recall decays vanish in one frame, and zoom tweens become instant.
+- **Dev-only pulse debug panel** — `localStorage.SHIELDCORTEX_DEBUG_PULSE = '1'` reveals a small overlay that fires `memory.created` / `memory.accessed` against an entity id for manual testing.
+
+### Changed
+
+- **`addMemory` reorder + payload extension** (`src/memory/store.ts`) — entity extraction now runs **before** the `memory_created` emit/persist/webhook calls so the event carries `entity_ids: number[]`. Without this, the new pulse layer's WebSocket subscriber had no way to map an event to a graph node and Layer A would silently never fire on real data. The auto-link block (`detectRelationships`) stays in its original position — it doesn't depend on entity ids.
+- **`memory_created` / `memory_accessed` event types** (`src/api/events.ts`) extended with `entity_ids: number[]`. `emitMemoryCreated` and `emitMemoryAccessed` helper signatures take the new arg.
+- **`GET /api/memories`** (`src/api/routes/memories.ts`) now returns `entity_ids: number[]` per row. Implemented as a single batched `IN (?, ?, …)` query — no N+1.
+
+### Fixed
+
+- **Native d3-force unpin via cast** — `react-force-graph-2d`'s `NodeObject<X>` declares `fx?: number` (no null), so the d3-canonical "set fx/fy to null to release" assignment was rejected by tsc. Cast at the assignment site preserves the runtime contract.
+- **Latent `.js` extension resolution** in three constellation modules — `from './renderMath.js'` etc. compiled under tsc and ran under Jest but Next.js Turbopack resolved the literals and 500'd at runtime. Dropped to extensionless imports so all three resolvers agree.
+
+### Tests
+
+- 40 new jest cases across `intensity.test.ts` (9), `anchor.test.ts` (11), `pulse.test.ts` (12), `renderMath.test.ts` (8). One new `src/__tests__/memory-event-entity-ids.test.ts` locks the `addMemory` reorder by asserting the emitted event carries the extracted entity ids and the `memory_entities` table is populated at emit time.
+- Full repo suite: **1184 passing + 2 skipped + 1 pre-existing flake** (`mcp-registration` teardown bug unchanged from prior releases). Zero regressions.
+- Dashboard `npx tsc --noEmit`: silent. `npm run lint`: 0 errors. `npm run build`: all 22 routes prerendered.
+
+### Architecture notes
+
+- The wirer keeps cluster paint (nebula halo, golden-angle star scatter, hover dashed ring, type label + entity count) inline rather than moving it into a new `renderClusters.ts` module. The spec's intent was preservation, and the cluster branch is naturally distinct from the entity branch — splitting it later remains an option.
+- `controls.ts`'s `centerAt`/`zoom` smooth tweens on node double-click are not yet gated on `prefers-reduced-motion`; only the wirer's `zoomToFit` calls are. Small follow-up if reduced-motion users notice.
+
 ## [4.18.5] - 2026-05-18
 
 **Modern Node support — no more cryptic native-module crash on Node 23/24/25/26.**
