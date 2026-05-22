@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.19.1] - 2026-05-22
+
+**Doctor: stop crying wolf about the expected `shieldcortex` peer-dep in OpenClaw's plugin tree.**
+
+Since v4.18.3 the bare `shieldcortex` package landing at `~/.openclaw/npm/node_modules/shieldcortex` is the *expected* steady state of a healthy install — OpenClaw resolves `@drakon-systems/shieldcortex-realtime`'s `peerDependencies.shieldcortex` by installing the main package alongside in its npm tree. The 4.18.3 root-manifest fix made this safe (OpenClaw's discovery validates the entry, finds the root manifest, dedupes by pluginId). But `shieldcortex doctor` still reported the state as `WARN` because the check's author (correctly, at the time of v4.18.2) was being conservative — the Jarvis 2026-05-15 crash mechanism was unconfirmed. With weeks of healthy fleet evidence we can now narrow the diagnostic without losing the safety net.
+
+### Changed
+
+- **`OpenClaw plugin pkg` check downgraded from `WARN` to `INFO`** when the bare `shieldcortex` version matches the installed `@drakon-systems/shieldcortex-realtime` version AND the root `openclaw.plugin.json` exists. This is the expected post-4.18.3 architecture; reporting INFO removes the noise from healthy fleet boxes and the operator inbox without changing any behaviour.
+
+### Unchanged
+
+- `FAIL` still fires when the bare package's declared extension entry is missing on disk (the real crash-loop precursor — Jarvis 2026-05-15).
+- `WARN` still fires for genuine surprises: version mismatch between bare and realtime, missing realtime peer (bare is misplaced), missing root manifest (the 4.18.3 architecture is not in place), unparseable package.json.
+- `PASS` still fires on installs where no bare `shieldcortex` is present at all.
+
+### Tests
+
+- 4 new cases (one INFO, three WARN edge cases) covering version mismatch, missing realtime peer, missing root manifest. Existing 5 cases preserved. Full suite green (1188 passing; the unrelated `mcp-registration` flake is unchanged).
+
 ## [4.19.0] - 2026-05-21
 
 **Living Constellation: the knowledge graph now feels alive.**

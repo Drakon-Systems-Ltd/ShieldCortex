@@ -842,16 +842,61 @@ export async function checkOpenClawPluginPackage(
     }
   }
 
+  // Expected peer-dep state (since v4.18.3): OpenClaw resolves the realtime
+  // plugin's `peerDependencies.shieldcortex` by installing the main package
+  // alongside in its npm tree. The 4.18.3 root-manifest fix made this safe
+  // (OpenClaw's discovery validates the entry → finds the root manifest →
+  // dedupes by pluginId with the dedicated realtime plugin). Recognising this
+  // state and reporting INFO instead of WARN removes the noise from healthy
+  // fleet boxes. WARN/FAIL still fire for the actual surprises below.
+  const bareVersion = readPkgVersion(barePkgJson);
+  const realtimeVersion = readPkgVersion(
+    path.join(npmModulesDir, '@drakon-systems', 'shieldcortex-realtime', 'package.json'),
+  );
+  const rootManifestPresent = fs.existsSync(path.join(barePkgDir, 'openclaw.plugin.json'));
+  if (
+    bareVersion !== null &&
+    realtimeVersion !== null &&
+    bareVersion === realtimeVersion &&
+    rootManifestPresent
+  ) {
+    return {
+      label,
+      status: 'info',
+      message:
+        `bare \`shieldcortex@${bareVersion}\` is the expected peer-dep of ` +
+        `@drakon-systems/shieldcortex-realtime@${realtimeVersion}; root manifest present ` +
+        `(post-4.18.3 architecture — OpenClaw dedupes by pluginId)`,
+    };
+  }
+
+  const mismatched =
+    bareVersion !== null &&
+    realtimeVersion !== null &&
+    bareVersion !== realtimeVersion;
   return {
     label,
     status: 'warn',
-    message:
-      'bare `shieldcortex` present in OpenClaw plugin dir — this is not the supported plugin ' +
-      'and OpenClaw will auto-discover it; the supported package is @drakon-systems/shieldcortex-realtime',
+    message: mismatched
+      ? `bare \`shieldcortex@${bareVersion}\` in OpenClaw plugin dir does not match ` +
+        `@drakon-systems/shieldcortex-realtime@${realtimeVersion} — version mismatch on the ` +
+        `realtime plugin's peer dep`
+      : 'bare `shieldcortex` present in OpenClaw plugin dir — this is not the supported plugin ' +
+        'and OpenClaw will auto-discover it; the supported package is @drakon-systems/shieldcortex-realtime',
     fix:
       `Remove ${barePkgDir.replace(os.homedir(), '~')} (the dedicated realtime plugin handles ` +
       `OpenClaw integration; the bare main package should not live here)`,
   };
+}
+
+/** Read a package's `version` field; returns null on any failure. */
+function readPkgVersion(pkgJson: string): string | null {
+  try {
+    const v = (JSON.parse(fs.readFileSync(pkgJson, 'utf-8')) as { version?: unknown }).version;
+    return typeof v === 'string' ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 // ── Check 9: Auto-memory sampling rate (#44) ──────────────
