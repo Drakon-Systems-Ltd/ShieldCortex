@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.20.0] - 2026-05-22
+
+**Stop the OpenClaw `duplicate plugin id detected` warning at its source — the main `shieldcortex` package no longer declares `openclaw.extensions`.**
+
+OpenClaw's npm discovery is gated on a package having `openclaw.extensions` in its `package.json`. Pre-v4.20.0 both the main package AND the dedicated `@drakon-systems/shieldcortex-realtime` plugin declared one, so OpenClaw scanned both copies (the bare main package gets pulled in alongside as the realtime plugin's `peerDependencies.shieldcortex`), registered both under `pluginId: shieldcortex-realtime`, deduplicated, and emitted a `duplicate plugin id detected; global plugin will be overridden by global plugin` warning on every `openclaw update`. Functionally fine (the right `dist/index.js` always won) but cosmetic noise on every fleet box.
+
+This release drops `openclaw.extensions` from the main package's `package.json`. The bare `shieldcortex` is now invisible to OpenClaw's npm discovery — no duplicate registration, no warning. The dedicated realtime plugin remains the only discovery target.
+
+### Changed
+
+- **`openclaw.extensions` removed from the main `package.json`.** The main package keeps `openclaw.hooks` (still load-bearing for the documented `openclaw hooks install` flow per memory `project_openclaw_main_pkg_crashloop`).
+- **Packaging test inverted** (`src/__tests__/openclaw-root-manifest-packaging.test.ts`) to assert the new contract: main package does NOT declare `openclaw.extensions`; root `openclaw.plugin.json` is kept as a defensive shim for one release.
+- **Plugin README clarified** (`plugins/openclaw/README.md`) — the "Packaging note for OpenClaw discovery" section now documents the v4.20.0 contract and the history (v4.18.2 incident → v4.18.3 manifest fix → v4.20.0 structural fix).
+
+### Unchanged
+
+- `doctor` check `OpenClaw plugin pkg` keeps its full WARN / FAIL / INFO matrix — older fleet boxes whose realtime peer-dep still drags in pre-v4.20.0 `shieldcortex` will continue to be diagnosed correctly. After upgrading to v4.20.0 fleet-wide, the bare copy has no `openclaw.extensions` for the check to consider — it returns INFO (expected peer-dep) just like before.
+- `openclaw hooks install` flow still works (relies on `openclaw.hooks`, not `extensions`).
+- The dedicated `@drakon-systems/shieldcortex-realtime` plugin's own `openclaw.extensions` is untouched — that's the legitimate plugin declaration.
+
+### Tests
+
+- Packaging contract test rewritten (3 assertions: extensions absent, hooks present, root manifest shim retained). Doctor synthetic-fixture suite (9 cases) preserved verbatim. Full suite green at the established baseline (one unrelated `mcp-registration` flake that has been there for weeks).
+
 ## [4.19.1] - 2026-05-22
 
 **Doctor: stop crying wolf about the expected `shieldcortex` peer-dep in OpenClaw's plugin tree.**

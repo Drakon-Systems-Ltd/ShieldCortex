@@ -5,40 +5,40 @@ import { fileURLToPath } from 'url';
 import { beforeAll, describe, expect, it } from '@jest/globals';
 
 /**
- * Regression guard for the v4.18.2 OpenClaw packaging bug (Jarvis,
- * 2026-05-16). After `openclaw update` pulled `shieldcortex@4.18.2`,
- * OpenClaw config validation failed with:
+ * Regression guard for the v4.20.0 packaging change: the *main* `shieldcortex`
+ * package no longer declares `openclaw.extensions`.
+ *
+ * Background. In v4.18.2 `openclaw update` failed config validation with:
  *
  *   plugins: plugin manifest not found:
  *   /home/ubuntu/.openclaw/npm/node_modules/shieldcortex/openclaw.plugin.json
  *
- * Root cause: the *main* `shieldcortex` package.json carries an
- * `openclaw.extensions` entry, so OpenClaw's npm auto-discovery treats the
- * bare package as a plugin and looks for a *root* `openclaw.plugin.json`.
- * The package only shipped the manifest at
- * `plugins/openclaw/dist/openclaw.plugin.json`, never at the package root,
- * so discovery failed and the gateway refused the config.
+ * Root cause: the main package.json carried `openclaw.extensions`, so
+ * OpenClaw's npm discovery walked the bare package as if it were a plugin
+ * and looked for a root manifest. The v4.18.2 fix added a root manifest;
+ * v4.20.0 takes the structural fix one step further by removing the
+ * extensions declaration from the main package altogether. OpenClaw's
+ * discovery is gated on `openclaw.extensions` being present, so without it
+ * the bare `shieldcortex` is invisible to discovery — no duplicate-plugin-id
+ * warning, no manifest dependency, no race against the dedicated
+ * `@drakon-systems/shieldcortex-realtime` plugin.
  *
- * The robust fix is a package-layout fix: the bare `shieldcortex` tarball
- * must carry a root `openclaw.plugin.json`, kept byte-identical to the
- * canonical `plugins/openclaw/openclaw.plugin.json`, and the declared
- * `openclaw.extensions[0]` must be resolvable from the package root within
- * the published files.
+ * The defensive root `openclaw.plugin.json` is kept for one release in case
+ * any fleet box still has cached discovery state from an older OpenClaw
+ * version; it can be removed in a follow-up once that's confirmed clear.
  */
-describe('shieldcortex bare-package OpenClaw root manifest', () => {
+describe('shieldcortex bare-package OpenClaw discovery contract (post-v4.20.0)', () => {
   const thisFile = fileURLToPath(import.meta.url);
   const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
 
   const rootPkg = JSON.parse(
     fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8'),
-  ) as { version: string; files: string[]; openclaw?: { extensions?: string[] } };
+  ) as {
+    version: string;
+    files: string[];
+    openclaw?: { hooks?: unknown; extensions?: unknown };
+  };
 
-  const canonicalManifestPath = path.join(
-    repoRoot,
-    'plugins',
-    'openclaw',
-    'openclaw.plugin.json',
-  );
   const rootManifestPath = path.join(repoRoot, 'openclaw.plugin.json');
 
   let packedFiles: string[];
@@ -53,34 +53,18 @@ describe('shieldcortex bare-package OpenClaw root manifest', () => {
     packedFiles = meta[0].files.map((f) => f.path.replace(/\\/g, '/'));
   }, 60000);
 
-  it('declares openclaw.plugin.json in the package files allow-list', () => {
+  it('does NOT declare openclaw.extensions on the main package (this is the v4.20.0 contract)', () => {
+    expect(rootPkg.openclaw?.extensions).toBeUndefined();
+  });
+
+  it('still declares openclaw.hooks for the documented `openclaw hooks install` flow', () => {
+    expect(Array.isArray(rootPkg.openclaw?.hooks)).toBe(true);
+    expect((rootPkg.openclaw?.hooks as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it('keeps the defensive root openclaw.plugin.json in the package files allow-list (one-release shim)', () => {
     expect(rootPkg.files).toContain('openclaw.plugin.json');
-  });
-
-  it('ships a root openclaw.plugin.json in the published bare package', () => {
     expect(packedFiles).toContain('openclaw.plugin.json');
-  });
-
-  it('keeps the root manifest byte-identical to the canonical plugin manifest', () => {
     expect(fs.existsSync(rootManifestPath)).toBe(true);
-    const root = fs.readFileSync(rootManifestPath, 'utf-8');
-    const canonical = fs.readFileSync(canonicalManifestPath, 'utf-8');
-    expect(root).toBe(canonical);
-  });
-
-  it('root manifest is a valid OpenClaw manifest matching the package version', () => {
-    const manifest = JSON.parse(fs.readFileSync(rootManifestPath, 'utf-8')) as {
-      id: string;
-      version: string;
-    };
-    expect(manifest.id).toBe('shieldcortex-realtime');
-    expect(manifest.version).toBe(rootPkg.version);
-  });
-
-  it('declared openclaw.extensions[0] is resolvable from the published package root', () => {
-    const ext = rootPkg.openclaw?.extensions?.[0];
-    expect(typeof ext).toBe('string');
-    const rel = (ext as string).replace(/^\.\//, '');
-    expect(packedFiles).toContain(rel);
   });
 });

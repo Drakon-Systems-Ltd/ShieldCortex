@@ -12,7 +12,11 @@ OpenClaw is declared as an **optional** peer dependency, so installs on older Op
 
 ### Packaging note for OpenClaw discovery
 
-The main `shieldcortex` package and the dedicated `@drakon-systems/shieldcortex-realtime` plugin both expose OpenClaw metadata. From `4.18.3`, the main package also ships a root `openclaw.plugin.json` matching the canonical plugin manifest. This is intentional: OpenClaw's npm discovery validates packages with a `package.json.openclaw.extensions` entry by looking for a root manifest. Without it, `openclaw update` can stop the gateway and then fail config validation with `plugin manifest not found`.
+Only the dedicated `@drakon-systems/shieldcortex-realtime` plugin declares OpenClaw plugin metadata (`openclaw.extensions` + a root `openclaw.plugin.json`). The main `shieldcortex` package keeps an `openclaw.hooks` entry — needed for the documented `openclaw hooks install` flow — but **as of v4.20.0 it no longer declares `openclaw.extensions`** so OpenClaw's npm discovery cannot mistake the bare main package for a plugin.
+
+Why this matters. The realtime plugin's `peerDependencies.shieldcortex` causes OpenClaw to install the main package alongside in its own npm tree (`~/.openclaw/npm/node_modules/shieldcortex`). With the old contract (pre-v4.20.0) OpenClaw scanned that bare copy, found `openclaw.extensions`, registered it as a duplicate of this plugin, and emitted `duplicate plugin id detected; global plugin will be overridden by global plugin`. Functionally it dedupes — the right `dist/index.js` always wins — but the warning was noise. Removing `openclaw.extensions` from the main package makes the bare copy invisible to discovery; the warning goes away and the dedicated plugin remains the only registration target.
+
+The defensive root `openclaw.plugin.json` is kept for one release on the main package as a shim against OpenClaw versions that might still consult it; it can be removed in a follow-up once that's confirmed clear. History: the v4.18.2 incident (Jarvis, 2026-05-16) was `plugin manifest not found` because the package declared `openclaw.extensions` *without* a root manifest. v4.18.3 added the manifest; v4.20.0 removes the declaration that required it in the first place.
 
 ### Known limitations under OpenClaw 2026.4.23
 

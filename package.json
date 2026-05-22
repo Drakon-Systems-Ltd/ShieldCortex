@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "4.19.1",
+  "version": "4.20.0",
   "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -101,9 +101,6 @@
   "openclaw": {
     "hooks": [
       "./hooks/openclaw/cortex-memory"
-    ],
-    "extensions": [
-      "./plugins/openclaw/dist/index.js"
     ]
   },
   "homepage": "https://github.com/Drakon-Systems-Ltd/ShieldCortex#readme",
