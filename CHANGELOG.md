@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.21.0] - 2026-05-24
+
+**Stop the doctor crying wolf about peer-range version skew on healthy fleet boxes.**
+
+Since v4.18.3 the bare `shieldcortex` sitting at `~/.openclaw/npm/node_modules/shieldcortex` has been the *expected* steady state — OpenClaw's managed-peer-deps installer drops it there to satisfy `@drakon-systems/shieldcortex-realtime`'s `peerDependencies.shieldcortex`. v4.19.1 taught the doctor to recognise that state and report INFO instead of WARN, but only when the bare version *exactly equalled* the realtime plugin version. In practice OpenClaw never refreshes the bare copy when realtime upgrades, so every box where realtime moved forward (4.18.4 → 4.18.5 → 4.19.x → 4.20.0) still got WARN even though the install was functionally healthy. `rm`-ing the bare copy doesn't stick either — the next peer-resolution pass restores the same stale version from the npm cache.
+
+This release fixes the noise at two points: (1) doctor uses `semver.satisfies()` against realtime's declared peer range instead of strict equality, and (2) the plugin's `peerDependencies.shieldcortex` widens from `^4.20.0` to `>=4.18.3 <5.0.0` (v4.18.3 is the architectural floor — the root-manifest packaging fix lands there). Together: after upgrading to v4.21.0 fleet-wide, any bare `shieldcortex` at v4.18.3+ reports INFO. Future patch/minor bumps of the main package no longer auto-create new fleet WARNs.
+
+### Changed
+
+- **`OpenClaw plugin pkg` doctor check uses `semver.satisfies()`.** When the bare version satisfies realtime's `peerDependencies.shieldcortex` range AND the root `openclaw.plugin.json` exists → INFO with a message that includes the actual peer range. Defensive fallback: when realtime's peer range is unreadable (corrupt or missing field), fall back to the v4.19.1 strict-equality behaviour.
+- **Realtime peer range widened**: `@drakon-systems/shieldcortex-realtime`'s `peerDependencies.shieldcortex` changes from `"^4.20.0"` to `">=4.18.3 <5.0.0"`. v4.18.3 is the architectural floor; the ceiling is the next major (revisited deliberately if/when a breaking change ships).
+- **Out-of-range fix message refined.** Doctor now suggests `openclaw plugins update @drakon-systems/shieldcortex-realtime` (which actually refreshes the peer) rather than `rm` (which doesn't stick — peer-resolution restores the same version from cache).
+- **`semver` is now a declared direct dependency** (`^7.7.0`). Was previously transitively loadable; making it explicit removes the fragility of relying on indirect resolution.
+
+### Unchanged
+
+- `FAIL` still fires for the v4.18.2-class crash precursor (bare shieldcortex's declared extension entry missing on disk).
+- `WARN` still fires for genuine surprises: bare present without realtime sibling, bare present without root manifest, unparseable bare `package.json`.
+- `PASS` still fires on installs where no bare `shieldcortex` is present at all.
+- All other doctor checks (database, schema, hooks, brain worker, project keys, embeddings, etc.) untouched.
+
+### Tests
+
+- Test fixture helper `writeRealtime` now writes a `peerDependencies.shieldcortex` field (defaults to `'^' + version` — preserves existing test semantics).
+- Two existing cases retightened: INFO for in-range bare versions (asserts new `satisfies` + `peer range` wording); WARN for out-of-range mismatch (asserts the refreshed `openclaw plugins update` fix message).
+- Three new cases: in-range-but-not-equal → INFO (the headline v4.21.0 behaviour), defensive fallback when realtime has no peer range, out-of-range fix-message wording.
+- Full suite at the established baseline (the `mcp-registration` flake unchanged).
+
 ## [4.20.0] - 2026-05-22
 
 **Stop the OpenClaw `duplicate plugin id detected` warning at its source — the main `shieldcortex` package no longer declares `openclaw.extensions`.**
