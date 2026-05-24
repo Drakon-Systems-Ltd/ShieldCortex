@@ -84,17 +84,18 @@ describe('doctor — OpenClaw plugin package placement', () => {
     expect(r.status).toBe('warn');
   });
 
-  // ── Expected peer-dep state — INFO, not WARN ───────────────────────
-  // Since v4.18.3 the bare `shieldcortex` is the *expected* steady state of
-  // a healthy install: OpenClaw resolves `@drakon-systems/shieldcortex-realtime`'s
-  // `peerDependencies.shieldcortex` by installing the main package alongside.
-  // The 4.18.3 root-manifest fix made this safe. The doctor's WARN here was
-  // conservative noise that drowned in operator inboxes — fleet-wide healthy
-  // installs report WARN despite being functionally correct.
+  // ── v4.21.2 visibility-first contract ──────────────────────────────
+  // OpenClaw discovers bare packages via TWO independent vectors:
+  // (1) `openclaw.extensions` in package.json (closed in v4.20.0)
+  // (2) Root `openclaw.plugin.json` file (closed in v4.21.1)
   //
-  // Recognise the expected state and downgrade to INFO; keep WARN/FAIL for
-  // actual anomalies (missing peer sibling, missing root manifest, version
-  // mismatch — all genuine surprises that justify operator attention).
+  // A v4.21.1+ bare has neither — fully invisible to OpenClaw discovery,
+  // duplicate-plugin-id warning cannot fire. INFO.
+  //
+  // If EITHER vector is present, OpenClaw will register the bare under
+  // `pluginId: shieldcortex-realtime` (colliding with the dedicated plugin)
+  // and emit `duplicate plugin id detected` on every session. Version
+  // alignment does NOT help — both copies share the same pluginId. WARN.
 
   function writeBare(version: string): string {
     const pkgDir = writePkg('shieldcortex', {
@@ -106,6 +107,16 @@ describe('doctor — OpenClaw plugin package placement', () => {
     fs.mkdirSync(ext, { recursive: true });
     fs.writeFileSync(path.join(ext, 'index.js'), '// stub', 'utf-8');
     return pkgDir;
+  }
+
+  function writeBareNoVectors(version: string): string {
+    // v4.21.1+ shape: package.json has NO `openclaw.extensions` field, NO
+    // root `openclaw.plugin.json`. Fully invisible to OpenClaw discovery.
+    return writePkg('shieldcortex', {
+      name: 'shieldcortex',
+      version,
+      // intentionally no openclaw.extensions
+    });
   }
 
   function writeRealtime(version: string, peerRange: string = '^' + version): void {
@@ -124,70 +135,100 @@ describe('doctor — OpenClaw plugin package placement', () => {
     );
   }
 
-  it('INFOs when bare version satisfies realtime peer range and root manifest is present (the expected peer-dep state)', async () => {
-    const barePkgDir = writeBare('4.19.0');
-    writeRealtime('4.19.0');
-    writeRootManifest(barePkgDir);
+  it('INFOs when bare has neither discovery vector (v4.21.1+ steady state)', async () => {
+    writeBareNoVectors('4.21.1');
+    writeRealtime('4.21.1', '>=4.18.3 <5.0.0');
+    // intentionally NO root manifest — v4.21.1+ ships without one
     const r = await checkOpenClawPluginPackage(npmDir);
     expect(r.status).toBe('info');
-    expect(r.message).toMatch(/satisfies/);
-    expect(r.message).toMatch(/peer range/);
-    expect(r.message).toMatch(/@drakon-systems\/shieldcortex-realtime/);
-    expect(r.message).toContain('4.19.0');
+    expect(r.message).toMatch(/invisible to OpenClaw discovery/);
+    expect(r.message).toContain('4.21.1');
     expect(r.fix).toBeUndefined();
   });
 
-  it('INFOs when bare is older than realtime but still satisfies realtime peer range (post-v4.21 noise reduction)', async () => {
-    const barePkgDir = writeBare('4.18.3');
-    writeRealtime('4.21.0', '>=4.18.3 <5.0.0');
-    writeRootManifest(barePkgDir);
+  it('INFOs when bare has no vectors and realtime sibling is absent (harmless leftover)', async () => {
+    writeBareNoVectors('4.21.1');
+    // no realtime — but bare can't be discovered, so it's still harmless
     const r = await checkOpenClawPluginPackage(npmDir);
     expect(r.status).toBe('info');
-    expect(r.message).toMatch(/satisfies/);
-    expect(r.message).toContain('4.18.3');
-    expect(r.message).toContain('4.21.0');
-    expect(r.fix).toBeUndefined();
+    expect(r.message).toMatch(/invisible to OpenClaw discovery/);
+    expect(r.message).toMatch(/harmless leftover|safe to remove/);
   });
 
-  it('falls back to strict-equality INFO when realtime package.json has no peer range (defensive)', async () => {
-    const barePkgDir = writeBare('4.19.0');
-    writePkg('@drakon-systems/shieldcortex-realtime', {
-      name: '@drakon-systems/shieldcortex-realtime',
-      version: '4.19.0',
-      // no peerDependencies field
-    });
-    writeRootManifest(barePkgDir);
+  it('INFOs (with note) when bare has no vectors but peer range is not satisfied', async () => {
+    writeBareNoVectors('4.17.0');
+    writeRealtime('4.21.1', '>=4.18.3 <5.0.0');
     const r = await checkOpenClawPluginPackage(npmDir);
     expect(r.status).toBe('info');
-    expect(r.message).toMatch(/expected peer-dep/);
-  });
-
-  it('WARNs and suggests `openclaw plugins update` (not rm) when bare is out-of-range — rm does not stick', async () => {
-    const barePkgDir = writeBare('4.18.3');
-    writeRealtime('4.19.0', '^4.19.0');
-    writeRootManifest(barePkgDir);
-    const r = await checkOpenClawPluginPackage(npmDir);
-    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/invisible to OpenClaw discovery/);
     expect(r.message).toMatch(/does not satisfy/);
-    expect(r.message).toContain('4.18.3');
-    expect(r.message).toContain('4.19.0');
-    expect(r.fix).toMatch(/openclaw plugins update/);
-    expect(r.fix).toMatch(/peer-resolution restores/);
+    expect(r.message).toContain('4.17.0');
   });
 
-  it('still WARNs when the realtime peer is absent (bare is genuinely misplaced)', async () => {
+  it('WARNs when bare carries both legacy discovery vectors (pre-v4.20.0 shape)', async () => {
     const barePkgDir = writeBare('4.19.0');
-    // no realtime sibling
+    writeRealtime('4.21.1', '>=4.18.3 <5.0.0');
     writeRootManifest(barePkgDir);
     const r = await checkOpenClawPluginPackage(npmDir);
     expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/discoverable by OpenClaw/);
+    expect(r.message).toMatch(/openclaw\.extensions/);
+    expect(r.message).toMatch(/root .*openclaw\.plugin\.json/);
+    expect(r.message).toMatch(/duplicate plugin id/);
+    expect(r.fix).toMatch(/v4\.21\.1 or later/);
+    expect(r.fix).toMatch(/npm install shieldcortex@latest/);
   });
 
-  it('still WARNs when root openclaw.plugin.json is missing (the 4.18.3 architecture is not in place)', async () => {
-    writeBare('4.19.0');
-    writeRealtime('4.19.0');
-    // no root openclaw.plugin.json — without it the auto-discovery path is unsafe
+  it('WARNs when bare has only the root-manifest vector (v4.20.0..v4.21.0 shape)', async () => {
+    const barePkgDir = writeBareNoVectors('4.20.0');
+    writeRealtime('4.21.1', '>=4.18.3 <5.0.0');
+    writeRootManifest(barePkgDir);
     const r = await checkOpenClawPluginPackage(npmDir);
     expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/discoverable by OpenClaw/);
+    expect(r.message).toMatch(/root .*openclaw\.plugin\.json/);
+    // extensions vector NOT in the message — only the manifest one
+    expect(r.message).not.toMatch(/openclaw\.extensions.*declared/);
+  });
+
+  it('WARNs when bare has only the extensions vector (modified package, edge case)', async () => {
+    const barePkgDir = writeBare('4.19.0');
+    writeRealtime('4.21.1', '>=4.18.3 <5.0.0');
+    // intentionally no root manifest
+    const r = await checkOpenClawPluginPackage(npmDir);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/discoverable by OpenClaw/);
+    expect(r.message).toMatch(/openclaw\.extensions/);
+    expect(r.message).not.toMatch(/root .*openclaw\.plugin\.json/);
+    expect(barePkgDir).toBeTruthy();
+  });
+
+  it('WARNs when bare is discoverable and the realtime sibling is absent (the misplaced-bare case)', async () => {
+    const barePkgDir = writeBare('4.19.0');
+    writeRootManifest(barePkgDir);
+    // no realtime
+    const r = await checkOpenClawPluginPackage(npmDir);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/active discovery vector/);
+    expect(r.message).toMatch(/@drakon-systems\/shieldcortex-realtime/);
+    expect(r.fix).toMatch(/Remove/);
+  });
+
+  it('reports peer-range satisfaction in the WARN message when applicable', async () => {
+    const barePkgDir = writeBare('4.18.3');
+    writeRealtime('4.21.1', '>=4.18.3 <5.0.0');
+    writeRootManifest(barePkgDir);
+    const r = await checkOpenClawPluginPackage(npmDir);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/peer range.*satisfied/);
+  });
+
+  it('reports peer-range NOT-satisfied in the WARN message when out-of-range', async () => {
+    const barePkgDir = writeBare('4.17.0');
+    writeRealtime('4.21.1', '>=4.18.3 <5.0.0');
+    writeRootManifest(barePkgDir);
+    const r = await checkOpenClawPluginPackage(npmDir);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/peer range.*NOT satisfied/);
   });
 });

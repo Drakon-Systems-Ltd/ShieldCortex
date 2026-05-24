@@ -843,15 +843,20 @@ export async function checkOpenClawPluginPackage(
     }
   }
 
-  // Expected peer-dep state: OpenClaw's managed-peer-deps installer drops a
-  // bare `shieldcortex` here to satisfy the realtime plugin's
-  // peerDependencies.shieldcortex. Since v4.18.3 (root-manifest fix) and
-  // v4.20.0 (extensions removed), this copy is a passive peer-dep artifact —
-  // it cannot be discovered as a plugin and cannot cause the crash-loop.
+  // Visibility-first model (v4.21.2+): OpenClaw discovers bare packages via
+  // TWO independent vectors — `openclaw.extensions` in package.json AND a
+  // root `openclaw.plugin.json`. If EITHER is present, OpenClaw registers
+  // the bare copy under `pluginId: shieldcortex-realtime` — same id as the
+  // dedicated `@drakon-systems/shieldcortex-realtime` plugin — and emits
+  // `duplicate plugin id detected; global plugin will be overridden by
+  // global plugin` on every session. v4.21.1 closed the second vector by
+  // dropping the root manifest from the bare tarball; v4.20.0 closed the
+  // first by dropping `openclaw.extensions`. A v4.21.1+ bare copy has
+  // neither vector — it's fully invisible to discovery.
   //
-  // INFO when the bare version satisfies realtime's declared peer range
-  // (in-range, even if not strictly equal). WARN only on genuine surprises:
-  // out-of-range peer, missing root manifest, missing realtime sibling.
+  // INFO when the bare is invisible (no discovery vectors). WARN when any
+  // vector is present and OpenClaw will register a duplicate — version
+  // alignment doesn't help (both copies share the pluginId regardless).
   const bareVersion = readPkgVersion(barePkgJson);
   const realtimePkgJson = path.join(
     npmModulesDir,
@@ -862,63 +867,79 @@ export async function checkOpenClawPluginPackage(
   const realtimeVersion = readPkgVersion(realtimePkgJson);
   const realtimePeerRange = readShieldcortexPeerRange(realtimePkgJson);
   const rootManifestPresent = fs.existsSync(path.join(barePkgDir, 'openclaw.plugin.json'));
+  const bareDiscoverable = extEntry !== null || rootManifestPresent;
 
   const inRange =
     bareVersion !== null &&
     realtimePeerRange !== null &&
     semver.satisfies(bareVersion, realtimePeerRange);
 
-  if (inRange && rootManifestPresent && realtimeVersion !== null) {
+  if (!bareDiscoverable) {
+    // Post-v4.21.1 architecture: bare exists but has zero discovery vectors.
+    // OpenClaw cannot see it; the duplicate-plugin-id warning cannot fire.
+    if (realtimeVersion !== null) {
+      const rangeNote = realtimePeerRange ? ` (range ${realtimePeerRange})` : '';
+      const peerNote = inRange
+        ? ''
+        : ` — note: bare version does not satisfy realtime's peer range, but ` +
+          `realtime imports resolve to this copy so behaviour may differ from intent`;
+      return {
+        label,
+        status: 'info',
+        message:
+          `bare \`shieldcortex@${bareVersion ?? '?'}\` invisible to OpenClaw discovery ` +
+          `(no \`openclaw.extensions\` field, no root \`openclaw.plugin.json\`); ` +
+          `peer of @drakon-systems/shieldcortex-realtime@${realtimeVersion}${rangeNote}` +
+          peerNote,
+      };
+    }
     return {
       label,
       status: 'info',
       message:
-        `bare \`shieldcortex@${bareVersion}\` satisfies ` +
-        `@drakon-systems/shieldcortex-realtime@${realtimeVersion}'s peer range ` +
-        `(${realtimePeerRange}); root manifest present (expected peer-dep artifact)`,
+        `bare \`shieldcortex@${bareVersion ?? '?'}\` invisible to OpenClaw discovery ` +
+        `(no \`openclaw.extensions\`, no root manifest); realtime sibling not present — ` +
+        `harmless leftover, safe to remove`,
     };
   }
 
-  // Defensive fallback: if realtime is present but we couldn't read its peer
-  // range (corrupt package.json, missing field), keep the v4.19.1 behaviour —
-  // strict equality + root manifest → INFO. Prevents a doctor regression on
-  // edge installs where the peer-range read fails.
-  if (
-    realtimePeerRange === null &&
-    bareVersion !== null &&
-    realtimeVersion !== null &&
-    bareVersion === realtimeVersion &&
-    rootManifestPresent
-  ) {
+  // bareDiscoverable === true: OpenClaw will pick this up and collide with
+  // the dedicated realtime plugin. Always WARN; explain which vector(s).
+  const vectors: string[] = [];
+  if (extEntry !== null) vectors.push('`openclaw.extensions` declared in package.json');
+  if (rootManifestPresent) vectors.push('root `openclaw.plugin.json` present');
+  const vectorList = vectors.join(' and ');
+
+  if (realtimeVersion !== null) {
+    const rangeNote = realtimePeerRange
+      ? `; realtime peer range ${realtimePeerRange}` +
+        (inRange ? ' satisfied' : ' NOT satisfied')
+      : '';
     return {
       label,
-      status: 'info',
+      status: 'warn',
       message:
-        `bare \`shieldcortex@${bareVersion}\` is the expected peer-dep of ` +
-        `@drakon-systems/shieldcortex-realtime@${realtimeVersion}; root manifest present`,
+        `bare \`shieldcortex@${bareVersion ?? '?'}\` is discoverable by OpenClaw ` +
+        `(${vectorList}) — will collide with ` +
+        `@drakon-systems/shieldcortex-realtime@${realtimeVersion} on every session and ` +
+        `emit \`duplicate plugin id detected\`${rangeNote}`,
+      fix:
+        `Bump the bare copy to v4.21.1 or later — v4.21.1+ ships without any OpenClaw ` +
+        `discovery vectors: \`cd ~/.openclaw/npm && npm install shieldcortex@latest && shieldcortex doctor\``,
     };
   }
 
-  const outOfRange =
-    bareVersion !== null &&
-    realtimeVersion !== null &&
-    realtimePeerRange !== null &&
-    !inRange;
+  // Bare discoverable, no realtime sibling — the original "misplaced bare" case.
   return {
     label,
     status: 'warn',
-    message: outOfRange
-      ? `bare \`shieldcortex@${bareVersion}\` does not satisfy ` +
-        `@drakon-systems/shieldcortex-realtime@${realtimeVersion}'s peer range ` +
-        `(${realtimePeerRange}) — realtime may not load correctly`
-      : 'bare `shieldcortex` present in OpenClaw plugin dir — this is not the supported plugin ' +
-        'and OpenClaw will auto-discover it; the supported package is @drakon-systems/shieldcortex-realtime',
-    fix: outOfRange
-      ? `Update the realtime plugin to refresh the peer dep: ` +
-        `\`openclaw plugins update @drakon-systems/shieldcortex-realtime\` ` +
-        `(rm of the bare copy alone does not stick — peer-resolution restores it from cache)`
-      : `Remove ${barePkgDir.replace(os.homedir(), '~')} (the dedicated realtime plugin handles ` +
-        `OpenClaw integration; the bare main package should not live here)`,
+    message:
+      `bare \`shieldcortex@${bareVersion ?? '?'}\` present in OpenClaw plugin dir ` +
+      `with active discovery vector (${vectorList}); the supported package is ` +
+      `@drakon-systems/shieldcortex-realtime`,
+    fix:
+      `Remove ${barePkgDir.replace(os.homedir(), '~')} (the dedicated realtime plugin handles ` +
+      `OpenClaw integration; the bare main package should not live here)`,
   };
 }
 

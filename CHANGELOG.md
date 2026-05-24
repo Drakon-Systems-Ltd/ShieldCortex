@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.21.2] - 2026-05-24
+
+**Doctor catches up to the v4.21.1 packaging contract — the `OpenClaw plugin pkg` check now reports INFO on the post-v4.21.1 "no discovery vectors" state instead of misclassifying it as WARN.**
+
+v4.21.0's doctor logic was tightly coupled to the v4.18.3-era invariant that the bare `shieldcortex` always shipped a root `openclaw.plugin.json` ("rootManifestPresent && peer-range-satisfied → INFO"). v4.21.1 deliberately removed the root manifest from the bare tarball — at which point the doctor's invariant ran backwards: post-v4.21.1 healthy installs (bare invisible to OpenClaw) got reported as WARN because the manifest the doctor expected to find was no longer there. Edith caught this immediately on her box after running `npm install shieldcortex@latest`.
+
+This release replaces the manifest-required INFO branch with a visibility-first model: the bare is healthy iff OpenClaw cannot discover it — i.e. iff `package.json#openclaw.extensions` is absent AND no root `openclaw.plugin.json` exists. Either vector being present is now the WARN condition, regardless of version alignment (version alignment doesn't help — both bare and realtime register under the same `pluginId: shieldcortex-realtime`).
+
+### Changed
+
+- **`OpenClaw plugin pkg` check rewritten with a visibility-first model.** The bare is INFO when it has zero OpenClaw discovery vectors (post-v4.21.1 architecture). It is WARN when either vector is present (`openclaw.extensions` field OR root manifest), with the WARN message naming the specific vector(s) so operators can diagnose. Out-of-range peer is now a secondary annotation inside the WARN/INFO message rather than a primary status driver.
+- **WARN fix-message points at the real fix**: `cd ~/.openclaw/npm && npm install shieldcortex@latest` (which bumps the bare to v4.21.1+, removing all discovery vectors). Replaces the previous `openclaw plugins update` suggestion — that command refreshes realtime, not the bare, so it didn't actually solve the WARN.
+
+### Unchanged
+
+- `FAIL` still fires for the v4.18.2-class crash precursor (bare's declared `openclaw.extensions` entry missing on disk).
+- `PASS` still fires when no bare `shieldcortex` exists in the OpenClaw plugin tree.
+- All other doctor checks (database, schema, hooks, brain worker, project keys, embeddings, etc.) untouched.
+
+### Tests
+
+- Test suite reworked for the new contract: 9 new cases covering INFO (no-vectors steady state, no-vectors-without-realtime harmless leftover, no-vectors-but-out-of-range with note), WARN (both legacy vectors, manifest-only vector, extensions-only vector, vectors-without-realtime), and message-level assertions (peer-range satisfied/NOT-satisfied annotations). Existing top-of-file fixtures (skip / pass / FAIL on missing extension entry / WARN on unparseable / WARN with extensions+entry) preserved verbatim. **14/14 passing.**
+
+### Operator note
+
+If you upgraded to v4.21.1 and saw an unexpected `⚠️ OpenClaw plugin pkg` WARN despite the `duplicate plugin id detected` OpenClaw warning being gone, that was this bug. Upgrade to v4.21.2 (or run `npm install shieldcortex@latest`) and the doctor will report INFO correctly.
+
 ## [4.21.1] - 2026-05-24
 
 **Kill the OpenClaw `duplicate plugin id detected` warning at its real source — drop the root `openclaw.plugin.json` shim that v4.20.0 left in the published tarball as a "one-release defensive shim."**
