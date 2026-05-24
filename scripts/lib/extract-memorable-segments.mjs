@@ -128,7 +128,21 @@ function detectExplicitRequest(text) {
   return patterns.some((pattern) => pattern.test(text));
 }
 
-export function calculateSalience(text) {
+/**
+ * Compute a 0-1 salience score from keyword + structural signals.
+ *
+ * @param {string} text
+ * @param {object} [opts]
+ * @param {boolean} [opts.autoExtractMode=false] — when true, cap the result
+ *   at AUTO_EXTRACT_SALIENCE_CAP (0.6) so auto-extracted segments never
+ *   compete with explicit `remember()` calls for top-rank in recall.
+ *   v4.22.0: keyword bonuses can stack to 1.85 pre-cap, so without the cap
+ *   most auto-extracts hit the 1.0 ceiling and dominate recall with
+ *   low-signal fragments.
+ * @returns {number} salience in [0, 1] (or [0, 0.6] under autoExtractMode)
+ */
+export function calculateSalience(text, opts = {}) {
+  const { autoExtractMode = false } = opts;
   let score = 0.25;
   if (detectExplicitRequest(text)) score += 0.5;
   if (detectKeywords(text, ARCHITECTURE_KEYWORDS)) score += 0.4;
@@ -139,7 +153,8 @@ export function calculateSalience(text) {
   if (detectKeywords(text, PREFERENCE_KEYWORDS)) score += 0.25;
   if (detectCodeReferences(text)) score += 0.15;
   if (detectKeywords(text, EMOTIONAL_MARKERS)) score += 0.2;
-  return Math.min(1.0, score);
+  const ceiling = autoExtractMode ? AUTO_EXTRACT_SALIENCE_CAP : 1.0;
+  return Math.min(ceiling, score);
 }
 
 export function suggestCategory(text) {

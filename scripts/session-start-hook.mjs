@@ -23,6 +23,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
+import { truncatePreservingWords } from './lib/truncate.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -135,9 +136,7 @@ function formatContext(memories, project) {
     for (const mem of byCategory[cat]) {
       const salience = Math.round(mem.salience * 100);
       lines.push(`- **${mem.title}** (${salience}% salience)`);
-      const content = mem.content.length > 200
-        ? mem.content.slice(0, 200) + '...'
-        : mem.content;
+      const content = truncatePreservingWords(mem.content, 200);
       lines.push(`  ${content}`);
     }
     lines.push('');

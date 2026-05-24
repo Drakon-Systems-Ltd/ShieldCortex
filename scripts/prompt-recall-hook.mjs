@@ -16,6 +16,7 @@ import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
+import { truncatePreservingWords } from './lib/truncate.mjs';
 
 // ==================== CONFIG ====================
 
@@ -134,9 +135,7 @@ function formatRecallContext(memories) {
 
   const lines = ['🧠 Recalled from memory:'];
   for (const m of memories) {
-    const content = m.content.length > MAX_CONTENT_LENGTH
-      ? m.content.slice(0, MAX_CONTENT_LENGTH) + '...'
-      : m.content;
+    const content = truncatePreservingWords(m.content, MAX_CONTENT_LENGTH);
     lines.push(`- **${m.title}**: ${content}`);
   }
   return lines.join('\n');

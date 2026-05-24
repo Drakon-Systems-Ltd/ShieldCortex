@@ -18,7 +18,8 @@ export type InjectionCategory =
   | 'instruction_injection'
   | 'encoding_trick'
   | 'role_manipulation'
-  | 'context_escape';
+  | 'context_escape'
+  | 'canary';
 
 export interface InjectionDetection {
   category: InjectionCategory | string;
@@ -288,6 +289,21 @@ pattern(
   'output_format_hijack',
   'Attempts to control the output format for injection',
   /(?:respond\s+(?:only\s+)?with|your\s+(?:only\s+)?(?:response|output|reply)\s+(?:should|must|will)\s+be|output\s+(?:exactly|only|nothing\s+(?:but|except))|say\s+(?:only|exactly|nothing\s+(?:but|except)))\s+/gi,
+);
+
+// ── Defence canary (synthetic probe — `shieldcortex doctor`) ──
+// Matches a unique marker emitted only by the doctor's canary check. Lets the
+// CLI prove the firewall layer is alive without depending on operator vibes or
+// real attack telemetry. Safe by construction: the marker is intentionally
+// non-natural (double-underscore + internal version tag) so it cannot collide
+// with legitimate content.
+
+pattern(
+  'canary',
+  'critical',
+  'defence_canary_test',
+  'Synthetic canary probe emitted by `shieldcortex doctor` to verify the pipeline catches known-malicious markers. Safe by construction.',
+  /__SHIELDCORTEX_CANARY_PROBE_v1__/g,
 );
 
 // ── External Patterns (Cloud Sync) ──

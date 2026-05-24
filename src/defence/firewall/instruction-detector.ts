@@ -142,6 +142,17 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /\bcomplete\s+this\s+request\.\s*(?:call|invoke|use)\s+this\s+tool\b/i,
     ],
   },
+  {
+    // Defence canary — synthetic probe used by `shieldcortex doctor` to verify
+    // the firewall is actually catching things. Marker is intentionally
+    // non-natural so it cannot collide with legitimate content. See
+    // src/defence/iron-dome/injection-scanner.ts for the parallel registration.
+    name: 'defence_canary',
+    weight: 1.0,
+    patterns: [
+      /__SHIELDCORTEX_CANARY_PROBE_v1__/,
+    ],
+  },
 ];
 
 // Maximum content length to scan (prevents ReDOS on very long inputs)

@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.22.0] - 2026-05-24
+
+**Defence canary + recall quick wins. Field-driven release closing two of the three critiques two ShieldCortex agents (edith, jarvis) raised on the same day: "defence layer is unprovable from inside the session" and "recall surfaces too much half-formed shrapnel with mid-word cuts".**
+
+### Added
+
+- **Defence canary doctor check.** `shieldcortex doctor` now runs a synthetic-injection probe (`__SHIELDCORTEX_CANARY_PROBE_v1__`) through `runDefencePipeline()` and asserts the firewall blocked it. Output: `✅ Defence canary: caught (10ms, pattern: defence_canary)`. Tagged with `source.identifier='cli:doctor:canary'` so audit-log consumers can exclude probe runs. Safe by construction — the marker is intentionally non-natural (double-underscore + internal version tag) and can never collide with real content. New `defence_canary` pattern group registered in [`src/defence/firewall/instruction-detector.ts`](src/defence/firewall/instruction-detector.ts) (the path `analyzeFirewall` actually consults); parallel registration in [`src/defence/iron-dome/injection-scanner.ts`](src/defence/iron-dome/injection-scanner.ts) for the iron-dome surface. Moves the defence layer from "unprovable" to "self-attested" — every doctor invocation is now a positive heartbeat for the security claim.
+- **Word-boundary-aware truncation helper.** New [`scripts/lib/truncate.mjs`](scripts/lib/truncate.mjs): `truncatePreservingWords(text, maxChars, lookback=20)` backs off to the last whitespace/punctuation boundary within 20 chars of the limit and appends `…`. Replaces hard `slice(0, N) + '...'` at two call sites: SessionStart preamble (200-char limit) and UserPromptSubmit recall (150-char limit). Edith's "with website-policy URLs added to evidence where m..." class of cuts goes away.
+
+### Changed
+
+- **`calculateSalience()` in the auto-extract pipeline now supports `{ autoExtractMode: true }`** — caps return at `AUTO_EXTRACT_SALIENCE_CAP` (0.6) instead of 1.0. Safety-in-depth: the downstream `seg.salience = Math.min(0.6, ...)` at line 558 was already capping the FINAL stored salience, but the function itself was returning up-to-1.0 — fragile if a new caller consumes the return value directly. Default mode unchanged (caps at 1.0) for backward compatibility.
+
+### Tests
+
+- New: [`src/__tests__/injection-scanner-canary.test.ts`](src/__tests__/injection-scanner-canary.test.ts) — 3 cases pinning the canary pattern (fires on marker, fires when embedded in benign context, does not fire on lookalikes).
+- New: [`src/__tests__/truncate.test.ts`](src/__tests__/truncate.test.ts) — 7 cases covering helper boundary behaviour (under-limit pass-through, space backoff, mid-word avoidance, hard-cut fallback, sentence-terminal punctuation, defensive non-string handling).
+- New: [`src/__tests__/extract-memorable-salience-cap.test.ts`](src/__tests__/extract-memorable-salience-cap.test.ts) — 5 cases pinning the cap behaviour (default vs `autoExtractMode`, low-signal unaffected, explicit false equivalent to default).
+- All targeted suites green; full suite at the established baseline (the `mcp-registration` flake remains unchanged).
+
+### Not in this release
+
+- **"100% salience" inflation on explicit `remember()` calls.** Investigation found that the items edith saw in her preamble at 100% came from explicit-call paths through `src/memory/salience.ts`, not the auto-extract pipeline (which was already capped at 0.6 via line 558 of `extract-memorable-segments.mjs`). Fixing the explicit-call calibration would change `remember()` behaviour and is deferred to a separate investigation.
+- **Prompt-aware re-ranking of recall.** `prompt-recall-hook.mjs:126` and `src/memory/search-recall.ts` both do a final sort by raw salience, discarding the FTS rank. This is the architectural fix for the "off-topic-but-high-salience leaks into recall" complaint and lands as v4.23.0 with its own design discussion (FTS-primary vs hybrid score vs cross-encoder re-rank).
+- **Cron-driven canary heartbeats.** The canary fires on-demand via `doctor`; periodic scheduled probes are a future enhancement.
+
 ## [4.21.2] - 2026-05-24
 
 **Doctor catches up to the v4.21.1 packaging contract — the `OpenClaw plugin pkg` check now reports INFO on the post-v4.21.1 "no discovery vectors" state instead of misclassifying it as WARN.**

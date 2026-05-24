@@ -943,6 +943,66 @@ export async function checkOpenClawPluginPackage(
   };
 }
 
+// ── Check: Defence canary (#48) ──────────────────────
+/**
+ * Defence canary — synthetic probe that proves the defence pipeline is alive
+ * and catching things. Without this check, the pipeline runs silently and
+ * "no warnings" is indistinguishable from "no protection." Field feedback
+ * (edith, jarvis, 2026-05-24) called the layer "unprovable from inside the
+ * session." This makes it provable.
+ *
+ * Runs a synthetic payload through `runDefencePipeline()` and asserts the
+ * firewall blocked it AND the specific `defence_canary_test` pattern fired.
+ * Tagged `source.identifier='cli:doctor:canary'` so audit-log consumers can
+ * exclude probe runs from real threat counts.
+ *
+ * Safe by construction: the marker `__SHIELDCORTEX_CANARY_PROBE_v1__` is
+ * intentionally non-natural (double-underscore + internal version tag) and
+ * can never collide with legitimate content.
+ */
+export async function checkDefenceCanary(): Promise<CheckResult> {
+  const label = 'Defence canary';
+  const canaryPayload =
+    'benign-context-prefix __SHIELDCORTEX_CANARY_PROBE_v1__ benign-context-suffix';
+  const start = Date.now();
+  try {
+    const { runDefencePipeline } = await import('../defence/pipeline.js');
+    const result = runDefencePipeline(canaryPayload, 'Defence canary probe', {
+      type: 'cli',
+      identifier: 'cli:doctor:canary',
+    });
+    const elapsed = Date.now() - start;
+    const blocked = result.firewall?.blockedPatterns ?? [];
+    const caught = result.allowed === false && blocked.includes('defence_canary');
+    if (caught) {
+      return {
+        label,
+        status: 'pass',
+        message: `caught (${elapsed}ms, pattern: defence_canary)`,
+      };
+    }
+    return {
+      label,
+      status: 'fail',
+      message:
+        `canary payload was NOT caught by the firewall (${elapsed}ms) — defence pipeline ` +
+        `is not detecting known-malicious markers. This is a positive failure: the pipeline ` +
+        `should always catch this synthetic probe.`,
+      fix:
+        `Check the injection scanner registration in src/defence/iron-dome/injection-scanner.ts ` +
+        `for the \`defence_canary_test\` pattern; rebuild with \`npm run build:ts\`. ` +
+        `If the pattern is present and the canary still slips, the firewall layer is bypassed.`,
+    };
+  } catch (err) {
+    return {
+      label,
+      status: 'warn',
+      message:
+        `canary probe could not run (${(err as Error).message}) — pipeline status unknown`,
+    };
+  }
+}
+
 /** Read a package's `version` field; returns null on any failure. */
 function readPkgVersion(pkgJson: string): string | null {
   try {
@@ -1274,6 +1334,7 @@ export async function runDoctor(): Promise<void> {
     checkLockFile,
     checkOpenClawResidue,
     checkOpenClawPluginPackage,
+    checkDefenceCanary,
     checkModelCache,
   ];
 
