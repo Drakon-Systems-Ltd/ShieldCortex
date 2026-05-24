@@ -5,29 +5,29 @@ import { fileURLToPath } from 'url';
 import { beforeAll, describe, expect, it } from '@jest/globals';
 
 /**
- * Regression guard for the v4.20.0 packaging change: the *main* `shieldcortex`
- * package no longer declares `openclaw.extensions`.
+ * Regression guard for the v4.21.1 packaging change: the *main* `shieldcortex`
+ * package ships NEITHER `openclaw.extensions` in package.json NOR a root
+ * `openclaw.plugin.json` — both are independent OpenClaw discovery vectors.
  *
- * Background. In v4.18.2 `openclaw update` failed config validation with:
+ * Background. v4.18.2 → v4.18.3 added a root `openclaw.plugin.json` because
+ * OpenClaw was discovering the bare package via package.json's
+ * `openclaw.extensions` and crash-looping when no manifest existed. v4.20.0
+ * removed `openclaw.extensions` from the main package, intending to close
+ * the discovery vector. The defensive root manifest was kept "for one
+ * release" while we waited for fleet evidence.
  *
- *   plugins: plugin manifest not found:
- *   /home/ubuntu/.openclaw/npm/node_modules/shieldcortex/openclaw.plugin.json
+ * Fleet evidence (edith, 2026-05-24) showed OpenClaw's `bundledDiscovery: "compat"`
+ * scans `node_modules/*​/openclaw.plugin.json` **independently of**
+ * package.json's `openclaw.extensions`. The bare `shieldcortex` was still
+ * being discovered via the root-manifest vector and registered under
+ * `pluginId: shieldcortex-realtime` — duplicate plugin id every session.
  *
- * Root cause: the main package.json carried `openclaw.extensions`, so
- * OpenClaw's npm discovery walked the bare package as if it were a plugin
- * and looked for a root manifest. The v4.18.2 fix added a root manifest;
- * v4.20.0 takes the structural fix one step further by removing the
- * extensions declaration from the main package altogether. OpenClaw's
- * discovery is gated on `openclaw.extensions` being present, so without it
- * the bare `shieldcortex` is invisible to discovery — no duplicate-plugin-id
- * warning, no manifest dependency, no race against the dedicated
- * `@drakon-systems/shieldcortex-realtime` plugin.
- *
- * The defensive root `openclaw.plugin.json` is kept for one release in case
- * any fleet box still has cached discovery state from an older OpenClaw
- * version; it can be removed in a follow-up once that's confirmed clear.
+ * v4.21.1 drops the root manifest from the published tarball. With neither
+ * discovery vector present, the bare package is fully invisible to OpenClaw
+ * discovery. The dedicated `@drakon-systems/shieldcortex-realtime` plugin is
+ * the only thing discoverable, no race, no duplicate registration.
  */
-describe('shieldcortex bare-package OpenClaw discovery contract (post-v4.20.0)', () => {
+describe('shieldcortex bare-package OpenClaw discovery contract (post-v4.21.1)', () => {
   const thisFile = fileURLToPath(import.meta.url);
   const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
 
@@ -62,9 +62,12 @@ describe('shieldcortex bare-package OpenClaw discovery contract (post-v4.20.0)',
     expect((rootPkg.openclaw?.hooks as unknown[]).length).toBeGreaterThan(0);
   });
 
-  it('keeps the defensive root openclaw.plugin.json in the package files allow-list (one-release shim)', () => {
-    expect(rootPkg.files).toContain('openclaw.plugin.json');
-    expect(packedFiles).toContain('openclaw.plugin.json');
-    expect(fs.existsSync(rootManifestPath)).toBe(true);
+  it('does NOT ship a root openclaw.plugin.json in the published tarball (the v4.21.1 contract)', () => {
+    expect(rootPkg.files).not.toContain('openclaw.plugin.json');
+    expect(packedFiles).not.toContain('openclaw.plugin.json');
+  });
+
+  it('does NOT keep a checked-in root openclaw.plugin.json in the repo (so the build cannot accidentally re-include it)', () => {
+    expect(fs.existsSync(rootManifestPath)).toBe(false);
   });
 });

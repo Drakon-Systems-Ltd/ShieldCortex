@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.21.1] - 2026-05-24
+
+**Kill the OpenClaw `duplicate plugin id detected` warning at its real source — drop the root `openclaw.plugin.json` shim that v4.20.0 left in the published tarball as a "one-release defensive shim."**
+
+v4.20.0 removed `openclaw.extensions` from the main package's `package.json`, intending to make the bare `shieldcortex` invisible to OpenClaw's discovery. Fleet evidence (edith, 2026-05-24) showed the warning persisted — OpenClaw's `bundledDiscovery: "compat"` scans `node_modules/*/openclaw.plugin.json` **independently** of `package.json#openclaw.extensions`. The defensive root manifest that v4.18.3 added (and v4.20.0 deliberately retained) was still being picked up and registered under `pluginId: shieldcortex-realtime` — same id as the dedicated `@drakon-systems/shieldcortex-realtime` plugin, hence the duplicate.
+
+With this release, the bare `shieldcortex` package ships **neither** discovery vector. It is fully invisible to OpenClaw discovery. Only the dedicated `@drakon-systems/shieldcortex-realtime` plugin remains discoverable. The v4.18.2 crash mode cannot recur — there's nothing left to discover.
+
+### Changed
+
+- **Root `openclaw.plugin.json` removed from the published tarball.** Dropped from `package.json`'s `files` allow-list; removed from the repo working tree; build script no longer copies the plugin manifest to the package root.
+- **Packaging test inverted** ([`src/__tests__/openclaw-root-manifest-packaging.test.ts`](src/__tests__/openclaw-root-manifest-packaging.test.ts)) to pin the new contract: tarball does NOT contain a root `openclaw.plugin.json`; repo does NOT have a checked-in root manifest.
+
+### Unchanged
+
+- `openclaw.hooks` in `package.json` (still load-bearing for the documented `openclaw hooks install` flow — see `project_openclaw_main_pkg_crashloop`).
+- The dedicated `@drakon-systems/shieldcortex-realtime` plugin's own root `openclaw.plugin.json` (legitimate plugin declaration, unrelated).
+- Doctor `OpenClaw plugin pkg` check matrix — every branch preserved.
+
+### Tests
+
+- Packaging test rewritten (4 assertions: `openclaw.extensions` absent, `openclaw.hooks` present, root manifest NOT in `files`, root manifest NOT in repo). Doctor synthetic-fixture suite (11 cases) preserved.
+
+### Operator note
+
+Fleet boxes will continue to see the warning until the bare `shieldcortex` copy in `~/.openclaw/npm/node_modules/shieldcortex/` is bumped to >= 4.21.1. One-liner to force-refresh on any box: `cd ~/.openclaw/npm && npm install shieldcortex@latest && shieldcortex doctor`. The realtime plugin's widened peer range (`>=4.18.3 <5.0.0`, shipped v4.21.0) allows the bare to land at 4.21.1+ cleanly.
+
 ## [4.21.0] - 2026-05-24
 
 **Stop the doctor crying wolf about peer-range version skew on healthy fleet boxes.**
