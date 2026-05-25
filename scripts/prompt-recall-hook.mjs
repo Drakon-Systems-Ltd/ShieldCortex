@@ -17,6 +17,7 @@ import { deriveProjectKey } from './lib/project-key.mjs';
 import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
+import { compareRecallResults } from './lib/recall-rank.mjs';
 
 // ==================== CONFIG ====================
 
@@ -124,7 +125,10 @@ function recallRelevant(db, project, prompt) {
     } catch { /* best-effort */ }
   }
 
-  results.sort((a, b) => (b.salience || 0) - (a.salience || 0));
+  // v4.23.0: FTS rank primary, salience tiebreaker. The previous raw-salience
+  // sort discarded the relevance signal from the FTS5 query above — high-
+  // salience-but-off-topic memories bubbled to the top of the recall preamble.
+  results.sort(compareRecallResults);
   return results.slice(0, MAX_RESULTS);
 }
 

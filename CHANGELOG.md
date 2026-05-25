@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.23.0] - 2026-05-25
+
+**Prompt-aware recall — FTS rank is now primary, salience is the tiebreaker. Closes the third critique from the 2026-05-24 field reports.**
+
+Pre-v4.23.0 the UserPromptSubmit recall hook filtered candidates by FTS5 keyword match (`memories_fts MATCH ?` with `ORDER BY fts.rank`) but then did a final sort by raw salience, **discarding the relevance signal entirely**. Result: high-salience-but-off-topic memories bubbled to the top of the per-prompt `🧠 Recalled from memory:` preamble. Edith flagged "context-less stubs"; jarvis flagged "occasional noise". Both pointed at the same root cause without naming it.
+
+This release picks **option A** from the v4.22.0 plan's three candidate approaches (FTS-primary vs hybrid score vs cross-encoder): the simplest change with no new dependencies and the smallest blast radius. If field feedback in a week says it's still too noisy, escalating to a hybrid score or cross-encoder re-rank is the next step.
+
+### Changed
+
+- **`prompt-recall-hook.mjs` ranking**: replaced raw-salience final sort with FTS-rank-primary / salience-tiebreaker comparator ([`scripts/lib/recall-rank.mjs`](scripts/lib/recall-rank.mjs)). FTS5 BM25 ranks are negative numbers — lower (more negative) = more relevant. Rows from the category-boost fallback path don't carry a `rank` field; they sort below all FTS results, then by salience among themselves.
+
+### Unchanged
+
+- **`session-start-hook.mjs` ranking stays salience-DESC.** There is no query/prompt at session start, so FTS rank isn't applicable — the preamble's job is "what's important in this project right now", not "what matches your current question".
+- **`src/memory/search-recall.ts` (the recall API path) already uses FTS rank** via its RRF or legacy ranker engine. No change needed.
+- The category-boost fallback (`bug|fix|error → error category`, etc.) is preserved — it still fills slots when FTS doesn't match the prompt.
+
+### Tests
+
+- New: [`src/__tests__/recall-rank.test.ts`](src/__tests__/recall-rank.test.ts) — 8 cases covering the comparator: FTS ordering, FTS-beats-category, tie-broken-by-salience, category-only ordering, missing-salience fallback, the edith-complaint regression (high-salience-but-off-topic no longer wins), NaN/Infinity defence, stable sort.
+- Full suite at the established baseline; the known `mcp-registration` flake is unchanged.
+
+### Field validation plan
+
+After CDN propagation, edith and jarvis should see two visible improvements on their next prompt:
+
+1. The `🧠 Recalled from memory:` block prioritises memories whose keywords actually match the current message.
+2. High-salience entries from unrelated topics (the "Decision: that path for the rest of this conversation"-style fragments) move down the list or stop appearing entirely, depending on how off-topic they are.
+
+If the noise persists, the next iteration is hybrid scoring (`α × normalised FTS rank + β × salience` with α≈0.7) — small bump, still no new dependencies.
+
 ## [4.22.1] - 2026-05-25
 
 **Quiet the defence canary — drop the stderr noise that v4.22.0 introduced on cold doctor runs.**
