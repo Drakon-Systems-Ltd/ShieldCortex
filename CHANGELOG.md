@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.22.1] - 2026-05-25
+
+**Quiet the defence canary — drop the stderr noise that v4.22.0 introduced on cold doctor runs.**
+
+Field signal (edith, jarvis 2026-05-25) showed v4.22.0's canary fires correctly (15-17ms, pattern matched on both boxes) but leaks a `[Events] Failed to persist event: Error: Database not initialized` stack trace to stderr ahead of the check output. Trace: `persistEvent → runDefencePipeline → checkDefenceCanary`. The doctor's other DB-touching checks lazy-init via `getDatabase()` and work fine, but the events DB needs explicit init that hadn't happened yet when the canary fired. Canary still worked (firewall analysis runs before the persist call), but the output was polluted.
+
+This release narrows the canary to call `detectInstructions()` directly instead of routing through the full `runDefencePipeline()`. Same signal — the firewall layer catches the marker or it doesn't — without the DB dependency, the audit-log write, or the event persist. As a bonus: the canary now runs in ~1ms instead of 15-17ms.
+
+### Changed
+
+- **`checkDefenceCanary()` calls `detectInstructions()` directly** ([`src/cli/doctor.ts`](src/cli/doctor.ts)). Drops the import of `runDefencePipeline` and the `source.identifier='cli:doctor:canary'` tagging — neither is needed for the narrow firewall-layer probe. The check is now sync-fast, side-effect-free, and DB-independent.
+- **Fix-message updated** to point at the `defence_canary` pattern group in `instruction-detector.ts` (the surface this check probes) rather than the iron-dome scanner.
+
+### Unchanged
+
+- Pattern registration in [`src/defence/firewall/instruction-detector.ts`](src/defence/firewall/instruction-detector.ts) (`defence_canary` group) — this is what `detectInstructions()` consults.
+- Parallel registration in [`src/defence/iron-dome/injection-scanner.ts`](src/defence/iron-dome/injection-scanner.ts) (`defence_canary_test` pattern) — kept for the iron-dome surface and the existing regression test; no functional impact.
+- All other v4.22.0 changes (word-boundary truncation helper, salience cap option) intact.
+
+### Operator note
+
+Pre-v4.22.1 doctor runs emitted ~6 lines of stack trace before the check output on cold start. After upgrade, doctor output is clean. The canary still proves the firewall is alive — it just no longer writes a row to `defence_audit` per invocation either, so fleet boxes stop accumulating `cli:doctor:canary` rows in their audit tables.
+
 ## [4.22.0] - 2026-05-24
 
 **Defence canary + recall quick wins. Field-driven release closing two of the three critiques two ShieldCortex agents (edith, jarvis) raised on the same day: "defence layer is unprovable from inside the session" and "recall surfaces too much half-formed shrapnel with mid-word cuts".**

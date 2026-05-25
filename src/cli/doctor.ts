@@ -945,20 +945,25 @@ export async function checkOpenClawPluginPackage(
 
 // ── Check: Defence canary (#48) ──────────────────────
 /**
- * Defence canary — synthetic probe that proves the defence pipeline is alive
- * and catching things. Without this check, the pipeline runs silently and
- * "no warnings" is indistinguishable from "no protection." Field feedback
- * (edith, jarvis, 2026-05-24) called the layer "unprovable from inside the
- * session." This makes it provable.
+ * Defence canary — synthetic probe that proves the firewall layer is alive
+ * and catching known-malicious markers. Without this check, the layer runs
+ * silently and "no warnings" is indistinguishable from "no protection."
+ * Field feedback (edith, jarvis, 2026-05-24) called the layer "unprovable
+ * from inside the session." This makes it provable.
  *
- * Runs a synthetic payload through `runDefencePipeline()` and asserts the
- * firewall blocked it AND the specific `defence_canary_test` pattern fired.
- * Tagged `source.identifier='cli:doctor:canary'` so audit-log consumers can
- * exclude probe runs from real threat counts.
+ * v4.22.1: calls `detectInstructions()` directly instead of routing through
+ * the full `runDefencePipeline()`. The pipeline writes to the events table
+ * which requires the DB to be initialised — in the doctor's run order the
+ * canary fired before the DB connection was established, leaking a
+ * `[Events] Failed to persist event` stack trace to stderr on every cold
+ * start. The narrow probe gives the same signal without the side effects:
+ * no DB dependency, no audit-log pollution, no event persistence, faster.
  *
  * Safe by construction: the marker `__SHIELDCORTEX_CANARY_PROBE_v1__` is
  * intentionally non-natural (double-underscore + internal version tag) and
- * can never collide with legitimate content.
+ * can never collide with legitimate content. Pattern is registered in
+ * src/defence/firewall/instruction-detector.ts under the `defence_canary`
+ * group; that's the surface this check probes.
  */
 export async function checkDefenceCanary(): Promise<CheckResult> {
   const label = 'Defence canary';
@@ -966,14 +971,10 @@ export async function checkDefenceCanary(): Promise<CheckResult> {
     'benign-context-prefix __SHIELDCORTEX_CANARY_PROBE_v1__ benign-context-suffix';
   const start = Date.now();
   try {
-    const { runDefencePipeline } = await import('../defence/pipeline.js');
-    const result = runDefencePipeline(canaryPayload, 'Defence canary probe', {
-      type: 'cli',
-      identifier: 'cli:doctor:canary',
-    });
+    const { detectInstructions } = await import('../defence/firewall/instruction-detector.js');
+    const result = detectInstructions(canaryPayload);
     const elapsed = Date.now() - start;
-    const blocked = result.firewall?.blockedPatterns ?? [];
-    const caught = result.allowed === false && blocked.includes('defence_canary');
+    const caught = result.detected && result.patterns.includes('defence_canary');
     if (caught) {
       return {
         label,
@@ -985,20 +986,20 @@ export async function checkDefenceCanary(): Promise<CheckResult> {
       label,
       status: 'fail',
       message:
-        `canary payload was NOT caught by the firewall (${elapsed}ms) — defence pipeline ` +
-        `is not detecting known-malicious markers. This is a positive failure: the pipeline ` +
-        `should always catch this synthetic probe.`,
+        `canary payload was NOT caught by the firewall (${elapsed}ms) — instruction ` +
+        `detector is not flagging known-malicious markers. This is a positive failure: ` +
+        `the layer should always catch this synthetic probe.`,
       fix:
-        `Check the injection scanner registration in src/defence/iron-dome/injection-scanner.ts ` +
-        `for the \`defence_canary_test\` pattern; rebuild with \`npm run build:ts\`. ` +
-        `If the pattern is present and the canary still slips, the firewall layer is bypassed.`,
+        `Check the \`defence_canary\` pattern group in ` +
+        `src/defence/firewall/instruction-detector.ts; rebuild with \`npm run build:ts\`. ` +
+        `If the pattern is registered and the canary still slips, the firewall layer is bypassed.`,
     };
   } catch (err) {
     return {
       label,
       status: 'warn',
       message:
-        `canary probe could not run (${(err as Error).message}) — pipeline status unknown`,
+        `canary probe could not run (${(err as Error).message}) — firewall layer status unknown`,
     };
   }
 }
