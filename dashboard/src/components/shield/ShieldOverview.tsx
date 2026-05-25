@@ -9,6 +9,7 @@ import { ThreatTimeline } from './ThreatTimeline';
 import { DefenceStatsCard } from './DefenceStatsCard';
 import HealthScore from '../health/HealthScore';
 import { CloudUpsellCard } from './CloudUpsellCard';
+import { ProUpsellCard } from './ProUpsellCard';
 import { CloudSyncStatus } from './CloudSyncStatus';
 import { SkillScannerCard } from './SkillScannerCard';
 import { IronDomeCard } from './IronDomeCard';
@@ -169,6 +170,8 @@ export function ShieldOverview() {
         <div>
           {/* Cloud upsell — hidden when already configured */}
           <CloudUpsellCard />
+          {/* Pro upsell — independent visibility; both cards may render if both qualify */}
+          <ProUpsellCard />
         </div>
       </div>
     </div>

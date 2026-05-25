@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.24.0] - 2026-05-25
+
+**Gentle Pro-tier upsell — doctor footer + dashboard banner. Three triggers, all gated on `tier === 'free'`, muteable, throttled.**
+
+Free users now get a non-pushy "look, you can upgrade — 1-2-3" nudge in two places: the `shieldcortex doctor` output (where engaged users already look) and the local dashboard's shield overview page (where new users see). The doctor footer renders at most once per week; the dashboard banner is dismissable for 7 days. Anyone already on Pro / Team / Enterprise — or in an active trial — sees nothing.
+
+### Added
+
+- **Pro upsell footer in `shieldcortex doctor`** ([`src/cli/upsell.ts`](src/cli/upsell.ts), wired in [`src/cli/doctor.ts`](src/cli/doctor.ts)). Three trigger conditions evaluated in priority order:
+  1. **trial_ended** — Pro trial expired within the last 30 days (uses the existing `getTrialStatus()` from `src/license/trial.ts`).
+  2. **usage** — monthly `defence_audit` count ≥ 80% of the free 500/mo cap.
+  3. **engagement** — oldest memory ≥ 14 days old AND `COUNT(*) memories ≥ 100`.
+  Throttle: 7-day cooldown via `~/.shieldcortex/upsell-state.json`. Mute: `npx shieldcortex config --upsell-mute`.
+- **Pro upsell banner in the dashboard** ([`dashboard/src/components/shield/ProUpsellCard.tsx`](dashboard/src/components/shield/ProUpsellCard.tsx)). Mirrors the existing `CloudUpsellCard` pattern (state machine, localStorage dismiss). Same three triggers, computed client-side from `useLicenseStatus()` + `useAuditStats('30d')`. Dismissable for 7 days via X button or "Maybe later" link.
+- **CLI flags** `--upsell-mute` / `--upsell-unmute` on `shieldcortex config` ([`src/cloud/cli.ts`](src/cloud/cli.ts)) — persist the mute state to `~/.shieldcortex/upsell-state.json`.
+
+### Implementation
+
+- Pure trigger logic in `src/cli/upsell.ts` exports `shouldShowProUpsell()` (no I/O, fully unit-testable) + `UPSELL_CONSTANTS` (single source of truth for thresholds; the dashboard mirrors them).
+- State persisted to `~/.shieldcortex/upsell-state.json` ([`src/cli/upsell-state.ts`](src/cli/upsell-state.ts)), kept separate from `config.json` so a corrupt write can't damage cloud-sync state.
+- Doctor footer rendered with `dim` ANSI styling (matches the existing fix-line aesthetic — present but not shouty).
+- Dashboard banner uses a single coral border + `Sparkles` icon to differentiate it from `CloudUpsellCard`'s cyan styling.
+
+### Tests
+
+- New: [`src/__tests__/upsell.test.ts`](src/__tests__/upsell.test.ts) — 16 cases pinning trigger logic: tier gates (free/pro/team/enterprise), mute, throttle window enter/exit, trial_ended within/outside 30-day window, trial-active suppression, usage at exact 80%, usage at 79% (just under), engagement at 14 days + 100 memories, engagement just under threshold (13 days OR 99 memories), priority of trial_ended over usage, copy invariants (3 numbered steps + mute hint + brand line on every render).
+- Full suite at the established baseline; the lone `mcp-registration` flake remains.
+
+### Operator note
+
+End-to-end smoke confirmed on a real `tier='free'` doctor invocation: the `trial_ended` lead line rendered with the correct date arithmetic ("Your Pro trial ended 11 days ago (2026-05-13)"). Muting suppresses the footer immediately; un-muting restores it on the next run outside the throttle window.
+
+### Out of scope
+
+- **Team-tier upsell** for Pro users hitting their 10K cap. Same machinery, different copy + threshold; deferred until Pro upsell behaviour is validated in the wild.
+- **Telemetry** (sending "upsell shown / muted / clicked" back to the SaaS). No remote calls — local-only.
+- **In-CLI purchase flow.** Footer links to `shieldcortex.ai/pricing`; checkout stays on the web.
+
 ## [4.23.0] - 2026-05-25
 
 **Prompt-aware recall — FTS rank is now primary, salience is the tiebreaker. Closes the third critique from the 2026-05-24 field reports.**

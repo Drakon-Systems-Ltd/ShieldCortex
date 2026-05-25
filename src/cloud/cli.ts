@@ -23,6 +23,7 @@ import { syncAllMemoriesToCloud } from './memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { initDatabase } from '../database/init.js';
 import { reconcileSyncQueue } from './sync-queue.js';
+import { setUpsellState } from '../cli/upsell-state.js';
 
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
@@ -206,6 +207,18 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  if (args.includes('--upsell-mute')) {
+    setUpsellState({ proMuted: true });
+    console.log('Pro upsell muted. Re-enable with --upsell-unmute.');
+    changed = true;
+  }
+
+  if (args.includes('--upsell-unmute')) {
+    setUpsellState({ proMuted: false });
+    console.log('Pro upsell un-muted.');
+    changed = true;
+  }
+
   if (!changed) {
     console.log('Usage: shieldcortex config [options]');
     console.log('');
@@ -220,6 +233,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (default: off — adds latency)');
     console.log('  --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
+    console.log('  --upsell-mute          Suppress the Pro upsell footer in doctor');
+    console.log('  --upsell-unmute        Allow the Pro upsell footer to surface again');
     console.log('');
     console.log('LLM Verification:');
     console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
