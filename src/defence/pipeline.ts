@@ -257,8 +257,9 @@ export function runDefencePipeline(
       auditId,
     };
 
-    // 8. Sync audit data to cloud (fire-and-forget, never blocks)
-    if (isFeatureEnabled('cloud_sync')) {
+    // 8. Sync audit data to cloud (fire-and-forget, never blocks).
+    // Gated on `cloud_audit_sync` (Free tier) — metadata only, no content.
+    if (isFeatureEnabled('cloud_audit_sync')) {
       try {
         syncToCloud(pipelineResult, source, durationMs);
       } catch {
@@ -266,7 +267,8 @@ export function runDefencePipeline(
       }
     }
 
-    // 9. Sync quarantine content to cloud (fire-and-forget)
+    // 9. Sync quarantine *content* to cloud (fire-and-forget). Gated on
+    // `cloud_sync` (Team tier) because this sends original content + title.
     if (isFeatureEnabled('cloud_sync') && firewall.result === 'QUARANTINE') {
       try {
         const indicators = firewall.threatIndicators.map(t =>

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.24.1] - 2026-05-26
+
+**Hotfix: Free-tier audit sync to ShieldCortex Cloud was incorrectly gated behind Team tier — every Free-tier install was silently dropping audit data.**
+
+The defence pipeline's "audit metadata" sync (the one that feeds the Cloud dashboard's scan counts, threat timeline, and device list) was gated on `isFeatureEnabled('cloud_sync')` — but `cloud_sync` is a Team-tier feature in `FEATURE_TIERS`. So even with a valid cloud API key set, Free-tier installs never sent anything. The Cloud dashboard appeared stuck on the "No scan data yet" empty state for every Free-tier user.
+
+This contradicts the published Free-tier offer (500 scans/month + 7-day audit retention on `api.shieldcortex.ai`).
+
+### Fixed
+
+- **Split the single `cloud_sync` flag into two narrower features** ([`src/license/gate.ts`](src/license/gate.ts)):
+  - `cloud_audit_sync` (Free) — sync audit metadata only, no content. Matches the Free-tier promise on the SaaS pricing page.
+  - `cloud_sync` (Team) — full bi-directional sync: memories, knowledge graph, and quarantine *content*. Unchanged tier.
+- **Re-gate the audit-ingest call** ([`src/defence/pipeline.ts:261`](src/defence/pipeline.ts#L261)) on the new `cloud_audit_sync` feature. Free-tier installs with a configured cloud API key now actually fire `POST /v1/audit/ingest` on each scan, as the dashboard has always expected.
+- **Quarantine content sync stays on `cloud_sync` (Team)** ([`src/defence/pipeline.ts:270`](src/defence/pipeline.ts#L270)) — this sends `original_content` + `original_title`, so it correctly remains Team-tier.
+
+### Migration
+
+No action required for users — `npm i -g shieldcortex@4.24.1` is enough. Existing cloud API keys keep working. The cloud dashboard's "No scan data yet" state will clear within a few scans once devices upgrade.
+
 ## [4.24.0] - 2026-05-25
 
 **Gentle Pro-tier upsell — doctor footer + dashboard banner. Three triggers, all gated on `tier === 'free'`, muteable, throttled.**

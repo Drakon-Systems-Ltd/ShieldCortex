@@ -17,6 +17,7 @@ export type GatedFeature =
   | 'custom_firewall_rules'
   | 'audit_export'
   | 'skill_scanner_deep'
+  | 'cloud_audit_sync'
   | 'cloud_sync'
   | 'team_management'
   | 'shared_patterns'
@@ -41,6 +42,7 @@ const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
   custom_firewall_rules: 'pro',
   audit_export: 'pro',
   skill_scanner_deep: 'pro',
+  cloud_audit_sync: 'free',
   cloud_sync: 'team',
   team_management: 'team',
   shared_patterns: 'team',
@@ -66,7 +68,8 @@ const FEATURE_DESCRIPTIONS: Record<GatedFeature, string> = {
   custom_firewall_rules: 'Add custom firewall rules to block or allow specific content patterns.',
   audit_export: 'Export your full audit trail as JSON or CSV for compliance reporting.',
   skill_scanner_deep: 'Deep skill scanning with multi-file analysis and semantic intent detection.',
-  cloud_sync: 'Sync audit data across devices for centralised team visibility.',
+  cloud_audit_sync: 'Sync audit metadata (no content) to ShieldCortex Cloud for centralised visibility — included on Free tier (500 scans/month, 7-day retention).',
+  cloud_sync: 'Full bi-directional cloud sync — memories, knowledge graph, and quarantine content. Required for cross-device team workflows.',
   team_management: 'Manage team members, invites, and shared security policies.',
   shared_patterns: 'Share custom injection patterns and policies across your team.',
   cortex_learning: 'Systematic mistake learning with pre-flight checks, pattern detection, and rule graduation.',

@@ -137,6 +137,20 @@ describe('Feature Gating', () => {
       expect(getRequiredTier('cloud_sync')).toBe('team');
       expect(getRequiredTier('team_management')).toBe('team');
     });
+
+    it('cloud_audit_sync is a Free-tier feature (audit metadata only)', async () => {
+      // Regression: v4.24.0 and earlier gated audit-ingest behind `cloud_sync` (Team),
+      // so every Free-tier install silently dropped data despite a valid cloud API key.
+      // The published Free tier is "500 scans/month + 7-day audit retention" — that
+      // requires the audit-ingest path to work on Free. cloud_audit_sync covers
+      // metadata-only ingest; cloud_sync stays Team for full memory + quarantine content.
+      const { getRequiredTier, isFeatureEnabled } = await import('../gate.js');
+      expect(getRequiredTier('cloud_audit_sync')).toBe('free');
+      expect(getRequiredTier('cloud_sync')).toBe('team');
+      // Free tier: audit ingest enabled, full sync gated.
+      expect(isFeatureEnabled('cloud_audit_sync')).toBe(true);
+      expect(isFeatureEnabled('cloud_sync')).toBe(false);
+    });
   });
 
   describe('listFeatures', () => {
