@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.24.3] - 2026-05-26
+
+**Memory-extraction quality fixes — sentence-bounded captures, first-sentence headlines, dedupe on recall. Field-driven by a long report from a production agent.**
+
+The auto-extract chunker was sliding fixed-character windows over assistant turns and labelling them by keyword presence. That produced memories like `Decision: python3 /home/ubuntu/clawd/scripts/beautyhair_colo...` where the regex grabbed 150 chars after the keyword regardless of where the sentence ended. Headlines were the first 50 chars of that mid-sentence capture, so the MEMORY.md index showed unreadable fragments. Adjacent user turns recalled near-identical memories because the recall hook had no dedupe. And literal `\n` JSON-escape sequences leaked through the entire chain.
+
+### Fixed
+
+- **Sentence-bounded captures** in [`scripts/lib/extract-memorable-segments.mjs`](scripts/lib/extract-memorable-segments.mjs). Every extractor pattern changed from `.{15,200}` (fixed character window) to `[^.!?\n]{15,200}[.!?]?` — stops at the first `.`/`!`/`?`/newline, falls back to the 200-char cap only if no terminator is reached. Applied to all 6 extractors (`decision`, `error-fix`, `learning`, `architecture`, `preference`, `important-note`) and the legacy stop-hook subset.
+- **First-sentence headlines** via new `extractFirstSentence(text, maxLen)` helper. The MEMORY.md index now shows the first complete sentence of the captured content (up to 80 chars at word boundary), not the first 50 raw characters. The terminator-followed-by-whitespace check keeps URLs / decimals / version strings from fooling the boundary detector.
+- **Defensive JSON-escape unescape** via new `defensiveUnescape(text)`. Strips literal `\n` / `\t` / `\r` (sequences that survived a stringify/parse round-trip upstream) before regex matching. Lookbehind keeps `\\n` (genuine literal backslash + n) intact. Idempotent on already-unescaped input.
+- **Per-session recall dedupe** in [`scripts/prompt-recall-hook.mjs`](scripts/prompt-recall-hook.mjs). Content hashes of injected memories are persisted to `~/.shieldcortex/.recall-dedup.json` keyed by `session_id` with a 5-item ring and 1-hour TTL. Same memory can't appear in two consecutive turns of the same session.
+- **Source ref on every recalled snippet** — appended `_[mem #N]_` so the operator can grep / inspect the backing memory. Schema-aware: emits nothing when memory ID isn't available.
+
+### Tests
+
+[`src/__tests__/extract-sentence-bounded.test.ts`](src/__tests__/extract-sentence-bounded.test.ts) covers:
+
+- Decision captures stop at sentence terminators (no bleed into the next sentence).
+- Headlines are the first complete sentence, not mid-clause garbage.
+- Literal `\n` escape leaks get unescaped before matching.
+- 200-char fallback when no terminator is nearby.
+- Preference captures don't bleed across "Always X. Never Y." pairs.
+
+5/5 new tests pass. 1240/1243 full suite pass (1 pre-existing flaky `mcp-registration` test fails on `main` too, 2 skipped).
+
+### What's not in this release
+
+The deeper issues Jarvis flagged — type-taxonomy drift (`Decision/Fix/Preference` vs the CLAUDE.md spec's `user/feedback/project/reference`), uniform "100% salience" scoring, and the call for LLM-driven extraction over regex — are not addressed here. They need a coordinated change to the auto-memory spec + salience math + a new local-LLM extractor and will land as 4.25.0+.
+
+### Migration
+
+`npm i -g shieldcortex@4.24.3` on each machine. No code change required for users. Existing memories in the DB aren't rewritten — only newly-extracted ones get the better shape. Future cleanup pass could rewrite the historical ones via the model.
+
 ## [4.24.2] - 2026-05-26
 
 **Hotfix: CLI scans on headless servers were silently dropping cloud sync — fetch was killed when the process exited.**

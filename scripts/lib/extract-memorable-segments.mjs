@@ -222,73 +222,82 @@ export function getExtractionThreshold(category, dynamicThreshold, categoryThres
 }
 
 // ==================== EXTRACTOR DEFINITIONS ====================
+//
+// All capture groups use `[^.!?\n]{N,M}[.!?]?` instead of `.{N,M}`. The
+// previous fixed-character-window form (`.{15,200}`) sliced clauses at
+// arbitrary offsets, producing memories like
+//   "Decision: python3 /home/ubuntu/clawd/scripts/beautyhair_colo..."
+// where the regex grabbed 150 chars after the keyword regardless of where
+// the sentence ended. The new form stops at the first `.`, `!`, `?`, or
+// newline, capping at 200 chars for safety, and optionally consumes the
+// terminator so the captured group ends cleanly. v4.24.3.
 
 const FULL_EXTRACTORS = [
   {
     name: 'decision',
     titlePrefix: 'Decision: ',
     patterns: [
-      /(?:we\s+)?decided\s+(?:to\s+)?(.{15,200})/gi,
-      /(?:going|went)\s+with\s+(.{15,150})/gi,
-      /(?:chose|chosen|selected)\s+(.{15,150})/gi,
-      /the\s+(?:approach|solution|fix)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:using|will\s+use)\s+(.{15,150})/gi,
-      /(?:opted\s+for|settled\s+on)\s+(.{15,150})/gi,
+      /(?:we\s+)?decided\s+(?:to\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:going|went)\s+with\s+([^.!?\n]{15,150}[.!?]?)/gi,
+      /(?:chose|chosen|selected)\s+([^.!?\n]{15,150}[.!?]?)/gi,
+      /the\s+(?:approach|solution|fix)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:using|will\s+use)\s+([^.!?\n]{15,150}[.!?]?)/gi,
+      /(?:opted\s+for|settled\s+on)\s+([^.!?\n]{15,150}[.!?]?)/gi,
     ],
   },
   {
     name: 'error-fix',
     titlePrefix: 'Fix: ',
     patterns: [
-      /(?:fixed|solved|resolved)\s+(?:by\s+)?(.{15,200})/gi,
-      /the\s+(?:fix|solution|workaround)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:root\s+cause|issue)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:error|bug)\s+(?:was\s+)?caused\s+by\s+(.{15,200})/gi,
-      /(?:problem|issue)\s+was\s+(.{15,150})/gi,
-      /(?:the\s+)?bug\s+(?:is|was)\s+(.{15,150})/gi,
-      /(?:debugging|debugged)\s+(.{15,150})/gi,
+      /(?:fixed|solved|resolved)\s+(?:by\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /the\s+(?:fix|solution|workaround)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:root\s+cause|issue)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:error|bug)\s+(?:was\s+)?caused\s+by\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:problem|issue)\s+was\s+([^.!?\n]{15,150}[.!?]?)/gi,
+      /(?:the\s+)?bug\s+(?:is|was)\s+([^.!?\n]{15,150}[.!?]?)/gi,
+      /(?:debugging|debugged)\s+([^.!?\n]{15,150}[.!?]?)/gi,
     ],
   },
   {
     name: 'learning',
     titlePrefix: 'Learned: ',
     patterns: [
-      /(?:learned|discovered|realized|found\s+out)\s+(?:that\s+)?(.{15,200})/gi,
-      /turns\s+out\s+(?:that\s+)?(.{15,200})/gi,
-      /(?:TIL|today\s+I\s+learned)[:\s]+(.{15,200})/gi,
-      /(?:now\s+)?(?:understand|know)\s+(?:that\s+)?(.{15,150})/gi,
-      /(?:figured\s+out|worked\s+out)\s+(.{15,150})/gi,
+      /(?:learned|discovered|realized|found\s+out)\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /turns\s+out\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:TIL|today\s+I\s+learned)[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:now\s+)?(?:understand|know)\s+(?:that\s+)?([^.!?\n]{15,150}[.!?]?)/gi,
+      /(?:figured\s+out|worked\s+out)\s+([^.!?\n]{15,150}[.!?]?)/gi,
     ],
   },
   {
     name: 'architecture',
     titlePrefix: 'Architecture: ',
     patterns: [
-      /the\s+architecture\s+(?:is|uses|consists\s+of)\s+(.{15,200})/gi,
-      /(?:design|pattern)\s+(?:is|uses)\s+(.{15,200})/gi,
-      /(?:system|api|database)\s+(?:structure|design)\s+(?:is|uses)\s+(.{15,200})/gi,
-      /(?:created|added|implemented|built)\s+(?:a\s+)?(.{15,200})/gi,
-      /(?:refactored|updated|changed)\s+(?:the\s+)?(.{15,150})/gi,
+      /the\s+architecture\s+(?:is|uses|consists\s+of)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:design|pattern)\s+(?:is|uses)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:system|api|database)\s+(?:structure|design)\s+(?:is|uses)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:created|added|implemented|built)\s+(?:a\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:refactored|updated|changed)\s+(?:the\s+)?([^.!?\n]{15,150}[.!?]?)/gi,
     ],
   },
   {
     name: 'preference',
     titlePrefix: 'Preference: ',
     patterns: [
-      /(?:always|never)\s+(.{10,150})/gi,
-      /(?:prefer|want)\s+to\s+(.{10,150})/gi,
-      /(?:should|must)\s+(?:always\s+)?(.{10,150})/gi,
+      /(?:always|never)\s+([^.!?\n]{10,150}[.!?]?)/gi,
+      /(?:prefer|want)\s+to\s+([^.!?\n]{10,150}[.!?]?)/gi,
+      /(?:should|must)\s+(?:always\s+)?([^.!?\n]{10,150}[.!?]?)/gi,
     ],
   },
   {
     name: 'important-note',
     titlePrefix: 'Note: ',
     patterns: [
-      /important[:\s]+(.{15,200})/gi,
-      /(?:note|remember)[:\s]+(.{15,200})/gi,
-      /(?:key|critical)\s+(?:point|thing)[:\s]+(.{15,200})/gi,
-      /(?:this\s+is\s+)?(?:crucial|essential)[:\s]+(.{15,150})/gi,
-      /(?:don't\s+forget|keep\s+in\s+mind)[:\s]+(.{15,150})/gi,
+      /important[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:note|remember)[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:key|critical)\s+(?:point|thing)[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:this\s+is\s+)?(?:crucial|essential)[:\s]+([^.!?\n]{15,150}[.!?]?)/gi,
+      /(?:don't\s+forget|keep\s+in\s+mind)[:\s]+([^.!?\n]{15,150}[.!?]?)/gi,
     ],
   },
 ];
@@ -296,36 +305,75 @@ const FULL_EXTRACTORS = [
 // stop-hook historically used a thinner extractor set (no architecture,
 // no important-note, fewer learning + preference patterns). Preserve the
 // pre-refactor surface so its behaviour does not change with this move.
+// Same sentence-bounded capture form as FULL_EXTRACTORS (v4.24.3).
 const STOP_HOOK_EXTRACTORS = [
   FULL_EXTRACTORS[0], // decision
   {
     name: 'error-fix',
     titlePrefix: 'Fix: ',
     patterns: [
-      /(?:fixed|solved|resolved)\s+(?:by\s+)?(.{15,200})/gi,
-      /the\s+(?:fix|solution|workaround)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:root\s+cause|issue)\s+(?:is|was)\s+(.{15,200})/gi,
-      /(?:error|bug)\s+(?:was\s+)?caused\s+by\s+(.{15,200})/gi,
+      /(?:fixed|solved|resolved)\s+(?:by\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /the\s+(?:fix|solution|workaround)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:root\s+cause|issue)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:error|bug)\s+(?:was\s+)?caused\s+by\s+([^.!?\n]{15,200}[.!?]?)/gi,
     ],
   },
   {
     name: 'learning',
     titlePrefix: 'Learned: ',
     patterns: [
-      /(?:learned|discovered|realized|found\s+out)\s+(?:that\s+)?(.{15,200})/gi,
-      /turns\s+out\s+(?:that\s+)?(.{15,200})/gi,
-      /(?:figured\s+out|worked\s+out)\s+(.{15,150})/gi,
+      /(?:learned|discovered|realized|found\s+out)\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /turns\s+out\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
+      /(?:figured\s+out|worked\s+out)\s+([^.!?\n]{15,150}[.!?]?)/gi,
     ],
   },
   {
     name: 'preference',
     titlePrefix: 'Preference: ',
     patterns: [
-      /(?:always|never)\s+(.{10,150})/gi,
-      /(?:prefer|want)\s+to\s+(.{10,150})/gi,
+      /(?:always|never)\s+([^.!?\n]{10,150}[.!?]?)/gi,
+      /(?:prefer|want)\s+to\s+([^.!?\n]{10,150}[.!?]?)/gi,
     ],
   },
 ];
+
+/**
+ * Defensive JSON-escape unescape. Some upstream paths re-emit
+ * conversation text after a stringify/parse round-trip without unescaping
+ * the inner string, so literal `\n` / `\t` / `\r` sequences leak through
+ * into matched segments. This fixes the most common leaks idempotently —
+ * sequences that are already real newlines / tabs / carriage returns are
+ * different characters from the literal 2-char `\n` / `\t` / `\r` so the
+ * replacement is a no-op on already-unescaped input. The lookbehind keeps
+ * `\\n` (genuine literal backslash + n) intact.
+ */
+function defensiveUnescape(text) {
+  return text
+    .replace(/(?<!\\)\\n/g, '\n')
+    .replace(/(?<!\\)\\t/g, '\t')
+    .replace(/(?<!\\)\\r/g, '\r');
+}
+
+/**
+ * Take a captured snippet and return the first sentence (or first
+ * word-bounded slice up to `maxLen` if no sentence terminator is nearby).
+ * Replaces the old `slice(0, 50)` headline which produced mid-clause
+ * garbage like "Decision: any command you must be authenticated. Run x..."
+ * where the first 50 chars meant nothing without their context.
+ */
+function extractFirstSentence(text, maxLen = 80) {
+  const trimmed = text.trim().replace(/\s+/g, ' ');
+  // Find first sentence terminator within reasonable bounds. The terminator
+  // must be followed by whitespace OR end-of-string so URLs / decimals /
+  // version strings ("v4.24.3") don't fool it.
+  const match = trimmed.match(/^([^.!?\n]{15,160}[.!?])(?:\s|$)/);
+  if (match) return match[1].slice(0, maxLen);
+  // No sentence boundary — trim to maxLen at the nearest word boundary.
+  if (trimmed.length <= maxLen) return trimmed;
+  const truncated = trimmed.slice(0, maxLen);
+  const lastSpace = truncated.lastIndexOf(' ');
+  return lastSpace > maxLen * 0.5 ? truncated.slice(0, lastSpace) : truncated;
+}
 
 /**
  * Extract memorable segments from conversation text.
@@ -338,16 +386,23 @@ export function extractMemorableSegments(conversationText, opts = {}) {
   const extractors = opts.mode === 'stop' ? STOP_HOOK_EXTRACTORS : FULL_EXTRACTORS;
   const segments = [];
 
+  // v4.24.3: unescape JSON-encoded escapes before regex matching so
+  // captured content doesn't include literal `\n` / `\t` sequences.
+  const text = defensiveUnescape(conversationText);
+
   for (const extractor of extractors) {
     for (const pattern of extractor.patterns) {
       // Reset lastIndex defensively — patterns are module-level globals.
       pattern.lastIndex = 0;
       let match;
-      while ((match = pattern.exec(conversationText)) !== null) {
+      while ((match = pattern.exec(text)) !== null) {
         const content = match[1].trim();
         if (content.length >= 20) {
-          const titleContent = content.slice(0, 50).replace(/\s+/g, ' ').trim();
-          const title = extractor.titlePrefix + (titleContent.length < 50 ? titleContent : titleContent + '...');
+          // v4.24.3: headline = first sentence (sentence-bounded), not
+          // the first 50 chars. Eliminates mid-clause garbage in the
+          // MEMORY.md index.
+          const headline = extractFirstSentence(content, 80);
+          const title = extractor.titlePrefix + headline;
           segments.push({
             title,
             content: content.slice(0, 500),

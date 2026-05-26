@@ -10,7 +10,8 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, readFileSync } from 'fs';
+import { createHash } from 'crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
@@ -22,10 +23,16 @@ import { compareRecallResults } from './lib/recall-rank.mjs';
 // ==================== CONFIG ====================
 
 const CONFIG_PATH = join(homedir(), '.shieldcortex', 'config.json');
+const RECALL_DEDUP_PATH = join(homedir(), '.shieldcortex', '.recall-dedup.json');
 const MAX_RESULTS = 5;
 const MAX_CONTENT_LENGTH = 150;
 const MIN_PROMPT_LENGTH = 8;
 const MIN_SALIENCE = 0.2;
+// v4.24.3: how many recent recall turns to remember for dedupe.
+// Suppresses a recalled memory if its content hash appeared in any of the
+// last DEDUP_RING_SIZE turns of THIS session. Per-session, not global.
+const DEDUP_RING_SIZE = 5;
+const DEDUP_TTL_MS = 60 * 60 * 1000; // forget session rings after 1h idle
 
 function loadConfig() {
   try {
@@ -132,6 +139,46 @@ function recallRelevant(db, project, prompt) {
   return results.slice(0, MAX_RESULTS);
 }
 
+// ==================== DEDUPE STATE ====================
+//
+// Per-session ring of recently-injected content hashes, persisted to
+// `~/.shieldcortex/.recall-dedup.json`. v4.24.3 — Jarvis flagged that
+// near-identical recalls were being injected in adjacent turns. The cheap
+// fix: hash content + suppress if seen in any of the last DEDUP_RING_SIZE
+// turns of this session. Best-effort — failures don't block recall.
+
+function loadDedupState() {
+  try {
+    if (!existsSync(RECALL_DEDUP_PATH)) return {};
+    const raw = JSON.parse(readFileSync(RECALL_DEDUP_PATH, 'utf-8'));
+    if (!raw || typeof raw !== 'object') return {};
+    // Purge stale sessions to keep the file bounded.
+    const now = Date.now();
+    for (const sid of Object.keys(raw)) {
+      const entry = raw[sid];
+      if (!entry || typeof entry.touched !== 'number' || now - entry.touched > DEDUP_TTL_MS) {
+        delete raw[sid];
+      }
+    }
+    return raw;
+  } catch {
+    return {};
+  }
+}
+
+function saveDedupState(state) {
+  try {
+    mkdirSync(join(homedir(), '.shieldcortex'), { recursive: true });
+    writeFileSync(RECALL_DEDUP_PATH, JSON.stringify(state), { mode: 0o600 });
+  } catch {
+    // Best-effort.
+  }
+}
+
+function hashContent(s) {
+  return createHash('sha256').update(s).digest('hex').slice(0, 16);
+}
+
 // ==================== FORMAT ====================
 
 function formatRecallContext(memories) {
@@ -140,7 +187,11 @@ function formatRecallContext(memories) {
   const lines = ['🧠 Recalled from memory:'];
   for (const m of memories) {
     const content = truncatePreservingWords(m.content, MAX_CONTENT_LENGTH);
-    lines.push(`- **${m.title}**: ${content}`);
+    // v4.24.3: append a source ref so the operator can grep / inspect
+    // the backing memory. Uses memory ID (always available); a future
+    // schema change could store the source_file path for clickability.
+    const source = m.id != null ? ` _[mem #${m.id}]_` : '';
+    lines.push(`- **${m.title}**: ${content}${source}`);
   }
   return lines.join('\n');
 }
@@ -216,14 +267,38 @@ process.stdin.on('end', () => {
     }
 
     const db = new Database(dbPath, { readonly: true, timeout: 2000 });
-    const memories = recallRelevant(db, project, prompt);
+    let memories = recallRelevant(db, project, prompt);
     db.close();
 
     if (memories.length === 0) {
       process.exit(0);
     }
 
+    // v4.24.3: suppress memories whose content hash appeared in any of
+    // the last DEDUP_RING_SIZE turns of this session. Avoids the
+    // "near-identical recall in adjacent turns" failure Jarvis flagged.
+    let dedupState = null;
+    let sessionRing = [];
+    if (sessionId) {
+      dedupState = loadDedupState();
+      const entry = dedupState[sessionId] ?? { ring: [], touched: Date.now() };
+      sessionRing = Array.isArray(entry.ring) ? entry.ring : [];
+      const recentHashes = new Set(sessionRing);
+      memories = memories.filter((m) => !recentHashes.has(hashContent(m.content)));
+      if (memories.length === 0) {
+        process.exit(0);
+      }
+    }
+
     const context = formatRecallContext(memories);
+
+    // Update the session ring with the hashes of what we just injected.
+    if (sessionId && dedupState) {
+      const newHashes = memories.map((m) => hashContent(m.content));
+      const merged = [...newHashes, ...sessionRing].slice(0, DEDUP_RING_SIZE);
+      dedupState[sessionId] = { ring: merged, touched: Date.now() };
+      saveDedupState(dedupState);
+    }
 
     // Reinforce access counts (fire-and-forget in a writable connection)
     try {
