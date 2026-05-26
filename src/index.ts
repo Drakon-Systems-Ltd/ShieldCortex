@@ -832,6 +832,14 @@ ${bold}DOCS${reset}
     }
 
     console.log();
+
+    // Drain any in-flight cloud sync requests before exiting. Without this,
+    // the fire-and-forget POST in syncToCloud() gets aborted when this
+    // short-lived CLI process terminates — and on headless Linux servers
+    // (no long-running dashboard daemon) every scan silently fails to sync.
+    const { flushPendingCloudSync } = await import('./cloud/sync.js');
+    await flushPendingCloudSync(8000);
+
     process.exit(result.allowed ? 0 : 1);
   }
 
@@ -881,6 +889,11 @@ ${bold}DOCS${reset}
     }
 
     console.log(`\n${result.summary}\n`);
+
+    // Drain pending cloud sync — same reasoning as the `scan` subcommand.
+    const { flushPendingCloudSync } = await import('./cloud/sync.js');
+    await flushPendingCloudSync(8000);
+
     process.exit(result.safe ? 0 : 1);
   }
 

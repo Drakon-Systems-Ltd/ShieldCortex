@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.24.2] - 2026-05-26
+
+**Hotfix: CLI scans on headless servers were silently dropping cloud sync — fetch was killed when the process exited.**
+
+The companion bug to v4.24.1. Once the gate was open (Free tier unblocked for audit-ingest), CLI scans on macOS started syncing reliably — because the `launchd`-managed dashboard daemon kept the Node process alive long enough for the fire-and-forget POST to complete. But on headless Linux servers (cron jobs, ad-hoc ssh scans, container entry points), `shieldcortex scan ...` ran the pipeline, printed results, and called `process.exit()` within ~1 second — aborting the in-flight fetch before the request left the machine. Verified end-to-end on two headless servers (edith + jarvis): `npx shieldcortex scan "test"` produced a local result with no cloud entry; same machine + same key with a direct `curl` to `/v1/audit/ingest` returned `{"ingested":1}` immediately.
+
+### Fixed
+
+- **Track in-flight cloud sync promises** in a module-level `Set` inside [`src/cloud/sync.ts`](src/cloud/sync.ts). `syncToCloud()`, `sendHeartbeat()`, and `sendKillSwitchAlert()` all participate. The fire-and-forget signature (return `void`) is preserved for the 50+ existing callers.
+- **New `flushPendingCloudSync(maxWaitMs = 8000)`** awaits all tracked promises with a timeout. Intended for short-lived CLI entry points. Long-lived processes (MCP server, brain worker, dashboard daemon, OpenClaw hooks) don't need to call it — their event loop holds the process open naturally.
+- **Wire `flushPendingCloudSync()` into the `scan` and `scan-skill` CLI subcommands** ([`src/index.ts`](src/index.ts)) immediately before `process.exit()`. Headless servers now drain cloud sync reliably.
+- **New `pendingCloudSyncCount()` helper** for tests + diagnostics.
+
+### Tests
+
+[`src/cloud/__tests__/flush-pending.test.ts`](src/cloud/__tests__/flush-pending.test.ts) covers:
+
+- No-op fast path when nothing is in flight (< 40ms even with 50ms cap).
+- `syncToCloud()` → `pendingCloudSyncCount() === 1` → resolved fetch → `pendingCloudSyncCount() === 0` after `flushPendingCloudSync()` settles.
+- `maxWaitMs` is respected on hung networks: timeout fires, flush returns, in-flight count stays at 1 (the underlying 10s abort handles the actual fetch).
+
+### Migration
+
+`npm i -g shieldcortex@4.24.2` on any headless server that was running v4.24.0 or v4.24.1 from CLI scans. No code change required for users. Mac users see no behaviour change.
+
 ## [4.24.1] - 2026-05-26
 
 **Hotfix: Free-tier audit sync to ShieldCortex Cloud was incorrectly gated behind Team tier — every Free-tier install was silently dropping audit data.**
