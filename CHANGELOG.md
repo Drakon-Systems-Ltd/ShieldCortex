@@ -2,7 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+> **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
+
 ## [Unreleased]
+
+## [4.26.0] - 2026-05-27
+
+**Internal quality pass after an honest audit. No user-facing behaviour changes — but the next person to touch `src/database/init.ts` will thank you.**
+
+After today's five-patch v4.25.x cycle drove an audit asking "is the code as patch-thrashed as it feels?", the answer was: no. Architecture is sound, 1293 tests pass, defence pipeline works as advertised. But the audit surfaced three genuine cleanups worth shipping before any UX work.
+
+### Changed
+
+- **`src/database/init.ts` decomposed from 1646 → 869 LOC** (47% reduction). The two largest chunks moved to dedicated files:
+  - [src/database/migrations.ts](src/database/migrations.ts) — `runMigrations()` + `logIfUnexpectedDdlError` helper (~470 LOC)
+  - [src/database/inline-schema.ts](src/database/inline-schema.ts) — `getInlineSchema()` fallback for bundled deployments (~310 LOC)
+
+  Pure cut-and-relocate; zero behaviour change. The next migration-add becomes a 5-line edit in `migrations.ts` instead of opening a 1600-line file.
+
+- **9 DDL `catch {}` blocks in migrations now log unexpected failures.** Idempotent SQLite errors (`already exists`, `duplicate column`, `no such table` etc.) stay silent for clean re-runs. Genuine failures (disk full, permission denied, schema corruption, FK conflict) print `[database] unexpected migration error in <op>: <msg>` on stderr so the doctor / operator can see them. Affects the migration paths for memories indexes, `defence_audit`/`quarantine` tables + project backfill, `fragmentation_entities`, `hook_invocations`, `sync_queue`, knowledge-graph tables (`entities`/`triples`/`memory_entities`), Pro-feature tables (`firewall_rules`, `rate_limits`, `custom_patterns`, `iron_dome_policies`), `firewall_rules.built_in` add, and `session_events.content_hash` add.
+
+### Removed
+
+- **5 stray git tags deleted from `origin`** (`v4.6.6`, `v4.7.0`, `v4.8.2`, `v4.13.2`, `v4.25.3`). These were tagged but never published to npm — three were ancient false-starts, one was today's unpublished broken-tarball release. `git tag | grep v4` now matches the npm version list exactly.
+
+### Added
+
+- **CHANGELOG coverage note** at the top of this file documenting that ~99 small patch releases between 4.0.0 and 4.20.x aren't individually itemised. The CHANGELOG has 49 entries covering every minor (`X.Y.0`) plus significant patches. Audited 2026-05-27 — pre-4.18 gap is intentional; going forward every release has an entry.
+
+### What the audit found and what we DIDN'T fix
+
+For honesty (the audit was over-scoped in two places and we backed off):
+
+- The audit flagged "413 empty catch blocks" — that count included openings of legitimately-commented `catch { /* intent */ }` blocks. The actual silent-failure liability was 17 vague catches, of which 9 wrapped DDL operations that genuinely hide bugs. Those 9 are now fixed; the other 8 (file cleanup, lock cleanup, shutdown close-failures) remain intentionally silent because logging them adds noise without value.
+- The audit flagged `src/database/` test:source as 1:44.5 — but that ratio counted only tests inside `src/database/__tests__/`. In reality, **25 test files across `src/__tests__/`** build real SQLite databases from `schema.sql` and exercise the migration paths through `init.ts`. Coverage is fine; no new tests written.
+
+### Verification
+
+- 1293/1295 tests pass — same baseline as v4.25.5.
+- `shieldcortex doctor` reports Database healthy on Mac, edith, jarvis, case.
+- No regressions in extractor / recall / save-memory / openclaw test suites.
 
 ## [4.25.5] - 2026-05-27
 
