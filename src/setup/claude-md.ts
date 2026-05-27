@@ -136,7 +136,7 @@ function isIdealMcpEntry(entry: unknown, ideal: McpCommand): boolean {
   return e.args.every((v, i) => v === ideal.args[i]);
 }
 
-function setupGlobalMcp(): void {
+export function setupGlobalMcp(): void {
   // Claude Code reads user-scope MCP servers from ~/.claude.json
   const mcpPath = path.join(os.homedir(), '.claude.json');
   const ideal = resolveMcpCommand();

@@ -59,9 +59,14 @@ describe('MCP global server registration (guards against npx-y hash thrash)', ()
     return path.join(tempHome, '.claude.json');
   }
 
+  // Call setupGlobalMcp directly rather than the full setupClaudeMd flow.
+  // setupClaudeMd also runs setupHooks + isOpenClawInstalled (2 execSyncs)
+  // + potentially installOpenClawHook — none of that affects the .claude.json
+  // assertions below, and on some machines it pushed runtime past the 10s
+  // jest timeout (the historical flake in this suite).
   async function runSetup() {
-    const { setupClaudeMd } = await import('../setup/claude-md.js');
-    await setupClaudeMd();
+    const { setupGlobalMcp } = await import('../setup/claude-md.js');
+    setupGlobalMcp();
   }
 
   const ambientBinary = resolvedShieldCortexBinary();
