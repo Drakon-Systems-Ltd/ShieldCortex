@@ -65,6 +65,12 @@ export function ProUpsellCard() {
 
   if (trial && !trial.active && trial.expiresAt) {
     const expiresAt = new Date(trial.expiresAt).getTime();
+    // react-hooks/purity flags Date.now() as impure-during-render. The banner
+    // is intentionally non-reactive: it just needs a wall-clock anchor for
+    // the "X days ago" label at first paint. A re-render reads the clock
+    // again — that's the desired behaviour for a banner that auto-dismisses
+    // after TRIAL_ENDED_WINDOW_DAYS.
+    // eslint-disable-next-line react-hooks/purity
     const daysSince = (Date.now() - expiresAt) / DAY_MS;
     if (daysSince >= 0 && daysSince <= TRIAL_ENDED_WINDOW_DAYS) {
       reason = 'trial_ended';
