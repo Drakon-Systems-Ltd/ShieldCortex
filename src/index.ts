@@ -281,12 +281,28 @@ function findDashboardPath(): { serverPath: string; cwd: string } | null {
 }
 
 /**
- * Start the Next.js dashboard as a child process
+ * Controller returned from startDashboard. Exposes the same `killed` /
+ * `kill()` surface that ChildProcess has, so caller code that supervises
+ * the dashboard doesn't have to change. Internally, the controller may be
+ * fronting a Next.js child that has been respawned one or more times after
+ * an exit — the caller doesn't need to know.
  */
-function startDashboard(): ChildProcess {
-  const fs = require('fs');
+interface DashboardController {
+  readonly killed: boolean;
+  kill(signal?: NodeJS.Signals | number): boolean;
+}
 
-  // Find dashboard server path
+/**
+ * Start the Next.js dashboard as a supervised child process.
+ *
+ * v4.27.1: if the child exits while the parent is still alive (crash, OOM,
+ * port conflict at startup, etc.), respawn it with exponential backoff
+ * (1 → 2 → 4 → 8 → 16 → 32 → 60 s, capped). Without this, a single child
+ * crash leaves the parent serving only the API on :3001 while :3030 stays
+ * silent — and launchd has no signal to restart the parent because the
+ * parent itself is fine. Field-observed on Mac after a multi-day uptime.
+ */
+function startDashboard(): DashboardController {
   const dashboardPath = findDashboardPath();
   const dashboardDir = path.resolve(__dirname, '..', 'dashboard');
   const useStandalone = dashboardPath !== null;
@@ -301,45 +317,43 @@ function startDashboard(): ChildProcess {
 ╚══════════════════════════════════════════════════════════════╝
   `);
 
-  let dashboard: ChildProcess;
+  let current: ChildProcess | null = null;
+  let restartCount = 0;
+  let shuttingDown = false;
+  let backoffTimer: NodeJS.Timeout | null = null;
+  let lastSpawnAt = 0;
 
-  if (useStandalone && dashboardPath) {
-    // Use standalone server (npm package distribution)
-    dashboard = spawn(process.execPath, ['server.js'], {
-      cwd: dashboardPath.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PORT: '3030', HOSTNAME: '0.0.0.0' },
-    });
-  } else {
-    // Fall back to npm run start (local development)
-    // Don't use shell: true — it fails on macOS Tahoe when /bin/zsh isn't accessible.
-    // Instead, find the npm binary path and spawn it directly.
+  const spawnChild = (): ChildProcess => {
+    lastSpawnAt = Date.now();
+    if (useStandalone && dashboardPath) {
+      return spawn(process.execPath, ['server.js'], {
+        cwd: dashboardPath.cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, PORT: '3030', HOSTNAME: '0.0.0.0' },
+      });
+    }
     const npmPath = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    dashboard = spawn(npmPath, ['run', 'start'], {
+    return spawn(npmPath, ['run', 'start'], {
       cwd: dashboardDir,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-  }
+  };
 
-  // Pipe dashboard output with prefix
-  dashboard.stdout?.on('data', (data) => {
-    const lines = data.toString().split('\n').filter((l: string) => l.trim());
-    for (const line of lines) {
-      console.log(`[dashboard] ${line}`);
-    }
-  });
+  const attach = (child: ChildProcess): void => {
+    child.stdout?.on('data', (data) => {
+      const lines = data.toString().split('\n').filter((l: string) => l.trim());
+      for (const line of lines) console.log(`[dashboard] ${line}`);
+    });
 
-  dashboard.stderr?.on('data', (data) => {
-    const lines = data.toString().split('\n').filter((l: string) => l.trim());
-    for (const line of lines) {
-      console.error(`[dashboard] ${line}`);
-    }
-  });
+    child.stderr?.on('data', (data) => {
+      const lines = data.toString().split('\n').filter((l: string) => l.trim());
+      for (const line of lines) console.error(`[dashboard] ${line}`);
+    });
 
-  dashboard.on('error', (error) => {
-    console.error('[dashboard] Failed to start:', error.message);
-    if (error.message.includes('ENOENT') || error.message.includes('spawn')) {
-      console.error(`
+    child.on('error', (error) => {
+      console.error('[dashboard] Failed to start:', error.message);
+      if (error.message.includes('ENOENT') || error.message.includes('spawn')) {
+        console.error(`
 ╔══════════════════════════════════════════════════════════════╗
 ║  ⚠️  Dashboard spawn failed (shell not found)                 ║
 ╠══════════════════════════════════════════════════════════════╣
@@ -351,21 +365,66 @@ function startDashboard(): ChildProcess {
 ║                                                              ║
 ║  Then visit: http://localhost:3030                           ║
 ╚══════════════════════════════════════════════════════════════╝
-      `);
-    } else if (!useStandalone) {
-      console.error('[dashboard] Make sure to run "npm run build" in the dashboard directory first.');
-    }
-  });
+        `);
+      } else if (!useStandalone) {
+        console.error('[dashboard] Make sure to run "npm run build" in the dashboard directory first.');
+      }
+    });
 
-  dashboard.on('exit', (code, signal) => {
-    if (signal) {
-      console.log(`[dashboard] Killed by signal ${signal}`);
-    } else if (code !== 0) {
-      console.error(`[dashboard] Exited with code ${code}`);
-    }
-  });
+    child.on('exit', (code, signal) => {
+      if (signal) {
+        console.log(`[dashboard] Killed by signal ${signal}`);
+      } else if (code !== 0) {
+        console.error(`[dashboard] Exited with code ${code}`);
+      } else {
+        console.log('[dashboard] Exited normally');
+      }
 
-  return dashboard;
+      if (shuttingDown) return;
+
+      // Reset the restart counter if the child stayed up long enough
+      // (>5 min) — this means it crashed long after a healthy start, not
+      // a tight crash-loop. Lets backoff start from 1s on isolated faults.
+      const uptimeMs = Date.now() - lastSpawnAt;
+      if (uptimeMs > 5 * 60 * 1000) restartCount = 0;
+
+      restartCount += 1;
+      const delayMs = Math.min(60000, 1000 * Math.pow(2, Math.min(restartCount - 1, 6)));
+      console.error(`[dashboard] Respawning in ${Math.round(delayMs / 1000)}s (attempt #${restartCount})`);
+
+      backoffTimer = setTimeout(() => {
+        backoffTimer = null;
+        if (shuttingDown) return;
+        current = spawnChild();
+        attach(current);
+      }, delayMs);
+      backoffTimer.unref();
+    });
+  };
+
+  current = spawnChild();
+  attach(current);
+
+  return {
+    get killed(): boolean {
+      // Match ChildProcess semantics — `killed` flips to true once a SIGTERM
+      // has been delivered. We treat the controller as "killed" once the
+      // caller has asked us to shut down, regardless of whether the child
+      // happens to be mid-respawn at that moment.
+      return shuttingDown || (current !== null && current.killed);
+    },
+    kill(signal: NodeJS.Signals | number = 'SIGTERM'): boolean {
+      shuttingDown = true;
+      if (backoffTimer) {
+        clearTimeout(backoffTimer);
+        backoffTimer = null;
+      }
+      if (current && !current.killed) {
+        return current.kill(signal);
+      }
+      return false;
+    },
+  };
 }
 
 async function startWorkerMode(dbPath?: string): Promise<void> {
@@ -1046,7 +1105,7 @@ ${bold}DOCS${reset}
 
   const { dbPath, mode } = parsedArgs;
 
-  let dashboardProcess: ChildProcess | null = null;
+  let dashboardProcess: DashboardController | null = null;
 
   if (mode === 'api') {
     // API mode only - for dashboard visualization

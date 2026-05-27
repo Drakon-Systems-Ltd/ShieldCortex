@@ -333,13 +333,24 @@ async function maybePrintDashboardHint(): Promise<void> {
       // @ts-expect-error — importing a .mjs hook util that has no .d.ts
       await import('../../scripts/lib/dashboard-hint.mjs');
     const hint = (await getDashboardHint()) as
-      | { title: string; command: string; url: string; detail: string }
+      | {
+          title: string;
+          command: string;
+          url: string;
+          detail: string;
+          alwaysOnCommand?: string;
+          alwaysOnDetail?: string;
+        }
       | null;
     if (!hint) return;
 
     process.stdout.write(`  ${paint('cyan', hint.title)}:\n`);
     process.stdout.write(`     ${paint('yellow', hint.command)}  ${paint('gray', `→ ${hint.url}`)}\n`);
-    process.stdout.write(`     ${paint('gray', hint.detail)}\n\n`);
+    process.stdout.write(`     ${paint('gray', hint.detail)}\n`);
+    if (hint.alwaysOnCommand) {
+      process.stdout.write(`     ${paint('yellow', hint.alwaysOnCommand)}  ${paint('gray', hint.alwaysOnDetail ?? '')}\n`);
+    }
+    process.stdout.write('\n');
   } catch { /* hint is best-effort */ }
 }
 

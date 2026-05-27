@@ -94,6 +94,8 @@ describe('dashboard hint', () => {
         command: 'shieldcortex dashboard',
         url: 'http://localhost:3030',
         detail: expect.any(String),
+        alwaysOnCommand: 'shieldcortex service install',
+        alwaysOnDetail: expect.stringContaining('always-on'),
       });
     });
   });

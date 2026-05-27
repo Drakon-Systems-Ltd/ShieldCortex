@@ -238,6 +238,9 @@ if (isGlobal && !isCI) {
       console.log(`\x1b[36m${hint.title}:\x1b[0m`);
       console.log(`  \x1b[33m${hint.command}\x1b[0m  \x1b[2m→ ${hint.url}\x1b[0m`);
       console.log(`  \x1b[2m${hint.detail}\x1b[0m`);
+      if (hint.alwaysOnCommand) {
+        console.log(`  \x1b[33m${hint.alwaysOnCommand}\x1b[0m  \x1b[2m${hint.alwaysOnDetail}\x1b[0m`);
+      }
       console.log('');
     }
   } catch { /* never fail postinstall on a hint */ }

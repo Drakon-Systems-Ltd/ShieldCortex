@@ -16,6 +16,7 @@ import http from 'node:http';
 export const DASHBOARD_URL = 'http://localhost:3030';
 export const DASHBOARD_PORT = 3030;
 export const DASHBOARD_COMMAND = 'shieldcortex dashboard';
+export const ALWAYS_ON_COMMAND = 'shieldcortex service install';
 
 /**
  * A "headless" system is one where launching a browser to view the dashboard
@@ -64,6 +65,8 @@ export async function getDashboardHint() {
       command: DASHBOARD_COMMAND,
       url: DASHBOARD_URL,
       detail: 'Inspect memories, review quarantine, and watch real-time scans.',
+      alwaysOnCommand: ALWAYS_ON_COMMAND,
+      alwaysOnDetail: 'For always-on (survives closing your terminal, restarts on crash).',
     };
   } catch {
     return null;

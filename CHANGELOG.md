@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.27.1] - 2026-05-27
+
+**Bug fix: `shieldcortex dashboard` now respawns its Next.js child on exit, and the discovery hint points users at `service install` for always-on.**
+
+Field-observed on Mac: after multi-day uptime, the LaunchAgent-managed `shieldcortex dashboard` parent was still alive and serving the API on `:3001`, but the Next.js child on `:3030` had died and was never respawned. The doctor reported "Dashboard: not running" while the launchd service status was happy, leaving users with no clear signal that anything was wrong. Easy to work around (`launchctl kickstart -k`), but the fix belongs in the parent supervisor.
+
+### Fixed
+
+- **`startDashboard()` now supervises the Next.js child** ([src/index.ts](src/index.ts)). On exit (signal, non-zero, or even clean exit while the parent is still alive), the parent respawns the child with exponential backoff — 1, 2, 4, 8, 16, 32, 60 s (capped). The backoff counter resets after 5 minutes of stable uptime so isolated faults start from 1 s instead of compounding. Honoured by `SIGINT` / `SIGTERM` on the parent — a deliberate shutdown cancels any pending respawn timer.
+- `startDashboard()` now returns a `DashboardController` (with the same `killed` / `kill()` surface that `ChildProcess` had) so the caller's supervision code doesn't change.
+
+### Changed
+
+- **Dashboard discovery hint** ([scripts/lib/dashboard-hint.mjs](scripts/lib/dashboard-hint.mjs)) now also surfaces `shieldcortex service install` as the always-on option in the postinstall + `shieldcortex update` footer. The hint structure gains `alwaysOnCommand` / `alwaysOnDetail` fields; renderers in [scripts/postinstall.mjs](scripts/postinstall.mjs) and [src/cli/update.ts](src/cli/update.ts) print the second line when present.
+
+### Verification
+
+- Manually verified on Mac via `launchctl kickstart -k gui/$UID/com.shieldcortex.dashboard` — both `:3001` and `:3030` listeners came back as expected (kickstart re-runs the parent, which then spawns a healthy Next.js child).
+- 9 dashboard-hint tests updated to assert the new `alwaysOnCommand` / `alwaysOnDetail` fields.
+
 ## [4.27.0] - 2026-05-27
 
 **UX pass: surface the dashboard without auto-launching it, and reshape `quickstart` around what users actually want.**
