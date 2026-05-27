@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.25.2] - 2026-05-27
+
+**Two related fixes for the `duplicate plugin id detected` OpenClaw config warning that field-tested on every fleet box after v4.25.1.**
+
+After the v4.25.1 ship, every fleet machine (edith, jarvis, case) showed `duplicate plugin id detected; global plugin will be overridden by global plugin` in `openclaw tui` and `openclaw plugins doctor`. Diagnosis (2026-05-27) found two layers:
+
+1. **Bare `shieldcortex`'s tarball still shipped `plugins/openclaw/dist/openclaw.plugin.json`.** Even though v4.20.0 dropped `openclaw.extensions` from the package.json (closing the discovery vector), the bundled manifest itself stayed in the published tarball via the `files` array — visible to OpenClaw's plugin scanner whenever bare shieldcortex landed in `~/.openclaw/npm/node_modules/`.
+2. **OpenClaw's plugin scanner walks `~/.openclaw/extensions/` and `~/.openclaw/hooks/` and registers every `openclaw.plugin.json` it finds — including ones in `.trash-<id>.<ts>/` directories (created by OpenClaw's own upgrade flow) and `<id>.disabled-<host>-<ts>/` directories (manual disables).** No existing doctor check looked at those paths. Jarvis + case had live legacy installs at `~/.openclaw/extensions/shieldcortex-realtime/` colliding with the canonical `~/.openclaw/npm/` install; edith had `.trash-*` and `*.disabled-*` leftovers from prior upgrades.
+
+### Fixed
+
+- **Bare `shieldcortex` no longer ships its bundled plugin manifest.** Dropped `"plugins/openclaw/dist"` from `files` in [`package.json`](package.json). The plugin is published as the standalone `@drakon-systems/shieldcortex-realtime` package — bundling a redundant copy in the main package created a phantom plugin discoverable by OpenClaw whenever a bare shieldcortex landed in `~/.openclaw/npm/node_modules/` as a peer or transitive dep. Tarball file count drops from 2293 → 2289.
+
+### Added
+
+- **`shieldcortex doctor` check: "OpenClaw dup installs"** — scans `~/.openclaw/extensions/` and `~/.openclaw/hooks/` for any directory whose name contains `shieldcortex-realtime` (catches live legacy installs, `.trash-*` upgrade leftovers, and `*.disabled-*` manual disables), reports them as duplicates if the canonical npm install is present, and emits a precise `rm -rf …` fix command. Lives at [`src/cli/doctor.ts`](src/cli/doctor.ts) as `checkOpenClawDuplicateInstalls()`. See [`src/__tests__/doctor-openclaw-dup-installs.test.ts`](src/__tests__/doctor-openclaw-dup-installs.test.ts) for the 10 scenarios covered.
+
+### Field cleanup (already applied today)
+
+- edith — removed `~/.openclaw/extensions/.trash-shieldcortex-realtime.20260527-093144/`, `~/.openclaw/extensions/shieldcortex-realtime.disabled-tars-20260526T104503Z/`, `~/.openclaw/hooks/.trash-shieldcortex-realtime.20260527-092053/`, plus the bundled manifests in `~/.npm-global/.../shieldcortex/plugins/openclaw/dist/openclaw.plugin.json` and `~/.openclaw/npm/.../shieldcortex/plugins/openclaw/dist/openclaw.plugin.json`. `openclaw plugins update shieldcortex-realtime` bumped the standalone install from **4.23.0** → **4.25.1**. Crucially this confirmed the **fleet was running stale 4.23.0 plugin code** — none of the v4.24.x or v4.25.x defence-pipeline / extraction / salience improvements were actually firing.
+- jarvis + case — removed `~/.openclaw/extensions/shieldcortex-realtime/` legacy live install (and `~/.openclaw/hooks/shieldcortex-realtime/` on jarvis). `openclaw plugins update` re-installed at 4.25.1.
+
+### Why this matters beyond a stray warning
+
+The visible noise was an OpenClaw config warning, but the hidden cost was the entire fleet running plugin code one minor version behind — the defence improvements (cloud-sync gate fix, drain-before-exit, sentence-bounded extraction, taxonomy mapping, effective salience, recall instrumentation) shipped to npm but were not actually running on production agents. The new doctor check makes this state self-diagnosable; the `files` fix prevents future installs from re-introducing the dup.
+
 ## [4.25.1] - 2026-05-27
 
 **Recall instrumentation: ring buffer + `inspect last-recall` CLI for diagnosing why specific memories surface for specific prompts.**

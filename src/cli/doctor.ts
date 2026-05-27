@@ -947,6 +947,117 @@ export async function checkOpenClawPluginPackage(
   };
 }
 
+/**
+ * Detects duplicate `shieldcortex-realtime` plugin installs under
+ * `~/.openclaw/extensions/` and `~/.openclaw/hooks/`. OpenClaw's plugin
+ * scanner walks both directories and registers every `openclaw.plugin.json`
+ * it finds, regardless of `.trash-*` or `*.disabled-*` naming conventions
+ * that suggest the directory has been retired. When the canonical npm
+ * install at `~/.openclaw/npm/node_modules/@drakon-systems/shieldcortex-realtime/`
+ * coexists with any of these legacy locations, OpenClaw emits
+ * `duplicate plugin id detected; global plugin will be overridden by global
+ * plugin` on every session.
+ *
+ * Field background (2026-05-27, all fleet boxes after v4.25.1 upgrade):
+ *   - edith had `.trash-shieldcortex-realtime.20260527-093144/` in both
+ *     extensions/ and hooks/, plus an older `shieldcortex-realtime.disabled-*`
+ *     left from a tars-era cleanup. None of them excluded by OpenClaw scan.
+ *   - jarvis + case had a live legacy install at
+ *     `~/.openclaw/extensions/shieldcortex-realtime/` alongside the newer
+ *     npm install — OpenClaw resolved to the npm one but kept warning
+ *     about the legacy directory as a duplicate.
+ *
+ * These weren't created by ShieldCortex's installer (no `.trash-` pattern
+ * appears in the codebase) — they appear to come from OpenClaw's own
+ * plugin upgrade flow soft-trashing the old install before replacing it.
+ * This check surfaces them so operators can clean up; the actual fix is
+ * `rm -rf` on each path the check reports.
+ */
+export async function checkOpenClawDuplicateInstalls(
+  openclawDir: string = path.join(os.homedir(), '.openclaw'),
+): Promise<CheckResult> {
+  const label = 'OpenClaw dup installs';
+
+  if (!fs.existsSync(openclawDir)) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  // The canonical install path post-v4.21.1 is the npm-managed location.
+  const canonicalPath = path.join(
+    openclawDir,
+    'npm',
+    'node_modules',
+    '@drakon-systems',
+    'shieldcortex-realtime',
+  );
+  const canonicalPresent = fs.existsSync(canonicalPath);
+
+  // Scan extensions/ and hooks/ for ANY directory whose name contains the
+  // plugin id — catches `shieldcortex-realtime/` (live legacy),
+  // `.trash-shieldcortex-realtime.<ts>/` (OpenClaw upgrade leftover), and
+  // `shieldcortex-realtime.disabled-<host>-<ts>/` (manual disable).
+  const dupCandidates: string[] = [];
+  for (const subdir of ['extensions', 'hooks']) {
+    const dir = path.join(openclawDir, subdir);
+    if (!fs.existsSync(dir)) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (!entry.name.includes('shieldcortex-realtime')) continue;
+      // The manifest must exist for OpenClaw to treat it as a discoverable
+      // plugin. If it doesn't, the dir is harmless (no scan hit).
+      const manifest = path.join(dir, entry.name, 'openclaw.plugin.json');
+      if (fs.existsSync(manifest)) {
+        dupCandidates.push(path.join(dir, entry.name));
+      }
+    }
+  }
+
+  if (dupCandidates.length === 0) {
+    return {
+      label,
+      status: 'pass',
+      message: 'clean (no duplicate shieldcortex-realtime installs in extensions/ or hooks/)',
+    };
+  }
+
+  // Format paths for display + fix instructions.
+  const home = os.homedir();
+  const displayPaths = dupCandidates.map((p) => p.replace(home, '~'));
+  const rmCmd = dupCandidates.map((p) => `rm -rf ${p.replace(home, '~')}`).join(' && ');
+
+  if (!canonicalPresent) {
+    // Legacy install exists but no canonical npm install. Less urgent —
+    // the plugin loads from the legacy path. Recommend bringing it in line
+    // with the post-v4.21.1 install convention.
+    return {
+      label,
+      status: 'warn',
+      message:
+        `${dupCandidates.length} legacy install location(s) under ~/.openclaw/, no canonical ` +
+        `~/.openclaw/npm/.../@drakon-systems/shieldcortex-realtime/: ${displayPaths.join(', ')}`,
+      fix:
+        `Reinstall via the canonical path: \`openclaw plugins install ` +
+        `@drakon-systems/shieldcortex-realtime\`, then \`${rmCmd}\` and restart OpenClaw`,
+    };
+  }
+
+  return {
+    label,
+    status: 'warn',
+    message:
+      `${dupCandidates.length} duplicate shieldcortex-realtime install(s) alongside the canonical ` +
+      `npm install — OpenClaw emits \`duplicate plugin id detected\` every session: ` +
+      displayPaths.join(', '),
+    fix: `${rmCmd} && restart OpenClaw (the canonical npm install at ~/.openclaw/npm/ is the supported location)`,
+  };
+}
+
 // ── Check: Defence canary (#48) ──────────────────────
 /**
  * Defence canary — synthetic probe that proves the firewall layer is alive
@@ -1339,6 +1450,7 @@ export async function runDoctor(): Promise<void> {
     checkLockFile,
     checkOpenClawResidue,
     checkOpenClawPluginPackage,
+    checkOpenClawDuplicateInstalls,
     checkDefenceCanary,
     checkModelCache,
   ];
