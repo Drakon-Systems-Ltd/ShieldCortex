@@ -1,10 +1,9 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
-import { useOpenClawSessions, useMemoriesWithRealtime, useAccessMemory } from '@/hooks/useMemories';
+import { useOpenClawSessions, useMemoriesWithRealtime } from '@/hooks/useMemories';
 import { useDashboardStore } from '@/lib/store';
 import { GlassCard } from '@/components/ds/GlassCard';
-import { Badge } from '@/components/ds/Badge';
 import { SessionCard } from './SessionCard';
 import { MemoryCard } from './MemoryCard';
 import { MemoryActionModal } from './MemoryActionModal';
@@ -31,7 +30,6 @@ export function MemoriesViewGlass() {
     mode: search ? 'search' : 'recent',
     query: search || undefined,
   });
-  const accessMutation = useAccessMemory();
 
   const sessions = useMemo(() => openClawData?.sessions ?? [], [openClawData?.sessions]);
 

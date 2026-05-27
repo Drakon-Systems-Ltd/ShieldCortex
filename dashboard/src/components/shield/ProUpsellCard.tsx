@@ -26,7 +26,6 @@ import { useLicenseStatus } from '@/hooks/useLicense';
 // Constants kept in sync with src/cli/upsell.ts UPSELL_CONSTANTS
 const FREE_MONTHLY_SCAN_LIMIT = 500;
 const USAGE_THRESHOLD_RATIO = 0.8;
-const ENGAGEMENT_DAYS = 14;
 const ENGAGEMENT_EVENTS = 100;
 const DISMISS_TTL_DAYS = 7;
 const TRIAL_ENDED_WINDOW_DAYS = 30;

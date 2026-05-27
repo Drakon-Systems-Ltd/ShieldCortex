@@ -23,7 +23,7 @@ import { useAuditStats, useQuarantine } from '@/hooks/useDefence';
 import { useContradictions, useQuality } from '@/hooks/useMemories';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { useXRayStatus } from '@/hooks/useXRay';
-import { TIER_LABELS, TIER_BG, TIER_COLOURS } from '@/lib/license';
+import { TIER_LABELS } from '@/lib/license';
 
 export function OverviewGlass() {
   const { data: stats } = useStats();

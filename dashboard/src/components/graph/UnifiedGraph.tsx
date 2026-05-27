@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Search, X, Maximize2 } from 'lucide-react';
+import { Search, X } from 'lucide-react';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge } from '@/components/ds/Badge';
 import { ConstellationGraph } from './ConstellationGraph';

@@ -33,10 +33,6 @@ function formatTimeUntil(isoString: string): string {
   return `in ${days}d`;
 }
 
-function isCloudSyncStale(lastSyncAt: string | null): boolean {
-  return lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() > 24 * 60 * 60 * 1000 : false;
-}
-
 function StatusBanner() {
   const { data: sync, isLoading } = useCloudSyncStatus();
   const { data: license } = useLicenseStatus();
@@ -47,7 +43,6 @@ function StatusBanner() {
   let title = 'Cloud sync disabled';
   let detail = 'Enable cloud sync and activate a Team licence to start replicating local data.';
   let Icon = Cloud;
-  const stale = isCloudSyncStale(sync.lastSyncAt);
   const replicationPending = sync.queue.byKind.memory.pending + sync.queue.byKind.graph.pending;
   const replicationFailed = sync.queue.byKind.memory.failed + sync.queue.byKind.graph.failed;
   const auxiliaryFailed =
