@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.25.3] - 2026-05-27
+
+**Real root-cause fix for the `duplicate plugin id detected` warning — the symptom-level fix in v4.25.2 was patching leaves, not the trunk.**
+
+After v4.25.2 shipped the doctor check + dropped the bundled manifest from bare `shieldcortex`, a deeper look revealed *why* the duplicate kept reappearing every time someone ran `openclaw plugins update`: the plugin's `package.json` declared `openclaw.hooks: [...]` — which triggers OpenClaw's "hook-pack install format" as a **second, parallel install mechanism** on top of the regular plugin install. The hook-pack format copies the package contents (including `openclaw.plugin.json`) to `~/.openclaw/hooks/<id>/`, where OpenClaw's plugin scanner then re-discovers it under the same plugin id. Duplicate.
+
+The `package.json` hook-pack declaration was added when OpenClaw 2026.5.5 introduced `validateHookDir`. We complied by shipping four empty stub directories (`llm_input/`, `llm_output/`, `before_tool_call/`, `session_end/`) whose only purpose was passing the install-time existence check. The "real" hook handlers always lived in `index.js` and registered at runtime via `api.registerHook(...)`. The hook-pack format was pure ceremony — and it was what generated the duplicate.
+
+Evidence: no other OpenClaw plugin (anthropic, memory-core, etc.) declares `openclaw.hooks`, and no other plugin has a `~/.openclaw/hooks/<id>/` subdirectory on any fleet machine. We were the only ones using both install paths simultaneously.
+
+### Fixed
+
+- **Removed `openclaw.hooks` from the plugin's `package.json`** — eliminates the hook-pack install path entirely. `openclaw plugins install/update` now installs only to `~/.openclaw/npm/node_modules/` (the canonical location). No `~/.openclaw/hooks/<id>/` directory is ever created, so the dup warning cannot reappear.
+- **Deleted the four hook-pack stub directories** from the plugin source: `llm_input/`, `llm_output/`, `before_tool_call/`, `session_end/`. Each contained only an empty `handler.js` stub and a `HOOK.md` description. None were referenced by `index.js`; the real hook registrations happen via the plugin API in [`plugins/openclaw/index.ts`](plugins/openclaw/index.ts).
+- **Dropped them from the plugin `package.json`'s `files` array**. The published tarball is now 12 files (down from 20), 29.1 kB.
+
+### Verified
+
+Local-tarball install test on Mac (2026-05-27):
+
+- `openclaw plugins install ./drakon-systems-shieldcortex-realtime-4.25.3.tgz` succeeded
+- Boot log: `[plugins] [shieldcortex] v4.25.3 registered (llm_input + llm_output + before_tool_call + /shieldcortex-status)` — all four hooks register at runtime exactly as before
+- `~/.openclaw/hooks/shieldcortex-realtime/` was NOT created after install
+- `shieldcortex doctor` clean (modulo a separate WARN about local-tarball installs landing in `~/.openclaw/extensions/` rather than the canonical `~/.openclaw/npm/` — that's an OpenClaw install-path quirk for local archives, not a regression)
+
+### Net effect across the three v4.25.x patches
+
+- v4.25.0 — taxonomy + scoring + downvote/inspect CLIs (Layer 2 of Jarvis's report)
+- v4.25.1 — recall instrumentation (`inspect last-recall`)
+- v4.25.2 — packaging fix (bare `shieldcortex` stopped shipping the plugin manifest) + new `doctor` check for legacy install leftovers
+- **v4.25.3 — actual root-cause fix: stop using OpenClaw's redundant hook-pack install format**
+
+Together they close out the fleet-wide stale-plugin-code situation that v4.25.x exposed.
+
 ## [4.25.2] - 2026-05-27
 
 **Two related fixes for the `duplicate plugin id detected` OpenClaw config warning that field-tested on every fleet box after v4.25.1.**
