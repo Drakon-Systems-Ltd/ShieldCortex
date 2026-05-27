@@ -953,6 +953,23 @@ function runMigrations(database: Database.Database): void {
     database.exec("ALTER TABLE memories ADD COLUMN memory_scope TEXT DEFAULT 'private'");
   }
 
+  // Migration: v4.25.0 — downvote_count for negative-feedback salience.
+  // When a user marks a memory unhelpful via `shieldcortex memory downvote
+  // <id>`, the count grows and the recall hook's effective-salience
+  // calculation multiplies in a (1 - 0.3 × n) penalty (floored at 0.1).
+  if (!columnNames.has('downvote_count')) {
+    database.exec('ALTER TABLE memories ADD COLUMN downvote_count INTEGER DEFAULT 0');
+  }
+  if (!columnNames.has('last_downvoted_at')) {
+    database.exec('ALTER TABLE memories ADD COLUMN last_downvoted_at TIMESTAMP');
+  }
+  // Sparse partial index — only indexes rows that have been downvoted.
+  // Cheap to maintain (most rows never downvoted) and lets the CLI list
+  // downvoted memories without a full scan.
+  database.exec(
+    'CREATE INDEX IF NOT EXISTS idx_memories_downvote_count ON memories(downvote_count) WHERE downvote_count > 0',
+  );
+
   // Migration: Pro feature tables (custom_patterns, iron_dome_policies, firewall_rules)
   try {
     database.exec(`
@@ -1326,7 +1343,9 @@ function getInlineSchema(): string {
       cloud_excluded INTEGER DEFAULT 0,
       graph_extraction_version INTEGER DEFAULT 0,
       memory_purpose TEXT DEFAULT 'project',
-      memory_scope TEXT DEFAULT 'private'
+      memory_scope TEXT DEFAULT 'private',
+      downvote_count INTEGER DEFAULT 0,
+      last_downvoted_at TIMESTAMP
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

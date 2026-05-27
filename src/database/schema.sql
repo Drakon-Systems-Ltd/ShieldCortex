@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS memories (
   graph_extraction_version INTEGER DEFAULT 0,
   memory_purpose TEXT DEFAULT 'project',
   memory_scope TEXT DEFAULT 'private',
+  downvote_count INTEGER DEFAULT 0,
+  last_downvoted_at TIMESTAMP,
 
   -- Index for common queries
   CONSTRAINT valid_category CHECK(category IN (

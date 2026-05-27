@@ -20,7 +20,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
  * Async: the pipeline lives in dist/ as ESM and is loaded via dynamic import.
  *
  * @param {import('better-sqlite3').Database} db
- * @param {{ title: string, content: string, category: string, salience: number, tags: string[] }} memory
+ * @param {{ title: string, content: string, category: string, salience: number, tags: string[], memoryPurpose?: string }} memory
  * @param {string|null} [project]
  * @param {{ source?: string }} [opts] — `source` identifies the calling hook
  *   ('session-end-hook' | 'pre-compact-hook' | 'stop-hook' | 'hook').
@@ -50,7 +50,7 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
   const decision = result.firewall.result;
 
   if (decision === 'ALLOW') {
-    insertMemoryRow(db, memory, project);
+    insertMemoryRow(db, memory, project, sourceIdentifier);
     return;
   }
 
@@ -73,11 +73,21 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
 
 // ==================== Internal: writes ====================
 
-function insertMemoryRow(db, memory, project) {
+function insertMemoryRow(db, memory, project, sourceIdentifier) {
   const timestamp = new Date().toISOString();
+  // v4.25.0: pre-4.25 the INSERT omitted memory_purpose / source / source_kind
+  // / capture_method, so every hook write looked identical to a user-typed
+  // memory at the SQL level. The hook already knows which hook is calling
+  // (sourceIdentifier) and the extractor already computed memoryPurpose —
+  // thread both through so `shieldcortex inspect last-precompact` and any
+  // memory-source SQL query can distinguish hook writes from user writes.
   db.prepare(`
-    INSERT INTO memories (uuid, title, content, type, category, salience, tags, project, created_at, last_accessed)
-    VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?)
+    INSERT INTO memories (
+      uuid, title, content, type, category, salience, tags, project,
+      memory_purpose, source, source_kind, capture_method,
+      created_at, last_accessed
+    )
+    VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?)
   `).run(
     randomUUID(),
     memory.title,
@@ -86,6 +96,8 @@ function insertMemoryRow(db, memory, project) {
     memory.salience,
     JSON.stringify(memory.tags),
     project || null,
+    memory.memoryPurpose ?? 'project',
+    `hook:${sourceIdentifier}`,
     timestamp,
     timestamp,
   );

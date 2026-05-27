@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.25.0] - 2026-05-27
+
+**Memory-pipeline taxonomy + scoring overhaul — Layer 2 of Jarvis's field-feedback report. Auto-extracted memories now get correct `memory_purpose` and `category` from extractor intent (not keyword guessing), get distinguishable `source`/`source_kind` columns, and rank by an effective-salience formula at recall time. New CLI commands let operators inspect what the precompact hook captured and downvote memories that turned out unhelpful.**
+
+Pre-4.25 every auto-extracted memory ended up with `memory_purpose='project'` (schema default) and a category chosen by keyword-scanning the captured text. An "important-note" capture would land as `category='error'` whenever the text mentioned "bug" or "fail". Hook writes were also indistinguishable from user-typed memories in SQL — every row had `source='user:direct'`, `source_kind='user'`, `capture_method='manual'`. And salience was a static base score with no recency decay, access boost, or negative-feedback path. Operators had no way to ask "what did the last precompact actually capture?" and no way to mark a memory unhelpful.
+
+### Added
+
+- **`shieldcortex memory <subcommand>` CLI** — `show <id>`, `downvote <id> [--reason <text>]`, `list [--purpose X] [--category X] [--limit N]`. The downvote subcommand prints the effective-salience delta so operators can see the impact of their feedback. Distinct from existing `memories` (plural) which routes to the legacy migrate flow.
+- **`shieldcortex inspect last-precompact [--history N | --all]` CLI** — read the precompact ring buffer. Shows extractor type, category, purpose, salience, and the saved/dropped disposition for every candidate the precompact hook proposed.
+- **Precompact ring buffer** at `~/.shieldcortex/precompact-log/{0..9}.json` (rolling, newest at index 0, oldest dropped on rotation). Each entry records threshold, context fullness, raw segment count, and per-candidate metadata. Atomic write via temp-file + rename.
+- **`EXTRACTOR_TO_PURPOSE` + `EXTRACTOR_TO_CATEGORY` maps** in [`scripts/lib/extract-memorable-segments.mjs`](scripts/lib/extract-memorable-segments.mjs). Deterministic taxonomy: preference→feedback, decision/architecture/error-fix/important-note→project, learning→reference. Category pinned by extractor type so an "important-note" never gets mislabelled as "error" because the text mentioned a bug.
+- **`downvote_count` + `last_downvoted_at` columns** on `memories` (inline `ALTER TABLE` migration in [`src/database/init.ts`](src/database/init.ts), pattern matched on the v4.0.0 memory_purpose migration). Sparse partial index — only indexes rows that have actually been downvoted.
+- **`scripts/lib/salience.mjs`** — exports `computeEffectiveSalience(memory, opts?)`. Formula: `base × recency × access × pin × downvote_penalty`. All four constants tunable via env vars (`SHIELDCORTEX_SALIENCE_HALF_LIFE_DAYS`, `SHIELDCORTEX_SALIENCE_ACCESS_NORM`, `SHIELDCORTEX_SALIENCE_PIN_BOOST`, `SHIELDCORTEX_SALIENCE_DOWNVOTE_DECAY`). No DB writes on the hot path — purely a read-time computation.
+
+### Changed
+
+- **`save-memory.mjs` INSERT** now writes `memory_purpose`, `source='hook:<name>'`, `source_kind='hook'`, `capture_method='auto'` on every auto-extracted row. Hook writes are now distinguishable from user-typed writes via SQL: `SELECT memory_purpose, source_kind, COUNT(*) FROM memories GROUP BY 1, 2`.
+- **Recall ranking tiebreaker** ([`scripts/lib/recall-rank.mjs`](scripts/lib/recall-rank.mjs)) now uses effective salience instead of raw salience when FTS rank is tied. Backward-compatible: rows without the new SELECT projections (legacy callers, recall-rank unit tests) still fall through to raw-salience comparison.
+- **`extractMemorableSegments` and `FULL_EXTRACTORS` / `STOP_HOOK_EXTRACTORS`** are now exported so tests can iterate the canonical extractor list and catch new extractors that lack a mapping entry.
+
+### Tests
+
+- [`src/__tests__/extractor-purpose-mapping.test.ts`](src/__tests__/extractor-purpose-mapping.test.ts) — every in-tree `extractorType` maps to a valid `memory_purpose` and `category`; preference/decision/learning/important-note/error-fix end-to-end through `processSegments` confirm the wiring.
+- [`src/__tests__/salience-formula.test.ts`](src/__tests__/salience-formula.test.ts) — each factor in isolation (recency half-life, access log-scaling, pin boost, downvote linear-decay-with-floor), env-var overrides, missing-field tolerance, and three integration tests confirming compareRecallResults tie-breaks via effective salience.
+- [`src/__tests__/precompact-ring-buffer.test.ts`](src/__tests__/precompact-ring-buffer.test.ts) — write to slot 0, rotation, ring drop past size 10, dir creation, atomic-write (no .tmp leftovers), full candidate field round-trip.
+- [`src/__tests__/save-auto-extracted-memory.test.ts`](src/__tests__/save-auto-extracted-memory.test.ts) extended with 5 new v4.25 assertions covering memoryPurpose pass-through, source-column stamping, and downvote-column defaults.
+
+### Why not Layer 3
+
+The original v4.24.3 release notes flagged Layer 3 (local LLM-driven extraction via Qwen2.5-0.5B) as the next ship. After a tradeoff conversation it was dropped — Layer 2's deterministic mapping uses the signal the extractor already has (`extractorType`) and should resolve ~80% of the field-reported quality issues without shipping a 500MB model. Revisit only if field data shows the deterministic mapping is genuinely miscategorising at >20% rate.
+
 ## [4.24.3] - 2026-05-26
 
 **Memory-extraction quality fixes — sentence-bounded captures, first-sentence headlines, dedupe on recall. Field-driven by a long report from a production agent.**

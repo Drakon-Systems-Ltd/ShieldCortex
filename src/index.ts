@@ -772,6 +772,22 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "memory" subcommand (v4.25.0) — show / downvote / list a single
+  // memory. Distinct from the existing "memories" (plural) command which
+  // routes to migrate-legacy.
+  if (process.argv[2] === 'memory') {
+    const { handleMemoryCommand } = await import('./cli/memory.js');
+    await handleMemoryCommand(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "inspect" subcommand (v4.25.0) — read the precompact ring buffer.
+  if (process.argv[2] === 'inspect') {
+    const { handleInspectCommand } = await import('./cli/inspect.js');
+    await handleInspectCommand(process.argv.slice(3));
+    return;
+  }
+
   // Handle "iron-dome" subcommand — behaviour protection layer
   if (process.argv[2] === 'iron-dome') {
     const { handleIronDomeCommand } = await import('./cli/iron-dome.js');

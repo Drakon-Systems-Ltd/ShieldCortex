@@ -80,8 +80,15 @@ function recallRelevant(db, project, prompt) {
   const ftsQuery = escapeFts5(prompt);
   if (ftsQuery.trim()) {
     try {
+      // v4.25.0: project pinned/access_count/last_accessed/downvote_count
+      // so compareRecallResults can compute effective salience without a
+      // second query. COALESCE on downvote_count for DBs that pre-date the
+      // 4.25 migration (the prompt-recall-hook runs against legacy DBs too).
       const ftsRows = db.prepare(`
-        SELECT m.id, m.title, m.content, m.category, m.salience, fts.rank
+        SELECT
+          m.id, m.title, m.content, m.category, m.salience, fts.rank,
+          m.pinned, m.access_count, m.last_accessed,
+          COALESCE(m.downvote_count, 0) AS downvote_count
         FROM memories m
         JOIN memories_fts fts ON m.id = fts.rowid
         WHERE memories_fts MATCH ?
@@ -112,8 +119,14 @@ function recallRelevant(db, project, prompt) {
 
   if (categoryBoost && results.length < MAX_RESULTS) {
     try {
+      // v4.25.0: project the salience-formula inputs (same as the FTS
+      // SELECT above) so compareRecallResults can compute effective
+      // salience for rows that came in via this fallback path.
       const catRows = db.prepare(`
-        SELECT id, title, content, category, salience
+        SELECT
+          id, title, content, category, salience,
+          pinned, access_count, last_accessed,
+          COALESCE(downvote_count, 0) AS downvote_count
         FROM memories
         WHERE category = ?
           AND (project = ? OR project IS NULL OR scope = 'global')

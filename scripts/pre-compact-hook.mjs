@@ -22,6 +22,7 @@ import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
+import { writePrecompactLog } from './lib/precompact-log.mjs';
 import {
   extractMemorableSegments,
   processSegments,
@@ -183,9 +184,12 @@ process.stdin.on('end', async () => {
     console.error(`[auto-extract] Dynamic threshold: ${dynamicThreshold.toFixed(2)}`);
 
     // Only attempt extraction if we have conversation content
+    let precompactCandidates = [];
+    let rawSegmentCount = 0;
     if (conversationText && conversationText.length > 100) {
       // Extract memorable segments
       const segments = extractMemorableSegments(conversationText);
+      rawSegmentCount = segments.length;
       const processedSegments = processSegments(segments, dynamicThreshold, {
         maxMemories: MAX_AUTO_MEMORIES,
         categoryThresholds: PRE_COMPACT_CATEGORY_THRESHOLDS,
@@ -194,18 +198,46 @@ process.stdin.on('end', async () => {
 
       // Save auto-extracted memories
       for (const memory of processedSegments) {
+        // v4.25.0: collect candidate metadata for the precompact ring buffer.
+        // Operators read this via `shieldcortex inspect last-precompact`
+        // when diagnosing why extraction did/didn't pick a particular line.
+        const candidate = {
+          extractorType: memory.extractorType,
+          category: memory.category,
+          memoryPurpose: memory.memoryPurpose,
+          title: memory.title,
+          salience: memory.salience,
+          frequencyBoost: memory.frequencyBoost ?? 0,
+          saved: false,
+          error: null,
+        };
         try {
           await saveMemory(db, memory, project);
           autoExtractedCount++;
+          candidate.saved = true;
           const boostInfo = memory.frequencyBoost > 0 ? ` +${memory.frequencyBoost.toFixed(2)} boost` : '';
           console.error(`[auto-extract] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}${boostInfo}, category: ${memory.category})`);
         } catch (err) {
+          candidate.error = err.message;
           console.error(`[auto-extract] Failed to save "${memory.title}": ${err.message}`);
         }
+        precompactCandidates.push(candidate);
       }
     } else {
       notes = 'no-content';
     }
+
+    // v4.25.0: write the run to the rolling ring buffer at
+    // ~/.shieldcortex/precompact-log/. Best-effort — never throw.
+    try {
+      writePrecompactLog({
+        thresholdUsed: dynamicThreshold,
+        contextFullnessPct: maxMemories > 0 ? Math.round((totalMemories / maxMemories) * 100) : null,
+        totalMemories,
+        rawSegmentCount,
+        candidates: precompactCandidates,
+      });
+    } catch { /* best-effort */ }
 
     console.error(`[shieldcortex] Pre-compact complete: ${autoExtractedCount} memories auto-extracted`);
 

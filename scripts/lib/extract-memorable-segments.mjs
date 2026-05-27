@@ -23,6 +23,37 @@ export const BASE_THRESHOLD = 0.35;
 // trust band (0.5–0.7) used elsewhere in the pipeline.
 export const AUTO_EXTRACT_SALIENCE_CAP = 0.6;
 
+// v4.25.0: deterministic taxonomy. The extractor already knows *why* a
+// segment matched (extractorType) — derive memory_purpose and category
+// from that signal instead of re-scanning the captured text. Keyword-
+// based suggestCategory() stays as a fallback for any extractorType not
+// in the map (defensive, not currently used by any in-tree extractor).
+//
+// memory_purpose follows the global taxonomy (src/memory/types.ts):
+//   user      — who the human is
+//   feedback  — corrections / instructions the human gave the agent
+//   project   — facts about the project (decisions, architecture, fixes)
+//   reference — reusable knowledge (learnings, external references)
+export const EXTRACTOR_TO_PURPOSE = {
+  preference: 'feedback',
+  decision: 'project',
+  architecture: 'project',
+  'error-fix': 'project',
+  learning: 'reference',
+  'important-note': 'project',
+};
+
+// Pinning category by extractorType eliminates the "important-note tagged
+// as 'error' because the text mentioned a bug" failure mode.
+export const EXTRACTOR_TO_CATEGORY = {
+  preference: 'preference',
+  decision: 'context',
+  architecture: 'architecture',
+  'error-fix': 'error',
+  learning: 'learning',
+  'important-note': 'note',
+};
+
 // Default category thresholds (session-end / lighter hooks).
 // Pre-compact hook uses tighter thresholds (raised +0.10 in v4.11.0) and
 // passes them via processSegments({ categoryThresholds: ... }).
@@ -232,7 +263,7 @@ export function getExtractionThreshold(category, dynamicThreshold, categoryThres
 // newline, capping at 200 chars for safety, and optionally consumes the
 // terminator so the captured group ends cleanly. v4.24.3.
 
-const FULL_EXTRACTORS = [
+export const FULL_EXTRACTORS = [
   {
     name: 'decision',
     titlePrefix: 'Decision: ',
@@ -306,7 +337,7 @@ const FULL_EXTRACTORS = [
 // no important-note, fewer learning + preference patterns). Preserve the
 // pre-refactor surface so its behaviour does not change with this move.
 // Same sentence-bounded capture form as FULL_EXTRACTORS (v4.24.3).
-const STOP_HOOK_EXTRACTORS = [
+export const STOP_HOOK_EXTRACTORS = [
   FULL_EXTRACTORS[0], // decision
   {
     name: 'error-fix',
@@ -598,11 +629,17 @@ export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opt
     if (!isDupe) {
       const text = seg.title + ' ' + seg.content;
       const baseSalience = calculateSalience(text);
-      const category = suggestCategory(text);
+      // v4.25.0: extractorType drives category and memory_purpose. Fall
+      // back to keyword-based suggestCategory only when extractorType is
+      // unknown (defensive; no in-tree extractor produces a name outside
+      // EXTRACTOR_TO_CATEGORY).
+      const category = EXTRACTOR_TO_CATEGORY[seg.extractorType] ?? suggestCategory(text);
+      const memoryPurpose = EXTRACTOR_TO_PURPOSE[seg.extractorType] ?? 'project';
       unique.push({
         ...seg,
         baseSalience,
         category,
+        memoryPurpose,
         tags: extractTags(text, hookTag, seg.extractorType),
       });
     }

@@ -92,4 +92,51 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
       .get('Decision: chose Drizzle for the SaaS schema') as { tags: string };
     expect(JSON.parse(row.tags)).toEqual(['decision', 'architecture']);
   });
+
+  // ===== v4.25.0: taxonomy + source identification =====
+
+  it('v4.25: writes memoryPurpose from the segment (not the schema default)', async () => {
+    await saveAutoExtractedMemory(
+      db,
+      makeMemory({ title: 'P', memoryPurpose: 'feedback' }),
+      'p',
+      { source: 'pre-compact-hook' },
+    );
+    const row = db.prepare('SELECT memory_purpose FROM memories WHERE title = ?')
+      .get('P') as { memory_purpose: string };
+    expect(row.memory_purpose).toBe('feedback');
+  });
+
+  it('v4.25: defaults memoryPurpose to "project" when the segment does not set one', async () => {
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'D' }), 'p', { source: 'pre-compact-hook' });
+    const row = db.prepare('SELECT memory_purpose FROM memories WHERE title = ?')
+      .get('D') as { memory_purpose: string };
+    expect(row.memory_purpose).toBe('project');
+  });
+
+  it('v4.25: stamps source/source_kind/capture_method so hook writes are distinguishable from user writes', async () => {
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'S' }), 'p', { source: 'pre-compact-hook' });
+    const row = db.prepare('SELECT source, source_kind, capture_method FROM memories WHERE title = ?')
+      .get('S') as { source: string; source_kind: string; capture_method: string };
+    expect(row.source).toBe('hook:pre-compact-hook');
+    expect(row.source_kind).toBe('hook');
+    expect(row.capture_method).toBe('auto');
+  });
+
+  it('v4.25: session-end-hook and pre-compact-hook are distinguishable via source column', async () => {
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'PC' }), 'p', { source: 'pre-compact-hook' });
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'SE' }), 'p', { source: 'session-end-hook' });
+    const rows = db.prepare('SELECT title, source FROM memories ORDER BY title').all() as Array<{ title: string; source: string }>;
+    const sources = Object.fromEntries(rows.map((r) => [r.title, r.source]));
+    expect(sources.PC).toBe('hook:pre-compact-hook');
+    expect(sources.SE).toBe('hook:session-end-hook');
+  });
+
+  it('v4.25: downvote_count + last_downvoted_at columns exist with safe defaults', async () => {
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'DV' }), 'p', { source: 'pre-compact-hook' });
+    const row = db.prepare('SELECT downvote_count, last_downvoted_at FROM memories WHERE title = ?')
+      .get('DV') as { downvote_count: number; last_downvoted_at: string | null };
+    expect(row.downvote_count).toBe(0);
+    expect(row.last_downvoted_at).toBeNull();
+  });
 });
