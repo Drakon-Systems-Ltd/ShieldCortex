@@ -320,6 +320,29 @@ async function stepClaudeHooks(): Promise<StepResult> {
   });
 }
 
+// ── Dashboard discovery hint ────────────────────────────────
+
+/**
+ * After a successful update, surface the dashboard command on non-headless
+ * systems where it isn't already running. The dashboard never auto-starts;
+ * this is purely a "did you know?" line.
+ */
+async function maybePrintDashboardHint(): Promise<void> {
+  try {
+    const { getDashboardHint } =
+      // @ts-expect-error — importing a .mjs hook util that has no .d.ts
+      await import('../../scripts/lib/dashboard-hint.mjs');
+    const hint = (await getDashboardHint()) as
+      | { title: string; command: string; url: string; detail: string }
+      | null;
+    if (!hint) return;
+
+    process.stdout.write(`  ${paint('cyan', hint.title)}:\n`);
+    process.stdout.write(`     ${paint('yellow', hint.command)}  ${paint('gray', `→ ${hint.url}`)}\n`);
+    process.stdout.write(`     ${paint('gray', hint.detail)}\n\n`);
+  } catch { /* hint is best-effort */ }
+}
+
 // ── 4.11.0 boundary notice (preserved from old flow) ────────
 
 function maybePrint411Notice(currentVersion: string, mainUpdated: boolean): void {
@@ -367,4 +390,5 @@ export async function runUpdate(): Promise<void> {
 
   footer(Date.now() - flowStart, mainUpdated);
   maybePrint411Notice(currentVersion, mainUpdated);
+  await maybePrintDashboardHint();
 }

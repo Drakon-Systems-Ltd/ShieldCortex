@@ -15,6 +15,7 @@ import { homedir } from 'os';
 import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { getDashboardHint } from './lib/dashboard-hint.mjs';
 
 const isGlobal = process.env.npm_config_global === 'true';
 const isCI = process.env.CI === 'true' || process.env.CONTINUOUS_INTEGRATION === 'true';
@@ -228,4 +229,16 @@ if (isGlobal && !isCI) {
     console.log('\x1b[2m  shieldcortex config --proactive-recall true|false\x1b[0m');
   }
   console.log('');
+
+  // Dashboard discovery hint — only shown on non-headless systems where the
+  // local dashboard isn't already running. Best-effort, never blocks install.
+  try {
+    const hint = await getDashboardHint();
+    if (hint) {
+      console.log(`\x1b[36m${hint.title}:\x1b[0m`);
+      console.log(`  \x1b[33m${hint.command}\x1b[0m  \x1b[2m→ ${hint.url}\x1b[0m`);
+      console.log(`  \x1b[2m${hint.detail}\x1b[0m`);
+      console.log('');
+    }
+  } catch { /* never fail postinstall on a hint */ }
 }

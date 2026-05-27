@@ -6,6 +6,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.27.0] - 2026-05-27
+
+**UX pass: surface the dashboard without auto-launching it, and reshape `quickstart` around what users actually want.**
+
+After v4.26.0's quality pass, this release ships the user-facing pair of changes from the same audit conversation: dashboards still never auto-launch (correct default — most fleet installs are headless or OpenClaw-only), but on machines that *can* run one, the user shouldn't have to read CLAUDE.md to learn it exists. Likewise, `shieldcortex quickstart` now leads with outcomes ("memory / defence / both") instead of asking which IDE you have installed.
+
+### Added
+
+- **Dashboard discovery hint** — a small, opt-in line surfaced in three places, only on non-headless systems where the dashboard isn't already running:
+  - **After `npm install -g shieldcortex`** ([scripts/postinstall.mjs](scripts/postinstall.mjs)) — appears below the existing install banner.
+  - **After `shieldcortex update`** ([src/cli/update.ts](src/cli/update.ts)) — appears below the update footer.
+  - **`shieldcortex doctor`** ([src/cli/doctor.ts](src/cli/doctor.ts)) — when the dashboard *is* running, the "running" message now includes `http://localhost:3030` so users can actually open it.
+
+  Headless detection: macOS and Windows are always treated as headed; Linux falls back to `DISPLAY` / `WAYLAND_DISPLAY` (matches the existing `doctor.ts` heuristic). The probe is best-effort with an 800 ms HTTP timeout and never blocks install or update flows.
+
+- **`shieldcortex quickstart` outcome-based intent picker** ([src/setup/quickstart.ts](src/setup/quickstart.ts)) — when run interactively with no target, the command now asks "What are you here for?" with four options:
+  1. Memory for my AI agents (recall, project context, auto-extracted decisions)
+  2. Defence scanning (prompt-injection, credential leaks, quarantine)
+  3. Both (memory + defence, recommended — default)
+  4. Just show me the commands
+
+  Each option routes into the existing per-target install flow. Non-TTY runs (CI, piped output) and explicit `quickstart <target>` invocations bypass the picker and behave exactly as before — no automation breakage.
+
+- **New helper module** [`scripts/lib/dashboard-hint.mjs`](scripts/lib/dashboard-hint.mjs) exporting `isHeadlessSystem()`, `isDashboardRunning(timeoutMs)`, and `getDashboardHint()`. Single source of truth so postinstall (pure ESM) and `update.ts` (TypeScript) stay in lockstep.
+
+### Tests
+
+[`src/__tests__/dashboard-hint.test.ts`](src/__tests__/dashboard-hint.test.ts) — covers headless detection across darwin/win32/linux, hint shape on darwin, and the dashboard-port probe (with EADDRINUSE-aware skip for developers running the real dashboard locally).
+
+### Not changed
+
+- The dashboard still never auto-launches from postinstall, update, setup, quickstart, or any other CLI path. The only ways to start it remain `shieldcortex dashboard`, `shieldcortex --dashboard`, and `shieldcortex service install`.
+- No changes to existing `shieldcortex quickstart claude|openclaw|copilot|codex|security` direct invocations.
+
 ## [4.26.0] - 2026-05-27
 
 **Internal quality pass after an honest audit. No user-facing behaviour changes — but the next person to touch `src/database/init.ts` will thank you.**

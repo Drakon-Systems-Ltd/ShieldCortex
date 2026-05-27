@@ -532,7 +532,7 @@ async function checkProcesses(): Promise<CheckResult[]> {
     const response = await fetch('http://localhost:3030/', { signal: controller.signal });
     clearTimeout(timeout);
     if (response.ok || response.status === 304) {
-      results.push({ label: 'Dashboard', status: 'pass', message: 'running (port 3030)' });
+      results.push({ label: 'Dashboard', status: 'pass', message: 'running (http://localhost:3030)' });
     } else {
       results.push({
         label: 'Dashboard',

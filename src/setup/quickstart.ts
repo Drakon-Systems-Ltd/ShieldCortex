@@ -154,6 +154,37 @@ async function promptYesNo(question: string, defaultYes = true): Promise<boolean
   }
 }
 
+type Intent = 'memory' | 'defence' | 'both' | 'skip';
+
+/**
+ * Outcome-based picker: routes the user by what they want rather than by
+ * which integration they happen to have installed. Returns 'skip' if the
+ * user picks "show me commands" or enters anything unrecognised, which
+ * preserves the pre-v4.27 behaviour (auto-guide + per-target prompts).
+ */
+async function promptIntent(): Promise<Intent> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  try {
+    console.log('What are you here for?');
+    console.log('  1. Memory for my AI agents  (recall, project context, auto-extracted decisions)');
+    console.log('  2. Defence scanning         (prompt-injection, credential leaks, quarantine)');
+    console.log('  3. Both                     (memory + defence, recommended)');
+    console.log('  4. Just show me the commands');
+    console.log('');
+    const answer = (await rl.question('Pick one [1-4, default 3]: ')).trim().toLowerCase();
+    if (!answer || answer === '3' || answer === 'both' || answer === 'b') return 'both';
+    if (answer === '1' || answer === 'memory' || answer === 'm') return 'memory';
+    if (answer === '2' || answer === 'defence' || answer === 'defense' || answer === 'd') return 'defence';
+    return 'skip';
+  } finally {
+    rl.close();
+  }
+}
+
 function detectedInstallers(env: DetectionResult): Array<{ target: DetectedInstaller; label: string }> {
   const installers: Array<{ target: DetectedInstaller; label: string }> = [];
   if (env.claude) installers.push({ target: 'claude', label: 'Claude Code' });
@@ -222,6 +253,31 @@ async function promptDetectedInstalls(autoApprove = false): Promise<void> {
 export async function handleQuickstartCommand(target?: string): Promise<void> {
   if (!target) {
     printAutoGuide();
+
+    // Interactive runs get the outcome-based picker first; non-TTY runs (CI,
+    // piped output) fall through to the historical per-target prompt flow so
+    // existing automation keeps working.
+    if (isInteractiveTerminal()) {
+      const intent = await promptIntent();
+      console.log('');
+      switch (intent) {
+        case 'memory':
+          await promptDetectedInstalls(false);
+          return;
+        case 'defence':
+          printSecurityGuide();
+          return;
+        case 'both':
+          await promptDetectedInstalls(false);
+          console.log('');
+          printSecurityGuide();
+          return;
+        case 'skip':
+          // Fall through to the historical prompt flow.
+          break;
+      }
+    }
+
     await promptDetectedInstalls(false);
     return;
   }
