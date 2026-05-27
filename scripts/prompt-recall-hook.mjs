@@ -19,6 +19,8 @@ import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
 import { compareRecallResults } from './lib/recall-rank.mjs';
+import { computeEffectiveSalience } from './lib/salience.mjs';
+import { writeRecallLog } from './lib/recall-log.mjs';
 
 // ==================== CONFIG ====================
 
@@ -102,6 +104,10 @@ function recallRelevant(db, project, prompt) {
       for (const row of ftsRows) {
         if (!seen.has(row.id)) {
           seen.add(row.id);
+          // v4.25.1: tag with source so the recall ring buffer can show
+          // operators which path surfaced a given candidate. _-prefixed so
+          // it doesn't collide with any future SELECT column.
+          row._source = 'fts';
           results.push(row);
         }
       }
@@ -139,6 +145,7 @@ function recallRelevant(db, project, prompt) {
       for (const row of catRows) {
         if (!seen.has(row.id)) {
           seen.add(row.id);
+          row._source = 'category-boost';
           results.push(row);
         }
       }
@@ -149,7 +156,10 @@ function recallRelevant(db, project, prompt) {
   // sort discarded the relevance signal from the FTS5 query above — high-
   // salience-but-off-topic memories bubbled to the top of the recall preamble.
   results.sort(compareRecallResults);
-  return results.slice(0, MAX_RESULTS);
+  // v4.25.1: return the full sorted set alongside the sliced top-N so the
+  // recall ring buffer can log which candidates were considered but didn't
+  // make the cut. The top-N is the existing public contract.
+  return { topN: results.slice(0, MAX_RESULTS), fullSet: results };
 }
 
 // ==================== DEDUPE STATE ====================
@@ -190,6 +200,69 @@ function saveDedupState(state) {
 
 function hashContent(s) {
   return createHash('sha256').update(s).digest('hex').slice(0, 16);
+}
+
+// ==================== RECALL LOG (v4.25.1) ====================
+//
+// Per-run dump of "what prompt fired, which memories were considered, which
+// were injected, which were dropped, and why" to ~/.shieldcortex/recall-log/.
+// Operators read this via `shieldcortex inspect last-recall`. Best-effort —
+// never throws into the caller. Designed to gather diagnostic data so we
+// can scope v4.26.x recall-quality fixes from real fleet usage.
+
+const RECALL_LOG_PROMPT_CAP = 200;
+
+function buildLogCandidates({ fullSet, topN, injected, dedupHashes }) {
+  const injectedIds = new Set(injected.map((m) => m.id));
+  const topNIds = new Set(topN.map((m) => m.id));
+  return fullSet.map((row) => {
+    const wasInjected = injectedIds.has(row.id);
+    let dropReason = null;
+    if (!wasInjected) {
+      if (topNIds.has(row.id) && dedupHashes.has(hashContent(row.content))) {
+        dropReason = 'dedupe';
+      } else if (!topNIds.has(row.id)) {
+        dropReason = 'outside_top_n';
+      } else {
+        // In top-N, not deduped, not injected — early exit on empty memories
+        // before the dedupe filter ran. Mark as not-injected-no-reason so the
+        // CLI can distinguish from an active drop.
+        dropReason = 'not_injected';
+      }
+    }
+    return {
+      id: row.id ?? null,
+      title: row.title ?? null,
+      category: row.category ?? null,
+      memoryPurpose: row.memory_purpose ?? null,
+      salience: typeof row.salience === 'number' ? row.salience : null,
+      ftsRank: typeof row.rank === 'number' ? row.rank : null,
+      source: row._source ?? null,
+      effectiveSalience: computeEffectiveSalience(row),
+      injected: wasInjected,
+      dropReason,
+    };
+  });
+}
+
+function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context }) {
+  try {
+    const promptCapped = prompt.length > RECALL_LOG_PROMPT_CAP
+      ? prompt.slice(0, RECALL_LOG_PROMPT_CAP) + '…'
+      : prompt;
+    writeRecallLog({
+      prompt: promptCapped,
+      promptHash: hashContent(prompt),
+      sessionId: sessionId ?? null,
+      project: project ?? null,
+      minSalience: MIN_SALIENCE,
+      candidates: buildLogCandidates({ fullSet, topN, injected, dedupHashes }),
+      injectedCount: injected.length,
+      finalContextChars: context ? context.length : 0,
+    });
+  } catch {
+    // Best-effort — recall must not block on log write failures.
+  }
 }
 
 // ==================== FORMAT ====================
@@ -280,10 +353,26 @@ process.stdin.on('end', () => {
     }
 
     const db = new Database(dbPath, { readonly: true, timeout: 2000 });
-    let memories = recallRelevant(db, project, prompt);
+    const { topN, fullSet } = recallRelevant(db, project, prompt);
     db.close();
+    let memories = topN;
 
     if (memories.length === 0) {
+      // v4.25.1: still log no-candidate runs ONLY when the FTS step actually
+      // ran (fullSet has something filtered out before the slice). Pure
+      // empties (no FTS match at all) skip the log — saves disk + signal.
+      if (fullSet.length > 0) {
+        logRecallRun({
+          prompt,
+          sessionId,
+          project,
+          fullSet,
+          topN: [],
+          injected: [],
+          dedupHashes: new Set(),
+          context: null,
+        });
+      }
       process.exit(0);
     }
 
@@ -292,13 +381,26 @@ process.stdin.on('end', () => {
     // "near-identical recall in adjacent turns" failure Jarvis flagged.
     let dedupState = null;
     let sessionRing = [];
+    let dedupHashes = new Set();
     if (sessionId) {
       dedupState = loadDedupState();
       const entry = dedupState[sessionId] ?? { ring: [], touched: Date.now() };
       sessionRing = Array.isArray(entry.ring) ? entry.ring : [];
-      const recentHashes = new Set(sessionRing);
-      memories = memories.filter((m) => !recentHashes.has(hashContent(m.content)));
+      dedupHashes = new Set(sessionRing);
+      memories = memories.filter((m) => !dedupHashes.has(hashContent(m.content)));
       if (memories.length === 0) {
+        // v4.25.1: log even when every top-N candidate was dedupe-suppressed.
+        // This is the most interesting case for diagnosing recall noise.
+        logRecallRun({
+          prompt,
+          sessionId,
+          project,
+          fullSet,
+          topN,
+          injected: [],
+          dedupHashes,
+          context: null,
+        });
         process.exit(0);
       }
     }
@@ -333,6 +435,18 @@ process.stdin.on('end', () => {
         additionalContext: context,
       },
     };
+
+    // v4.25.1: log the recall run (best-effort, never blocks output)
+    logRecallRun({
+      prompt,
+      sessionId,
+      project,
+      fullSet,
+      topN,
+      injected: memories,
+      dedupHashes,
+      context,
+    });
 
     console.log(JSON.stringify(output));
     console.error(`[shieldcortex] Proactive recall: ${memories.length} memories for "${project}"`);

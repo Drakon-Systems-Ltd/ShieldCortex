@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.25.1] - 2026-05-27
+
+**Recall instrumentation: ring buffer + `inspect last-recall` CLI for diagnosing why specific memories surface for specific prompts.**
+
+Jarvis tested v4.25.0 in production and confirmed the infrastructure layer is solid but recall *quality* is still the weak link — a Google Slides "use black rgb(0,0,0) as shape fill" memory surfaced for a ShieldCortex-versions prompt. The salience filter alone isn't discriminating. Rather than fix recall blind from one anecdote, this release ships instrumentation so v4.26 can be scoped from real fleet usage data.
+
+### Added
+
+- **Recall ring buffer** at `~/.shieldcortex/recall-log/{0..9}.json` (rolling, newest at index 0, oldest dropped on rotation). Each entry records the sanitised prompt (capped at 200 chars), prompt hash, session id, project, min-salience threshold, and per-candidate detail: id, title, category, memoryPurpose, base salience, FTS rank, source (`fts` | `category-boost`), effective salience, injected/dropped, and drop reason (`dedupe` | `outside_top_n` | `not_injected`). Atomic write via temp-file + rename; trust boundary identical to memories.db.
+- **`shieldcortex inspect last-recall [--history N | --all]` CLI** — pattern matched on the existing `last-precompact` handler. Default shows the most recent recall run; `--history N` shows slot N (0=newest, 9=oldest); `--all` dumps the full ring.
+- **`scripts/lib/recall-log.mjs`** — `writeRecallLog`, `readRecallLog`, `listRecallLogs`, `getRecallLogDir`, `RECALL_RING_SIZE`. Mirrors `precompact-log.mjs` line-for-line including the `process.env.HOME || homedir()` pattern needed for jest ESM-VM isolation.
+
+### Changed
+
+- **`recallRelevant()` in `prompt-recall-hook.mjs`** returns `{ topN, fullSet }` instead of `topN` alone, so the log can record candidates considered-but-not-injected. Each row also gets a `_source` tag (`'fts'` or `'category-boost'`) at materialisation time.
+- **Hook exit paths** now call `logRecallRun()` at three points: the success path (memories injected), the post-dedupe empty path (every candidate was dedupe-suppressed — the most interesting case), and the no-top-N-after-FTS-found-something path. Pure no-FTS-match exits are not logged (saves disk + signal). Always best-effort try-catch — recall never blocks on log failure.
+
+### Tests
+
+- [`src/__tests__/recall-ring-buffer.test.ts`](src/__tests__/recall-ring-buffer.test.ts) — 8 cases mirroring `precompact-ring-buffer.test.ts`: write to slot 0, rotation up, drop past slot 9, lazy dir creation, missing-slot tolerance, newest-first listing, atomic-write (no `.tmp` leftovers), full per-candidate field round-trip including dropReason / source / effectiveSalience / ftsRank.
+
+### Diagnostic intent
+
+After 3-7 days of fleet usage, pull `~/.shieldcortex/recall-log/` from each machine. Look for patterns: are off-topic memories getting high FTS rank? Is effective salience demoting the right things? Is dedupe over-suppressing legitimate recalls? Answer informs v4.26.x scope (tighter FTS query? recency floor? project-scope strictness? flip proactive-recall default off?). One early observation from the local smoke test: legacy memories with `access_count=0` produce `eff=0` from the salience formula, meaning the access-factor multiplier collapses the entire tiebreaker. That's a likely v4.26 target.
+
+### What this is NOT
+
+- Not a recall-quality fix (deliberate — scoping from data).
+- Not a behaviour change (proactive-recall default unchanged; Jarvis's `--proactive-recall false` workaround still recommended for users who want pull-based recall today).
+- Not a backfill of stale memory content (separate concern, deferred since v4.24.3).
+
 ## [4.25.0] - 2026-05-27
 
 **Memory-pipeline taxonomy + scoring overhaul — Layer 2 of Jarvis's field-feedback report. Auto-extracted memories now get correct `memory_purpose` and `category` from extractor intent (not keyword guessing), get distinguishable `source`/`source_kind` columns, and rank by an effective-salience formula at recall time. New CLI commands let operators inspect what the precompact hook captured and downvote memories that turned out unhelpful.**

@@ -132,6 +132,116 @@ async function cmdLastPrecompact(args: string[]): Promise<number> {
   return 0;
 }
 
+// ===== last-recall (v4.25.1) =====
+
+interface RecallCandidate {
+  id?: number | null;
+  title?: string | null;
+  category?: string | null;
+  memoryPurpose?: string | null;
+  salience?: number | null;
+  ftsRank?: number | null;
+  source?: 'fts' | 'category-boost' | null;
+  effectiveSalience?: number | null;
+  injected?: boolean;
+  dropReason?: string | null;
+}
+
+interface RecallEntry {
+  ranAt?: string;
+  prompt?: string | null;
+  promptHash?: string | null;
+  sessionId?: string | null;
+  project?: string | null;
+  minSalience?: number | null;
+  candidates?: RecallCandidate[];
+  injectedCount?: number | null;
+  finalContextChars?: number | null;
+}
+
+function fmtRank(rank: number | null | undefined): string {
+  if (typeof rank !== 'number' || !Number.isFinite(rank)) return '   ----';
+  return rank.toFixed(2).padStart(7);
+}
+
+function fmtEff(eff: number | null | undefined): string {
+  if (typeof eff !== 'number' || !Number.isFinite(eff)) return '----';
+  return eff.toFixed(2);
+}
+
+function printRecallEntry(index: number, entry: RecallEntry) {
+  const candidates = entry.candidates ?? [];
+  const injected = candidates.filter((c) => c.injected);
+  const dropped = candidates.filter((c) => !c.injected);
+
+  console.log(`${bold}Slot ${index}: ${entry.ranAt ?? '(unknown time)'} ${dim}${relativeTime(entry.ranAt)}${reset}`);
+  const promptDisplay = entry.prompt ? `"${entry.prompt}"` : '(no prompt)';
+  console.log(`  Prompt: ${cyan}${promptDisplay}${reset}`);
+  const meta = [
+    entry.project ? `project=${entry.project}` : null,
+    entry.sessionId ? `session=${entry.sessionId.slice(0, 8)}` : null,
+    entry.minSalience != null ? `min_sal=${entry.minSalience.toFixed(2)}` : null,
+  ].filter(Boolean).join(', ');
+  if (meta) console.log(`  ${dim}${meta}${reset}`);
+  console.log(`  Candidates: ${candidates.length} considered, ${green}${injected.length} injected${reset}, ${dim}${dropped.length} dropped${reset}`);
+
+  if (injected.length > 0) {
+    console.log(`\n  ${green}INJECTED${reset}`);
+    for (const c of injected) {
+      const src = (c.source ?? '?').padEnd(15);
+      console.log(`    [#${String(c.id ?? '?').padEnd(5)}] ${cyan}${src}${reset} rank=${fmtRank(c.ftsRank)}  eff=${fmtEff(c.effectiveSalience)}  ${(c.title ?? '').slice(0, 70)}`);
+    }
+  }
+
+  if (dropped.length > 0) {
+    console.log(`\n  ${red}DROPPED${reset}`);
+    for (const c of dropped) {
+      const src = (c.source ?? '?').padEnd(15);
+      const reason = c.dropReason ? ` ${yellow}(${c.dropReason})${reset}` : '';
+      console.log(`    ${dim}[#${String(c.id ?? '?').padEnd(5)}]${reset} ${dim}${src}${reset} rank=${fmtRank(c.ftsRank)}  eff=${fmtEff(c.effectiveSalience)}  ${dim}${(c.title ?? '').slice(0, 70)}${reset}${reason}`);
+    }
+  }
+  console.log('');
+}
+
+async function cmdLastRecall(args: string[]): Promise<number> {
+  const all = args.includes('--all');
+  const historyArg = parseFlag(args, '--history');
+  const historyIndex = historyArg !== undefined ? parseInt(historyArg, 10) : 0;
+
+  const { readRecallLog, listRecallLogs, RECALL_RING_SIZE } =
+    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
+    await import('../../scripts/lib/recall-log.mjs');
+
+  if (all) {
+    const entries = listRecallLogs() as Array<{ index: number; entry: RecallEntry }>;
+    if (entries.length === 0) {
+      console.log(`${dim}No recall runs logged yet. The recall ring buffer fills as the UserPromptSubmit hook fires with proactiveRecall=true.${reset}`);
+      return 0;
+    }
+    console.log(`${bold}${entries.length} recall run(s) in ring buffer${reset}\n`);
+    for (const { index, entry } of entries) printRecallEntry(index, entry);
+    return 0;
+  }
+
+  if (!Number.isFinite(historyIndex) || historyIndex < 0 || historyIndex >= RECALL_RING_SIZE) {
+    console.error(`--history must be 0..${RECALL_RING_SIZE - 1}. Got: ${historyArg ?? '<missing>'}`);
+    return 2;
+  }
+
+  const entry = readRecallLog(historyIndex) as RecallEntry | null;
+  if (!entry) {
+    if (historyIndex === 0) {
+      console.log(`${dim}No recall runs logged yet. The recall ring buffer fills as the UserPromptSubmit hook fires with proactiveRecall=true.${reset}`);
+    } else {
+      console.log(`${dim}No recall run at history slot ${historyIndex}.${reset}`);
+    }
+    return 0;
+  }
+  printRecallEntry(historyIndex, entry);
+  return 0;
+}
+
 function printHelp() {
   console.log('Usage: shieldcortex inspect <subcommand>');
   console.log('');
@@ -139,6 +249,12 @@ function printHelp() {
   console.log('  last-precompact [--history N | --all]    Show extractor candidates from the last precompact run');
   console.log('                                           --history N (0=newest, up to 9) — show slot N');
   console.log('                                           --all — show every entry in the ring buffer (newest first)');
+  console.log('');
+  console.log('  last-recall [--history N | --all]        Show recall candidates from the last prompt-recall run');
+  console.log('                                           (requires proactiveRecall=true; logs prompt + per-candidate');
+  console.log('                                           FTS rank + effective salience + drop reason).');
+  console.log('                                           Note: prompts are stored locally at ~/.shieldcortex/recall-log/');
+  console.log('                                           — same trust boundary as memories.db.');
 }
 
 export async function handleInspectCommand(args: string[]): Promise<void> {
@@ -147,6 +263,9 @@ export async function handleInspectCommand(args: string[]): Promise<void> {
   switch (sub) {
     case 'last-precompact':
       code = await cmdLastPrecompact(args.slice(1));
+      break;
+    case 'last-recall':
+      code = await cmdLastRecall(args.slice(1));
       break;
     case undefined:
     case '--help':
