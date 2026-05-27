@@ -1114,6 +1114,282 @@ export async function openClawHookStatus(): Promise<void> {
   }
 }
 
+/**
+ * `shieldcortex openclaw repair` (v4.25.5).
+ *
+ * Diagnoses and fixes the duplicate-plugin-id mess that `shieldcortex doctor`'s
+ * "OpenClaw dup installs" check surfaces. Two distinct cases:
+ *
+ *   1. **Sticky hooks/ duplicate** — when a copy sits at `~/.openclaw/hooks/
+ *      shieldcortex-realtime/`, plain `rm -rf` reverts on the next
+ *      `openclaw plugins update` because OpenClaw's hook-pack install
+ *      tracking re-creates it. The only reliable purge is a full
+ *      `openclaw plugins uninstall` + `plugins install @latest` round-trip,
+ *      which clears every tracking record at once. Customer-side config
+ *      under `~/.openclaw/openclaw.json` → `plugins.entries.shieldcortex-
+ *      realtime` (interceptor severity actions, cloudApiKey, autoMemory
+ *      thresholds, the enabled flag, allowlist membership) is wiped by
+ *      `plugins uninstall`, so this function snapshots it first and
+ *      restores it after reinstall.
+ *
+ *   2. **Extensions/ leftovers** — legacy install locations and
+ *      `.trash-*` / `*.disabled-*` directories. No sticky state — a simple
+ *      `rm -rf` suffices.
+ *
+ * Memory data at `~/.shieldcortex/` is never touched.
+ *
+ * If something fails between uninstall and restore, the snapshot is also
+ * written to `~/.openclaw/openclaw.json.repair-backup-<ts>` so the user
+ * can recover manually.
+ */
+export async function repairOpenClawPlugin(): Promise<void> {
+  const home = resolveUserHome();
+  const openclawDir = path.join(home, '.openclaw');
+  const configPath = path.join(openclawDir, 'openclaw.json');
+  const pluginId = 'shieldcortex-realtime';
+
+  if (!fs.existsSync(openclawDir)) {
+    console.log('OpenClaw not detected (~/.openclaw missing). Nothing to repair.');
+    return;
+  }
+
+  // Find duplicate install locations (same scan as the doctor check).
+  const dupCandidates: string[] = [];
+  for (const subdir of ['extensions', 'hooks']) {
+    const dir = path.join(openclawDir, subdir);
+    if (!fs.existsSync(dir)) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (!entry.name.includes(pluginId)) continue;
+      const manifest = path.join(dir, entry.name, 'openclaw.plugin.json');
+      if (fs.existsSync(manifest)) {
+        dupCandidates.push(path.join(dir, entry.name));
+      }
+    }
+  }
+
+  if (dupCandidates.length === 0) {
+    console.log('No duplicate shieldcortex-realtime installs detected. Nothing to repair.');
+    return;
+  }
+
+  const hooksDirPrefix = path.join(openclawDir, 'hooks') + path.sep;
+  const hasHooksDup = dupCandidates.some((p) => p.startsWith(hooksDirPrefix));
+  const displayPaths = dupCandidates.map((p) => p.replace(home, '~'));
+
+  console.log(`Found ${dupCandidates.length} duplicate install(s):`);
+  for (const p of displayPaths) console.log(`  - ${p}`);
+  console.log('');
+
+  if (!hasHooksDup) {
+    // Simple case: extensions/ leftovers only. No sticky state — just rm.
+    console.log('All duplicates are in ~/.openclaw/extensions/ (no sticky state). Removing:');
+    for (const p of dupCandidates) {
+      try {
+        fs.rmSync(p, { recursive: true, force: true });
+        console.log(`  ✓ removed ${p.replace(home, '~')}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`  ✗ failed to remove ${p.replace(home, '~')} — ${msg}`);
+      }
+    }
+    console.log('');
+    console.log('Repair complete. Restart the OpenClaw gateway to apply.');
+    return;
+  }
+
+  // Sticky case: ~/.openclaw/hooks/<id>/ duplicate present. Need the full
+  // uninstall+reinstall round-trip with config preservation.
+
+  // Step 1: Snapshot the customer's plugin config from openclaw.json.
+  let configSnapshot: {
+    entry: unknown;
+    allowed: boolean;
+    raw: Record<string, unknown> | null;
+  } = { entry: null, allowed: false, raw: null };
+
+  if (fs.existsSync(configPath)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+      const plugins = (raw.plugins ?? {}) as { entries?: Record<string, unknown>; allow?: unknown[] };
+      const entry = plugins.entries?.[pluginId] ?? null;
+      const allowed = Array.isArray(plugins.allow) && plugins.allow.includes(pluginId);
+      configSnapshot = { entry, allowed, raw };
+      console.log('Snapshotted customer plugin config:');
+      console.log(`  - plugins.entries.${pluginId}: ${entry ? 'present' : '(none — defaults will apply)'}`);
+      console.log(`  - plugins.allow membership: ${allowed ? 'yes' : 'no'}`);
+
+      // Also write a backup file so the user can manually restore if the
+      // restore step at the end fails for any reason.
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const backupPath = `${configPath}.repair-backup-${ts}`;
+      try {
+        fs.writeFileSync(backupPath, JSON.stringify(raw, null, 2), 'utf-8');
+        console.log(`  - safety backup: ${backupPath.replace(home, '~')}`);
+      } catch { /* best-effort */ }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`Warning: could not read ${configPath.replace(home, '~')} — ${msg}`);
+      console.log('Continuing without snapshot. Customer config may be reset to defaults.');
+    }
+  } else {
+    console.log('No ~/.openclaw/openclaw.json present. Nothing to snapshot.');
+  }
+  console.log('');
+
+  // Step 2: Resolve openclaw binary.
+  let openclawBin: string;
+  try {
+    openclawBin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
+    if (!openclawBin || !fs.existsSync(openclawBin)) {
+      throw new Error('not on PATH');
+    }
+  } catch {
+    console.error('Cannot run repair: `openclaw` binary not found on PATH.');
+    console.error('Install OpenClaw first, or run `shieldcortex openclaw install` to set up the integration.');
+    process.exit(1);
+  }
+
+  const spawnEnv = { ...process.env, HOME: home };
+
+  // Step 3: Uninstall the plugin. The uninstall command requires interactive
+  // confirmation by default; pipe `y\n` via stdin to auto-confirm.
+  console.log('Step 1/3: openclaw plugins uninstall shieldcortex-realtime');
+  const uninstallResult = spawnSync(openclawBin, ['plugins', 'uninstall', pluginId], {
+    encoding: 'utf-8',
+    env: spawnEnv,
+    input: 'y\n',
+    timeout: 60000,
+  });
+  if (uninstallResult.status !== 0) {
+    console.error('  ✗ uninstall failed:');
+    if (uninstallResult.stderr) console.error(uninstallResult.stderr);
+    if (uninstallResult.stdout) console.error(uninstallResult.stdout);
+    console.error('');
+    console.error('Aborting — no destructive change has been made.');
+    process.exit(1);
+  }
+  console.log('  ✓ uninstall succeeded');
+  console.log('');
+
+  // Step 4: rm -rf any duplicate locations the uninstall didn't touch.
+  // Field discovery (mac, 2026-05-27): `openclaw plugins uninstall` removes
+  // only the ~/.openclaw/npm/node_modules/<scope>/<id>/ directory + the
+  // openclaw.json `plugins.entries.<id>` entry — it does NOT remove
+  // ~/.openclaw/hooks/<id>/ or ~/.openclaw/extensions/<id>/. If those
+  // lingering copies are left in place, the next install short-circuits
+  // and leaves them intact, so the duplicate persists.
+  console.log('Step 2/3: clear lingering duplicate install paths + hook-pack tracking');
+  let cleared = 0;
+  for (const p of dupCandidates) {
+    try {
+      fs.rmSync(p, { recursive: true, force: true });
+      console.log(`  ✓ removed ${p.replace(home, '~')}`);
+      cleared++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  ✗ failed to remove ${p.replace(home, '~')} — ${msg}`);
+    }
+  }
+  if (cleared === 0) {
+    console.log('  (no duplicate paths required cleanup)');
+  }
+
+  // ALSO purge `hooks.internal.installs.<id>` from openclaw.json — this
+  // is the legacy-version pin (typically @4.18.3) that drives the
+  // hook-pack reinstall on every `openclaw plugins update`. `plugins
+  // uninstall` does NOT touch this entry on macOS (confirmed via state
+  // inspection 2026-05-27). With the entry removed AND the disk dirs
+  // gone, the next install runs against a true clean slate.
+  if (fs.existsSync(configPath)) {
+    try {
+      const current = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+      const hooks = (current.hooks ?? {}) as { internal?: { installs?: Record<string, unknown> } };
+      const installs = hooks.internal?.installs;
+      if (installs && Object.prototype.hasOwnProperty.call(installs, pluginId)) {
+        delete installs[pluginId];
+        const tmp = `${configPath}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
+        fs.renameSync(tmp, configPath);
+        console.log(`  ✓ cleared hooks.internal.installs.${pluginId} (legacy 4.18.3 hook-pack pin)`);
+      } else {
+        console.log(`  (no hooks.internal.installs.${pluginId} entry to clear)`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  ✗ could not edit openclaw.json — ${msg} (proceeding anyway)`);
+    }
+  }
+  console.log('');
+
+  // Step 5: Reinstall from npm.
+  console.log('Step 3/3: openclaw plugins install @drakon-systems/shieldcortex-realtime@latest');
+  const installResult = spawnSync(
+    openclawBin,
+    ['plugins', 'install', '@drakon-systems/shieldcortex-realtime@latest'],
+    { encoding: 'utf-8', env: spawnEnv, timeout: 120000 },
+  );
+  if (installResult.status !== 0) {
+    console.error('  ✗ install failed:');
+    if (installResult.stderr) console.error(installResult.stderr);
+    if (installResult.stdout) console.error(installResult.stdout);
+    console.error('');
+    console.error('CRITICAL: uninstall succeeded but reinstall failed. The plugin is currently uninstalled.');
+    if (configSnapshot.raw) {
+      console.error('Your previous OpenClaw config has been backed up — see the safety backup line above.');
+    }
+    console.error('Try again with: openclaw plugins install @drakon-systems/shieldcortex-realtime@latest');
+    process.exit(1);
+  }
+  console.log('  ✓ install succeeded');
+  console.log('');
+
+  // Step 5: Restore the customer's plugin config snapshot.
+  if (configSnapshot.entry || configSnapshot.allowed) {
+    try {
+      const current = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+      const plugins = (current.plugins ?? {}) as {
+        entries?: Record<string, unknown>;
+        allow?: string[];
+      };
+      plugins.entries = plugins.entries ?? {};
+      plugins.allow = Array.isArray(plugins.allow) ? plugins.allow : [];
+
+      // Restore the customer's entries.<id> subtree (preserves config,
+      // enabled flag, anything else they had set).
+      if (configSnapshot.entry !== null) {
+        plugins.entries[pluginId] = configSnapshot.entry;
+      }
+      // Restore allowlist membership.
+      if (configSnapshot.allowed && !plugins.allow.includes(pluginId)) {
+        plugins.allow.push(pluginId);
+      }
+      current.plugins = plugins;
+
+      // Atomic write.
+      const tmp = `${configPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
+      fs.renameSync(tmp, configPath);
+      console.log('Restored customer plugin config:');
+      if (configSnapshot.entry) console.log(`  ✓ plugins.entries.${pluginId} restored`);
+      if (configSnapshot.allowed) console.log(`  ✓ plugins.allow membership restored`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Warning: could not restore config — ${msg}`);
+      console.error('Your previous config is in the safety backup file (see snapshot section above).');
+    }
+  }
+  console.log('');
+
+  console.log('Repair complete. Restart the OpenClaw gateway to load the fresh plugin install.');
+}
+
 export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
@@ -1129,13 +1405,21 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
     case 'status':
       await openClawHookStatus();
       break;
+    case 'repair':
+      await repairOpenClawPlugin();
+      break;
     default:
-      console.log('Usage: shieldcortex openclaw <install|uninstall|status>');
+      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair>');
       console.log('');
       console.log('Install options:');
       console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
       console.log('  --no-plugins            Skip plugin installation (useful in Docker/CI)');
       console.log('  --no-gateway-restart    Skip the auto gateway restart after install');
+      console.log('');
+      console.log('Repair: diagnose + safely fix duplicate-plugin-id state surfaced by');
+      console.log('`shieldcortex doctor`. Preserves the customer\'s OpenClaw-side plugin');
+      console.log('config (interceptor settings, cloud API key, allowlist) across the');
+      console.log('uninstall+reinstall round-trip needed for sticky cases.');
       process.exit(1);
   }
 }

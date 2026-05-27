@@ -99,10 +99,33 @@ describe('doctor — OpenClaw duplicate installs', () => {
     writeManifest('extensions/shieldcortex-realtime.disabled-tars-20260526T104503Z');
     const r = await checkOpenClawDuplicateInstalls(openclawDir);
     expect(r.status).toBe('warn');
-    // All three paths should be in the fix string
-    expect(r.fix).toMatch(/\.trash-shieldcortex-realtime\.20260527-093144/);
-    expect(r.fix).toMatch(/\.trash-shieldcortex-realtime\.20260527-092053/);
-    expect(r.fix).toMatch(/disabled-tars/);
+    // All three paths should be enumerated in the message (the fix string
+    // for hooks/ dups points at `shieldcortex openclaw repair` and does
+    // NOT enumerate paths — the repair command handles them all).
+    expect(r.message).toMatch(/\.trash-shieldcortex-realtime\.20260527-093144/);
+    expect(r.message).toMatch(/\.trash-shieldcortex-realtime\.20260527-092053/);
+    expect(r.message).toMatch(/disabled-tars/);
+  });
+
+  it('hooks/ dup case fix points at `shieldcortex openclaw repair` (v4.25.5: sticky-case path)', async () => {
+    writeCanonical();
+    writeManifest('hooks/shieldcortex-realtime');
+    const r = await checkOpenClawDuplicateInstalls(openclawDir);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/sticky/);
+    expect(r.fix).toMatch(/shieldcortex openclaw repair/);
+    // Should NOT recommend bare `rm -rf` for the sticky case (it'd revert
+    // on next `openclaw plugins update`).
+    expect(r.fix).not.toMatch(/^rm -rf/);
+  });
+
+  it('extensions/-only dup case fix includes both repair command AND manual rm option', async () => {
+    writeCanonical();
+    writeManifest('extensions/.trash-shieldcortex-realtime.20260527-093144');
+    const r = await checkOpenClawDuplicateInstalls(openclawDir);
+    expect(r.status).toBe('warn');
+    expect(r.fix).toMatch(/shieldcortex openclaw repair/);
+    expect(r.fix).toMatch(/rm -rf/); // manual option still offered
   });
 
   it('directory matching the name pattern but missing openclaw.plugin.json is not flagged', async () => {
@@ -120,7 +143,7 @@ describe('doctor — OpenClaw duplicate installs', () => {
     const r = await checkOpenClawDuplicateInstalls(openclawDir);
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/legacy install location/);
-    expect(r.fix).toMatch(/openclaw plugins install/);
+    expect(r.fix).toMatch(/shieldcortex openclaw repair/);
   });
 
   it('non-shieldcortex directories are not flagged (other plugins are not our concern)', async () => {

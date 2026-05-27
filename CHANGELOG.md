@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.25.5] - 2026-05-27
+
+**`shieldcortex openclaw repair` — turn the duplicate-plugin-id fix from a copy-paste recipe into a single command, with customer config preserved.**
+
+v4.25.4 made the doctor surface the dup-install state correctly. But the fix required users to memorise an `openclaw plugins uninstall + rm -rf + plugins install + jq edit` dance, and a wrong order would either leave the dup state in place or lose their OpenClaw-side plugin config (interceptor severity actions, cloud API key, allowlist membership, enabled flag — anything stored under `~/.openclaw/openclaw.json` → `plugins.entries.shieldcortex-realtime.config`). Field experience on Mac (2026-05-27) showed even a careful manual sequence missed one of the load-bearing state files, so the doctor would warn again on the next `openclaw plugins update`.
+
+### Added
+
+- **`shieldcortex openclaw repair` subcommand** ([`src/setup/openclaw.ts`](src/setup/openclaw.ts)) — diagnoses + fixes the dup-install state safely. Three-step flow:
+  1. **Snapshot** customer plugin config from `~/.openclaw/openclaw.json` (entry subtree, allowlist membership, enabled flag) and write a safety backup file to `~/.openclaw/openclaw.json.repair-backup-<ts>`
+  2. **`openclaw plugins uninstall`** (auto-confirmed via stdin) → **`rm -rf` lingering hooks/ + extensions/ paths** + **clear `hooks.internal.installs.<id>`** from openclaw.json (the legacy 4.18.3 hook-pack version pin that survives plain uninstall on Mac) → **`openclaw plugins install @drakon-systems/shieldcortex-realtime@latest`**
+  3. **Restore** the snapshotted config + allowlist membership via atomic write
+- If uninstall fails: aborts before any destructive change.
+- If reinstall fails after uninstall: prints clear recovery instructions pointing at the safety backup.
+- If only extensions/-side dups (no sticky case): short-circuits to a plain `rm -rf` of each path — no uninstall/reinstall round-trip needed.
+- Memory data at `~/.shieldcortex/` is never touched (it's a separate trust boundary).
+
+### Changed
+
+- **`shieldcortex doctor` "OpenClaw dup installs" check** now recommends `shieldcortex openclaw repair` instead of asking users to memorise the manual sequence. The fix message distinguishes the sticky case (hooks/ duplicate present) from the simple case (extensions/-only) and notes that plain `rm -rf` reverts on next `openclaw plugins update` for the sticky case.
+
+### Field-verified resilience
+
+The previous v4.25.4 cleanup on Mac left a sticky `hooks.internal.installs.shieldcortex-realtime.spec = "@4.18.3"` entry in openclaw.json that `openclaw plugins uninstall` doesn't touch — every subsequent `plugins update` would re-create the 4.18.3 hook-pack copy. v4.25.5's repair explicitly clears that entry. Verified: after running the repair, a subsequent `openclaw plugins update` no longer recreates the hooks/ dup.
+
+### Tests
+
+[`src/__tests__/doctor-openclaw-dup-installs.test.ts`](src/__tests__/doctor-openclaw-dup-installs.test.ts) extended:
+
+- Existing assertions updated for the new fix-string wording (points at `shieldcortex openclaw repair`)
+- New test: hooks/ dup case fix points at the repair command, not at bare `rm -rf` (sticky-case path)
+- New test: extensions/-only dup case fix includes both the repair command and a manual `rm -rf` option
+
 ## [4.25.4] - 2026-05-27
 
 **Same root-cause fix as the unpublished v4.25.3 attempt — but with a build-sequencing guard so it actually ships.**

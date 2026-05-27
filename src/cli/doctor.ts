@@ -1029,12 +1029,27 @@ export async function checkOpenClawDuplicateInstalls(
   // Format paths for display + fix instructions.
   const home = os.homedir();
   const displayPaths = dupCandidates.map((p) => p.replace(home, '~'));
+  const hooksDir = path.join(openclawDir, 'hooks');
+
+  // A duplicate under `~/.openclaw/hooks/<id>/` is the *sticky* case. Field
+  // experience (jarvis, 2026-05-27): plain `rm -rf` on the hooks-dir copy
+  // doesn't stick — `openclaw plugins update` reads internal hook-pack
+  // tracking state (across multiple config keys; `hooks.internal.installs`
+  // is one of several) and rebuilds the hook-pack dir at the recorded
+  // legacy version. The only reliable purge is a full
+  // `openclaw plugins uninstall <id>` + `plugins install <id>@latest`
+  // round-trip, which clears every tracking record at once.
+  //
+  // Duplicates under `~/.openclaw/extensions/` (including `.trash-*` and
+  // `*.disabled-*` legacy paths) DON'T have this stickiness — a one-shot
+  // `rm -rf` is sufficient.
+  const hasHooksDup = dupCandidates.some((p) => p.startsWith(hooksDir + path.sep));
   const rmCmd = dupCandidates.map((p) => `rm -rf ${p.replace(home, '~')}`).join(' && ');
 
   if (!canonicalPresent) {
-    // Legacy install exists but no canonical npm install. Less urgent —
-    // the plugin loads from the legacy path. Recommend bringing it in line
-    // with the post-v4.21.1 install convention.
+    // Legacy install exists but no canonical npm install. The repair
+    // command knows how to handle this case too — it'll reinstall via
+    // npm + clean the legacy paths in one step.
     return {
       label,
       status: 'warn',
@@ -1042,11 +1057,37 @@ export async function checkOpenClawDuplicateInstalls(
         `${dupCandidates.length} legacy install location(s) under ~/.openclaw/, no canonical ` +
         `~/.openclaw/npm/.../@drakon-systems/shieldcortex-realtime/: ${displayPaths.join(', ')}`,
       fix:
-        `Reinstall via the canonical path: \`openclaw plugins install ` +
-        `@drakon-systems/shieldcortex-realtime\`, then \`${rmCmd}\` and restart OpenClaw`,
+        `Run \`shieldcortex openclaw repair\` to safely reinstall via the canonical path ` +
+        `and clean up the legacy locations (preserves your OpenClaw plugin config).`,
     };
   }
 
+  if (hasHooksDup) {
+    // Sticky case — `rm -rf` alone reverts on next `plugins update` because
+    // OpenClaw's hook-pack tracking re-creates the hooks/ copy at a pinned
+    // legacy version. `shieldcortex openclaw repair` runs the full
+    // uninstall+reinstall round-trip that clears every tracking record, AND
+    // snapshots+restores the customer's plugin config (interceptor settings,
+    // cloud API key, allowlist) across the round-trip.
+    return {
+      label,
+      status: 'warn',
+      message:
+        `${dupCandidates.length} duplicate shieldcortex-realtime install(s) alongside the canonical ` +
+        `npm install — OpenClaw emits \`duplicate plugin id detected\` every session: ` +
+        displayPaths.join(', ') +
+        ` (includes a ~/.openclaw/hooks/ duplicate — sticky)`,
+      fix:
+        `Run \`shieldcortex openclaw repair\` — it does the safe uninstall+reinstall ` +
+        `round-trip needed to clear OpenClaw's sticky hook-pack tracking, while preserving ` +
+        `your OpenClaw plugin config. (Plain \`rm -rf\` on the hooks/ copy reverts on the ` +
+        `next \`plugins update\`.)`,
+    };
+  }
+
+  // Simple case — no hooks-dir copy, just extensions/ leftovers. The repair
+  // command handles this too via a plain `rm -rf` path; offer it as the
+  // single canonical fix surface for any dup state.
   return {
     label,
     status: 'warn',
@@ -1054,7 +1095,9 @@ export async function checkOpenClawDuplicateInstalls(
       `${dupCandidates.length} duplicate shieldcortex-realtime install(s) alongside the canonical ` +
       `npm install — OpenClaw emits \`duplicate plugin id detected\` every session: ` +
       displayPaths.join(', '),
-    fix: `${rmCmd} && restart OpenClaw (the canonical npm install at ~/.openclaw/npm/ is the supported location)`,
+    fix:
+      `Run \`shieldcortex openclaw repair\` (or remove manually: ${rmCmd}) and restart OpenClaw. ` +
+      `The canonical npm install at ~/.openclaw/npm/ is the supported location.`,
   };
 }
 
