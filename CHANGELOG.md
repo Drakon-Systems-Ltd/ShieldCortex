@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [4.25.3] - 2026-05-27
+## [4.25.4] - 2026-05-27
+
+**Same root-cause fix as the unpublished v4.25.3 attempt — but with a build-sequencing guard so it actually ships.**
+
+v4.25.3 contained the correct code change (dropped `openclaw.hooks` + the four hook-pack stub directories) but the published tarball was missing `dist/` because the publish chain ran concurrently with the main package's `prepublishOnly` rebuild — the plugin's `npm publish` packed during the window where `build:ts` had already cleared `dist/` but not yet rewritten it. Both 4.25.3 versions (main + plugin) have been unpublished from npm. `npm view ... dist-tags` shows `latest: 4.25.2` until this release.
+
+### Added
+
+- **`prepublishOnly` guard on the plugin package** ([`plugins/openclaw/package.json`](plugins/openclaw/package.json)) — explicitly fails the publish if `dist/index.js` is missing, with a clear error message pointing at `npm run build:ts`. Prevents the empty-tarball regression that broke v4.25.3.
+
+### Fixed (same content as the unpublished 4.25.3)
 
 **Real root-cause fix for the `duplicate plugin id detected` warning — the symptom-level fix in v4.25.2 was patching leaves, not the trunk.**
 

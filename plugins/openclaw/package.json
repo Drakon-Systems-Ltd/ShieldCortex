@@ -1,6 +1,6 @@
 {
   "name": "@drakon-systems/shieldcortex-realtime",
-  "version": "4.25.3",
+  "version": "4.25.4",
   "description": "OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory extraction.",
   "type": "module",
   "main": "./dist/index.js",
@@ -23,7 +23,8 @@
     "README.md"
   ],
   "scripts": {
-    "pack:verify": "npm pack --dry-run"
+    "pack:verify": "npm pack --dry-run",
+    "prepublishOnly": "node -e \"if(!require('fs').existsSync('dist/index.js'))throw new Error('plugin dist/index.js missing — run `npm run build:ts` from the repo root before publishing')\""
   },
   "peerDependencies": {
     "shieldcortex": ">=4.18.3 <5.0.0",
