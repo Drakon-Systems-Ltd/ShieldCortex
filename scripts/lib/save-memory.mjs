@@ -75,12 +75,24 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
 
 function insertMemoryRow(db, memory, project, sourceIdentifier) {
   const timestamp = new Date().toISOString();
-  // v4.25.0: pre-4.25 the INSERT omitted memory_purpose / source / source_kind
-  // / capture_method, so every hook write looked identical to a user-typed
-  // memory at the SQL level. The hook already knows which hook is calling
-  // (sourceIdentifier) and the extractor already computed memoryPurpose —
-  // thread both through so `shieldcortex inspect last-precompact` and any
-  // memory-source SQL query can distinguish hook writes from user writes.
+
+  // Cross-call dedup: the hook fires repeatedly (per turn, or per salience
+  // bypass) over overlapping transcript windows, so the same regex match
+  // tends to surface multiple times across calls. The within-batch dedup in
+  // processSegments doesn't cover that. A single SELECT by (title, project,
+  // source_kind) keeps re-extractions from cluttering the store.
+  const existing = db.prepare(
+    `SELECT 1 FROM memories
+       WHERE title = ?
+         AND (project IS ? OR (project IS NULL AND ? IS NULL))
+         AND source_kind = 'hook'
+       LIMIT 1`,
+  ).get(memory.title, project || null, project || null);
+  if (existing) {
+    process.stderr.write(`[shieldcortex save-memory] skipped duplicate: ${memory.title}\n`);
+    return;
+  }
+
   db.prepare(`
     INSERT INTO memories (
       uuid, title, content, type, category, salience, tags, project,

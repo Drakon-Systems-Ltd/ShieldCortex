@@ -6,6 +6,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.27.2] - 2026-05-28
+
+**Bug fix: cross-project memory recall leak + auto-extractor duplication and mid-clause capture. Recalls were polluted with memories from other projects (NULL-project rows leaking globally + over-eager `scope='global'` auto-promotion), and the hook-driven extractor was both saving identical fragments multiple times per session and capturing mid-sentence fragments as memory titles.**
+
+Field symptoms:
+
+- While working in one project, recalls included memories from completely unrelated projects (e.g. "BeautyHair uses claude-cortex" appearing in a ShieldCortex session).
+- The same fragment saved four times in eight minutes from the stop-hook ("Fix: one), so they sit at project=NULL...").
+- Markdown headers and transient API errors landing as memory titles ("Fix: # Systematic Debugging", "Learned: API Error: 529 Overloaded").
+
+Root causes:
+
+1. Recall query treated `project IS NULL` as a global match.
+2. Auto-scope classifier auto-promoted any `preference`/`learning`/`pattern` category memory to `scope='global'`.
+3. `saveAutoExtractedMemory` had no cross-call dedup — within-batch only, so repeated hook invocations over overlapping transcript windows wrote duplicate rows.
+4. The error-fix regex matched mid-paragraph trigger words; captures could escape a parenthetical, leaving an unbalanced closing paren in the title.
+
+### Fixed
+
+- **[`scripts/prompt-recall-hook.mjs`](scripts/prompt-recall-hook.mjs):** Removed the `OR project IS NULL` clause from both the FTS and category-boost recall queries (lines 97 and 138). Project-less rows no longer leak across projects. Explicit `scope='global'` rows still recall everywhere (intentional).
+- **[`src/memory/store.ts`](src/memory/store.ts) `detectGlobalPattern()`:** Tightened the auto-promotion heuristic. Categories alone no longer trigger global scope; the function now requires either (a) an explicit `universal`/`global`/`general`/`cross-project` tag, or (b) a generic category PLUS a universality keyword in content AND no project-specific identifier (filesystem paths, URLs, env vars, dotted call signatures).
+- **[`scripts/lib/save-memory.mjs`](scripts/lib/save-memory.mjs) `insertMemoryRow()`:** Added a cross-call dedup check — before INSERT, `SELECT 1 FROM memories WHERE title=? AND project=? AND source_kind='hook'`. Hooks that re-fire over an overlapping transcript window now skip rather than duplicate. Skips log to stderr for telemetry.
+- **[`scripts/lib/extract-memorable-segments.mjs`](scripts/lib/extract-memorable-segments.mjs) `shouldRejectCandidate()`:** New `unbalanced_close_paren` rejection rule. Captures that contain a `)` without a matching `(` started mid-clause inside a parenthetical and should not become memory titles.
+
+### Verification
+
+- `npm run build:ts` — clean.
+- Sample DB audit on a 451-memory store: 5 rows with `project IS NULL`, 4 rows with `scope='global'` mis-tagging specific projects, and 11 hook-write duplicate sets covering 24 redundant rows.
+- Unit-sanity run of the new rejection rule against the field-observed bad fragment `"one), so they sit at project=NULL..."` returns `unbalanced_close_paren`; balanced-paren content like `"(this is fine) so we ship it"` passes through.
+
+### Operator note
+
+Existing duplicate / NULL-project / mis-tagged-global rows are not removed by this release. SQL for retiring them (re-projecting NULL-project rows, re-scoping mis-tagged globals, deleting the 24 duplicate rows) is in the bug-fix conversation for 2026-05-28 — apply on a per-store basis after backing up `~/.shieldcortex/memories.db`.
+
 ## [4.27.1] - 2026-05-27
 
 **Bug fix: `shieldcortex dashboard` now respawns its Next.js child on exit, and the discovery hint points users at `service install` for always-on.**

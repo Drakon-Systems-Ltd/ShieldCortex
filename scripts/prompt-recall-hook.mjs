@@ -94,7 +94,7 @@ function recallRelevant(db, project, prompt) {
         FROM memories m
         JOIN memories_fts fts ON m.id = fts.rowid
         WHERE memories_fts MATCH ?
-          AND (m.project = ? OR m.project IS NULL OR m.scope = 'global')
+          AND (m.project = ? OR m.scope = 'global')
           AND COALESCE(m.status, 'active') = 'active'
           AND m.salience >= ?
         ORDER BY fts.rank
@@ -135,7 +135,7 @@ function recallRelevant(db, project, prompt) {
           COALESCE(downvote_count, 0) AS downvote_count
         FROM memories
         WHERE category = ?
-          AND (project = ? OR project IS NULL OR scope = 'global')
+          AND (project = ? OR scope = 'global')
           AND COALESCE(status, 'active') = 'active'
           AND salience >= ?
         ORDER BY salience DESC, last_accessed DESC

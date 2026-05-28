@@ -531,6 +531,22 @@ function looksLikePathLabel(content) {
   return PATH_LABEL_PATTERN.test(content.trim());
 }
 
+// Captures that escape a parenthetical leak into the title with a stray
+// closing paren — e.g. the orphan "one), so they sit at `project=NULL`..."
+// fragment seen in the field. If the content contains a closing paren that
+// has no matching opener within the capture, the regex hit fell mid-clause.
+function hasUnbalancedClosingParen(content) {
+  let depth = 0;
+  for (const ch of content) {
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth < 0) return true;
+    }
+  }
+  return false;
+}
+
 function looksLikeEmailBody(content) {
   return EMAIL_BODY_TELLS.some(rx => rx.test(content));
 }
@@ -578,6 +594,9 @@ export function shouldRejectCandidate(segment, conversationText) {
   }
   if (looksLikePathLabel(content)) {
     return { rejected: true, reason: 'path_label_fragment' };
+  }
+  if (hasUnbalancedClosingParen(content)) {
+    return { rejected: true, reason: 'unbalanced_close_paren' };
   }
   if (looksLikeBareImperative(content)) {
     return { rejected: true, reason: 'bare_imperative_verb' };

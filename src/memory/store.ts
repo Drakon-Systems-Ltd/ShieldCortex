@@ -193,16 +193,30 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
  * Detect if memory content suggests global applicability
  * Used to auto-set scope to 'global' for transferable knowledge
  */
+// Default to project scope. Only auto-promote when the memory carries an
+// explicit "applies everywhere" signal — a global tag, or a universality
+// keyword in content of a generic category that doesn't reference any
+// project-specific identifier.
 function detectGlobalPattern(content: string, category: MemoryCategory, tags: string[]): boolean {
-  const globalCategories: MemoryCategory[] = ['pattern', 'preference', 'learning'];
-  const globalKeywords = ['always', 'never', 'best practice', 'general rule', 'universal'];
   const globalTags = ['universal', 'global', 'general', 'cross-project'];
-
-  if (globalCategories.includes(category)) return true;
-  if (globalKeywords.some(k => content.toLowerCase().includes(k))) return true;
   if (tags.some(t => globalTags.includes(t.toLowerCase()))) return true;
 
-  return false;
+  const universalCategories: MemoryCategory[] = ['pattern', 'preference'];
+  if (!universalCategories.includes(category)) return false;
+
+  const universalKeywords = [
+    'always ', 'never ', 'best practice', 'general rule',
+    'universal', 'in every project', 'across projects', 'globally',
+  ];
+  const lower = content.toLowerCase();
+  if (!universalKeywords.some(k => lower.includes(k))) return false;
+
+  // Filesystem paths, URLs, env vars, or dotted identifiers are strong
+  // signals the note pins to a specific project or system.
+  const projectSpecificMarkers = /(\/[A-Za-z0-9_.-]+){2,}|https?:\/\/|\b[A-Z][A-Z0-9_]{3,}\b|\b\w+\.\w+\(/;
+  if (projectSpecificMarkers.test(content)) return false;
+
+  return true;
 }
 
 // ── Rate Limiter ──
