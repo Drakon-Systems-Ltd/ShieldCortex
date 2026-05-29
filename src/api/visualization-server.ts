@@ -52,6 +52,7 @@ import { registerDigestRoutes } from './routes/digest.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { createIronDomeRouteGuard } from './iron-dome-route-guard.js';
 import { readAndClearDetectionEvents } from '../xray/activity.js';
+import { classifySqlQuery } from './sql-classifier.js';
 
 const PORT = process.env.PORT || 3001;
 
@@ -180,11 +181,16 @@ export function startVisualizationServer(dbPath?: string): void {
   }
 
   function classifySqlAction(req: Request): string {
-    const query = typeof req.body?.query === 'string' ? req.body.query.trim().toUpperCase() : '';
-    if (!query) return 'database_migrate';
-    if (query.startsWith('SELECT') || query.startsWith('PRAGMA')) return 'run_report';
-    if (/\bDELETE\b/.test(query)) return 'delete';
-    if (/\bDROP\b|\bTRUNCATE\b|\bPURGE\b/.test(query)) return 'destroy';
+    const query = typeof req.body?.query === 'string' ? req.body.query : '';
+    if (!query.trim()) return 'database_migrate';
+
+    // PURGE is application-level (not a real SQL keyword) — keep the regex check.
+    if (/\bPURGE\b/i.test(query)) return 'destroy';
+
+    const classification = classifySqlQuery(query);
+    if (classification.kind === 'read') return 'run_report';
+    if (classification.kind === 'destroy') return 'destroy';
+    if (classification.kind === 'write' && classification.operation === 'DELETE') return 'delete';
     return 'database_migrate';
   }
 
@@ -242,24 +248,26 @@ export function startVisualizationServer(dbPath?: string): void {
         return res.status(400).json({ error: 'Query string required' });
       }
 
-      const upperQuery = query.toUpperCase().trim();
+      // Classify the query — robust against CTE prefixes that would bypass
+      // a naive `startsWith('INSERT'|'UPDATE'|...)` check, e.g.
+      //   WITH t AS (SELECT 1) INSERT INTO memories VALUES (...)
+      const classification = classifySqlQuery(query);
 
-      // Always block DROP and TRUNCATE
-      if (/\bDROP\b/.test(upperQuery) || /\bTRUNCATE\b/.test(upperQuery)) {
+      // Always block DROP and TRUNCATE (and reject anything we can't classify)
+      if (classification.kind === 'destroy') {
         return res.status(403).json({
           error: 'DROP and TRUNCATE operations are blocked for safety',
         });
       }
 
-      // Block writes unless explicitly allowed
-      const isWriteOperation =
-        upperQuery.startsWith('INSERT') ||
-        upperQuery.startsWith('UPDATE') ||
-        upperQuery.startsWith('DELETE') ||
-        upperQuery.startsWith('ALTER') ||
-        upperQuery.startsWith('CREATE');
+      if (classification.kind === 'reject') {
+        return res.status(400).json({
+          error: `Query rejected: ${classification.reason}`,
+        });
+      }
 
-      if (isWriteOperation && !allowWrite) {
+      // Block writes unless explicitly allowed
+      if (classification.kind === 'write' && !allowWrite) {
         return res.status(403).json({
           error: 'Write operations are disabled. Enable allowWrite to execute.',
         });
@@ -268,10 +276,7 @@ export function startVisualizationServer(dbPath?: string): void {
       const db = getDatabase();
       const startTime = Date.now();
 
-      // Execute query
-      const isSelect = upperQuery.startsWith('SELECT') || upperQuery.startsWith('PRAGMA');
-
-      if (isSelect) {
+      if (classification.kind === 'read') {
         const rows = db.prepare(query).all() as Record<string, unknown>[];
         const executionTime = Date.now() - startTime;
 
@@ -285,7 +290,7 @@ export function startVisualizationServer(dbPath?: string): void {
           executionTime,
         });
       } else {
-        // Write operation
+        // Write operation (allowWrite === true at this point)
         const result = db.prepare(query).run();
         const executionTime = Date.now() - startTime;
 
