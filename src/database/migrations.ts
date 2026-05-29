@@ -527,4 +527,33 @@ export function runMigrations(database: Database.Database): void {
     logIfUnexpectedDdlError(err, 'session_events.content_hash column + dedupe index');
     // (importer-side INSERT OR IGNORE handles missing index gracefully)
   }
+
+  // Migration: session_events.sensitivity_level (v4.28 — Fix #10).
+  //
+  // Without this, the UserPromptSubmit hook captured the raw prompt verbatim
+  // (no pipeline, no credential scan, no sensitivity tag). The column lets
+  // the hook record the defence classifier's verdict alongside the redacted
+  // text so the dashboard's replay UI can mask/strip RESTRICTED rows.
+  // Defaults to 'INTERNAL' for backfilled rows + future callers that omit it.
+  try {
+    const sessionEventsTable = database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_events'")
+      .get();
+    if (sessionEventsTable) {
+      const sessionCols = database
+        .prepare("PRAGMA table_info(session_events)")
+        .all() as { name: string }[];
+      const sessionColNames = new Set(sessionCols.map((c) => c.name));
+      if (!sessionColNames.has('sensitivity_level')) {
+        database.exec(
+          "ALTER TABLE session_events ADD COLUMN sensitivity_level TEXT DEFAULT 'INTERNAL'",
+        );
+      }
+      database.exec(
+        'CREATE INDEX IF NOT EXISTS idx_session_events_sensitivity ON session_events(sensitivity_level)',
+      );
+    }
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'session_events.sensitivity_level column + index');
+  }
 }

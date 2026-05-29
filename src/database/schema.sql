@@ -120,11 +120,16 @@ CREATE TABLE IF NOT EXISTS session_events (
   duration_ms INTEGER,
   audit_id INTEGER,
   content_hash TEXT,
+  -- v4.28 (Fix #10): defence classifier verdict for this event.
+  -- PUBLIC | INTERNAL | CONFIDENTIAL | RESTRICTED. Lets the dashboard
+  -- replay UI mask or strip sensitive prompts/responses.
+  sensitivity_level TEXT DEFAULT 'INTERNAL',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_session_events_project ON session_events(project, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_session_events_sensitivity ON session_events(sensitivity_level);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_dedupe
   ON session_events(session_id, ts, kind, content_hash);
 

@@ -21,10 +21,14 @@ const VALID_KINDS = new Set([
   'hook_fire',
 ]);
 
+// v4.28 (Fix #10): `sensitivity_level` carries the defence classifier verdict
+// (PUBLIC | INTERNAL | CONFIDENTIAL | RESTRICTED) so the dashboard replay UI
+// can mask/strip rows that contain credentials or otherwise-sensitive prompts.
+// Defaults to 'INTERNAL' for events written by callers that don't set it.
 const INSERT_SQL = `
   INSERT INTO session_events
-    (session_id, project, ts, kind, actor, payload, duration_ms, audit_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (session_id, project, ts, kind, actor, payload, duration_ms, audit_id, sensitivity_level)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 /** Stringify payload — objects → JSON, strings pass through verbatim. */
@@ -60,6 +64,7 @@ export function recordSessionEvent(db, event) {
       serialisePayload(event.payload),
       event.duration_ms ?? null,
       event.audit_id ?? null,
+      event.sensitivity_level ?? 'INTERNAL',
     );
     return Number(result.lastInsertRowid);
   } catch (err) {
@@ -93,6 +98,7 @@ export function recordSessionEvents(db, events) {
         serialisePayload(event.payload),
         event.duration_ms ?? null,
         event.audit_id ?? null,
+        event.sensitivity_level ?? 'INTERNAL',
       );
       ids.push(Number(result.lastInsertRowid));
     }

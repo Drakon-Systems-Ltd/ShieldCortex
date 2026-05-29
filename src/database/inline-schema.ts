@@ -295,6 +295,7 @@ export function getInlineSchema(): string {
     );
 
     -- v4.17 Session capture (mirrors schema.sql; bundled fallback only).
+    -- v4.28 (Fix #10): + sensitivity_level for prompt-redaction tagging.
     CREATE TABLE IF NOT EXISTS session_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
@@ -308,11 +309,13 @@ export function getInlineSchema(): string {
       duration_ms INTEGER,
       audit_id INTEGER,
       content_hash TEXT,
+      sensitivity_level TEXT DEFAULT 'INTERNAL',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (audit_id) REFERENCES defence_audit(id) ON DELETE SET NULL
     );
     CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts);
     CREATE INDEX IF NOT EXISTS idx_session_events_project ON session_events(project, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_session_events_sensitivity ON session_events(sensitivity_level);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_dedupe
       ON session_events(session_id, ts, kind, content_hash);
   `;

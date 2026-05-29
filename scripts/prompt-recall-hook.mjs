@@ -17,6 +17,7 @@ import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
+import { captureForSessionEvent } from './lib/capture-prompt.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
 import { compareRecallResults } from './lib/recall-rank.mjs';
 import { computeEffectiveSalience } from './lib/salience.mjs';
@@ -291,7 +292,7 @@ process.stdin.on('readable', () => {
   while ((chunk = process.stdin.read()) !== null) input += chunk;
 });
 
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   try {
     const config = loadConfig();
     const hookData = JSON.parse(input || '{}');
@@ -303,19 +304,27 @@ process.stdin.on('end', () => {
     //    proactiveRecall config so the dashboard replay timeline gets a
     //    complete event stream. Opt-out via captureEvents=false. Failures
     //    are swallowed — capture must never block the user prompt.
+    //
+    // Fix #10 (v4.28): redact credentials + classify sensitivity BEFORE the
+    // INSERT. Pasting a `.env` into Claude Code used to land verbatim in
+    // session_events; now it's routed through the defence pipeline first
+    // and the resulting sensitivity_level lets the dashboard mask/strip
+    // RESTRICTED rows from replay timelines.
     if (config.captureEvents !== false && sessionId && rawPrompt) {
       try {
         const project = deriveProjectKey(cwd);
         const dbPath = getDbPath();
         if (existsSync(dbPath)) {
+          const { redactedText, sensitivity } = await captureForSessionEvent(rawPrompt);
           const captureDb = new Database(dbPath, { timeout: 1000 });
           recordSessionEvent(captureDb, {
             session_id: sessionId,
             ts: new Date().toISOString(),
             kind: 'prompt',
-            payload: { text: rawPrompt },
+            payload: { text: redactedText },
             project: project || null,
             actor: 'user',
+            sensitivity_level: sensitivity,
           });
           captureDb.close();
         }
