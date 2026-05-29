@@ -38,10 +38,11 @@ export async function submitVerification(
 
   // Redact credentials before sending to cloud
   const cleanContent = redactCredentials(content);
+  const cleanTitle = redactCredentials(title);
 
   const payload = {
     content: cleanContent,
-    title,
+    title: cleanTitle,
     source_type: source.type,
     source_identifier: source.identifier,
     anomaly_score: pipelineResult.firewall.anomalyScore,
