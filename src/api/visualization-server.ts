@@ -56,6 +56,50 @@ import { classifySqlQuery } from './sql-classifier.js';
 
 const PORT = process.env.PORT || 3001;
 
+// ── Defence source whitelist (Fix #13) ──────────────────────────────────────
+// The DefenceSource.type field is part of the threat-model surface — caller-
+// controlled `source.type` values pollute Iron Dome dashboards and audit
+// queries. Normalise unknown values to 'api' silently (defence in depth) and
+// cap identifier length to avoid log-explosion attacks.
+const ALLOWED_DEFENCE_SOURCE_TYPES: ReadonlyArray<DefenceSource['type']> = [
+  'user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response',
+] as const;
+const MAX_SOURCE_IDENTIFIER_LENGTH = 200;
+
+/**
+ * Normalise an incoming `source` object from a REST request body into a
+ * trusted `DefenceSource`.
+ *
+ * - Unknown `type` values fall back to `'api'` (no rejection — defence in depth)
+ * - `identifier` longer than {@link MAX_SOURCE_IDENTIFIER_LENGTH} is truncated
+ *   with an ellipsis ("…") so the truncation is visible in audit logs
+ * - Non-string identifiers fall back to `'rest-api'`
+ *
+ * Exported for unit tests.
+ */
+export function normaliseDefenceSource(raw: unknown): DefenceSource {
+  const candidate = (raw ?? {}) as { type?: unknown; identifier?: unknown };
+
+  const rawType = typeof candidate.type === 'string' ? candidate.type : undefined;
+  const type: DefenceSource['type'] =
+    rawType && (ALLOWED_DEFENCE_SOURCE_TYPES as ReadonlyArray<string>).includes(rawType)
+      ? (rawType as DefenceSource['type'])
+      : 'api';
+
+  const rawIdentifier = typeof candidate.identifier === 'string' ? candidate.identifier : 'rest-api';
+  const identifier =
+    rawIdentifier.length > MAX_SOURCE_IDENTIFIER_LENGTH
+      ? rawIdentifier.slice(0, MAX_SOURCE_IDENTIFIER_LENGTH - 1) + '…'
+      : rawIdentifier;
+
+  return { type, identifier };
+}
+
+export const __test__ = {
+  ALLOWED_DEFENCE_SOURCE_TYPES,
+  MAX_SOURCE_IDENTIFIER_LENGTH,
+};
+
 /**
  * In-memory counters for FEATURE_GATED (403) responses per feature.
  * Lightweight telemetry to detect noisy free-tier clients hammering gated endpoints.
@@ -91,6 +135,113 @@ function requireProFeature(feature: GatedFeature) {
 
 // Track connected WebSocket clients
 const clients = new Set<WebSocket>();
+
+/**
+ * Handler for `POST /api/v1/scan`.
+ *
+ * Scans content through the defence pipeline. The `config` field on the
+ * request body is intentionally ignored — runtime always uses the persisted
+ * defence mode. Any attempt to override config is logged as a BLOCK with
+ * RESTRICTED sensitivity so incident-triage queries surface it (Fix #13).
+ *
+ * Exported for unit tests.
+ */
+export function handleV1Scan(req: Request, res: Response): void {
+  try {
+    const { content, title, source } = req.body;
+    if (!content || typeof content !== 'string') {
+      res.status(400).json({ error: 'content (string) is required' });
+      return;
+    }
+
+    // Log if caller tried to override config (potential tampering).
+    // Fix #13: record as BLOCK / RESTRICTED so incident-triage queries
+    // filtering on firewall_result IN ('BLOCK','QUARANTINE') surface
+    // config-tampering attempts.
+    if (req.body.config) {
+      try {
+        logAudit({
+          memory_id: null,
+          project: null,
+          timestamp: new Date().toISOString(),
+          source_type: 'api',
+          source_identifier: 'rest-api',
+          trust_score: 0,
+          sensitivity_level: 'RESTRICTED',
+          firewall_result: 'BLOCK',
+          anomaly_score: 0.5,
+          threat_indicators: '["config_tampering"]',
+          blocked_patterns: '[]',
+          reason: 'config_override_attempt: scan endpoint config parameter ignored',
+          fragmentation_score: null,
+          pipeline_duration_ms: 0,
+        });
+      } catch { /* audit is best-effort */ }
+    }
+
+    // Fix #13: whitelist source.type and cap identifier length
+    const defenceSource = normaliseDefenceSource(source);
+
+    // Always use persisted config — no per-request overrides via HTTP
+    const defenceConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
+
+    const result = runDefencePipeline(
+      content,
+      title ?? 'Untitled',
+      defenceSource,
+      defenceConfig,
+    );
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+}
+
+/**
+ * Handler for `POST /api/v1/scan/batch`.
+ *
+ * Scans up to 100 items in one request. Like {@link handleV1Scan}, the
+ * `config` field is intentionally ignored; source is normalised through
+ * {@link normaliseDefenceSource} (Fix #13).
+ *
+ * Exported for unit tests.
+ */
+export function handleV1ScanBatch(req: Request, res: Response): void {
+  try {
+    const { items, source } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      res.status(400).json({ error: 'items (array) is required' });
+      return;
+    }
+    if (items.length > 100) {
+      res.status(400).json({ error: 'Maximum 100 items per batch' });
+      return;
+    }
+
+    // Fix #13: whitelist source.type and cap identifier length
+    const defenceSource = normaliseDefenceSource(source);
+
+    // Always use persisted config — no per-request overrides via HTTP
+    const defenceConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
+
+    const results = items.map((item: { content: string; title?: string }) => {
+      if (!item.content || typeof item.content !== 'string') {
+        return { error: 'content (string) is required', allowed: false };
+      }
+      return runDefencePipeline(
+        item.content,
+        item.title ?? 'Untitled',
+        defenceSource,
+        defenceConfig,
+      );
+    });
+
+    res.json({ results, total: results.length });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+}
 
 /**
  * Start the visualization API server
@@ -628,95 +779,8 @@ export function startVisualizationServer(dbPath?: string): void {
 
   // ── Defence API v1 ──────────────────────────────────────────
 
-  // Scan content through the defence pipeline
-  // NOTE: config parameter is intentionally ignored — always uses persisted mode (security hardening)
-  app.post('/api/v1/scan', (req: Request, res: Response) => {
-    try {
-      const { content, title, source } = req.body;
-      if (!content || typeof content !== 'string') {
-        return res.status(400).json({ error: 'content (string) is required' });
-      }
-
-      // Log if caller tried to override config (potential tampering)
-      if (req.body.config) {
-        try {
-          logAudit({
-            memory_id: null,
-            project: null,
-            timestamp: new Date().toISOString(),
-            source_type: 'api',
-            source_identifier: 'rest-api',
-            trust_score: 0,
-            sensitivity_level: 'INTERNAL',
-            firewall_result: 'ALLOW',
-            anomaly_score: 0.5,
-            threat_indicators: '["config_tampering"]',
-            blocked_patterns: '[]',
-            reason: 'config_override_attempt: scan endpoint config parameter ignored',
-            fragmentation_score: null,
-            pipeline_duration_ms: 0,
-          });
-        } catch { /* audit is best-effort */ }
-      }
-
-      const defenceSource: DefenceSource = {
-        type: source?.type ?? 'api',
-        identifier: source?.identifier ?? 'rest-api',
-      };
-
-      // Always use persisted config — no per-request overrides via HTTP
-      const defenceConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
-
-      const result = runDefencePipeline(
-        content,
-        title ?? 'Untitled',
-        defenceSource,
-        defenceConfig,
-      );
-
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
-
-  // Batch scan multiple items
-  // NOTE: config parameter is intentionally ignored — always uses persisted mode (security hardening)
-  app.post('/api/v1/scan/batch', (req: Request, res: Response) => {
-    try {
-      const { items, source } = req.body;
-      if (!Array.isArray(items) || items.length === 0) {
-        return res.status(400).json({ error: 'items (array) is required' });
-      }
-      if (items.length > 100) {
-        return res.status(400).json({ error: 'Maximum 100 items per batch' });
-      }
-
-      const defenceSource: DefenceSource = {
-        type: source?.type ?? 'api',
-        identifier: source?.identifier ?? 'rest-api',
-      };
-
-      // Always use persisted config — no per-request overrides via HTTP
-      const defenceConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
-
-      const results = items.map((item: { content: string; title?: string }) => {
-        if (!item.content || typeof item.content !== 'string') {
-          return { error: 'content (string) is required', allowed: false };
-        }
-        return runDefencePipeline(
-          item.content,
-          item.title ?? 'Untitled',
-          defenceSource,
-          defenceConfig,
-        );
-      });
-
-      res.json({ results, total: results.length });
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
-  });
+  app.post('/api/v1/scan', handleV1Scan);
+  app.post('/api/v1/scan/batch', handleV1ScanBatch);
 
   const brainWorker = new BrainWorker();
   registerIncidentRoutes(app);
