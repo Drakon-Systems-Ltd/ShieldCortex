@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.27.3] - 2026-05-29
+
+**Five-fix security & release-discipline pass driven by an adversarially-verified internal audit. The headline: the defence pipeline's trust model could be set by the untrusted MCP caller; cloud sync defaulted to shipping CONFIDENTIAL-classified memories without consent; a SQL-console allow-list could be bypassed with a CTE prefix; the verify-cloud path redacted content but leaked the title; and the publish gate had been bypassed once already (v4.27.2 shipped despite a red plugin-manifest test).**
+
+Every change in this release has the same shape: tighten a previously-trusting input boundary, make the safer default the actual default, and add a regression test so the same drift can't recur.
+
+### Fixed
+
+- **[`scripts/sync-plugin-version.mjs`](scripts/sync-plugin-version.mjs) (new) + [`package.json`](package.json) lifecycle hooks:** a manual `npm publish` from a laptop could (and did) skip CI and ship a version where root `package.json` and the plugin manifests disagreed. The new script syncs the version into [`plugins/openclaw/package.json`](plugins/openclaw/package.json) and [`plugins/openclaw/openclaw.plugin.json`](plugins/openclaw/openclaw.plugin.json); wired into `npm version` (auto-sync on bump) and `prepublishOnly` with `--check` (manual publish fails fast on drift). Cleared the 4.27.1 → 4.27.2 drift that motivated the fix.
+- **[`src/server.ts`](src/server.ts) + [`src/defence/trust/env-detector.ts`](src/defence/trust/env-detector.ts) + [`src/defence/trust/resolve-tool-source.ts`](src/defence/trust/resolve-tool-source.ts) (new):** MCP `source` self-attestation now clamps to the env-inferred trust ceiling. A prompt-injected sub-agent calling `remember` with `source:{type:'user',identifier:'direct'}` no longer obtains trust=1.0 and bypasses the auto-quarantine band. The Zod schema rejects `type:'user'` at validation (MCP is never invoked by a literal human), and `clampSourceToCeiling()` writes a `SOURCE_ELEVATION_BLOCKED` audit row when an over-claim is detected. The `SHIELDCORTEX_AGENT_SOURCE` env override still accepts `type:'user'` — separate follow-up.
+- **[`src/cloud/config.ts`](src/cloud/config.ts) + [`src/cloud/cli.ts`](src/cloud/cli.ts) + [`src/cloud/memory-sync.ts`](src/cloud/memory-sync.ts):** flipped `cloudSyncExcludeSensitive` default to `true`. A one-shot migration in `getCloudSyncControls()` rewrites existing `cloudEnabled:true` configs that have no explicit value to the new safe default and stamps `cloudSyncDefaultsMigratedAt`. Configs with an explicit prior choice are untouched. New CLI opt-back-in flag `--cloud-include-sensitive`.
+- **[`src/cloud/verify.ts`](src/cloud/verify.ts):** one-line symmetry restoration — `submitVerification` now applies `redactCredentials()` to the title field, matching the precedent set by [`quarantine-sync.ts`](src/cloud/quarantine-sync.ts). Titles routinely carry the most distinctive identifier; a leaked title is a leaked credential.
+- **[`src/api/sql-classifier.ts`](src/api/sql-classifier.ts) (new) + [`src/api/visualization-server.ts`](src/api/visualization-server.ts):** the SQL console's `upperQuery.startsWith('INSERT'|...)` write-gate was bypassable with a `WITH t AS (SELECT 1) INSERT ...` prefix. New classifier strips leading comments and CTE prefixes before checking the first real keyword; the fallthrough branch now fails closed (rejects unmatched queries rather than executing them).
+
+### Verification
+
+- `npm run build:ts` — clean.
+- `npm test -- src/__tests__/plugin-manifest src/defence/__tests__/env-detector src/cloud/__tests__/verify src/cloud/__tests__/sync-defaults src/api/__tests__/sql-classifier` — 64/64 green across the 5 new/modified suites.
+- The plugin-manifest assertion that motivated Fix #1 was already red on `main` against v4.27.2 — now green.
+
 ## [4.27.2] - 2026-05-28
 
 **Bug fix: cross-project memory recall leak + auto-extractor duplication and mid-clause capture. Recalls were polluted with memories from other projects (NULL-project rows leaking globally + over-eager `scope='global'` auto-promotion), and the hook-driven extractor was both saving identical fragments multiple times per session and capturing mid-sentence fragments as memory titles.**
