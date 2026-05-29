@@ -607,7 +607,12 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         return res.status(400).json({ error: 'keptId and removedId must be different' });
       }
 
-      const merged = mergeMemories(keptId as number, removedId as number, { reviewedBy });
+      const merged = mergeMemories(
+        keptId as number,
+        removedId as number,
+        { reviewedBy },
+        { type: 'api', identifier: 'dashboard:memory-merge' },
+      );
       if (!merged) {
         return res.status(404).json({ error: 'Unable to merge memories' });
       }

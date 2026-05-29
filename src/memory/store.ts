@@ -819,6 +819,7 @@ export function mergeMemories(
   keptId: number,
   removedId: number,
   options?: { reviewedBy?: string | null },
+  source: DefenceSource = { type: 'cli', identifier: 'merge' },
 ): Memory | null {
   if (keptId === removedId) return getMemoryById(keptId);
 
@@ -833,6 +834,25 @@ export function mergeMemories(
     const mergedContent = mergedSnippets.length > 0
       ? `${kept.content}\n\nMerged from duplicate (${removed.title}):\n${mergedSnippets.join('. ')}.`
       : kept.content;
+
+    // DEFENCE PIPELINE: re-scan the *merged* content. Two individually-clean
+    // memories can produce content that straddles a credential or injection
+    // pattern across the join (kept.content + " " + removed sentences). This
+    // is the one path that mechanically constructs new content from existing
+    // rows — without this re-scan the "every byte in `memories` has been
+    // scanned" invariant is broken. Throwing here rolls back the transaction
+    // so neither the kept row nor the removed row changes.
+    const mergedTitle = kept.title;
+    const defenceResult = runDefencePipeline(
+      mergedContent,
+      mergedTitle,
+      source,
+      undefined,
+      kept.project ?? removed.project ?? undefined,
+    );
+    if (defenceResult.firewall.result !== 'ALLOW') {
+      throw new MemoryBlockedError(defenceResult.firewall.reason);
+    }
 
     const mergedTags = Array.from(new Set([...(kept.tags ?? []), ...(removed.tags ?? [])]));
     const mergedFrom = Array.isArray(kept.metadata?.mergedFrom)

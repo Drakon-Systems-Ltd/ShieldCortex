@@ -28,6 +28,8 @@ import {
   addMemory,
   rowToMemory,
 } from './store.js';
+import { runDefencePipeline } from '../defence/index.js';
+import type { DefenceSource } from '../defence/types.js';
 import {
   calculateDecayedScore,
   shouldPromoteToLongTerm,
@@ -358,6 +360,28 @@ export function deduplicateMemories(options?: { dryRun?: boolean }): {
 
         if (uniqueSentences.length > 0) {
           const mergedContent = kept.content + '\n\nMerged from duplicate:\n' + uniqueSentences.join('. ') + '.';
+
+          // DEFENCE PIPELINE: re-scan the merged content. Two individually-clean
+          // memories can produce content that straddles a credential pattern
+          // across the join. Without this re-scan the "every byte in `memories`
+          // has been scanned" invariant is broken. If the merge is blocked, skip
+          // both the content update AND the delete so the source rows survive.
+          const dedupSource: DefenceSource = { type: 'hook', identifier: 'hook:consolidation' };
+          const defenceResult = runDefencePipeline(
+            mergedContent,
+            kept.title,
+            dedupSource,
+            undefined,
+            kept.project ?? discarded.project ?? undefined,
+          );
+          if (defenceResult.firewall.result !== 'ALLOW') {
+            // Surface in audit (already written by the pipeline) and skip this pair.
+            console.warn(
+              `[shieldcortex] Dedup merge blocked for memory ${kept.id} + ${removedId}: ${defenceResult.firewall.reason}`,
+            );
+            continue;
+          }
+
           db.prepare('UPDATE memories SET content = ? WHERE id = ?').run(mergedContent, kept.id);
         }
 
