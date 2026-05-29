@@ -1,6 +1,8 @@
 import {
   getCloudConfig,
   setCloudConfig,
+  getCloudSyncControls,
+  setCloudSyncControls,
   getDefenceMode,
   setDefenceMode,
   getVerifyConfig,
@@ -36,12 +38,14 @@ export function handleCloudConfig(args: string[]): void {
     const reviewCopilot = getReviewCopilotConfig();
     const openclawAutoMemory = getOpenClawAutoMemory();
     const ranker = getRankerConfig();
+    const syncControls = getCloudSyncControls();
     const rankerOverridden = !!process.env.SHIELDCORTEX_RANKER;
     console.log('\nShieldCortex Configuration:');
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
     console.log(`  API Key:  ${config.cloudApiKey ? config.cloudApiKey.substring(0, 12) + '...' : 'Not set'}`);
     console.log(`  Base URL: ${config.cloudBaseUrl}`);
+    console.log(`  Sensitive Memories: ${syncControls.excludeSensitive ? 'Excluded from sync (safe default)' : 'Included in sync'}`);
     console.log(`  LLM Verify:   ${verify.verifyEnabled ? 'Enabled' : 'Disabled'} (${verify.verifyMode}, ${verify.verifyTimeoutMs}ms timeout)`);
     console.log(`  Verify Triggers: ${verify.verifyTriggers.join(', ')}`);
     console.log(`  Local AI Explainer: ${reviewCopilot.enabled ? 'Enabled' : 'Disabled'} (${reviewCopilot.modelId})`);
@@ -89,6 +93,24 @@ export function handleCloudConfig(args: string[]): void {
   if (args.includes('--cloud-disable')) {
     setCloudConfig({ cloudEnabled: false });
     console.log('Cloud sync disabled.');
+    changed = true;
+  }
+
+  // ── Sensitive-content opt-in/opt-out ──
+  // Default since v4.27: CONFIDENTIAL+ memories are NOT shipped to the cloud.
+  // Users who genuinely want to mirror sensitive content (e.g. self-hosted
+  // backend on their own network) can opt back in here.
+
+  if (args.includes('--cloud-include-sensitive')) {
+    setCloudSyncControls({ excludeSensitive: false });
+    console.log('Cloud sync will now include CONFIDENTIAL+ memories.');
+    console.log('Note: content is sent to your configured cloudBaseUrl in full.');
+    changed = true;
+  }
+
+  if (args.includes('--cloud-exclude-sensitive')) {
+    setCloudSyncControls({ excludeSensitive: true });
+    console.log('Cloud sync will skip CONFIDENTIAL+ memories (default).');
     changed = true;
   }
 
@@ -228,6 +250,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-url <url>      Set cloud base URL');
     console.log('  --cloud-enable         Enable cloud sync');
     console.log('  --cloud-disable        Disable cloud sync');
+    console.log('  --cloud-include-sensitive  Sync CONFIDENTIAL+ memories (off by default since v4.27)');
+    console.log('  --cloud-exclude-sensitive  Stop syncing CONFIDENTIAL+ memories (default)');
     console.log('  --cloud-status         Show current configuration');
     console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (default: off)');
     console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (default: off — adds latency)');

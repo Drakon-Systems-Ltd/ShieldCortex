@@ -45,11 +45,18 @@ function getIntegrityKeyFile(): string {
 }
 
 const DEFAULT_BASE_URL = 'https://api.shieldcortex.ai';
+// Safety-first defaults: CONFIDENTIAL+ memories are NOT shipped to the cloud
+// unless the user explicitly opts in via `--cloud-include-sensitive` or the
+// dashboard. Prior to the v4.27 flip, `excludeSensitive` defaulted to false,
+// which meant enabling cloud sync silently shipped credential-bearing /
+// classified content without per-record consent. `contentMode` stays 'full'
+// so the opt-in sync stream remains useful for PUBLIC/INTERNAL records that
+// the user did consent to share.
 const DEFAULT_SYNC_CONTROLS: CloudSyncControls = {
   projectMode: 'all',
   projects: [],
   contentMode: 'full',
-  excludeSensitive: false,
+  excludeSensitive: true,
 };
 const DEFAULT_REVIEW_COPILOT_CONFIG: ReviewCopilotConfig = {
   enabled: false,
@@ -193,6 +200,23 @@ function normalizeProjectList(value: unknown): string[] {
 
 export function getCloudSyncControls(): CloudSyncControls {
   const raw = readRawConfig();
+
+  // One-shot v4.27 migration: pre-upgrade configs with cloud sync enabled
+  // were silently shipping CONFIDENTIAL+ content because `excludeSensitive`
+  // defaulted to false. Detect those configs (cloud on, no explicit setting,
+  // no prior migration stamp) and rewrite them to the new safe default. If
+  // the user later opts back in via `--cloud-include-sensitive`, that writes
+  // `cloudSyncExcludeSensitive: false` explicitly and this branch is skipped.
+  if (
+    raw.cloudEnabled === true &&
+    typeof raw.cloudSyncExcludeSensitive !== 'boolean' &&
+    typeof raw.cloudSyncDefaultsMigratedAt !== 'string'
+  ) {
+    raw.cloudSyncExcludeSensitive = true;
+    raw.cloudSyncDefaultsMigratedAt = new Date().toISOString();
+    writeRawConfig(raw);
+  }
+
   const projectMode = raw.cloudSyncProjectMode;
   const contentMode = raw.cloudSyncContentMode;
 

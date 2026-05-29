@@ -86,7 +86,13 @@ function buildEnvelope(records: SyncedMemoryRecord[]): MemorySyncEnvelope {
   };
 }
 
-function shouldSyncRecord(record: Pick<SyncedMemoryRecord, 'project' | 'sensitivity_level' | 'cloud_excluded'>): boolean {
+/**
+ * Per-record sync gate. Exported for unit testing the safety contract:
+ * a CONFIDENTIAL record on fresh-default controls MUST return false.
+ */
+export function shouldSyncRecord(
+  record: Pick<SyncedMemoryRecord, 'project' | 'sensitivity_level' | 'cloud_excluded'>,
+): boolean {
   if (record.cloud_excluded) return false;
   const controls = getCloudSyncControls();
   if (!shouldSyncProject(record.project, controls)) return false;
