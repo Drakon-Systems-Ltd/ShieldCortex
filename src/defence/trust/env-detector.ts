@@ -10,6 +10,7 @@
  */
 
 import type { DefenceSource } from '../types.js';
+import { scoreSource } from './source-scorer.js';
 
 export interface EnvDetectionResult {
   source: DefenceSource;
@@ -139,6 +140,76 @@ export function resolveSource(
   return {
     source: detection.source,
     inferred: true,
+    detection,
+  };
+}
+
+export interface CeilingClampResult {
+  /** The effective source after clamping (declared if safe, env-inferred otherwise). */
+  source: DefenceSource;
+  /** True when the declared source claimed higher trust than the runtime environment justifies. */
+  clamped: boolean;
+  /** Trust score of the declared source (only meaningful when a declared source was passed). */
+  declaredScore: number | null;
+  /** Trust score the runtime environment actually permits. */
+  ceilingScore: number;
+  /** The environment-inferred source used as the trust ceiling. */
+  ceiling: DefenceSource;
+  /** Detection metadata for the environment inference. */
+  detection: EnvDetectionResult;
+}
+
+/**
+ * Clamp a caller-declared source against the environment-inferred trust ceiling.
+ *
+ * MCP callers are arbitrary processes — a prompt-injected agent could claim
+ * `{type:'user', identifier:'direct'}` to get trust=1.0 and bypass quarantine.
+ * To prevent that, we compute the highest trust the actual runtime allows
+ * (from env vars like CLAUDE_CODE_ENTRYPOINT) and refuse any declared source
+ * that would score higher.
+ *
+ * Semantics:
+ * - If no declared source: return env-inferred (no clamping).
+ * - If declaredScore <= ceilingScore: trust the declared source (allows
+ *   legitimate downgrades, e.g. an agent labelling input as `email`).
+ * - If declaredScore > ceilingScore: drop the declared source and use the
+ *   env-inferred one, with `clamped: true` so the caller can audit it.
+ */
+export function clampSourceToCeiling(
+  declaredSource: DefenceSource | undefined,
+): CeilingClampResult {
+  const detection = inferSourceFromEnvironment();
+  const ceilingScore = scoreSource(detection.source).score;
+
+  if (!declaredSource) {
+    return {
+      source: detection.source,
+      clamped: false,
+      declaredScore: null,
+      ceilingScore,
+      ceiling: detection.source,
+      detection,
+    };
+  }
+
+  const declaredScore = scoreSource(declaredSource).score;
+  if (declaredScore > ceilingScore) {
+    return {
+      source: detection.source,
+      clamped: true,
+      declaredScore,
+      ceilingScore,
+      ceiling: detection.source,
+      detection,
+    };
+  }
+
+  return {
+    source: declaredSource,
+    clamped: false,
+    declaredScore,
+    ceilingScore,
+    ceiling: detection.source,
     detection,
   };
 }

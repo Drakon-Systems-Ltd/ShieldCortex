@@ -2,8 +2,20 @@
  * Environment-Based Source Inference Tests
  */
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { inferSourceFromEnvironment, resolveSource } from '../trust/env-detector.js';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { inferSourceFromEnvironment, resolveSource, clampSourceToCeiling } from '../trust/env-detector.js';
+import { scoreSource } from '../trust/source-scorer.js';
+
+// Mock the audit logger before importing resolve-tool-source so we can assert
+// SOURCE_ELEVATION_BLOCKED rows get written without needing a real database.
+// The repo is ESM-only; use unstable_mockModule + top-level await import.
+jest.unstable_mockModule('../audit/logger.js', () => ({
+  logAudit: jest.fn(() => 1),
+  createContentHash: jest.fn(() => 'hash'),
+}));
+
+const { logAudit } = (await import('../audit/logger.js')) as { logAudit: jest.Mock };
+const { resolveToolSource } = await import('../trust/resolve-tool-source.js');
 
 describe('Environment-Based Source Inference', () => {
   const originalEnv = { ...process.env };
@@ -113,6 +125,101 @@ describe('Environment-Based Source Inference', () => {
       const result = resolveSource(undefined, true);
       // Not default method, so no downgrade
       expect(result.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    });
+  });
+
+  describe('clampSourceToCeiling', () => {
+    it('clamps a caller-declared user:direct source under a sub-agent env', () => {
+      process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
+      const declared = { type: 'user' as const, identifier: 'direct' };
+
+      const result = clampSourceToCeiling(declared);
+
+      expect(result.clamped).toBe(true);
+      expect(result.source).toEqual({ type: 'agent', identifier: 'agent-spawned' });
+      expect(result.declaredScore).toBe(scoreSource(declared).score);
+      expect(result.ceilingScore).toBe(
+        scoreSource({ type: 'agent', identifier: 'agent-spawned' }).score,
+      );
+      expect(result.declaredScore).toBeGreaterThan(result.ceilingScore);
+    });
+
+    it('does not clamp when declared trust is at or below the ceiling', () => {
+      process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+      const declared = { type: 'agent' as const, identifier: 'user-spawned>task-1' };
+
+      const result = clampSourceToCeiling(declared);
+
+      expect(result.clamped).toBe(false);
+      expect(result.source).toEqual(declared);
+    });
+
+    it('returns env-inferred source when no declared source is passed', () => {
+      process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
+
+      const result = clampSourceToCeiling(undefined);
+
+      expect(result.clamped).toBe(false);
+      expect(result.declaredScore).toBeNull();
+      expect(result.source).toEqual({ type: 'agent', identifier: 'agent-spawned' });
+    });
+  });
+
+  describe('resolveToolSource', () => {
+    beforeEach(() => {
+      logAudit.mockClear();
+    });
+
+    it('drops a caller-claimed user:direct under a sub-agent env and writes SOURCE_ELEVATION_BLOCKED', () => {
+      process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
+
+      const source = resolveToolSource(
+        { type: 'user', identifier: 'direct' },
+        { toolName: 'remember', project: 'test-project' },
+      );
+
+      expect(source).toEqual({ type: 'agent', identifier: 'agent-spawned' });
+      expect(logAudit).toHaveBeenCalledTimes(1);
+      const entry = logAudit.mock.calls[0][0] as {
+        firewall_result: string;
+        reason: string;
+        threat_indicators: string;
+        project: string | null;
+      };
+      expect(entry.firewall_result).toBe('BLOCK');
+      expect(entry.reason).toContain('SOURCE_ELEVATION_BLOCKED');
+      expect(entry.reason).toContain('tool=remember');
+      expect(entry.reason).toContain('declared=user:direct');
+      expect(entry.threat_indicators).toContain('privilege_escalation');
+      expect(entry.project).toBe('test-project');
+    });
+
+    it('honours declared sources that score at or below the env ceiling', () => {
+      process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+      const declared = { type: 'agent' as const, identifier: 'user-spawned>task-1' };
+
+      const source = resolveToolSource(declared, {
+        toolName: 'recall',
+        project: null,
+      });
+
+      expect(source).toEqual(declared);
+      expect(logAudit).not.toHaveBeenCalled();
+    });
+
+    it('writes a SOURCE_MISSING audit row when no source is declared', () => {
+      process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+
+      const source = resolveToolSource(undefined, {
+        toolName: 'recall',
+        project: null,
+      });
+
+      expect(source).toEqual({ type: 'cli', identifier: 'mcp' });
+      expect(logAudit).toHaveBeenCalledTimes(1);
+      const entry = logAudit.mock.calls[0][0] as { firewall_result: string; reason: string };
+      expect(entry.firewall_result).toBe('ALLOW');
+      expect(entry.reason).toContain('SOURCE_MISSING');
     });
   });
 });

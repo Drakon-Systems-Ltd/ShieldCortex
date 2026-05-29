@@ -39,8 +39,7 @@ import { checkDatabaseSize } from './database/init.js';
 import { queryAuditLogs, getAuditStats, getLifetimeStats } from './defence/audit/index.js';
 import { scanExistingMemories } from './defence/scanner/index.js';
 import type { FirewallResult as FwResult, DefenceSource } from './defence/types.js';
-import { resolveSource } from './defence/trust/env-detector.js';
-import { logAudit } from './defence/audit/logger.js';
+import { resolveToolSource as resolveToolSourceImpl } from './defence/trust/resolve-tool-source.js';
 import { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
 import { getToolResponseScanConfig } from './cloud/config.js';
 
@@ -54,11 +53,18 @@ import {
 } from './api/control.js';
 import type { OperationKind } from './api/control.js';
 
-// Shared source schema for access control on MCP tools
+// Shared source schema for access control on MCP tools.
+// NOTE: 'user' is intentionally NOT accepted from MCP callers. MCP tools are
+// always invoked by an agent, hook, CLI or API — never by a literal human
+// typing — so accepting type:'user' would let a prompt-injected agent
+// self-attest as the human operator and earn trust=1.0, bypassing the
+// quarantine band and RESTRICTED read gating. The 'user' type still exists
+// internally for things like dashboard-originated writes, but it must never
+// be honoured when it arrives over the MCP transport.
 const sourceParam = z.object({
-  type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
+  type: z.enum(['cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
   identifier: z.string(),
-}).optional().describe('Caller identity for access control (agents should pass this)');
+}).optional().describe('Caller identity for access control (agents should pass this). type:"user" is rejected — MCP is never a human channel.');
 
 /**
  * Wrap an MCP tool handler to scan its response for threats.
@@ -97,34 +103,19 @@ function withResponseScan(toolName: string, handler: (...args: any[]) => any): (
 }
 
 /**
- * Resolve source for an MCP tool call, inferring from environment if not declared.
- * Logs an audit warning when source is missing (gives operators visibility).
+ * Resolve source for an MCP tool call.
+ *
+ * Delegates to the env-ceiling clamp helper, which:
+ * - Drops any caller-declared source that claims higher trust than the
+ *   runtime environment justifies (writes SOURCE_ELEVATION_BLOCKED to audit).
+ * - Falls back to env-inferred source when none was declared (writes
+ *   SOURCE_MISSING to audit for operator visibility).
  */
 function resolveToolSource(declaredSource: DefenceSource | undefined, toolName: string): DefenceSource {
-  const { source, inferred, detection } = resolveSource(declaredSource);
-  if (inferred) {
-    try {
-      logAudit({
-        memory_id: null,
-        project: getActiveProject(),
-        timestamp: new Date().toISOString(),
-        source_type: source.type,
-        source_identifier: source.identifier,
-        trust_score: 0,
-        sensitivity_level: 'PUBLIC',
-        firewall_result: 'ALLOW',
-        anomaly_score: 0,
-        threat_indicators: '[]',
-        blocked_patterns: '[]',
-        reason: `SOURCE_MISSING: tool=${toolName}, inferred=${source.type}:${source.identifier} via ${detection?.method ?? 'default'} (confidence: ${detection?.confidence ?? 'low'})`,
-        fragmentation_score: null,
-        pipeline_duration_ms: null,
-      });
-    } catch {
-      // Audit logging should never break tool execution
-    }
-  }
-  return source;
+  return resolveToolSourceImpl(declaredSource, {
+    toolName,
+    project: getActiveProject(),
+  });
 }
 
 /**
