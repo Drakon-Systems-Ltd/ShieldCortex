@@ -6,6 +6,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.28.0] - 2026-05-29
+
+**Defence-pipeline coverage pass: three paths that could write into the local store or audit log without going through the canonical defence chokepoint are now closed. The unifying theme is that the defence pipeline is supposed to be the single chokepoint for "every byte we persist" and "every audit row we emit" — these three fixes restore that invariant on the paths that were quietly bypassing it. Minor bump because audit-row shapes and one CLI default change in ways that operators querying the schema should notice.**
+
+### Fixed
+
+- **[`src/memory/store.ts`](src/memory/store.ts) + [`src/memory/consolidate.ts`](src/memory/consolidate.ts) — `mergeMemories` no longer bypasses the defence pipeline.** Both paths assembled merged content from two existing rows and wrote via raw `UPDATE` with no re-scan, so two individually-clean memories could merge into content that contained a credential or injection pattern across the `". "` join. Both paths now call `runDefencePipeline` on the merged content before the UPDATE. `mergeMemories` throws `MemoryBlockedError` on non-ALLOW (transaction rolls back); `consolidate.ts` skips the offending pair with `continue` so one poisoned merge doesn't lose the entire dedup batch. `mergeMemories` gains an optional `DefenceSource` parameter (defaults to `{type:'cli', identifier:'merge'}` for back-compat); the dashboard caller in [`src/api/routes/memories.ts`](src/api/routes/memories.ts) passes `{type:'api', identifier:'dashboard:memory-merge'}` for attribution.
+- **[`scripts/lib/capture-prompt.mjs`](scripts/lib/capture-prompt.mjs) (new) + [`scripts/prompt-recall-hook.mjs`](scripts/prompt-recall-hook.mjs) — `UserPromptSubmit` captures are redacted + classified before they hit `session_events`.** The raw prompt was previously written to `session_events.payload` with no credential scan and no sensitivity tag; `sanitisePromptForRecall` ran *after* the INSERT and only for FTS query construction. New `captureForSessionEvent()` lazy-loads the credential-leak + sensitivity modules from `dist/`, runs them on the raw text, force-elevates sensitivity to CONFIDENTIAL when credentials are found, and fail-closes to a placeholder + RESTRICTED if defence modules can't load. The prompt-recall-hook awaits this before the INSERT and stores the redacted payload + new `sensitivity_level` column.
+- **[`src/database/migrations.ts`](src/database/migrations.ts) + [`schema.sql`](src/database/schema.sql) + [`inline-schema.ts`](src/database/inline-schema.ts) — `session_events.sensitivity_level` column added** (`TEXT DEFAULT 'INTERNAL'`). Idempotent migration; all three schema files kept in lock-step per the hand-written-migrations convention.
+- **[`src/api/visualization-server.ts`](src/api/visualization-server.ts) — `/api/v1/scan` audit row shape tightened.** The config-tamper path now writes `firewall_result:'BLOCK'` + `sensitivity_level:'RESTRICTED'` (was `'ALLOW'` + `'INTERNAL'`, so incident-triage queries filtering on `firewall_result IN ('BLOCK','QUARANTINE')` missed config-tampering attempts entirely). The normal-scan path now whitelists `source.type` against the 9-literal `DefenceSource` enum and silently normalises unknown values to `'api'`; `source.identifier` is capped at 200 chars. Applied to both single-scan and batch handlers.
+
+### Verification
+
+- `npm run build:ts` — clean.
+- `npm test -- src/__tests__/store src/__tests__/capture-prompt src/api/__tests__/scan-route-source src/__tests__/plugin-manifest` — 68/68 green (2 skipped, pre-existing).
+- The v4.27.2-era recall-leak / dedup invariants tested against the new schema migration; sensitivity_level rolls forward without breaking existing rows.
+
+### Operator note
+
+The `session_events` schema change is additive and backfills via the column default — no data loss, no downtime. Operators querying `session_events` directly should expect the new `sensitivity_level` column and use it to filter recall replays. The tamper-row shape change means existing dashboards/queries that filtered tamper attempts on `firewall_result='ALLOW'` will need to switch to `firewall_result='BLOCK'` (which is the more intuitive query anyway).
+
 ## [4.27.3] - 2026-05-29
 
 **Five-fix security & release-discipline pass driven by an adversarially-verified internal audit. The headline: the defence pipeline's trust model could be set by the untrusted MCP caller; cloud sync defaulted to shipping CONFIDENTIAL-classified memories without consent; a SQL-console allow-list could be bypassed with a CTE prefix; the verify-cloud path redacted content but leaked the title; and the publish gate had been bypassed once already (v4.27.2 shipped despite a red plugin-manifest test).**
