@@ -6,6 +6,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.28.1] - 2026-05-30
+
+**Licence cache hot-reload — `shieldcortex license activate <key>` now takes effect on long-running workers without a restart.**
+
+Field-observed on the user's fleet (mac/jarvis/case 2026-05-29): after activating a fresh Team licence from the CLI, the `shieldcortex --mode worker` systemd / launchd processes kept reporting Free or Pro (trial expired) for hours. `isFeatureEnabled('cloud_sync')` returned false against the cached old tier, so the BrainWorker's light-tick heartbeat (`sendHeartbeat`) was skipped silently and the Cloud dashboard showed the devices as Offline. Restarting each worker picked up the new licence — but that's not a workflow.
+
+### Fixed
+
+- **[src/license/store.ts](src/license/store.ts) — `getLicense()` now invalidates its in-memory cache when `~/.shieldcortex/license.json`'s mtime advances.** Single `fs.statSync` per call (microseconds), no extra dependencies, no file watcher. Cache key is `(LicenseInfo, mtimeMs|null)`; we drop the cache when the current stat returns a different mtime than the one we cached, then re-read and re-verify. The `clearLicenseCache()`, `activateLicense()`, `deactivateLicense()`, and `updateValidationStatus()` paths all update the mtime alongside `cachedLicense` so a same-process activate doesn't trigger a redundant re-read.
+
+  What this means in practice: a Cloud-enabled Team key activated on `mac` is picked up by the next BrainWorker light tick (≤ 5 min on `full` profile, ≤ 15 min on `mcp`), so heartbeats start flowing and the dashboard flips the device Online without any restart, kickstart, or `systemctl` dance.
+
+### Tests
+
+- New [src/license/__tests__/store-hot-reload.test.ts](src/license/__tests__/store-hot-reload.test.ts) — 6 cases covering: FREE-no-file cached identity, FREE→appearing-file invalidation, mtime-advance invalidation, file-deletion invalidation, hot-path stat-only when nothing changes, and `activateLicense` keeping cache + mtime atomic on the verify-fails path.
+
+### Verification
+
+- Run `npm run build:ts` + `npm test`.
+- Live verification on the user's fleet after upgrade: activate any tier-changing licence on a box with the worker already running, then watch the device's `lastSeen` in the platform dashboard advance within the worker's light-tick interval — no `systemctl --user restart shieldcortex-dashboard.service` needed.
+
+### What this is NOT
+
+- Not a watcher — there's no inotify / FSEvents subscription; the check runs only when `getLicense()` is called (i.e. when feature gates are checked or the dashboard reads tier status). On a fully idle process the cache stays warm.
+- Not a fix for the worker being entirely paused (process suspended, NTP jump, daemon killed) — that's separate operational concern.
+- Not retroactive — workers running v4.28.0 or earlier still need a one-time restart to drop their pre-fix cache. After they're on v4.28.1, future activations are seamless.
+
 ## [4.28.0] - 2026-05-29
 
 **Defence-pipeline coverage pass: three paths that could write into the local store or audit log without going through the canonical defence chokepoint are now closed. The unifying theme is that the defence pipeline is supposed to be the single chokepoint for "every byte we persist" and "every audit row we emit" — these three fixes restore that invariant on the paths that were quietly bypassing it. Minor bump because audit-row shapes and one CLI default change in ways that operators querying the schema should notice.**

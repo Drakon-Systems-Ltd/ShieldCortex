@@ -10,7 +10,7 @@
  * License is cached in memory after first read.
  */
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { verifyLicenseKey } from './verify.js';
@@ -33,12 +33,34 @@ function getLicenseFilePath(): string {
 }
 
 // ── Cache ────────────────────────────────────────────────
+//
+// In-memory cache of the parsed/verified licence. Refreshed automatically
+// when the on-disk file mtime changes (v4.27.2). This lets long-running
+// workers pick up `shieldcortex license activate <key>` without a process
+// restart — previously the worker held the old tier cached for its
+// lifetime and any cloud_sync / heartbeat feature gate stayed stuck on
+// the value at startup. The mtime check is a single stat() per call
+// (microseconds); cheap enough to run on every gate hit.
 
 let cachedLicense: LicenseInfo | null = null;
+let cachedLicenseFileMtimeMs: number | null = null;
+
+/**
+ * Read the licence file's current mtime (ms). Returns null if the file
+ * doesn't exist — that's a valid cached state too (= FREE).
+ */
+function readLicenseFileMtimeMs(): number | null {
+  try {
+    return statSync(getLicenseFilePath()).mtimeMs;
+  } catch {
+    return null;
+  }
+}
 
 /** Clear the in-memory cache (useful for testing or after activation). */
 export function clearLicenseCache(): void {
   cachedLicense = null;
+  cachedLicenseFileMtimeMs = null;
   clearTrialCache();
 }
 
@@ -49,6 +71,16 @@ export function clearLicenseCache(): void {
  * Returns a LicenseInfo with tier='free' if no license exists or verification fails.
  */
 export function getLicense(): LicenseInfo {
+  // Hot-reload: if the licence file's mtime has changed since the value
+  // was cached (or the file appeared/disappeared), drop the cache so the
+  // new tier takes effect immediately. This is what makes long-running
+  // workers see `shieldcortex license activate <key>` without a restart.
+  const currentMtimeMs = readLicenseFileMtimeMs();
+  if (cachedLicense !== null && cachedLicenseFileMtimeMs !== currentMtimeMs) {
+    cachedLicense = null;
+    clearTrialCache();
+  }
+
   if (cachedLicense) return cachedLicense;
 
   const FREE: LicenseInfo = {
@@ -65,12 +97,14 @@ export function getLicense(): LicenseInfo {
     const licenseFile = getLicenseFilePath();
     if (!existsSync(licenseFile)) {
       cachedLicense = FREE;
+      cachedLicenseFileMtimeMs = null;
       return FREE;
     }
 
     const raw: LicenseFile = JSON.parse(readFileSync(licenseFile, 'utf-8'));
     if (!raw.key) {
       cachedLicense = FREE;
+      cachedLicenseFileMtimeMs = currentMtimeMs;
       return FREE;
     }
 
@@ -80,15 +114,18 @@ export function getLicense(): LicenseInfo {
     // so we only hard-block on revoked here.
     if (raw.validationStatus === 'revoked') {
       cachedLicense = FREE;
+      cachedLicenseFileMtimeMs = currentMtimeMs;
       return FREE;
     }
 
     // Verify the key cryptographically (checks exp + grace period)
     const info = verifyLicenseKey(raw.key);
     cachedLicense = info;
+    cachedLicenseFileMtimeMs = currentMtimeMs;
     return info;
   } catch {
     cachedLicense = FREE;
+    cachedLicenseFileMtimeMs = currentMtimeMs;
     return FREE;
   }
 }
@@ -150,8 +187,10 @@ export function activateLicense(key: string): LicenseInfo {
   mkdirSync(configDir, { recursive: true });
   writeFileSync(licenseFile, JSON.stringify(file, null, 2) + '\n', { mode: 0o600 });
 
-  // Invalidate cache
+  // Refresh cache + mtime so the next getLicense() call in this process
+  // doesn't trigger a re-read for no reason.
   cachedLicense = info;
+  cachedLicenseFileMtimeMs = readLicenseFileMtimeMs();
   return info;
 }
 
@@ -168,6 +207,7 @@ export function deactivateLicense(): void {
     // Best effort
   }
   cachedLicense = null;
+  cachedLicenseFileMtimeMs = null;
   clearTrialCache();
 }
 
@@ -187,6 +227,7 @@ export function updateValidationStatus(status: LicenseFile['validationStatus']):
     // If revoked or expired, invalidate cache so next getLicense() re-verifies
     if (status === 'revoked' || status === 'expired') {
       cachedLicense = null;
+      cachedLicenseFileMtimeMs = null;
     }
   } catch {
     // Best effort
