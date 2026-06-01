@@ -579,6 +579,26 @@ export function initDatabase(dbPath?: string): Database.Database {
   // Register cleanup handlers for graceful shutdown
   registerShutdownHandlers();
 
+  // Pre-backfill file snapshot (v4.29.0, B4): before the one-time salience-wall
+  // backfill mutates rows, take an offline restore point of the live file. The
+  // in-DB `memories_backfill_backup` shares the fate of the live file that
+  // empty-live/corrupt recovery could stash, so this on-disk copy is the
+  // independent rollback artefact. Checkpoint WAL first so the main file is
+  // current before any count-based recovery can fire. Sentinel-gated: only
+  // taken once (before the backfill has run), never on :memory: DBs, and never
+  // allowed to block startup.
+  try {
+    const sentinel = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_backfill_backup'"
+    ).get();
+    if (!sentinel && expandedPath !== ':memory:' && existsSync(expandedPath)) {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      copyFileSync(expandedPath, `${expandedPath}.pre-backfill-${Date.now()}`);
+    }
+  } catch {
+    // Best-effort restore point; never block startup.
+  }
+
   // Run migrations FIRST for existing databases
   // This ensures columns exist before schema tries to create indexes on them
   runMigrations(db);

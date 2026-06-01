@@ -556,4 +556,133 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'session_events.sensitivity_level column + index');
   }
+
+  // ---------------------------------------------------------------------------
+  // Migration: v4.29.0 — one-time salience-wall backfill (clamp-only).
+  //
+  // Historically ~80% of stored memories landed at salience=1.0 (the "wall"),
+  // collapsing salience as a ranking signal. That stale 1.0 data is all
+  // machine-generated (auto / legacy-migrate / plugin captures). Forward-only
+  // fixes never cleaned it, so this self-healing auto-migration clamps those
+  // rows down to a flat 0.6 on the next process startup after updating.
+  //
+  // SCOPE IS CLAMP-ONLY. We deliberately do NOT re-derive category or
+  // memory_purpose — live data proved the title-prefix heuristic is not
+  // authoritative and re-deriving corrupts already-correct labels. The ONLY
+  // mutation is lowering salience.
+  //
+  // Untouched: manual/user rows (explicit user input), pinned rows, and
+  // canonical rows. updated_at is intentionally NOT re-stamped — these rows
+  // were not user-edited, and re-stamping would trigger a fleet-wide cloud
+  // re-sync burst.
+  //
+  // Run-once guard = existence of `memories_backfill_backup` (NOT user_version,
+  // which `.dump`-based disaster recovery does not preserve; the table does).
+  // The backup table also powers the revert path (Task 5).
+  //
+  // This block owns a LOUD catch (NOT logIfUnexpectedDdlError) — a data
+  // backfill failure must be visible and retried, not swallowed as idempotent.
+  try {
+    // Clamp predicate — flat 0.6 for machine rows; manual/user/pinned/canonical
+    // untouched. COALESCE guards old fleet DBs with NULL pinned/status.
+    const CLAMP_WHERE = `
+        salience > 0.6
+        AND COALESCE(pinned, 0) = 0
+        AND COALESCE(status, 'active') != 'canonical'
+        AND capture_method IN ('auto', 'legacy-migrate', 'plugin')`;
+
+    // Run-once guard (outside the txn): if the box already self-healed, bail
+    // before doing any FTS or write work.
+    const alreadyDone = database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_backfill_backup'"
+    ).get();
+
+    if (!alreadyDone) {
+      // FTS rebuild FIRST, in its own try/catch (B3). On a drifted-FTS DB the
+      // per-row memories_au trigger throws "database disk image is malformed"
+      // mid-UPDATE and aborts everything. Repairing the index up front means
+      // the trigger firings during the clamp won't throw. A rebuild failure
+      // here must NOT abort the backfill, so it is isolated.
+      try {
+        database.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')");
+      } catch (ftsErr) {
+        const msg = ftsErr instanceof Error ? ftsErr.message : String(ftsErr);
+        console.error(`[backfill v4.29.0] FTS rebuild skipped (continuing): ${msg}`);
+      }
+
+      // Backup-table creation + the clamp UPDATE in a SINGLE IMMEDIATE
+      // transaction (B4). IMMEDIATE grabs the write lock at BEGIN, closing the
+      // read-gate -> write race so five concurrent runMigrations processes
+      // serialise cleanly. The guard is RE-READ inside the txn: a concurrent
+      // winner may have created the table between our outer check and the lock.
+      let clamped = 0;
+      const run = database.transaction(() => {
+        const winner = database.prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_backfill_backup'"
+        ).get();
+        if (winner) {
+          return; // another process already did it; no-op
+        }
+
+        // Back up just the mutated column (clamp-only). Doubles as the run-once
+        // guard: even a zero-row match creates the (empty) table so the box
+        // never re-scans on subsequent startups.
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS memories_backfill_backup AS
+          SELECT id, salience, datetime('now') AS backed_up_at
+          FROM memories
+          WHERE ${CLAMP_WHERE}
+        `);
+
+        const res = database.prepare(
+          `UPDATE memories SET salience = 0.6 WHERE ${CLAMP_WHERE}`
+        ).run();
+        clamped = res.changes;
+      });
+      run.immediate();
+
+      // SUCCESS marker (after commit) so the fleet rollout is observable via the
+      // existing cloud audit ingest. firewall_result is constrained to
+      // ALLOW/BLOCK/QUARANTINE — this is an informational ALLOW marker.
+      try {
+        database.prepare(`
+          INSERT INTO defence_audit (
+            memory_id, project, timestamp,
+            source_type, source_identifier,
+            trust_score, sensitivity_level, firewall_result,
+            anomaly_score, threat_indicators, blocked_patterns,
+            reason, fragmentation_score, pipeline_duration_ms
+          ) VALUES (NULL, NULL, ?, 'migration', 'backfill-v4.29.0', 1.0, 'INTERNAL', 'ALLOW', 0, '[]', '[]', ?, NULL, 0)
+        `).run(
+          new Date().toISOString(),
+          JSON.stringify({ status: 'success', clamped, version: 'v4.29.0' }),
+        );
+      } catch {
+        // Older schemas may predate the audit columns. The success path itself
+        // already committed; the marker is best-effort observability only.
+      }
+    }
+  } catch (err) {
+    // LOUD catch — do NOT route through logIfUnexpectedDdlError. Because the
+    // guard table is created INSIDE the rolled-back transaction, a failure here
+    // leaves NO guard, so the box cleanly retries on next startup.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[backfill v4.29.0] FAILED, will retry next startup: ${msg}`);
+    try {
+      database.prepare(`
+        INSERT INTO defence_audit (
+          memory_id, project, timestamp,
+          source_type, source_identifier,
+          trust_score, sensitivity_level, firewall_result,
+          anomaly_score, threat_indicators, blocked_patterns,
+          reason, fragmentation_score, pipeline_duration_ms
+        ) VALUES (NULL, NULL, ?, 'migration', 'backfill-v4.29.0', 0, 'INTERNAL', 'BLOCK', 0, '[]', '[]', ?, NULL, 0)
+      `).run(
+        new Date().toISOString(),
+        JSON.stringify({ status: 'failed', error: msg, version: 'v4.29.0' }),
+      );
+    } catch {
+      // Best-effort marker; the stderr line above carries the signal.
+    }
+  }
 }
