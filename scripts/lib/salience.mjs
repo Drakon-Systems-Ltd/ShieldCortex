@@ -11,7 +11,7 @@
  *   effective = base × recency × access × pin × downvote_penalty
  *
  *   recency           = exp(-Δt_days / halfLifeDays)        // decay
- *   access            = log(1 + access_count) / log(1 + accessNorm)
+ *   access            = accessFloor + (1 - accessFloor) × log(1 + access_count) / log(1 + accessNorm)
  *   pin               = pinned ? pinBoost : 1
  *   downvote_penalty  = max(0.1, 1 - downvoteDecay × downvote_count)
  *
@@ -30,6 +30,7 @@
  * @param {{
  *   halfLifeDays?: number,
  *   accessNorm?: number,
+ *   accessFloor?: number,
  *   pinBoost?: number,
  *   downvoteDecay?: number,
  *   now?: number,
@@ -52,6 +53,7 @@ export function computeEffectiveSalience(memory, opts = {}) {
   const accessNorm = pickNumber(opts.accessNorm, 'SHIELDCORTEX_SALIENCE_ACCESS_NORM', 10);
   const pinBoost = pickNumber(opts.pinBoost, 'SHIELDCORTEX_SALIENCE_PIN_BOOST', 1.5);
   const downvoteDecay = pickNumber(opts.downvoteDecay, 'SHIELDCORTEX_SALIENCE_DOWNVOTE_DECAY', 0.3);
+  const accessFloor = pickNumber(opts.accessFloor, 'SHIELDCORTEX_ACCESS_FLOOR', 0.4);
   const now = opts.now ?? Date.now();
 
   const base = typeof memory.salience === 'number' ? memory.salience : 0;
@@ -67,9 +69,12 @@ export function computeEffectiveSalience(memory, opts = {}) {
     }
   }
 
-  // Access: log-scaled, normalised so access_count=accessNorm produces ~1.0.
+  // Access: log-scaled boost, NOT a gate. Floored at accessFloor so a
+  // never-accessed memory (access_count=0, ~44% of the live DB) keeps a
+  // non-zero multiplier instead of collapsing the whole product to 0.
+  // access_count=0 → accessFloor; access_count=accessNorm → ~1.0.
   const accessCount = Math.max(0, Number(memory.access_count) || 0);
-  const access = Math.log1p(accessCount) / Math.log1p(accessNorm);
+  const access = accessFloor + (1 - accessFloor) * (Math.log1p(accessCount) / Math.log1p(accessNorm));
 
   // Pin: SQLite stores boolean as 0/1.
   const pin = memory.pinned ? pinBoost : 1;

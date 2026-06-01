@@ -41,7 +41,7 @@ describe('v4.25.0 computeEffectiveSalience', () => {
     expect(score).toBeCloseTo(Math.exp(-1), 2);
   });
 
-  it('access factor is log-scaled and normalised to ~1 at access_count=10 (default)', async () => {
+  it('access factor is a log-scaled boost: floored at 0.4 when cold, ~1 at access_count=10 (default)', async () => {
     const { computeEffectiveSalience } = await import('../../scripts/lib/salience.mjs');
     const now = Date.parse('2026-05-27T00:00:00Z');
     const cold = computeEffectiveSalience(
@@ -52,7 +52,8 @@ describe('v4.25.0 computeEffectiveSalience', () => {
       { salience: 1.0, last_accessed: '2026-05-27T00:00:00Z', access_count: 10, pinned: 0, downvote_count: 0 },
       { now },
     );
-    expect(cold).toBe(0); // log(1) = 0
+    // access is a 0.4..1.0 boost, not a 0..1 gate: log(1)=0 → floor 0.4 (was 0 pre-fix).
+    expect(cold).toBeCloseTo(0.4, 3);
     expect(warm).toBeCloseTo(1.0, 2);
   });
 
