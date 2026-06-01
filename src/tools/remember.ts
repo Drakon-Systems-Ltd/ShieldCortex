@@ -116,6 +116,23 @@ export async function executeRemember(input: RememberInput): Promise<{
       salienceOverride = importanceMap[input.importance];
     }
 
+    // Defence-in-depth against the "salience wall": automated/hook callers
+    // (e.g. the OpenClaw hook, which shells out `remember` with
+    // importance:"high"/"critical" and sourceType:"hook") must not be able to
+    // mint 0.8/1.0-salience memories the way a human deliberately saving
+    // something can. Regex/keyword extraction catches keyword shapes, not
+    // semantic confidence, so cap hook-origin importance at the same 0.6 used
+    // by the dedicated auto-extract writer. Interactive remembers (no source,
+    // or a user/cli/agent source) stay uncapped — deliberate intent is honoured.
+    //
+    // Canonical constant: scripts/lib/extract-memorable-segments.mjs:24
+    // (AUTO_EXTRACT_SALIENCE_CAP = 0.6). That lives in a build-script .mjs
+    // outside the compiled src/ surface, so the value is mirrored here.
+    const AUTO_EXTRACT_SALIENCE_CAP = 0.6;
+    if (salienceOverride != null && derivedSource?.type === 'hook') {
+      salienceOverride = Math.min(salienceOverride, AUTO_EXTRACT_SALIENCE_CAP);
+    }
+
     // Check for duplicates (use trimmed title)
     const existing = await searchMemories({
       query: title,
