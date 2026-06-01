@@ -24,6 +24,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
+import { orderByEffectiveSalience } from './lib/session-context.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -84,17 +85,25 @@ You have access to a persistent memory system. Use it proactively:
 function getProjectContext(db, project) {
   const memories = [];
 
-  const highPriority = db.prepare(`
-    SELECT id, title, content, category, type, salience, tags, created_at
+  // Over-fetch a candidate pool (raw salience is a stable pre-filter), then
+  // rank by *effective* salience in JS and slice. Effective ordering can
+  // promote a fresh/pinned row that a raw-salience LIMIT would have dropped,
+  // so the SQL LIMIT must be wider than MAX. The projected pinned/access_count/
+  // last_accessed/downvote_count columns feed computeEffectiveSalience.
+  const candidates = db.prepare(`
+    SELECT id, title, content, category, type, salience, tags, created_at,
+           pinned, access_count, last_accessed, COALESCE(downvote_count, 0) AS downvote_count
     FROM memories
     WHERE (project = ? OR project IS NULL)
       AND salience >= ?
       AND type IN ('long_term', 'episodic')
     ORDER BY salience DESC, last_accessed DESC
     LIMIT ?
-  `).all(project, MIN_SALIENCE_THRESHOLD, MAX_CONTEXT_MEMORIES);
+  `).all(project, MIN_SALIENCE_THRESHOLD, MAX_CONTEXT_MEMORIES * 4);
 
-  memories.push(...highPriority);
+  const ranked = orderByEffectiveSalience(candidates).slice(0, MAX_CONTEXT_MEMORIES);
+
+  memories.push(...ranked);
 
   if (memories.length < 5) {
     const excludeIds = memories.map(m => m.id);
