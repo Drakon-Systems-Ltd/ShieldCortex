@@ -9,6 +9,7 @@
  *   shieldcortex memory show <id>
  *   shieldcortex memory downvote <id> [--reason <text>]
  *   shieldcortex memory list [--purpose <X>] [--category <X>] [--limit N]
+ *   shieldcortex memory revert-backfill
  *
  * Effective salience is computed via scripts/lib/salience.mjs so this CLI
  * shows the same numbers the recall hook actually ranks by.
@@ -16,6 +17,8 @@
 
 import path from 'path';
 import os from 'os';
+import fs from 'fs';
+import type Database from 'better-sqlite3';
 import { initDatabase, getDatabase } from '../database/init.js';
 
 // ANSI colours — match doctor.ts conventions.
@@ -229,6 +232,102 @@ async function cmdList(args: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * Undo the v4.29.0 salience-wall clamp (Task 5).
+ *
+ * The backfill (src/database/migrations.ts) clamped stale machine-generated
+ * `salience > 0.6` rows down to a flat 0.6, after stashing the PRE-clamp
+ * salience in the `memories_backfill_backup` table (columns: id, salience,
+ * backed_up_at). It is clamp-only, so salience is the ONLY column to restore —
+ * the backup carries no category / memory_purpose to put back.
+ *
+ * This is deliberately STICKY: we do NOT drop `memories_backfill_backup`.
+ * That table's existence is also the migration's run-once guard, so keeping it
+ * means the next process startup will NOT re-run the clamp and silently undo
+ * this revert. To re-enable the backfill, the operator drops the table.
+ *
+ * Pure + testable: takes the DB handle, returns a summary. No process.exit,
+ * no console output — the CLI wrapper owns the user-facing reporting.
+ */
+export function revertBackfill(db: Database.Database): { reverted: number; hadBackup: boolean } {
+  const hasBackup = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_backfill_backup'")
+    .get();
+  if (!hasBackup) {
+    return { reverted: 0, hadBackup: false };
+  }
+
+  const reverted = (db
+    .prepare('SELECT COUNT(*) AS cnt FROM memories_backfill_backup')
+    .get() as { cnt: number }).cnt;
+
+  // FTS-drift safety, mirroring the migration: rebuild the FTS index FIRST in
+  // its own try/catch so the per-row memories_au trigger that fires on the
+  // salience UPDATE below cannot throw "database disk image is malformed" on a
+  // drifted index. Best-effort — a rebuild failure must not abort the revert.
+  try {
+    db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')");
+  } catch (ftsErr) {
+    const msg = ftsErr instanceof Error ? ftsErr.message : String(ftsErr);
+    console.error(`[revert-backfill] FTS rebuild skipped (continuing): ${msg}`);
+  }
+
+  // Restore ONLY salience, atomically. The 3-column backup has no category /
+  // memory_purpose, so we never reference columns that don't exist there.
+  const run = db.transaction(() => {
+    db.prepare(`
+      UPDATE memories
+        SET salience = (SELECT b.salience FROM memories_backfill_backup b WHERE b.id = memories.id)
+        WHERE id IN (SELECT id FROM memories_backfill_backup)
+    `).run();
+  });
+  run();
+
+  // Intentionally NOT dropping memories_backfill_backup — see the doc comment:
+  // retaining it keeps the migration's run-once guard satisfied so the next
+  // startup will not re-clamp and undo this revert.
+  return { reverted, hadBackup: true };
+}
+
+function cmdRevertBackfill(): number {
+  const dbPath = defaultDbPath();
+  const db = openDb();
+  const { reverted, hadBackup } = revertBackfill(db);
+
+  if (!hadBackup) {
+    console.log('No backfill to revert — this database was never backfilled.');
+    return 0;
+  }
+
+  console.log(`${green}Reverted${reset} the v4.29.0 salience-wall clamp.`);
+  console.log(`  Rows restored to their pre-clamp salience: ${bold}${reverted}${reset}`);
+  console.log(`  ${dim}Backfill guard retained so the migration will not re-apply.${reset}`);
+  console.log(`  ${dim}To re-enable the backfill, drop the memories_backfill_backup table.${reset}`);
+
+  // Surface the whole-DB file snapshot (if any) as a fuller restore option.
+  // We do NOT delete it — the 30-day reaper handles cleanup and the operator
+  // may still want it.
+  try {
+    const dir = path.dirname(dbPath);
+    const base = path.basename(dbPath);
+    const snapshots = fs
+      .readdirSync(dir)
+      .filter((name) => name.startsWith(`${base}.pre-backfill-`))
+      .sort();
+    if (snapshots.length > 0) {
+      console.log('');
+      console.log(`  ${cyan}Full pre-backfill DB snapshot(s) also available:${reset}`);
+      for (const name of snapshots) {
+        console.log(`    ${dim}${path.join(dir, name)}${reset}`);
+      }
+    }
+  } catch {
+    // Snapshot discovery is a hint only; never let it fail the revert report.
+  }
+
+  return 0;
+}
+
 function printHelp() {
   console.log('Usage: shieldcortex memory <subcommand> [args]');
   console.log('');
@@ -236,6 +335,7 @@ function printHelp() {
   console.log('  show <id>                          Show a single memory with effective-salience breakdown');
   console.log('  downvote <id> [--reason <text>]    Mark a memory unhelpful (reduces effective salience at recall)');
   console.log('  list [--purpose X] [--category X] [--limit N]   Table view (default 20 rows)');
+  console.log('  revert-backfill                    Undo the v4.29.0 salience-wall clamp (restores pre-clamp salience)');
 }
 
 export async function handleMemoryCommand(args: string[]): Promise<void> {
@@ -250,6 +350,9 @@ export async function handleMemoryCommand(args: string[]): Promise<void> {
       break;
     case 'list':
       code = await cmdList(args.slice(1));
+      break;
+    case 'revert-backfill':
+      code = cmdRevertBackfill();
       break;
     case undefined:
     case '--help':
