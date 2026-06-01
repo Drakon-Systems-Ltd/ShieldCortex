@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { copyFileSync, mkdtempSync, rmSync } from 'fs';
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { homedir, tmpdir } from 'os';
 import { __databaseTestUtils } from '../database/init.js';
@@ -123,6 +123,67 @@ describe('database integrity recovery', () => {
       expect(backups).toHaveLength(1);
       expect(backups[0]?.path).toBe(backupPath);
       expect(backups[0]?.count).toBe(1);
+
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('cleanupStaleBackups', () => {
+    it('reaps pre-backfill snapshots older than 30 days but keeps recent ones', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+
+      const oldSnapshot = `${dbPath}.pre-backfill-1700000000000`;
+      const recentSnapshot = `${dbPath}.pre-backfill-${Date.now()}`;
+      writeFileSync(oldSnapshot, 'old snapshot', 'utf-8');
+      writeFileSync(recentSnapshot, 'recent snapshot', 'utf-8');
+
+      // Force the old snapshot's mtime to 31 days ago; leave the recent one as-is.
+      const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      utimesSync(oldSnapshot, thirtyOneDaysAgo, thirtyOneDaysAgo);
+
+      __databaseTestUtils.cleanupStaleBackups(dbPath);
+
+      expect(existsSync(oldSnapshot)).toBe(false);
+      expect(existsSync(recentSnapshot)).toBe(true);
+
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('keeps a pre-backfill snapshot only 8 days old (30-day TTL, not 7)', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+
+      const snapshot = `${dbPath}.pre-backfill-1700000000000`;
+      writeFileSync(snapshot, 'snapshot', 'utf-8');
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      utimesSync(snapshot, eightDaysAgo, eightDaysAgo);
+
+      __databaseTestUtils.cleanupStaleBackups(dbPath);
+
+      // 8 days exceeds the 7-day corrupt/recovery TTL but is well inside the
+      // 30-day pre-backfill window, so the restore point must survive.
+      expect(existsSync(snapshot)).toBe(true);
+
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('still reaps corrupt/recovery backups older than 7 days', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+
+      const oldCorrupt = `${dbPath}.corrupt.2020-01-01T00-00-00-000Z`;
+      const oldRecovery = `${dbPath}.recovery-failed.2020-01-01T00-00-00-000Z`;
+      writeFileSync(oldCorrupt, 'corrupt', 'utf-8');
+      writeFileSync(oldRecovery, 'recovery', 'utf-8');
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      utimesSync(oldCorrupt, eightDaysAgo, eightDaysAgo);
+      utimesSync(oldRecovery, eightDaysAgo, eightDaysAgo);
+
+      __databaseTestUtils.cleanupStaleBackups(dbPath);
+
+      expect(existsSync(oldCorrupt)).toBe(false);
+      expect(existsSync(oldRecovery)).toBe(false);
 
       rmSync(tempDir, { recursive: true, force: true });
     });

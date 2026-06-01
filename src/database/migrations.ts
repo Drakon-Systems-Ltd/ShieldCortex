@@ -617,11 +617,11 @@ export function runMigrations(database: Database.Database): void {
       // winner may have created the table between our outer check and the lock.
       let clamped = 0;
       const run = database.transaction(() => {
-        const winner = database.prepare(
+        const winnerCreatedTable = database.prepare(
           "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_backfill_backup'"
         ).get();
-        if (winner) {
-          return; // another process already did it; no-op
+        if (winnerCreatedTable) {
+          return; // a concurrent winner already created the table; no-op
         }
 
         // Back up just the mutated column (clamp-only). Doubles as the run-once
@@ -644,6 +644,9 @@ export function runMigrations(database: Database.Database): void {
       // SUCCESS marker (after commit) so the fleet rollout is observable via the
       // existing cloud audit ingest. firewall_result is constrained to
       // ALLOW/BLOCK/QUARANTINE — this is an informational ALLOW marker.
+      // ORDERING DEPENDENCY: both markers INSERT into `defence_audit`, which is
+      // created earlier in this same function — keep the table migration ahead
+      // of this backfill block or the markers will silently no-op (caught below).
       try {
         database.prepare(`
           INSERT INTO defence_audit (

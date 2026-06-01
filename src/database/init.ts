@@ -341,22 +341,30 @@ function attemptDumpRecovery(dbPath: string): Database.Database | null {
 }
 
 /**
- * Remove .corrupt.* and .recovery-failed.* backup files older than 7 days.
- * Runs once at startup after successful init — prevents unbounded accumulation.
+ * Remove stale backup files. Runs once at startup after successful init —
+ * prevents unbounded accumulation.
+ * - .corrupt.* / .recovery-failed.*  — older than 7 days
+ * - .pre-backfill-*                  — older than 30 days (longer TTL so the
+ *   revert-backfill CLI keeps a usable restore point for a reasonable window)
  */
 function cleanupStaleBackups(dbPath: string): void {
   const dir = dirname(dbPath);
   const base = basename(dbPath);
   const maxAge = 7 * 24 * 60 * 60 * 1000;
+  const preBackfillMaxAge = 30 * 24 * 60 * 60 * 1000;
   const now = Date.now();
 
   try {
     for (const name of readdirSync(dir)) {
-      if (!name.startsWith(base + '.corrupt.') && !name.startsWith(base + '.recovery-failed.')) continue;
+      const isCorruptOrRecovery =
+        name.startsWith(base + '.corrupt.') || name.startsWith(base + '.recovery-failed.');
+      const isPreBackfill = name.startsWith(base + '.pre-backfill-');
+      if (!isCorruptOrRecovery && !isPreBackfill) continue;
       const filePath = join(dir, name);
       try {
         const age = now - statSync(filePath).mtimeMs;
-        if (age > maxAge) {
+        const ttl = isPreBackfill ? preBackfillMaxAge : maxAge;
+        if (age > ttl) {
           unlinkSync(filePath);
         }
       } catch {
@@ -442,6 +450,7 @@ export const __databaseTestUtils = {
   resolveRuntimeInfo,
   enforceSafeRuntimePath,
   acquireStartupLock,
+  cleanupStaleBackups,
 };
 
 /**
@@ -593,7 +602,9 @@ export function initDatabase(dbPath?: string): Database.Database {
     ).get();
     if (!sentinel && expandedPath !== ':memory:' && existsSync(expandedPath)) {
       db.pragma('wal_checkpoint(TRUNCATE)');
-      copyFileSync(expandedPath, `${expandedPath}.pre-backfill-${Date.now()}`);
+      const snapshotPath = `${expandedPath}.pre-backfill-${Date.now()}`;
+      copyFileSync(expandedPath, snapshotPath);
+      console.error(`[shieldcortex] pre-backfill snapshot saved: ${snapshotPath}`);
     }
   } catch {
     // Best-effort restore point; never block startup.
