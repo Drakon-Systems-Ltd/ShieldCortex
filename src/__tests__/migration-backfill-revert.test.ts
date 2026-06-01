@@ -123,6 +123,32 @@ describe('revertBackfill — undo of the v4.29.0 salience-wall clamp', () => {
     expect(result).toEqual({ hadBackup: false, reverted: 0 });
   });
 
+  it('handles an empty backup table: hadBackup:true, reverted:0, salience untouched', () => {
+    // The migration creates memories_backfill_backup even when nothing matched
+    // the clamp, so the table can EXIST with ZERO rows. That must read as a
+    // present-but-empty backup (hadBackup:true, reverted:0), distinct from a
+    // never-backfilled DB (hadBackup:false). Simulate the empty-guard state
+    // directly with the same 3-column shape the migration uses.
+    const untouched = insertStale(db, { capture_method: 'manual', salience: 0.8 });
+    db.exec(
+      `CREATE TABLE memories_backfill_backup (
+         id INTEGER PRIMARY KEY,
+         salience REAL NOT NULL,
+         backed_up_at TEXT NOT NULL DEFAULT (datetime('now'))
+       )`,
+    );
+    expect(backupTableExists()).toBe(true);
+
+    let result: ReturnType<typeof revertBackfill> | undefined;
+    expect(() => {
+      result = revertBackfill(db);
+    }).not.toThrow();
+
+    expect(result).toEqual({ hadBackup: true, reverted: 0 });
+    // No backed-up rows -> the UPDATE touches nothing -> salience is unchanged.
+    expect(salienceOf(untouched)).toBeCloseTo(0.8, 9);
+  });
+
   it('is sticky: keeps the guard table so a re-run of runMigrations does NOT re-clamp', () => {
     const auto = insertStale(db, { capture_method: 'auto', salience: 1.0 });
 

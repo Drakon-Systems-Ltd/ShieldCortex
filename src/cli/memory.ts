@@ -257,10 +257,6 @@ export function revertBackfill(db: Database.Database): { reverted: number; hadBa
     return { reverted: 0, hadBackup: false };
   }
 
-  const reverted = (db
-    .prepare('SELECT COUNT(*) AS cnt FROM memories_backfill_backup')
-    .get() as { cnt: number }).cnt;
-
   // FTS-drift safety, mirroring the migration: rebuild the FTS index FIRST in
   // its own try/catch so the per-row memories_au trigger that fires on the
   // salience UPDATE below cannot throw "database disk image is malformed" on a
@@ -274,19 +270,29 @@ export function revertBackfill(db: Database.Database): { reverted: number; hadBa
 
   // Restore ONLY salience, atomically. The 3-column backup has no category /
   // memory_purpose, so we never reference columns that don't exist there.
+  //
+  // Concurrency note: this uses a plain (deferred) db.transaction(...), NOT the
+  // migration's .immediate() variant — deliberately. Revert is an interactive
+  // operator command, not the multi-PID startup race the migration guards
+  // against, so deferred locking is correct here; don't "fix" it to .immediate().
+  //
+  // `reverted` is taken from the UPDATE's RunResult.changes — the count of rows
+  // ACTUALLY restored — not COUNT(*) of the backup table. If the operator
+  // deleted some memories after the clamp, the backup still lists their ids, so
+  // the backup count would overstate what changed.
   const run = db.transaction(() => {
-    db.prepare(`
+    return db.prepare(`
       UPDATE memories
         SET salience = (SELECT b.salience FROM memories_backfill_backup b WHERE b.id = memories.id)
         WHERE id IN (SELECT id FROM memories_backfill_backup)
     `).run();
   });
-  run();
+  const info = run();
 
   // Intentionally NOT dropping memories_backfill_backup — see the doc comment:
   // retaining it keeps the migration's run-once guard satisfied so the next
   // startup will not re-clamp and undo this revert.
-  return { reverted, hadBackup: true };
+  return { reverted: info.changes, hadBackup: true };
 }
 
 function cmdRevertBackfill(): number {
