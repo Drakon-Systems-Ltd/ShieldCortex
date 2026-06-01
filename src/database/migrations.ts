@@ -647,22 +647,31 @@ export function runMigrations(database: Database.Database): void {
       // ORDERING DEPENDENCY: both markers INSERT into `defence_audit`, which is
       // created earlier in this same function — keep the table migration ahead
       // of this backfill block or the markers will silently no-op (caught below).
-      try {
-        database.prepare(`
-          INSERT INTO defence_audit (
-            memory_id, project, timestamp,
-            source_type, source_identifier,
-            trust_score, sensitivity_level, firewall_result,
-            anomaly_score, threat_indicators, blocked_patterns,
-            reason, fragmentation_score, pipeline_duration_ms
-          ) VALUES (NULL, NULL, ?, 'migration', 'backfill-v4.29.0', 1.0, 'INTERNAL', 'ALLOW', 0, '[]', '[]', ?, NULL, 0)
-        `).run(
-          new Date().toISOString(),
-          JSON.stringify({ status: 'success', clamped, version: 'v4.29.0' }),
-        );
-      } catch {
-        // Older schemas may predate the audit columns. The success path itself
-        // already committed; the marker is best-effort observability only.
+      //
+      // GATED on clamped > 0: a run that healed nothing (fresh DB, or a box with
+      // no stale machine rows) still creates the run-once guard table, but must
+      // NOT emit a "healed" telemetry row. An unconditional marker was genuine
+      // noise AND tripped the defence-pipeline-bypass invariant (every
+      // saveAutoExtractedMemory must produce exactly one defence_audit row —
+      // a spurious migration marker made it two).
+      if (clamped > 0) {
+        try {
+          database.prepare(`
+            INSERT INTO defence_audit (
+              memory_id, project, timestamp,
+              source_type, source_identifier,
+              trust_score, sensitivity_level, firewall_result,
+              anomaly_score, threat_indicators, blocked_patterns,
+              reason, fragmentation_score, pipeline_duration_ms
+            ) VALUES (NULL, NULL, ?, 'migration', 'backfill-v4.29.0', 1.0, 'INTERNAL', 'ALLOW', 0, '[]', '[]', ?, NULL, 0)
+          `).run(
+            new Date().toISOString(),
+            JSON.stringify({ status: 'success', clamped, version: 'v4.29.0' }),
+          );
+        } catch {
+          // Older schemas may predate the audit columns. The success path itself
+          // already committed; the marker is best-effort observability only.
+        }
       }
     }
   } catch (err) {

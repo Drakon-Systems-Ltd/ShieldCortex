@@ -88,6 +88,15 @@ describe('runMigrations — v4.29.0 salience-wall backfill', () => {
   const salienceOf = (id: number): number =>
     (db.prepare('SELECT salience FROM memories WHERE id = ?').get(id) as { salience: number }).salience;
 
+  // Count the v4.29.0 backfill telemetry markers written into defence_audit.
+  // The SUCCESS marker must only appear when the run actually clamped rows.
+  const markerCount = (): number =>
+    (db
+      .prepare(
+        "SELECT COUNT(*) as c FROM defence_audit WHERE source_identifier = 'backfill-v4.29.0'",
+      )
+      .get() as { c: number }).c;
+
   it('clamps machine salience > 0.6 down to 0.6 (auto / legacy-migrate / plugin)', () => {
     const auto = insertStale(db, { capture_method: 'auto', salience: 1.0 });
     const legacy = insertStale(db, { capture_method: 'legacy-migrate', salience: 1.0 });
@@ -99,6 +108,38 @@ describe('runMigrations — v4.29.0 salience-wall backfill', () => {
     expect(salienceOf(legacy)).toBeLessThanOrEqual(0.6);
     expect(salienceOf(plugin)).toBeLessThanOrEqual(0.6);
     expect(salienceOf(auto)).toBeCloseTo(0.6, 9);
+
+    // A run that DID clamp rows writes exactly one success telemetry marker.
+    expect(markerCount()).toBe(1);
+  });
+
+  it('writes NO defence_audit success marker when zero rows are clamped (fresh / no-stale DB)', () => {
+    // No clamp-eligible rows at all — only a manual row, which the predicate
+    // skips. The run-once guard table is still created, but a migration that
+    // healed nothing must not emit a "healed" telemetry row. This is the exact
+    // regression that made defence-pipeline-bypass see 2 audit rows instead of 1.
+    insertStale(db, { capture_method: 'manual', salience: 1.0 });
+
+    runMigrations(db);
+
+    // Guard table created unconditionally (run-once persistence on a 0-clamp box).
+    const guard = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories_backfill_backup'")
+      .get();
+    expect(guard).toBeDefined();
+
+    // ...but ZERO success markers, because nothing was clamped.
+    expect(markerCount()).toBe(0);
+  });
+
+  it('writes NO success marker on a completely empty DB (no memories at all)', () => {
+    runMigrations(db);
+
+    const guard = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories_backfill_backup'")
+      .get();
+    expect(guard).toBeDefined();
+    expect(markerCount()).toBe(0);
   });
 
   it('does NOT clamp manual / user rows', () => {
