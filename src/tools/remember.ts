@@ -116,23 +116,6 @@ export async function executeRemember(input: RememberInput): Promise<{
       salienceOverride = importanceMap[input.importance];
     }
 
-    // Defence-in-depth against the "salience wall": automated/hook callers
-    // (e.g. the OpenClaw hook, which shells out `remember` with
-    // importance:"high"/"critical" and sourceType:"hook") must not be able to
-    // mint 0.8/1.0-salience memories the way a human deliberately saving
-    // something can. Regex/keyword extraction catches keyword shapes, not
-    // semantic confidence, so cap hook-origin importance at the same 0.6 used
-    // by the dedicated auto-extract writer. Interactive remembers (no source,
-    // or a user/cli/agent source) stay uncapped — deliberate intent is honoured.
-    //
-    // Canonical constant: scripts/lib/extract-memorable-segments.mjs:24
-    // (AUTO_EXTRACT_SALIENCE_CAP = 0.6). That lives in a build-script .mjs
-    // outside the compiled src/ surface, so the value is mirrored here.
-    const AUTO_EXTRACT_SALIENCE_CAP = 0.6;
-    if (salienceOverride != null && derivedSource?.type === 'hook') {
-      salienceOverride = Math.min(salienceOverride, AUTO_EXTRACT_SALIENCE_CAP);
-    }
-
     // Check for duplicates (use trimmed title)
     const existing = await searchMemories({
       query: title,
@@ -181,15 +164,23 @@ export async function executeRemember(input: RememberInput): Promise<{
       memoryScope: input.memoryScope,
     };
 
-    // Generalise the hook-origin cap to ALL salience paths, not just the
-    // importance branch above. If a hook calls remember WITHOUT importance,
-    // salienceOverride is null and addMemory falls through to calculateSalience
-    // (unclamped — keyword-rich content can score 1.0). B7 intent: even a
-    // stale/un-refactored hook must not write salience > 0.6 by ANY path.
-    // Resolve the effective salience exactly as addMemory does — the SAME
-    // `memoryInput` object it receives — so calculateSalience sees an identical
-    // input shape (no risk of drift), then clamp and pass it verbatim.
+    // Defence-in-depth against the "salience wall": automated/hook callers
+    // (e.g. the OpenClaw hook, which shells out `remember` with importance:"high"
+    // /"critical" and sourceType:"hook") must not mint 0.8/1.0-salience memories
+    // the way a human deliberately saving something can. Cap the FINAL resolved
+    // salience — covering BOTH the importance-derived override and the
+    // calculateSalience fall-through — at the same 0.6 the dedicated auto-extract
+    // writer enforces, so even a stale/un-refactored hook can't exceed it by ANY
+    // path. Interactive remembers (no source, or a user/cli/agent source) stay
+    // uncapped — deliberate intent is honoured. Resolve salience exactly as
+    // addMemory does, from the SAME memoryInput object, so there is no input-shape
+    // drift, then clamp and pass it verbatim.
+    //
+    // Canonical constant: scripts/lib/extract-memorable-segments.mjs:24
+    // (AUTO_EXTRACT_SALIENCE_CAP = 0.6). It lives in a build-script .mjs outside
+    // the compiled src/ surface, so the value is mirrored here.
     if (derivedSource?.type === 'hook') {
+      const AUTO_EXTRACT_SALIENCE_CAP = 0.6;
       const effective = memoryInput.salience ?? calculateSalience(memoryInput);
       memoryInput.salience = Math.min(effective, AUTO_EXTRACT_SALIENCE_CAP);
     }
