@@ -102,4 +102,31 @@ describe('remember tool — auto/hook-origin salience cap', () => {
     const stored = getMemoryById(result.memory!.id);
     expect(stored!.salience).toBe(1.0);
   });
+
+  it('caps a hook-origin remember with NO importance (calculateSalience path) at 0.6', async () => {
+    // The leak this guards: a hook (or a stale, un-refactored one) can call
+    // remember WITHOUT importance. Then salienceOverride is null, the importance
+    // branch is skipped, and addMemory falls through to calculateSalience —
+    // which, for keyword-rich content, scores well above 0.6
+    // (explicitRequest 0.5 + architecture 0.4 + error 0.35 + ... → capped 1.0).
+    // B7 intent: even by the calculateSalience path, a hook can't exceed 0.6.
+    const result = await executeRemember({
+      title: 'Important: critical architecture decision — fixed the database error',
+      content:
+        'Remember this: we redesigned the API architecture and schema to fix a ' +
+        'critical bug. The error was a crash in src/db/init.ts line 42. We ' +
+        'always prefer this pattern now — important, crucial, key approach.',
+      category: 'architecture',
+      project: 'openclaw',
+      // NO importance — forces the calculateSalience fall-through in addMemory.
+      tags: ['auto-extracted', 'openclaw-hook'],
+      sourceType: 'hook',
+      sourceIdentifier: 'openclaw-session-end',
+    });
+
+    expect(result.success).toBe(true);
+    const stored = getMemoryById(result.memory!.id);
+    expect(stored).not.toBeNull();
+    expect(stored!.salience).toBeLessThanOrEqual(AUTO_EXTRACT_SALIENCE_CAP);
+  });
 });

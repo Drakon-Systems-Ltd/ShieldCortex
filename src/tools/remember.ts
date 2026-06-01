@@ -166,7 +166,7 @@ export async function executeRemember(input: RememberInput): Promise<{
       };
     }
 
-    const memory = addMemory({
+    const memoryInput = {
       title,
       content,
       category: input.category,
@@ -179,7 +179,22 @@ export async function executeRemember(input: RememberInput): Promise<{
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       memoryPurpose: input.memoryPurpose,
       memoryScope: input.memoryScope,
-    }, undefined, derivedSource ?? { type: 'cli', identifier: 'mcp' });
+    };
+
+    // Generalise the hook-origin cap to ALL salience paths, not just the
+    // importance branch above. If a hook calls remember WITHOUT importance,
+    // salienceOverride is null and addMemory falls through to calculateSalience
+    // (unclamped — keyword-rich content can score 1.0). B7 intent: even a
+    // stale/un-refactored hook must not write salience > 0.6 by ANY path.
+    // Resolve the effective salience exactly as addMemory does — the SAME
+    // `memoryInput` object it receives — so calculateSalience sees an identical
+    // input shape (no risk of drift), then clamp and pass it verbatim.
+    if (derivedSource?.type === 'hook') {
+      const effective = memoryInput.salience ?? calculateSalience(memoryInput);
+      memoryInput.salience = Math.min(effective, AUTO_EXTRACT_SALIENCE_CAP);
+    }
+
+    const memory = addMemory(memoryInput, undefined, derivedSource ?? { type: 'cli', identifier: 'mcp' });
 
     // Auto-detect and create relationships with existing memories
     let linksCreated = 0;
