@@ -86,10 +86,12 @@ function getProjectContext(db, project) {
   const memories = [];
 
   // Over-fetch a candidate pool (raw salience is a stable pre-filter), then
-  // rank by *effective* salience in JS and slice. Effective ordering can
-  // promote a fresh/pinned row that a raw-salience LIMIT would have dropped,
-  // so the SQL LIMIT must be wider than MAX. The projected pinned/access_count/
-  // last_accessed/downvote_count columns feed computeEffectiveSalience.
+  // rank by *effective* salience in JS and slice. Widening the SQL LIMIT past
+  // MAX gives the effective-salience sort room to promote a fresher/more-active
+  // row over a higher raw-salience one *within the candidate window* — it is a
+  // pragmatic widening, not a guarantee that every deep-tail row is reconsidered.
+  // The projected pinned/access_count/last_accessed/downvote_count columns feed
+  // computeEffectiveSalience.
   const candidates = db.prepare(`
     SELECT id, title, content, category, type, salience, tags, created_at,
            pinned, access_count, last_accessed, COALESCE(downvote_count, 0) AS downvote_count
@@ -99,13 +101,13 @@ function getProjectContext(db, project) {
       AND type IN ('long_term', 'episodic')
     ORDER BY salience DESC, last_accessed DESC
     LIMIT ?
-  `).all(project, MIN_SALIENCE_THRESHOLD, MAX_CONTEXT_MEMORIES * 4);
+  `).all(project, MIN_SALIENCE_THRESHOLD, MAX_CONTEXT_MEMORIES * 8);
 
   const ranked = orderByEffectiveSalience(candidates).slice(0, MAX_CONTEXT_MEMORIES);
 
   memories.push(...ranked);
 
-  if (memories.length < 5) {
+  if (memories.length < MAX_CONTEXT_MEMORIES) {
     const excludeIds = memories.map(m => m.id);
     const placeholders = excludeIds.length > 0 ? excludeIds.map(() => '?').join(',') : '0';
     const recent = db.prepare(`
@@ -115,7 +117,7 @@ function getProjectContext(db, project) {
         AND id NOT IN (${placeholders})
       ORDER BY created_at DESC
       LIMIT ?
-    `).all(project, ...excludeIds, 5 - memories.length);
+    `).all(project, ...excludeIds, MAX_CONTEXT_MEMORIES - memories.length);
 
     memories.push(...recent);
   }
