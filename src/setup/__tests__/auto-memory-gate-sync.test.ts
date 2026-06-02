@@ -90,4 +90,40 @@ describe('setupHooks aligns autoMemory enable gate with install flags (#41)', ()
     expect(liveConfig.enableStop).toBe(true);
     expect(liveConfig.enableSessionEnd).toBe(true);
   });
+
+  // Regression (2026-06-02): setup printed "Hook: SessionEnd (removed …)" but
+  // left it wired on disk. The removal mutated `settings` but wasn't counted
+  // toward `changed`, so a removal-only run (every other hook already
+  // configured) took the "all already configured" branch and never wrote the
+  // file. Doctor then warned "wired in settings.json but runtime gate is off".
+  it('persists SessionEnd removal even when no other hook changes (removal-only write)', async () => {
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+
+    // Seed every always-installed hook as already configured (so `added` stays
+    // 0) plus a stale ShieldCortex SessionEnd entry. Timeouts are high so the
+    // timeout reconciler counts nothing either — the exact shape that skipped
+    // the write.
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const settingsPath = path.join(claudeDir, 'settings.json');
+    const cmd = (c: string) => ({ hooks: [{ type: 'command', command: c, timeout: 60 }] });
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        PreCompact: [cmd('shieldcortex hook pre-compact')],
+        SessionStart: [cmd('shieldcortex hook session-start')],
+        UserPromptSubmit: [cmd('shieldcortex hook prompt-recall')],
+        SessionEnd: [cmd('shieldcortex hook session-end')],
+      },
+    }, null, 2) + '\n');
+
+    const { setupHooks } = await import('../settings-hooks.js');
+    setupHooks(); // no opt-in → the stale SessionEnd must be removed AND written
+
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    expect(after.hooks.SessionEnd).toBeUndefined();
+    // Removal-only: the other hooks must survive untouched (no collateral write).
+    expect(after.hooks.PreCompact).toBeDefined();
+    expect(after.hooks.SessionStart).toBeDefined();
+    expect(after.hooks.UserPromptSubmit).toBeDefined();
+  });
 });

@@ -164,6 +164,7 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
   //     by config + OpenClaw env so it's safe to wire here);
   //   - otherwise, remove any existing ShieldCortex SessionEnd entry to keep
   //     the OpenClaw-safe default for users who don't explicitly opt in.
+  let removed = 0;
   if (!options?.sessionEnd && settings.hooks.SessionEnd) {
     const hadCortex = hasCortexHook(settings.hooks.SessionEnd);
     if (hadCortex) {
@@ -171,6 +172,7 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
         (e: HookEntry) => !e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('shieldcortex'))
       );
       if (settings.hooks.SessionEnd.length === 0) delete settings.hooks.SessionEnd;
+      removed++;
       console.log('  - Hook: SessionEnd (removed — opt in with `--with-session-end`)');
     }
   }
@@ -219,10 +221,16 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
     }
   }
 
-  const changed = added + migrated + timeoutsUpdated;
+  // `removed` MUST be in this sum: removing a stale SessionEnd entry mutates
+  // `settings` but adds nothing, so omitting it meant a removal-only run (every
+  // other hook already configured) computed the removal, printed "removed", then
+  // took the else-branch and never wrote the file — the entry stayed wired on
+  // disk while setup claimed it was gone.
+  const changed = added + removed + migrated + timeoutsUpdated;
   if (changed > 0) {
     writeSettings(settings);
     const parts = [`${added} added`, `${migrated} migrated`];
+    if (removed > 0) parts.push(`${removed} removed`);
     if (timeoutsUpdated > 0) parts.push(`${timeoutsUpdated} timeout${timeoutsUpdated === 1 ? '' : 's'} updated`);
     console.log(`Hooks: ${parts.join(', ')} in ~/.claude/settings.json`);
   } else {

@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.30.1] - 2026-06-02
+
+**Fix: `shieldcortex setup` / `install` now actually persists SessionEnd hook removal.** Run without `--with-session-end` on a machine where the SessionEnd hook was already wired *and* every other hook was already configured, setup printed `Hook: SessionEnd (removed …)` but never wrote the change to `~/.claude/settings.json` — leaving the hook wired-but-gated, which `doctor` then flagged as `wired in settings.json but runtime gate is off — hook will exit silently every turn`. The removal mutated the in-memory settings but wasn't counted toward the change tally that gates the file write, so a removal-only run took the "all hooks already configured" branch and skipped `writeSettings()`. Harmless in effect (the leftover hook is a gated no-op) but setup was reporting a change it didn't make.
+
+### Fixed
+
+- **[`src/setup/settings-hooks.ts`](src/setup/settings-hooks.ts) — count SessionEnd removal toward the settings-write gate.** A `removed` counter now feeds the `changed` total alongside `added` / `migrated` / `timeoutsUpdated`, so a removal-only run persists to disk and the summary reports `… N removed`. The class of bug — a mutation that doesn't increment the counter gating persistence — is now pinned by a regression test that reproduces the exact "SessionEnd wired + everything else already configured" shape.
+
+### Verification
+
+- `npm run build:ts` — clean.
+- `npm test` — setup + doctor gate suites green; the new regression test fails on the pre-fix code (SessionEnd left on disk) and passes with the fix.
+
 ## [4.30.0] - 2026-06-02
 
 **Privacy hardening for the OpenClaw realtime plugin, plus a deterministic test suite. The realtime threat plugin now forwards threat *metadata only* — never the raw input/output text — and only when Cloud sync is explicitly enabled; SKILL.md gains a full "Data handling, privacy & consent" disclosure. Separately, the cross-worker test flake that kept forcing manual npm publishes is fixed at the root, and the ClawHub auto-sync step is decoupled from npm's publish gate so it retries independently. This is the release that clears the ClawScan security-audit findings.**
