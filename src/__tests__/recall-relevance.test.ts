@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@jest/globals';
 // @ts-expect-error -- importing a .mjs hook utility
-import { filterByRelevance } from '../../scripts/lib/recall-relevance.mjs';
+import { filterByRelevance, extractQueryTerms } from '../../scripts/lib/recall-relevance.mjs';
 
 /**
  * Unit tests for the P4 recall relevance gate (B9 design).
@@ -194,6 +194,115 @@ describe('filterByRelevance — term-coverage primary gate', () => {
     const snapshot = JSON.parse(JSON.stringify(rows));
     filterByRelevance(rows, { ...DEFAULT, queryTerms });
     expect(rows).toEqual(snapshot);
+  });
+});
+
+describe('filterByRelevance — absolute BM25 floor is opt-in (small-corpus regression)', () => {
+  // Regression: on a small/new FTS index real bm25 ranks are near-zero
+  // (~-1e-6), so an absolute floor of -0.5 dropped EVERY row as
+  // below_relevance_floor — the first operator to enable enforce mode lost ALL
+  // recall. The absolute floor must therefore be OFF by default (maxBm25
+  // null/omitted); only the relative floor + term-coverage gate by default.
+
+  it('DISABLED floor (maxBm25 omitted): a full-coverage row with a weak near-zero rank is KEPT', () => {
+    const queryTerms = ['drizzle', 'migration', 'rollback', 'journal'];
+    const rows = [
+      {
+        id: 'small-corpus-real',
+        title: 'Drizzle migration is hand-written',
+        // Matches all four distinct terms — a genuinely on-topic full-coverage
+        // hit — but on a tiny index its bm25 rank is barely below zero.
+        content: 'Hand-write the drizzle migration rollback journal entry; drizzle-kit is broken.',
+        salience: 0.4,
+        rank: -0.000001, // weak/near-zero rank typical of a small FTS index
+      },
+    ];
+
+    // No maxBm25 at all → absolute floor off. relFactor still present.
+    const { kept, dropped } = filterByRelevance(rows, {
+      queryTerms,
+      minTermMatches: 2,
+      relFactor: 0.35,
+    });
+
+    expect(kept.map((r: any) => r.id)).toEqual(['small-corpus-real']);
+    expect(dropped).toHaveLength(0);
+  });
+
+  it('DISABLED floor (maxBm25: null): same near-zero-rank full-coverage row is KEPT', () => {
+    const queryTerms = ['drizzle', 'migration', 'rollback', 'journal'];
+    const rows = [
+      {
+        id: 'real',
+        title: 'Drizzle migration',
+        content: 'drizzle migration rollback journal — hand-written.',
+        salience: 0.4,
+        rank: -0.000001,
+      },
+    ];
+
+    const { kept } = filterByRelevance(rows, {
+      queryTerms,
+      minTermMatches: 2,
+      relFactor: 0.35,
+      maxBm25: null,
+    });
+
+    expect(kept.map((r: any) => r.id)).toEqual(['real']);
+  });
+
+  it('OPT-IN floor (maxBm25 explicitly set): the absolute dreg cut still applies', () => {
+    const queryTerms = ['drizzle', 'migration', 'rollback', 'journal'];
+    const rows = [
+      {
+        id: 'real',
+        title: 'Drizzle migration',
+        content: 'drizzle migration rollback journal — hand-written.',
+        salience: 0.4,
+        rank: -0.000001, // weaker than an explicit -0.5 floor
+      },
+    ];
+
+    // Explicit numeric maxBm25 → opt-in absolute floor honoured. The single row
+    // is the relative-best, so the relative floor can't drop it; only the
+    // absolute floor can — proving the opt-in path still cuts dregs.
+    const { kept, dropped } = filterByRelevance(rows, {
+      queryTerms,
+      minTermMatches: 2,
+      relFactor: 0.35,
+      maxBm25: -0.5,
+    });
+
+    expect(kept).toHaveLength(0);
+    expect(dropped.find((d: any) => d.row.id === 'real')?.reason).toBe('below_relevance_floor');
+  });
+});
+
+describe('extractQueryTerms — dedup BEFORE slicing to 6', () => {
+  it('repeated early terms do not crowd out distinct later ones (yields 6 distinct terms)', () => {
+    // Previously .slice(0,6) ran BEFORE dedup, so the three "drizzle" + two
+    // "migration" tokens consumed five of the six slots and only 3 distinct
+    // terms survived. Dedup-before-slice must yield 6 DISTINCT terms.
+    const terms = extractQueryTerms(
+      'drizzle drizzle drizzle migration migration rollback schema postgres journal',
+    );
+    expect(terms).toEqual(['drizzle', 'migration', 'rollback', 'schema', 'postgres', 'journal']);
+    expect(new Set(terms).size).toBe(6);
+  });
+
+  it('caps at 6 distinct terms, preserving first-occurrence order', () => {
+    const terms = extractQueryTerms('one two three four five six seven eight');
+    expect(terms).toEqual(['one', 'two', 'three', 'four', 'five', 'six']);
+  });
+
+  it('terms shorter than 3 chars and FTS boolean keywords are dropped', () => {
+    const terms = extractQueryTerms('AND fix OR the bug NOT now');
+    // "the", "bug", "fix", "now" survive the length filter; AND/OR/NOT removed.
+    expect(terms).toContain('fix');
+    expect(terms).toContain('bug');
+    expect(terms).not.toContain('and');
+    expect(terms).not.toContain('or');
+    expect(terms).not.toContain('not');
   });
 });
 

@@ -65,7 +65,7 @@ function countMatchedTerms(text, queryTerms) {
  *   queryTerms: string[],
  *   minTermMatches?: number,
  *   relFactor?: number,
- *   maxBm25?: number,
+ *   maxBm25?: number | null,
  * }} opts
  * @returns {{ kept: any[], dropped: Array<{ row: any, reason: 'below_term_coverage' | 'below_relevance_floor' }> }}
  */
@@ -78,6 +78,12 @@ export function filterByRelevance(rows, opts = {}) {
       : 2;
   const relFactor =
     typeof opts.relFactor === 'number' && Number.isFinite(opts.relFactor) ? opts.relFactor : 0.35;
+  // Absolute BM25 floor is OPT-IN: null/undefined (the default) means "no
+  // absolute dreg cut". It has no safe cross-corpus default — on a small/new
+  // FTS index real bm25 ranks are tiny (~-1e-6), so an absolute floor like
+  // -0.5 would drop even a perfect full-coverage match the moment an operator
+  // turns on enforce mode. Only honour it when an explicit numeric value is
+  // passed; the relative floor + term-coverage do the gating otherwise.
   const maxBm25 =
     typeof opts.maxBm25 === 'number' && Number.isFinite(opts.maxBm25) ? opts.maxBm25 : null;
 
@@ -166,8 +172,11 @@ export function extractQueryTerms(query) {
     .replace(/[*(){}[\]<>~^"]/g, ' ')
     .replace(/\b(AND|OR|NOT|NEAR)\b/gi, '')
     .split(/\s+/)
-    .filter((w) => w.length > 2)
-    .slice(0, 6);
+    .filter((w) => w.length > 2);
+  // Dedup BEFORE the cap so repeated early terms don't crowd out distinct
+  // later ones (e.g. "drizzle drizzle drizzle migration migration rollback
+  // schema postgres journal" → up to 6 DISTINCT terms, not 3). First
+  // occurrence wins (order preserved); the slice then keeps the first 6.
   const out = [];
   const seen = new Set();
   for (const w of words) {
@@ -176,6 +185,7 @@ export function extractQueryTerms(query) {
       seen.add(lw);
       out.push(lw);
     }
+    if (out.length >= 6) break;
   }
   return out;
 }

@@ -67,7 +67,17 @@ function pickBool(envName) {
 const RECALL_ENFORCE = pickBool('SHIELDCORTEX_RECALL_ENFORCE');
 const RECALL_MIN_TERMS = pickNumber('SHIELDCORTEX_RECALL_MIN_TERMS', 2);
 const RECALL_REL_FACTOR = pickNumber('SHIELDCORTEX_RECALL_REL_FACTOR', 0.35);
-const RECALL_MAX_BM25 = pickNumber('SHIELDCORTEX_RECALL_MAX_BM25', -0.5);
+// Absolute BM25 floor is OFF by default (null) — it has no safe default across
+// corpus sizes: on a small/new FTS index real bm25 ranks are tiny (~-1e-6), so
+// any fixed floor would drop even a perfect full-coverage match the moment an
+// operator sets SHIELDCORTEX_RECALL_ENFORCE=1. The relative floor + term-
+// coverage do the gating; tune the absolute floor from fleet recall-logs if a
+// real corpus shows it's needed. Read the env only if present; absent → null.
+const RECALL_MAX_BM25 =
+  process.env.SHIELDCORTEX_RECALL_MAX_BM25 !== undefined &&
+  process.env.SHIELDCORTEX_RECALL_MAX_BM25 !== ''
+    ? pickNumber('SHIELDCORTEX_RECALL_MAX_BM25', null)
+    : null;
 
 function loadConfig() {
   try {
