@@ -202,7 +202,12 @@ jobs:
           # Pull the just-published plugin tarball and confirm OpenClaw 2026.5.4+
           # will accept it (we hit both of these silently in plugin v4.12.14):
           #   - dist/index.js must be present (validator demands compiled output)
-          #   - package.json must declare openclaw.hooks (hook-pack contract)
+          #   - package.json must declare openclaw.extensions (the plugin entry
+          #     point). NOTE: this used to check openclaw.hooks, but v4.25.3
+          #     deliberately dropped the redundant hook-pack format in favour of
+          #     openclaw.extensions — the old check was stale and false-failed
+          #     every auto-publish from v4.25.3 on (it only stopped biting because
+          #     intervening releases were published manually, bypassing CI).
           mkdir -p /tmp/plugin-verify
           cd /tmp/plugin-verify
           npm pack @drakon-systems/shieldcortex-realtime@$PLUGIN >/dev/null
@@ -211,12 +216,15 @@ jobs:
             echo "::error::Plugin tarball is missing dist/index.js — OpenClaw 2026.5.4 will reject this install"
             exit 1
           fi
-          PLUGIN_PKG_HOOKS=$(tar -xOf "$TARBALL" package/package.json | node -e "let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{const p=JSON.parse(d); console.log(JSON.stringify(p.openclaw?.hooks ?? null));})")
-          if [ "$PLUGIN_PKG_HOOKS" = "null" ]; then
-            echo "::error::Plugin package.json is missing openclaw.hooks — OpenClaw 2026.5.4 will reject this install"
+          # Extract to a file first — piping `tar -xO ... | node` raced a SIGPIPE
+          # ("tar: stdout: write error") that could corrupt the read.
+          tar -xOf "$TARBALL" package/package.json > /tmp/plugin-verify/pkg.json
+          PLUGIN_PKG_EXT=$(node -e "const p=require('/tmp/plugin-verify/pkg.json'); console.log(JSON.stringify(p.openclaw?.extensions ?? null));")
+          if [ "$PLUGIN_PKG_EXT" = "null" ]; then
+            echo "::error::Plugin package.json is missing openclaw.extensions — OpenClaw will reject this install"
             exit 1
           fi
-          echo "Plugin tarball shape OK: dist/index.js present, openclaw.hooks=${PLUGIN_PKG_HOOKS}"
+          echo "Plugin tarball shape OK: dist/index.js present, openclaw.extensions=${PLUGIN_PKG_EXT}"
 
       # Create the GitHub Release immediately after npm publish so a later
       # ClawHub auth failure can't skip it. (Hit this on v4.10.0 — CLAWHUB_TOKEN
