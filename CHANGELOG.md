@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.30.0] - 2026-06-02
+
+**Privacy hardening for the OpenClaw realtime plugin, plus a deterministic test suite. The realtime threat plugin now forwards threat *metadata only* — never the raw input/output text — and only when Cloud sync is explicitly enabled; SKILL.md gains a full "Data handling, privacy & consent" disclosure. Separately, the cross-worker test flake that kept forcing manual npm publishes is fixed at the root, and the ClawHub auto-sync step is decoupled from npm's publish gate so it retries independently. This is the release that clears the ClawScan security-audit findings.**
+
+### Fixed
+
+- **[`plugins/openclaw/cloud-sync.ts`](plugins/openclaw/cloud-sync.ts) + [`plugins/openclaw/intercept-ingest.ts`](plugins/openclaw/intercept-ingest.ts) — the realtime plugin transmits threat *metadata only*, and only with consent.** The OpenClaw realtime threat plugin previously POSTed a short raw-input preview (≤200 chars of the scanned content) to `/v1/threats` and `/v1/audit/ingest`. Both senders now strip `content`/`preview` before the request and forward only threat metadata (type, scores, indicators, timestamps, device). `cloud-sync.ts` now gates on `cloudEnabled && cloudApiKey` — it previously checked the key alone, so events could leave the machine with a key present even when Cloud sync was "off" — and [`plugins/openclaw/index.ts`](plugins/openclaw/index.ts) preserves `cloudEnabled` through the plugin config parse, where it was being silently dropped (leaving the interceptor's consent gate dead). Flagged-content previews are still kept in the **local** audit log for triage; they are simply never transmitted.
+- **[`scripts/jest-config-sandbox.mjs`](scripts/jest-config-sandbox.mjs) + [`jest.config.js`](jest.config.js) — the test suite no longer races on a shared on-disk config (the flake that forced manual publishes).** The defence pipeline reads `getDefenceMode()` live from `~/.shieldcortex/config.json` on every scan, and the suite gave every parallel Jest worker — and the developer's real machine — that **one** file. A config write in one worker (e.g. `verify.test.ts` calling `setVerifyConfig`) raced a verdict read in another, so a fixture that should QUARANTINE intermittently read a half-written config and came back BLOCK — failing the Node-20 CI leg while Node-22 passed on the identical commit, and passing in isolation. Each worker now gets its own throwaway config dir (`setupFilesAfterEnv`), so workers can't race and tests never touch the real user config. Verified green across repeated full parallel runs.
+
+### Changed
+
+- **[`.github/workflows/publish.yml`](.github/workflows/publish.yml) — ClawHub auto-sync is decoupled from npm's `already_published` gate.** A re-run after a flaky publish (where npm already had the version) used to skip the entire ClawHub block, which silently left ClawHub stuck at 4.18.3 for ~6 weeks. The ClawHub steps now gate on whether *ClawHub* already has the version, install the latest CLI, and end with a **loud** (non-fatal) verify step that points to the manual web fallback — so a ClawHub hiccup can never again rot silently or fail the npm/GitHub release.
+
+### Added
+
+- **[`skills/shieldcortex/SKILL.md`](skills/shieldcortex/SKILL.md) — a "Data handling, privacy & consent" section.** Documents exactly what the tool reads (session transcripts, opt-in), stores (local SQLite, persistent), and — only with Cloud sync explicitly enabled — transmits, per path: audit telemetry (metadata only), memory sync (full content of PUBLIC/INTERNAL, Team tier, off by default), quarantine sync (credentials redacted), and the realtime plugin (threat metadata only). Addresses the ClawScan disclosure findings.
+
+### Verification
+
+- `npm run build:ts` — clean.
+- `npm test` — full suite green under parallel workers (142 suites, 1453 passed, 2 skipped), repeated; the real `~/.shieldcortex/config.json` is no longer modified by the test run.
+- Plugin manifest + bundled ClawHub snapshot synced to 4.30.0; bundled `cloud-sync.js` carries the metadata-only egress fix.
+
 ## [4.29.0] - 2026-06-02
 
 **Memory-quality pass: the "salience wall" that zeroed never-recalled memories is gone, hook/auto-sourced writes can no longer mint maximum-salience rows, recall gained a relevance gate (shadow by default), the write path dedupes near-duplicates across all capture paths, and consolidation stopped building "frankenmemories". A one-time auto-migration backfills the historic high-salience machine-generated rows down to the new ceiling, and the OpenClaw cortex-memory hook now shares the same hardened extraction path as everything else. Minor bump: salience scoring, recall ranking, and persisted salience values all change in ways operators will observe.**

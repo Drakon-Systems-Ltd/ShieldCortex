@@ -6,6 +6,10 @@ export default {
   testMatch: ['**/__tests__/**/*.test.ts', '**/*.test.ts'],
   moduleFileExtensions: ['ts', 'js', 'json'],
   extensionsToTreatAsEsm: ['.ts'],
+  // Per-worker config sandbox — isolates ~/.shieldcortex/config.json so parallel
+  // workers don't race on the shared on-disk config the defence pipeline reads.
+  // See scripts/jest-config-sandbox.mjs for the full rationale.
+  setupFilesAfterEnv: ['<rootDir>/scripts/jest-config-sandbox.mjs'],
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
