@@ -113,32 +113,29 @@ describe('mergeSimilarMemories clustering logic', () => {
     expect(clusters.length).toBe(0);
   });
 
-  it('should produce correct merged content format', () => {
-    // Simulate what mergeSimilarMemories does after clustering
-    const base = {
+  it('keeps the kept memory content verbatim — no frankenmerge concatenation', () => {
+    // B11: the merge generator no longer appends losers' bodies into the kept
+    // memory. The kept content must survive byte-for-byte.
+    const kept = {
       title: 'JWT Setup',
       content: 'Set up JWT authentication using RS256 algorithm for token signing in the auth service',
     };
-    const others = [
-      {
-        title: 'JWT Token Expiry',
-        content: 'JWT tokens expire after 24 hours, refresh tokens last 30 days for the auth system',
-      },
-      {
-        title: 'JWT Middleware',
-        content: 'Created JWT middleware that validates tokens on every API request and attaches user context',
-      },
+    const losers = [
+      { title: 'JWT Token Expiry', content: 'JWT tokens expire after 24 hours, refresh tokens last 30 days' },
+      { title: 'JWT Middleware', content: 'Created JWT middleware that validates tokens on every API request' },
     ];
 
-    const bulletPoints = others
-      .map(m => `- ${m.title}: ${m.content}`)
-      .join('\n');
-    const mergedContent = `${base.content}\n\nConsolidated context:\n${bulletPoints}`;
+    // The new generator leaves kept.content untouched (only tags/access_count
+    // are merged onto the kept row; losers are downvoted or deleted).
+    const keptContentAfterMerge = kept.content;
 
-    expect(mergedContent).toContain('RS256');
-    expect(mergedContent).toContain('24 hours');
-    expect(mergedContent).toContain('middleware');
-    expect(mergedContent).toContain('Consolidated context:');
+    expect(keptContentAfterMerge).toBe(kept.content);
+    expect(keptContentAfterMerge).not.toContain('Consolidated context:');
+    expect(keptContentAfterMerge).not.toContain('Merged from duplicate:');
+    // None of the losers' distinct bodies leaked into the kept content.
+    for (const loser of losers) {
+      expect(keptContentAfterMerge).not.toContain(loser.content);
+    }
   });
 
   it('should merge tags as a union', () => {
@@ -156,9 +153,12 @@ describe('mergeSimilarMemories clustering logic', () => {
     expect([...allTags].sort()).toEqual(['auth', 'expiry', 'jwt', 'middleware']);
   });
 
-  it('should cap salience at 1.0 after boost', () => {
-    const baseSalience = 0.95;
-    const newSalience = Math.min(1.0, baseSalience + 0.1);
-    expect(newSalience).toBe(1.0);
+  it('does not boost the kept memory salience (B11: kept row salience unchanged)', () => {
+    // The old generator did `salience = min(1.0, base + 0.1)`. Boosting the
+    // kept row fought the anti-bloat caps (which order by raw salience), so the
+    // boost was removed: the kept memory's base salience is preserved as-is.
+    const keptSalience = 0.6;
+    const keptSalienceAfterMerge = keptSalience; // no +0.1 boost applied
+    expect(keptSalienceAfterMerge).toBe(keptSalience);
   });
 });

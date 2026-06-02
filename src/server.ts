@@ -1286,12 +1286,13 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
   // Schedule periodic consolidation every 4 hours
   const CONSOLIDATION_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours
   setInterval(() => {
-    try {
-      const result = fullCleanup();
-      console.error(`[shieldcortex] Scheduled cleanup: ${result.consolidation.consolidated} promoted, ${result.consolidation.deleted} deleted, ${result.merged} merged, vacuumed: ${result.vacuumed}`);
-    } catch (e) {
-      console.error('[shieldcortex] Scheduled cleanup failed:', e);
-    }
+    fullCleanup()
+      .then((result) => {
+        console.error(`[shieldcortex] Scheduled cleanup: ${result.consolidation.consolidated} promoted, ${result.consolidation.deleted} deleted, ${result.merged} merged, vacuumed: ${result.vacuumed}`);
+      })
+      .catch((e) => {
+        console.error('[shieldcortex] Scheduled cleanup failed:', e);
+      });
   }, CONSOLIDATION_INTERVAL);
 
   return server;
