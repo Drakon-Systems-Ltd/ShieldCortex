@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 export function createOpenClawRuntime({
   logPrefix = "[shieldcortex]",
@@ -77,6 +78,67 @@ export function createOpenClawRuntime({
     return resolvedServerCmd;
   }
 
+  // ==================== CHUNKER WRAPPER RESOLUTION ====================
+  //
+  // The OpenClaw hook extracts memories with the SAME hardened chunker the
+  // Claude-Code side uses, loaded from the resolved local install. We resolve
+  // the package root from the server binary (NOT by opening any DB), then
+  // dynamic-import the PURE wrapper (no native deps). Persistence still goes
+  // through callCortex's mcporter shell-out — never via a native DB handle in
+  // this long-lived process.
+
+  /**
+   * Resolve the ShieldCortex package root from the resolved server command.
+   * Returns null when there is no resolvable local install (npx fallback).
+   * @returns {Promise<string|null>}
+   */
+  async function resolvePackageRoot() {
+    const cmd = await resolveServerCmd();
+    if (!cmd || cmd.startsWith("npx")) return null; // no local install
+    const real = await fs.realpath(cmd).catch(() => cmd); // .../dist/index.js
+    return path.resolve(path.dirname(real), ".."); // -> package root
+  }
+
+  let _openClawExtract = null;
+  let _openClawExtractTried = false;
+
+  /**
+   * Dynamic-import the pure chunker wrapper from the resolved package root.
+   * Cached after the first attempt. Returns null on any failure (no local
+   * install, missing file, import error) — callers must treat null as
+   * "skip auto-capture", NOT as a reason to fall back to a legacy high-salience
+   * path.
+   * @returns {Promise<{ extractSessionMemories: Function, extractKeywordMemory: Function }|null>}
+   */
+  async function loadOpenClawExtract() {
+    if (_openClawExtract) return _openClawExtract;
+    if (_openClawExtractTried) return _openClawExtract; // null, don't retry every event
+    _openClawExtractTried = true;
+
+    try {
+      const root = await resolvePackageRoot();
+      if (!root) return null;
+
+      const wrapperPath = path.join(root, "scripts", "lib", "openclaw-extract.mjs");
+      await fs.access(wrapperPath);
+
+      // Absolute file URL — required so jiti / the copied hook resolves it
+      // regardless of the hook's own on-disk location.
+      const mod = await import(pathToFileURL(wrapperPath).href);
+      if (typeof mod?.extractSessionMemories !== "function" || typeof mod?.extractKeywordMemory !== "function") {
+        return null;
+      }
+
+      _openClawExtract = {
+        extractSessionMemories: mod.extractSessionMemories,
+        extractKeywordMemory: mod.extractKeywordMemory,
+      };
+      return _openClawExtract;
+    } catch {
+      return null;
+    }
+  }
+
   async function callCortex(tool, args = {}, options = { retries: 0, timeout: 15000 }) {
     const serverCmd = await resolveServerCmd();
 
@@ -139,5 +201,7 @@ export function createOpenClawRuntime({
     isOpenClawAutoMemoryEnabled,
     loadShieldConfig,
     resolveServerCmd,
+    resolvePackageRoot,
+    loadOpenClawExtract,
   };
 }

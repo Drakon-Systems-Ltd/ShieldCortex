@@ -15,9 +15,16 @@ import { createOpenClawRuntime } from "./runtime.mjs";
 // ==================== SERVER COMMAND RESOLUTION ====================
 
 let _autoMemoryNoticeShown = false;
+let _noExtractNoticeShown = false;
 const runtime = createOpenClawRuntime({ logPrefix: "[cortex-memory]" });
 const loadShieldConfig = runtime.loadShieldConfig;
 const callCortex = runtime.callCortex;
+// Pure chunker wrapper loader (resolves the local install's hardened
+// extractor). Returns null when no local install is resolvable — in which
+// case auto-capture is simply skipped (we do NOT regrow the old high-salience
+// bespoke-extractor path). The wrapper imports nothing native; persistence
+// still flows only through callCortex's mcporter shell-out.
+const loadOpenClawExtract = runtime.loadOpenClawExtract;
 
 async function isOpenClawAutoMemoryEnabled() {
   const config = await loadShieldConfig();
@@ -251,67 +258,32 @@ async function scanInstalledHooks() {
 }
 
 // ==================== CONTENT EXTRACTION ====================
-
-const PATTERNS = {
-  architecture: [
-    /\b(?:architecture|designed|structured|pattern|approach)\b.*?(?:uses?|is|with)\b/i,
-    /\b(?:created|implemented|refactored|built|set up)\b/i,
-    /\b(?:decided?\s+to|going\s+with|chose|opted?\s+for|using)\b/i,
-  ],
-  error: [
-    /\b(?:fixed|resolved|solved)\s+(?:by|with|using)\b/i,
-    /\b(?:the\s+)?(?:solution|fix|root\s*cause|bug)\s+(?:was|is)\b/i,
-  ],
-  learning: [
-    /\b(?:learned|discovered|turns?\s+out|figured\s+out|realized)\b/i,
-    /\b(?:TIL|today\s+I\s+learned)\b/i,
-  ],
-  preference: [
-    /\b(?:I|we|you\s+should)\s+(?:always|never)\b/i,
-    /\b(?:always\s+use|never\s+use|never\s+commit)\b/i,
-    /\bprefer(?:\s+to)?\s+\w+/i,
-    /\bshould\s+always\b/i,
-  ],
-  note: [
-    /\b(?:important|remember|key\s+point|crucial|note)\s*:/i,
-  ],
-};
+//
+// Extraction is delegated to the hardened centralized chunker via the pure
+// `openclaw-extract` wrapper (resolved through runtime.loadOpenClawExtract).
+// The old bespoke regex extractor lived here and mislabelled categories,
+// produced clause fragments, and minted high/critical-salience memories (the
+// "salience wall"). It is intentionally gone — the chunker is now the single
+// source of truth for extraction quality and taxonomy. Persistence below is
+// uniformly importance:"normal" (0.5, capped well under the wall).
 
 /**
- * Extract high-salience content from session messages
- * @param {string[]} messages - Array of "role: content" strings
- * @returns {Array<{title: string, content: string, category: string}>}
+ * Join transcript lines into conversation text, keeping ONLY assistant-authored
+ * lines. getRecentMessages returns "role: content" strings for both user and
+ * assistant turns; for the first ship we extract from assistant text only
+ * (lowest-risk: don't mine user-typed prose). Returns "" if nothing qualifies.
+ * @param {string[]} messages
+ * @returns {string}
  */
-function extractMemories(messages) {
-  const extracted = [];
-  const seen = new Set();
-
+function assistantConversationText(messages) {
+  const PREFIX = "assistant:";
+  const parts: string[] = [];
   for (const msg of messages) {
-    if (!msg.startsWith("assistant:")) continue;
-    const text = msg.slice("assistant:".length).trim();
-    if (text.length < 20) continue;
-
-    for (const [category, patterns] of Object.entries(PATTERNS)) {
-      for (const pattern of patterns) {
-        if (pattern.test(text)) {
-          const title = text.slice(0, 80).replace(/["\n]/g, " ").trim();
-          if (seen.has(title)) break;
-          seen.add(title);
-
-          extracted.push({
-            title,
-            content: text.slice(0, 500),
-            category,
-          });
-          break;
-        }
-      }
-      if (extracted.length >= 5) break;
-    }
-    if (extracted.length >= 5) break;
+    if (typeof msg !== "string" || !msg.startsWith(PREFIX)) continue;
+    const text = msg.slice(PREFIX.length).trim();
+    if (text.length > 0) parts.push(text);
   }
-
-  return extracted;
+  return parts.join("\n");
 }
 
 // ==================== SESSION FILE READER ====================
@@ -381,7 +353,22 @@ async function onSessionEnd(event) {
     return;
   }
 
-  const memories = extractMemories(messages);
+  const conversationText = assistantConversationText(messages);
+  if (conversationText.length === 0) {
+    console.log("[cortex-memory] No assistant content to extract");
+    return;
+  }
+
+  const extract = await loadOpenClawExtract();
+  if (!extract) {
+    if (!_noExtractNoticeShown) {
+      console.log("[cortex-memory] No resolvable local install — skipping auto-extraction (no fallback)");
+      _noExtractNoticeShown = true;
+    }
+    return;
+  }
+
+  const memories = extract.extractSessionMemories(conversationText);
   if (memories.length === 0) {
     console.log("[cortex-memory] No high-salience content found");
     return;
@@ -401,9 +388,10 @@ async function onSessionEnd(event) {
       title: mem.title,
       content: mem.content,
       category: mem.category,
+      memoryPurpose: mem.memoryPurpose,
       project: "openclaw",
       scope: "global",
-      importance: "high",
+      importance: "normal",
       tags: "auto-extracted,openclaw-hook",
       sourceType: "hook",
       sourceIdentifier: "openclaw-session-end",
@@ -452,7 +440,22 @@ async function onSessionStop(event) {
     return;
   }
 
-  const memories = extractMemories(messages);
+  const conversationText = assistantConversationText(messages);
+  if (conversationText.length === 0) {
+    console.log("[cortex-memory] No assistant content to extract on stop");
+    return;
+  }
+
+  const extract = await loadOpenClawExtract();
+  if (!extract) {
+    if (!_noExtractNoticeShown) {
+      console.log("[cortex-memory] No resolvable local install — skipping auto-extraction (no fallback)");
+      _noExtractNoticeShown = true;
+    }
+    return;
+  }
+
+  const memories = extract.extractSessionMemories(conversationText);
   if (memories.length === 0) {
     console.log("[cortex-memory] No high-salience content found on stop");
     return;
@@ -472,9 +475,10 @@ async function onSessionStop(event) {
       title: mem.title,
       content: mem.content,
       category: mem.category,
+      memoryPurpose: mem.memoryPurpose,
       project: "openclaw",
       scope: "global",
-      importance: "high",
+      importance: "normal",
       tags: "auto-extracted,openclaw-hook,session-stop",
       sourceType: "hook",
       sourceIdentifier: "openclaw-session-stop",
@@ -531,43 +535,47 @@ async function onBootstrap(event) {
 }
 
 /**
- * Keyword triggers with their categories and importance levels
- * Order matters: more specific triggers should come first
+ * Keyword trigger phrases. Order matters: more specific triggers should come
+ * first (the first match wins). Category + memory_purpose are now derived by
+ * the chunker (via extractKeywordMemory), and salience is uniform across all
+ * triggers (importance:"normal" → 0.5, capped well under the wall). The old
+ * per-trigger category/importance fields are gone — they minted high/critical
+ * salience and mislabelled categories.
  */
 const KEYWORD_TRIGGERS = [
   // Learning triggers
-  { phrase: "lesson learned", category: "learning", importance: "high" },
-  { phrase: "i learned", category: "learning", importance: "normal" },
-  { phrase: "til:", category: "learning", importance: "normal" },
-  { phrase: "today i learned", category: "learning", importance: "normal" },
-  
+  { phrase: "lesson learned" },
+  { phrase: "i learned" },
+  { phrase: "til:" },
+  { phrase: "today i learned" },
+
   // Error/prevention triggers
-  { phrase: "never again", category: "error", importance: "critical" },
-  { phrase: "root cause was", category: "error", importance: "high" },
-  { phrase: "the fix was", category: "error", importance: "high" },
-  
+  { phrase: "never again" },
+  { phrase: "root cause was" },
+  { phrase: "the fix was" },
+
   // Preference triggers
-  { phrase: "always do", category: "preference", importance: "high" },
-  { phrase: "never do", category: "preference", importance: "high" },
-  { phrase: "i prefer", category: "preference", importance: "normal" },
-  { phrase: "we should always", category: "preference", importance: "high" },
-  
+  { phrase: "always do" },
+  { phrase: "never do" },
+  { phrase: "i prefer" },
+  { phrase: "we should always" },
+
   // Architecture/decision triggers
-  { phrase: "we decided", category: "architecture", importance: "high" },
-  { phrase: "decision made", category: "architecture", importance: "high" },
-  { phrase: "going with", category: "architecture", importance: "normal" },
-  
-  // Explicit memory triggers (highest priority - always critical)
-  { phrase: "remember this", category: "note", importance: "critical" },
-  { phrase: "don't forget", category: "note", importance: "critical" },
-  { phrase: "dont forget", category: "note", importance: "critical" },
-  { phrase: "this is important", category: "note", importance: "critical" },
-  { phrase: "make a note", category: "note", importance: "critical" },
-  { phrase: "for the record", category: "note", importance: "critical" },
-  { phrase: "note to self", category: "note", importance: "critical" },
-  { phrase: "important:", category: "note", importance: "critical" },
-  { phrase: "key point:", category: "note", importance: "high" },
-  { phrase: "crucial:", category: "note", importance: "critical" },
+  { phrase: "we decided" },
+  { phrase: "decision made" },
+  { phrase: "going with" },
+
+  // Explicit memory triggers
+  { phrase: "remember this" },
+  { phrase: "don't forget" },
+  { phrase: "dont forget" },
+  { phrase: "this is important" },
+  { phrase: "make a note" },
+  { phrase: "for the record" },
+  { phrase: "note to self" },
+  { phrase: "important:" },
+  { phrase: "key point:" },
+  { phrase: "crucial:" },
 ];
 
 /**
@@ -604,35 +612,54 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
     content = messageText;
   }
 
-  const title = content.slice(0, 80).replace(/["\n]/g, " ").trim();
+  // Route through the chunker wrapper: applies the rejection corpus (drops true
+  // malformations) and derives category + memory_purpose from the chunker's
+  // taxonomy. Explicit keyword intent BYPASSES the salience threshold (B8) —
+  // the wrapper returns a memory for any non-malformed content.
+  const extract = await loadOpenClawExtract();
+  if (!extract) {
+    if (!_noExtractNoticeShown) {
+      console.log("[cortex-memory] No resolvable local install — skipping keyword capture (no fallback)");
+      _noExtractNoticeShown = true;
+    }
+    return false;
+  }
+
+  const candidates = extract.extractKeywordMemory(matchedTrigger.phrase, content);
+  if (candidates.length === 0) {
+    console.log(`[cortex-memory] Keyword trigger skipped (rejected as malformed): "${matchedTrigger.phrase}"`);
+    return false;
+  }
+  const mem = candidates[0];
 
   // Deduplicate via shared novelty gate (same gate used by session-end/stop extraction)
   const noveltyGate = await getSharedNoveltyGate();
-  const novelty = noveltyGate.inspect(content.slice(0, 500));
+  const novelty = noveltyGate.inspect(mem.content);
   if (!novelty.allow) {
-    console.log(`[cortex-memory] Keyword trigger skipped (duplicate): "${title}"`);
+    console.log(`[cortex-memory] Keyword trigger skipped (duplicate): "${mem.title}"`);
     return false;
   }
 
   const result = await callCortex("remember", {
-    title,
-    content: content.slice(0, 500),
-    category: matchedTrigger.category,
+    title: mem.title,
+    content: mem.content,
+    category: mem.category,
+    memoryPurpose: mem.memoryPurpose,
     project: "openclaw",
     scope: "global",
-    importance: matchedTrigger.importance,
+    importance: "normal",
     tags: `keyword-trigger,openclaw-hook,trigger:${matchedTrigger.phrase.replace(/\s+/g, "-")}`,
     sourceType: "hook",
     sourceIdentifier: `openclaw-keyword:${matchedTrigger.phrase.replace(/\s+/g, "-")}`,
   });
 
   if (result) {
-    noveltyGate.remember({ content: content.slice(0, 500), title, category: matchedTrigger.category }, novelty);
+    noveltyGate.remember({ content: mem.content, title: mem.title, category: mem.category }, novelty);
     await noveltyGate.flush();
     if (event.messages) {
-      event.messages.push(`✅ Saved to Cortex memory (${matchedTrigger.category}): "${title}"`);
+      event.messages.push(`✅ Saved to Cortex memory (${mem.category}): "${mem.title}"`);
     }
-    console.log(`[cortex-memory] Keyword trigger "${matchedTrigger.phrase}" saved: ${title}`);
+    console.log(`[cortex-memory] Keyword trigger "${matchedTrigger.phrase}" saved: ${mem.title}`);
     return true;
   }
   return false;
