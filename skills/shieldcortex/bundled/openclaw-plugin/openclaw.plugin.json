@@ -1,8 +1,30 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "3.5.0",
+  "version": "4.29.0",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
+  "kind": null,
+  "engines": {
+    "openclaw": ">=2026.3.22",
+    "recommended": ">=2026.4.23"
+  },
+  "enabledByDefault": false,
+  "activation": {
+    "onStartup": false,
+    "hooks": [
+      "llm_input",
+      "llm_output",
+      "before_tool_call",
+      "session_end"
+    ],
+    "commands": [
+      "shieldcortex-status"
+    ]
+  },
+  "contracts": {},
+  "commandAliases": {
+    "shieldcortex-status": "shieldcortex-status"
+  },
   "uiHints": {
     "binaryPath": {
       "label": "ShieldCortex Binary Path",
@@ -59,7 +81,7 @@
   },
   "configSchema": {
     "type": "object",
-    "additionalProperties": true,
+    "additionalProperties": false,
     "properties": {
       "enabled": {
         "type": "boolean"
@@ -92,23 +114,88 @@
       "interceptor": {
         "type": "object",
         "properties": {
-          "enabled": { "type": "boolean", "default": true },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
           "severityActions": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-              "low": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "log" },
-              "medium": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "warn" },
-              "high": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "require_approval" },
-              "critical": { "type": "string", "enum": ["log", "warn", "require_approval"], "default": "require_approval" }
+              "low": {
+                "type": "string",
+                "enum": [
+                  "log",
+                  "warn",
+                  "require_approval"
+                ],
+                "default": "log"
+              },
+              "medium": {
+                "type": "string",
+                "enum": [
+                  "log",
+                  "warn",
+                  "require_approval"
+                ],
+                "default": "log"
+              },
+              "high": {
+                "type": "string",
+                "enum": [
+                  "log",
+                  "warn",
+                  "require_approval"
+                ],
+                "default": "warn"
+              },
+              "critical": {
+                "type": "string",
+                "enum": [
+                  "log",
+                  "warn",
+                  "require_approval"
+                ],
+                "default": "log"
+              }
             }
           },
           "failurePolicy": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-              "low": { "type": "string", "enum": ["allow", "deny"], "default": "allow" },
-              "medium": { "type": "string", "enum": ["allow", "deny"], "default": "allow" },
-              "high": { "type": "string", "enum": ["allow", "deny"], "default": "deny" },
-              "critical": { "type": "string", "enum": ["allow", "deny"], "default": "deny" }
+              "low": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ],
+                "default": "allow"
+              },
+              "medium": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ],
+                "default": "allow"
+              },
+              "high": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ],
+                "default": "deny"
+              },
+              "critical": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "deny"
+                ],
+                "default": "deny"
+              }
             }
           }
         }

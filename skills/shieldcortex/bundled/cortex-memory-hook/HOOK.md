@@ -3,15 +3,7 @@ name: cortex-memory
 description: "Persistent brain-like memory via ShieldCortex — recalls past knowledge, with optional auto-save"
 homepage: https://github.com/Drakon-Systems-Ltd/ShieldCortex
 metadata:
-  {
-    "openclaw":
-      {
-        "emoji": "🧠",
-        "events": ["command:new", "command:stop", "agent:bootstrap", "command"],
-        "requires": { "anyBins": ["npx"] },
-        "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }],
-      },
-  }
+  { "openclaw": { "emoji": "🧠", "events": ["command:new", "command:stop", "agent:bootstrap"], "requires": { "bins": ["npx"] }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }
 ---
 
 # Cortex Memory Hook
@@ -36,9 +28,9 @@ When `openclawAutoMemory` is enabled:
 5. Skips exact and near-duplicate memories using novelty filtering
 
 ### On Session Start (Agent Bootstrap)
-1. Calls Cortex `get_context` to retrieve relevant memories
-2. Injects them into the agent's bootstrap context
-3. Agent starts with knowledge of past sessions
+Bootstrap context injection was **disabled in v2026.2.26**. OpenClaw's native Memory Search now handles context recall at session start, so the hook no longer pushes memories into the system prompt (which was producing ~40× duplication of CORTEX_MEMORY.md and eating most of the context window).
+
+The hook still fires on `agent:bootstrap` for lifecycle wiring (warning-bootstrap-file handoff, etc.) but contributes nothing to the system prompt. This keeps `extraSystemPromptHash` stable across turns and prevents the session-binding reset loop documented in `src/setup/claude-md.ts`.
 
 ### Keyword Triggers
 
@@ -71,6 +63,43 @@ Say any of these phrases to trigger an instant save to Cortex memory:
 | **"going with"** | architecture | normal |
 
 Content after the trigger phrase is extracted and saved as the memory content.
+
+## Defence Audit Guarantees
+
+Every byte that lands in `memories` from the auto-extract path passes the
+6-layer defence pipeline first. The hook write path is no longer the
+bypass it once was:
+
+- **ALLOW** → row inserted into `memories`; a corresponding row appears in
+  `defence_audit` with `source_type = 'hook'` and the hook's identifier
+  (`session-end-hook` / `pre-compact-hook` / `stop-hook`).
+- **QUARANTINE** → row inserted into `quarantine` (not `memories`), linked
+  to the audit row via `audit_id`. Visible in the dashboard for review.
+- **BLOCK** → dropped. The audit row written by the pipeline carries the
+  block reason; nothing reaches `memories`.
+- **Pipeline error** → dropped + a synthetic audit row with reason
+  `pipeline_error: <msg>`. Never silently lose data.
+
+Built-in firewall rules covering instruction injection, hidden
+instruction, imperative tool-call directives ("call X tool now"), command
+injection, and credential leaks (AWS / JWT / private keys) are seeded
+into `firewall_rules` on first run with `built_in = 1`. They are
+evaluated on every tier (the Pro `custom_firewall_rules` gate applies
+only to user-added rules) and excluded from the user-facing 25-rule cap.
+
+The chunker also rejects malformed candidates *before* they reach the
+write path: imperative tool-calls, bare-imperative starts ("commit
+secrets" with the negation dropped), email-body bleed, and path-label
+fragments. Auto-extracted memories are now capped at salience 0.6
+(reserved 1.0 for LLM-rated future paths).
+
+To audit an existing database for malformed rows accumulated before this
+fix:
+
+```bash
+shieldcortex memories purge --malformed --dry-run    # preview
+shieldcortex memories purge --malformed --execute    # delete (writes a backup first)
+```
 
 ## Auto-Memory
 

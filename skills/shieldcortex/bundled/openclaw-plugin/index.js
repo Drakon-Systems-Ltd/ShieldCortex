@@ -5,13 +5,15 @@
  * for llm_input/llm_output scanning and optional memory extraction.
  * All scanning operations are fire-and-forget.
  */
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
+import { syncInterceptEvent } from './intercept-ingest.js';
+import { cloudSync } from './cloud-sync.js';
 let runtimePromise = null;
 function addRuntimeCandidate(candidates, packageRoot) {
     const runtimePath = path.join(packageRoot, "hooks", "openclaw", "cortex-memory", "runtime.mjs");
@@ -32,50 +34,46 @@ function collectRuntimeCandidates() {
     const candidates = new Set();
     // 1. Relative path (works when running from within npm package tree)
     candidates.add(new URL("../../hooks/openclaw/cortex-memory/runtime.mjs", import.meta.url).href);
-    // 2. Environment variable override
-    if (process.env.SHIELDCORTEX_ROOT) {
-        addRuntimeCandidate(candidates, process.env.SHIELDCORTEX_ROOT);
+    // 2. Config file override (reads path from ~/.shieldcortex/config.json instead of env var)
+    try {
+        const cfgPath = path.join(homedir(), ".shieldcortex", "config.json");
+        if (existsSync(cfgPath)) {
+            const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+            if (cfg.installRoot)
+                addRuntimeCandidate(candidates, cfg.installRoot);
+        }
     }
+    catch { /* no config */ }
     // 3. Walk up from current file location
     addAncestorCandidates(candidates, path.dirname(fileURLToPath(import.meta.url)));
-    // 4. Find via shieldcortex binary
-    try {
-        const bin = execFileSync("which", ["shieldcortex"], {
-            encoding: "utf-8",
-            timeout: 3000,
-        }).trim();
-        if (bin)
-            addAncestorCandidates(candidates, realpathSync(bin));
+    // 4. Resolve via common bin symlink paths (no child_process needed)
+    for (const binDir of ["/usr/local/bin", "/opt/homebrew/bin", path.join(homedir(), ".npm-global", "bin")]) {
+        const binPath = path.join(binDir, "shieldcortex");
+        try {
+            if (existsSync(binPath))
+                addAncestorCandidates(candidates, realpathSync(binPath));
+        }
+        catch { /* broken symlink */ }
     }
-    catch { }
-    // 5. npm global root
-    try {
-        const npmRoot = execFileSync("npm", ["root", "-g"], {
-            encoding: "utf-8",
-            timeout: 3000,
-        }).trim();
-        if (npmRoot)
-            addRuntimeCandidate(candidates, path.join(npmRoot, "shieldcortex"));
-    }
-    catch { }
-    // 6. npm prefix
-    try {
-        const prefix = execFileSync("npm", ["config", "get", "prefix"], {
-            encoding: "utf-8",
-            timeout: 3000,
-        }).trim();
-        if (prefix)
-            addRuntimeCandidate(candidates, path.join(prefix, "lib", "node_modules", "shieldcortex"));
-    }
-    catch { }
-    // 7. Common global install paths
+    // 5. Common global install paths (covers npm root -g results without spawning npm)
     for (const root of [
         "/usr/lib/node_modules/shieldcortex",
         "/usr/local/lib/node_modules/shieldcortex",
         "/opt/homebrew/lib/node_modules/shieldcortex",
         path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex"),
+        path.join(homedir(), ".nvm", "versions", "node"), // nvm users
     ]) {
-        addRuntimeCandidate(candidates, root);
+        if (root.includes(".nvm")) {
+            // For nvm, check the current symlink
+            try {
+                const currentNode = path.join(homedir(), ".nvm", "current", "lib", "node_modules", "shieldcortex");
+                addRuntimeCandidate(candidates, currentNode);
+            }
+            catch { /* no nvm */ }
+        }
+        else {
+            addRuntimeCandidate(candidates, root);
+        }
     }
     return [...candidates];
 }
@@ -158,17 +156,24 @@ const PLUGIN_CONFIG_JSON_SCHEMA = {
     },
 };
 let _config = null;
+// Identity of the shield config we last merged from. The runtime's
+// loadShieldConfig() returns the same parsed object until the file's mtime
+// advances; using reference equality lets us re-merge precisely when the
+// underlying config has actually changed (dashboard / CLI write).
+let _lastShieldConfigRef = null;
 let _configOverride = null;
 let _version = "0.0.0";
 try {
-    for (const packageUrl of [
+    // Try package.json first, then openclaw.plugin.json (the manifest IS copied to extensions/)
+    for (const candidateUrl of [
         new URL("./package.json", import.meta.url),
         new URL("../../package.json", import.meta.url),
+        new URL("./openclaw.plugin.json", import.meta.url),
     ]) {
         try {
-            const pkg = JSON.parse(readFileSync(packageUrl, "utf-8"));
-            if (typeof pkg.version === "string" && pkg.version.trim()) {
-                _version = pkg.version;
+            const data = JSON.parse(readFileSync(candidateUrl, "utf-8"));
+            if (typeof data.version === "string" && data.version.trim()) {
+                _version = data.version;
                 break;
             }
         }
@@ -178,6 +183,7 @@ try {
     }
 }
 catch { /* fallback */ }
+let _registered = false;
 function normaliseConfig(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
         return {};
@@ -215,9 +221,12 @@ function extractPluginConfig(rootConfig) {
     return normaliseConfig(pluginConfig);
 }
 function applyPluginConfigOverride(api) {
-    const runtimeConfig = typeof api.runtime?.config?.loadConfig === "function"
-        ? api.runtime.config.loadConfig()
-        : api.config;
+    const runtimeConfigApi = api.runtime?.config;
+    const runtimeConfig = typeof runtimeConfigApi?.current === "function"
+        ? runtimeConfigApi.current()
+        : typeof runtimeConfigApi?.loadConfig === "function"
+            ? runtimeConfigApi.loadConfig()
+            : api.config;
     const pluginConfig = extractPluginConfig(runtimeConfig);
     if (Object.keys(pluginConfig).length === 0)
         return;
@@ -225,16 +234,17 @@ function applyPluginConfigOverride(api) {
         ...(_configOverride ?? {}),
         ...pluginConfig,
     };
-    if (_config) {
-        _config = { ..._config, ...pluginConfig };
-    }
+    // Override changed — invalidate so loadConfig() re-merges with new override.
+    _config = null;
+    _lastShieldConfigRef = null;
 }
 async function loadConfig() {
-    if (_config)
+    const shieldConfigRaw = await (await getRuntime()).loadShieldConfig();
+    if (_config && shieldConfigRaw === _lastShieldConfigRef)
         return _config;
-    const shieldConfig = normaliseConfig(await (await getRuntime()).loadShieldConfig());
+    _lastShieldConfigRef = shieldConfigRaw;
     _config = {
-        ...shieldConfig,
+        ...normaliseConfig(shieldConfigRaw),
         ...(_configOverride ?? {}),
     };
     return _config;
@@ -330,20 +340,6 @@ async function auditLog(entry) {
     try {
         await fs.mkdir(AUDIT_DIR, { recursive: true });
         await fs.appendFile(path.join(AUDIT_DIR, `realtime-${new Date().toISOString().slice(0, 10)}.jsonl`), JSON.stringify(entry) + "\n");
-    }
-    catch { }
-}
-async function cloudSync(threat) {
-    const cfg = await loadConfig();
-    if (!cfg.cloudApiKey)
-        return;
-    try {
-        await fetch(`${cfg.cloudBaseUrl || "https://api.shieldcortex.ai"}/v1/threats`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.cloudApiKey}` },
-            body: JSON.stringify(threat),
-            signal: AbortSignal.timeout(5000),
-        });
     }
     catch { }
 }
@@ -497,7 +493,9 @@ function handleLlmInput(event, ctx) {
                         preview: text.slice(0, 100), ts: new Date().toISOString(),
                     };
                     auditLog(entry);
-                    cloudSync({ ...entry, content: text.slice(0, 200) });
+                    loadConfig()
+                        .then(cfg => cloudSync({ ...entry, content: text.slice(0, 200) }, cfg))
+                        .catch(() => { });
                 }
             }
         }
@@ -582,32 +580,124 @@ export default {
         jsonSchema: PLUGIN_CONFIG_JSON_SCHEMA,
     },
     register(api) {
-        applyPluginConfigOverride(api);
-        // Explicit capability registration (replaces legacy api.on)
-        api.registerHook("llm_input", handleLlmInput, {
-            name: "shieldcortex-scan-input",
-            description: "Real-time threat scanning on LLM input",
-        });
-        api.registerHook("llm_output", handleLlmOutput, {
-            name: "shieldcortex-scan-output",
-            description: "Memory extraction from LLM output",
-        });
-        // Register a lightweight status command so the plugin is not hook-only
-        api.registerCommand({
-            name: "shieldcortex-status",
-            aliases: ["sc-status"],
-            description: "Show ShieldCortex real-time scanner status",
-            async execute({ reply }) {
-                const cfg = await loadConfig();
-                const autoMemory = isAutoMemoryEnabled(cfg) ? "on" : "off";
-                const dedupe = isAutoMemoryDedupeEnabled(cfg) ? "on" : "off";
-                const cloud = cfg.cloudApiKey ? "configured" : "not configured";
-                reply(`ShieldCortex v${_version}\n` +
-                    `  Hooks: llm_input (scan), llm_output (memory)\n` +
-                    `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
-                    `  Cloud sync: ${cloud}`);
-            },
-        });
-        api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output + /shieldcortex-status)`);
+        if (_registered)
+            return;
+        _registered = true;
+        try {
+            applyPluginConfigOverride(api);
+            // --- Interceptor (lazy init) ---
+            let interceptorReady = null;
+            let interceptorInitAttempted = false;
+            async function initInterceptor() {
+                if (interceptorInitAttempted)
+                    return interceptorReady;
+                interceptorInitAttempted = true;
+                try {
+                    const scConfig = await loadConfig();
+                    const rawInterceptorConfig = scConfig.interceptor;
+                    const interceptorConfig = {
+                        ...DEFAULT_INTERCEPTOR_CONFIG,
+                        ...(rawInterceptorConfig && typeof rawInterceptorConfig === 'object' ? {
+                            enabled: rawInterceptorConfig.enabled ?? DEFAULT_INTERCEPTOR_CONFIG.enabled,
+                            severityActions: { ...DEFAULT_INTERCEPTOR_CONFIG.severityActions, ...rawInterceptorConfig.severityActions },
+                            failurePolicy: { ...DEFAULT_INTERCEPTOR_CONFIG.failurePolicy, ...rawInterceptorConfig.failurePolicy },
+                        } : {}),
+                        logger: { info: api.logger?.info ?? console.log, warn: api.logger?.warn ?? console.warn },
+                    };
+                    if (!interceptorConfig.enabled)
+                        return null;
+                    // Dynamic import with string variable to prevent TypeScript from resolving
+                    // at compile time — 'shieldcortex/defence' only exists at runtime when the
+                    // package is installed globally, not during CI builds of the plugin itself.
+                    let defenceMod;
+                    try {
+                        const defenceModPath = 'shieldcortex' + '/defence';
+                        defenceMod = await import(/* webpackIgnore: true */ defenceModPath);
+                    }
+                    catch (importErr) {
+                        // Stack overflow or missing module — interceptor can't load
+                        api.logger?.warn?.(`[shieldcortex] Cannot load defence module: ${importErr instanceof Error ? importErr.message : importErr}`);
+                        return null;
+                    }
+                    if (typeof defenceMod.runDefencePipeline !== 'function')
+                        return null;
+                    interceptorReady = createInterceptor(interceptorConfig, defenceMod.runDefencePipeline, {
+                        onAuditEntry: (entry) => syncInterceptEvent(entry, {
+                            cloudApiKey: scConfig.cloudApiKey ?? '',
+                            cloudBaseUrl: scConfig.cloudBaseUrl ?? 'https://api.shieldcortex.ai',
+                            cloudEnabled: scConfig.cloudEnabled ?? false,
+                        }),
+                    });
+                    api.logger?.info?.('[shieldcortex] Interceptor active — watching: remember, mcp__memory__remember');
+                    return interceptorReady;
+                }
+                catch (err) {
+                    api.logger?.warn?.(`[shieldcortex] Interceptor init failed: ${err instanceof Error ? err.message : err}`);
+                    return null;
+                }
+            }
+            // Register before_tool_call with lazy-init wrapper
+            api.registerHook('before_tool_call', async (context) => {
+                const interceptor = await initInterceptor();
+                if (!interceptor)
+                    return;
+                try {
+                    await interceptor.handleToolCall(context);
+                }
+                catch (err) {
+                    // Intentional blocks from the interceptor (ShieldCortex: ...) should propagate
+                    if (err instanceof Error && err.message.startsWith('ShieldCortex:'))
+                        throw err;
+                    // Unexpected errors (DB crash, etc.) — log and allow the tool call through
+                    api.logger?.warn?.(`[shieldcortex] Interceptor error (allowing tool call): ${err instanceof Error ? err.message : err}`);
+                }
+            }, {
+                name: 'shieldcortex-intercept-tool',
+                description: 'Active threat gating on tool calls',
+            });
+            // Try to register session_end for cache cleanup
+            try {
+                api.registerHook('session_end', () => { interceptorReady?.resetSession(); }, {
+                    name: 'shieldcortex-session-cleanup',
+                    description: 'Clear interceptor deny cache on session end',
+                });
+            }
+            catch {
+                // session_end may not be a supported hook — TTL safety net handles this
+            }
+            // Explicit capability registration (replaces legacy api.on)
+            api.registerHook("llm_input", handleLlmInput, {
+                name: "shieldcortex-scan-input",
+                description: "Real-time threat scanning on LLM input",
+            });
+            api.registerHook("llm_output", handleLlmOutput, {
+                name: "shieldcortex-scan-output",
+                description: "Memory extraction from LLM output",
+            });
+            // Register a lightweight status command so the plugin is not hook-only
+            api.registerCommand({
+                name: "shieldcortex-status",
+                description: "Show ShieldCortex real-time scanner status",
+                async handler() {
+                    const cfg = await loadConfig();
+                    const autoMemory = isAutoMemoryEnabled(cfg) ? "on" : "off";
+                    const dedupe = isAutoMemoryDedupeEnabled(cfg) ? "on" : "off";
+                    const cloud = cfg.cloudApiKey ? "configured" : "not configured";
+                    return {
+                        text: `ShieldCortex v${_version}\n` +
+                            `  Hooks: llm_input (scan), llm_output (memory)\n` +
+                            `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
+                            `  Cloud sync: ${cloud}`,
+                    };
+                },
+            });
+            api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output + before_tool_call + /shieldcortex-status)`);
+        }
+        catch (err) {
+            // Plugin must never block channel startup — warn and bail gracefully
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[shieldcortex] WARNING: Plugin failed to initialize: ${msg}`);
+            console.warn('[shieldcortex] Real-time scanning is disabled. Channels will start normally.');
+        }
     },
 };
