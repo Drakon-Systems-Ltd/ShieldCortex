@@ -362,12 +362,15 @@ export function findDuplicateMemoryPairs(options?: {
  *     content and salience are untouched.
  *
  * Defence re-scan removed (B11): the old re-scan existed ONLY to validate the
- * concatenated merged body before persisting it (two individually-clean rows
- * could straddle a credential pattern across the join). With no concatenation
- * there is no new content to scan — the kept row's bytes were already scanned at
- * write time and are written verbatim — so the invariant "every byte in
- * `memories` has been scanned" holds without re-running the pipeline. Dropping
- * it also avoids re-auditing unchanged content on every 4h pass.
+ * SYNTHESIZED concatenated merged body before persisting it (two individually-
+ * clean rows could straddle a credential pattern across the join). Now that no
+ * concatenation happens here, there is no synthesized content to scan — the kept
+ * row's bytes are written verbatim and unchanged, exactly as they already exist
+ * in `memories`. So this pass introduces no new bytes to validate. (This is a
+ * narrow claim about THIS path: it does not assume every row was scanned at write
+ * time — e.g. importMemories inserts rows with no scan — only that the dedup no
+ * longer fabricates a new body that would need scanning.) Dropping the re-scan
+ * also avoids re-auditing unchanged content on every 4h pass.
  *
  * Only rows clustered in THIS pass are acted on; historical merged rows are not
  * rewritten (effective salience demotes them over time). STM→LTM promotion is
@@ -1193,74 +1196,115 @@ export interface DreamModeResult {
  * 1. Find near-duplicates by embedding similarity >0.9, merge them
  * 2. Flag memories >30 days old with no access as archival candidates
  * 3. Detect and flag contradictions
+ *
+ * DISPOSAL POLICY — deliberately DIVERGES from the auto path:
+ * This is the EXPLICIT, user-invoked `shieldcortex consolidate` command (and the
+ * public `consolidateMemories` export). Because the user has actively asked for a
+ * consolidation, aggressive cleanup is the intended behaviour: the loser of every
+ * duplicate pair is HARD-DELETED. This is on purpose and must NOT be replaced with
+ * the gentle `disposeLoser` policy.
+ *
+ * Contrast with the 4-hourly AUTO path (deduplicateMemories / mergeSimilarMemories),
+ * which runs UNATTENDED and therefore uses the conservative `disposeLoser`: it only
+ * deletes near-identical losers (combined ≥ 0.85, content already contained in the
+ * kept row) and merely DOWNVOTES (reversible) the moderate near-dups. That caution
+ * is right for an unsupervised background job, but wrong for a deliberate manual
+ * cleanup the user explicitly triggered.
+ *
+ * The two paths DO share keep-selection: both pick the kept row by EFFECTIVE
+ * salience (effectiveSalienceOfRow — recency/access/pin/downvote), so the row that
+ * survives is consistent across all three dedup sites. Effective salience also
+ * discriminates where the pair's raw `recommendedKeepId` (raw salience + recency)
+ * ties at 1.0.
  */
 export function consolidateMemories(): DreamModeResult {
-  const db = getDatabase();
-  let nearDuplicatesMerged = 0;
-  let archivalCandidates = 0;
-  let contradictionsDetected = 0;
+  // Wrap the dedup delete loop in a transaction for atomicity: previously each
+  // pair was deleted on a bare getDatabase() with no transaction, so a mid-loop
+  // failure left partial deletes (some losers gone, tag-merges half-applied).
+  return withTransaction(() => {
+    const db = getDatabase();
+    let nearDuplicatesMerged = 0;
+    let archivalCandidates = 0;
+    let contradictionsDetected = 0;
 
-  // Step 1: Find and merge near-duplicates
-  const duplicatePairs = findDuplicateMemoryPairs({ limit: 100 });
-  for (const pair of duplicatePairs) {
+    // findDuplicateMemoryPairs returns rowToMemory-converted objects, which omit
+    // downvote_count. Fetch raw rows on demand so effective-salience keep-selection
+    // sees the full signal (same pattern as deduplicateMemories).
+    const rawRowStmt = db.prepare('SELECT * FROM memories WHERE id = ?');
+    const rawRow = (id: number) => rawRowStmt.get(id) as Record<string, unknown> | undefined;
+
+    // Step 1: Find and merge near-duplicates
+    const duplicatePairs = findDuplicateMemoryPairs({ limit: 100 });
+    for (const pair of duplicatePairs) {
+      try {
+        const memA = pair.memoryA;
+        const memB = pair.memoryB;
+        if (!memA || !memB) continue;
+
+        // KEEP the higher-EFFECTIVE-salience member (recency/access/pin/downvote),
+        // consistent with deduplicateMemories and mergeSimilarMemories — one source
+        // of truth via effectiveSalienceOfRow. This can differ from the pair's raw
+        // `recommendedKeepId` (raw salience + recency), which can't break a 1.0 tie.
+        const rowA = rawRow(memA.id);
+        const rowB = rawRow(memB.id);
+        if (!rowA || !rowB) continue; // already gone (deleted earlier this pass)
+
+        // Tie → keep A (the older row by findDuplicateMemoryPairs' created_at ASC).
+        const keepA = effectiveSalienceOfRow(rowA) >= effectiveSalienceOfRow(rowB);
+        const kept = keepA ? memA : memB;
+        const removed = keepA ? memB : memA;
+
+        // Merge tags from both onto the kept row (metadata only, non-lossy).
+        const mergedTags = [...new Set([...kept.tags, ...removed.tags])];
+        db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
+          .run(JSON.stringify(mergedTags), kept.id);
+
+        // Aggressive hard-DELETE of the loser — intended for this manual command
+        // (see the disposal-policy note in the function header).
+        deleteMemory(removed.id);
+        nearDuplicatesMerged++;
+      } catch {
+        // Skip problematic pairs
+      }
+    }
+
+    // Step 2: Flag stale memories for archival (>30 days, no access)
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const staleRows = db.prepare(`
+      SELECT id FROM memories
+      WHERE status = 'active'
+        AND last_accessed < ?
+        AND access_count <= 1
+        AND pinned = 0
+    `).all(thirtyDaysAgo) as { id: number }[];
+
+    for (const row of staleRows) {
+      try {
+        db.prepare("UPDATE memories SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .run(row.id);
+        archivalCandidates++;
+      } catch {
+        // Skip
+      }
+    }
+
+    // Step 3: Detect contradictions
     try {
-      const memA = pair.memoryA;
-      const memB = pair.memoryB;
-      if (!memA || !memB) continue;
-
-      // Keep the recommended one, delete the other
-      const removedId = pair.recommendedKeepId === memA.id ? memB.id : memA.id;
-      const keptId = pair.recommendedKeepId;
-
-      // Merge tags from both
-      const kept = keptId === memA.id ? memA : memB;
-      const removed = keptId === memA.id ? memB : memA;
-      const mergedTags = [...new Set([...kept.tags, ...removed.tags])];
-      db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
-        .run(JSON.stringify(mergedTags), keptId);
-      deleteMemory(removedId);
-      nearDuplicatesMerged++;
+      const contradictions = detectContradictions();
+      if (contradictions.length > 0) {
+        contradictionsDetected = linkContradictions(contradictions);
+      }
     } catch {
-      // Skip problematic pairs
+      // Contradiction detection may fail on empty/small DBs
     }
-  }
 
-  // Step 2: Flag stale memories for archival (>30 days, no access)
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString();
-  const staleRows = db.prepare(`
-    SELECT id FROM memories
-    WHERE status = 'active'
-      AND last_accessed < ?
-      AND access_count <= 1
-      AND pinned = 0
-  `).all(thirtyDaysAgo) as { id: number }[];
+    const totalProcessed = duplicatePairs.length + staleRows.length;
 
-  for (const row of staleRows) {
-    try {
-      db.prepare("UPDATE memories SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run(row.id);
-      archivalCandidates++;
-    } catch {
-      // Skip
-    }
-  }
-
-  // Step 3: Detect contradictions
-  try {
-    const contradictions = detectContradictions();
-    if (contradictions.length > 0) {
-      contradictionsDetected = linkContradictions(contradictions);
-    }
-  } catch {
-    // Contradiction detection may fail on empty/small DBs
-  }
-
-  const totalProcessed = duplicatePairs.length + staleRows.length;
-
-  return {
-    nearDuplicatesMerged,
-    archivalCandidates,
-    contradictionsDetected,
-    totalProcessed,
-  };
+    return {
+      nearDuplicatesMerged,
+      archivalCandidates,
+      contradictionsDetected,
+      totalProcessed,
+    };
+  });
 }
