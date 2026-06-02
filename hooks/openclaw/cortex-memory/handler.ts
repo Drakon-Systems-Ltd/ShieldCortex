@@ -33,6 +33,10 @@ const callCortex = runtime.callCortex;
 // bespoke-extractor path). The wrapper imports nothing native; persistence
 // still flows only through callCortex's mcporter shell-out.
 const loadOpenClawExtract = runtime.loadOpenClawExtract;
+// Resolves the ShieldCortex package root from the resolved server binary (no
+// DB access). Used by selfCheckAndHeal to compare the running hook against the
+// packaged source for staleness — warn-only, never re-copies from the gateway.
+const resolvePackageRoot = runtime.resolvePackageRoot;
 
 async function isOpenClawAutoMemoryEnabled() {
   const config = await loadShieldConfig();
@@ -759,6 +763,46 @@ async function selfCheckAndHeal(event) {
           } catch { /* doesn't exist — good */ }
         }
       }
+
+      // Task 6b: staleness signal. The hook is installed by file-copy, so a
+      // package update can leave THIS running copy behind the packaged source
+      // (e.g. an OpenClaw version-lag where the global package is newer than
+      // the hook last copied into ~/.openclaw). Compare our running files
+      // against the package's hooks/openclaw/cortex-memory source by content.
+      //
+      // WARN-ONLY by design — we do NOT re-copy from inside the long-lived
+      // gateway. Re-copying would overwrite the very files this process is
+      // executing from, racing any concurrently-bootstrapping agent's jiti
+      // load. The real auto-refresh happens in the npm postinstall; the
+      // user-invoked repair is `shieldcortex openclaw install` (also surfaced
+      // by `shieldcortex doctor`). No DB, no persistence — pure fs reads.
+      try {
+        const root = await resolvePackageRoot();
+        if (root) {
+          const sourceDir = path.join(root, "hooks", "openclaw", "cortex-memory");
+          const hookFiles = ["HOOK.md", "handler.ts", "runtime.mjs"];
+          let stale = false;
+          for (const file of hookFiles) {
+            const srcPath = path.join(sourceDir, file);
+            const minePath = path.join(myDir, file);
+            try {
+              const srcBuf = await fs.readFile(srcPath);
+              const mineBuf = await fs.readFile(minePath);
+              if (!srcBuf.equals(mineBuf)) { stale = true; break; }
+            } catch {
+              // Source file missing/unreadable (can't prove staleness for it)
+              // or our own file unreadable — don't flip `stale` on a read error.
+            }
+          }
+          if (stale) {
+            console.warn(
+              "[cortex-memory] Installed hook is OUT OF DATE — it differs from the " +
+              "packaged version. Run `shieldcortex openclaw install` to refresh it " +
+              "(then restart the gateway) so memory capture uses the latest logic."
+            );
+          }
+        }
+      } catch { /* staleness check is best-effort — never blocks bootstrap */ }
 
       return; // All good
     }

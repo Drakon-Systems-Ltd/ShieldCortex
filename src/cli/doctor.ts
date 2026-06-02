@@ -1434,6 +1434,54 @@ async function checkHookTimeouts(): Promise<CheckResult> {
   }
 }
 
+// ── Check: OpenClaw hook freshness (Task 6b) ─────────────
+/**
+ * The cortex-memory hook is installed by FILE COPY into
+ * `~/.openclaw/hooks/cortex-memory/` (see src/setup/openclaw.ts). A package
+ * update does NOT re-copy it automatically on every install shape — non-global
+ * (dependency) installs skip the postinstall auto-refresh, and a documented
+ * version-lag (OpenClaw 4.25.x vs a newer global) can leave the installed
+ * `handler.ts` / `runtime.mjs` behind the packaged version. A stale hook keeps
+ * running the OLD extraction logic, so memory-quality fixes never reach claws.
+ *
+ * `hookFilesStale()` is the single source of truth (byte-for-byte comparison
+ * against the packaged HOOK_SOURCE). Doctor only DETECTS + GUIDES here — it has
+ * no auto-repair mode, and re-copying files mid-doctor would be a surprising
+ * side effect. The actionable fix is `shieldcortex openclaw install`.
+ *
+ * `destDir` is injectable for tests; defaults to the standard install dest.
+ */
+export async function checkOpenClawHookFreshness(
+  destDir?: string,
+): Promise<CheckResult> {
+  const label = 'OpenClaw hook';
+  try {
+    const { defaultHookDestDir, hookFilesStale } = await import('../setup/openclaw.js');
+    const dest = destDir ?? defaultHookDestDir();
+
+    // Only meaningful when a hook copy actually exists on disk. A missing dest
+    // dir means the integration simply isn't installed — that's the domain of
+    // the OpenClaw residue / dup-installs checks, not a staleness warning.
+    if (!fs.existsSync(dest)) {
+      return { label, status: 'info', message: 'skipped (cortex-memory hook not installed)' };
+    }
+
+    if (hookFilesStale(dest)) {
+      return {
+        label,
+        status: 'warn',
+        message: 'cortex-memory hook is out of date (installed copy differs from packaged version)',
+        fix: 'Run `shieldcortex openclaw install` to refresh the hook',
+      };
+    }
+
+    return { label, status: 'pass', message: 'cortex-memory hook up to date' };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'info', message: `check skipped — ${msg}` };
+  }
+}
+
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
   const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
@@ -1492,6 +1540,7 @@ export async function runDoctor(): Promise<void> {
     checkDiskUsage,
     checkLockFile,
     checkOpenClawResidue,
+    checkOpenClawHookFreshness,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkDefenceCanary,

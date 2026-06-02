@@ -223,6 +223,61 @@ function hasRequiredHookFiles(dir: string): boolean {
   return HOOK_FILES.every(file => fs.existsSync(path.join(dir, file)));
 }
 
+/**
+ * The standard installed-hook destination: `~/.openclaw/hooks/cortex-memory`.
+ * Resolves the real user's home (sudo-aware) so doctor/postinstall agree with
+ * the install path.
+ */
+export function defaultHookDestDir(): string {
+  return path.join(resolveUserHome(), '.openclaw', 'hooks', HOOK_NAME);
+}
+
+/**
+ * Single source of truth for "the installed hook copy is out of date".
+ *
+ * The cortex-memory hook is installed by FILE COPY (see `copyHookFiles`) into
+ * `~/.openclaw/hooks/cortex-memory/`. A package update does NOT automatically
+ * re-copy it, so the installed `handler.ts` / `runtime.mjs` can drift behind
+ * the package's `HOOK_SOURCE` version. This compares every HOOK_FILE in
+ * `destDir` against the packaged source by content.
+ *
+ * Pure + synchronous (fs reads only, no writes, no side effects). Returns
+ * `true` if any required file is missing from `destDir` OR differs byte-for-byte
+ * from the packaged source. Returns `false` only when every file is present and
+ * identical. On any unexpected read error it returns `true` (fail toward
+ * "refresh needed") so a half-readable install is never reported as current.
+ *
+ * If the package's own `HOOK_SOURCE` is missing (corrupt/partial package), the
+ * comparison is impossible, so this returns `false` — we can't claim the
+ * install is stale relative to a source we can't read.
+ */
+export function hookFilesStale(destDir: string = defaultHookDestDir()): boolean {
+  // No installed copy at all → definitely needs (re)install.
+  if (!fs.existsSync(destDir)) return true;
+  // No packaged source to compare against → can't prove staleness.
+  if (!fs.existsSync(HOOK_SOURCE)) return false;
+
+  for (const file of HOOK_FILES) {
+    const srcPath = path.join(HOOK_SOURCE, file);
+    const destPath = path.join(destDir, file);
+    try {
+      if (!fs.existsSync(srcPath)) {
+        // Packaged source is missing this file — can't compare it; skip.
+        continue;
+      }
+      if (!fs.existsSync(destPath)) return true; // installed copy missing a file
+      const srcBuf = fs.readFileSync(srcPath);
+      const destBuf = fs.readFileSync(destPath);
+      if (!srcBuf.equals(destBuf)) return true; // content differs → stale
+    } catch {
+      // Unreadable file on either side — treat as stale so the user re-copies.
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function copyHookFiles(sourceDir: string, destDir: string): void {
   fs.mkdirSync(destDir, { recursive: true });
 
