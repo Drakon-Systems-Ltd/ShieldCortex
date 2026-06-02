@@ -98,7 +98,22 @@ function rotate() {
  *     source?: 'fts' | 'category-boost',
  *     effectiveSalience?: number,
  *     injected?: boolean,
- *     dropReason?: string | null,
+ *     // Why a candidate was not injected (null = injected). Recognised values:
+ *     //   'dedupe'                — content hash seen in a recent turn
+ *     //   'outside_top_n'         — ranked below the MAX_RESULTS cut
+ *     //   'not_injected'          — early-exit before the dedupe filter ran
+ *     //   'below_term_coverage'   — P4 gate: matched too few distinct query terms
+ *     //   'below_relevance_floor' — P4 gate: BM25 rank below the relative floor
+ *     // The two P4 reasons appear in SHADOW mode too (the row is still
+ *     // injected then) so `shieldcortex inspect last-recall` can show
+ *     // "considered but below floor" for threshold tuning before enforcement.
+ *     dropReason?:
+ *       | 'dedupe'
+ *       | 'outside_top_n'
+ *       | 'not_injected'
+ *       | 'below_term_coverage'
+ *       | 'below_relevance_floor'
+ *       | null,
  *   }>,
  *   injectedCount?: number,
  *   finalContextChars?: number,

@@ -22,6 +22,7 @@ import { truncatePreservingWords } from './lib/truncate.mjs';
 import { compareRecallResults } from './lib/recall-rank.mjs';
 import { computeEffectiveSalience } from './lib/salience.mjs';
 import { writeRecallLog } from './lib/recall-log.mjs';
+import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
 
 // ==================== CONFIG ====================
 
@@ -36,6 +37,37 @@ const MIN_SALIENCE = 0.2;
 // last DEDUP_RING_SIZE turns of THIS session. Per-session, not global.
 const DEDUP_RING_SIZE = 5;
 const DEDUP_TTL_MS = 60 * 60 * 1000; // forget session rings after 1h idle
+
+// ── P4 recall relevance gate (B9) ────────────────────────────────────────
+// Term-coverage is the PRIMARY gate; relative BM25 floor is secondary. SHADOW
+// MODE is the default: we compute the gate and LOG what it would drop, but
+// inject the original set unchanged until SHIELDCORTEX_RECALL_ENFORCE=1. This
+// lets us tune thresholds from real fleet recall-logs before trading recall
+// noise for amnesia. All thresholds are env-tunable (pickNumber pattern,
+// mirrors scripts/lib/salience.mjs).
+
+// Resolve a numeric tuning constant from a SHIELDCORTEX_* env var, falling back
+// to the documented default. Returns the default for a NaN/empty env var so a
+// typo can't silently zero out a threshold. (Same contract as salience.mjs's
+// pickNumber, minus the explicit-override arg — the hook has no overrides.)
+function pickNumber(envName, fallback) {
+  const fromEnv = Number(process.env[envName]);
+  if (Number.isFinite(fromEnv) && process.env[envName] !== undefined && process.env[envName] !== '') {
+    return fromEnv;
+  }
+  return fallback;
+}
+
+// Truthy env flag: "1", "true", "yes", "on" (case-insensitive). Unset = false.
+function pickBool(envName) {
+  const v = (process.env[envName] || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+const RECALL_ENFORCE = pickBool('SHIELDCORTEX_RECALL_ENFORCE');
+const RECALL_MIN_TERMS = pickNumber('SHIELDCORTEX_RECALL_MIN_TERMS', 2);
+const RECALL_REL_FACTOR = pickNumber('SHIELDCORTEX_RECALL_REL_FACTOR', 0.35);
+const RECALL_MAX_BM25 = pickNumber('SHIELDCORTEX_RECALL_MAX_BM25', -0.5);
 
 function loadConfig() {
   try {
@@ -62,14 +94,14 @@ function getDbPath() {
 
 // ==================== FTS5 QUERY ====================
 
+// Build the FTS5 MATCH expression from the same distinct terms the relevance
+// gate scores against. extractQueryTerms (recall-relevance.mjs) is the single
+// source of truth for "which words count" — strip FTS5 operators, drop boolean
+// keywords, keep words longer than two chars, cap at six. Keeping both in sync
+// is load-bearing: the gate must score the SAME terms the FTS query OR-joined.
 function escapeFts5(query) {
-  return query
-    .replace(/[*(){}[\]<>~^"]/g, ' ')
-    .replace(/\b(AND|OR|NOT|NEAR)\b/gi, '')
-    .split(/\s+/)
-    .filter(w => w.length > 2)
-    .map(w => `"${w}"`)
-    .slice(0, 6)
+  return extractQueryTerms(query)
+    .map((w) => `"${w}"`)
     .join(' OR ');
 }
 
@@ -78,6 +110,7 @@ function escapeFts5(query) {
 function recallRelevant(db, project, prompt) {
   const results = [];
   const seen = new Set();
+  let ftsHits = 0;
 
   // 1. FTS5 text search
   const ftsQuery = escapeFts5(prompt);
@@ -110,6 +143,7 @@ function recallRelevant(db, project, prompt) {
           // it doesn't collide with any future SELECT column.
           row._source = 'fts';
           results.push(row);
+          ftsHits += 1;
         }
       }
     } catch {
@@ -124,7 +158,13 @@ function recallRelevant(db, project, prompt) {
   else if (/\b(deploy|release|publish|ship)\b/.test(promptLower)) categoryBoost = 'architecture';
   else if (/\b(prefer|style|convention|format)\b/.test(promptLower)) categoryBoost = 'preference';
 
-  if (categoryBoost && results.length < MAX_RESULTS) {
+  // P4 (B9 item 6): only fire the category-boost fallback when the FTS path
+  // found at least one on-topic hit. The fallback has ZERO query relevance —
+  // it matches purely on category + salience — so firing it whenever the
+  // result set is short was a back-door for off-topic high-salience rows on a
+  // prompt that didn't match ANY memory. Requiring an FTS hit means the prompt
+  // is genuinely on-topic for this project before we top up from its category.
+  if (categoryBoost && ftsHits > 0 && results.length < MAX_RESULTS) {
     try {
       // v4.25.0: project the salience-formula inputs (same as the FTS
       // SELECT above) so compareRecallResults can compute effective
@@ -160,7 +200,16 @@ function recallRelevant(db, project, prompt) {
   // v4.25.1: return the full sorted set alongside the sliced top-N so the
   // recall ring buffer can log which candidates were considered but didn't
   // make the cut. The top-N is the existing public contract.
-  return { topN: results.slice(0, MAX_RESULTS), fullSet: results };
+  //
+  // P4: also surface the distinct query terms (the same set escapeFts5 OR-
+  // joined) and the FTS hit count so the caller can run the relevance gate
+  // and the dedupe step against a consistent term list.
+  return {
+    topN: results.slice(0, MAX_RESULTS),
+    fullSet: results,
+    queryTerms: extractQueryTerms(prompt),
+    ftsHits,
+  };
 }
 
 // ==================== DEDUPE STATE ====================
@@ -213,13 +262,26 @@ function hashContent(s) {
 
 const RECALL_LOG_PROMPT_CAP = 200;
 
-function buildLogCandidates({ fullSet, topN, injected, dedupHashes }) {
+function buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDrops }) {
   const injectedIds = new Set(injected.map((m) => m.id));
   const topNIds = new Set(topN.map((m) => m.id));
+  // P4: id → 'below_term_coverage' | 'below_relevance_floor'. Populated even
+  // in shadow mode (where these rows ARE still injected) so the recall-log
+  // surfaces "considered but below floor" to `shieldcortex inspect last-recall`
+  // for threshold tuning before enforcement. Map is empty when the gate found
+  // nothing to drop.
+  const relDrops = relevanceDrops instanceof Map ? relevanceDrops : new Map();
   return fullSet.map((row) => {
     const wasInjected = injectedIds.has(row.id);
     let dropReason = null;
-    if (!wasInjected) {
+    // The relevance-gate reason takes precedence for a row it flagged: it's the
+    // most specific "why this is noise" signal, and in shadow mode it's the
+    // ONLY drop signal (the row is still injected, so the dedupe/top-N branches
+    // below wouldn't fire). When enforcing, a gate-dropped row is also not
+    // injected, so this is still the correct reason.
+    if (relDrops.has(row.id)) {
+      dropReason = relDrops.get(row.id);
+    } else if (!wasInjected) {
       if (topNIds.has(row.id) && dedupHashes.has(hashContent(row.content))) {
         dropReason = 'dedupe';
       } else if (!topNIds.has(row.id)) {
@@ -246,7 +308,7 @@ function buildLogCandidates({ fullSet, topN, injected, dedupHashes }) {
   });
 }
 
-function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context }) {
+function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context, relevanceDrops }) {
   try {
     const promptCapped = prompt.length > RECALL_LOG_PROMPT_CAP
       ? prompt.slice(0, RECALL_LOG_PROMPT_CAP) + '…'
@@ -257,7 +319,7 @@ function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, ded
       sessionId: sessionId ?? null,
       project: project ?? null,
       minSalience: MIN_SALIENCE,
-      candidates: buildLogCandidates({ fullSet, topN, injected, dedupHashes }),
+      candidates: buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDrops }),
       injectedCount: injected.length,
       finalContextChars: context ? context.length : 0,
     });
@@ -362,14 +424,42 @@ process.stdin.on('end', async () => {
     }
 
     const db = new Database(dbPath, { readonly: true, timeout: 2000 });
-    const { topN, fullSet } = recallRelevant(db, project, prompt);
+    const { topN, fullSet, queryTerms } = recallRelevant(db, project, prompt);
     db.close();
-    let memories = topN;
+
+    // ── P4 recall relevance gate (B9) ───────────────────────────────────
+    // Run the term-coverage + relative-BM25 gate over the would-be-injected
+    // top-N. SHADOW MODE (default): record the would-drops in the recall log
+    // but inject the ORIGINAL top-N unchanged. ENFORCE mode
+    // (SHIELDCORTEX_RECALL_ENFORCE=1): inject only the survivors. Either way
+    // the dropped rows STAY in fullSet so `inspect last-recall` shows them as
+    // "considered but below floor".
+    const { kept, dropped } = filterByRelevance(topN, {
+      queryTerms,
+      minTermMatches: RECALL_MIN_TERMS,
+      relFactor: RECALL_REL_FACTOR,
+      maxBm25: RECALL_MAX_BM25,
+    });
+    const relevanceDrops = new Map(dropped.map((d) => [d.row.id, d.reason]));
+    if (dropped.length > 0) {
+      // Visible in the hook's stderr diagnostics; the structured detail lands
+      // in the recall log via relevanceDrops.
+      console.error(
+        `[shieldcortex] Recall relevance gate (${RECALL_ENFORCE ? 'ENFORCE' : 'SHADOW'}): ` +
+          `${dropped.length}/${topN.length} would-drop ` +
+          `(${dropped.map((d) => `#${d.row.id}:${d.reason}`).join(', ')})`,
+      );
+    }
+    // SHADOW = inject original top-N; ENFORCE = inject only survivors.
+    let memories = RECALL_ENFORCE ? kept : topN;
 
     if (memories.length === 0) {
       // v4.25.1: still log no-candidate runs ONLY when the FTS step actually
       // ran (fullSet has something filtered out before the slice). Pure
       // empties (no FTS match at all) skip the log — saves disk + signal.
+      // P4: in ENFORCE mode the gate can empty the set (the "weather query →
+      // inject nothing" case) even though fullSet has rows — those are logged
+      // with their relevance dropReason. The empty-path logger still fires.
       if (fullSet.length > 0) {
         logRecallRun({
           prompt,
@@ -380,6 +470,7 @@ process.stdin.on('end', async () => {
           injected: [],
           dedupHashes: new Set(),
           context: null,
+          relevanceDrops,
         });
       }
       process.exit(0);
@@ -409,6 +500,7 @@ process.stdin.on('end', async () => {
           injected: [],
           dedupHashes,
           context: null,
+          relevanceDrops,
         });
         process.exit(0);
       }
@@ -455,6 +547,7 @@ process.stdin.on('end', async () => {
       injected: memories,
       dedupHashes,
       context,
+      relevanceDrops,
     });
 
     console.log(JSON.stringify(output));
