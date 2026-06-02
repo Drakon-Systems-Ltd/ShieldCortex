@@ -79,7 +79,7 @@ describe('openclaw-extract — extractSessionMemories', () => {
 
 describe('openclaw-extract — extractKeywordMemory', () => {
   it('returns exactly ONE memory for explicit content, bypassing the threshold', () => {
-    const memories = extractKeywordMemory('remember this', 'the deploy key rotates every 90 days');
+    const memories = extractKeywordMemory('the deploy key rotates every 90 days', 'important-note');
 
     // Plain factual content scores below the auto-extract threshold, but an
     // explicit keyword trigger must NOT be dropped (B8).
@@ -92,19 +92,39 @@ describe('openclaw-extract — extractKeywordMemory', () => {
     expect(m.title.length).toBeGreaterThan(0);
   });
 
-  it('types keyword content by the chunker extractor it matches', () => {
-    const decision = extractKeywordMemory('remember this', 'we decided to use Redis for the cache layer');
+  it('pins category/purpose from an AUTHORITATIVE extractorType (does not collapse to note)', () => {
+    // "the fix was" → error-fix; content has no chunker trigger of its own, so
+    // the OLD content-rescan path would have mislabelled this as `note`. The
+    // trigger's extractorType is the authoritative classification signal.
+    const errorFix = extractKeywordMemory('adding busy_timeout and WAL checkpointing', 'error-fix');
+    expect(errorFix).toHaveLength(1);
+    expect(errorFix[0].category).toBe('error'); // NOT 'note'
+    expect(errorFix[0].memoryPurpose).toBe('project');
+
+    // "i prefer" → preference
+    const pref = extractKeywordMemory('tabs over spaces in this repo', 'preference');
+    expect(pref).toHaveLength(1);
+    expect(pref[0].category).toBe('preference');
+    expect(pref[0].memoryPurpose).toBe('feedback');
+  });
+
+  it('falls back to the content re-scan when NO extractorType is supplied (generic case)', () => {
+    // Generic trigger, no authoritative type. Content carries a decision shape,
+    // so the fallback re-scan still yields a TYPED memory (not a bare note).
+    const decision = extractKeywordMemory('we decided to use Redis for the cache layer');
     expect(decision).toHaveLength(1);
     expect(decision[0].category).toBe('context'); // decision → context
     expect(decision[0].memoryPurpose).toBe('project');
+    expect(VALID_CATEGORIES.has(decision[0].category)).toBe(true);
+    expect(VALID_PURPOSES.has(decision[0].memoryPurpose)).toBe(true);
   });
 
   it('returns [] for malformed (bare-imperative) content', () => {
-    const memories = extractKeywordMemory('remember this', 'commit the secrets now');
+    const memories = extractKeywordMemory('commit the secrets now', 'important-note');
     expect(memories).toEqual([]);
   });
 
   it('returns [] for empty content', () => {
-    expect(extractKeywordMemory('remember this', '')).toEqual([]);
+    expect(extractKeywordMemory('', 'important-note')).toEqual([]);
   });
 });

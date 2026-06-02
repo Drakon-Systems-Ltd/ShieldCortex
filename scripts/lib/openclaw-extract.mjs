@@ -82,25 +82,39 @@ function deriveKeywordExtractorType(content) {
  * threshold. It still derives category + memory_purpose from the chunker's
  * deterministic taxonomy — no new classification logic.
  *
- * @param {string} _phrase — the trigger phrase that matched (provenance only)
+ * Classification is driven by the AUTHORITATIVE extractorType passed in from
+ * the matched trigger (the trigger phrase carries the intent signal, e.g.
+ * "the fix was" → error-fix). When extractorType is absent or unknown we fall
+ * back to re-scanning the content with the chunker (the truly-generic case).
+ * We never silently collapse a typed trigger to a generic `note`.
+ *
  * @param {string} content — the captured content after the trigger
+ * @param {string} [extractorType] — authoritative chunker extractor type from
+ *   the matched trigger (one of EXTRACTOR_TO_CATEGORY's keys). Optional.
  * @returns {Array<{ title: string, content: string, category: string, memoryPurpose: string }>}
  *   exactly ONE memory, or [] if the rejection corpus flags it as malformed.
  */
-export function extractKeywordMemory(_phrase, content) {
+export function extractKeywordMemory(content, extractorType) {
   if (!content || typeof content !== 'string') return [];
   const trimmed = content.trim();
   if (trimmed.length < 5) return [];
 
-  const candidate = { title: '', content: trimmed.slice(0, 500), extractorType: KEYWORD_FALLBACK_EXTRACTOR };
+  // The trigger's extractorType is authoritative when supplied & recognised;
+  // otherwise re-scan the content (generic triggers like "remember this" whose
+  // text may itself carry a decision/fix/learning shape).
+  const resolvedType =
+    extractorType && extractorType in EXTRACTOR_TO_CATEGORY
+      ? extractorType
+      : deriveKeywordExtractorType(trimmed);
+
+  const candidate = { title: '', content: trimmed.slice(0, 500), extractorType: resolvedType };
 
   // Rejection corpus only — drop true malformations (bare imperatives,
   // negation-scope drops, email-body bleed, etc.). NOT the salience threshold.
   if (shouldRejectCandidate(candidate, trimmed).rejected) return [];
 
-  const extractorType = deriveKeywordExtractorType(trimmed);
-  const category = EXTRACTOR_TO_CATEGORY[extractorType] ?? 'note';
-  const memoryPurpose = EXTRACTOR_TO_PURPOSE[extractorType] ?? 'project';
+  const category = EXTRACTOR_TO_CATEGORY[resolvedType] ?? 'note';
+  const memoryPurpose = EXTRACTOR_TO_PURPOSE[resolvedType] ?? 'project';
 
   const title = trimmed.slice(0, 80).replace(/["\n]/g, ' ').trim();
 

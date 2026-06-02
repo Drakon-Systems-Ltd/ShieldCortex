@@ -14,6 +14,14 @@ import { createOpenClawRuntime } from "./runtime.mjs";
 
 // ==================== SERVER COMMAND RESOLUTION ====================
 
+// Transcript line format shared by the producer (getRecentMessages builds
+// `${role}: ${text}`) and the consumer (assistantConversationText filters on
+// this prefix). Centralised so a format change can't silently break the filter.
+const ASSISTANT_PREFIX = "assistant:";
+
+// Process-global by design: these one-shot notice flags and the load-null
+// cache live for the lifetime of the long-lived gateway process. A gateway
+// restart is the intended upgrade boundary that resets them.
 let _autoMemoryNoticeShown = false;
 let _noExtractNoticeShown = false;
 const runtime = createOpenClawRuntime({ logPrefix: "[cortex-memory]" });
@@ -272,15 +280,12 @@ async function scanInstalledHooks() {
  * lines. getRecentMessages returns "role: content" strings for both user and
  * assistant turns; for the first ship we extract from assistant text only
  * (lowest-risk: don't mine user-typed prose). Returns "" if nothing qualifies.
- * @param {string[]} messages
- * @returns {string}
  */
-function assistantConversationText(messages) {
-  const PREFIX = "assistant:";
+function assistantConversationText(messages: string[]): string {
   const parts: string[] = [];
   for (const msg of messages) {
-    if (typeof msg !== "string" || !msg.startsWith(PREFIX)) continue;
-    const text = msg.slice(PREFIX.length).trim();
+    if (typeof msg !== "string" || !msg.startsWith(ASSISTANT_PREFIX)) continue;
+    const text = msg.slice(ASSISTANT_PREFIX.length).trim();
     if (text.length > 0) parts.push(text);
   }
   return parts.join("\n");
@@ -310,7 +315,11 @@ async function getRecentMessages(sessionFilePath) {
               ? msg.content.find((c) => c.type === "text")?.text
               : msg.content;
             if (text && !text.startsWith("/")) {
-              messages.push(`${msg.role}: ${text}`);
+              // Producer side of the transcript line format. The assistant
+              // prefix is tied to ASSISTANT_PREFIX so the consumer
+              // (assistantConversationText) filter can't silently drift.
+              const prefix = msg.role === "assistant" ? ASSISTANT_PREFIX : `${msg.role}:`;
+              messages.push(`${prefix} ${text}`);
             }
           }
         }
@@ -327,9 +336,16 @@ async function getRecentMessages(sessionFilePath) {
 // ==================== EVENT HANDLERS ====================
 
 /**
- * Handle command:new — extract memories from ending session
+ * Shared session-extraction routine for both /new (onSessionEnd) and
+ * /stop|/clear|/exit (onSessionStop). They were ~95% identical; the only
+ * differences are which sessionEntry to read, the persisted tags +
+ * source-identifier, and the user-facing "done" message. Behaviour is
+ * otherwise identical — gateway-safe persistence via callCortex only.
+ *
+ * @param {object} event
+ * @param {{ sessionEntry: object, tags: string, sourceIdentifier: string, doneMessage: (n: number) => string }} opts
  */
-async function onSessionEnd(event) {
+async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifier, doneMessage }) {
   if (!(await isOpenClawAutoMemoryEnabled())) {
     if (!_autoMemoryNoticeShown) {
       console.log("[cortex-memory] Auto memory extraction disabled (set openclawAutoMemory=true to enable)");
@@ -339,7 +355,6 @@ async function onSessionEnd(event) {
   }
 
   const context = event.context || {};
-  const sessionEntry = context.previousSessionEntry || context.sessionEntry || {};
   const sessionFile = sessionEntry.sessionFile;
 
   if (!sessionFile) {
@@ -392,9 +407,9 @@ async function onSessionEnd(event) {
       project: "openclaw",
       scope: "global",
       importance: "normal",
-      tags: "auto-extracted,openclaw-hook",
+      tags,
       sourceType: "hook",
-      sourceIdentifier: "openclaw-session-end",
+      sourceIdentifier,
       workspaceDir: context.workspaceDir || "",
     });
     if (result) {
@@ -408,8 +423,22 @@ async function onSessionEnd(event) {
 
   // Provide visible feedback to user
   if (saved > 0 && event.messages) {
-    event.messages.push(`🧠 ShieldCortex: Saved ${saved} memor${saved === 1 ? 'y' : 'ies'} from this session`);
+    event.messages.push(doneMessage(saved));
   }
+}
+
+/**
+ * Handle command:new — extract memories from ending session
+ */
+async function onSessionEnd(event) {
+  const context = event.context || {};
+  await runSessionExtraction(event, {
+    sessionEntry: context.previousSessionEntry || context.sessionEntry || {},
+    tags: "auto-extracted,openclaw-hook",
+    sourceIdentifier: "openclaw-session-end",
+    doneMessage: (n) =>
+      `🧠 ShieldCortex: Saved ${n} memor${n === 1 ? "y" : "ies"} from this session`,
+  });
 }
 
 /**
@@ -417,86 +446,14 @@ async function onSessionEnd(event) {
  * This fires when user explicitly calls /stop
  */
 async function onSessionStop(event) {
-  if (!(await isOpenClawAutoMemoryEnabled())) {
-    if (!_autoMemoryNoticeShown) {
-      console.log("[cortex-memory] Auto memory extraction disabled (set openclawAutoMemory=true to enable)");
-      _autoMemoryNoticeShown = true;
-    }
-    return;
-  }
-
   const context = event.context || {};
-  const sessionEntry = context.sessionEntry || {};
-  const sessionFile = sessionEntry.sessionFile;
-
-  if (!sessionFile) {
-    console.log("[cortex-memory] No session file found for stop, skipping extraction");
-    return;
-  }
-
-  const messages = await getRecentMessages(sessionFile);
-  if (messages.length === 0) {
-    console.log("[cortex-memory] No messages to extract on stop");
-    return;
-  }
-
-  const conversationText = assistantConversationText(messages);
-  if (conversationText.length === 0) {
-    console.log("[cortex-memory] No assistant content to extract on stop");
-    return;
-  }
-
-  const extract = await loadOpenClawExtract();
-  if (!extract) {
-    if (!_noExtractNoticeShown) {
-      console.log("[cortex-memory] No resolvable local install — skipping auto-extraction (no fallback)");
-      _noExtractNoticeShown = true;
-    }
-    return;
-  }
-
-  const memories = extract.extractSessionMemories(conversationText);
-  if (memories.length === 0) {
-    console.log("[cortex-memory] No high-salience content found on stop");
-    return;
-  }
-
-  const noveltyGate = await getSharedNoveltyGate();
-  let saved = 0;
-  let skipped = 0;
-  for (const mem of memories) {
-    const novelty = noveltyGate.inspect(mem.content);
-    if (!novelty.allow) {
-      skipped++;
-      continue;
-    }
-
-    const result = await callCortex("remember", {
-      title: mem.title,
-      content: mem.content,
-      category: mem.category,
-      memoryPurpose: mem.memoryPurpose,
-      project: "openclaw",
-      scope: "global",
-      importance: "normal",
-      tags: "auto-extracted,openclaw-hook,session-stop",
-      sourceType: "hook",
-      sourceIdentifier: "openclaw-session-stop",
-      workspaceDir: context.workspaceDir || "",
-    });
-    if (result) {
-      saved++;
-      noveltyGate.remember(mem, novelty);
-    }
-  }
-  await noveltyGate.flush();
-
-  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories on session stop (${skipped} skipped as duplicates)`);
-  
-  // Provide visible feedback to user
-  if (saved > 0 && event.messages) {
-    event.messages.push(`🧠 ShieldCortex: Saved ${saved} memor${saved === 1 ? 'y' : 'ies'} before session end`);
-  }
+  await runSessionExtraction(event, {
+    sessionEntry: context.sessionEntry || {},
+    tags: "auto-extracted,openclaw-hook,session-stop",
+    sourceIdentifier: "openclaw-session-stop",
+    doneMessage: (n) =>
+      `🧠 ShieldCortex: Saved ${n} memor${n === 1 ? "y" : "ies"} before session end`,
+  });
 }
 
 /**
@@ -536,46 +493,53 @@ async function onBootstrap(event) {
 
 /**
  * Keyword trigger phrases. Order matters: more specific triggers should come
- * first (the first match wins). Category + memory_purpose are now derived by
- * the chunker (via extractKeywordMemory), and salience is uniform across all
- * triggers (importance:"normal" → 0.5, capped well under the wall). The old
+ * first (the first match wins). Each entry carries the AUTHORITATIVE chunker
+ * extractorType for its phrase — the trigger phrase is the classification
+ * signal ("the fix was" → error-fix, "i prefer" → preference), so we pass it
+ * straight into extractKeywordMemory rather than re-guessing from content
+ * (which collapsed everything to `note`). Salience stays uniform across all
+ * triggers (importance:"normal" → 0.5, capped well under the wall); the old
  * per-trigger category/importance fields are gone — they minted high/critical
  * salience and mislabelled categories.
+ *
+ * extractorType must be one of the chunker's keys (EXTRACTOR_TO_CATEGORY /
+ * EXTRACTOR_TO_PURPOSE in extract-memorable-segments.mjs):
+ *   decision | error-fix | learning | architecture | preference | important-note
  */
 const KEYWORD_TRIGGERS = [
   // Learning triggers
-  { phrase: "lesson learned" },
-  { phrase: "i learned" },
-  { phrase: "til:" },
-  { phrase: "today i learned" },
+  { phrase: "lesson learned", extractorType: "learning" },
+  { phrase: "i learned", extractorType: "learning" },
+  { phrase: "til:", extractorType: "learning" },
+  { phrase: "today i learned", extractorType: "learning" },
 
   // Error/prevention triggers
-  { phrase: "never again" },
-  { phrase: "root cause was" },
-  { phrase: "the fix was" },
+  { phrase: "never again", extractorType: "error-fix" },
+  { phrase: "root cause was", extractorType: "error-fix" },
+  { phrase: "the fix was", extractorType: "error-fix" },
 
   // Preference triggers
-  { phrase: "always do" },
-  { phrase: "never do" },
-  { phrase: "i prefer" },
-  { phrase: "we should always" },
+  { phrase: "always do", extractorType: "preference" },
+  { phrase: "never do", extractorType: "preference" },
+  { phrase: "i prefer", extractorType: "preference" },
+  { phrase: "we should always", extractorType: "preference" },
 
   // Architecture/decision triggers
-  { phrase: "we decided" },
-  { phrase: "decision made" },
-  { phrase: "going with" },
+  { phrase: "we decided", extractorType: "decision" },
+  { phrase: "decision made", extractorType: "decision" },
+  { phrase: "going with", extractorType: "decision" },
 
-  // Explicit memory triggers
-  { phrase: "remember this" },
-  { phrase: "don't forget" },
-  { phrase: "dont forget" },
-  { phrase: "this is important" },
-  { phrase: "make a note" },
-  { phrase: "for the record" },
-  { phrase: "note to self" },
-  { phrase: "important:" },
-  { phrase: "key point:" },
-  { phrase: "crucial:" },
+  // Explicit memory triggers (generic — important-note)
+  { phrase: "remember this", extractorType: "important-note" },
+  { phrase: "don't forget", extractorType: "important-note" },
+  { phrase: "dont forget", extractorType: "important-note" },
+  { phrase: "this is important", extractorType: "important-note" },
+  { phrase: "make a note", extractorType: "important-note" },
+  { phrase: "for the record", extractorType: "important-note" },
+  { phrase: "note to self", extractorType: "important-note" },
+  { phrase: "important:", extractorType: "important-note" },
+  { phrase: "key point:", extractorType: "important-note" },
+  { phrase: "crucial:", extractorType: "important-note" },
 ];
 
 /**
@@ -625,7 +589,10 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
     return false;
   }
 
-  const candidates = extract.extractKeywordMemory(matchedTrigger.phrase, content);
+  // The trigger phrase carries the authoritative classification — pass its
+  // extractorType so the wrapper pins category/purpose instead of re-guessing
+  // from content (which collapsed typed triggers to `note`).
+  const candidates = extract.extractKeywordMemory(content, matchedTrigger.extractorType);
   if (candidates.length === 0) {
     console.log(`[cortex-memory] Keyword trigger skipped (rejected as malformed): "${matchedTrigger.phrase}"`);
     return false;
@@ -637,6 +604,11 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
   const novelty = noveltyGate.inspect(mem.content);
   if (!novelty.allow) {
     console.log(`[cortex-memory] Keyword trigger skipped (duplicate): "${mem.title}"`);
+    // M2: an EXPLICIT "remember this" must never be silently dropped — make the
+    // dedup decision visible even though we skip the duplicate store.
+    if (event.messages) {
+      event.messages.push(`🧠 Already remembered.`);
+    }
     return false;
   }
 

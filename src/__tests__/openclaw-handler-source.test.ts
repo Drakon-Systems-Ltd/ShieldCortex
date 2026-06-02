@@ -56,4 +56,37 @@ describe('openclaw cortex-memory handler — source invariants', () => {
     expect(handlerSource).not.toMatch(/function\s+extractMemories\b/);
     expect(handlerSource).not.toMatch(/const\s+PATTERNS\b/);
   });
+
+  it('every KEYWORD_TRIGGERS entry carries an extractorType (authoritative classification)', () => {
+    const block = handlerSource.match(/const KEYWORD_TRIGGERS = \[([\s\S]*?)\];/);
+    expect(block).not.toBeNull();
+    const body = block![1];
+
+    // Count phrase declarations and extractorType declarations — they must be 1:1.
+    const phraseCount = (body.match(/phrase:/g) || []).length;
+    const extractorTypeCount = (body.match(/extractorType:/g) || []).length;
+    expect(phraseCount).toBeGreaterThan(0);
+    expect(extractorTypeCount).toBe(phraseCount);
+
+    // Each extractorType value must be one of the chunker's valid keys.
+    const VALID_EXTRACTOR_TYPES = [
+      'decision',
+      'error-fix',
+      'learning',
+      'architecture',
+      'preference',
+      'important-note',
+    ];
+    const usedTypes = [...body.matchAll(/extractorType:\s*["']([^"']+)["']/g)].map((m) => m[1]);
+    expect(usedTypes).toHaveLength(phraseCount);
+    for (const t of usedTypes) {
+      expect(VALID_EXTRACTOR_TYPES).toContain(t);
+    }
+  });
+
+  it('passes the trigger extractorType into extractKeywordMemory (not re-guessed from content)', () => {
+    expect(handlerSource).toMatch(
+      /extractKeywordMemory\(\s*content\s*,\s*matchedTrigger\.extractorType\s*\)/
+    );
+  });
 });
