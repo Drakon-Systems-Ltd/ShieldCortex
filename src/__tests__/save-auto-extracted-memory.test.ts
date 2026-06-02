@@ -64,8 +64,18 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
   });
 
   it('generates a unique UUID per insert (no collision on bulk auto-extract)', async () => {
-    for (let i = 0; i < 5; i++) {
-      await saveAutoExtractedMemory(db, makeMemory({ title: `Memory ${i}` }), 'p');
+    // Five genuinely distinct findings (distinct titles AND content) so the
+    // T8 near-dup gate doesn't fold them — this test asserts UUID uniqueness
+    // across a bulk extract, not dedup behaviour.
+    const findings = [
+      { title: 'Auth tokens are single-use', content: 'The verify endpoint burns the magic-link token on first use.' },
+      { title: 'WAL checkpoint cadence', content: 'SQLite auto-checkpoints the write-ahead log every hundred pages.' },
+      { title: 'Dashboard polls every thirty seconds', content: 'WebSocket falls back to polling when the socket drops.' },
+      { title: 'Drizzle chosen for the schema', content: 'Comparing Prisma and Kysely, Drizzle won on type ergonomics.' },
+      { title: 'British spelling throughout', content: 'Defence, colour, analyse — the product copy stays British.' },
+    ];
+    for (const f of findings) {
+      await saveAutoExtractedMemory(db, makeMemory(f), 'p');
     }
     const uuids = db.prepare('SELECT uuid FROM memories').all() as Array<{ uuid: string }>;
     expect(uuids).toHaveLength(5);

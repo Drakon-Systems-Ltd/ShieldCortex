@@ -1,6 +1,32 @@
 import { randomUUID } from 'crypto';
 import { dirname, resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { isNearDuplicate } from './dedup.mjs';
+
+// Env-tunable dedup thresholds (pickNumber/env pattern — mirrors
+// scripts/prompt-recall-hook.mjs). A typo'd or empty env var falls back to the
+// documented default rather than silently zeroing the gate.
+function pickNumber(envName, fallback) {
+  const fromEnv = Number(process.env[envName]);
+  if (Number.isFinite(fromEnv) && process.env[envName] !== undefined && process.env[envName] !== '') {
+    return fromEnv;
+  }
+  return fallback;
+}
+
+// Title-Jaccard PRE-GATE: only pairs whose titles already overlap this much get
+// a content comparison (bounds cost + avoids merging unrelated notes).
+const DEDUP_TITLE_JACCARD = pickNumber('SHIELDCORTEX_DEDUP_TITLE_JACCARD', 0.6);
+// Combined (content*0.6 + title*0.4) score at/above which the incoming write is
+// dropped as a near-duplicate.
+//
+// DELIBERATE: this write-skip threshold (0.5) is STRICTER than
+// consolidate.ts's merge threshold (0.25). Skipping silently DISCARDS the new
+// write, so a false positive here is data loss — we demand high confidence. A
+// consolidate false-merge only concatenates two existing rows (recoverable),
+// so it can afford to be more aggressive. Do not lower this to match consolidate.
+const DEDUP_COMBINED = pickNumber('SHIELDCORTEX_DEDUP_COMBINED', 0.5);
+const DEDUP_CANDIDATE_LIMIT = 200; // bound the candidate scan per write
 
 /**
  * Insert an auto-extracted memory into the SC database, routed through the
@@ -76,21 +102,51 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
 function insertMemoryRow(db, memory, project, sourceIdentifier) {
   const timestamp = new Date().toISOString();
 
-  // Cross-call dedup: the hook fires repeatedly (per turn, or per salience
-  // bypass) over overlapping transcript windows, so the same regex match
-  // tends to surface multiple times across calls. The within-batch dedup in
-  // processSegments doesn't cover that. A single SELECT by (title, project,
-  // source_kind) keeps re-extractions from cluttering the store.
+  // Cross-call, CROSS-PATH exact-title dedup: the hook fires repeatedly (per
+  // turn, or per salience bypass) over overlapping transcript windows, so the
+  // same regex match tends to surface multiple times across calls. The
+  // within-batch dedup in processSegments doesn't cover that. We match on
+  // (title, project) WITHOUT a source_kind filter — incoming writes here are
+  // always hook, so dropping the filter just means a hook re-extraction of
+  // something the user ALREADY saved manually is caught too (the old
+  // source_kind='hook' filter let those through).
   const existing = db.prepare(
     `SELECT 1 FROM memories
        WHERE title = ?
          AND (project IS ? OR (project IS NULL AND ? IS NULL))
-         AND source_kind = 'hook'
        LIMIT 1`,
   ).get(memory.title, project || null, project || null);
   if (existing) {
     process.stderr.write(`[shieldcortex save-memory] skipped duplicate: ${memory.title}\n`);
     return;
+  }
+
+  // Near-duplicate dedup: exact-title only catches verbatim re-saves. Reworded
+  // captures of the same fact ("Fix: X" vs "X fix") have different titles but
+  // near-identical content. Scan same-project, same-category, ACTIVE rows
+  // (most-recent first, bounded) and skip the write if any is a near-dup. This
+  // is also cross-path — a prior manual row can block a hook re-extraction.
+  const candidates = db.prepare(
+    `SELECT title, content FROM memories
+       WHERE (project IS ? OR (project IS NULL AND ? IS NULL))
+         AND category IS ?
+         AND COALESCE(status, 'active') = 'active'
+       ORDER BY created_at DESC
+       LIMIT ?`,
+  ).all(project || null, project || null, memory.category ?? null, DEDUP_CANDIDATE_LIMIT);
+
+  for (const candidate of candidates) {
+    const { duplicate, combined } = isNearDuplicate(
+      { title: memory.title, content: memory.content },
+      { title: candidate.title, content: candidate.content },
+      { titleJaccard: DEDUP_TITLE_JACCARD, combinedThreshold: DEDUP_COMBINED },
+    );
+    if (duplicate) {
+      process.stderr.write(
+        `[shieldcortex save-memory] skipped near-duplicate (combined=${combined.toFixed(2)}): ${memory.title}\n`,
+      );
+      return;
+    }
   }
 
   db.prepare(`
