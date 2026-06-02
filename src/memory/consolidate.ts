@@ -8,6 +8,7 @@
  * - Merges similar memories to reduce redundancy
  */
 
+import type Database from 'better-sqlite3';
 import { getDatabase, withTransaction } from '../database/init.js';
 import {
   Memory,
@@ -28,8 +29,6 @@ import {
   addMemory,
   rowToMemory,
 } from './store.js';
-import { runDefencePipeline } from '../defence/index.js';
-import type { DefenceSource } from '../defence/types.js';
 import {
   calculateDecayedScore,
   shouldPromoteToLongTerm,
@@ -43,6 +42,17 @@ import {
 } from './contradiction.js';
 import { jaccardSimilarity } from './similarity.js';
 import { pruneActivationCache } from './activation.js';
+// Static import of the shared effective-salience helper. Every other src/ file
+// (cli/memory.ts, the recall hook) reaches salience.mjs via a relative path
+// because `scripts/` lives outside tsconfig's rootDir; a static top-level
+// import compiles clean (tsc keeps the dist layout intact and emits the same
+// '../../scripts/lib/salience.mjs' specifier the dynamic import did) and lets
+// these consolidation functions stay SYNCHRONOUS — better-sqlite3 transactions
+// cannot await, and consolidate()/deduplicateMemories() have several sync
+// callers. One source of truth: this is the same computeEffectiveSalience the
+// recall hook and `shieldcortex memory downvote` use.
+// @ts-expect-error — importing a .mjs hook util that has no .d.ts
+import { computeEffectiveSalience } from '../../scripts/lib/salience.mjs';
 
 /**
  * Run full consolidation process
@@ -329,8 +339,39 @@ export function findDuplicateMemoryPairs(options?: {
 }
 
 /**
- * Find memories with very similar titles/content and merge them.
- * Keeps the newer one, appends unique content from the older one.
+ * De-duplicate long-term memories found as duplicate PAIRS by
+ * findDuplicateMemoryPairs (same project|category, similar title + >0.5 content
+ * overlap). Runs every ~4h on the auto path: server.ts setInterval → fullCleanup
+ * → consolidate → deduplicateMemories.
+ *
+ * B11 (memory-quality fix): the previous implementation built
+ * `kept.content + "\n\nMerged from duplicate:\n" + uniqueSentences` and wrote it
+ * back with `UPDATE memories SET content = ?`. That was the SECOND lossy-append
+ * site (mergeSimilarMemories was the first) and kept generating ever-growing
+ * "frankenmemories" on this path even after the first site was fixed. The kept
+ * memory's `content` is now NEVER modified.
+ *
+ * New policy (identical to mergeSimilarMemories — one source of truth):
+ *   - KEEP the higher-EFFECTIVE-salience member of the pair (computeEffectiveSalience
+ *     via the shared salience.mjs — recency/access/pin/downvote, same ranking as
+ *     recall and the downvote CLI). NOTE: this can differ from the pair's raw
+ *     `recommendedKeepId`, which only considered raw salience + recency.
+ *   - Dispose the loser via the shared disposeLoser: combined similarity
+ *     (re-measured vs the kept row) ≥ 0.85 → DELETE; below → DOWNVOTE (reversible).
+ *   - Tags are unioned onto the kept row (metadata only, non-lossy). The kept
+ *     content and salience are untouched.
+ *
+ * Defence re-scan removed (B11): the old re-scan existed ONLY to validate the
+ * concatenated merged body before persisting it (two individually-clean rows
+ * could straddle a credential pattern across the join). With no concatenation
+ * there is no new content to scan — the kept row's bytes were already scanned at
+ * write time and are written verbatim — so the invariant "every byte in
+ * `memories` has been scanned" holds without re-running the pipeline. Dropping
+ * it also avoids re-auditing unchanged content on every 4h pass.
+ *
+ * Only rows clustered in THIS pass are acted on; historical merged rows are not
+ * rewritten (effective salience demotes them over time). STM→LTM promotion is
+ * handled separately by processDecay/promoteMemory in consolidate().
  */
 export function deduplicateMemories(options?: { dryRun?: boolean }): {
   merged: number;
@@ -341,57 +382,48 @@ export function deduplicateMemories(options?: { dryRun?: boolean }): {
   return withTransaction(() => {
     const db = getDatabase();
     const pairs: Array<{ kept: number; removed: number; similarity: string }> = [];
-    const removed = new Set<number>();
+    const disposed = new Set<number>();
+    const nowIso = new Date().toISOString();
+    const downvoteStmt = db.prepare(DOWNVOTE_SQL) as Database.Statement<[string, number]>;
+
+    // findDuplicateMemoryPairs returns rowToMemory-converted objects, which omit
+    // downvote_count. Fetch raw rows on demand so effective-salience ranking and
+    // the loser disposal see the full signal.
+    const rawRowStmt = db.prepare('SELECT * FROM memories WHERE id = ?');
+    const rawRow = (id: number) => rawRowStmt.get(id) as Record<string, unknown> | undefined;
 
     for (const pair of findDuplicateMemoryPairs()) {
-      if (removed.has(pair.memoryA.id) || removed.has(pair.memoryB.id)) continue;
-      const removedId = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB.id : pair.memoryA.id;
+      if (disposed.has(pair.memoryA.id) || disposed.has(pair.memoryB.id)) continue;
+
+      const rowA = rawRow(pair.memoryA.id);
+      const rowB = rawRow(pair.memoryB.id);
+      if (!rowA || !rowB) continue; // already gone (e.g. deleted earlier this pass)
+
+      // KEEP the higher-effective-salience member (tie → keep A, the older row
+      // by findDuplicateMemoryPairs' created_at ASC ordering).
+      const keepA = effectiveSalienceOfRow(rowA) >= effectiveSalienceOfRow(rowB);
+      const kept = keepA ? pair.memoryA : pair.memoryB;
+      const loser = keepA ? pair.memoryB : pair.memoryA;
 
       if (!dryRun) {
-        const kept = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
-        const discarded = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
-        const keptSentences = new Set(
-          kept.content.split(/[.!?\n]+/).map(s => s.trim().toLowerCase()).filter(s => s.length > 0)
+        // Union the loser's tags onto the kept row (metadata only, non-lossy).
+        const mergedTags = [...new Set([...kept.tags, ...loser.tags])];
+        db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
+          .run(JSON.stringify(mergedTags), kept.id);
+
+        // Shared disposal policy — identical to mergeSimilarMemories.
+        disposeLoser(
+          { content: kept.content, title: kept.title },
+          { id: loser.id, content: loser.content, title: loser.title },
+          downvoteStmt,
+          nowIso
         );
-        const uniqueSentences = discarded.content
-          .split(/[.!?\n]+/)
-          .map(s => s.trim())
-          .filter(s => s.length > 0 && !keptSentences.has(s.toLowerCase()));
-
-        if (uniqueSentences.length > 0) {
-          const mergedContent = kept.content + '\n\nMerged from duplicate:\n' + uniqueSentences.join('. ') + '.';
-
-          // DEFENCE PIPELINE: re-scan the merged content. Two individually-clean
-          // memories can produce content that straddles a credential pattern
-          // across the join. Without this re-scan the "every byte in `memories`
-          // has been scanned" invariant is broken. If the merge is blocked, skip
-          // both the content update AND the delete so the source rows survive.
-          const dedupSource: DefenceSource = { type: 'hook', identifier: 'hook:consolidation' };
-          const defenceResult = runDefencePipeline(
-            mergedContent,
-            kept.title,
-            dedupSource,
-            undefined,
-            kept.project ?? discarded.project ?? undefined,
-          );
-          if (defenceResult.firewall.result !== 'ALLOW') {
-            // Surface in audit (already written by the pipeline) and skip this pair.
-            console.warn(
-              `[shieldcortex] Dedup merge blocked for memory ${kept.id} + ${removedId}: ${defenceResult.firewall.reason}`,
-            );
-            continue;
-          }
-
-          db.prepare('UPDATE memories SET content = ? WHERE id = ?').run(mergedContent, kept.id);
-        }
-
-        deleteMemory(removedId);
       }
 
-      removed.add(removedId);
+      disposed.add(loser.id);
       pairs.push({
-        kept: pair.recommendedKeepId,
-        removed: removedId,
+        kept: kept.id,
+        removed: loser.id,
         similarity: pair.similarity,
       });
     }
@@ -562,6 +594,71 @@ export function enforceMemoryLimits(config: MemoryConfig = DEFAULT_CONFIG): numb
 const NEAR_IDENTICAL_DELETE_THRESHOLD = 0.85;
 
 /**
+ * Effective salience of a raw `memories` row, via the shared
+ * scripts/lib/salience.mjs helper (recency × access × pin × downvote_penalty).
+ * One source of truth with recall ranking and the `shieldcortex memory
+ * downvote` CLI, so "highest-salience to keep" and "downvoted to demote" agree.
+ */
+function effectiveSalienceOfRow(m: Record<string, unknown>): number {
+  return computeEffectiveSalience({
+    salience: (m.salience as number) ?? 0,
+    last_accessed: (m.last_accessed as string) ?? null,
+    access_count: (m.access_count as number) ?? 0,
+    pinned: (m.pinned as number) ?? 0,
+    downvote_count: (m.downvote_count as number) ?? 0,
+  });
+}
+
+/**
+ * The single, shared loser-disposal policy used by BOTH dedup paths
+ * (mergeSimilarMemories on short-term clusters, deduplicateMemories on
+ * long-term duplicate pairs). Re-measures combined similarity (content 0.6 +
+ * title 0.4) of the loser AGAINST THE KEPT memory and:
+ *   - combined ≥ NEAR_IDENTICAL_DELETE_THRESHOLD → DELETE (near-identical;
+ *     the loser's content is already contained in the kept row, and no reaping
+ *     path reads downvote_count/effective salience, so deleting near-identical
+ *     losers is what keeps the store bounded — see mergeSimilarMemories' header)
+ *   - below that bar → DOWNVOTE (reversible, non-lossy; effective salience
+ *     sinks it in recall while its distinct content survives intact)
+ *
+ * The loser's `content` is NEVER read into the kept row — no frankenmerge.
+ * `kept`/`loser` carry only title+content for the similarity re-measure.
+ * `downvoteStmt` is the caller-prepared DOWNVOTE_SQL statement, bound (?, ?) =
+ * (last_downvoted_at iso string, id).
+ */
+type LoserDisposition = 'deleted' | 'downvoted';
+
+function disposeLoser(
+  kept: { content: string; title: string },
+  loser: { id: number; content: string; title: string },
+  downvoteStmt: Database.Statement<[string, number]>,
+  nowIso: string
+): LoserDisposition {
+  const cSim = jaccardSimilarity(kept.content, loser.content);
+  const tSim = jaccardSimilarity(kept.title, loser.title);
+  const combinedToKept = cSim * 0.6 + tSim * 0.4;
+
+  if (combinedToKept >= NEAR_IDENTICAL_DELETE_THRESHOLD) {
+    deleteMemory(loser.id);
+    return 'deleted';
+  }
+  downvoteStmt.run(nowIso, loser.id);
+  return 'downvoted';
+}
+
+/**
+ * The shared downvote SQL — prepared once per pass by each caller and handed to
+ * disposeLoser. Reversible soft demotion: bumps downvote_count (effective
+ * salience reads it) and stamps last_downvoted_at.
+ */
+const DOWNVOTE_SQL = `
+  UPDATE memories
+  SET downvote_count = COALESCE(downvote_count, 0) + 1,
+      last_downvoted_at = ?
+  WHERE id = ?
+`;
+
+/**
  * Find clusters of similar short-term memories within each project|category,
  * KEEP the single highest-effective-salience member, and demote the rest
  * WITHOUT destroying or concatenating their content.
@@ -589,26 +686,10 @@ const NEAR_IDENTICAL_DELETE_THRESHOLD = 0.85;
  *
  * Returns the count of deleted (near-identical) losers.
  */
-export async function mergeSimilarMemories(
+export function mergeSimilarMemories(
   project?: string,
   similarityThreshold: number = 0.25
-): Promise<number> {
-  // Load the effective-salience helper ONCE, before the (synchronous,
-  // better-sqlite3) transaction — better-sqlite3 transactions cannot await.
-  // One source of truth: this is the same scripts/lib/salience.mjs the recall
-  // hook and `shieldcortex memory downvote` use, so kept-selection ranking and
-  // the downvote demotion agree on what "low effective salience" means.
-  // @ts-expect-error — importing a .mjs hook util that has no .d.ts
-  const { computeEffectiveSalience } = await import('../../scripts/lib/salience.mjs');
-  const effSalience = (m: Record<string, unknown>): number =>
-    computeEffectiveSalience({
-      salience: (m.salience as number) ?? 0,
-      last_accessed: (m.last_accessed as string) ?? null,
-      access_count: (m.access_count as number) ?? 0,
-      pinned: (m.pinned as number) ?? 0,
-      downvote_count: (m.downvote_count as number) ?? 0,
-    });
-
+): number {
   return withTransaction(() => {
     const db = getDatabase();
     let deleted = 0;
@@ -689,7 +770,7 @@ export async function mergeSimilarMemories(
         // recency, pins and access all factor in — same ranking the recall
         // hook uses). The kept row's `content` is NEVER touched.
         const clusterMems = cluster.map(idx => group[idx]);
-        clusterMems.sort((a, b) => effSalience(b) - effSalience(a));
+        clusterMems.sort((a, b) => effectiveSalienceOfRow(b) - effectiveSalienceOfRow(a));
 
         const kept = clusterMems[0];
         const losers = clusterMems.slice(1);
@@ -726,31 +807,25 @@ export async function mergeSimilarMemories(
           kept.id as number
         );
 
-        // Dispose of each loser by its similarity TO THE KEPT memory:
-        //   ≥ 0.85  → DELETE (near-identical; nothing distinct to preserve, and
-        //             nothing else reaps downvoted rows so this keeps the store
-        //             bounded — see mergeSimilarMemories' header comment).
-        //   < 0.85  → DOWNVOTE (reversible, non-lossy; effective salience sinks
-        //             it in recall while its distinct content survives).
+        // Dispose of each loser via the SHARED disposal policy (disposeLoser):
+        // near-identical (≥ 0.85 vs the kept row) → DELETE; moderate → DOWNVOTE.
+        // Identical policy to deduplicateMemories — one source of truth.
         const nowIso = new Date().toISOString();
-        const downvoteStmt = db.prepare(`
-          UPDATE memories
-          SET downvote_count = COALESCE(downvote_count, 0) + 1,
-              last_downvoted_at = ?
-          WHERE id = ?
-        `);
+        const downvoteStmt = db.prepare(DOWNVOTE_SQL) as Database.Statement<[string, number]>;
 
+        const keptText = { content: kept.content as string, title: kept.title as string };
         for (const loser of losers) {
-          const cSim = jaccardSimilarity(kept.content as string, loser.content as string);
-          const tSim = jaccardSimilarity(kept.title as string, loser.title as string);
-          const combinedToKept = cSim * 0.6 + tSim * 0.4;
-
-          if (combinedToKept >= NEAR_IDENTICAL_DELETE_THRESHOLD) {
-            deleteMemory(loser.id as number);
-            deleted++;
-          } else {
-            downvoteStmt.run(nowIso, loser.id as number);
-          }
+          const disposition = disposeLoser(
+            keptText,
+            {
+              id: loser.id as number,
+              content: loser.content as string,
+              title: loser.title as string,
+            },
+            downvoteStmt,
+            nowIso
+          );
+          if (disposition === 'deleted') deleted++;
         }
       }
     }
@@ -1077,14 +1152,14 @@ export function shouldTriggerConsolidation(
  * Full cleanup: consolidate + vacuum
  * Best run periodically to keep database healthy
  */
-export async function fullCleanup(
+export function fullCleanup(
   config: MemoryConfig = DEFAULT_CONFIG
-): Promise<{ consolidation: ConsolidationResult; vacuumed: boolean; merged: number; quarantineExpired: number }> {
+): { consolidation: ConsolidationResult; vacuumed: boolean; merged: number; quarantineExpired: number } {
   // Run consolidation
   const consolidation = consolidate(config);
 
-  // Merge similar memories (async: loads the effective-salience helper)
-  const merged = await mergeSimilarMemories();
+  // Merge similar memories
+  const merged = mergeSimilarMemories();
 
   // Expire old quarantine items
   let quarantineExpired = 0;
