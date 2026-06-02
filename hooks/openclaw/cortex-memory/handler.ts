@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createOpenClawRuntime } from "./runtime.mjs";
 
 // ==================== SERVER COMMAND RESOLUTION ====================
@@ -727,8 +728,11 @@ async function selfCheckAndHeal(event) {
     const { homedir } = await import("node:os");
     const home = homedir();
 
-    // Where am I running from?
-    const myDir = path.dirname(new URL(import.meta.url).pathname);
+    // Where am I running from? Use fileURLToPath, not URL.pathname — the latter
+    // does NOT decode percent-encoding, so an install path with spaces/special
+    // chars would yield a path that fails every downstream fs read (staleness
+    // comparison + self-heal copy below).
+    const myDir = path.dirname(fileURLToPath(import.meta.url));
 
     // Expected locations (newest first)
     const expectedDirs = [
@@ -792,6 +796,11 @@ async function selfCheckAndHeal(event) {
             } catch {
               // Source file missing/unreadable (can't prove staleness for it)
               // or our own file unreadable — don't flip `stale` on a read error.
+              // DELIBERATE ASYMMETRY with src/setup/openclaw.ts `hookFilesStale`,
+              // which returns `true` (stale) on a read error so the doctor nags
+              // on a broken install. Here we stay quiet: this runs inside the
+              // long-lived gateway, where a transient read error must not emit a
+              // spurious bootstrap "out of date" warning. Keep them divergent.
             }
           }
           if (stale) {

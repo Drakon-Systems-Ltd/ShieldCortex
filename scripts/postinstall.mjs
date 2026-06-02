@@ -174,42 +174,40 @@ if (isGlobal && !isCI) {
       console.warn('[shieldcortex] To manually install after confirming OpenClaw support:');
       console.warn('[shieldcortex]   shieldcortex openclaw install --no-plugins');
     } else if (state.pluginInstalled) {
-      // Bug #15: Plugin exists from a previous install — auto-copy new files.
+      // Bug #15 + Task 6b: a previous install left the plugin (and possibly the
+      // hook) on disk. Both are installed by file-copy, so a package bump
+      // leaves them stale until something re-copies them.
       console.log('');
-      console.log('[shieldcortex] Existing plugin detected. Copying updated plugin files...');
-      const copied = autoCopyPlugin(state.pluginDir, cliPath);
-      if (copied) {
-        console.log('[shieldcortex] Plugin files updated.');
-      } else {
-        console.warn('[shieldcortex] ⚠  Plugin auto-copy failed — full refresh will recopy it.');
-      }
-
-      // Task 6b: the hook is installed by file-copy and goes STALE on a
-      // package bump unless something re-copies it. The plugin auto-copy
-      // above only touches plugin files, leaving a stale handler.ts/runtime.mjs
-      // in ~/.openclaw/hooks/cortex-memory/. Whenever the hook is present we
-      // ALSO run the full refresh (it re-copies the hook AND re-registers the
-      // plugin). The full install is idempotent, so re-running is safe even
-      // right after the plugin auto-copy.
       if (state.hookInstalled) {
-        console.log('[shieldcortex] Refreshing OpenClaw hook to latest version...');
+        // Hook present → run the full refresh ONLY. `shieldcortex openclaw
+        // install` re-copies the hook (copyHookFiles) AND re-installs/registers
+        // the plugin in one idempotent pass, so a standalone autoCopyPlugin()
+        // here would copy the plugin a second time for no benefit. The full
+        // refresh is the single guarantee that keeps the file-copied hook from
+        // going stale on a plugin-present update.
+        console.log('[shieldcortex] Refreshing OpenClaw hook + plugin to latest version...');
         const ok = refreshOpenClawInstall(cliPath);
         if (!ok) {
-          console.warn('[shieldcortex] ⚠  OpenClaw hook refresh failed (non-fatal).');
-          console.warn('[shieldcortex] Run manually: shieldcortex openclaw install');
-        }
-      } else if (!copied) {
-        // No hook installed AND the plugin copy failed — fall back to a full
-        // refresh so the plugin still lands.
-        console.log('[shieldcortex] Running full OpenClaw refresh...');
-        const ok = refreshOpenClawInstall(cliPath);
-        if (!ok) {
-          console.warn('[shieldcortex] ⚠  OpenClaw auto-refresh failed (non-fatal).');
+          console.warn('[shieldcortex] ⚠  OpenClaw hook + plugin refresh failed (non-fatal).');
           console.warn('[shieldcortex] Run manually: shieldcortex openclaw install');
         }
       } else {
-        console.log('[shieldcortex] No hook installed. Run full setup for hook + memory:');
-        console.log('[shieldcortex]   shieldcortex openclaw install');
+        // Plugin-only (no hook) → just freshen the plugin files in place, with
+        // a full-refresh fallback if the in-place copy fails.
+        console.log('[shieldcortex] Existing plugin detected. Copying updated plugin files...');
+        const copied = autoCopyPlugin(state.pluginDir, cliPath);
+        if (copied) {
+          console.log('[shieldcortex] Plugin files updated.');
+          console.log('[shieldcortex] No hook installed. Run full setup for hook + memory:');
+          console.log('[shieldcortex]   shieldcortex openclaw install');
+        } else {
+          console.warn('[shieldcortex] ⚠  Plugin auto-copy failed — running full refresh.');
+          const ok = refreshOpenClawInstall(cliPath);
+          if (!ok) {
+            console.warn('[shieldcortex] ⚠  OpenClaw auto-refresh failed (non-fatal).');
+            console.warn('[shieldcortex] Run manually: shieldcortex openclaw install');
+          }
+        }
       }
     } else if (state.hookInstalled) {
       // Hook exists but no plugin — run full refresh

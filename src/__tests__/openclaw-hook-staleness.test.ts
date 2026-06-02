@@ -105,12 +105,44 @@ describe('postinstall — plugin-present branch refreshes the hook (Task 6b)', (
     return after.slice(0, end);
   })();
 
+  // Inside the plugin-present block, isolate the `if (state.hookInstalled)`
+  // TRUE arm (up to its closing `} else {`). On the common plugin+hook update
+  // path the full refresh — which already re-copies BOTH plugin and hook — must
+  // be the ONLY copy action; a standalone autoCopyPlugin() there would copy the
+  // plugin twice.
+  const hookInstalledArm = (() => {
+    const start = pluginBranch.indexOf('if (state.hookInstalled)');
+    expect(start).toBeGreaterThan(-1);
+    const after = pluginBranch.slice(start);
+    const end = after.indexOf('} else {');
+    expect(end).toBeGreaterThan(-1);
+    return after.slice(0, end);
+  })();
+
   it('runs refreshOpenClawInstall inside the plugin-present branch', () => {
     expect(pluginBranch).toMatch(/refreshOpenClawInstall\(cliPath\)/);
   });
 
   it('gates the hook refresh on state.hookInstalled', () => {
     expect(pluginBranch).toMatch(/if\s*\(\s*state\.hookInstalled\s*\)/);
+  });
+
+  it('runs the full refresh on the plugin+hook path (re-copies the hook)', () => {
+    expect(hookInstalledArm).toMatch(/refreshOpenClawInstall\(cliPath\)/);
+  });
+
+  it('does NOT call standalone autoCopyPlugin on the plugin+hook path (no double copy)', () => {
+    // The full refresh handles the plugin; a standalone autoCopyPlugin() here
+    // would be a redundant second copy. Match the actual call signature
+    // (autoCopyPlugin(state.pluginDir, ...)) so a mention of the function in a
+    // comment can't make this assertion false-fail.
+    expect(hookInstalledArm).not.toMatch(/autoCopyPlugin\(state\.pluginDir/);
+  });
+
+  it('still calls autoCopyPlugin on the plugin-only (no hook) path', () => {
+    // Plugin-only updates have no hook to re-copy, so the lightweight in-place
+    // plugin copy remains the primary action there.
+    expect(pluginBranch).toMatch(/autoCopyPlugin\(state\.pluginDir/);
   });
 
   it('no longer prints the old "run full refresh for hook updates" dead-end', () => {

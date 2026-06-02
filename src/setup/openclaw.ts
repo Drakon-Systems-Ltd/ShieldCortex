@@ -271,6 +271,11 @@ export function hookFilesStale(destDir: string = defaultHookDestDir()): boolean 
       if (!srcBuf.equals(destBuf)) return true; // content differs → stale
     } catch {
       // Unreadable file on either side — treat as stale so the user re-copies.
+      // DELIBERATE ASYMMETRY with the inline staleness loop in
+      // hooks/openclaw/cortex-memory/handler.ts (selfCheckAndHeal), which does
+      // NOT flip `stale` on a read error: that runs in the long-lived gateway
+      // and must stay quiet on transient errors. This path backs `doctor`, which
+      // SHOULD nag on a half-readable install. Keep them divergent.
       return true;
     }
   }
