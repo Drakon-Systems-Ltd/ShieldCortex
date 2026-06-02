@@ -12,6 +12,12 @@ export function syncInterceptEvent(event: InterceptAuditEntry, config: CloudConf
 
   const url = `${config.cloudBaseUrl}/v1/audit/ingest`;
 
+  // Privacy: forward audit METADATA only — strip the content preview so raw memory
+  // text never leaves the machine (ClawScan finding: previews may contain credentials
+  // or confidential data). The local audit JSONL retains the preview for triage.
+  const metadata: Record<string, unknown> = { ...event };
+  delete metadata.preview;
+
   fetch(url, {
     method: 'POST',
     headers: {
@@ -19,7 +25,7 @@ export function syncInterceptEvent(event: InterceptAuditEntry, config: CloudConf
       Authorization: `Bearer ${config.cloudApiKey}`,
     },
     body: JSON.stringify({
-      events: [{ ...event, source: 'openclaw-interceptor' }],
+      events: [{ ...metadata, source: 'openclaw-interceptor' }],
     }),
     signal: AbortSignal.timeout(5_000),
   }).catch(() => {

@@ -97,6 +97,23 @@ This section explains every privileged operation the tool performs and why.
 - **Lifecycle event handlers.** ShieldCortex registers lifecycle handlers that auto-extract important context from conversations. These are registered in `~/.claude/settings.json` during setup and can be removed at any time. They run locally, never phone home.
 - **Proactive recall.** The UserPromptSubmit handler queries local memory on each prompt (<100ms) and surfaces relevant context. Fully local, configurable: `shieldcortex config --proactive-recall false`.
 
+## Data handling, privacy & consent
+
+ShieldCortex is **local-first**: memory, scanning, and audit run entirely on your machine — no account, no network, no telemetry by default. Because the tool can auto-capture conversation content, here is exactly what it reads, stores, and (only if you opt in) transmits.
+
+- **What it reads.** With the lifecycle handlers enabled (opt-in at setup), ShieldCortex reads your agent **session transcripts — both your prompts and the assistant's replies** — to auto-extract memorable context. PreCompact (before context compaction) reads the recent transcript; the SessionEnd and Stop handlers are **off by default**; the OpenClaw integration extracts from assistant output and explicit keyword triggers. SessionStart does **not** read transcripts (it only loads existing local memory and scans project rule files).
+- **What it stores, and for how long.** Saved and auto-extracted memories are written to a **local SQLite database at `~/.shieldcortex/memories.db`** — title and content verbatim — and **persist across sessions** until you remove them (decay/consolidation prune low-value entries over time). Nothing is stored remotely unless you enable Cloud sync. Delete a memory with the `forget` tool, or remove the database to wipe everything.
+- **Secrets & credentials.** Every write — manual or auto-extracted — passes the defence pipeline first; high-confidence credential patterns (keys/tokens across 11+ providers) and content classified RESTRICTED are **blocked or quarantined before storage**, not saved as live memory. This is a strong filter, not a guarantee: low-confidence or low-entropy secrets can still be stored. On sensitive work, **review what auto-memory captures** and disable auto-extraction (`shieldcortex config --openclaw-auto-memory false`; the Claude Code handlers can be removed from `~/.claude/settings.json`).
+- **Triggers capture surrounding context.** Keyword auto-save triggers (e.g. "remember this", "don't forget") capture the *nearby* text, which may include more than you intend — treat them as "save the recent context," not "save exactly this line." They're capped (auto-extracts never outrank explicit saves) and run through the same credential/injection scan.
+- **Subprocess execution.** The OpenClaw integration spawns short-lived `npx mcporter` subprocesses (via `execFile`, no shell) to talk to your **local** ShieldCortex MCP server over stdio. No remote code is fetched or executed.
+- **Cloud sync — off by default, opt-in, explicit.** No data leaves your machine unless you run `shieldcortex config --cloud-enable --cloud-api-key <key>`. When enabled:
+  - **Audit telemetry** (`/v1/audit/ingest`): scan **metadata only** — trust scores, threat indicators, categories, timings, device name. **No memory content.**
+  - **Memory sync** (`/v1/sync/memories`, Team tier): transmits **full memory title + content** of PUBLIC/INTERNAL memories so they sync across your team. CONFIDENTIAL/RESTRICTED memories are **excluded by default**; switch to metadata-only with the `contentMode` control.
+  - **Quarantine sync** (Team tier): flagged content is sent with **detected credentials redacted**.
+  - **OpenClaw realtime plugin** (optional): scans live input and output **locally**. When it flags something, only **threat metadata** (type, scores, timestamps — **never the input text itself**) is forwarded, and only when Cloud sync is enabled. Flagged-content previews are kept in your **local** audit log; they are never transmitted.
+
+  Raw conversation/input text is never transmitted by the audit, threat, or interceptor paths — they carry metadata only. The single exception is **Memory sync** above, which uploads the content of memories you chose to store (PUBLIC/INTERNAL, off by default, Team tier). You can disable any of the above at any time, and the realtime plugin and lifecycle handlers can be removed entirely.
+
 ## What it does NOT do
 
 - Does **not** read SSH keys, AWS credentials, GPG keys, or /etc/ files

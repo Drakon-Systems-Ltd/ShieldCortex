@@ -195,6 +195,9 @@ function normaliseConfig(raw) {
     if (typeof value.cloudBaseUrl === "string" && value.cloudBaseUrl.trim()) {
         config.cloudBaseUrl = value.cloudBaseUrl.trim();
     }
+    if (typeof value.cloudEnabled === "boolean") {
+        config.cloudEnabled = value.cloudEnabled;
+    }
     if (typeof value.binaryPath === "string" && value.binaryPath.trim()) {
         config.binaryPath = value.binaryPath.trim();
     }
@@ -494,7 +497,9 @@ function handleLlmInput(event, ctx) {
                     };
                     auditLog(entry);
                     loadConfig()
-                        .then(cfg => cloudSync({ ...entry, content: text.slice(0, 200) }, cfg))
+                        // Pass the local entry as-is; cloudSync strips the input preview/content
+                        // before transmit (metadata-only egress). No raw LLM input leaves here.
+                        .then(cfg => cloudSync(entry, cfg))
                         .catch(() => { });
                 }
             }
