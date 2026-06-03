@@ -1482,6 +1482,65 @@ export async function checkOpenClawHookFreshness(
   }
 }
 
+/**
+ * Surfaces the installed OpenClaw realtime plugin's version and WARNs when it
+ * lags the running ShieldCortex package.
+ *
+ * The plugin (`@drakon-systems/shieldcortex-realtime`) ships in lockstep with
+ * the main package, but it's managed by OpenClaw's own registry
+ * (`~/.openclaw/plugins/installs.json`) — `shieldcortex update` does NOT touch
+ * it — so it can silently fall behind (observed: plugin stuck at 4.29.0 while
+ * the npm package reached 4.30.1). The other OpenClaw checks confirm the plugin
+ * is *present*; none read its *version*. `installsJsonPath` / `expectedVersion`
+ * are injectable for tests.
+ */
+export async function checkOpenClawPluginVersion(
+  installsJsonPath: string = path.join(os.homedir(), '.openclaw', 'plugins', 'installs.json'),
+  expectedVersion: string = pkg.version,
+): Promise<CheckResult> {
+  const label = 'OpenClaw plugin version';
+
+  if (!fs.existsSync(installsJsonPath)) {
+    return { label, status: 'info', message: 'skipped (OpenClaw plugin registry not present)' };
+  }
+
+  let installed: string | null = null;
+  try {
+    const json = JSON.parse(fs.readFileSync(installsJsonPath, 'utf-8')) as {
+      installRecords?: Record<string, { version?: unknown; resolvedVersion?: unknown }>;
+    };
+    const record = json.installRecords?.['shieldcortex-realtime'];
+    const v = record?.version ?? record?.resolvedVersion;
+    installed = typeof v === 'string' ? v : null;
+  } catch {
+    return { label, status: 'info', message: 'skipped (plugin registry unreadable)' };
+  }
+
+  if (!installed) {
+    return { label, status: 'info', message: 'realtime plugin not registered with OpenClaw' };
+  }
+
+  // Defensive: if either version isn't valid semver, report presence without a verdict.
+  if (!semver.valid(installed) || !semver.valid(expectedVersion)) {
+    return { label, status: 'info', message: `realtime plugin v${installed} installed` };
+  }
+
+  if (semver.lt(installed, expectedVersion)) {
+    return {
+      label,
+      status: 'warn',
+      message: `realtime plugin v${installed} installed, v${expectedVersion} available`,
+      fix: 'Run `openclaw plugins update shieldcortex-realtime` (OpenClaw manages this plugin, not `shieldcortex update`), then restart the gateway',
+    };
+  }
+
+  if (semver.gt(installed, expectedVersion)) {
+    return { label, status: 'info', message: `realtime plugin v${installed} (ahead of local shieldcortex v${expectedVersion})` };
+  }
+
+  return { label, status: 'pass', message: `realtime plugin v${installed} (current)` };
+}
+
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
   const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
@@ -1541,6 +1600,7 @@ export async function runDoctor(): Promise<void> {
     checkLockFile,
     checkOpenClawResidue,
     checkOpenClawHookFreshness,
+    checkOpenClawPluginVersion,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkDefenceCanary,

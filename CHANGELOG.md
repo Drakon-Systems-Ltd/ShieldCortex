@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.30.2] - 2026-06-03
+
+**Fix: `shieldcortex update` now sees OpenClaw registry-managed plugins, and `doctor` reports the realtime plugin's version and flags staleness.** The OpenClaw realtime plugin is installed and managed by OpenClaw's own registry (`~/.openclaw/plugins/installs.json`, with the package under `~/.openclaw/npm/projects/<name>-<hash>/node_modules/`). `shieldcortex update` only checked the legacy `~/.openclaw/extensions/` path and a non-existent `~/.openclaw/npm/node_modules/…` path, so it reported `OpenClaw plugin: not installed` and silently skipped the plugin — leaving it stale (observed stuck at 4.29.0 while npm reached 4.30.1) — while `doctor` reported it "installed" without ever reading its version, so the drift was invisible.
+
+### Fixed
+
+- **[`src/cli/update.ts`](src/cli/update.ts) — `update` detects registry-managed OpenClaw plugins.** `stepOpenClawPlugin` now consults the OpenClaw plugin registry (`installs.json`, the authoritative source `doctor` also trusts) in addition to the legacy extension dir, so a registry-managed install is no longer invisible. A registry install is refreshed with OpenClaw's idempotent `openclaw plugins update shieldcortex-realtime`; a legacy file-copied install is migrated to the registry (and the legacy copy removed to avoid the dup-install state doctor flags).
+
+### Added
+
+- **[`src/cli/doctor.ts`](src/cli/doctor.ts) — new "OpenClaw plugin version" check.** Reads the installed realtime plugin version from the OpenClaw registry and compares it (semver) against the running ShieldCortex package: PASS `v4.30.2 (current)`, WARN `v4.29.0 installed, v4.30.2 available` (with `openclaw plugins update shieldcortex-realtime` as the fix, since OpenClaw manages this plugin, not `shieldcortex update`), or INFO when ahead / not registered. The existing OpenClaw checks confirmed the plugin was *present* but never read its *version*.
+
+### Verification
+
+- `npm run build:ts` — clean.
+- `npm test` — full suite green; 11 new regression tests for registry detection + version staleness (they fail on the pre-fix behaviour and pass with the fixes).
+
 ## [4.30.1] - 2026-06-02
 
 **Fix: `shieldcortex setup` / `install` now actually persists SessionEnd hook removal.** Run without `--with-session-end` on a machine where the SessionEnd hook was already wired *and* every other hook was already configured, setup printed `Hook: SessionEnd (removed …)` but never wrote the change to `~/.claude/settings.json` — leaving the hook wired-but-gated, which `doctor` then flagged as `wired in settings.json but runtime gate is off — hook will exit silently every turn`. The removal mutated the in-memory settings but wasn't counted toward the change tally that gates the file write, so a removal-only run took the "all hooks already configured" branch and skipped `writeSettings()`. Harmless in effect (the leftover hook is a gated no-op) but setup was reporting a change it didn't make.

@@ -246,24 +246,59 @@ async function stepNpmPackage(
   return { updated: true, result };
 }
 
+/**
+ * Is the realtime plugin registered with OpenClaw's plugin registry?
+ *
+ * OpenClaw's modern `openclaw plugins install` stores the package under
+ * `~/.openclaw/npm/projects/<name>-<hash>/node_modules/` and records it in
+ * `~/.openclaw/plugins/installs.json`. The old detection only checked
+ * `~/.openclaw/extensions/` (the legacy file-copy layout) and a non-existent
+ * `~/.openclaw/npm/node_modules/...` path, so a registry-managed install was
+ * invisible — `update` reported "not installed" and silently SKIPPED it,
+ * leaving the plugin stale while the npm package moved on. Read the registry
+ * (the authoritative source `doctor` also trusts) instead.
+ */
+export function isRealtimePluginRegistered(home: string): boolean {
+  try {
+    const installsPath = path.join(home, '.openclaw', 'plugins', 'installs.json');
+    if (!fs.existsSync(installsPath)) return false;
+    const json = JSON.parse(fs.readFileSync(installsPath, 'utf-8')) as {
+      installRecords?: Record<string, unknown>;
+      plugins?: Array<{ pluginId?: string }>;
+    };
+    if (json.installRecords && Object.prototype.hasOwnProperty.call(json.installRecords, 'shieldcortex-realtime')) {
+      return true;
+    }
+    return Array.isArray(json.plugins) && json.plugins.some((p) => p?.pluginId === 'shieldcortex-realtime');
+  } catch {
+    return false; // unreadable registry → treat as not installed
+  }
+}
+
 async function stepOpenClawPlugin(home: string): Promise<StepResult> {
   const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
-  const npmDir = path.join(home, '.openclaw', 'npm', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
-  if (!fs.existsSync(extDir) && !fs.existsSync(npmDir)) {
+  const legacy = fs.existsSync(extDir);
+  const registered = isRealtimePluginRegistered(home);
+  if (!legacy && !registered) {
     return await step('OpenClaw plugin', async () => ({ status: 'skip' as const, summary: 'not installed' }));
   }
   return await step('OpenClaw plugin', async () => {
-    try { fs.rmSync(extDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    // Drop any legacy file-copied extension so OpenClaw's registry copy is the
+    // single source of truth (prevents the dup-install state doctor flags).
+    if (legacy) {
+      try { fs.rmSync(extDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
     try {
-      await runQuiet(
-        'openclaw',
-        ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'],
-        { timeout: 60000, env: { ...process.env, HOME: home } },
-      );
-      return '@latest installed';
+      // A registry-managed install uses OpenClaw's idempotent `update` verb; a
+      // legacy-only install is migrated to the registry with a forced reinstall.
+      const args = registered
+        ? ['plugins', 'update', 'shieldcortex-realtime']
+        : ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'];
+      await runQuiet('openclaw', args, { timeout: 60000, env: { ...process.env, HOME: home } });
+      return registered ? 'updated via openclaw' : '@latest installed';
     } catch {
       // Don't propagate — surface as warn instead of failing the whole flow.
-      return { status: 'warn' as const, summary: 'reinstall failed (run manually)' };
+      return { status: 'warn' as const, summary: 'update failed — run `openclaw plugins update shieldcortex-realtime`' };
     }
   });
 }
