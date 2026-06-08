@@ -66,6 +66,17 @@ describe('truncatePreservingWords', () => {
     expect(result).toContain('First sentence');
   });
 
+  it('prefers a sentence boundary over a later mid-sentence word break', () => {
+    // jarvis 2026-06-08: recall snippets stopped at the rightmost word boundary,
+    // which is mid-sentence. A complete earlier sentence is the better snippet.
+    const input = 'We shipped the fix. Then we monitored everything.';
+    const result = truncatePreservingWords(input, 30);
+    expect(result).toMatch(/…$/);
+    expect(result).toContain('We shipped the fix.');
+    // Old behaviour cut at the space after "we", bleeding into sentence 2.
+    expect(result).not.toContain('Then');
+  });
+
   it('returns non-strings unchanged (defensive)', () => {
     expect(truncatePreservingWords(undefined, 100)).toBeUndefined();
     expect(truncatePreservingWords(null, 100)).toBeNull();
