@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.31.0] - 2026-06-08
+
+**Memory quality: sentence-bounded titles & recall snippets, fragment-aware salience, dream-mode logging.** Field reports (Jarvis) of recall content truncated mid-word/mid-sentence and low-value fragments surfacing at top salience were traced to the shared hook-path extractor — not the MCP/library path. Three fixes, all adversarial-review-validated.
+
+### Fixed
+
+- **Mid-word title truncation (P1).** `extractFirstSentence` matched a complete sentence (≤160 chars) then sliced it to 80, cutting mid-word — every truncated title in the field was exactly `prefix + 80`. A matched complete sentence is now returned whole; word-bounded trimming with an ellipsis applies only to the no-terminator fallback. Headline cap raised 80 → 120.
+- **Recall snippet truncation (P1).** `truncatePreservingWords` took a single `Math.max` over all boundaries, so the rightmost word-space won and snippets stopped mid-sentence. It now prefers a sentence boundary in a wider window, falling back to a word boundary only when none exists.
+- **OpenClaw keyword titles (P1).** `extractKeywordMemory` built its title with a raw `slice(0, 80)` — the one path bypassing the shared sentence-bounded helper. Now unified onto `extractFirstSentence`.
+
+### Added
+
+- **Fragment-quality salience signal (P2).** Auto-extracted captures that trail off on a dangling function word are demoted below self-contained facts, so a fragment can no longer tie a complete fact at the 0.6 cap. The penalty affects ranking only — the survival gate uses the un-penalised salience, so it can **never** drop a memory that would otherwise be kept (no silent memory loss). Complete-but-unpunctuated long facts are not penalised.
+- **Dream-mode completion logging (P3).** `consolidateMemories` now emits a `[dream]` summary (merged / archived / contradictions / processed), with explicit "nothing to consolidate" wording on a zero-candidate pass — so a quiet night no longer reads as a silent near-empty report.
+
 ## [4.30.2] - 2026-06-03
 
 **Fix: `shieldcortex update` now sees OpenClaw registry-managed plugins, and `doctor` reports the realtime plugin's version and flags staleness.** The OpenClaw realtime plugin is installed and managed by OpenClaw's own registry (`~/.openclaw/plugins/installs.json`, with the package under `~/.openclaw/npm/projects/<name>-<hash>/node_modules/`). `shieldcortex update` only checked the legacy `~/.openclaw/extensions/` path and a non-existent `~/.openclaw/npm/node_modules/…` path, so it reported `OpenClaw plugin: not installed` and silently skipped the plugin — leaving it stale (observed stuck at 4.29.0 while npm reached 4.30.1) — while `doctor` reported it "installed" without ever reading its version, so the drift was invisible.
