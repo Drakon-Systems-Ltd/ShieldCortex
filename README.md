@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/shieldcortex-logo.jpg" alt="ShieldCortex" width="160" />
+  <img src="assets/shieldcortex-logo.png" alt="ShieldCortex" width="200" height="200" />
 </p>
 
 <p align="center">
