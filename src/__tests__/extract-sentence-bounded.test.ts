@@ -90,6 +90,26 @@ describe('v4.24.3 sentence-bounded extraction', () => {
     expect(decision!.content.length).toBeLessThanOrEqual(500); // existing body cap
   });
 
+  it('does not cut a clean sentence mid-word at the headline cap', async () => {
+    const { extractMemorableSegments } = await import('../../scripts/lib/extract-memorable-segments.mjs');
+    // One complete ~100-char sentence (terminated) — longer than the old 80-char
+    // headline cap, so the old `slice(0, 80)` chopped it mid-word ("...session to").
+    const sentence =
+      'We decided to migrate the entire authentication subsystem onto short-lived ' +
+      'rotating session tokens this quarter.';
+    const segments = extractMemorableSegments(sentence);
+    const decision = segments.find((s) => s.extractorType === 'decision');
+    expect(decision).toBeDefined();
+    const headline = decision!.title.replace(/^Decision: /, '');
+    // The headline is a prefix of the captured content...
+    const core = headline.replace(/…$/, '').trimEnd();
+    expect(decision!.content.startsWith(core)).toBe(true);
+    // ...and wherever it stops, the next source char must be a word boundary —
+    // never mid-word. (end-of-content counts as a clean stop.)
+    const nextChar = decision!.content.charAt(core.length);
+    expect(nextChar === '' || /[\s.!?,;:]/.test(nextChar)).toBe(true);
+  });
+
   it('preference captures stop at a sentence terminator', async () => {
     const { extractMemorableSegments } = await import('../../scripts/lib/extract-memorable-segments.mjs');
     const text =

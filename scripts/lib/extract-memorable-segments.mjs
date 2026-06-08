@@ -392,18 +392,24 @@ function defensiveUnescape(text) {
  * garbage like "Decision: any command you must be authenticated. Run x..."
  * where the first 50 chars meant nothing without their context.
  */
-function extractFirstSentence(text, maxLen = 80) {
+function extractFirstSentence(text, maxLen = 120) {
   const trimmed = text.trim().replace(/\s+/g, ' ');
+  // Back off to the last word boundary (never mid-word); ellipsis marks the cut.
+  const wordBound = (s) => {
+    if (s.length <= maxLen) return s;
+    const cut = s.slice(0, maxLen);
+    const lastSpace = cut.lastIndexOf(' ');
+    return (lastSpace > maxLen * 0.5 ? cut.slice(0, lastSpace) : cut).trimEnd() + '…';
+  };
   // Find first sentence terminator within reasonable bounds. The terminator
   // must be followed by whitespace OR end-of-string so URLs / decimals /
-  // version strings ("v4.24.3") don't fool it.
+  // version strings ("v4.24.3") don't fool it. A matched sentence is returned
+  // WHOLE when it fits — the old `slice(0, maxLen)` chopped clean sentences
+  // mid-word (every truncated title was exactly prefix+80 chars).
   const match = trimmed.match(/^([^.!?\n]{15,160}[.!?])(?:\s|$)/);
-  if (match) return match[1].slice(0, maxLen);
-  // No sentence boundary — trim to maxLen at the nearest word boundary.
-  if (trimmed.length <= maxLen) return trimmed;
-  const truncated = trimmed.slice(0, maxLen);
-  const lastSpace = truncated.lastIndexOf(' ');
-  return lastSpace > maxLen * 0.5 ? truncated.slice(0, lastSpace) : truncated;
+  if (match) return wordBound(match[1]);
+  // No sentence boundary — word-bounded trim of the whole capture.
+  return wordBound(trimmed);
 }
 
 /**
@@ -432,7 +438,7 @@ export function extractMemorableSegments(conversationText, opts = {}) {
           // v4.24.3: headline = first sentence (sentence-bounded), not
           // the first 50 chars. Eliminates mid-clause garbage in the
           // MEMORY.md index.
-          const headline = extractFirstSentence(content, 80);
+          const headline = extractFirstSentence(content, 120);
           const title = extractor.titlePrefix + headline;
           segments.push({
             title,
