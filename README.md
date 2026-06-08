@@ -1,14 +1,20 @@
 <p align="center">
-  <h1 align="center">ShieldCortex</h1>
-  <p align="center">
-    Memory security for AI agents.
-  </p>
-  <p align="center">
-    <a href="https://www.npmjs.com/package/shieldcortex"><img src="https://img.shields.io/npm/v/shieldcortex.svg" alt="npm version"></a>
-    <a href="https://www.npmjs.com/package/shieldcortex"><img src="https://img.shields.io/npm/dt/shieldcortex.svg" alt="npm downloads"></a>
-    <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-    <a href="https://github.com/Drakon-Systems-Ltd/ShieldCortex/stargazers"><img src="https://img.shields.io/github/stars/Drakon-Systems-Ltd/ShieldCortex.svg?style=social" alt="GitHub stars"></a>
-  </p>
+  <img src="assets/shieldcortex-logo.png" alt="ShieldCortex" width="200" height="200" />
+</p>
+
+<p align="center">
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=34&duration=3000&pause=900&color=00FF7F&center=true&vCenter=true&width=620&lines=ShieldCortex;Memory+You+Can+Trust;Security+For+AI+Agents;Inspect.+Review.+Defend." alt="ShieldCortex" />
+</p>
+
+<p align="center">
+  <b>Memory security for AI agents.</b>
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/shieldcortex"><img src="https://img.shields.io/npm/v/shieldcortex.svg" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/shieldcortex"><img src="https://img.shields.io/npm/dt/shieldcortex.svg" alt="npm downloads"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/Drakon-Systems-Ltd/ShieldCortex/stargazers"><img src="https://img.shields.io/github/stars/Drakon-Systems-Ltd/ShieldCortex.svg?style=social" alt="GitHub stars"></a>
 </p>
 
 Your AI agent forgets useful context, stores untrusted context, and then confidently builds on both. ShieldCortex fixes that by giving agents memory you can inspect, review, and defend before it poisons future decisions.
