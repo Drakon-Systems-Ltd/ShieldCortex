@@ -188,6 +188,24 @@ export function calculateSalience(text, opts = {}) {
   return Math.min(ceiling, score);
 }
 
+/**
+ * Quality signal: reward self-contained captures, discount fragments. The 0.6
+ * cap bounds salience but says nothing about whether a capture is a complete
+ * thought — so a mid-clause fragment used to compete on equal footing with a
+ * complete fact (Jarvis P2, 2026-06-08). A capture that ends like a complete
+ * sentence (terminal punctuation, allowing a trailing quote/paren) gets no
+ * penalty; anything that trails off mid-clause is discounted so it ranks below
+ * self-contained facts. Pure + exported for direct testing.
+ *
+ * @param {string} content
+ * @returns {number} 0 for complete captures, a negative penalty for fragments
+ */
+export function completenessAdjustment(content) {
+  const t = (content || '').trim();
+  if (!t) return 0;
+  return /[.!?]["')\]]?$/.test(t) ? 0 : -0.15;
+}
+
 export function suggestCategory(text) {
   const lower = text.toLowerCase();
   if (detectKeywords(lower, ARCHITECTURE_KEYWORDS)) return 'architecture';
@@ -672,7 +690,11 @@ export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opt
 
   for (const seg of unique) {
     const frequencyBoost = applyFrequencyBoost ? calculateFrequencyBoost(seg, unique) : 0;
-    seg.salience = Math.min(AUTO_EXTRACT_SALIENCE_CAP, seg.baseSalience + frequencyBoost);
+    // Apply the fragment penalty AFTER the cap so a high-keyword fragment can't
+    // tie a complete fact at the ceiling — a self-contained fact always
+    // out-ranks an otherwise-equivalent fragment (Jarvis P2).
+    const capped = Math.min(AUTO_EXTRACT_SALIENCE_CAP, seg.baseSalience + frequencyBoost);
+    seg.salience = Math.max(0, capped + completenessAdjustment(seg.content));
     seg.frequencyBoost = frequencyBoost;
   }
 
