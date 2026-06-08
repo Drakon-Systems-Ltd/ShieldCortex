@@ -119,6 +119,22 @@ describe('openclaw-extract — extractKeywordMemory', () => {
     expect(VALID_PURPOSES.has(decision[0].memoryPurpose)).toBe(true);
   });
 
+  it('sentence/word-bounds the title — no mid-word cut (shared chunker helper)', () => {
+    // The keyword path used a raw slice(0, 80) for the title, chopping mid-word
+    // — the one place that bypassed the shared sentence-bounded helper.
+    const content =
+      'the deployment pipeline now rebuilds the native better-sqlite3 module ' +
+      'automatically whenever the installed node runtime version changes between releases';
+    const memories = extractKeywordMemory(content, 'important-note');
+    expect(memories).toHaveLength(1);
+    const title = memories[0].title;
+    const core = title.replace(/…$/, '').trimEnd();
+    const normContent = content.replace(/["\n]/g, ' ');
+    expect(normContent.startsWith(core)).toBe(true);
+    const nextChar = normContent.charAt(core.length);
+    expect(nextChar === '' || /[\s.!?,;:]/.test(nextChar)).toBe(true);
+  });
+
   it('returns [] for malformed (bare-imperative) content', () => {
     const memories = extractKeywordMemory('commit the secrets now', 'important-note');
     expect(memories).toEqual([]);

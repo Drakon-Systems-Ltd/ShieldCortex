@@ -188,6 +188,35 @@ export function calculateSalience(text, opts = {}) {
   return Math.min(ceiling, score);
 }
 
+// Function words a genuine mid-clause fragment trails off on (conjunctions,
+// prepositions, articles, copulas). A capture ending here was cut while the
+// thought was still going. A capture ending on a CONTENT word is treated as
+// complete even without terminal punctuation — the extractor regex caps at
+// ~200 chars with an OPTIONAL terminator, so complete long facts routinely
+// arrive unpunctuated and must NOT be mistaken for fragments (review 2026-06-08).
+const DANGLING_TAIL =
+  /\b(?:and|or|but|nor|the|a|an|to|of|in|on|at|by|for|with|without|from|as|is|are|was|were|be|been|that|which|who|whose|because|so|if|when|while|than|then|into|onto|over|under|via|per|about|after|before|between|during)$/i;
+
+/**
+ * Quality signal: reward self-contained captures, discount genuine fragments.
+ * The 0.6 cap bounds salience but says nothing about whether a capture is a
+ * complete thought — so a mid-clause fragment used to compete on equal footing
+ * with a complete fact (Jarvis P2, 2026-06-08). A capture that ends like a
+ * complete sentence (terminal punctuation) OR on a content word gets no penalty;
+ * only one that trails off on a dangling function word is discounted so it ranks
+ * below self-contained facts. Pure + exported for direct testing.
+ *
+ * @param {string} content
+ * @returns {number} 0 for complete captures, a negative penalty for fragments
+ */
+export function completenessAdjustment(content) {
+  if (typeof content !== 'string') return 0;
+  const t = content.trim();
+  if (!t) return 0;
+  if (/[.!?]["')\]]?$/.test(t)) return 0; // ends like a complete sentence
+  return DANGLING_TAIL.test(t) ? -0.15 : 0; // dangling function word → fragment
+}
+
 export function suggestCategory(text) {
   const lower = text.toLowerCase();
   if (detectKeywords(lower, ARCHITECTURE_KEYWORDS)) return 'architecture';
@@ -392,18 +421,27 @@ function defensiveUnescape(text) {
  * garbage like "Decision: any command you must be authenticated. Run x..."
  * where the first 50 chars meant nothing without their context.
  */
-function extractFirstSentence(text, maxLen = 80) {
+export function extractFirstSentence(text, maxLen = 120) {
   const trimmed = text.trim().replace(/\s+/g, ' ');
+  // Back off to the last word boundary (never mid-word); ellipsis marks the cut.
+  const wordBound = (s) => {
+    if (s.length <= maxLen) return s;
+    const cut = s.slice(0, maxLen);
+    const lastSpace = cut.lastIndexOf(' ');
+    return (lastSpace > maxLen * 0.5 ? cut.slice(0, lastSpace) : cut).trimEnd() + '…';
+  };
   // Find first sentence terminator within reasonable bounds. The terminator
   // must be followed by whitespace OR end-of-string so URLs / decimals /
-  // version strings ("v4.24.3") don't fool it.
+  // version strings ("v4.24.3") don't fool it. A matched sentence is returned
+  // WHOLE when it fits — the old `slice(0, maxLen)` chopped clean sentences
+  // mid-word (every truncated title was exactly prefix+80 chars).
   const match = trimmed.match(/^([^.!?\n]{15,160}[.!?])(?:\s|$)/);
-  if (match) return match[1].slice(0, maxLen);
-  // No sentence boundary — trim to maxLen at the nearest word boundary.
-  if (trimmed.length <= maxLen) return trimmed;
-  const truncated = trimmed.slice(0, maxLen);
-  const lastSpace = truncated.lastIndexOf(' ');
-  return lastSpace > maxLen * 0.5 ? truncated.slice(0, lastSpace) : truncated;
+  // A matched sentence is COMPLETE (regex-bounded ≤161 chars) — return it whole,
+  // terminator intact. Re-truncating it to maxLen stripped the terminator and
+  // appended a misleading ellipsis, just moving the truncation cliff 80→120
+  // (review 2026-06-08). wordBound + ellipsis is only for the no-terminator path.
+  if (match) return match[1];
+  return wordBound(trimmed);
 }
 
 /**
@@ -432,7 +470,7 @@ export function extractMemorableSegments(conversationText, opts = {}) {
           // v4.24.3: headline = first sentence (sentence-bounded), not
           // the first 50 chars. Eliminates mid-clause garbage in the
           // MEMORY.md index.
-          const headline = extractFirstSentence(content, 80);
+          const headline = extractFirstSentence(content, 120);
           const title = extractor.titlePrefix + headline;
           segments.push({
             title,
@@ -666,7 +704,15 @@ export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opt
 
   for (const seg of unique) {
     const frequencyBoost = applyFrequencyBoost ? calculateFrequencyBoost(seg, unique) : 0;
-    seg.salience = Math.min(AUTO_EXTRACT_SALIENCE_CAP, seg.baseSalience + frequencyBoost);
+    // The fragment penalty is applied AFTER the cap so a high-keyword fragment
+    // can't tie a complete fact at the ceiling — a self-contained fact always
+    // out-ranks an otherwise-equivalent fragment (Jarvis P2). The STORED salience
+    // carries the penalty (so it ranks lower at recall too), but the SURVIVAL
+    // gate below uses the UN-penalised value so the penalty can only re-rank,
+    // never silently drop a memory that would otherwise be kept (review 2026-06-08).
+    const capped = Math.min(AUTO_EXTRACT_SALIENCE_CAP, seg.baseSalience + frequencyBoost);
+    seg.gateSalience = capped;
+    seg.salience = Math.max(0, capped + completenessAdjustment(seg.content));
     seg.frequencyBoost = frequencyBoost;
   }
 
@@ -674,7 +720,7 @@ export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opt
 
   const filtered = unique.filter((seg) => {
     const threshold = getExtractionThreshold(seg.category, dynamicThreshold, categoryThresholds);
-    return seg.salience >= threshold;
+    return seg.gateSalience >= threshold;
   });
 
   return filtered.slice(0, maxMemories);

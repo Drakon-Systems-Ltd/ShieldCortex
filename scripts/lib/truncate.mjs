@@ -25,17 +25,29 @@ export function truncatePreservingWords(text, maxChars, lookback = 20) {
   if (typeof text !== 'string') return text;
   if (text.length <= maxChars) return text;
   const slice = text.slice(0, maxChars);
-  const minIdx = Math.max(0, maxChars - lookback);
-  const lastBoundary = Math.max(
-    slice.lastIndexOf(' '),
+  // Prefer a SENTENCE boundary, searched in a generous window, so a complete
+  // earlier sentence beats a nearer mid-sentence word break (jarvis 2026-06-08:
+  // "prefer a complete sentence over a fixed character window"). The previous
+  // single Math.max over all boundaries let the rightmost word-space win,
+  // producing word-complete but sentence-incomplete snippets.
+  const sentenceMin = Math.max(0, maxChars - lookback * 3);
+  const sentenceEnd = Math.max(
     slice.lastIndexOf('. '),
+    slice.lastIndexOf('! '),
+    slice.lastIndexOf('? '),
+    slice.lastIndexOf('\n'),
+  );
+  if (sentenceEnd >= sentenceMin) {
+    return slice.slice(0, sentenceEnd + 1).trimEnd() + '…';
+  }
+  // No sentence boundary nearby — back off to the last word boundary.
+  const wordMin = Math.max(0, maxChars - lookback);
+  const wordEnd = Math.max(
+    slice.lastIndexOf(' '),
     slice.lastIndexOf(', '),
     slice.lastIndexOf('; '),
     slice.lastIndexOf(': '),
-    slice.lastIndexOf('\n'),
-    slice.lastIndexOf('? '),
-    slice.lastIndexOf('! '),
   );
-  const cutAt = lastBoundary >= minIdx ? lastBoundary : maxChars;
+  const cutAt = wordEnd >= wordMin ? wordEnd : maxChars;
   return slice.slice(0, cutAt).trimEnd() + '…';
 }

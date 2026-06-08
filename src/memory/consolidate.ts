@@ -1300,6 +1300,15 @@ export function consolidateMemories(): DreamModeResult {
 
     const totalProcessed = duplicatePairs.length + staleRows.length;
 
+    // Completion summary — without this, a quiet pass produced a 2-line
+    // near-empty report with no signal as to whether it under-extracted, errored,
+    // or legitimately had nothing to do (Jarvis P3, 2026-06-08).
+    const summary = totalProcessed === 0
+      ? '[dream] nothing to consolidate (0 candidates this pass)'
+      : `[dream] merged ${nearDuplicatesMerged}, archived ${archivalCandidates}, ` +
+        `contradictions ${contradictionsDetected} (from ${totalProcessed} candidates)`;
+    console.error(summary);
+
     return {
       nearDuplicatesMerged,
       archivalCandidates,
