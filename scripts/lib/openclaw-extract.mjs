@@ -17,6 +17,7 @@ import {
   extractMemorableSegments,
   processSegments,
   shouldRejectCandidate,
+  extractFirstSentence,
   EXTRACTOR_TO_CATEGORY,
   EXTRACTOR_TO_PURPOSE,
 } from './extract-memorable-segments.mjs';
@@ -116,7 +117,9 @@ export function extractKeywordMemory(content, extractorType) {
   const category = EXTRACTOR_TO_CATEGORY[resolvedType] ?? 'note';
   const memoryPurpose = EXTRACTOR_TO_PURPOSE[resolvedType] ?? 'project';
 
-  const title = trimmed.slice(0, 80).replace(/["\n]/g, ' ').trim();
+  // Sentence/word-bounded via the shared chunker helper — never a mid-word
+  // slice (was a raw trimmed.slice(0, 80), the one path that bypassed it).
+  const title = extractFirstSentence(trimmed.replace(/["\n]/g, ' '), 120);
 
   return [
     {

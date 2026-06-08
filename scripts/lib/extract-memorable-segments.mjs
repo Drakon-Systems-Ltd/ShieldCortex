@@ -392,7 +392,7 @@ function defensiveUnescape(text) {
  * garbage like "Decision: any command you must be authenticated. Run x..."
  * where the first 50 chars meant nothing without their context.
  */
-function extractFirstSentence(text, maxLen = 120) {
+export function extractFirstSentence(text, maxLen = 120) {
   const trimmed = text.trim().replace(/\s+/g, ' ');
   // Back off to the last word boundary (never mid-word); ellipsis marks the cut.
   const wordBound = (s) => {
