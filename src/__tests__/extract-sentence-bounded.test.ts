@@ -110,6 +110,23 @@ describe('v4.24.3 sentence-bounded extraction', () => {
     expect(nextChar === '' || /[\s.!?,;:]/.test(nextChar)).toBe(true);
   });
 
+  it('returns a complete matched sentence whole — no ellipsis in the 121-160 char band', async () => {
+    const { extractMemorableSegments } = await import('../../scripts/lib/extract-memorable-segments.mjs');
+    // A single COMPLETE terminated sentence ~133 chars: within the regex's 160
+    // bound but above the 120 headline cap. It must come back whole, terminator
+    // intact — NOT re-truncated with an ellipsis (review finding: the fix only
+    // moved the truncation cliff from 80 to 120).
+    const sentence =
+      'We decided to migrate the entire authentication and authorisation subsystem ' +
+      'onto short-lived rotating session tokens across the whole platform now.';
+    const segments = extractMemorableSegments(sentence);
+    const decision = segments.find((s) => s.extractorType === 'decision');
+    expect(decision).toBeDefined();
+    const headline = decision!.title.replace(/^Decision: /, '');
+    expect(headline.endsWith('…')).toBe(false); // not ellipsis-truncated
+    expect(/[.!?]$/.test(headline)).toBe(true); // terminator preserved
+  });
+
   it('preference captures stop at a sentence terminator', async () => {
     const { extractMemorableSegments } = await import('../../scripts/lib/extract-memorable-segments.mjs');
     const text =

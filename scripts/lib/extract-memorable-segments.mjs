@@ -188,22 +188,33 @@ export function calculateSalience(text, opts = {}) {
   return Math.min(ceiling, score);
 }
 
+// Function words a genuine mid-clause fragment trails off on (conjunctions,
+// prepositions, articles, copulas). A capture ending here was cut while the
+// thought was still going. A capture ending on a CONTENT word is treated as
+// complete even without terminal punctuation — the extractor regex caps at
+// ~200 chars with an OPTIONAL terminator, so complete long facts routinely
+// arrive unpunctuated and must NOT be mistaken for fragments (review 2026-06-08).
+const DANGLING_TAIL =
+  /\b(?:and|or|but|nor|the|a|an|to|of|in|on|at|by|for|with|without|from|as|is|are|was|were|be|been|that|which|who|whose|because|so|if|when|while|than|then|into|onto|over|under|via|per|about|after|before|between|during)$/i;
+
 /**
- * Quality signal: reward self-contained captures, discount fragments. The 0.6
- * cap bounds salience but says nothing about whether a capture is a complete
- * thought — so a mid-clause fragment used to compete on equal footing with a
- * complete fact (Jarvis P2, 2026-06-08). A capture that ends like a complete
- * sentence (terminal punctuation, allowing a trailing quote/paren) gets no
- * penalty; anything that trails off mid-clause is discounted so it ranks below
- * self-contained facts. Pure + exported for direct testing.
+ * Quality signal: reward self-contained captures, discount genuine fragments.
+ * The 0.6 cap bounds salience but says nothing about whether a capture is a
+ * complete thought — so a mid-clause fragment used to compete on equal footing
+ * with a complete fact (Jarvis P2, 2026-06-08). A capture that ends like a
+ * complete sentence (terminal punctuation) OR on a content word gets no penalty;
+ * only one that trails off on a dangling function word is discounted so it ranks
+ * below self-contained facts. Pure + exported for direct testing.
  *
  * @param {string} content
  * @returns {number} 0 for complete captures, a negative penalty for fragments
  */
 export function completenessAdjustment(content) {
-  const t = (content || '').trim();
+  if (typeof content !== 'string') return 0;
+  const t = content.trim();
   if (!t) return 0;
-  return /[.!?]["')\]]?$/.test(t) ? 0 : -0.15;
+  if (/[.!?]["')\]]?$/.test(t)) return 0; // ends like a complete sentence
+  return DANGLING_TAIL.test(t) ? -0.15 : 0; // dangling function word → fragment
 }
 
 export function suggestCategory(text) {
@@ -425,8 +436,11 @@ export function extractFirstSentence(text, maxLen = 120) {
   // WHOLE when it fits — the old `slice(0, maxLen)` chopped clean sentences
   // mid-word (every truncated title was exactly prefix+80 chars).
   const match = trimmed.match(/^([^.!?\n]{15,160}[.!?])(?:\s|$)/);
-  if (match) return wordBound(match[1]);
-  // No sentence boundary — word-bounded trim of the whole capture.
+  // A matched sentence is COMPLETE (regex-bounded ≤161 chars) — return it whole,
+  // terminator intact. Re-truncating it to maxLen stripped the terminator and
+  // appended a misleading ellipsis, just moving the truncation cliff 80→120
+  // (review 2026-06-08). wordBound + ellipsis is only for the no-terminator path.
+  if (match) return match[1];
   return wordBound(trimmed);
 }
 
@@ -690,10 +704,14 @@ export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opt
 
   for (const seg of unique) {
     const frequencyBoost = applyFrequencyBoost ? calculateFrequencyBoost(seg, unique) : 0;
-    // Apply the fragment penalty AFTER the cap so a high-keyword fragment can't
-    // tie a complete fact at the ceiling — a self-contained fact always
-    // out-ranks an otherwise-equivalent fragment (Jarvis P2).
+    // The fragment penalty is applied AFTER the cap so a high-keyword fragment
+    // can't tie a complete fact at the ceiling — a self-contained fact always
+    // out-ranks an otherwise-equivalent fragment (Jarvis P2). The STORED salience
+    // carries the penalty (so it ranks lower at recall too), but the SURVIVAL
+    // gate below uses the UN-penalised value so the penalty can only re-rank,
+    // never silently drop a memory that would otherwise be kept (review 2026-06-08).
     const capped = Math.min(AUTO_EXTRACT_SALIENCE_CAP, seg.baseSalience + frequencyBoost);
+    seg.gateSalience = capped;
     seg.salience = Math.max(0, capped + completenessAdjustment(seg.content));
     seg.frequencyBoost = frequencyBoost;
   }
@@ -702,7 +720,7 @@ export function processSegments(segments, dynamicThreshold = BASE_THRESHOLD, opt
 
   const filtered = unique.filter((seg) => {
     const threshold = getExtractionThreshold(seg.category, dynamicThreshold, categoryThresholds);
-    return seg.salience >= threshold;
+    return seg.gateSalience >= threshold;
   });
 
   return filtered.slice(0, maxMemories);
