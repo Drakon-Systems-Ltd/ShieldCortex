@@ -5,6 +5,8 @@
  * hex encoding, suspicious URL encoding, and invisible characters.
  */
 
+import { hasConfusables } from './confusables.js';
+
 export interface EncodingDetectionResult {
   detected: boolean;
   encodingTypes: string[];
@@ -29,8 +31,8 @@ const ZERO_WIDTH_PATTERN = /[\u200B\u200C\u200D\uFEFF]/;
 // RTL override \u2014 presence check only, NO `/g` (same stateful-test hazard).
 const RTL_OVERRIDE_PATTERN = /\u202E/;
 
-// Unicode homoglyphs — Cyrillic characters that look like Latin
-const CYRILLIC_HOMOGLYPHS = /[\u0430\u0435\u043E\u0440\u0441\u0443\u0445\u0410\u0412\u0415\u041A\u041C\u041D\u041E\u0420\u0421\u0422\u0423\u0425]/g;
+// ASCII Latin letters — used by the mixed-script homoglyph signal below.
+const ASCII_LATIN = /[A-Za-z]/;
 
 function tryBase64DecodeSingle(str: string): string | null {
   try {
@@ -144,9 +146,19 @@ export function detectEncoding(content: string): EncodingDetectionResult {
     encodingTypes.push('rtl_override');
   }
 
-  // Unicode homoglyphs
-  const homoglyphMatches = content.match(CYRILLIC_HOMOGLYPHS);
-  if (homoglyphMatches && homoglyphMatches.length >= 2) {
+  // Unicode homoglyphs — mixed-script signal.
+  //
+  // The old rule ("≥2 Cyrillic confusables") missed a single substitution
+  // (`ignorе` with one Cyrillic е reads as Latin and slipped through). The new
+  // rule flags 'unicode_homoglyph' when BOTH are true:
+  //   1. a curated cross-script confusable is present (hasConfusables — folding
+  //      changed something beyond plain NFKC), AND
+  //   2. the content also contains an ASCII Latin letter.
+  // That combination means a Latin word has a foreign lookalike hidden in it.
+  // A wholly-Cyrillic Russian sentence has NO ASCII Latin letters, so it does
+  // NOT flag — genuine non-Latin text is left alone. Covers the Cyrillic AND
+  // Greek glyphs in the confusables map (a single substitution is enough).
+  if (hasConfusables(content) && ASCII_LATIN.test(content)) {
     encodingTypes.push('unicode_homoglyph');
   }
 

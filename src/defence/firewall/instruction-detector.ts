@@ -4,6 +4,8 @@
  * Detects prompt injection and hidden instruction patterns in memory content.
  */
 
+import { foldConfusables } from './confusables.js';
+
 export interface InstructionDetectionResult {
   detected: boolean;
   patterns: string[];
@@ -172,9 +174,17 @@ export function detectInstructions(content: string): InstructionDetectionResult 
   let totalWeight = 0;
   let maxWeight = 0;
 
+  // Fold cross-script confusables (Cyrillic/Greek homoglyphs + NFKC forms) to
+  // their Latin skeleton so a single-glyph substitution like `ignorе` (Cyrillic
+  // е) still matches the ASCII patterns. We test the original first, then the
+  // folded copy only if folding changed something — testing both means we never
+  // *lose* a match that the original would have caught.
+  const folded = foldConfusables(content);
+  const variants = folded !== content ? [content, folded] : [content];
+
   for (const group of PATTERN_GROUPS) {
     for (const pattern of group.patterns) {
-      if (safeRegexTest(pattern, content)) {
+      if (variants.some((variant) => safeRegexTest(pattern, variant))) {
         matchedPatterns.push(group.name);
         totalWeight += group.weight;
         if (group.weight > maxWeight) {
