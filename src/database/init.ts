@@ -3,7 +3,7 @@
  */
 
 import type Database from 'better-sqlite3';
-import BetterSqlite3 from './better-sqlite3-guard.js';
+import BetterSqlite3, { isNativeModuleLoadError } from './better-sqlite3-guard.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
@@ -486,6 +486,25 @@ export function initDatabase(dbPath?: string): Database.Database {
   try {
     database = new BetterSqlite3(expandedPath);
   } catch (openError) {
+    // A NATIVE-MODULE load failure (missing / ABI-mismatched better-sqlite3
+    // binding) throws here too — better-sqlite3 resolves its binding lazily in
+    // the constructor, so it surfaces at open time, NOT at require(). That is an
+    // INSTALL problem, not file corruption: renaming a healthy DB to .corrupt.*
+    // here is data loss (observed 2026-06-09 on an arm64 box after a Node/native
+    // mismatch — a live memories.db was moved aside). Never touch the DB file on
+    // a binding error; surface an actionable message and let the caller stop.
+    if (isNativeModuleLoadError(openError)) {
+      const detail = openError instanceof Error ? openError.message : String(openError);
+      throw new Error(
+        'ShieldCortex could not load its database engine (the better-sqlite3 native module). ' +
+        `This is an install / Node-version issue, NOT database corruption — your data at ${expandedPath} is untouched. ` +
+        'Rebuild the native module and retry:\n' +
+        '  cd "$(npm root -g)/shieldcortex" && npm rebuild better-sqlite3\n' +
+        '(install a C/C++ toolchain first if it fails to compile)\n' +
+        `Underlying error: ${detail}`,
+      );
+    }
+
     // Database file is corrupt or not a valid SQLite database
     console.error(`❌ Database open failed for ${expandedPath}: ${openError}`);
 

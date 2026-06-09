@@ -41,6 +41,37 @@ export function formatNativeLoadError(
   ].join('\n');
 }
 
+/**
+ * Signatures of a NATIVE-MODULE load failure (missing / ABI-mismatched / wrong-
+ * arch better-sqlite3 binding, or the module not being installed). These throw
+ * from `new Database()` — better-sqlite3 resolves its binding lazily at
+ * construction, not at require() — and must be distinguished from genuine SQLite
+ * FILE corruption: a load failure is an install problem, and treating it as
+ * corruption (renaming the live DB to .corrupt.*) is data loss.
+ */
+const NATIVE_LOAD_SIGNATURES: RegExp[] = [
+  /could not locate the bindings file/i,
+  /better_sqlite3\.node/i,
+  /NODE_MODULE_VERSION/i,
+  /compiled against a different node/i,
+  /invalid ELF header/i,
+  /wrong ELF class/i,
+  /dlopen\(/i,
+  /symbol not found/i,
+  /specified module could not be found/i,
+  /cannot find module ['"]better-sqlite3/i,
+];
+
+/**
+ * True when an error from opening the database is a better-sqlite3 native-module
+ * load failure (environmental), as opposed to genuine file corruption. Pure +
+ * exported so the init path can route it away from destructive recovery.
+ */
+export function isNativeModuleLoadError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error ?? '');
+  return NATIVE_LOAD_SIGNATURES.some((re) => re.test(msg));
+}
+
 function loadBetterSqlite3(): typeof DatabaseConstructor {
   try {
     return require('better-sqlite3') as typeof DatabaseConstructor;
