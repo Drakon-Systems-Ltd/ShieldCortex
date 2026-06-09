@@ -352,3 +352,11 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   write_count INTEGER NOT NULL DEFAULT 1,
   window_start_ms INTEGER NOT NULL
 );
+
+-- Control state (single row, cross-process kill-switch / pause)
+CREATE TABLE IF NOT EXISTS control_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  mode TEXT NOT NULL DEFAULT 'active' CHECK (mode IN ('active','paused','kill_switch')),
+  meta_json TEXT,
+  updated_at TEXT NOT NULL
+);

@@ -697,4 +697,25 @@ export function runMigrations(database: Database.Database): void {
       // Best-effort marker; the stderr line above carries the signal.
     }
   }
+
+  // Migration: control_state table (cross-process kill-switch / pause).
+  //
+  // Phase 2 hardening: the kill switch / pause mode used to live only in
+  // module-level memory, so a dashboard (API process) activation never reached
+  // the separate MCP server process. control_state is the single-row source of
+  // truth both processes read/write; api/control.ts persists to and refreshes
+  // from it. Existing DBs that predate the table get it here (schema.sql /
+  // inline-schema.ts cover fresh installs).
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS control_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        mode TEXT NOT NULL DEFAULT 'active' CHECK (mode IN ('active','paused','kill_switch')),
+        meta_json TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'control_state');
+  }
 }

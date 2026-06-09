@@ -294,6 +294,14 @@ export function getInlineSchema(): string {
       window_start_ms INTEGER NOT NULL
     );
 
+    -- Control state (single row, cross-process kill-switch / pause)
+    CREATE TABLE IF NOT EXISTS control_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mode TEXT NOT NULL DEFAULT 'active' CHECK (mode IN ('active','paused','kill_switch')),
+      meta_json TEXT,
+      updated_at TEXT NOT NULL
+    );
+
     -- v4.17 Session capture (mirrors schema.sql; bundled fallback only).
     -- v4.28 (Fix #10): + sensitivity_level for prompt-redaction tagging.
     CREATE TABLE IF NOT EXISTS session_events (
