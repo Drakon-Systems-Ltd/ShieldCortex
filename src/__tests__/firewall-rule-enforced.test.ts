@@ -17,7 +17,8 @@ import { runDefencePipeline } from '../defence/pipeline.js';
  * the real block path (no require(esm) involved), so this asserts the genuine
  * verdict: a seeded enabled `block` rule on KEYWORD makes runDefencePipeline
  * return allowed === false. The compiled-dist harness (real Node ESM) and the
- * `npm run test:dist` guard remain the authoritative proof at the dist layer.
+ * `npm run test:dist` guard cover the dist layer, but only run at publish-time
+ * via prepublishOnly — not in PR CI.
  */
 describe('firewall rules are applied by the scan pipeline', () => {
   const KEYWORD = 'zebra-unicorn-sentinel';

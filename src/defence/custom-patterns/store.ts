@@ -46,7 +46,7 @@ export function validateRegex(pattern: string): { valid: boolean; error?: string
 
   // ReDoS check via safe-regex2
   try {
-    // Dynamic import fallback — safe-regex2 may not be installed
+    // Load the CommonJS safe-regex2 via createRequire (it may not be installed)
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const safe = require('safe-regex2');
     if (!safe(pattern)) {

@@ -21,11 +21,12 @@ import { handleKillPhrase } from './kill-switch.js';
 import { activateKillSwitch } from '../../api/control.js';
 import { getActiveIronDomePolicy } from './custom-policies.js';
 
-// ./custom-policies.js is imported statically. ESM tolerates the cycle because
-// getActiveIronDomePolicy is only called inside getEffectiveIronDomeConfig
-// (function-level use, resolved at call time), and the store is lightweight
-// (DB-query only). The try/catch + isDatabaseInitialized() guard below stays so
-// an uninitialised DB falls through to cloud/profile defaults rather than throw.
+// ./custom-policies.js is imported statically. Safe at module-eval time: there
+// is no import cycle on this edge — custom-policies imports only getDatabase and
+// types, never back into this module — and it does no work at import. It is only
+// called inside getEffectiveIronDomeConfig. The try/catch + isDatabaseInitialized()
+// guard below stays so an uninitialised DB falls through to cloud/profile
+// defaults (fail closed) rather than throw.
 
 // ── Re-exports ──
 

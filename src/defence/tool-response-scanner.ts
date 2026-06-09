@@ -16,11 +16,12 @@ import { getToolResponseScanConfig } from '../cloud/config.js';
 import type { ThreatIndicator, ToolResponseScanResult } from './types.js';
 import { persistEvent } from '../api/events.js';
 
-// ../api/events.js is imported statically. ESM tolerates the cycle because
-// persistEvent is only called inside scanToolResponse (function-level use,
-// resolved at call time), and the events module is lightweight (EventEmitter +
-// getDatabase, no server/ws stack). The try/catch below stays — dashboard event
-// persistence is best-effort and must never affect tool-response delivery.
+// ../api/events.js is imported statically. Safe at module-eval time: there is no
+// import cycle on this edge — events imports only an EventEmitter, getDatabase
+// and types, never back into this module — and it does no work at import (no
+// server/ws stack). persistEvent is only called inside scanToolResponse. The
+// try/catch below stays — dashboard event persistence is best-effort and must
+// never affect tool-response delivery.
 
 // Tools that return memory/knowledge content (worth scanning)
 const HIGH_RISK_TOOLS = new Set([

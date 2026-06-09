@@ -27,6 +27,32 @@ const offenders = [];
 // so we can compute the line, plus (optionally) a string-literal argument.
 const REQUIRE_CALL = /(^|[^.\w])require\s*\(\s*(['"])([^'"]*)\2\s*\)|(^|[^.\w])require\s*\(/g;
 
+// Blank out comment contents BEFORE scanning so the word "require(" inside a
+// `//` or `/* */` comment is not flagged (the dist/database/init.js:439 false
+// positive was a require() mentioned in a comment). Replace each comment's
+// characters in place — newlines preserved, everything else turned to spaces —
+// so byte offsets and therefore reported line numbers stay correct.
+//
+// Known limitation: string- and template-literal CONTENTS are NOT stripped, so
+// a literal like "...require('./x.js')..." could still be flagged. Robustly
+// stripping strings with a regex is fragile (escapes, nesting, template
+// interpolation) and the real-world defect was comments, so we only strip
+// those. No current dist offender lives inside a string literal.
+function stripComments(src) {
+  // Match: line comments, block comments, single- or double-quoted strings,
+  // and template literals. Comments are blanked; strings/templates are kept
+  // verbatim so a `//` or `/*` inside a string is never mistaken for a comment.
+  const TOKEN = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
+  return src.replace(TOKEN, (match) => {
+    if (match.startsWith('//') || match.startsWith('/*')) {
+      // Blank the comment but preserve newlines to keep line numbers stable.
+      return match.replace(/[^\n]/g, ' ');
+    }
+    // String/template literal — leave untouched.
+    return match;
+  });
+}
+
 function isRelativeNonJson(spec) {
   if (spec === undefined) return false;
   if (!(spec.startsWith('./') || spec.startsWith('../'))) return false;
@@ -38,7 +64,9 @@ function walk(dir) {
     const full = path.join(dir, entry);
     if (statSync(full).isDirectory()) { walk(full); continue; }
     if (!full.endsWith('.js')) continue;
-    const src = readFileSync(full, 'utf8');
+    // Strip comments first so commented-out require()/createRequire() mentions
+    // are ignored by both the shim check and the offender scan.
+    const src = stripComments(readFileSync(full, 'utf8'));
     const hasShim = /createRequire\s*\(/.test(src);
 
     REQUIRE_CALL.lastIndex = 0;
@@ -68,4 +96,4 @@ if (offenders.length) {
   for (const o of offenders) console.error('  ' + o);
   process.exit(1);
 }
-console.log('OK: no fragile require() in dist.');
+console.log('OK: no ESM-unsafe require() in dist.');

@@ -33,13 +33,13 @@ import { isDatabaseInitialized } from '../database/init.js';
 import { getEnabledFirewallRules } from './custom-rules/store.js';
 import { getEnabledCustomPatterns } from './custom-patterns/store.js';
 
-// The rule/pattern stores are imported statically. ESM tolerates the cycle
-// because these are only called inside runDefencePipeline (function-level use,
-// resolved at call time — not at module-eval time), and the stores are
-// lightweight (DB-query only — they import nothing but getDatabase). The
-// surrounding try/catch below stays: getEnabledFirewallRules()/
-// getEnabledCustomPatterns() throw if the DB is uninitialised, and that must
-// still fail safe rather than weaken a decision.
+// The rule/pattern stores are imported statically. Safe at module-eval time:
+// there is no import cycle on these edges — custom-rules/store and
+// custom-patterns/store import only getDatabase and types, never back into the
+// pipeline — and they do no work at import (no top-level DB access). They are
+// only called inside runDefencePipeline. The surrounding try/catch below stays:
+// getEnabledFirewallRules()/getEnabledCustomPatterns() throw if the DB is
+// uninitialised, and that must still fail closed rather than weaken a decision.
 
 export function runDefencePipeline(
   content: string,
