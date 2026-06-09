@@ -30,14 +30,16 @@ import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { getDefenceMode } from '../cloud/config.js';
 import { isDatabaseInitialized } from '../database/init.js';
-import { createRequire } from 'module';
+import { getEnabledFirewallRules } from './custom-rules/store.js';
+import { getEnabledCustomPatterns } from './custom-patterns/store.js';
 
-// The stores below are require()d lazily (inside functions, behind try/catch)
-// to avoid eager-loading the DB layer at import time and to dodge import
-// cycles. Under real Node ESM a bare require() throws ReferenceError, which
-// the surrounding catch would silently swallow — disabling the firewall-rule
-// and custom-pattern layers. createRequire() gives us a working require here.
-const require = createRequire(import.meta.url);
+// The rule/pattern stores are imported statically. ESM tolerates the cycle
+// because these are only called inside runDefencePipeline (function-level use,
+// resolved at call time — not at module-eval time), and the stores are
+// lightweight (DB-query only — they import nothing but getDatabase). The
+// surrounding try/catch below stays: getEnabledFirewallRules()/
+// getEnabledCustomPatterns() throw if the DB is uninitialised, and that must
+// still fail safe rather than weaken a decision.
 
 export function runDefencePipeline(
   content: string,
@@ -140,7 +142,6 @@ export function runDefencePipeline(
     // are additive only — can tighten, never weaken.
     if (allowed && isDatabaseInitialized()) {
       try {
-        const { getEnabledFirewallRules } = require('./custom-rules/store.js');
         const userRulesAllowed = isFeatureEnabled('custom_firewall_rules');
         const allRules = getEnabledFirewallRules();
         for (const rule of allRules) {
@@ -179,7 +180,6 @@ export function runDefencePipeline(
     // 6c. Apply custom injection patterns (Pro feature, additive)
     if (allowed && isFeatureEnabled('custom_injection_patterns') && isDatabaseInitialized()) {
       try {
-        const { getEnabledCustomPatterns } = require('./custom-patterns/store.js');
         const customPatterns = getEnabledCustomPatterns();
         for (const pattern of customPatterns) {
           try {

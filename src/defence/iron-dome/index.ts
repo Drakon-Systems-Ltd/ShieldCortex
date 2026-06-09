@@ -19,14 +19,13 @@ import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
 import { isDatabaseInitialized } from '../../database/init.js';
 import { handleKillPhrase } from './kill-switch.js';
 import { activateKillSwitch } from '../../api/control.js';
-import { createRequire } from 'module';
+import { getActiveIronDomePolicy } from './custom-policies.js';
 
-// ./custom-policies.js is require()d lazily (inside getEffectiveIronDomeConfig,
-// behind try/catch) to avoid eager-loading the DB layer and dodge import
-// cycles. Under real Node ESM a bare require() throws ReferenceError, which the
-// surrounding catch would swallow — silently ignoring local custom policies.
-// createRequire() gives us a working require here.
-const require = createRequire(import.meta.url);
+// ./custom-policies.js is imported statically. ESM tolerates the cycle because
+// getActiveIronDomePolicy is only called inside getEffectiveIronDomeConfig
+// (function-level use, resolved at call time), and the store is lightweight
+// (DB-query only). The try/catch + isDatabaseInitialized() guard below stays so
+// an uninitialised DB falls through to cloud/profile defaults rather than throw.
 
 // ── Re-exports ──
 
@@ -281,7 +280,6 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
   // Check for active local custom policy (takes precedence over cloud)
   if (isDatabaseInitialized()) {
     try {
-      const { getActiveIronDomePolicy } = require('./custom-policies.js');
       const activePolicy = getActiveIronDomePolicy();
       if (activePolicy) {
         const policyConfig = JSON.parse(activePolicy.config);

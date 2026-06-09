@@ -14,14 +14,13 @@ import { logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
 import type { ThreatIndicator, ToolResponseScanResult } from './types.js';
-import { createRequire } from 'module';
+import { persistEvent } from '../api/events.js';
 
-// ../api/events.js is require()d lazily (inside scanToolResponse, behind
-// try/catch) to keep the dashboard event sink optional. Under real Node ESM a
-// bare require() throws ReferenceError, which the surrounding catch would
-// swallow — dropping real-time defence events. createRequire() gives us a
-// working require here.
-const require = createRequire(import.meta.url);
+// ../api/events.js is imported statically. ESM tolerates the cycle because
+// persistEvent is only called inside scanToolResponse (function-level use,
+// resolved at call time), and the events module is lightweight (EventEmitter +
+// getDatabase, no server/ws stack). The try/catch below stays — dashboard event
+// persistence is best-effort and must never affect tool-response delivery.
 
 // Tools that return memory/knowledge content (worth scanning)
 const HIGH_RISK_TOOLS = new Set([
@@ -146,7 +145,6 @@ export function scanToolResponse(
 
     // 6. Dashboard real-time event
     try {
-      const { persistEvent } = require('../api/events.js');
       persistEvent('defence_event', {
         source_type: 'tool_response',
         source_identifier: toolName,
