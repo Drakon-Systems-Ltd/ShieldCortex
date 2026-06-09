@@ -88,45 +88,57 @@ describe('doctor — checkOpenClawPluginVersion (staleness)', () => {
   });
 
   it('WARNs when the installed plugin lags the running package (the reported case: 4.29.0 vs 4.30.1)', async () => {
-    const file = writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { version: '4.29.0' } } });
-    const r = await checkOpenClawPluginVersion(file, '4.30.1');
+    writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { version: '4.29.0' } } });
+    const r = await checkOpenClawPluginVersion(dir, '4.30.1');
     expect(r.status).toBe('warn');
     expect(r.message).toContain('4.29.0');
     expect(r.message).toContain('4.30.1');
-    expect(r.fix).toContain('openclaw plugins update shieldcortex-realtime');
+    expect(r.fix).toContain('shieldcortex-realtime');
   });
 
   it('PASSes when the installed plugin matches the running package', async () => {
-    const file = writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { version: '4.30.1' } } });
-    const r = await checkOpenClawPluginVersion(file, '4.30.1');
+    writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { version: '4.30.1' } } });
+    const r = await checkOpenClawPluginVersion(dir, '4.30.1');
     expect(r.status).toBe('pass');
     expect(r.message).toContain('4.30.1');
     expect(r.message).toContain('current');
   });
 
+  it('reports the ON-DISK version, not the stale installs.json field (the 2026-06-09 bug)', async () => {
+    // installs.json frozen at 4.30.2, but OpenClaw installed 4.31.0 on disk.
+    const installPath = path.join(dir, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-z9', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    fs.mkdirSync(installPath, { recursive: true });
+    fs.writeFileSync(path.join(installPath, 'package.json'), JSON.stringify({ version: '4.31.0' }));
+    writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { version: '4.30.2', installPath } } });
+    const r = await checkOpenClawPluginVersion(dir, '4.31.0');
+    expect(r.status).toBe('pass'); // would have been 'warn' off the stale 4.30.2 field
+    expect(r.message).toContain('4.31.0');
+    expect(r.message).toContain('current');
+  });
+
   it('reports INFO (not a warning) when the installed plugin is ahead of the local package', async () => {
-    const file = writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { version: '4.31.0' } } });
-    const r = await checkOpenClawPluginVersion(file, '4.30.1');
+    writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { version: '4.31.0' } } });
+    const r = await checkOpenClawPluginVersion(dir, '4.30.1');
     expect(r.status).toBe('info');
     expect(r.message).toContain('ahead');
   });
 
   it('falls back to resolvedVersion when version is absent', async () => {
-    const file = writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { resolvedVersion: '4.29.0' } } });
-    const r = await checkOpenClawPluginVersion(file, '4.30.1');
+    writeInstalls(dir, { installRecords: { 'shieldcortex-realtime': { resolvedVersion: '4.29.0' } } });
+    const r = await checkOpenClawPluginVersion(dir, '4.30.1');
     expect(r.status).toBe('warn');
     expect(r.message).toContain('4.29.0');
   });
 
   it('skips (info) when the registry is absent', async () => {
-    const r = await checkOpenClawPluginVersion(path.join(dir, 'nope', 'installs.json'), '4.30.1');
+    const r = await checkOpenClawPluginVersion(path.join(dir, 'nope'), '4.30.1');
     expect(r.status).toBe('info');
     expect(r.message).toContain('skipped');
   });
 
   it('skips (info) when the realtime plugin is not registered', async () => {
-    const file = writeInstalls(dir, { installRecords: { brave: { version: '1.0.0' } } });
-    const r = await checkOpenClawPluginVersion(file, '4.30.1');
+    writeInstalls(dir, { installRecords: { brave: { version: '1.0.0' } } });
+    const r = await checkOpenClawPluginVersion(dir, '4.30.1');
     expect(r.status).toBe('info');
     expect(r.message).toContain('not registered');
   });

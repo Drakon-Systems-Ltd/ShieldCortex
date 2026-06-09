@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
+import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 
 // ── ANSI ────────────────────────────────────────────────────
 
@@ -259,6 +260,9 @@ async function stepNpmPackage(
  * (the authoritative source `doctor` also trusts) instead.
  */
 export function isRealtimePluginRegistered(home: string): boolean {
+  // An on-disk install resolves even on boxes whose authoritative plugin state
+  // is SQLite-only (no legacy installs.json) — check that first.
+  if (resolveRealtimePluginInstallPath(home)) return true;
   try {
     const installsPath = path.join(home, '.openclaw', 'plugins', 'installs.json');
     if (!fs.existsSync(installsPath)) return false;
@@ -288,17 +292,23 @@ async function stepOpenClawPlugin(home: string): Promise<StepResult> {
     if (legacy) {
       try { fs.rmSync(extDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
+    const before = readInstalledRealtimePluginVersion(home);
     try {
-      // A registry-managed install uses OpenClaw's idempotent `update` verb; a
-      // legacy-only install is migrated to the registry with a forced reinstall.
-      const args = registered
-        ? ['plugins', 'update', 'shieldcortex-realtime']
-        : ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'];
-      await runQuiet('openclaw', args, { timeout: 60000, env: { ...process.env, HOME: home } });
-      return registered ? 'updated via openclaw' : '@latest installed';
+      // `openclaw plugins update` no-ops when OpenClaw recorded an exact-pinned
+      // spec (observed 2026-06-09: the index pinned @4.30.2 → "up to date" while
+      // npm had 4.31.0). A forced @latest install reliably advances the plugin
+      // AND rewrites the tracked spec to @latest so future updates work.
+      await runQuiet('openclaw', ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'],
+        { timeout: 120000, env: { ...process.env, HOME: home } });
+      // Report the ACTUAL on-disk transition, not just command success — the old
+      // "updated via openclaw" was printed even when the version never moved.
+      const after = readInstalledRealtimePluginVersion(home);
+      if (before && after && before !== after) return `${before} → ${after}`;
+      if (after) return `up to date (v${after})`;
+      return 'reinstalled';
     } catch {
       // Don't propagate — surface as warn instead of failing the whole flow.
-      return { status: 'warn' as const, summary: 'update failed — run `openclaw plugins update shieldcortex-realtime`' };
+      return { status: 'warn' as const, summary: 'update failed — run `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest`' };
     }
   });
 }

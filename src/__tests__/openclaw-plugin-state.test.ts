@@ -1,0 +1,82 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import {
+  resolveRealtimePluginInstallPath,
+  readInstalledRealtimePluginVersion,
+} from '../integrations/openclaw-plugin-state.js';
+
+/**
+ * Regression (2026-06-09): OpenClaw 2026.6.1 moved authoritative plugin state
+ * into a SQLite index and stopped updating the legacy `installs.json` `version`
+ * field. After `openclaw plugins install @latest` bumped the realtime plugin to
+ * 4.31.0 on disk, `installs.json` still read 4.30.2 — so `shieldcortex doctor`
+ * (which read that field) wrongly reported "v4.30.2 installed, v4.31.0
+ * available". The fix reads the ACTUAL on-disk package.json version (ground
+ * truth — the code OpenClaw loads), not the stale registry field.
+ */
+
+const PKG_REL = path.join(
+  'node_modules', '@drakon-systems', 'shieldcortex-realtime',
+);
+
+function makeHome(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ocstate-'));
+}
+
+/** Create an on-disk plugin install at a hashed projects dir, return installPath. */
+function writeInstalledPackage(home: string, version: string, hash = 'abc123'): string {
+  const installPath = path.join(home, '.openclaw', 'npm', 'projects', `drakon-systems-shieldcortex-realtime-${hash}`, PKG_REL);
+  fs.mkdirSync(installPath, { recursive: true });
+  fs.writeFileSync(path.join(installPath, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version }));
+  return installPath;
+}
+
+function writeInstalls(home: string, json: unknown): void {
+  const dir = path.join(home, '.openclaw', 'plugins');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'installs.json'), JSON.stringify(json, null, 2));
+}
+
+describe('openclaw-plugin-state — on-disk version is ground truth', () => {
+  let home: string;
+  beforeEach(() => { home = makeHome(); });
+  afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); });
+
+  it('reads the on-disk package.json version even when installs.json is STALE (the reported bug)', () => {
+    const installPath = writeInstalledPackage(home, '4.31.0');
+    // installs.json still records the OLD version + the correct installPath.
+    writeInstalls(home, { installRecords: { 'shieldcortex-realtime': { version: '4.30.2', installPath } } });
+    expect(readInstalledRealtimePluginVersion(home)).toBe('4.31.0');
+  });
+
+  it('resolves installPath from installs.json when present', () => {
+    const installPath = writeInstalledPackage(home, '4.31.0');
+    writeInstalls(home, { installRecords: { 'shieldcortex-realtime': { version: '4.30.2', installPath } } });
+    expect(resolveRealtimePluginInstallPath(home)).toBe(installPath);
+  });
+
+  it('falls back to scanning the projects dir when installs.json lacks installPath (SQLite-only box)', () => {
+    writeInstalledPackage(home, '4.31.0');
+    // No installs.json at all — must still find the on-disk install.
+    expect(readInstalledRealtimePluginVersion(home)).toBe('4.31.0');
+  });
+
+  it('falls back to the installs.json recorded version when no on-disk package resolves', () => {
+    writeInstalls(home, { installRecords: { 'shieldcortex-realtime': { version: '4.29.0' } } });
+    expect(readInstalledRealtimePluginVersion(home)).toBe('4.29.0');
+  });
+
+  it('returns null when nothing is installed or registered', () => {
+    expect(resolveRealtimePluginInstallPath(home)).toBeNull();
+    expect(readInstalledRealtimePluginVersion(home)).toBeNull();
+  });
+
+  it('does not throw on a malformed installs.json (returns null/scan fallback)', () => {
+    fs.mkdirSync(path.join(home, '.openclaw', 'plugins'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'), '{ not json');
+    expect(() => readInstalledRealtimePluginVersion(home)).not.toThrow();
+    expect(readInstalledRealtimePluginVersion(home)).toBeNull();
+  });
+});

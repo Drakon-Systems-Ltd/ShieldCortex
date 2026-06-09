@@ -13,6 +13,7 @@ import { getLicense, getTrialStatus } from '../license/index.js';
 import { isDatabaseInitialized, getDatabase } from '../database/init.js';
 import { shouldShowProUpsell, UPSELL_CONSTANTS, type UpsellInputs } from './upsell.js';
 import { getUpsellState, markUpsellShown } from './upsell-state.js';
+import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -1491,31 +1492,26 @@ export async function checkOpenClawHookFreshness(
  * (`~/.openclaw/plugins/installs.json`) — `shieldcortex update` does NOT touch
  * it — so it can silently fall behind (observed: plugin stuck at 4.29.0 while
  * the npm package reached 4.30.1). The other OpenClaw checks confirm the plugin
- * is *present*; none read its *version*. `installsJsonPath` / `expectedVersion`
- * are injectable for tests.
+ * is *present*; none read its *version*.
+ *
+ * The version is read from the plugin's on-disk package.json (ground truth — the
+ * code OpenClaw actually loads), NOT the `installs.json` `version` field, which
+ * OpenClaw 2026.6.1 leaves stale after moving plugin state into SQLite. `home` /
+ * `expectedVersion` are injectable for tests.
  */
 export async function checkOpenClawPluginVersion(
-  installsJsonPath: string = path.join(os.homedir(), '.openclaw', 'plugins', 'installs.json'),
+  home: string = os.homedir(),
   expectedVersion: string = pkg.version,
 ): Promise<CheckResult> {
   const label = 'OpenClaw plugin version';
+  const installsJsonPath = path.join(home, '.openclaw', 'plugins', 'installs.json');
 
-  if (!fs.existsSync(installsJsonPath)) {
+  // Present if either the registry lists it or an on-disk install resolves.
+  if (!fs.existsSync(installsJsonPath) && !resolveRealtimePluginInstallPath(home)) {
     return { label, status: 'info', message: 'skipped (OpenClaw plugin registry not present)' };
   }
 
-  let installed: string | null = null;
-  try {
-    const json = JSON.parse(fs.readFileSync(installsJsonPath, 'utf-8')) as {
-      installRecords?: Record<string, { version?: unknown; resolvedVersion?: unknown }>;
-    };
-    const record = json.installRecords?.['shieldcortex-realtime'];
-    const v = record?.version ?? record?.resolvedVersion;
-    installed = typeof v === 'string' ? v : null;
-  } catch {
-    return { label, status: 'info', message: 'skipped (plugin registry unreadable)' };
-  }
-
+  const installed = readInstalledRealtimePluginVersion(home);
   if (!installed) {
     return { label, status: 'info', message: 'realtime plugin not registered with OpenClaw' };
   }
@@ -1530,7 +1526,7 @@ export async function checkOpenClawPluginVersion(
       label,
       status: 'warn',
       message: `realtime plugin v${installed} installed, v${expectedVersion} available`,
-      fix: 'Run `openclaw plugins update shieldcortex-realtime` (OpenClaw manages this plugin, not `shieldcortex update`), then restart the gateway',
+      fix: 'Run `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest` (reliable past a pinned spec), then restart the gateway',
     };
   }
 
