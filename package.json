@@ -57,12 +57,13 @@
     "test": "node scripts/run-jest.mjs",
     "test:watch": "node scripts/run-jest.mjs --watch",
     "test:coverage": "node scripts/run-jest.mjs --coverage",
+    "test:dist": "node scripts/check-no-bare-require.mjs",
     "bench": "tsx benchmark/longmemeval/run.ts",
     "bench:smoke": "SHIELDCORTEX_SKIP_EMBEDDINGS=1 tsx benchmark/longmemeval/run.ts --quiet",
     "audit:security": "npm audit --audit-level=moderate",
     "prepack": "node scripts/ensure-bin-executable.mjs",
     "version": "node scripts/sync-plugin-version.mjs && git add plugins/openclaw/package.json plugins/openclaw/openclaw.plugin.json",
-    "prepublishOnly": "node scripts/sync-plugin-version.mjs --check && npm run build"
+    "prepublishOnly": "node scripts/sync-plugin-version.mjs --check && npm run build && npm run test:dist"
   },
   "keywords": [
     "ai-memory",
