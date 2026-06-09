@@ -15,7 +15,7 @@ import os from 'os';
 import { execSync } from 'child_process';
 import { installOpenClawHook, findAllHooksDirs } from './openclaw.js';
 import { setupHooks } from './settings-hooks.js';
-import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
+import { readJsonConfigOrAbort, writeJsonConfigWithBackup, looksLikeShieldcortex } from './json-config.js';
 
 const MARKER = '# ShieldCortex — Memory System';
 
@@ -135,24 +135,6 @@ function isIdealMcpEntry(entry: unknown, ideal: McpCommand): boolean {
   if (e.command !== ideal.command) return false;
   if (!Array.isArray(e.args) || e.args.length !== ideal.args.length) return false;
   return e.args.every((v, i) => v === ideal.args[i]);
-}
-
-/**
- * Ownership check, identical in spirit to uninstall.ts's `looksLikeShieldcortex`.
- * `mcpServers.memory` is a generic key — the official upstream
- * `@modelcontextprotocol/server-memory` registers under the same name. The
- * uninstall path declares this check mandatory before touching the entry; the
- * install path was missing it and would silently overwrite a differently-owned
- * `memory` server. An entry "looks like ShieldCortex" if its command path or
- * any arg contains a shieldcortex / shield-cortex token.
- */
-function looksLikeShieldcortex(entry: unknown): boolean {
-  if (!entry || typeof entry !== 'object') return false;
-  const e = entry as { command?: unknown; args?: unknown };
-  const tokens: string[] = [];
-  if (typeof e.command === 'string') tokens.push(e.command);
-  if (Array.isArray(e.args)) for (const a of e.args) if (typeof a === 'string') tokens.push(a);
-  return tokens.some((t) => /shield[-]?cortex/i.test(t));
 }
 
 export function setupGlobalMcp(): void {

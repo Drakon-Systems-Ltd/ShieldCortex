@@ -62,6 +62,25 @@ function readJsonForStatus(filePath: string): McpConfig | null {
 }
 
 /**
+ * Uninstall-side read: returns the parsed config, or `null` if the file is
+ * unparseable. When it returns `null` for a file that ACTUALLY EXISTS (JSONC /
+ * trailing comma), print a warning naming the path — otherwise a real
+ * `shieldcortex` entry that can't be parsed is silently left in place while
+ * uninstall reports "not configured." An absent file is silent (normal). The
+ * caller treats `null` as a no-op (we never corrupt on parse failure).
+ */
+function readJsonForRemoval(filePath: string): McpConfig | null {
+  const config = readJsonForStatus(filePath);
+  if (config === null && fs.existsSync(filePath)) {
+    console.warn(
+      `  ! ${filePath} is JSONC/unparseable — could not auto-remove; ` +
+        `remove the shieldcortex entry manually.`,
+    );
+  }
+  return config;
+}
+
+/**
  * Build the server entry for ShieldCortex MCP.
  */
 function serverEntry(): McpConfig {
@@ -131,11 +150,13 @@ function addToVsCode(configDir: string): boolean {
  * If the file is unparseable (JSONC), leave it untouched and report nothing
  * removed — same "don't corrupt on parse failure" stance as readJson, but on
  * the uninstall side we degrade to a no-op rather than throwing through the
- * uninstaller loop.
+ * uninstaller loop. A present-but-unparseable file warns (via
+ * readJsonForRemoval) so the user isn't told "not configured" while an entry
+ * silently lingers.
  */
 function removeFromVsCode(configDir: string): boolean {
   const mcpPath = path.join(configDir, 'mcp.json');
-  const config = readJsonForStatus(mcpPath);
+  const config = readJsonForRemoval(mcpPath);
   if (config === null) return false;
 
   if (!config.servers || typeof config.servers !== 'object') return false;
@@ -189,11 +210,12 @@ function addToCursor(cursorDir: string): boolean {
 /**
  * Remove ShieldCortex from Cursor's mcp.json.
  *
- * Unparseable file → no-op (don't corrupt on parse failure), as in removeFromVsCode.
+ * Unparseable file → no-op (don't corrupt on parse failure), as in
+ * removeFromVsCode; a present-but-unparseable file warns via readJsonForRemoval.
  */
 function removeFromCursor(cursorDir: string): boolean {
   const mcpPath = path.join(cursorDir, 'mcp.json');
-  const config = readJsonForStatus(mcpPath);
+  const config = readJsonForRemoval(mcpPath);
   if (config === null) return false;
 
   if (!config.mcpServers || typeof config.mcpServers !== 'object') return false;

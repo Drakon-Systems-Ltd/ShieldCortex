@@ -13,6 +13,7 @@ import os from 'os';
 import readline from 'readline';
 import { uninstallService } from '../service/install.js';
 import { uninstallOpenClawHook } from './openclaw.js';
+import { looksLikeShieldcortex } from './json-config.js';
 
 /**
  * Check if the current process is running in an agent context.
@@ -158,23 +159,6 @@ export function removeClaudeMdBlock(): void {
   const newContent = (before + after).trimEnd() + '\n';
   fs.writeFileSync(CLAUDE_MD_PATH, newContent, 'utf-8');
   console.log('CLAUDE.md: removed ShieldCortex memory instructions block.');
-}
-
-/**
- * Ownership check: an mcpServers entry "looks like ShieldCortex" if its
- * command path or args contain a shieldcortex / shield-cortex token.
- * `mcpServers.memory` is a generic key — the official upstream
- * `@modelcontextprotocol/server-memory` registers under the same name —
- * so we MUST verify ownership before deletion or risk clobbering an
- * unrelated MCP server the user installed.
- */
-function looksLikeShieldcortex(entry: unknown): boolean {
-  if (!entry || typeof entry !== 'object') return false;
-  const e = entry as { command?: unknown; args?: unknown };
-  const tokens: string[] = [];
-  if (typeof e.command === 'string') tokens.push(e.command);
-  if (Array.isArray(e.args)) for (const a of e.args) if (typeof a === 'string') tokens.push(a);
-  return tokens.some((t) => /shield[-]?cortex/i.test(t));
 }
 
 /**

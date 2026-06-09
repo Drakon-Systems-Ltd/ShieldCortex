@@ -120,6 +120,41 @@ describe('installer config safety — never wipe on parse failure, back up befor
       const raw = fs.readFileSync(p, 'utf-8');
       expect(raw).toBe('{\n  "a": {\n    "b": 1\n  }\n}\n');
     });
+
+    it('leaves no .tmp-shieldcortex temp file behind after a successful write', async () => {
+      const { writeJsonConfigWithBackup } = await import('../setup/json-config.js');
+      const p = path.join(tempHome, 'atomic.json');
+      writeJsonConfigWithBackup(p, { ok: true });
+      expect(fs.existsSync(`${p}.tmp-shieldcortex`)).toBe(false);
+      // And there should be no stray temp files in the dir at all.
+      expect(fs.readdirSync(tempHome).some((f) => f.endsWith('.tmp-shieldcortex'))).toBe(false);
+    });
+
+    it('leaves the ORIGINAL file intact (and cleans up temp) when the rename fails mid-write', async () => {
+      const { writeJsonConfigWithBackup } = await import('../setup/json-config.js');
+      const p = path.join(tempHome, 'survives.json');
+      const original = JSON.stringify({ keep: 'me' }, null, 2) + '\n';
+      fs.writeFileSync(p, original);
+
+      // Simulate a process death between the temp-write and the rename: the
+      // temp file gets written, but the atomic swap into place fails. The
+      // original must be untouched.
+      const renameSpy = jest.spyOn(fs, 'renameSync').mockImplementation(() => {
+        throw new Error('simulated crash before rename completes');
+      });
+      try {
+        expect(() => writeJsonConfigWithBackup(p, { keep: 'overwritten' })).toThrow(
+          /simulated crash/,
+        );
+      } finally {
+        renameSpy.mockRestore();
+      }
+
+      // Original survived unchanged — never truncated, never replaced.
+      expect(fs.readFileSync(p, 'utf-8')).toBe(original);
+      // Temp file was cleaned up on failure.
+      expect(fs.existsSync(`${p}.tmp-shieldcortex`)).toBe(false);
+    });
   });
 
   // ── settings-hooks.ts: parse failure must abort, not wipe ──
