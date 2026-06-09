@@ -45,6 +45,7 @@ export type ForgetInput = z.infer<typeof forgetSchema>;
 export async function executeForget(input: ForgetInput): Promise<{
   success: boolean;
   deleted?: number;
+  denied?: number;
   wouldDelete?: number;
   memories?: { id: number; title: string }[];
   error?: string;
@@ -167,15 +168,29 @@ export async function executeForget(input: ForgetInput): Promise<{
       };
     }
 
-    // Execute deletion within a transaction for atomicity
+    // Execute deletion within a transaction for atomicity. Route every
+    // affected id through deleteMemory(id, source) — NOT a raw bulk DELETE —
+    // so each row gets the same enforcement as the single-ID path: delete-ACL
+    // check (+ access-denial audit on refusal), graph cleanup, cloud-sync
+    // delete, and the dashboard `memory_deleted` event. A low-trust / non-owner
+    // caller therefore can't mass-delete protected memories. better-sqlite3 is
+    // synchronous, so the per-row loop stays inside one transaction atomically.
+    const deletedMemories: { id: number; title: string }[] = [];
     withTransaction(() => {
-      db.prepare(`DELETE FROM memories WHERE ${whereClause}`).run(...params);
+      for (const memory of affected) {
+        if (deleteMemory(memory.id, source)) {
+          deletedMemories.push(memory);
+        }
+      }
     });
+
+    const denied = affected.length - deletedMemories.length;
 
     return {
       success: true,
-      deleted: affected.length,
-      memories: affected,
+      deleted: deletedMemories.length,
+      ...(denied > 0 ? { denied } : {}),
+      memories: deletedMemories,
     };
   } catch (error) {
     return {
