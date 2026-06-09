@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.31.2] - 2026-06-09
+
+**Fix (data loss): a missing better-sqlite3 native binding no longer renames your database.** better-sqlite3 resolves its native binding *lazily* inside `new Database()`, not at `require()` — so on a box where the binding is missing or ABI-mismatched (e.g. an arm64 host after a Node upgrade or a reinstall that didn't rebuild the module), the failure surfaced deep in the DB-open path and was **misclassified as file corruption**. The recovery logic then renamed the live `memories.db` to `memories.db.corrupt.<timestamp>` and crashed. Observed in the field on an arm64 fleet box.
+
+### Fixed
+
+- **The DB init path now distinguishes a native-module load failure from genuine file corruption** (`isNativeModuleLoadError`) and, on a load failure, raises an actionable "rebuild better-sqlite3 — your data is untouched" error **without touching the database file**. Real corruption still routes to the existing recovery. If your DB was wrongly renamed, restore it: `mv ~/.shieldcortex/memories.db.corrupt.<ts> ~/.shieldcortex/memories.db` after rebuilding the binding (`cd "$(npm root -g)/shieldcortex" && npm rebuild better-sqlite3`).
+
 ## [4.31.1] - 2026-06-09
 
 **Fix: `doctor`/`update` now read the OpenClaw plugin version from disk, not the stale registry field.** OpenClaw 2026.6.1 moved authoritative plugin state into a SQLite index and stopped updating the legacy `~/.openclaw/plugins/installs.json` `version` field. After `openclaw plugins install @latest` bumped the realtime plugin to 4.31.0 on disk, that field still read 4.30.2 — so `shieldcortex doctor` reported "v4.30.2 installed, v4.31.0 available" for an already-current plugin, and `update` could report success on a no-op.
