@@ -155,7 +155,7 @@ function withKillSwitchGuard(kind: OperationKind, handler: (...args: any[]) => a
  * Check text for kill phrase and trigger kill switch if detected.
  * Returns true if kill switch was activated.
  */
-function checkAndTriggerKillSwitch(text: string, source: string): boolean {
+export function checkAndTriggerKillSwitch(text: string, source: string): boolean {
   if (isKillSwitchActive()) return false; // already active
   try {
     // Statically imported (see top of file) — no circular dep:
