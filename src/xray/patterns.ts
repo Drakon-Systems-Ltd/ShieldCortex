@@ -4,12 +4,13 @@
  * Comprehensive pattern groups for detecting hidden risk in packages, files,
  * and metadata. Follows the same conventions as skill-scanner/patterns.ts:
  *   - safeRegexTest wrapper for every test
- *   - MAX_SCAN_LENGTH truncation to prevent ReDOS
+ *   - Overlapping windowed scanning to bound per-regex work (ReDOS guard)
  *   - PatternGroup style with weighted confidence
  *   - One match per group is enough (break after first)
  */
 
 import type { XRayCategory, XRayFinding } from './types.js';
+import { forEachWindow } from '../defence/scan-windows.js';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -20,21 +21,6 @@ interface PatternGroup {
   patterns: RegExp[];
   title: string;
   description: string;
-}
-
-// ── Constants ───────────────────────────────────────────────────────────────
-
-/** Maximum content length to analyse (prevents ReDOS on very long inputs). */
-const MAX_SCAN_LENGTH = 50000;
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Safely test a regex against content with a length limit.
- */
-function safeRegexTest(pattern: RegExp, text: string): boolean {
-  const truncated = text.length > MAX_SCAN_LENGTH ? text.slice(0, MAX_SCAN_LENGTH) : text;
-  return pattern.test(truncated);
 }
 
 // ── Pattern Groups ──────────────────────────────────────────────────────────
@@ -240,22 +226,29 @@ const XRAY_PATTERN_GROUPS: PatternGroup[] = [
  */
 export function detectPatterns(content: string, filePath?: string): XRayFinding[] {
   const findings: XRayFinding[] = [];
-  const truncated = content.length > MAX_SCAN_LENGTH ? content.slice(0, MAX_SCAN_LENGTH) : content;
 
   for (const group of XRAY_PATTERN_GROUPS) {
     for (const pattern of group.patterns) {
-      if (safeRegexTest(pattern, truncated)) {
-        const match = pattern.exec(truncated);
-        let line: number | undefined;
-        let evidence: string | undefined;
+      // Scan the WHOLE content as overlapping windows (<= SCAN_WINDOW_SIZE each)
+      // instead of truncating to the first 50KB, so a finding buried past the
+      // cap is still detected. `start` is the window's absolute char offset, used
+      // to translate the window-local match index back to a content-absolute one
+      // for an accurate line number.
+      let line: number | undefined;
+      let evidence: string | undefined;
 
-        if (match) {
-          // Calculate line number from match index
-          const before = truncated.slice(0, match.index);
-          line = (before.match(/\n/g) || []).length + 1;
-          evidence = match[0].slice(0, 120);
-        }
+      const matched = forEachWindow(content, (window, start) => {
+        const match = pattern.exec(window);
+        if (!match) return false;
 
+        const absoluteIndex = start + match.index;
+        const before = content.slice(0, absoluteIndex);
+        line = (before.match(/\n/g) || []).length + 1;
+        evidence = match[0].slice(0, 120);
+        return true;
+      });
+
+      if (matched) {
         findings.push({
           severity: group.severity,
           category: group.category,

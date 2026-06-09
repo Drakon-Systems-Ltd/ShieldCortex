@@ -5,6 +5,7 @@
  */
 
 import { foldConfusables } from './confusables.js';
+import { someWindow } from '../scan-windows.js';
 
 export interface InstructionDetectionResult {
   detected: boolean;
@@ -157,16 +158,17 @@ const PATTERN_GROUPS: PatternGroup[] = [
   },
 ];
 
-// Maximum content length to scan (prevents ReDOS on very long inputs)
-const MAX_SCAN_LENGTH = 50000;
-
 /**
- * Safely test a regex against content with length limit
+ * Safely test a regex against content.
+ *
+ * Scans the WHOLE input as overlapping windows (<= SCAN_WINDOW_SIZE chars each)
+ * rather than truncating to the first 50KB. Each window keeps the per-regex work
+ * bounded (preserving the ReDoS guarantee the old truncation gave us) while the
+ * overlap means a payload buried past 50KB of filler is still tested — closing
+ * the >50KB padding bypass.
  */
 function safeRegexTest(pattern: RegExp, text: string): boolean {
-  // Truncate to prevent potential ReDOS on extremely long inputs
-  const truncated = text.length > MAX_SCAN_LENGTH ? text.slice(0, MAX_SCAN_LENGTH) : text;
-  return pattern.test(truncated);
+  return someWindow(text, (window) => pattern.test(window));
 }
 
 export function detectInstructions(content: string): InstructionDetectionResult {

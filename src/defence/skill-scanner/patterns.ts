@@ -11,10 +11,12 @@
  *
  * Follows the same conventions as instruction-detector.ts:
  *  - One match per group is enough (break after first)
- *  - MAX_SCAN_LENGTH truncation to prevent ReDOS
+ *  - Overlapping windowed scanning to bound per-regex work (ReDOS guard)
  *  - safeRegexTest wrapper for every test
  *  - Length caps on unbounded quantifiers ([\s\S]{0,N})
  */
+
+import { someWindow } from '../scan-windows.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,19 +32,17 @@ interface PatternGroup {
   weight: number;
 }
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
-/** Maximum content length to analyse (prevents ReDOS on very long inputs). */
-const MAX_SCAN_LENGTH = 50000;
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Safely test a regex against content with a length limit.
+ * Safely test a regex against content.
+ *
+ * Scans the WHOLE input as overlapping windows (<= SCAN_WINDOW_SIZE chars each)
+ * instead of truncating to the first 50KB, so a payload padded past the cap is
+ * still tested. Each window bounds the per-regex work (ReDOS guard).
  */
 function safeRegexTest(pattern: RegExp, text: string): boolean {
-  const truncated = text.length > MAX_SCAN_LENGTH ? text.slice(0, MAX_SCAN_LENGTH) : text;
-  return pattern.test(truncated);
+  return someWindow(text, (window) => pattern.test(window));
 }
 
 /**
