@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync } from 'fs';
 import { join } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
@@ -71,6 +71,16 @@ const DEFAULT_REVIEW_COPILOT_CONFIG: ReviewCopilotConfig = {
 let cachedConfig: CloudConfig | null = null;
 let cachedConfigFile: string | null = null;
 
+// Raw-config cache keyed on (file path, mtimeMs). The defence pipeline reads
+// the config on every scan via getDefenceMode() and ~30 other accessors all
+// funnel through readRawConfig(); without this each call re-read + re-parsed +
+// re-HMAC-verified the file. The mtime key means an external write (any other
+// process) is picked up on its next stat, while a hot loop in one process pays
+// for the read+parse+verify exactly once per actual file change.
+let cachedRawConfig: Record<string, unknown> | null = null;
+let cachedRawConfigFile: string | null = null;
+let cachedRawConfigMtimeMs: number | null = null;
+
 // ── Config Integrity (HMAC) ──────────────────────────────
 
 let cachedIntegrityKey: string | null = null;
@@ -102,6 +112,26 @@ function signConfig(jsonContent: string): string {
   return createHmac('sha256', getIntegrityKey()).update(jsonContent, 'utf-8').digest('hex');
 }
 
+/**
+ * The exact byte string the HMAC is computed over for the embedded-`_sig`
+ * scheme. Defined once and used by BOTH the write path and the verify path so
+ * they can never diverge: the canonical body is the config object with `_sig`
+ * stripped, serialised with `JSON.stringify(rest, null, 2)`. Whatever the
+ * writer signs, the verifier recomputes over the identical bytes.
+ */
+function canonicalBodyForSig(obj: Record<string, unknown>): string {
+  const rest = { ...obj };
+  delete rest._sig;
+  return JSON.stringify(rest, null, 2);
+}
+
+function constantTimeEqualHex(storedSig: string, computedSig: string): boolean {
+  const a = Buffer.from(storedSig, 'utf-8');
+  const b = Buffer.from(computedSig, 'utf-8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 function writeConfigSignature(jsonContent: string): void {
   const sig = signConfig(jsonContent);
   const sigFile = getSigFile();
@@ -109,20 +139,41 @@ function writeConfigSignature(jsonContent: string): void {
   try { chmodSync(sigFile, 0o600); } catch { /* best-effort */ }
 }
 
-function verifyConfigIntegrity(jsonContent: string): boolean {
+/**
+ * Verify a parsed config object's integrity.
+ *
+ * Two on-disk formats are supported for backward compatibility:
+ *   - **Embedded (new, v4.32+):** the object carries a top-level `_sig` field;
+ *     verify it against the HMAC of `canonicalBodyForSig(obj)`.
+ *   - **Legacy (pre-v4.32):** no `_sig` field — the signature lives in a
+ *     separate `.config-sig` file, computed over the EXACT file bytes
+ *     (`rawFileContent`). This is the original scheme; we keep reading it so an
+ *     install that hasn't been rewritten yet never false-tampers. The next
+ *     write upgrades it to the embedded format.
+ *
+ * `rawFileContent` is the literal bytes read from disk (needed for the legacy
+ * whole-file signature). On a missing legacy sig file we adopt the current
+ * content as trusted (first run after upgrade), matching prior behaviour.
+ */
+function verifyConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: string): boolean {
   try {
+    if (typeof parsed._sig === 'string') {
+      // Embedded scheme: recompute over the canonical body (object minus _sig).
+      const computed = signConfig(canonicalBodyForSig(parsed));
+      return constantTimeEqualHex(parsed._sig, computed);
+    }
+    // Legacy scheme: separate .config-sig file signed over the whole file.
     const sigFile = getSigFile();
     if (!existsSync(sigFile)) {
-      // First run after upgrade — create signature, don't flag tamper
-      writeConfigSignature(jsonContent);
+      // First run after upgrade with no sig yet — adopt as trusted, write a
+      // legacy sig so a subsequent read (before the next write upgrades it)
+      // still verifies. Matches the prior behaviour to avoid a false tamper.
+      writeConfigSignature(rawFileContent);
       return true;
     }
     const storedSig = readFileSync(sigFile, 'utf-8').trim();
-    const computedSig = signConfig(jsonContent);
-    const a = Buffer.from(storedSig, 'utf-8');
-    const b = Buffer.from(computedSig, 'utf-8');
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+    const computedSig = signConfig(rawFileContent);
+    return constantTimeEqualHex(storedSig, computedSig);
   } catch {
     return false;
   }
@@ -137,55 +188,50 @@ export function getCloudConfig(): CloudConfig {
   const configFile = getConfigFile();
   if (cachedConfig && cachedConfigFile === configFile) return cachedConfig;
 
-  try {
-    if (!existsSync(configFile)) {
-      return { cloudApiKey: null, cloudBaseUrl: DEFAULT_BASE_URL, cloudEnabled: false };
-    }
-    const raw = JSON.parse(readFileSync(configFile, 'utf-8'));
-    cachedConfig = {
-      cloudApiKey: raw.cloudApiKey ?? null,
-      cloudBaseUrl: raw.cloudBaseUrl ?? DEFAULT_BASE_URL,
-      cloudEnabled: raw.cloudEnabled ?? false,
-    };
-    cachedConfigFile = configFile;
-    return cachedConfig;
-  } catch {
-    return { cloudApiKey: null, cloudBaseUrl: DEFAULT_BASE_URL, cloudEnabled: false };
-  }
+  // Route through the shared, mtime-cached, integrity-verified read so the
+  // cloud config reflects the same view (and `_sig` stripping) as every other
+  // accessor — no second bespoke parse path that could drift.
+  const raw = readRawConfig();
+  cachedConfig = {
+    cloudApiKey: (raw.cloudApiKey as string | null | undefined) ?? null,
+    cloudBaseUrl: (raw.cloudBaseUrl as string | undefined) ?? DEFAULT_BASE_URL,
+    cloudEnabled: (raw.cloudEnabled as boolean | undefined) ?? false,
+  };
+  cachedConfigFile = configFile;
+  return cachedConfig;
 }
 
 export function setCloudConfig(updates: Partial<CloudConfig>): void {
-  let existing: Record<string, unknown> = {};
-  try {
-    const configFile = getConfigFile();
-    if (existsSync(configFile)) {
-      existing = JSON.parse(readFileSync(configFile, 'utf-8'));
-    }
-  } catch {
-    // Start fresh if parse fails
+  // Read-modify-write through the shared helpers: preserves every other field
+  // (defenceMode, deviceId, sync controls…) and writes atomically with the
+  // embedded `_sig`. On a corrupt/unreadable file we do NOT silently start
+  // fresh — that would wipe a credential the user is still relying on; abort
+  // instead so the caller surfaces the problem rather than losing data.
+  const { data: existing, parseFailed } = readRawConfigState();
+  if (parseFailed) {
+    throw new Error(
+      '[ShieldCortex] Refusing to update cloud config: existing config.json is unreadable. ' +
+      'Fix or remove the corrupt file before changing cloud settings to avoid losing credentials.',
+    );
   }
 
   if (updates.cloudApiKey !== undefined) existing.cloudApiKey = updates.cloudApiKey;
   if (updates.cloudBaseUrl !== undefined) existing.cloudBaseUrl = updates.cloudBaseUrl;
   if (updates.cloudEnabled !== undefined) existing.cloudEnabled = updates.cloudEnabled;
 
-  const configDir = getConfigDir();
-  const configFile = getConfigFile();
-  mkdirSync(configDir, { recursive: true });
-  const content = JSON.stringify(existing, null, 2) + '\n';
-  writeFileSync(configFile, content);
-  writeConfigSignature(content);
+  writeRawConfig(existing);
 
-  // Invalidate cache
+  // Invalidate the derived cloud-config cache (writeRawConfig already cleared
+  // the raw cache and tamper flag).
   cachedConfig = null;
   cachedConfigFile = null;
-  configTampered = false;
 }
 
 /** Reset the in-memory cache (useful for testing) */
 export function clearCloudConfigCache(): void {
   cachedConfig = null;
   cachedConfigFile = null;
+  invalidateRawConfigCache();
 }
 
 function normalizeProjectList(value: unknown): string[] {
@@ -258,37 +304,139 @@ export function isSensitiveLevel(level: string | null | undefined): boolean {
 
 // ── Trusted Skills ──────────────────────────────────────
 
-export function readRawConfig(): Record<string, unknown> {
+interface RawConfigState {
+  /** Parsed config (or {} if the file is missing/empty), with `_sig` stripped. */
+  data: Record<string, unknown>;
+  /**
+   * True when the file EXISTS but could not be parsed (corrupt / mid-write
+   * torn read). Callers that persist (getDeviceId/getDeviceName) MUST NOT write
+   * when this is set — overwriting would wipe cloudApiKey and every other
+   * setting that the unreadable file still holds.
+   */
+  parseFailed: boolean;
+}
+
+/**
+ * Read + verify the raw config, distinguishing "file absent/empty" (safe to
+ * write) from "file present but unparseable" (must stay read-only). Backed by
+ * an mtime cache so a hot path (per-scan getDefenceMode) doesn't re-read,
+ * re-parse and re-HMAC the file on every call.
+ */
+function readRawConfigState(): RawConfigState {
+  const configFile = getConfigFile();
+
+  // mtime cache: if the file is unchanged since the last successful read,
+  // return the cached parsed object without touching disk again.
   try {
-    const configFile = getConfigFile();
+    const mtimeMs = statSync(configFile).mtimeMs;
+    if (
+      cachedRawConfig !== null &&
+      cachedRawConfigFile === configFile &&
+      cachedRawConfigMtimeMs === mtimeMs
+    ) {
+      // Return a shallow copy so callers can mutate freely without poisoning
+      // the cache (accessors push to arrays / set fields before writing back).
+      return { data: { ...cachedRawConfig }, parseFailed: false };
+    }
+  } catch {
+    // stat failed (file likely absent) — fall through to the real read.
+  }
+
+  try {
     if (existsSync(configFile)) {
       const content = readFileSync(configFile, 'utf-8');
-      const data = JSON.parse(content);
+      // An empty file is treated as "no config yet", not a parse failure.
+      if (content.trim().length === 0) {
+        return { data: {}, parseFailed: false };
+      }
 
-      // Verify HMAC integrity
-      if (!verifyConfigIntegrity(content)) {
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(content);
+      } catch {
+        // File exists but is corrupt/torn. Do NOT return {} as writable —
+        // signal parseFailed so persisters skip the write and we never clobber
+        // a momentarily-unreadable config.
+        return { data: {}, parseFailed: true };
+      }
+
+      // Verify HMAC integrity (embedded `_sig`, else legacy `.config-sig`).
+      if (!verifyConfigIntegrity(data, content)) {
         configTampered = true;
         console.error('[ShieldCortex] WARNING: Config file integrity check failed — possible tampering detected. Falling back to strict mode.');
         // Force strict mode on tampered config
         data.defenceMode = 'strict';
       }
 
-      return data;
+      // `_sig` is an integrity artefact, never config data — strip it so it
+      // can't leak into CloudConfig or get re-serialised as a normal field.
+      delete data._sig;
+
+      // Populate the mtime cache from the parsed (sig-stripped) object.
+      try {
+        cachedRawConfig = { ...data };
+        cachedRawConfigFile = configFile;
+        cachedRawConfigMtimeMs = statSync(configFile).mtimeMs;
+      } catch { /* caching is best-effort */ }
+
+      return { data, parseFailed: false };
     }
-  } catch { /* ignore */ }
-  return {};
+  } catch { /* ignore — treat as absent */ }
+  return { data: {}, parseFailed: false };
 }
 
+export function readRawConfig(): Record<string, unknown> {
+  return readRawConfigState().data;
+}
+
+function invalidateRawConfigCache(): void {
+  cachedRawConfig = null;
+  cachedRawConfigFile = null;
+  cachedRawConfigMtimeMs = null;
+}
+
+/**
+ * Atomically persist the raw config with the HMAC embedded as a top-level
+ * `_sig` field, computed over `canonicalBodyForSig` (the object WITHOUT
+ * `_sig`). Because the signature lives inside the same file and the file is
+ * swapped in via `renameSync` (atomic on POSIX), a concurrent reader can never
+ * observe a half-written file or a config/signature pair that are out of step
+ * — the two torn-read cases the audit found.
+ */
 function writeRawConfig(raw: Record<string, unknown>): void {
   const configDir = getConfigDir();
   const configFile = getConfigFile();
   mkdirSync(configDir, { recursive: true });
-  const content = JSON.stringify(raw, null, 2) + '\n';
-  writeFileSync(configFile, content);
-  // Sign the config after writing
-  writeConfigSignature(content);
+
+  // Never carry an inbound `_sig` through; we always recompute it.
+  const { _sig: _ignored, ...rest } = raw;
+  const body = canonicalBodyForSig(rest);
+  const sig = signConfig(body);
+  const out = JSON.stringify({ ...rest, _sig: sig }, null, 2) + '\n';
+
+  // Write to a unique temp file in the same dir, then atomically rename over
+  // the target. The original config survives a failed/partial write — we never
+  // truncate it. Same-dir tmp guarantees rename is a same-filesystem move.
+  const tmpFile = `${configFile}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  try {
+    writeFileSync(tmpFile, out, { mode: 0o600 });
+    renameSync(tmpFile, configFile);
+  } catch (err) {
+    try { if (existsSync(tmpFile)) rmSync(tmpFile, { force: true }); } catch { /* best-effort */ }
+    throw err;
+  }
+
+  // The embedded `_sig` is now the source of truth. Delete the stale legacy
+  // `.config-sig` only after a successful embedded write, only if it exists —
+  // this completes the one-way upgrade from the legacy format.
+  try {
+    const sigFile = getSigFile();
+    if (existsSync(sigFile)) rmSync(sigFile, { force: true });
+  } catch { /* best-effort */ }
+
   cachedConfig = null;
   cachedConfigFile = null;
+  invalidateRawConfigCache();
   // Clear tamper flag on legitimate write
   configTampered = false;
 }
@@ -343,13 +491,58 @@ export function getCloudIronDomeCache(): Record<string, unknown> | null {
 
 // ── Sync Timestamp ────────────────────────────────────
 
+// Debounce state for lastSyncAt. The sync queue, graph-sync and memory-sync all
+// call updateLastSyncAt() after EVERY successful upload — a busy agent fired a
+// full read-modify-write of config.json per record. We keep the latest value in
+// memory and only persist at most once per LAST_SYNC_PERSIST_INTERVAL_MS, which
+// collapses a burst to a single write while readers still see a fresh value.
+const LAST_SYNC_PERSIST_INTERVAL_MS = 60_000;
+let pendingLastSyncAt: string | null = null;
+let lastSyncPersistedAtMs = 0;
+
 /**
- * Write lastSyncAt timestamp to config.json on successful cloud sync.
+ * Record a successful cloud sync. Always updates the in-memory timestamp;
+ * persists to config.json at most once per 60s (time-debounced). Callers
+ * (sync.ts / sync-queue.ts / memory-sync.ts) are unchanged — the debounce is
+ * internal.
  */
 export function updateLastSyncAt(): void {
-  const raw = readRawConfig();
-  raw.lastSyncAt = new Date().toISOString();
+  const now = Date.now();
+  pendingLastSyncAt = new Date(now).toISOString();
+  if (now - lastSyncPersistedAtMs < LAST_SYNC_PERSIST_INTERVAL_MS) {
+    return; // within the debounce window — memory updated, disk left alone
+  }
+  persistLastSyncAt(now);
+}
+
+function persistLastSyncAt(nowMs: number): void {
+  if (pendingLastSyncAt === null) return;
+  const { data: raw, parseFailed } = readRawConfigState();
+  if (parseFailed) return; // never clobber an unreadable config
+  raw.lastSyncAt = pendingLastSyncAt;
   writeRawConfig(raw);
+  lastSyncPersistedAtMs = nowMs;
+}
+
+/**
+ * Force-persist the latest in-memory lastSyncAt regardless of the debounce
+ * window. Intended for a shutdown path so the final sync timestamp isn't lost
+ * if the process exits inside the debounce window. Safe no-op if nothing is
+ * pending.
+ */
+export function flushLastSyncAt(): void {
+  persistLastSyncAt(Date.now());
+}
+
+/**
+ * Returns the most recent sync timestamp, preferring the in-memory value (which
+ * may be ahead of disk inside the debounce window) and falling back to the
+ * persisted config value.
+ */
+export function getLastSyncAt(): string | null {
+  if (pendingLastSyncAt !== null) return pendingLastSyncAt;
+  const raw = readRawConfig();
+  return typeof raw.lastSyncAt === 'string' ? raw.lastSyncAt : null;
 }
 
 // ── Defence Mode ──────────────────────────────────────
@@ -774,11 +967,19 @@ export function setToolResponseScanConfig(updates: Partial<ToolResponseScanConfi
  * Generates and persists on first call; reads from config thereafter.
  */
 export function getDeviceId(): string {
-  const raw = readRawConfig();
+  const { data: raw, parseFailed } = readRawConfigState();
   if (typeof raw.deviceId === 'string' && raw.deviceId) {
     return raw.deviceId;
   }
   const id = randomUUID();
+  if (parseFailed) {
+    // The config file exists but is unreadable. Persisting now would write
+    // `{ deviceId }` over the corrupt bytes and destroy cloudApiKey and every
+    // other setting the file still holds. Return an ephemeral id this run and
+    // leave the file untouched — identity persists once the file is readable.
+    console.error('[ShieldCortex] config.json unreadable — using an ephemeral device id this run; identity was NOT persisted.');
+    return id;
+  }
   raw.deviceId = id;
   writeRawConfig(raw);
   return id;
@@ -789,11 +990,16 @@ export function getDeviceId(): string {
  * Stores in config on first call; reads from config thereafter.
  */
 export function getDeviceName(): string {
-  const raw = readRawConfig();
+  const { data: raw, parseFailed } = readRawConfigState();
   if (typeof raw.deviceName === 'string' && raw.deviceName) {
     return raw.deviceName;
   }
   const name = hostname();
+  if (parseFailed) {
+    // See getDeviceId — never overwrite an unreadable config.
+    console.error('[ShieldCortex] config.json unreadable — using the live hostname this run; device name was NOT persisted.');
+    return name;
+  }
   raw.deviceName = name;
   writeRawConfig(raw);
   return name;

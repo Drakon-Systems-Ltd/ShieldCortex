@@ -146,6 +146,7 @@ describe('API route mutation regressions', () => {
         isSensitiveLevel: () => false,
         getCloudIronDomeCache: () => null,
         updateLastSyncAt: jest.fn(),
+        getLastSyncAt: () => null,
         addTrustedSkill: jest.fn(),
         removeTrustedSkill: jest.fn(),
         setCloudIronDomeCache: jest.fn(),

@@ -10,10 +10,10 @@ import {
   getDeviceId,
   getDeviceName,
   getDefenceMode,
+  getLastSyncAt,
   getOpenClawMemoryConfig,
   isConfigTampered,
   isProactiveRecallEnabled,
-  readRawConfig,
   setCloudConfig,
   setCloudSyncControls,
   setDefenceMode,
@@ -333,7 +333,6 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
   app.get('/api/cloud/sync-status', (_req: Request, res: Response) => {
     try {
       const config = getCloudConfig();
-      const raw = readRawConfig();
       const queue = getQueueStats();
 
       res.json({
@@ -343,7 +342,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
         featureEnabled: isFeatureEnabled('cloud_sync'),
         requiredTier: getRequiredTier('cloud_sync'),
         controls: getCloudSyncControls(),
-        lastSyncAt: (typeof raw.lastSyncAt === 'string' ? raw.lastSyncAt : null) as string | null,
+        lastSyncAt: getLastSyncAt(),
         device: {
           id: getDeviceId(),
           name: getDeviceName(),
