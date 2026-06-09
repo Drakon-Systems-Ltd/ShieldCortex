@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.31.1] - 2026-06-09
+
+**Fix: `doctor`/`update` now read the OpenClaw plugin version from disk, not the stale registry field.** OpenClaw 2026.6.1 moved authoritative plugin state into a SQLite index and stopped updating the legacy `~/.openclaw/plugins/installs.json` `version` field. After `openclaw plugins install @latest` bumped the realtime plugin to 4.31.0 on disk, that field still read 4.30.2 — so `shieldcortex doctor` reported "v4.30.2 installed, v4.31.0 available" for an already-current plugin, and `update` could report success on a no-op.
+
+### Fixed
+
+- **Plugin version is read from the on-disk `package.json`** at the resolved install path (ground truth — the code OpenClaw loads), with a scan of `~/.openclaw/npm/projects/` as a fallback for SQLite-only boxes. New `src/integrations/openclaw-plugin-state.ts`.
+- **`shieldcortex update` now uses a forced `@latest` install** instead of `openclaw plugins update`, which no-ops when OpenClaw recorded an exact-pinned spec (observed: index pinned `@4.30.2` → "up to date" while npm had 4.31.0). It also reports the **actual** before→after version transition instead of an unconditional "updated".
+- **Plugin detection** (`isRealtimePluginRegistered`) now also recognises on-disk installs on boxes with no legacy `installs.json`.
+
 ## [4.31.0] - 2026-06-08
 
 **Memory quality: sentence-bounded titles & recall snippets, fragment-aware salience, dream-mode logging.** Field reports (Jarvis) of recall content truncated mid-word/mid-sentence and low-value fragments surfacing at top salience were traced to the shared hook-path extractor — not the MCP/library path. Three fixes, all adversarial-review-validated.
