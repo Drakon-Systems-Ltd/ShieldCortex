@@ -69,9 +69,14 @@ let killSwitchMeta: KillSwitchMeta | null = null;
 // in-memory `mode` / `killSwitchMeta` stay as the cache. Every DB access here
 // is best-effort: a missing / uninitialised DB or any error falls back to the
 // current in-memory behaviour and NEVER throws into callers.
+//
+// Worst-case propagation delay of another process's change to this process is
+// `cacheTtlMs` (~1s) — acceptable for memory-write gating, not for sub-second
+// guarantees. Mutators force a fresh read first (refreshControlState(true)), so
+// cross-process precedence checks never act on a stale cached mode.
 
 let lastRead = 0;
-let cacheTtlMs = 1000;
+const cacheTtlMs = 1000;
 
 /**
  * Persist the current in-memory control state to the single control_state row.
@@ -97,10 +102,15 @@ function persistControlState(): void {
     // Our cache is now authoritative for this write — avoid an immediate
     // redundant read clobbering it within the TTL window.
     lastRead = Date.now();
-  } catch {
-    // Never let persistence break a control operation.
+  } catch (err) {
+    // Never let persistence break a control operation — but a silent failure
+    // here means a dashboard "kill switch" never reaches the MCP process while
+    // the dashboard reports success. Surface it (still swallow, never throw).
+    console.error('[shieldcortex] failed to persist control state:', err);
   }
 }
+
+const VALID_MODES: ReadonlySet<string> = new Set(['active', 'paused', 'kill_switch']);
 
 /**
  * Refresh the in-memory control state from the control_state row, subject to a
@@ -117,13 +127,36 @@ function loadControlState(): void {
   try {
     const row = getDatabase()
       .prepare('SELECT mode, meta_json FROM control_state WHERE id = 1')
-      .get() as { mode: ControlMode; meta_json: string | null } | undefined;
+      .get() as { mode: string; meta_json: string | null } | undefined;
     if (!row) return; // no row yet — keep in-memory state
-    mode = row.mode;
+    // Fail-closed: a corrupted / unknown mode must NOT disable lockdown. Keep
+    // the prior in-memory state rather than assigning garbage (which would make
+    // assertOperationAllowed fail OPEN for any non-'kill_switch' value).
+    if (!VALID_MODES.has(row.mode)) {
+      console.error(`[shieldcortex] ignoring invalid control_state mode: ${JSON.stringify(row.mode)}`);
+      return;
+    }
+    mode = row.mode as ControlMode;
     killSwitchMeta = row.meta_json ? (JSON.parse(row.meta_json) as KillSwitchMeta) : null;
   } catch {
     // Keep current in-memory values on any read/parse failure.
   }
+}
+
+/**
+ * Force-or-TTL refresh of the in-memory control state from the row.
+ *
+ * Mutators (pause/resume/activate/deactivate) call this with force=true BEFORE
+ * their precedence checks so they never act on a stale cached `mode`. Without
+ * it, process B calling resume() within the TTL after process A activated the
+ * kill switch would see its stale in-memory 'active', pass the guard, and write
+ * 'active' — silently clearing A's kill switch. Mutators are rare, so the
+ * forced DB read is fine. A forced reload with no DB still no-ops (loadControlState
+ * guards on isDatabaseInitialized), preserving the uninitialised-DB fallback.
+ */
+function refreshControlState(force = false): void {
+  if (force) lastRead = 0;
+  loadControlState();
 }
 
 // ── Pause (soft — memory writes only) ──
@@ -134,6 +167,7 @@ export function isPaused(): boolean {
 }
 
 export function pause(): void {
+  refreshControlState(true); // see current row before the precedence check
   if (mode === 'kill_switch') return; // kill switch takes precedence
   mode = 'paused';
   console.log('[shieldcortex] Memory creation PAUSED');
@@ -141,6 +175,7 @@ export function pause(): void {
 }
 
 export function resume(): void {
+  refreshControlState(true); // see current row before the precedence check
   if (mode === 'kill_switch') return; // must use deactivateKillSwitch
   mode = 'active';
   console.log('[shieldcortex] Memory creation RESUMED');
@@ -160,6 +195,7 @@ export function getKillSwitchMeta(): KillSwitchMeta | null {
 }
 
 export function activateKillSwitch(meta: Omit<KillSwitchMeta, 'triggeredAt'>): void {
+  refreshControlState(true); // see current row before the precedence check
   if (mode === 'kill_switch') return; // already active, idempotent
 
   const fullMeta: KillSwitchMeta = {
@@ -204,6 +240,7 @@ export function activateKillSwitch(meta: Omit<KillSwitchMeta, 'triggeredAt'>): v
 }
 
 export function deactivateKillSwitch(reason: string): void {
+  refreshControlState(true); // see current row before the precedence check
   if (mode !== 'kill_switch') return;
 
   const previousMeta = killSwitchMeta;
@@ -291,11 +328,5 @@ export function getControlStatus(): {
 
 /** Force the next gated read to re-query the control_state row (bypass TTL). */
 export function __refreshControlStateForTest(): void {
-  lastRead = 0;
-  loadControlState();
-}
-
-/** Override the TTL cache window (ms). Pass the default (1000) to restore. */
-export function __setControlCacheTtlForTest(ms: number): void {
-  cacheTtlMs = ms;
+  refreshControlState(true);
 }

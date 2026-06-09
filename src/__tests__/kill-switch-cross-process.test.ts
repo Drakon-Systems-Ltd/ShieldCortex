@@ -5,6 +5,7 @@ import {
   deactivateKillSwitch,
   isKillSwitchActive,
   KillSwitchError,
+  resume,
   __refreshControlStateForTest,
 } from '../api/control.js';
 
@@ -98,6 +99,35 @@ describe('kill switch is honoured cross-process via control_state', () => {
 
     expect(() => assertOperationAllowed('memory_write')).not.toThrow();
     expect(isKillSwitchActive()).toBe(false);
+  });
+
+  it('resume() in THIS process does NOT clear a kill switch set by ANOTHER process', () => {
+    // I2 regression: resume() must force-reload the row BEFORE its precedence
+    // check. Process A (the dashboard) activates the kill switch by writing the
+    // row directly — THIS process never calls activateKillSwitch, so its stale
+    // in-memory mode is still 'active' within the 1s TTL.
+    writeControlRow('kill_switch', {
+      triggeredAt: new Date().toISOString(),
+      source: 'manual',
+      reason: 'dashboard emergency stop',
+    });
+
+    // No refresh here on purpose: simulate process B calling resume() while its
+    // cache still says 'active'. The fix is the forced reload INSIDE resume();
+    // without it, resume() would pass its `mode === 'kill_switch'` guard on the
+    // stale 'active' value and write mode='active', clearing A's kill switch.
+    resume();
+
+    // The kill switch must still be active: resume() reloaded, saw kill_switch,
+    // and its precedence guard fired (no-op). We verify from the source of truth.
+    __refreshControlStateForTest();
+    expect(isKillSwitchActive()).toBe(true);
+    expect(() => assertOperationAllowed('memory_write')).toThrow(KillSwitchError);
+
+    const row = getDatabase()
+      .prepare('SELECT mode FROM control_state WHERE id = 1')
+      .get() as { mode: string };
+    expect(row.mode).toBe('kill_switch');
   });
 
   it('falls back to in-memory state when no DB is initialised', () => {
