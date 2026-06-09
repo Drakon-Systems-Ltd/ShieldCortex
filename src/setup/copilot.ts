@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,25 +27,38 @@ interface McpConfig {
 }
 
 /**
- * Read a JSON file, returning {} if it doesn't exist or is invalid.
+ * Read a JSON config file. Missing → {}; existing-but-unparseable → THROWS.
+ *
+ * VS Code / Cursor `mcp.json` files are JSONC and may contain `//` comments
+ * and trailing commas, which `JSON.parse` rejects. Aborting on that is the
+ * CORRECT safe behaviour — silently treating an unparseable-but-present file
+ * as `{}` and writing it back would delete every OTHER MCP server the user
+ * configured. The thrown error (from readJsonConfigOrAbort) explains that
+ * JSONC isn't supported so the user knows why the install stopped.
  */
 function readJson(filePath: string): McpConfig {
-  try {
-    if (!fs.existsSync(filePath)) return {};
-    const raw = fs.readFileSync(filePath, 'utf-8').trim();
-    if (!raw) return {};
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  return readJsonConfigOrAbort(filePath) as McpConfig;
 }
 
 /**
- * Write a JSON file, creating parent directories as needed.
+ * Write a JSON config file, backing up any existing file first and creating
+ * parent directories as needed.
  */
 function writeJson(filePath: string, data: McpConfig): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
+  writeJsonConfigWithBackup(filePath, data);
+}
+
+/**
+ * Read for the informational `status` command only: never throw. A JSONC/
+ * unparseable file is reported as unreadable (null) instead of aborting the
+ * whole status run. Mutating paths use readJson (which throws to abort).
+ */
+function readJsonForStatus(filePath: string): McpConfig | null {
+  try {
+    return readJson(filePath);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -113,10 +127,16 @@ function addToVsCode(configDir: string): boolean {
 
 /**
  * Remove ShieldCortex from a VS Code mcp.json file.
+ *
+ * If the file is unparseable (JSONC), leave it untouched and report nothing
+ * removed — same "don't corrupt on parse failure" stance as readJson, but on
+ * the uninstall side we degrade to a no-op rather than throwing through the
+ * uninstaller loop.
  */
 function removeFromVsCode(configDir: string): boolean {
   const mcpPath = path.join(configDir, 'mcp.json');
-  const config = readJson(mcpPath);
+  const config = readJsonForStatus(mcpPath);
+  if (config === null) return false;
 
   if (!config.servers || typeof config.servers !== 'object') return false;
 
@@ -168,10 +188,13 @@ function addToCursor(cursorDir: string): boolean {
 
 /**
  * Remove ShieldCortex from Cursor's mcp.json.
+ *
+ * Unparseable file → no-op (don't corrupt on parse failure), as in removeFromVsCode.
  */
 function removeFromCursor(cursorDir: string): boolean {
   const mcpPath = path.join(cursorDir, 'mcp.json');
-  const config = readJson(mcpPath);
+  const config = readJsonForStatus(mcpPath);
+  if (config === null) return false;
 
   if (!config.mcpServers || typeof config.mcpServers !== 'object') return false;
 
@@ -284,7 +307,11 @@ export async function copilotStatus(): Promise<void> {
   for (const dir of vscodeDirs) {
     const variant = path.basename(path.dirname(dir));
     const mcpPath = path.join(dir, 'mcp.json');
-    const config = readJson(mcpPath);
+    const config = readJsonForStatus(mcpPath);
+    if (config === null) {
+      console.log(`VS Code (${variant}):  unreadable (not valid JSON — JSONC/comments not supported)`);
+      continue;
+    }
     const servers = (config.servers ?? {}) as McpConfig;
     const installed = !!servers[SERVER_NAME];
     console.log(`VS Code (${variant}):  ${installed ? 'configured' : 'not configured'}`);
@@ -296,10 +323,14 @@ export async function copilotStatus(): Promise<void> {
     console.log('Cursor:   not found');
   } else {
     const mcpPath = path.join(cursorDir, 'mcp.json');
-    const config = readJson(mcpPath);
-    const servers = (config.mcpServers ?? {}) as McpConfig;
-    const installed = !!servers[SERVER_NAME];
-    console.log(`Cursor:   ${installed ? 'configured' : 'not configured'}`);
+    const config = readJsonForStatus(mcpPath);
+    if (config === null) {
+      console.log('Cursor:   unreadable (not valid JSON — JSONC/comments not supported)');
+    } else {
+      const servers = (config.mcpServers ?? {}) as McpConfig;
+      const installed = !!servers[SERVER_NAME];
+      console.log(`Cursor:   ${installed ? 'configured' : 'not configured'}`);
+    }
   }
 }
 

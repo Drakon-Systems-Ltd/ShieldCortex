@@ -2,10 +2,10 @@
  * Auto-configure Claude Code hooks in ~/.claude/settings.json.
  */
 
-import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { setAutoMemoryEnableConfig } from '../cloud/config.js';
+import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 
@@ -72,21 +72,17 @@ function hasCortexHook(entries: HookEntry[]): boolean {
   );
 }
 
+// Reads settings.json. A missing file yields {} (fresh install); a file that
+// EXISTS but won't parse THROWS — setupHooks() must surface that and abort
+// rather than write a hooks-only file over the user's permissions/env/model
+// settings. Mirrors uninstall.ts's "aborting to avoid corruption" discipline.
 function readSettings(): Record<string, any> {
-  if (!fs.existsSync(SETTINGS_PATH)) {
-    return {};
-  }
-  try {
-    return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
-  } catch {
-    return {};
-  }
+  return readJsonConfigOrAbort(SETTINGS_PATH);
 }
 
+// Backs up an existing settings.json before overwriting it.
 function writeSettings(settings: Record<string, any>): void {
-  const dir = path.dirname(SETTINGS_PATH);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  writeJsonConfigWithBackup(SETTINGS_PATH, settings);
 }
 
 /**

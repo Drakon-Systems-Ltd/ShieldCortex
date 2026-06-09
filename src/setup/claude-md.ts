@@ -15,6 +15,7 @@ import os from 'os';
 import { execSync } from 'child_process';
 import { installOpenClawHook, findAllHooksDirs } from './openclaw.js';
 import { setupHooks } from './settings-hooks.js';
+import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
 
 const MARKER = '# ShieldCortex — Memory System';
 
@@ -136,6 +137,24 @@ function isIdealMcpEntry(entry: unknown, ideal: McpCommand): boolean {
   return e.args.every((v, i) => v === ideal.args[i]);
 }
 
+/**
+ * Ownership check, identical in spirit to uninstall.ts's `looksLikeShieldcortex`.
+ * `mcpServers.memory` is a generic key — the official upstream
+ * `@modelcontextprotocol/server-memory` registers under the same name. The
+ * uninstall path declares this check mandatory before touching the entry; the
+ * install path was missing it and would silently overwrite a differently-owned
+ * `memory` server. An entry "looks like ShieldCortex" if its command path or
+ * any arg contains a shieldcortex / shield-cortex token.
+ */
+function looksLikeShieldcortex(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as { command?: unknown; args?: unknown };
+  const tokens: string[] = [];
+  if (typeof e.command === 'string') tokens.push(e.command);
+  if (Array.isArray(e.args)) for (const a of e.args) if (typeof a === 'string') tokens.push(a);
+  return tokens.some((t) => /shield[-]?cortex/i.test(t));
+}
+
 export function setupGlobalMcp(): void {
   // Claude Code reads user-scope MCP servers from ~/.claude.json
   const mcpPath = path.join(os.homedir(), '.claude.json');
@@ -147,47 +166,51 @@ export function setupGlobalMcp(): void {
   };
   const isStablePath = ideal.command !== 'npx';
 
-  if (fs.existsSync(mcpPath)) {
-    try {
-      const existing = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
-      const servers = existing.mcpServers || {};
-      const current = servers.memory;
+  // ~/.claude.json is Claude Code's PRIMARY state file. A parse failure on an
+  // EXISTING file MUST abort (readJsonConfigOrAbort throws) — never overwrite
+  // it with a `{ mcpServers: { memory } }` stub, which would wipe the user's
+  // entire Claude Code state. A missing file legitimately yields {}.
+  const existing = readJsonConfigOrAbort(mcpPath);
+  const fileExisted = fs.existsSync(mcpPath);
+  const servers = existing.mcpServers || {};
+  const current = servers.memory;
 
-      if (isIdealMcpEntry(current, idealEntry)) {
-        console.log(
-          `✓ MCP: global server already configured in ~/.claude.json (stable binary: ${isStablePath ? ideal.command : 'npx'})`
-        );
-        return;
-      }
-
-      // Detect whether this is a fresh add or an upgrade from the old
-      // `npx -y shieldcortex` form so we log the right message.
-      const currentIsShieldCortex = !!current && (
-        current.command?.includes?.('shieldcortex') ||
-        current.args?.some?.((a: string) => typeof a === 'string' && a.includes('shieldcortex'))
-      );
-
-      existing.mcpServers = servers;
-      existing.mcpServers.memory = idealEntry;
-      fs.writeFileSync(mcpPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
-
-      if (currentIsShieldCortex && isStablePath) {
-        console.log(`✓ MCP: upgraded shieldcortex server to stable binary path (${ideal.command})`);
-        console.log('  Reason: `npx -y` resolution drift was causing periodic CLI session resets.');
-      } else if (currentIsShieldCortex) {
-        console.log('✓ MCP: refreshed shieldcortex server registration');
-      } else {
-        console.log(`✓ MCP: added shieldcortex server to ~/.claude.json (${ideal.command})`);
-      }
-      return;
-    } catch {
-      // Parse error — fall through and create fresh below.
-    }
+  if (isIdealMcpEntry(current, idealEntry)) {
+    console.log(
+      `✓ MCP: global server already configured in ~/.claude.json (stable binary: ${isStablePath ? ideal.command : 'npx'})`
+    );
+    return;
   }
 
-  const config = { mcpServers: { memory: idealEntry } };
-  fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-  console.log(`✓ MCP: created global server config at ~/.claude.json (${ideal.command})`);
+  // Ownership guard (mirrors uninstall.ts): `memory` is a generic key the
+  // upstream @modelcontextprotocol/server-memory also uses. If an existing
+  // entry is NOT ShieldCortex-owned, leave it alone rather than clobber it.
+  if (current && !looksLikeShieldcortex(current)) {
+    console.warn(
+      '⚠ MCP: ~/.claude.json mcpServers.memory does not look ShieldCortex-owned — leaving it alone.'
+    );
+    console.warn('  Remove or rename that entry if you want ShieldCortex to register under `memory`.');
+    return;
+  }
+
+  // Detect whether this is a fresh add or an upgrade from the old
+  // `npx -y shieldcortex` form so we log the right message.
+  const currentIsShieldCortex = !!current && looksLikeShieldcortex(current);
+
+  existing.mcpServers = servers;
+  existing.mcpServers.memory = idealEntry;
+  writeJsonConfigWithBackup(mcpPath, existing);
+
+  if (!fileExisted) {
+    console.log(`✓ MCP: created global server config at ~/.claude.json (${ideal.command})`);
+  } else if (currentIsShieldCortex && isStablePath) {
+    console.log(`✓ MCP: upgraded shieldcortex server to stable binary path (${ideal.command})`);
+    console.log('  Reason: `npx -y` resolution drift was causing periodic CLI session resets.');
+  } else if (currentIsShieldCortex) {
+    console.log('✓ MCP: refreshed shieldcortex server registration');
+  } else {
+    console.log(`✓ MCP: added shieldcortex server to ~/.claude.json (${ideal.command})`);
+  }
 }
 
 export async function setupClaudeMd(options?: { stopHook?: boolean; sessionEnd?: boolean }): Promise<void> {
