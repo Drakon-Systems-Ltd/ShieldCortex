@@ -1,15 +1,32 @@
 /**
  * Tool Response Scanner
  *
- * Lightweight defence scanner for MCP tool outputs (read-path).
- * Runs injection detection + credential leak scanning (2 of 6 layers).
- * Skips fragmentation, sensitivity, and trust scoring (write-path concerns).
+ * Defence scanner for MCP tool outputs (read-path). Tool output is the #1 MCP
+ * attack surface, so the read path shares the WRITE-path detection surface
+ * instead of running a thinner pattern set:
  *
- * Advisory by default: logs threats but never blocks tool responses.
+ *   - scanForInjection   — Iron Dome regex set (named-pattern reporting)
+ *   - detectInstructions — write-path instruction detector; folds cross-script
+ *                          homoglyphs and scans in windows (catches `ignorе …`)
+ *   - detectEncoding     — write-path encoding detector; decodes base64/hex/url
+ *                          blobs so a BARE blob that decodes to an injection is
+ *                          re-scanned on the plaintext (decode-and-rescan)
+ *   - detectMarkdownImageExfil — markdown image whose URL smuggles data out
+ *   - scanForCredentials — credential leak scanning (retained)
+ *
+ * It deliberately does NOT pull in the write-path's trust scoring, anomaly,
+ * privilege, fragmentation or sensitivity layers — those are write concerns.
+ *
+ * Advisory by default: logs threats but never blocks tool responses. Only the
+ * audit/event firewall_result reflects enforce mode; the scan itself never hard
+ * blocks tool execution.
  */
 
 import { scanForInjection } from './iron-dome/injection-scanner.js';
 import { scanForCredentials } from './credential-leak/index.js';
+import { detectInstructions } from './firewall/instruction-detector.js';
+import { detectEncoding } from './firewall/encoding-detector.js';
+import { detectMarkdownImageExfil } from './firewall/markdown-image-detector.js';
 import { logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
@@ -58,7 +75,9 @@ export function shouldScanToolResponse(toolName: string): boolean {
 /**
  * Scan a tool response for threats.
  *
- * Runs injection scanning (40+ patterns) + credential leak detection (25+ providers).
+ * Shares the write-path detection surface: Iron Dome injection patterns,
+ * instruction detection (with homoglyph folding + windowed scanning), encoding
+ * decode-and-rescan, markdown-image exfiltration, and credential leak detection.
  * In advisory mode, threats are logged but the response is never blocked.
  */
 export function scanToolResponse(
@@ -84,43 +103,107 @@ export function scanToolResponse(
     };
   }
 
-  // 1. Injection scan (Iron Dome patterns)
+  // 1. Injection scan (Iron Dome named patterns — drives the `injection` field
+  //    of the result and the human-readable summary).
   const injection = scanForInjection(content);
 
-  // 2. Credential leak scan
+  // 2. Write-path detectors (parity). detectInstructions folds homoglyphs and
+  //    scans in windows; detectEncoding decodes base64/hex/url blobs.
+  const instructions = detectInstructions(content);
+  const encoding = detectEncoding(content);
+
+  // 2b. Decode-and-rescan: re-run instruction + credential detection on each
+  //     decoded snippet so a BARE base64/hex blob that decodes to an injection
+  //     (the Iron Dome base64 rule only fires on literal framing words) is
+  //     caught on its plaintext. Reuses the write-path detectors — no
+  //     duplicated detection logic.
+  let decodedInjection = false;
+  let decodedCredentialLeak = false;
+  for (const snippet of encoding.decodedSnippets) {
+    if (!decodedInjection && detectInstructions(snippet).detected) {
+      decodedInjection = true;
+    }
+    if (!decodedCredentialLeak && scanForCredentials(snippet).leaked) {
+      decodedCredentialLeak = true;
+    }
+    if (decodedInjection && decodedCredentialLeak) break;
+  }
+
+  // 3. Markdown-image exfiltration (rendered image URL smuggling data out).
+  const markdownImage = detectMarkdownImageExfil(content);
+
+  // 4. Credential leak scan (retained from the original 2-layer read path).
   const credentials = scanForCredentials(content);
 
-  // 3. Collect threat indicators
+  // 5. Collect threat indicators across every layer.
   const threatIndicators: ThreatIndicator[] = [];
+  const pushIndicator = (indicator: ThreatIndicator): void => {
+    if (!threatIndicators.includes(indicator)) threatIndicators.push(indicator);
+  };
+
+  if (instructions.detected || decodedInjection) {
+    pushIndicator('instruction_injection');
+  }
+  if (encoding.detected) {
+    pushIndicator('encoding_obfuscation');
+  }
   if (!injection.clean) {
-    threatIndicators.push('instruction_injection');
+    pushIndicator('instruction_injection');
     const categories = new Set(injection.detections.map(d => d.category));
     if (categories.has('credential_extraction')) {
-      threatIndicators.push('credential_leak');
+      pushIndicator('credential_leak');
     }
     if (categories.has('encoding_trick')) {
-      threatIndicators.push('encoding_obfuscation');
+      pushIndicator('encoding_obfuscation');
     }
   }
-  if (credentials.leaked && !threatIndicators.includes('credential_leak')) {
-    threatIndicators.push('credential_leak');
+  if (markdownImage.detected) {
+    pushIndicator('external_url');
+  }
+  if (credentials.leaked || decodedCredentialLeak) {
+    pushIndicator('credential_leak');
   }
 
-  const clean = injection.clean && !credentials.leaked;
+  const clean =
+    injection.clean &&
+    !instructions.detected &&
+    !encoding.detected &&
+    !decodedInjection &&
+    !markdownImage.detected &&
+    !credentials.leaked;
   const durationMs = Math.round(performance.now() - startTime);
 
-  // 4. Build summary
+  // 6. Build summary
   let summary: string;
   if (clean) {
     summary = `Tool response from "${toolName}" is clean (${durationMs}ms)`;
   } else {
     const parts: string[] = [];
     if (!injection.clean) parts.push(`injection: ${injection.summary}`);
+    if (instructions.detected) parts.push(`instructions: ${instructions.patterns.join(', ')}`);
+    if (decodedInjection) parts.push('decoded payload contains injection');
+    if (encoding.detected) parts.push(`encoding: ${encoding.encodingTypes.join(', ')}`);
+    if (markdownImage.detected) parts.push(`markdown-image exfil: ${markdownImage.urls.length} URL(s)`);
     if (credentials.leaked) parts.push(`credentials: ${credentials.findings.length} finding(s)`);
+    else if (decodedCredentialLeak) parts.push('decoded payload contains credentials');
     summary = `THREAT in "${toolName}" response: ${parts.join('; ')} (${durationMs}ms)`;
   }
 
-  // 5. Audit log (threats only)
+  // 7. Anomaly score: CRITICAL Iron Dome risk pins to 1.0; any other detection
+  //    (homoglyph, decoded payload, markdown-image exfil, etc.) scores 0.7.
+  const anomalyScore = injection.riskLevel === 'CRITICAL' ? 1.0 : 0.7;
+
+  // Blocked patterns reported to the audit/dashboard — Iron Dome named patterns
+  // plus the parity detectors' own labels.
+  const blockedPatterns = [
+    ...injection.detections.map(d => d.pattern),
+    ...instructions.patterns,
+    ...encoding.encodingTypes,
+    ...(decodedInjection ? ['decoded_injection'] : []),
+    ...(markdownImage.detected ? ['markdown_image_exfil'] : []),
+  ];
+
+  // 8. Audit log (threats only)
   let auditId = -1;
   if (!clean && isDatabaseInitialized()) {
     try {
@@ -131,11 +214,11 @@ export function scanToolResponse(
         source_type: 'tool_response',
         source_identifier: toolName,
         trust_score: 0.5,
-        sensitivity_level: credentials.leaked ? 'CONFIDENTIAL' : 'PUBLIC',
+        sensitivity_level: (credentials.leaked || decodedCredentialLeak) ? 'CONFIDENTIAL' : 'PUBLIC',
         firewall_result: resolvedMode === 'enforce' ? 'BLOCK' : 'ALLOW',
-        anomaly_score: injection.clean ? 0 : (injection.riskLevel === 'CRITICAL' ? 1.0 : 0.7),
+        anomaly_score: anomalyScore,
         threat_indicators: JSON.stringify(threatIndicators),
-        blocked_patterns: JSON.stringify(injection.detections.map(d => d.pattern)),
+        blocked_patterns: JSON.stringify(blockedPatterns),
         reason: summary,
         fragmentation_score: null,
         pipeline_duration_ms: durationMs,
@@ -144,14 +227,14 @@ export function scanToolResponse(
       // Audit logging must never affect tool response delivery
     }
 
-    // 6. Dashboard real-time event
+    // 9. Dashboard real-time event
     try {
       persistEvent('defence_event', {
         source_type: 'tool_response',
         source_identifier: toolName,
         firewall_result: resolvedMode === 'enforce' ? 'BLOCK' : 'ALLOW',
         trust_score: 0.5,
-        anomaly_score: injection.clean ? 0 : 0.7,
+        anomaly_score: anomalyScore,
         reason: summary,
         threat_indicators: JSON.stringify(threatIndicators),
         timestamp: new Date().toISOString(),

@@ -25,6 +25,8 @@ import type { PrivilegeDetectionResult } from './privilege-detector.js';
 import { detectEncoding } from './encoding-detector.js';
 import type { EncodingDetectionResult } from './encoding-detector.js';
 
+import { detectMarkdownImageExfil } from './markdown-image-detector.js';
+
 import { scoreAnomaly } from './anomaly-scorer.js';
 
 import { detectSkillThreats } from '../skill-scanner/patterns.js';
@@ -37,6 +39,8 @@ export { detectPrivilegeEscalation } from './privilege-detector.js';
 export type { PrivilegeDetectionResult } from './privilege-detector.js';
 export { detectEncoding } from './encoding-detector.js';
 export type { EncodingDetectionResult } from './encoding-detector.js';
+export { detectMarkdownImageExfil } from './markdown-image-detector.js';
+export type { MarkdownImageExfilResult } from './markdown-image-detector.js';
 export { scoreAnomaly } from './anomaly-scorer.js';
 
 /**
@@ -59,6 +63,7 @@ export function analyzeFirewall(
   const instructions = detectInstructions(content);
   const privilege = detectPrivilegeEscalation(content);
   const encoding = detectEncoding(content);
+  const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
 
   // Fold pre-sanitisation zero-width/bidi strips into the encoding signal so
@@ -108,6 +113,15 @@ export function analyzeFirewall(
   if (encoding.detected) {
     threatIndicators.push('encoding_obfuscation');
     blockedPatterns.push(...encoding.encodingTypes);
+  }
+
+  // Markdown-image exfiltration — a rendered image URL that smuggles data to an
+  // attacker. Reported as external_url so determineResult treats it the same as
+  // any other off-host link: low-severity alone, but it escalates the verdict
+  // when it co-occurs with another detection (encoding combined with >=2, etc.).
+  if (markdownImage.detected && !threatIndicators.includes('external_url')) {
+    threatIndicators.push('external_url');
+    blockedPatterns.push('markdown_image_exfil');
   }
 
   // Skill-level threats in memory content (tool injection, scope escalation, etc.)
