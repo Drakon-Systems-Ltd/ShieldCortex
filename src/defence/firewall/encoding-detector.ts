@@ -20,11 +20,14 @@ const HEX_PATTERN = /(?:0x[0-9a-fA-F]{2}\s*){4,}|(?:\\x[0-9a-fA-F]{2}){4,}|\b[0-
 // Suspicious URL encoding (4+ encoded chars in sequence)
 const URL_ENCODING_PATTERN = /(?:%[0-9A-Fa-f]{2}){4,}/g;
 
-// Zero-width characters
-const ZERO_WIDTH_PATTERN = /[\u200B\u200C\u200D\uFEFF]/g;
+// Zero-width characters.
+// NOTE: presence check only (used with `.test()`), so NO `/g` flag \u2014 a stateful
+// `/g` regex advances `lastIndex` across `.test()` calls and flip-flops between
+// true/false for identical content, silently missing zero-width smuggling.
+const ZERO_WIDTH_PATTERN = /[\u200B\u200C\u200D\uFEFF]/;
 
-// RTL override
-const RTL_OVERRIDE_PATTERN = /\u202E/g;
+// RTL override \u2014 presence check only, NO `/g` (same stateful-test hazard).
+const RTL_OVERRIDE_PATTERN = /\u202E/;
 
 // Unicode homoglyphs — Cyrillic characters that look like Latin
 const CYRILLIC_HOMOGLYPHS = /[\u0430\u0435\u043E\u0440\u0441\u0443\u0445\u0410\u0412\u0415\u041A\u041C\u041D\u041E\u0420\u0421\u0422\u0423\u0425]/g;

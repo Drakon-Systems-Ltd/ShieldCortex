@@ -59,16 +59,21 @@ export function runDefencePipeline(
     // 2. Score trust
     const trust: TrustScore = scoreSource(source);
 
-    // 3. Run firewall (on sanitised content)
+    // 3. Run firewall (on sanitised content). Pass the strip categories so the
+    // firewall can account for zero-width/bidi bytes the sanitiser already
+    // removed — otherwise its encoding detector never sees them and the
+    // "zero-width/RTL → quarantine" rule can't fire.
     const firewall: FirewallAnalysis = analyzeFirewall(
       cleanContent,
       title,
       source,
       trust.score,
       cfg,
+      sanitisation.strippedCategories,
     );
 
-    // Carry forward any sanitisation threat indicators
+    // Carry forward any sanitisation threat indicators (deduped — the firewall
+    // may already have added 'encoding_obfuscation' from the strip signal above)
     for (const indicator of sanitisation.threatIndicators) {
       if (!firewall.threatIndicators.includes(indicator)) {
         firewall.threatIndicators.push(indicator);

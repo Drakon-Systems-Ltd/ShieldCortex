@@ -14,6 +14,7 @@ import type {
   DefenceConfig,
   ThreatIndicator,
 } from '../types.js';
+import type { SanitisationCategory } from '../input-sanitisation/index.js';
 
 import { detectInstructions } from './instruction-detector.js';
 import type { InstructionDetectionResult } from './instruction-detector.js';
@@ -47,11 +48,34 @@ export function analyzeFirewall(
   source: DefenceSource,
   trustScore: number,
   config: DefenceConfig,
+  /**
+   * Categories stripped by Layer 1 sanitisation BEFORE this content arrived.
+   * The sanitiser removes zero-width/bidi bytes, so the encoding detector below
+   * never sees them — feeding the strip signal back in lets the verdict reflect
+   * the smuggling attempt instead of silently allowing the cleaned content.
+   */
+  preSanitisationStrips?: SanitisationCategory[],
 ): FirewallAnalysis {
   const instructions = detectInstructions(content);
   const privilege = detectPrivilegeEscalation(content);
   const encoding = detectEncoding(content);
   const anomaly = scoreAnomaly(content, title);
+
+  // Fold pre-sanitisation zero-width/bidi strips into the encoding signal so
+  // determineResult escalates (quarantine in balanced, block in strict). We map
+  // them onto the SAME encodingTypes the detector emits ('zero_width_chars' /
+  // 'rtl_override') so the existing "suspicious encoding → quarantine" rule and
+  // the strict-mode detection count both fire without any extra branches.
+  if (preSanitisationStrips?.includes('zero_width') &&
+      !encoding.encodingTypes.includes('zero_width_chars')) {
+    encoding.encodingTypes.push('zero_width_chars');
+    encoding.detected = true;
+  }
+  if (preSanitisationStrips?.includes('bidi_override') &&
+      !encoding.encodingTypes.includes('rtl_override')) {
+    encoding.encodingTypes.push('rtl_override');
+    encoding.detected = true;
+  }
 
   // Skill scanner patterns — catches tool injection, scope escalation,
   // data exfiltration, persistence, supply chain, agent manipulation,
