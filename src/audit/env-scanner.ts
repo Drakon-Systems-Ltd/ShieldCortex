@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join, basename } from 'path';
 import { homedir } from 'os';
+import { execFileSync } from 'node:child_process';
 import type { AuditFinding, ScannerResult } from './types.js';
 import { scanForCredentials } from '../defence/credential-leak/index.js';
 
@@ -88,8 +89,10 @@ function discoverEnvFiles(): string[] {
  */
 function isGitIgnored(filePath: string): boolean {
   try {
-    const { execSync } = require('child_process');
-    const result = execSync(`git check-ignore -q "${filePath}" 2>/dev/null`, {
+    // execFileSync (no shell) — filePath is passed as an argv element, so shell
+    // metacharacters in a path can never be interpreted. stderr is piped (not
+    // inherited), so a non-repo dir stays quiet without a `2>/dev/null` redirect.
+    execFileSync('git', ['check-ignore', '-q', filePath], {
       cwd: process.cwd(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });

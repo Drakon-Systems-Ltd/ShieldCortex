@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
+import Database from '../database/better-sqlite3-guard.js';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 const CLAUDE_MD_PATH = path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -248,12 +249,11 @@ export function migrateDatabase(): { copied: boolean; merged: boolean; mergedCou
 
   // Target exists — merge memories that don't already exist
   try {
-    const Database = require('better-sqlite3');
     const db = new Database(targetPath);
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
 
-    const countBefore = db.prepare('SELECT COUNT(*) as c FROM memories').get().c;
+    const countBefore = (db.prepare('SELECT COUNT(*) as c FROM memories').get() as { c: number }).c;
 
     db.exec(`ATTACH DATABASE '${legacyPath.replace(/'/g, "''")}' AS old`);
 
@@ -267,7 +267,7 @@ export function migrateDatabase(): { copied: boolean; merged: boolean; mergedCou
 
     db.exec('DETACH old');
 
-    const countAfter = db.prepare('SELECT COUNT(*) as c FROM memories').get().c;
+    const countAfter = (db.prepare('SELECT COUNT(*) as c FROM memories').get() as { c: number }).c;
     const imported = countAfter - countBefore;
 
     db.close();

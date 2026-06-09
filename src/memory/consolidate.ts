@@ -10,6 +10,7 @@
 
 import type Database from 'better-sqlite3';
 import { getDatabase, withTransaction } from '../database/init.js';
+import { expireQuarantineItems } from '../defence/quarantine/auto-expire.js';
 import {
   Memory,
   MemoryConfig,
@@ -1167,7 +1168,6 @@ export function fullCleanup(
   // Expire old quarantine items
   let quarantineExpired = 0;
   try {
-    const { expireQuarantineItems } = require('../defence/quarantine/auto-expire.js');
     quarantineExpired = expireQuarantineItems();
   } catch { /* defence module may not be available */ }
 

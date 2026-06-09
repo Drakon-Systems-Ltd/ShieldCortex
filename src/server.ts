@@ -42,6 +42,7 @@ import type { FirewallResult as FwResult, DefenceSource } from './defence/types.
 import { resolveToolSource as resolveToolSourceImpl } from './defence/trust/resolve-tool-source.js';
 import { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
 import { getToolResponseScanConfig } from './cloud/config.js';
+import { checkKillPhrase } from './defence/iron-dome/index.js';
 
 import {
   isKillSwitchActive,
@@ -157,9 +158,10 @@ function withKillSwitchGuard(kind: OperationKind, handler: (...args: any[]) => a
 function checkAndTriggerKillSwitch(text: string, source: string): boolean {
   if (isKillSwitchActive()) return false; // already active
   try {
-    // Lazy import to avoid circular deps
-    const ironDome = require('./defence/iron-dome/index.js');
-    const result = ironDome.checkKillPhrase(text);
+    // Statically imported (see top of file) — no circular dep:
+    // iron-dome/index does not import server.ts. try/catch is purely
+    // defensive against a kill-phrase check failing at runtime.
+    const result = checkKillPhrase(text);
     return result.triggered;
   } catch {
     return false;

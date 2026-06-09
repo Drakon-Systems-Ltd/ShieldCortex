@@ -45,6 +45,9 @@ jobs:
       - name: Build
         run: npm run build:ts
 
+      - name: Check dist for ESM-unsafe require()
+        run: npm run test:dist
+
       - name: Test
         run: npm test
 
