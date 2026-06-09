@@ -19,6 +19,14 @@ import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
 import { isDatabaseInitialized } from '../../database/init.js';
 import { handleKillPhrase } from './kill-switch.js';
 import { activateKillSwitch } from '../../api/control.js';
+import { createRequire } from 'module';
+
+// ./custom-policies.js is require()d lazily (inside getEffectiveIronDomeConfig,
+// behind try/catch) to avoid eager-loading the DB layer and dodge import
+// cycles. Under real Node ESM a bare require() throws ReferenceError, which the
+// surrounding catch would swallow — silently ignoring local custom policies.
+// createRequire() gives us a working require here.
+const require = createRequire(import.meta.url);
 
 // ── Re-exports ──
 

@@ -23,13 +23,21 @@ import { analyzeFirewall } from './firewall/index.js';
 import { classifySensitivity } from './sensitivity/index.js';
 import { analyzeFragmentation } from './fragmentation/index.js';
 import { scanForCredentials, type CredentialScanResult } from './credential-leak/index.js';
-import { logAudit, createContentHash } from './audit/index.js';
+import { logAudit } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
 import { syncToCloud } from '../cloud/sync.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { getDefenceMode } from '../cloud/config.js';
 import { isDatabaseInitialized } from '../database/init.js';
+import { createRequire } from 'module';
+
+// The stores below are require()d lazily (inside functions, behind try/catch)
+// to avoid eager-loading the DB layer at import time and to dodge import
+// cycles. Under real Node ESM a bare require() throws ReferenceError, which
+// the surrounding catch would silently swallow — disabling the firewall-rule
+// and custom-pattern layers. createRequire() gives us a working require here.
+const require = createRequire(import.meta.url);
 
 export function runDefencePipeline(
   content: string,
@@ -211,7 +219,6 @@ export function runDefencePipeline(
     const durationMs = Math.round(performance.now() - startTime);
 
     // 6. Log audit
-    const _contentHash = createContentHash(content);
     const auditId = logAudit({
       memory_id: null,
       project: project ?? null,

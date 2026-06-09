@@ -3,6 +3,14 @@
  */
 
 import { getDatabase } from '../../database/init.js';
+import { createRequire } from 'module';
+
+// safe-regex2 is require()d lazily (it may not be installed) behind a
+// try/catch fallback. Under real Node ESM a bare require() throws
+// ReferenceError, which the catch would swallow — quietly downgrading the
+// ReDoS check to the weaker heuristic. createRequire() gives us a working
+// require here.
+const require = createRequire(import.meta.url);
 
 export interface CustomPattern {
   id: number;

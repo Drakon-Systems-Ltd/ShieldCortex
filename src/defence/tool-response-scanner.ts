@@ -14,6 +14,14 @@ import { logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
 import type { ThreatIndicator, ToolResponseScanResult } from './types.js';
+import { createRequire } from 'module';
+
+// ../api/events.js is require()d lazily (inside scanToolResponse, behind
+// try/catch) to keep the dashboard event sink optional. Under real Node ESM a
+// bare require() throws ReferenceError, which the surrounding catch would
+// swallow — dropping real-time defence events. createRequire() gives us a
+// working require here.
+const require = createRequire(import.meta.url);
 
 // Tools that return memory/knowledge content (worth scanning)
 const HIGH_RISK_TOOLS = new Set([
