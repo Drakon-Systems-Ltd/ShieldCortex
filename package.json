@@ -30,6 +30,10 @@
       "import": "./dist/defence/index.js",
       "types": "./dist/defence/index.d.ts"
     },
+    "./scan": {
+      "import": "./dist/scan-only.js",
+      "types": "./dist/scan-only.d.ts"
+    },
     "./environment": {
       "import": "./dist/environment/index.js",
       "types": "./dist/environment/index.d.ts"
@@ -113,7 +117,6 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.7.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^12.0.0",
     "cors": "^2.8.5",
@@ -122,6 +125,9 @@
     "semver": "^7.7.0",
     "ws": "^8.18.0",
     "zod": "^3.23.0"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.7.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
