@@ -76,6 +76,15 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 export const MCP_LIGHT_TICK_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
+ * Per-tick budget for the sync retry queue under the MCP profile. MCP-only
+ * installs have no full worker, so they MUST drain their own queue or queued
+ * audits/memories age out unsent — but one MCP process runs per Claude Code
+ * window, so we cap the network work each does per light tick. The full
+ * (dashboard) profile keeps its historical unbudgeted cadence.
+ */
+export const MCP_RETRY_QUEUE_BUDGET = 25;
+
+/**
  * Result of a light tick operation
  */
 export interface LightTickResult {

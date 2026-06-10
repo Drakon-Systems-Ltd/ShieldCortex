@@ -17,6 +17,7 @@ import {
   MediumTickResult,
   WorkerStatus,
   MCP_LIGHT_TICK_INTERVAL_MS,
+  MCP_RETRY_QUEUE_BUDGET,
 } from './types.js';
 import { getDatabase } from '../database/init.js';
 import { pruneActivationCache } from '../memory/activation.js';
@@ -289,22 +290,31 @@ export class BrainWorker {
         console.error('[BrainWorker] Audit retention failed:', auditErr);
       }
 
-      // 4-6: cloud sync (retry queue, heartbeat, Iron Dome) — full profile only.
-      // Skipped under MCP profile so we don't fan out N concurrent network calls
-      // from N open Claude Code windows.
-      if (this.config.profile === 'full') {
-        try {
-          const retryResult = await processRetryQueue();
-          if (retryResult.processed > 0) {
-            console.log(
-              `[BrainWorker] Sync retry queue: processed ${retryResult.processed} ` +
-              `(${retryResult.succeeded} ok, ${retryResult.failed} retry, ${retryResult.permanentlyFailed} failed)`
-            );
-          }
-        } catch (retryError) {
-          console.error('[BrainWorker] Sync retry queue failed:', retryError);
+      // 4. Sync retry queue — drains on BOTH profiles. MCP-only installs have
+      // no full worker, so if this stayed full-only their queued audits/
+      // memories would age out unsent (the same gap we closed for audit
+      // retention above). The MCP path is BUDGETED (one process per Claude Code
+      // window) so it doesn't do unbounded network work each tick; full keeps
+      // its historical unbudgeted cadence. processRetryQueue itself no-ops
+      // cheaply when cloud is disabled (no API key), so this is safe to call
+      // unconditionally — no extra gate needed.
+      try {
+        const retryResult = await processRetryQueue(
+          this.config.profile === 'mcp' ? { maxRows: MCP_RETRY_QUEUE_BUDGET } : {},
+        );
+        if (retryResult.processed > 0) {
+          console.log(
+            `[BrainWorker] Sync retry queue: processed ${retryResult.processed} ` +
+            `(${retryResult.succeeded} ok, ${retryResult.failed} retry, ${retryResult.permanentlyFailed} failed)`
+          );
         }
+      } catch (retryError) {
+        console.error('[BrainWorker] Sync retry queue failed:', retryError);
+      }
 
+      // 5-6: heartbeat + Iron Dome — full profile only. Skipped under MCP so we
+      // don't fan out N concurrent network calls from N open Claude Code windows.
+      if (this.config.profile === 'full') {
         if (isFeatureEnabled('cloud_sync')) {
           try {
             sendHeartbeat();

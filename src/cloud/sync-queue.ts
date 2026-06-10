@@ -270,32 +270,103 @@ function buildRetryRequest(payloadText: string): { path: string; body: string } 
   throw new Error('Unsupported sync queue payload');
 }
 
+/** Cap on transient backoff. A single offline laptop shouldn't wait more than
+ * an hour between retry attempts, but we don't want 2^attempts*30s to grow
+ * unbounded after a long outage (it hits days within ~14 attempts). */
+const MAX_BACKOFF_MS = 60 * 60 * 1000; // 1h
+const BASE_BACKOFF_MS = 30_000;
+
 /**
- * Mark a queue row as retrying (schedule next attempt) or permanently failed.
- * Exponential backoff: 2^attempts * 30s (30s, 60s, 120s).
+ * Classify a sync failure to decide retry policy.
+ *
+ * - 'permanent': HTTP 4xx. The request is malformed, unauthorised, or points
+ *   at something that doesn't exist — retrying is pointless, so fail fast.
+ * - 'transient': network errors, timeouts/AbortError, HTTP 5xx, HTTP 429.
+ *   The server or link is temporarily unavailable; retrying always makes
+ *   sense, so we keep the row pending (capped backoff) until the 7-day TTL
+ *   purge removes it.
+ *
+ * 429 (rate limited) is deliberately transient — backing off and retrying is
+ * exactly the right response to a rate limit.
  */
-function markRetryOrFailed(
-  rowId: number,
-  currentAttempts: number,
-  newAttempts: number,
-  maxAttempts: number,
-  errorMsg: string,
-): boolean {
+function classifyHttpStatus(status: number): 'transient' | 'permanent' {
+  // 4xx (except 429) is a client error → permanent. 429 + 5xx → transient.
+  if (status === 429) return 'transient';
+  if (status >= 400 && status < 500) return 'permanent';
+  return 'transient';
+}
+
+/**
+ * Heuristic for whether a stored `last_error` describes a transient failure,
+ * used by the resurrection pass to revive rows that the OLD 3-attempt logic
+ * wrongly marked terminal. We can't store the classification (no schema
+ * change), so we infer from the message:
+ *   - `HTTP 4xx` (but not `HTTP 429`) → permanent → leave failed.
+ *   - everything else (timeouts, network messages, `HTTP 5xx`, `HTTP 429`)
+ *     → transient → resurrect.
+ * Conservative by design: an unrecognised message is treated as transient so
+ * we err on the side of retrying rather than silently dropping a sync.
+ */
+function isTransientErrorMessage(lastError: string | null): boolean {
+  if (!lastError) return true;
+  const m = /^HTTP (\d{3})/.exec(lastError);
+  if (m) return classifyHttpStatus(Number(m[1])) === 'transient';
+  return true; // network/timeout/unknown → transient
+}
+
+/**
+ * Schedule a transient-failure retry. Keeps the row `pending` with a future
+ * `next_retry_at` using capped exponential backoff (min(2^attempts*30s, 1h)).
+ * Crucially this does NOT honour max_attempts — transient errors retry until
+ * the 7-day TTL purge, so an overnight outage recovers instead of being
+ * permanently lost after 3 strikes. `attempts` still increments for observability.
+ */
+function scheduleRetry(rowId: number, currentAttempts: number, newAttempts: number, errorMsg: string): void {
   const db = getDatabase();
-  if (newAttempts >= maxAttempts) {
-    db.prepare(`
-      UPDATE sync_queue SET status = 'failed', attempts = ?, last_error = ?
-      WHERE id = ?
-    `).run(newAttempts, errorMsg, rowId);
-    return true; // permanently failed
-  }
-  const backoffMs = Math.pow(2, currentAttempts) * 30_000;
+  const backoffMs = Math.min(Math.pow(2, currentAttempts) * BASE_BACKOFF_MS, MAX_BACKOFF_MS);
   const nextRetry = new Date(Date.now() + backoffMs).toISOString();
   db.prepare(`
-    UPDATE sync_queue SET attempts = ?, next_retry_at = ?, last_error = ?
+    UPDATE sync_queue SET status = 'pending', attempts = ?, next_retry_at = ?, last_error = ?
     WHERE id = ?
   `).run(newAttempts, nextRetry, errorMsg, rowId);
-  return false;
+}
+
+/**
+ * Mark a queue row permanently failed (HTTP 4xx). No further retries.
+ */
+function markPermanentlyFailed(rowId: number, newAttempts: number, errorMsg: string): void {
+  const db = getDatabase();
+  db.prepare(`
+    UPDATE sync_queue SET status = 'failed', attempts = ?, last_error = ?
+    WHERE id = ?
+  `).run(newAttempts, errorMsg, rowId);
+}
+
+/**
+ * Revive `failed` rows that were really transient failures (old 3-attempt
+ * logic, or pre-upgrade rows). Only rows still within the 7-day TTL window
+ * and whose `last_error` looks transient are reset to `pending` + due now.
+ * Genuine 4xx failures stay failed. Returns the number of rows resurrected.
+ */
+function resurrectTransientFailures(): number {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  // Resurrect failed rows within TTL whose last_error is NOT a 4xx (4xx except
+  // 429 are permanent). `HTTP 429` and `HTTP 5xx` and network/timeout messages
+  // all fall through to transient. NULL last_error → transient (be generous).
+  const result = db.prepare(`
+    UPDATE sync_queue
+    SET status = 'pending', next_retry_at = ?
+    WHERE status = 'failed'
+      AND created_at > ?
+      AND (
+        last_error IS NULL
+        OR last_error NOT GLOB 'HTTP 4[0-9][0-9]*'
+        OR last_error GLOB 'HTTP 429*'
+      )
+  `).run(now, cutoff);
+  return Number(result.changes ?? 0);
 }
 
 function formatQueueError(err: unknown): string {
@@ -313,14 +384,36 @@ function formatQueueError(err: unknown): string {
   return message;
 }
 
+// Default per-tick budget for the full profile. Kept at the historical value
+// so dashboard behaviour is unchanged; mcp callers pass a smaller budget.
+const DEFAULT_RETRY_BUDGET = 10;
+
+export interface ProcessRetryOptions {
+  /**
+   * Maximum number of pending rows to attempt in one call. Bounds the network
+   * work an MCP-profile worker does per light tick (it passes a small budget,
+   * e.g. 25); the full dashboard profile uses the default. Resurrection is
+   * unaffected — only the pending-row SELECT is limited.
+   */
+  maxRows?: number;
+}
+
 /**
  * Process pending items in the retry queue.
- * SELECT pending WHERE next_retry_at <= now, retry each (up to 10 per tick).
+ *
+ * Runs a resurrection pass first (revive transiently-failed rows within TTL),
+ * then SELECTs pending rows due for retry (up to `maxRows`) and attempts each.
  * Awaits each fetch so results are accurate and no double-processing occurs.
+ *
+ * Failure handling:
+ *   - HTTP 4xx (≠429) → permanent: mark failed, no further retries.
+ *   - network/timeout/5xx/429 → transient: keep pending with capped (≤1h)
+ *     backoff, retrying until the 7-day TTL purge — survives long outages.
  */
-export async function processRetryQueue(): Promise<SyncQueueResult> {
+export async function processRetryQueue(options: ProcessRetryOptions = {}): Promise<SyncQueueResult> {
   const db = getDatabase();
   const config = getCloudConfig();
+  const limit = options.maxRows && options.maxRows > 0 ? options.maxRows : DEFAULT_RETRY_BUDGET;
 
   const result: SyncQueueResult = {
     processed: 0,
@@ -334,20 +427,27 @@ export async function processRetryQueue(): Promise<SyncQueueResult> {
     return result;
   }
 
+  // Revive any transiently-failed rows (old 3-attempt logic / pre-upgrade)
+  // before selecting the pending batch, so they get a chance this tick.
+  try {
+    resurrectTransientFailures();
+  } catch {
+    /* best-effort — resurrection failure must not block live retries */
+  }
+
   const now = new Date().toISOString();
 
-  // Fetch up to 10 pending items ready for retry
+  // Fetch pending items ready for retry, bounded by the budget.
   const rows = db.prepare(`
-    SELECT id, payload, attempts, max_attempts
+    SELECT id, payload, attempts
     FROM sync_queue
     WHERE status = 'pending' AND next_retry_at <= ?
     ORDER BY next_retry_at ASC
-    LIMIT 10
-  `).all(now) as Array<{
+    LIMIT ?
+  `).all(now, limit) as Array<{
     id: number;
     payload: string;
     attempts: number;
-    max_attempts: number;
   }>;
 
   if (rows.length === 0) {
@@ -383,16 +483,19 @@ export async function processRetryQueue(): Promise<SyncQueueResult> {
         `).run(newAttempts, new Date().toISOString(), row.id);
         result.succeeded++;
         try { updateLastSyncAt(); } catch { /* non-critical */ }
+      } else if (classifyHttpStatus(res.status) === 'permanent') {
+        markPermanentlyFailed(row.id, newAttempts, `HTTP ${res.status}`);
+        result.permanentlyFailed++;
       } else {
-        const permanent = markRetryOrFailed(row.id, row.attempts, newAttempts, row.max_attempts, `HTTP ${res.status}`);
-        if (permanent) result.permanentlyFailed++;
-        else result.failed++;
+        // 5xx / 429 — transient, keep retrying with capped backoff.
+        scheduleRetry(row.id, row.attempts, newAttempts, `HTTP ${res.status}`);
+        result.failed++;
       }
     } catch (err) {
+      // Network errors, timeouts (AbortError) — all transient.
       const errorMsg = formatQueueError(err);
-      const permanent = markRetryOrFailed(row.id, row.attempts, newAttempts, row.max_attempts, errorMsg);
-      if (permanent) result.permanentlyFailed++;
-      else result.failed++;
+      scheduleRetry(row.id, row.attempts, newAttempts, errorMsg);
+      result.failed++;
     }
   }
 
