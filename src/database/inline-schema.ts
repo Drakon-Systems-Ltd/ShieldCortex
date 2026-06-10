@@ -338,5 +338,17 @@ export function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_session_events_sensitivity ON session_events(sensitivity_level);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_dedupe
       ON session_events(session_id, ts, kind, content_hash);
+
+    -- Phase 14: MCP tool-description hashes (drift / rug-pull detection).
+    -- Mirrors schema.sql.
+    CREATE TABLE IF NOT EXISTS mcp_tool_hashes (
+      server_name TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      first_seen TEXT,
+      last_seen TEXT,
+      last_changed TEXT,
+      PRIMARY KEY (server_name, tool_name)
+    );
   `;
 }

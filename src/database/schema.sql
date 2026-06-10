@@ -375,3 +375,17 @@ CREATE TABLE IF NOT EXISTS control_state (
   meta_json TEXT,
   updated_at TEXT NOT NULL
 );
+
+-- Phase 14: MCP tool-description hashes (drift / rug-pull detection).
+-- `shieldcortex mcp scan` stores a sha256 of each MCP server's advertised tool
+-- definition; a CHANGED hash on a re-scan flags a silently-altered (rug-pulled)
+-- tool description.
+CREATE TABLE IF NOT EXISTS mcp_tool_hashes (
+  server_name TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  first_seen TEXT,
+  last_seen TEXT,
+  last_changed TEXT,
+  PRIMARY KEY (server_name, tool_name)
+);

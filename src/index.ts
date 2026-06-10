@@ -849,6 +849,14 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "mcp" subcommand (Phase 14) — scan configured MCP servers' tool
+  // descriptions for poisoning / line-jumping and rug-pull drift.
+  if (process.argv[2] === 'mcp') {
+    const { handleMcpCommand } = await import('./cli/mcp.js');
+    await handleMcpCommand(process.argv.slice(3));
+    return;
+  }
+
   // Handle "memory" subcommand (v4.25.0) — show / downvote / list a single
   // memory. Distinct from the existing "memories" (plural) command which
   // routes to migrate-legacy.
@@ -1110,7 +1118,7 @@ ${bold}DOCS${reset}
 
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
-    'graph', 'license', 'licence', 'audit', 'iron-dome', 'scan', 'cloud', 'review-copilot',
+    'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
     'memories', 'import-jsonl',
   ]);

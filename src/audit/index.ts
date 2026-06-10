@@ -23,7 +23,25 @@ export type {
   MemoryFileScanRecord,
   MemoryFileScanSummary,
 } from './memory-scanner.js';
-export { scanMcpConfigs } from './mcp-config-scanner.js';
+export { scanMcpConfigs, discoverMcpServers } from './mcp-config-scanner.js';
+export type { DiscoveredMcpServer } from './mcp-config-scanner.js';
+export {
+  scanMcpTools,
+  scanToolList,
+  scanToolFields,
+  computeDrift,
+  hashTool,
+  serialiseTool,
+  fetchServerTools,
+  formatToolsReport,
+} from './mcp-tools-scanner.js';
+export type {
+  McpToolDescriptor,
+  McpToolsScanReport,
+  ToolDrift,
+  ToolHashStore,
+  DriftStatus,
+} from './mcp-tools-scanner.js';
 export { scanEnvFiles } from './env-scanner.js';
 export { scanRulesFiles } from './rules-file-scanner.js';
 export { scanDependencies, resolveNodeModulesPath, quarantinePackage, cleanPackage } from './dependency-scanner.js';

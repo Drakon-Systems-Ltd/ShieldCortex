@@ -71,6 +71,8 @@ function getConfigLocations(): ConfigLocation[] {
     // Claude Code / OpenClaw
     { path: join(home, '.claude', 'mcp.json'), name: 'Claude Code (global)' },
     { path: join(cwd, '.claude', 'mcp.json'), name: 'Claude Code (project)' },
+    { path: join(home, '.claude.json'), name: 'Claude Code (~/.claude.json)' },
+    { path: join(cwd, '.claude.json'), name: 'Claude Code (project .claude.json)' },
     { path: join(home, '.openclaw', 'mcp.json'), name: 'OpenClaw (global)' },
     // Claude Desktop
     { path: join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'), name: 'Claude Desktop' },
@@ -213,6 +215,142 @@ function extractServers(config: Record<string, unknown>): Record<string, unknown
     return config.servers as Record<string, unknown>;
   }
   return {};
+}
+
+// ── Structured Server Discovery (reused by the tools scanner) ──
+//
+// The config scanner above only needs a stringified blob of each server entry
+// to pattern-match dangerous flags / known CVEs. The tools scanner needs to
+// actually SPAWN each server, so it needs the command + args + env as proper
+// typed values. `discoverMcpServers()` reuses the same config-location list and
+// the same JSON/TOML parsers, then normalises each entry into a spawnable
+// descriptor. Stdio servers only — remote (url/sse/http) servers cannot be
+// spawned locally and are skipped.
+
+export interface DiscoveredMcpServer {
+  /** Server key from the config (e.g. "memory", "github") */
+  name: string;
+  /** Config file this server was discovered in */
+  source: string;
+  /** Config file path */
+  sourcePath: string;
+  /** Executable to spawn */
+  command: string;
+  /** Arguments passed to the command */
+  args: string[];
+  /** Extra environment variables for the child */
+  env: Record<string, string>;
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v): v is string => typeof v === 'string');
+}
+
+function asStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object') return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+    else if (typeof v === 'number' || typeof v === 'boolean') out[k] = String(v);
+  }
+  return out;
+}
+
+/**
+ * Parse a TOML `[mcp_servers.<name>]` block into structured command/args/env.
+ * Deliberately small — handles the common `command = "..."`,
+ * `args = ["a", "b"]`, `env = { KEY = "val" }` forms emitted by Codex.
+ */
+function parseTomlServersStructured(content: string): Record<string, { command?: string; args: string[]; env: Record<string, string> }> {
+  const servers: Record<string, { command?: string; args: string[]; env: Record<string, string> }> = {};
+  const sectionPattern = /^\[mcp_servers\.([^\]]+)\]\s*$/gm;
+  const matches = [...content.matchAll(sectionPattern)];
+
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i];
+    const serverName = match[1];
+    const sectionStart = match.index! + match[0].length;
+    const sectionEnd = i + 1 < matches.length ? matches[i + 1].index! : content.length;
+    const body = content.slice(sectionStart, sectionEnd);
+
+    const commandMatch = body.match(/^\s*command\s*=\s*"([^"]+)"/m);
+    const argsMatch = body.match(/^\s*args\s*=\s*\[([\s\S]*?)\]/m);
+    const envMatch = body.match(/^\s*env\s*=\s*\{([\s\S]*?)\}/m);
+
+    const args: string[] = [];
+    if (argsMatch) {
+      for (const m of argsMatch[1].matchAll(/"([^"]*)"/g)) args.push(m[1]);
+    }
+    const env: Record<string, string> = {};
+    if (envMatch) {
+      for (const m of envMatch[1].matchAll(/([A-Za-z_][\w]*)\s*=\s*"([^"]*)"/g)) env[m[1]] = m[2];
+    }
+
+    servers[serverName] = { command: commandMatch?.[1], args, env };
+  }
+
+  return servers;
+}
+
+/**
+ * Discover all configured, locally-spawnable (stdio) MCP servers across every
+ * known config location. Reuses `getConfigLocations()` + `extractServers()` so
+ * path logic lives in exactly one place.
+ *
+ * Servers are de-duplicated by name (first config wins) so the same logical
+ * server defined in both a global and project config isn't scanned twice.
+ */
+export function discoverMcpServers(): DiscoveredMcpServer[] {
+  const out: DiscoveredMcpServer[] = [];
+  const seen = new Set<string>();
+
+  for (const location of getConfigLocations()) {
+    if (!existsSync(location.path)) continue;
+
+    let content: string;
+    try {
+      content = readFileSync(location.path, 'utf-8');
+    } catch {
+      continue;
+    }
+
+    if (location.path.endsWith('.toml')) {
+      const servers = parseTomlServersStructured(content);
+      for (const [name, cfg] of Object.entries(servers)) {
+        if (!cfg.command || seen.has(name)) continue;
+        seen.add(name);
+        out.push({ name, source: location.name, sourcePath: location.path, command: cfg.command, args: cfg.args, env: cfg.env });
+      }
+      continue;
+    }
+
+    let config: Record<string, unknown>;
+    try {
+      config = JSON.parse(content);
+    } catch {
+      continue;
+    }
+
+    for (const [name, raw] of Object.entries(extractServers(config))) {
+      if (seen.has(name) || !raw || typeof raw !== 'object') continue;
+      const entry = raw as Record<string, unknown>;
+      const command = typeof entry.command === 'string' ? entry.command : undefined;
+      // Skip remote servers (url/sse/http) — they can't be spawned locally.
+      if (!command) continue;
+      seen.add(name);
+      out.push({
+        name,
+        source: location.name,
+        sourcePath: location.path,
+        command,
+        args: asStringArray(entry.args),
+        env: asStringRecord(entry.env),
+      });
+    }
+  }
+
+  return out;
 }
 
 /**

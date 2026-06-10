@@ -773,4 +773,28 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'memories_au');
   }
+
+  // Migration: Phase 14 — mcp_tool_hashes table (MCP tool-description drift /
+  // rug-pull detection). `shieldcortex mcp scan` stores a sha256 of each MCP
+  // server's advertised tool definition (name + description + inputSchema) and
+  // compares it on the next scan: a CHANGED hash for an already-seen tool is
+  // the classic rug-pull signal (a server silently altering an approved tool
+  // description). Mirrors the content-hash idempotency pattern used elsewhere
+  // (session_events.content_hash). Fresh installs get this from schema.sql /
+  // inline-schema.ts; this block only matters for existing DBs.
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tool_hashes (
+        server_name TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        first_seen TEXT,
+        last_seen TEXT,
+        last_changed TEXT,
+        PRIMARY KEY (server_name, tool_name)
+      );
+    `);
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'mcp_tool_hashes');
+  }
 }
