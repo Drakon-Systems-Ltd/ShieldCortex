@@ -168,10 +168,17 @@ describe('config atomicity + integrity hardening', () => {
       config.setCloudConfig({ cloudApiKey: 'cached-value' });
       config.clearCloudConfigCache();
 
-      // Prime the cache.
+      // Pin the file mtime to a deterministic INTEGER-second value before priming
+      // the cache, so statSync().mtimeMs is exactly `mtime * 1000` on every
+      // filesystem. (Using the real fractional mtimeMs/1000 and restoring it via
+      // utimesSync is flaky: macOS and CI Linux round the float→fs conversion
+      // differently, so the restored mtimeMs may not equal the cached one.)
+      const mtime = 1_700_000_000;
+      utimesSync(configFile, mtime, mtime);
+
+      // Prime the cache (records mtimeMs = mtime * 1000, an exact integer).
       const first = config.readRawConfig();
       expect(first.cloudApiKey).toBe('cached-value');
-      const mtime = statSync(configFile).mtimeMs / 1000;
 
       // Mutate the on-disk bytes OUT OF BAND (no public API) but reset the
       // mtime to its previous value so the cache key is unchanged. A correct
