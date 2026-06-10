@@ -198,13 +198,21 @@ export interface LifetimeStats {
 }
 
 /**
- * Get all-time aggregate stats from the defence_audit table.
- * Fast COUNT-only queries — no heavy computation.
+ * Get all-time aggregate stats.
+ *
+ * defence_audit is now retention-bounded (see src/defence/audit/retention.ts):
+ * old rows are periodically purged so the table can't grow until it bricks the
+ * DB at the 100MB hard limit. To keep these lifetime totals correct, every purge
+ * first rolls the to-be-deleted rows' contributions into the single-row
+ * `audit_aggregates` table. So the lifetime total is `aggregate + scan(live)` —
+ * the aggregate carries the purged history and the COUNT scan covers the
+ * (bounded) rows still on disk. This guarantees totals never go backwards after
+ * a purge. The credential LIKE scan is over a bounded table now, so it's fine.
  */
 export function getLifetimeStats(): LifetimeStats {
   const db = getDatabase();
 
-  // Counts by firewall result
+  // Counts by firewall result (live, retention-bounded rows)
   const counts = db.prepare(`
     SELECT firewall_result, COUNT(*) as cnt
     FROM defence_audit
@@ -230,7 +238,34 @@ export function getLifetimeStats(): LifetimeStats {
     WHERE LOWER(threat_indicators) LIKE '%credential%'
   `).get() as { cnt: number };
 
-  const credentialLeaks = credRow?.cnt ?? 0;
+  let credentialLeaks = credRow?.cnt ?? 0;
+
+  // Add the cumulative aggregate of all rows already purged by retention. The
+  // table may not exist on very old DBs mid-migration — treat absence as zero.
+  try {
+    const agg = db.prepare(`
+      SELECT total_scans, threats_blocked, quarantined, memories_protected, credential_leaks
+      FROM audit_aggregates WHERE id = 1
+    `).get() as
+      | {
+          total_scans: number;
+          threats_blocked: number;
+          quarantined: number;
+          memories_protected: number;
+          credential_leaks: number;
+        }
+      | undefined;
+
+    if (agg) {
+      totalScans += agg.total_scans;
+      threatsBlocked += agg.threats_blocked;
+      quarantined += agg.quarantined;
+      memoriesProtected += agg.memories_protected;
+      credentialLeaks += agg.credential_leaks;
+    }
+  } catch {
+    // No aggregate row / table yet — lifetime == live counts.
+  }
 
   return {
     totalScans,

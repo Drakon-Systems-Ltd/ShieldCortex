@@ -229,6 +229,21 @@ CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
 CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
 CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
 
+-- Defence: cumulative audit aggregate (single row, id=1). Retention purges roll
+-- the to-be-deleted rows' lifetime-stat contributions into this row BEFORE
+-- deleting, so getLifetimeStats() = this aggregate + a scan of the (bounded)
+-- live defence_audit table. Without it, retention would make lifetime stats
+-- silently undercount after every purge.
+CREATE TABLE IF NOT EXISTS audit_aggregates (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  total_scans INTEGER NOT NULL DEFAULT 0,
+  threats_blocked INTEGER NOT NULL DEFAULT 0,
+  quarantined INTEGER NOT NULL DEFAULT 0,
+  memories_protected INTEGER NOT NULL DEFAULT 0,
+  credential_leaks INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT
+);
+
 -- Defence: Quarantine for blocked/suspicious memories pending review
 CREATE TABLE IF NOT EXISTS quarantine (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

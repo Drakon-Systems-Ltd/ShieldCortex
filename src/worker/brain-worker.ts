@@ -36,25 +36,58 @@ import {
 import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 import { sendHeartbeat } from '../cloud/sync.js';
 import { refreshCloudIronDome, applyCachedCloudPatterns } from '../cloud/iron-dome-sync.js';
+import { purgeOldAuditEntries, purgeAuditUnderSizePressure } from '../defence/audit/retention.js';
 import { isFeatureEnabled } from '../license/gate.js';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
 const WORKER_STATE_DIR = join(homedir(), '.shieldcortex', 'state');
 const WORKER_STATE_FILE = join(WORKER_STATE_DIR, 'worker.json');
 
-function persistWorkerState(profile: string, lastLightTick: Date): void {
+// Audit retention runs in the light tick (which fires every 5–15 min) but is
+// throttled to ~once per day — a daily purge is plenty to keep defence_audit
+// bounded, and running it every tick would be wasteful.
+const AUDIT_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+function persistWorkerState(profile: string, lastLightTick: Date, lastAuditPurge: Date | null): void {
   try {
     if (!existsSync(WORKER_STATE_DIR)) mkdirSync(WORKER_STATE_DIR, { recursive: true });
     writeFileSync(
       WORKER_STATE_FILE,
-      JSON.stringify({ pid: process.pid, profile, lastLightTick: lastLightTick.toISOString() }, null, 2),
+      JSON.stringify(
+        {
+          pid: process.pid,
+          profile,
+          lastLightTick: lastLightTick.toISOString(),
+          lastAuditPurge: lastAuditPurge ? lastAuditPurge.toISOString() : null,
+        },
+        null,
+        2,
+      ),
       'utf-8'
     );
   } catch {
     // Best-effort: doctor will warn if the file is stale or missing
   }
+}
+
+/**
+ * Read the persisted lastAuditPurge timestamp so the 24h throttle survives
+ * process restarts — MCP servers restart frequently (one per Claude Code
+ * window), and without this every restart would trigger a fresh purge.
+ */
+function readPersistedAuditPurge(): Date | null {
+  try {
+    const raw = JSON.parse(readFileSync(WORKER_STATE_FILE, 'utf-8')) as { lastAuditPurge?: string | null };
+    if (raw.lastAuditPurge) {
+      const d = new Date(raw.lastAuditPurge);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  } catch {
+    // No prior state — treat as never purged.
+  }
+  return null;
 }
 
 /**
@@ -81,6 +114,9 @@ export class BrainWorker {
   private lastLightTick: Date | null = null;
   private lastMediumTick: Date | null = null;
   private lastConsolidation: Date | null = null;
+  // Seeded from persisted state so the 24h audit-purge throttle survives
+  // frequent MCP-server restarts.
+  private lastAuditPurge: Date | null = readPersistedAuditPurge();
 
   /**
    * Create a new BrainWorker
@@ -227,7 +263,33 @@ export class BrainWorker {
         });
       }
 
-      // 3-5: cloud sync (retry queue, heartbeat, Iron Dome) — full profile only.
+      // 3. Audit retention — runs on BOTH profiles (MCP-only installs scan
+      // tool responses too, so their defence_audit also grows unbounded; the
+      // sync-queue purge being worker-only left an analogous gap we deliberately
+      // don't repeat here). The pressure valve is a cheap size check, so it runs
+      // every tick; the age-based purge is throttled to ~once per 24h.
+      try {
+        const pressurePurged = purgeAuditUnderSizePressure();
+        if (pressurePurged > 0) {
+          console.log(`[BrainWorker] Audit size-pressure valve purged ${pressurePurged} rows`);
+        }
+
+        const now = result.timestamp.getTime();
+        const dueForPurge =
+          this.lastAuditPurge === null ||
+          now - this.lastAuditPurge.getTime() >= AUDIT_PURGE_INTERVAL_MS;
+        if (dueForPurge) {
+          const purged = purgeOldAuditEntries();
+          this.lastAuditPurge = result.timestamp;
+          if (purged > 0) {
+            console.log(`[BrainWorker] Audit retention purged ${purged} entries older than 90d`);
+          }
+        }
+      } catch (auditErr) {
+        console.error('[BrainWorker] Audit retention failed:', auditErr);
+      }
+
+      // 4-6: cloud sync (retry queue, heartbeat, Iron Dome) — full profile only.
       // Skipped under MCP profile so we don't fan out N concurrent network calls
       // from N open Claude Code windows.
       if (this.config.profile === 'full') {
@@ -265,7 +327,7 @@ export class BrainWorker {
       this.stats.lightTicks++;
 
       // Persist worker freshness for `shieldcortex doctor` to detect stalls.
-      persistWorkerState(this.config.profile, result.timestamp);
+      persistWorkerState(this.config.profile, result.timestamp, this.lastAuditPurge);
 
       // Emit light tick event
       emitWorkerLightTick(result);

@@ -718,4 +718,30 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'control_state');
   }
+
+  // Migration: audit_aggregates table (Phase 8a — bound defence_audit growth).
+  //
+  // defence_audit grows on every pipeline run with no DELETE anywhere, so a busy
+  // agent eventually trips the 100MB hard block (init.ts MAX_DB_SIZE) and bricks
+  // its own memory store. Retention purges (src/defence/audit/retention.ts) now
+  // delete old rows — but getLifetimeStats() scans the whole table, so a naive
+  // purge would make lifetime totals silently undercount. This single-row
+  // cumulative aggregate is the rollup target: purges add the to-be-deleted
+  // rows' contributions here BEFORE deleting, and getLifetimeStats() returns
+  // aggregate + live so the numbers never go backwards.
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS audit_aggregates (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        total_scans INTEGER NOT NULL DEFAULT 0,
+        threats_blocked INTEGER NOT NULL DEFAULT 0,
+        quarantined INTEGER NOT NULL DEFAULT 0,
+        memories_protected INTEGER NOT NULL DEFAULT 0,
+        credential_leaks INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT
+      );
+    `);
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'audit_aggregates');
+  }
 }
