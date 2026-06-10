@@ -36,6 +36,9 @@ export interface QuarantineSyncEntry {
   threat_indicators: string[];
   anomaly_score: number;
   firewall_result: string;
+  project?: string | null;
+  sensitivity_level?: string | null;
+  content_redacted?: boolean;
   device_id: string;
   device_name: string;
   timestamp: string;

@@ -13,7 +13,7 @@ import {
   type CredentialType,
   type CredentialSeverity,
 } from './patterns.js';
-import { extractHighEntropyTokens } from './entropy.js';
+import { extractHighEntropyTokens, isWellKnownNonSecret } from './entropy.js';
 
 // ── Public Types ──
 
@@ -88,6 +88,26 @@ function isAllowlisted(value: string, allowlist: string[]): boolean {
   return false;
 }
 
+/**
+ * Expand a match span to the full contiguous identifier token it sits in, then
+ * test it against the well-known-non-secret allowlist (git SHA / UUID).
+ *
+ * Generic hex patterns (e.g. the 32-hex "Azure" rule) match a SUBSTRING of a
+ * 40-hex commit SHA, so checking only the captured value misses it — we must
+ * look at the surrounding contiguous run. The token boundary is the usual
+ * credential alphabet ([A-Za-z0-9-]); we deliberately do NOT cross `/`, `+`,
+ * `=` etc. so a real base64 secret that merely contains a hex-looking run is
+ * not whitelisted.
+ */
+function matchIsWellKnownNonSecret(content: string, start: number, end: number): boolean {
+  const tokenChar = /[A-Za-z0-9-]/;
+  let s = start;
+  let e = end;
+  while (s > 0 && tokenChar.test(content[s - 1])) s--;
+  while (e < content.length && tokenChar.test(content[e])) e++;
+  return isWellKnownNonSecret(content.slice(s, e));
+}
+
 // ── Scanner ──
 
 /**
@@ -136,6 +156,11 @@ export function scanForCredentials(
       const start = match.index;
       const end = start + fullMatch.length;
       if (matchedRanges.some(r => start >= r.start && end <= r.end)) continue;
+
+      // Skip well-known PUBLIC identifiers (git SHA / UUID). Generic hex rules
+      // match a substring of these, so expand to the full token before testing
+      // (Phase 17 A5).
+      if (matchIsWellKnownNonSecret(content, start, end)) continue;
 
       const action = actionForSeverity(pattern.severity, cfg);
       const redacted = redactMatch(secretValue, pattern.type);

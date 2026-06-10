@@ -1,4 +1,11 @@
-import { getCloudConfig, getDeviceId, getDeviceName } from './config.js';
+import {
+  getCloudConfig,
+  getCloudSyncControls,
+  getDeviceId,
+  getDeviceName,
+  isSensitiveLevel,
+  shouldSyncProject,
+} from './config.js';
 import { enqueueFailedQuarantineSync } from './sync-queue.js';
 import { redactCredentials } from '../defence/credential-leak/index.js';
 
@@ -6,8 +13,14 @@ import { redactCredentials } from '../defence/credential-leak/index.js';
  * Fire-and-forget: sends quarantined content to ShieldCortex cloud.
  * Never blocks, never throws. Failed requests are logged and queued for retry.
  *
- * IMPORTANT: Content is redacted before transmission — credentials and secrets
- * are replaced with [REDACTED-{type}] placeholders to prevent PII/secret leakage.
+ * IMPORTANT: Quarantine holds the most sensitive payloads, so it applies the
+ * SAME CloudSyncControls gating as memory-sync (see shouldSyncRecord /
+ * applyContentMode in memory-sync.ts) BEFORE any content leaves the device:
+ *   - project filter (`shouldSyncProject`) — excluded projects never sync
+ *   - `excludeSensitive` — CONFIDENTIAL+ items are dropped entirely
+ *   - `contentMode: 'metadata'` — content/title are redacted to a placeholder
+ * On top of that, credentials/secrets are always redacted with
+ * [REDACTED-{type}] placeholders to prevent secret leakage.
  */
 export function syncQuarantineToCloud(entry: {
   original_content: string;
@@ -18,15 +31,36 @@ export function syncQuarantineToCloud(entry: {
   threat_indicators: string[];
   anomaly_score: number;
   firewall_result: string;
+  /** Project the quarantined write belongs to (for the project filter). */
+  project?: string | null;
+  /** Sensitivity classification of the content (for `excludeSensitive`). */
+  sensitivity_level?: string | null;
 }): void {
   const config = getCloudConfig();
   if (!config.cloudEnabled || !config.cloudApiKey) return;
 
+  // Apply the user's CloudSyncControls (parity with memory-sync).
+  const controls = getCloudSyncControls();
+  if (!shouldSyncProject(entry.project ?? null, controls)) return;
+  if (controls.excludeSensitive && isSensitiveLevel(entry.sensitivity_level ?? null)) return;
+
+  const metadataOnly = controls.contentMode === 'metadata';
+
+  // Always redact credentials; metadata-only mode replaces content entirely.
+  const safeContent = metadataOnly
+    ? '[ShieldCortex] Quarantine content redacted by local sync policy.'
+    : redactCredentials(entry.original_content);
+  const safeTitle = metadataOnly
+    ? '[Metadata only]'
+    : entry.original_title
+      ? redactCredentials(entry.original_title)
+      : entry.original_title;
+
   const payload = {
     ...entry,
-    // Redact credentials/secrets before sending to cloud
-    original_content: redactCredentials(entry.original_content),
-    original_title: entry.original_title ? redactCredentials(entry.original_title) : entry.original_title,
+    original_content: safeContent,
+    original_title: safeTitle,
+    content_redacted: metadataOnly,
     device_id: getDeviceId(),
     device_name: getDeviceName(),
     timestamp: new Date().toISOString(),

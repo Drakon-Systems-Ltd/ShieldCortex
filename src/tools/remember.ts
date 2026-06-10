@@ -5,7 +5,7 @@
  */
 
 import { z } from 'zod';
-import { addMemory, searchMemories, detectRelationships, createMemoryLink, getLastTruncationInfo } from '../memory/store.js';
+import { addMemory, updateMemory, searchMemories, detectRelationships, createMemoryLink, getLastTruncationInfo } from '../memory/store.js';
 import { calculateSalience, analyzeSalienceFactors, explainSalience } from '../memory/salience.js';
 import { MemoryCategory, MemoryType, MemoryPurpose, MemoryScope } from '../memory/types.js';
 import { formatErrorForMcp } from '../errors.js';
@@ -123,18 +123,29 @@ export async function executeRemember(input: RememberInput): Promise<{
       limit: 3,
     });
 
-    // If very similar memory exists, update instead
+    // If a very similar memory exists, genuinely UPDATE it with the new
+    // content rather than silently discarding the new write. The previous
+    // behaviour reported "Updated existing similar memory" but never persisted
+    // anything — so a richer follow-up was lost while the report implied a
+    // successful update (Phase 17 A4).
     if (existing.length > 0 && existing[0].relevanceScore > 0.9) {
       const existingMemory = existing[0].memory;
+      const contentChanged = existingMemory.content !== content;
+      const updated = contentChanged
+        ? updateMemory(existingMemory.id, { content, title })
+        : existingMemory;
+      const target = updated ?? existingMemory;
       return {
         success: true,
         memory: {
-          id: existingMemory.id,
-          title: existingMemory.title,
-          salience: existingMemory.salience,
-          type: existingMemory.type,
-          category: existingMemory.category,
-          reason: 'Updated existing similar memory',
+          id: target.id,
+          title: target.title,
+          salience: target.salience,
+          type: target.type,
+          category: target.category,
+          reason: contentChanged
+            ? 'Updated existing similar memory with new content'
+            : 'Existing similar memory already up to date',
         },
       };
     }

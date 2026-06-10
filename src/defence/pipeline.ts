@@ -30,7 +30,7 @@ import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { getDefenceMode } from '../cloud/config.js';
 import { isDatabaseInitialized } from '../database/init.js';
-import { getEnabledFirewallRules } from './custom-rules/store.js';
+import { getEnabledFirewallRules, ruleMatches } from './custom-rules/store.js';
 import { getEnabledCustomPatterns } from './custom-patterns/store.js';
 
 // The rule/pattern stores are imported statically. Safe at module-eval time:
@@ -152,8 +152,9 @@ export function runDefencePipeline(
         for (const rule of allRules) {
           if (!rule.built_in && !userRulesAllowed) continue;
           try {
-            const regex = new RegExp(rule.condition_value, 'gi');
-            if (regex.test(cleanContent) || regex.test(title)) {
+            // Honour the rule's condition_type: keyword = literal substring,
+            // domain = hostname match, regex = compiled pattern.
+            if (ruleMatches(rule, cleanContent, title)) {
               const indicator = rule.built_in ? 'builtin_rule' : 'custom_rule';
               if (rule.action === 'block') {
                 allowed = false;
@@ -295,6 +296,8 @@ export function runDefencePipeline(
           threat_indicators: indicators,
           anomaly_score: firewall.anomalyScore,
           firewall_result: firewall.result,
+          project: project ?? null,
+          sensitivity_level: sensitivity.level,
         });
       } catch {
         // Quarantine sync must never affect local pipeline

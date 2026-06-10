@@ -8,6 +8,8 @@ import {
   searchMemories,
   getRecentMemories,
   getHighPriorityMemories,
+  countMemories,
+  countHighPriorityMemories,
   getMemoryStats,
   getMemoryById,
   addMemory,
@@ -281,32 +283,37 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       const limit = Math.min(parseInt(limitStr, 10) || 50, 1000);
       const offset = parseInt(offsetStr, 10) || 0;
 
+      // Push the type/category filters into the query so the page rows AND the
+      // `total` count share one predicate — otherwise `total`/`hasMore` reflect
+      // the unfiltered grand count (Phase 17 A3).
+      const filters = { type, category };
+
       let memories: Memory[];
+      let total: number;
       if (mode === 'search' && query) {
+        // searchMemories already applies type/category filters internally, so
+        // the filtered total is the size of the full result set. Fetch a
+        // generous window (capped) and count what comes back.
+        const SEARCH_TOTAL_CAP = 1000;
         const results = await searchMemories({
           query,
           project,
           type: type as Memory['type'] | undefined,
           category: category as Memory['category'] | undefined,
-          limit: limit + offset + 1,
+          limit: SEARCH_TOTAL_CAP,
         });
-        memories = results.map((result) => result.memory);
+        const allMatches = results.map((result) => result.memory);
+        total = allMatches.length;
+        memories = allMatches;
       } else if (mode === 'important') {
-        memories = getHighPriorityMemories(limit + offset + 1, project);
+        memories = getHighPriorityMemories(limit + offset + 1, project, undefined, filters);
+        total = countHighPriorityMemories(project, filters);
       } else {
-        memories = getRecentMemories(limit + offset + 1, project);
+        memories = getRecentMemories(limit + offset + 1, project, undefined, filters);
+        total = countMemories(project, filters);
       }
 
-      if (type) {
-        memories = memories.filter((memory) => memory.type === type);
-      }
-      if (category) {
-        memories = memories.filter((memory) => memory.category === category);
-      }
-
-      const stats = getMemoryStats(project);
-      const total = stats.total;
-      const hasMore = memories.length > offset + limit;
+      const hasMore = offset + limit < total;
       const paginatedMemories = memories.slice(offset, offset + limit);
 
       // Batch-load entity_ids per memory so the constellation graph client

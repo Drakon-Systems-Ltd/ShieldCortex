@@ -421,6 +421,8 @@ export function addMemory(
           threat_indicators: indicators,
           anomaly_score: defenceResult.firewall.anomalyScore,
           firewall_result: defenceResult.firewall.result,
+          project: input.project ?? null,
+          sensitivity_level: defenceResult.sensitivity.level,
         });
       } catch {
         // Cloud sync must never affect local quarantine flow
@@ -1036,22 +1038,60 @@ export function getProjectMemories(
 /**
  * Get recent memories
  */
+export interface MemoryListFilters {
+  type?: string;
+  category?: string;
+}
+
+/**
+ * Build the shared `WHERE` fragment for project + type + category filters.
+ * Returned `clause` is the full `WHERE ...` string (empty when no filters),
+ * so the SAME predicate drives both the page query and its COUNT(*) — keeping
+ * pagination `total`/`hasMore` honest under filters (Phase 17 A3).
+ */
+function buildMemoryFilterClause(
+  project?: string,
+  filters?: MemoryListFilters,
+): { clause: string; params: unknown[] } {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  if (project) {
+    conds.push('project = ?');
+    params.push(project);
+  }
+  if (filters?.type) {
+    conds.push('type = ?');
+    params.push(filters.type);
+  }
+  if (filters?.category) {
+    conds.push('category = ?');
+    params.push(filters.category);
+  }
+  return { clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params };
+}
+
+/**
+ * Count memories matching the project + type/category filters. Used by the
+ * dashboard memories route so `total`/`hasMore` reflect the filtered set.
+ */
+export function countMemories(project?: string, filters?: MemoryListFilters): number {
+  const db = getDatabase();
+  const { clause, params } = buildMemoryFilterClause(project, filters);
+  return (db.prepare(`SELECT COUNT(*) as count FROM memories ${clause}`).get(...params) as { count: number }).count;
+}
+
 export function getRecentMemories(
   limit: number = 10,
   project?: string,
   source?: DefenceSource,
+  filters?: MemoryListFilters,
 ): Memory[] {
   const db = getDatabase();
-  let sql = 'SELECT * FROM memories';
-  const params: unknown[] = [];
-
-  if (project) {
-    sql += ' WHERE project = ?';
-    params.push(project);
-  }
+  const { clause, params } = buildMemoryFilterClause(project, filters);
+  let sql = `SELECT * FROM memories ${clause}`;
 
   sql += ' ORDER BY last_accessed DESC LIMIT ?';
-  params.push(source ? limit * 2 : limit); // over-fetch when filtering
+  params.push(source ? limit * 2 : limit); // over-fetch when access-filtering
 
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
   if (source) rows = filterRowsByAccess(rows, source);
@@ -1083,17 +1123,23 @@ export function getHighPriorityMemories(
   limit: number = 10,
   project?: string,
   source?: DefenceSource,
+  filters?: MemoryListFilters,
 ): Memory[] {
   const db = getDatabase();
-  let sql = `
-    SELECT * FROM memories
-    WHERE salience >= 0.6
-  `;
+  let sql = `SELECT * FROM memories WHERE salience >= 0.6`;
   const params: unknown[] = [];
 
   if (project) {
     sql += ' AND project = ?';
     params.push(project);
+  }
+  if (filters?.type) {
+    sql += ' AND type = ?';
+    params.push(filters.type);
+  }
+  if (filters?.category) {
+    sql += ' AND category = ?';
+    params.push(filters.category);
   }
 
   sql += ' ORDER BY salience DESC, last_accessed DESC LIMIT ?';
@@ -1102,6 +1148,26 @@ export function getHighPriorityMemories(
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
   if (source) rows = filterRowsByAccess(rows, source);
   return rows.slice(0, limit).map(rowToMemory);
+}
+
+/** Count high-priority (salience >= 0.6) memories matching the filters. */
+export function countHighPriorityMemories(project?: string, filters?: MemoryListFilters): number {
+  const db = getDatabase();
+  let sql = `SELECT COUNT(*) as count FROM memories WHERE salience >= 0.6`;
+  const params: unknown[] = [];
+  if (project) {
+    sql += ' AND project = ?';
+    params.push(project);
+  }
+  if (filters?.type) {
+    sql += ' AND type = ?';
+    params.push(filters.type);
+  }
+  if (filters?.category) {
+    sql += ' AND category = ?';
+    params.push(filters.category);
+  }
+  return (db.prepare(sql).get(...params) as { count: number }).count;
 }
 
 /**

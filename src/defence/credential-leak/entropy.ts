@@ -94,9 +94,36 @@ export function extractHighEntropyTokens(
 }
 
 /**
+ * Allowlist of well-known PUBLIC identifier shapes that are NOT secrets and
+ * must never be flagged as credentials — by ANY detector (pattern OR entropy).
+ *
+ * Conservative on purpose: only the exact canonical shapes below are excluded,
+ * so real secrets (sk_live_..., random base64 tokens) still trip detection.
+ * The token is matched on its own boundaries (anchored), so a SHA-shaped
+ * substring of a longer secret is NOT what gets matched here — callers pass the
+ * isolated token.
+ */
+export function isWellKnownNonSecret(token: string): boolean {
+  const t = token.trim();
+
+  // Canonical UUID (any version), e.g. 550e8400-e29b-41d4-a716-446655440000.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)) return true;
+
+  // Git commit SHA-1 (40 hex) and SHA-256 (64 hex) — public revision ids.
+  if (/^[0-9a-f]{40}$/i.test(t)) return true;
+  if (/^[0-9a-f]{64}$/i.test(t)) return true;
+
+  // Abbreviated git SHA (7–12 hex, the `git rev-parse --short` range).
+  if (/^[0-9a-f]{7,12}$/i.test(t)) return true;
+
+  return false;
+}
+
+/**
  * Heuristic filter to reduce false positives from entropy detection.
  */
 function isLikelyFalsePositive(token: string): boolean {
+  if (isWellKnownNonSecret(token)) return true;
   // UUIDs — legitimate identifiers, not secrets
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) return true;
 
