@@ -610,6 +610,8 @@ ${bold}USAGE${reset}
   shieldcortex [command] [options]
 
 ${bold}COMMANDS${reset}
+  ${cyan}remember${reset} <title>       Write a memory (via the defence pipeline)
+                        --content <text> or pipe via stdin; --importance, --tags
   ${cyan}scan${reset} <text>           Scan text through the defence pipeline
   ${cyan}scan-skill${reset} <path>     Scan an agent instruction file for threats
   ${cyan}scan-skills${reset}           Scan all installed skills/hooks
@@ -777,6 +779,15 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'memories') {
     const { handleMemoriesCommand } = await import('./cli/migrate-legacy.js');
     await handleMemoriesCommand(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "remember" subcommand (Phase 15c) — direct, non-hanging memory write
+  // through the same defence pipeline + project scoping the MCP tool uses.
+  // Content via --content or piped stdin; never blocks on a TTY (prints usage).
+  if (process.argv[2] === 'remember') {
+    const { handleRememberCommand } = await import('./cli/remember.js');
+    await handleRememberCommand(process.argv.slice(3));
     return;
   }
 
@@ -1120,7 +1131,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl',
+    'memories', 'import-jsonl', 'remember',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
