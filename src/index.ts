@@ -71,18 +71,15 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
-import { createServer } from './server.js';
-import { startVisualizationServer } from './api/visualization-server.js';
-import { handleServiceCommand } from './service/install.js';
-import { setupClaudeMd } from './setup/claude-md.js';
-import { handleHookCommand } from './setup/hooks.js';
-import { handleOpenClawCommand } from './setup/openclaw.js';
-import { handleCopilotCommand } from './setup/copilot.js';
-import { handleCodexCommand } from './setup/codex.js';
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
-import { disposeModel, preloadModel } from './embeddings/index.js';
-import { startDefaultWorker, stopDefaultWorker } from './worker/brain-worker.js';
+
+// Heavy modules (MCP server, visualization API + express/cors/ws, embedding
+// model, brain worker, installer handlers) are loaded lazily via `await import`
+// inside the dispatch branch that needs them — keeping per-prompt hook startup
+// and lightweight CLI commands (--version, --help, status, doctor) fast. See
+// Phase 11 of the hardening plan: the `hook` path must not eagerly pull in any
+// of these, nor run the npx-staleness check.
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
@@ -158,6 +155,12 @@ function parseArgs(): Args {
  * Start MCP server for Claude Code integration
  */
 async function startMcpServer(dbPath?: string): Promise<void> {
+  // Lazy-load heavy server/worker/embedding modules — only the actual MCP
+  // server path needs them, so they stay out of fast CLI/hook startup.
+  const { createServer } = await import('./server.js');
+  const { disposeModel, preloadModel } = await import('./embeddings/index.js');
+  const { startDefaultWorker, stopDefaultWorker } = await import('./worker/brain-worker.js');
+
   // Create the MCP server
   const server = createServer(dbPath);
   const transport = new StdioServerTransport();
@@ -429,7 +432,7 @@ function startDashboard(): DashboardController {
 
 async function startWorkerMode(dbPath?: string): Promise<void> {
   const { initDatabase } = await import('./database/init.js');
-  const { startDefaultWorker } = await import('./worker/brain-worker.js');
+  const { startDefaultWorker, stopDefaultWorker } = await import('./worker/brain-worker.js');
 
   initDatabase(dbPath);
   startDefaultWorker();
@@ -513,6 +516,18 @@ async function isLocalDashboardRunning(): Promise<boolean> {
  * Main entry point
  */
 async function main() {
+  // Dispatch the "hook" subcommand FIRST — before checkVersionStaleness() and
+  // the trial/stats banner. Hooks fire on every UserPromptSubmit, so this path
+  // must be as cheap as possible: no `npm ls -g` staleness probe (hooks were
+  // migrated to the global binary, where the warning is meaningless) and no
+  // trial/stats banners. handleHookCommand is imported lazily so the rest of
+  // the installer surface stays out of hook startup.
+  if (process.argv[2] === 'hook') {
+    const { handleHookCommand } = await import('./setup/hooks.js');
+    await handleHookCommand(process.argv[3] || '');
+    return;
+  }
+
   // Warn if npx is serving a stale cached version
   checkVersionStaleness();
   const parsedArgs = parseArgs();
@@ -682,6 +697,7 @@ ${bold}DOCS${reset}
     }
     const stopHook = process.argv.includes('--with-stop-hook');
     const sessionEnd = process.argv.includes('--with-session-end');
+    const { setupClaudeMd } = await import('./setup/claude-md.js');
     await setupClaudeMd({ stopHook, sessionEnd });
     return;
   }
@@ -704,32 +720,34 @@ ${bold}DOCS${reset}
     return;
   }
 
-  // Handle "hook" subcommand
-  if (process.argv[2] === 'hook') {
-    await handleHookCommand(process.argv[3] || '');
-    return;
-  }
+  // NOTE: the "hook" subcommand is dispatched at the very top of main(),
+  // before checkVersionStaleness() and the trial/stats banner — it must stay
+  // fast (fires on every UserPromptSubmit) and never run `npm ls -g`.
 
   // Handle "openclaw" subcommand (backward compat: "clawdbot" also accepted)
   if (process.argv[2] === 'openclaw' || process.argv[2] === 'clawdbot') {
+    const { handleOpenClawCommand } = await import('./setup/openclaw.js');
     await handleOpenClawCommand(process.argv[3] || '', process.argv.slice(4));
     return;
   }
 
   // Handle "copilot" subcommand (VS Code + Cursor MCP setup)
   if (process.argv[2] === 'copilot') {
+    const { handleCopilotCommand } = await import('./setup/copilot.js');
     await handleCopilotCommand(process.argv[3] || '');
     return;
   }
 
   // Handle "codex" subcommand (Codex CLI + VS Code MCP setup)
   if (process.argv[2] === 'codex') {
+    const { handleCodexCommand } = await import('./setup/codex.js');
     await handleCodexCommand(process.argv[3] || '');
     return;
   }
 
   // Handle "service" subcommand before normal mode parsing
   if (process.argv[2] === 'service') {
+    const { handleServiceCommand } = await import('./service/install.js');
     await handleServiceCommand(process.argv[3] || '', process.argv.slice(4));
     return;
   }
@@ -1106,6 +1124,13 @@ ${bold}DOCS${reset}
   const { dbPath, mode } = parsedArgs;
 
   let dashboardProcess: DashboardController | null = null;
+
+  // Lazy-load the visualization server (pulls in express + cors + ws) only on
+  // the modes that actually start it. mcp/worker never touch it.
+  const needsVizServer = mode === 'api' || mode === 'dashboard' || mode === 'both';
+  const startVisualizationServer = needsVizServer
+    ? (await import('./api/visualization-server.js')).startVisualizationServer
+    : undefined as never;
 
   if (mode === 'api') {
     // API mode only - for dashboard visualization
