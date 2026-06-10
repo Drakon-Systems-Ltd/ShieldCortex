@@ -215,6 +215,54 @@ async function getSharedNoveltyGate() {
  * Uses ShieldCortex's scanSkill via mcporter
  * @returns {Promise<Array<{hookName: string, threat: string}>>}
  */
+// Content-hash cache for hook scan_skill verdicts. Byte-identical
+// HOOK.md/handler.js files produce the same sha256, so we skip the (cold MCP)
+// scan_skill shell-out on a cache hit and reuse the stored verdict. Keyed by
+// sha256(content) → "unsafe" | "clean". Persisted to ~/.shieldcortex so the
+// cache survives gateway restarts. A file edit changes the hash and forces a
+// fresh scan, so this never masks a newly-introduced threat.
+const HOOK_SCAN_CACHE_FILE = path.join(homedir(), ".shieldcortex", "openclaw-hook-scan-cache.json");
+
+async function loadHookScanCache() {
+  try {
+    const raw = JSON.parse(await fs.readFile(HOOK_SCAN_CACHE_FILE, "utf-8"));
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
+  } catch { /* no cache yet / unreadable */ }
+  return {};
+}
+
+async function saveHookScanCache(cache) {
+  try {
+    await fs.mkdir(path.dirname(HOOK_SCAN_CACHE_FILE), { recursive: true });
+    await fs.writeFile(HOOK_SCAN_CACHE_FILE, JSON.stringify(cache) + "\n", "utf-8");
+  } catch { /* best-effort — never block bootstrap on cache write */ }
+}
+
+function hashHookContent(content) {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * Scan one hook file, reusing a cached verdict when the content hash matches.
+ * Mutates `cache` in place and sets `dirty.changed` when a fresh scan runs.
+ * @returns {Promise<boolean>} true when the file is flagged unsafe
+ */
+async function scanHookFileCached(content, name, format, cache, dirty) {
+  const hash = hashHookContent(content);
+  const cached = cache[hash];
+  if (cached === "unsafe") return true;
+  if (cached === "clean") return false;
+
+  const result = await callCortex("scan_skill", { content, name, format });
+  // Only memoise a definitive verdict. A null/failed call is NOT cached, so a
+  // transient MCP failure doesn't get pinned as "clean" for an unscanned file.
+  if (result == null) return false;
+  const unsafe = result.includes("unsafe");
+  cache[hash] = unsafe ? "unsafe" : "clean";
+  dirty.changed = true;
+  return unsafe;
+}
+
 async function scanInstalledHooks() {
   const path = await import("node:path");
   const { homedir } = await import("node:os");
@@ -224,6 +272,8 @@ async function scanInstalledHooks() {
 
   try {
     const entries = await fs.readdir(hooksDir, { withFileTypes: true });
+    const cache = await loadHookScanCache();
+    const dirty = { changed: false };
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -237,13 +287,7 @@ async function scanInstalledHooks() {
       const hookMdPath = path.join(hookDir, "HOOK.md");
       try {
         const hookContent = await fs.readFile(hookMdPath, "utf-8");
-        const result = await callCortex("scan_skill", {
-          content: hookContent,
-          name: entry.name,
-          format: "hook-md",
-        });
-
-        if (result && result.includes("unsafe")) {
+        if (await scanHookFileCached(hookContent, entry.name, "hook-md", cache, dirty)) {
           threats.push({ hookName: entry.name, threat: `HOOK.md flagged as unsafe` });
         }
       } catch { /* No HOOK.md, skip */ }
@@ -252,17 +296,13 @@ async function scanInstalledHooks() {
       const handlerPath = path.join(hookDir, "handler.js");
       try {
         const handlerContent = await fs.readFile(handlerPath, "utf-8");
-        const result = await callCortex("scan_skill", {
-          content: handlerContent,
-          name: `${entry.name}/handler.js`,
-          format: "hook-js",
-        });
-
-        if (result && result.includes("unsafe")) {
+        if (await scanHookFileCached(handlerContent, `${entry.name}/handler.js`, "hook-js", cache, dirty)) {
           threats.push({ hookName: entry.name, threat: `handler.js flagged as unsafe` });
         }
       } catch { /* No handler.js, skip */ }
     }
+
+    if (dirty.changed) await saveHookScanCache(cache);
   } catch {
     // Hooks directory doesn't exist or is unreadable
   }
@@ -303,10 +343,37 @@ function assistantConversationText(messages: string[]): string {
  * @param {string} sessionFilePath
  * @returns {Promise<string[]>} Array of "role: content" strings
  */
+// Read only the tail of a (potentially large) JSONL transcript. We need the
+// last 30 lines; reading the whole file just to discard the head wastes memory
+// on long sessions. Read up to TAIL_BYTES from the end via a file descriptor.
+// If the window started mid-file we drop its first (possibly partial) line so
+// only complete lines are parsed — JSON.parse failures are skipped anyway, but
+// dropping the fragment keeps the "last 30 complete lines" semantics exact.
+const TAIL_BYTES = 64 * 1024;
+
+async function readSessionTail(sessionFilePath) {
+  const fh = await fs.open(sessionFilePath, "r");
+  try {
+    const { size } = await fh.stat();
+    if (size <= TAIL_BYTES) {
+      // Small file — read it whole (identical to the original behaviour).
+      return { text: await fh.readFile("utf-8"), truncated: false };
+    }
+    const start = size - TAIL_BYTES;
+    const buf = Buffer.allocUnsafe(TAIL_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, TAIL_BYTES, start);
+    return { text: buf.toString("utf-8", 0, bytesRead), truncated: true };
+  } finally {
+    await fh.close();
+  }
+}
+
 async function getRecentMessages(sessionFilePath) {
   try {
-    const content = await fs.readFile(sessionFilePath, "utf-8");
-    const lines = content.trim().split("\n");
+    const { text, truncated } = await readSessionTail(sessionFilePath);
+    let lines = text.trim().split("\n");
+    // Drop the leading partial line when we started reading mid-file.
+    if (truncated && lines.length > 1) lines = lines.slice(1);
     const recentLines = lines.slice(-30);
 
     const messages = [];

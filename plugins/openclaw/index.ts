@@ -28,6 +28,21 @@ type OpenClawRuntime = {
   loadShieldConfig: () => Promise<any>;
 };
 
+// The subset of `shieldcortex/defence` the plugin uses in-process. Both the
+// `before_tool_call` interceptor (runDefencePipeline) and realtime scanning
+// (scanToolResponse) load from the SAME module via getDefenceModule().
+type DefenceModule = {
+  runDefencePipeline?: (...args: any[]) => any;
+  scanToolResponse?: (
+    toolName: string,
+    content: string,
+    mode?: 'advisory' | 'enforce',
+  ) => {
+    clean: boolean;
+    injection: { clean: boolean; riskLevel: string; detections: unknown[] };
+  };
+};
+
 let runtimePromise: Promise<OpenClawRuntime> | null = null;
 
 function addRuntimeCandidate(candidates: Set<string>, packageRoot: string) {
@@ -95,7 +110,11 @@ function collectRuntimeCandidates(): string[] {
   return [...candidates];
 }
 
+// Test seam: lets the jest suite inject a spy runtime without touching disk.
+let _runtimeOverride: OpenClawRuntime | null = null;
+
 async function getRuntime(): Promise<OpenClawRuntime> {
+  if (_runtimeOverride) return _runtimeOverride;
   if (!runtimePromise) {
     runtimePromise = (async () => {
       const tried: string[] = [];
@@ -119,6 +138,43 @@ async function getRuntime(): Promise<OpenClawRuntime> {
   }
 
   return runtimePromise;
+}
+
+// ==================== SHARED IN-PROCESS DEFENCE MODULE ====================
+// `shieldcortex/defence` is loaded ONCE and shared by both the
+// `before_tool_call` interceptor (runDefencePipeline) and realtime scanning
+// (scanToolResponse). The dynamic import uses a string-concatenated specifier
+// so TypeScript does not resolve it at compile time — the module only exists at
+// runtime when the package is installed, not during CI builds of the plugin.
+// Returns null (cached) when the module is unavailable so callers can fall back
+// to the mcporter shell-out gracefully.
+let _defenceModPromise: Promise<DefenceModule | null> | null = null;
+let _defenceModOverride: DefenceModule | null | undefined; // undefined = not overridden
+
+async function getDefenceModule(): Promise<DefenceModule | null> {
+  if (_defenceModOverride !== undefined) return _defenceModOverride;
+  if (!_defenceModPromise) {
+    _defenceModPromise = (async () => {
+      try {
+        const defenceModPath = 'shieldcortex' + '/defence';
+        return (await import(/* webpackIgnore: true */ defenceModPath)) as DefenceModule;
+      } catch {
+        // Older install / package not resolvable — caller falls back.
+        return null;
+      }
+    })();
+  }
+  return _defenceModPromise;
+}
+
+// Test seams (jest only): inject a stub defence module / spy runtime, then reset.
+export function __setDefenceModuleForTest(mod: DefenceModule | null | undefined): void {
+  _defenceModOverride = mod;
+  _defenceModPromise = null;
+}
+export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
+  _runtimeOverride = runtime;
+  if (runtime) runtimePromise = null;
 }
 
 type LlmInputEvent = {
@@ -331,17 +387,10 @@ async function callCortex(tool: string, args: Record<string, string> = {}): Prom
 
 // ==================== REMOTE SCANNING ====================
 
-async function scanRealtimeContent(text: string): Promise<{ clean: boolean; summary: string }> {
-  const response = await callCortex("scan_tool_response", {
-    toolName: "openclaw-realtime",
-    content: text,
-    mode: "advisory",
-  });
-
-  if (!response) {
-    return { clean: true, summary: "scan unavailable" };
-  }
-
+// Build the `{ clean, summary }` contract from the parsed MCP text response.
+// Kept identical to the historical regex parse so the fallback degrades to the
+// exact behaviour callers depended on before in-process scanning landed.
+function parseScanResponse(response: string): { clean: boolean; summary: string } {
   const cleanMatch = response.match(/\*\*Clean:\*\*\s*(Yes|No)/i);
   const riskMatch = response.match(/\*\*Risk Level:\*\*\s*([A-Za-z]+)/i);
   const detectionsMatch = response.match(/\*\*Detections:\*\*\s*(\d+)/i);
@@ -352,6 +401,38 @@ async function scanRealtimeContent(text: string): Promise<{ clean: boolean; summ
   const summary = detections ? `${risk} (${detections} detections)` : risk;
 
   return { clean, summary };
+}
+
+export async function scanRealtimeContent(text: string): Promise<{ clean: boolean; summary: string }> {
+  // PRIMARY: scan in-process via the shared shieldcortex/defence module. The
+  // scan is pure (no DB handle required — scanToolResponse's audit write is
+  // guarded by isDatabaseInitialized()), so it is safe in the long-lived
+  // gateway and avoids booting a cold MCP server per message.
+  const defenceMod = await getDefenceModule();
+  if (defenceMod && typeof defenceMod.scanToolResponse === "function") {
+    const scan = defenceMod.scanToolResponse("openclaw-realtime", text, "advisory");
+    // Reproduce the historical summary contract exactly: risk level + detection
+    // count only when the injection scan flagged something.
+    const risk = scan.injection.clean ? "unknown" : scan.injection.riskLevel;
+    const summary = scan.injection.clean
+      ? risk
+      : `${risk} (${scan.injection.detections.length} detections)`;
+    return { clean: scan.clean, summary };
+  }
+
+  // FALLBACK: in-process defence unavailable (older install, import failed) —
+  // degrade to the MCP shell-out so scanning still happens rather than breaking.
+  const response = await callCortex("scan_tool_response", {
+    toolName: "openclaw-realtime",
+    content: text,
+    mode: "advisory",
+  });
+
+  if (!response) {
+    return { clean: true, summary: "scan unavailable" };
+  }
+
+  return parseScanResponse(response);
 }
 
 // ==================== CONTENT PATTERNS ====================
@@ -579,35 +660,40 @@ function isInternalContent(text: string): boolean {
   return SKIP_PATTERNS.some(p => p.test(text.trim()));
 }
 
+// Awaitable scan body — extracted so the jest suite can verify behaviour
+// deterministically. handleLlmInput wraps this fire-and-forget so the hook
+// itself stays non-blocking.
+export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promise<void> {
+  try {
+    // Only scan user content, skip system/boot/heartbeat prompts
+    const userTexts = extractUserContent(event.historyMessages).slice(-5);
+    const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t));
+    for (const text of texts) {
+      if (!text || text.length < 10) continue;
+      const result = await scanRealtimeContent(text);
+      if (!result.clean) {
+        console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary}`);
+        const entry = {
+          type: "threat", hook: "llm_input", sessionId: event.sessionId,
+          model: event.model, reason: result.summary,
+          preview: text.slice(0, 100), ts: new Date().toISOString(),
+        };
+        auditLog(entry);
+        loadConfig()
+          // Pass the local entry as-is; cloudSync strips the input preview/content
+          // before transmit (metadata-only egress). No raw LLM input leaves here.
+          .then(cfg => cloudSync(entry, cfg))
+          .catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.error("[shieldcortex] llm_input error:", e instanceof Error ? e.message : String(e));
+  }
+}
+
 function handleLlmInput(event: LlmInputEvent, ctx: AgentCtx): void {
   // Fire and forget
-  (async () => {
-    try {
-      // Only scan user content, skip system/boot/heartbeat prompts
-      const userTexts = extractUserContent(event.historyMessages).slice(-5);
-      const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t));
-      for (const text of texts) {
-        if (!text || text.length < 10) continue;
-        const result = await scanRealtimeContent(text);
-        if (!result.clean) {
-          console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary}`);
-          const entry = {
-            type: "threat", hook: "llm_input", sessionId: event.sessionId,
-            model: event.model, reason: result.summary,
-            preview: text.slice(0, 100), ts: new Date().toISOString(),
-          };
-          auditLog(entry);
-          loadConfig()
-            // Pass the local entry as-is; cloudSync strips the input preview/content
-            // before transmit (metadata-only egress). No raw LLM input leaves here.
-            .then(cfg => cloudSync(entry, cfg))
-            .catch(() => {});
-        }
-      }
-    } catch (e) {
-      console.error("[shieldcortex] llm_input error:", e instanceof Error ? e.message : String(e));
-    }
-  })();
+  void scanLlmInput(event, ctx);
 }
 
 // Skip text blocks that are ShieldCortex/OpenClaw tool-result pass-throughs
@@ -713,16 +799,13 @@ export default {
 
         if (!interceptorConfig.enabled) return null;
 
-        // Dynamic import with string variable to prevent TypeScript from resolving
-        // at compile time — 'shieldcortex/defence' only exists at runtime when the
-        // package is installed globally, not during CI builds of the plugin itself.
-        let defenceMod: any;
-        try {
-          const defenceModPath = 'shieldcortex' + '/defence';
-          defenceMod = await import(/* webpackIgnore: true */ defenceModPath);
-        } catch (importErr) {
-          // Stack overflow or missing module — interceptor can't load
-          (api.logger as any)?.warn?.(`[shieldcortex] Cannot load defence module: ${importErr instanceof Error ? importErr.message : importErr}`);
+        // Shared in-process defence module (same instance realtime scanning
+        // uses — see getDefenceModule). Loaded via a string-concatenated
+        // specifier so TypeScript doesn't resolve 'shieldcortex/defence' at
+        // compile time; it only exists at runtime once the package is installed.
+        const defenceMod = await getDefenceModule();
+        if (!defenceMod) {
+          (api.logger as any)?.warn?.('[shieldcortex] Cannot load defence module — interceptor disabled');
           return null;
         }
         if (typeof defenceMod.runDefencePipeline !== 'function') return null;

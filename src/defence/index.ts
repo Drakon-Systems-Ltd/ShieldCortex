@@ -52,6 +52,13 @@ export { logAudit, queryAuditLogs, getAuditStats } from './audit/index.js';
 export { scanSkill, scanSkillContent, discoverSkillFiles, detectFormat, detectFormatFromContent, parseSkillFile, readSkillFile } from './skill-scanner/index.js';
 export type { SkillScanResult, SkillScanOptions, SkillThreatFinding, ParsedSkill, SkillFormat } from './skill-scanner/index.js';
 
+// Tool Response Scanner (read-path scan; pure, no DB handle required —
+// the audit write is guarded by isDatabaseInitialized()). Exposed here so the
+// OpenClaw realtime plugin can scan in-process instead of shelling out to the
+// MCP server per message.
+export { scanToolResponse, shouldScanToolResponse } from './tool-response-scanner.js';
+export type { ToolResponseScanResult } from './types.js';
+
 // Iron Dome — Behaviour Protection Layer
 export {
   activateIronDome,
