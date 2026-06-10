@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.1] - 2026-06-10
+
+**Self-healing native database engine.** On platforms where `better-sqlite3` has no matching prebuilt binary (arm64, or a Node newer than the prebuilds) the native binding may fail to build during `npm install` — and `npm install -g` still exits 0, leaving the package installed-but-broken with `Could not locate the bindings file`. This release detects and repairs that automatically.
+
+### Added
+
+- **`shieldcortex repair`** — one-command self-heal. Verifies the `better-sqlite3` native binding, and if it can't load, rebuilds it **in the install directory** then re-verifies. (A bare `npm rebuild better-sqlite3` from your home dir is a silent no-op — the rebuild only works in the package's install dir; `repair` resolves that for you.)
+
+### Fixed
+
+- **`shieldcortex update` now verifies the native binding after installing** and rebuilds it in place if it's missing, instead of reporting success purely on npm's exit code. If the rebuild can't complete (no C/C++ toolchain), it prints the exact copy-paste remediation.
+- **`shieldcortex doctor`** no longer suggests a bare `npm rebuild better-sqlite3` (which runs in the wrong directory and does nothing). On a binding/ABI error it now points to `shieldcortex repair` and shows the correct install-dir command.
+- **Post-install guidance** for a failed binding load now points to `shieldcortex repair` and includes the required `cd` into the install directory.
+
 ## [4.32.0] - 2026-06-10
 
 **Security & hardening release — a full audit pass.** A capability/optimisation audit of the package surfaced and this release fixes a large batch of issues spanning the defence pipeline, the local stores, packaging, and the integrations. The headline: several advertised defence layers were **silently disabled in shipped builds** by a bare-`require()`-under-ESM bug, and are now actually running.
