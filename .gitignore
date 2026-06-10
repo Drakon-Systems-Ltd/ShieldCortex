@@ -4,6 +4,12 @@ node_modules/
 # Build output
 dist/
 
+# Compiled output never belongs alongside the TypeScript sources. src/ holds
+# only .ts (compiled output lives in dist/). A stray committed src/**/*.js is a
+# second, drifting source of truth — see the divergent trust-score weights that
+# accumulated in src/xray. No hand-written .js/.mjs exists under src/.
+src/**/*.js
+
 # Git worktrees (feature branches checked out alongside main)
 .worktrees/
 

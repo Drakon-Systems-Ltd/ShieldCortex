@@ -211,6 +211,27 @@ async function getSharedNoveltyGate() {
 // ==================== HOOK SCANNER ====================
 
 /**
+ * Parse the scan_skill verdict from its structured markdown output.
+ *
+ * The MCP `scan_skill` tool emits a fixed `**Safe:** Yes|No` field (see
+ * server.ts). We parse THAT exact field rather than substring-matching the
+ * whole report. The old `result.includes("unsafe")` was wrong twice over: the
+ * report never even prints the literal word "unsafe" (the verdict field is
+ * `**Safe:** No`), and any finding `description`/`matchedText` that merely
+ * mentions "unsafe" would false-positive a clean file into a security warning.
+ *
+ * Returns true (unsafe), false (safe), or null (unparseable → indeterminate).
+ * @param {string} result
+ * @returns {boolean|null}
+ */
+function parseScanSkillUnsafe(result) {
+  if (typeof result !== "string") return null;
+  const m = result.match(/\*{0,2}Safe:\*{0,2}\s*(Yes|No)\b/i);
+  if (!m) return null;
+  return m[1].toLowerCase() === "no";
+}
+
+/**
  * Scan installed OpenClaw hooks for potential threats
  * Uses ShieldCortex's scanSkill via mcporter
  * @returns {Promise<Array<{hookName: string, threat: string}>>}
@@ -243,7 +264,7 @@ async function scanInstalledHooks() {
           format: "hook-md",
         });
 
-        if (result && result.includes("unsafe")) {
+        if (parseScanSkillUnsafe(result) === true) {
           threats.push({ hookName: entry.name, threat: `HOOK.md flagged as unsafe` });
         }
       } catch { /* No HOOK.md, skip */ }
@@ -258,7 +279,7 @@ async function scanInstalledHooks() {
           format: "hook-js",
         });
 
-        if (result && result.includes("unsafe")) {
+        if (parseScanSkillUnsafe(result) === true) {
           threats.push({ hookName: entry.name, threat: `handler.js flagged as unsafe` });
         }
       } catch { /* No handler.js, skip */ }
@@ -665,7 +686,13 @@ async function proactiveRecall(event) {
       project: "*",
     });
 
-    if (result && typeof result === "string" && result.includes("Found") && !result.includes("Found 0")) {
+    // Parse the structured `Found N memor(y|ies):` header (recall.ts) at the
+    // START of the result, rather than substring-matching "Found" anywhere — a
+    // recalled memory's own content can contain "Found" and the old
+    // `!result.includes("Found 0")` clause was dead (empty = "No memories
+    // found...", never "Found 0"). Surface only on N >= 1.
+    const recallMatch = typeof result === "string" ? result.match(/^Found\s+(\d+)\s+memor/m) : null;
+    if (recallMatch && Number(recallMatch[1]) >= 1) {
       if (event.messages) {
         event.messages.push(`🧠 ${result}`);
       }

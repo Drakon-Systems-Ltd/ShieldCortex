@@ -16,6 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 
 /** Suffix for the safety copy written before any mutating write. */
 export const BACKUP_SUFFIX = '.bak-shieldcortex';
@@ -122,4 +123,51 @@ export function looksLikeShieldcortex(entry: unknown): boolean {
   if (typeof e.command === 'string') tokens.push(e.command);
   if (Array.isArray(e.args)) for (const a of e.args) if (typeof a === 'string') tokens.push(a);
   return tokens.some((t) => /shield[-]?cortex/i.test(t));
+}
+
+/** A resolved MCP stdio command: an executable plus its argv. */
+export interface McpServerCommand {
+  command: string;
+  args: string[];
+}
+
+/**
+ * Resolve the stdio command an editor (Codex / VS Code Copilot / Cursor) should
+ * launch to start the ShieldCortex MCP server.
+ *
+ * Mirrors `claude-md.ts setupGlobalMcp`'s v4.11.1 fix: prefer the installed
+ * GLOBAL binary, resolved to an ABSOLUTE path via `which`/`where`, and invoke
+ * it directly. The hazard being avoided is `npx -y shieldcortex` as the MCP
+ * command — `npx` re-resolves dynamically on every spawn, so a cache shift
+ * (version drift / fresh publish / cache miss) silently changes the effective
+ * command. Editors hash their MCP config; a changed command changes the hash
+ * and resets the active session, wiping context (the 2026-04-22 fleet "fresh
+ * session" bug). An absolute path never drifts.
+ *
+ * Fallback when no global binary is on PATH: `node <absoluteDistEntry>` — the
+ * bundled `dist/index.js` resolved to an absolute path from this module's
+ * location. That is ALSO stable (a fixed absolute path, not `npx`), so a
+ * single-shot install without a global binary still gets a hash-stable command
+ * rather than re-introducing the npx hash-thrash class.
+ *
+ * @param distEntry Absolute path to the package's `dist/index.js` (the caller
+ *   resolves it from its own `__dirname` so we don't guess the layout).
+ */
+export function resolveMcpServerCommand(distEntry: string): McpServerCommand {
+  try {
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+    const resolved = execSync(`${whichCmd} shieldcortex`, {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .trim()
+      .split('\n')[0]
+      .trim();
+    if (resolved && fs.existsSync(resolved)) {
+      return { command: resolved, args: [] };
+    }
+  } catch {
+    // No global install on PATH — fall through to the bundled entry.
+  }
+  return { command: 'node', args: [distEntry] };
 }

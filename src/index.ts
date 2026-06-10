@@ -124,6 +124,50 @@ interface Args {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * Should the interactive trial/stats banner print for this invocation?
+ *
+ * It must print for normal interactive CLI commands (status, scan, doctor,
+ * audit, setup, …) but NEVER for:
+ *   - the MCP stdio server path (bare `shieldcortex`, `shieldcortex --db x`,
+ *     or `shieldcortex --mode mcp`) — stdout there is the JSON-RPC channel and
+ *     any banner bytes corrupt the protocol;
+ *   - the per-prompt `hook` path (dispatched + returned before this is reached).
+ *
+ * The previous guard was `argv[2] && mode !== 'mcp'`. That was broken because
+ * `parseArgs()` defaults `mode` to `'mcp'` for EVERY command except the few
+ * server modes (dashboard/api/worker/--mode) — so `status`, `scan`, `doctor`,
+ * `audit` etc. all kept `mode === 'mcp'` and were silently excluded, and the
+ * banner never showed for any normal command (Phase 11 reordered this block but
+ * left the faulty condition).
+ *
+ * The reliable discriminator is a POSITIONAL command word: the MCP stdio launch
+ * is only ever reached with no positional command (flags only). So we show the
+ * banner when either (a) there's a positional first arg that isn't a flag, or
+ * (b) a non-mcp server mode was selected. `mcp` as an explicit positional
+ * subcommand IS an interactive CLI command (the MCP-config scanner) — it parses
+ * to mode 'mcp' but is not the stdio server, and prints normal stdout, so it's
+ * fine for it to show the banner.
+ *
+ * Exported for unit testing.
+ */
+export function shouldShowInteractiveBanner(argv: string[], mode: ServerMode): boolean {
+  const first = argv[2];
+  if (!first) return false; // bare invocation → MCP stdio server
+  // A positional (non-flag) first arg means a CLI subcommand was given.
+  const hasPositionalCommand = !first.startsWith('-');
+  if (hasPositionalCommand) {
+    // The only way a positional first arg lands on the stdio MCP server is the
+    // explicit server-mode words, which select a non-mcp mode anyway — so any
+    // positional command that resolves to mode 'mcp' is an interactive command
+    // (e.g. `mcp`, `scan`, `status`). Always show for positional commands.
+    return true;
+  }
+  // Flag-only invocation (e.g. `--db x`, `--mode mcp`, `--version`). Show only
+  // when a non-mcp server mode was explicitly requested (dashboard/api/worker).
+  return mode !== 'mcp';
+}
+
 // Parse command line arguments
 function parseArgs(): Args {
   const args = process.argv.slice(2);
@@ -533,8 +577,10 @@ async function main() {
   const parsedArgs = parseArgs();
 
   // ── Trial welcome / expiry warning ──────────────────────
-  // Only show for interactive CLI commands (not MCP server mode — stdout must stay clean for JSON-RPC)
-  if (process.argv[2] && parsedArgs.mode !== 'mcp') {
+  // Only show for interactive CLI commands. shouldShowInteractiveBanner gates
+  // out the MCP stdio server path (bare / --mode mcp / --db) where stdout is
+  // the JSON-RPC channel; the per-prompt `hook` path already returned above.
+  if (shouldShowInteractiveBanner(process.argv, parsedArgs.mode)) {
     try {
       const { existsSync } = await import('fs');
       const { join } = await import('path');

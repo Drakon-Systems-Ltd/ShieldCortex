@@ -10,6 +10,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { resolveMcpServerCommand } from './json-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,10 +48,16 @@ function escapeTomlString(value: string): string {
 }
 
 function buildServerBlock(): string {
+  // Prefer the absolute global binary (`which shieldcortex`); fall back to
+  // `node <absolute dist/index.js>`. Never `npx -y` — see resolveMcpServerCommand
+  // (the v4.11.1 fix: a dynamically-re-resolved command thrashes the editor's
+  // MCP-config hash and resets the active session).
+  const { command, args } = resolveMcpServerCommand(MCP_ENTRY);
+  const argsToml = args.map((a) => `"${escapeTomlString(a)}"`).join(', ');
   return [
     `[mcp_servers.${SERVER_NAME}]`,
-    'command = "node"',
-    `args = ["${escapeTomlString(MCP_ENTRY)}"]`,
+    `command = "${escapeTomlString(command)}"`,
+    `args = [${argsToml}]`,
     '',
   ].join('\n');
 }

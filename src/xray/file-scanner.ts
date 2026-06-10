@@ -283,9 +283,17 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
     return findings;
   }
 
+  // Read the file body AT MOST ONCE. Each branch records what it read so deep
+  // mode (below) can reuse it instead of re-reading from disk. Previously a
+  // deep scan read every file a second time (and on every other-text file,
+  // walked the same content twice) — pure wasted IO for large trees.
+  let fileBuffer: Buffer | null = null;
+  let textContent: string | null = null;
+
   // Route by extension
   if (IMAGE_EXTENSIONS.has(ext)) {
     const buf = fs.readFileSync(filePath);
+    fileBuffer = buf;
     findings.push(...scanImage(filePath, buf));
 
     // Polyglot check
@@ -296,6 +304,7 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
     }
   } else if (JSON_EXTENSIONS.has(ext)) {
     const content = fs.readFileSync(filePath, 'utf-8');
+    textContent = content;
     findings.push(...scanJson(filePath, content));
 
     // Zero-width unicode check
@@ -306,6 +315,7 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
     }
   } else if (CODE_EXTENSIONS.has(ext)) {
     const content = fs.readFileSync(filePath, 'utf-8');
+    textContent = content;
     findings.push(...detectPatterns(content, filePath));
 
     // Zero-width unicode check
@@ -318,6 +328,7 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
     // For any other text-like file, try reading as text
     try {
       const buf = fs.readFileSync(filePath);
+      fileBuffer = buf;
 
       // Check if it's mostly text
       let nonPrintable = 0;
@@ -332,6 +343,7 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
       if (nonPrintable / sampleSize < 0.1) {
         // Treat as text
         const content = buf.toString('utf-8');
+        textContent = content;
         findings.push(...detectPatterns(content, filePath));
 
         const zw = hasZeroWidthUnicode(content);
@@ -355,7 +367,12 @@ export async function scanFile(filePath: string, deep: boolean): Promise<XRayFin
   // Deep mode: additional analysis (Pro feature)
   if (deep && stat.size > 0) {
     try {
-      const content = fs.readFileSync(filePath, 'utf-8');
+      // Reuse the content already read above. Derive text from a buffer the
+      // image/binary branch read (no re-read); only hit disk if nothing was
+      // captured (a branch that didn't read, e.g. an early-skipped path).
+      const content =
+        textContent ??
+        (fileBuffer ? fileBuffer.toString('utf-8') : fs.readFileSync(filePath, 'utf-8'));
 
       // Entropy analysis — detect packed/obfuscated code
       if (CODE_EXTENSIONS.has(ext) || ext === '.js' || ext === '.mjs') {

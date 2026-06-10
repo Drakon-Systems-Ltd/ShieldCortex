@@ -143,10 +143,16 @@ export function createOpenClawRuntime({
     const serverCmd = await resolveServerCmd();
 
     return new Promise((resolve) => {
-      const cmdArgs = ["mcporter", "call", "--stdio", serverCmd, tool];
-      for (const [key, value] of Object.entries(args)) {
-        cmdArgs.push(`${key}:${String(value).replace(/'/g, "''")}`);
-      }
+      // Pass arguments as a single `--args <json>` payload, NOT as per-key
+      // `key:value` flags. The old form did `String(value).replace(/'/g, "''")`
+      // — SQL-style apostrophe doubling — on each value, which mangled saved
+      // memory content (an apostrophe in "it's" became "it''s" and was stored
+      // literally; this is a key:value CLI flag, not a bound SQL param, so no
+      // such escaping should ever happen). A JSON payload also round-trips
+      // colons, spaces, and newlines in content without the `key:value`
+      // splitter misreading them. execFile passes argv elements directly (no
+      // shell), so the JSON string needs no further quoting/escaping.
+      const cmdArgs = ["mcporter", "call", "--stdio", serverCmd, tool, "--args", JSON.stringify(args)];
 
       let attempts = 0;
       const maxAttempts = (options.retries || 0) + 1;

@@ -10,7 +10,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
+import {
+  readJsonConfigOrAbort,
+  writeJsonConfigWithBackup,
+  looksLikeShieldcortex,
+  resolveMcpServerCommand,
+} from './json-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -81,14 +86,53 @@ function readJsonForRemoval(filePath: string): McpConfig | null {
 }
 
 /**
- * Build the server entry for ShieldCortex MCP.
+ * Build the VS Code server entry for ShieldCortex MCP.
+ *
+ * Resolves to the absolute global binary (or `node <absolute dist/index.js>`),
+ * never `npx -y` — see resolveMcpServerCommand for why a re-resolving command
+ * thrashes the editor's MCP-config hash. VS Code format includes `type`.
  */
 function serverEntry(): McpConfig {
+  const { command, args } = resolveMcpServerCommand(MCP_ENTRY);
   return {
     type: 'stdio',
-    command: 'node',
-    args: [MCP_ENTRY],
+    command,
+    args,
   };
+}
+
+/**
+ * Build the Cursor server entry. Same resolved command as VS Code, but Cursor's
+ * schema omits the `type` field.
+ */
+function cursorServerEntry(): McpConfig {
+  const { command, args } = resolveMcpServerCommand(MCP_ENTRY);
+  return { command, args };
+}
+
+/**
+ * Decide what to do with an EXISTING entry under our server name.
+ *
+ *  - not ours (looksLikeShieldcortex false) → leave it alone (`'foreign'`)
+ *  - ours but the command/args already match the desired entry → `'current'`
+ *  - ours but stale (old `node dist/index.js`, `npx -y shieldcortex`, a stale
+ *    absolute path, …) → `'stale'`, caller refreshes it
+ *
+ * `SERVER_NAME` is ShieldCortex-specific (unlike the generic `memory` key in
+ * ~/.claude.json), so a present entry under it is almost always ours — but we
+ * still guard with looksLikeShieldcortex so a user who parked an unrelated
+ * server under the same name isn't clobbered.
+ */
+function classifyExisting(existing: unknown, desired: McpConfig): 'foreign' | 'current' | 'stale' {
+  if (!looksLikeShieldcortex(existing)) return 'foreign';
+  const e = existing as { command?: unknown; args?: unknown };
+  const sameCommand = e.command === desired.command;
+  const desiredArgs = (desired.args as unknown[]) ?? [];
+  const sameArgs =
+    Array.isArray(e.args) &&
+    e.args.length === desiredArgs.length &&
+    e.args.every((v, i) => v === desiredArgs[i]);
+  return sameCommand && sameArgs ? 'current' : 'stale';
 }
 
 // ── VS Code ──
@@ -122,11 +166,20 @@ function findVsCodeDirs(): string[] {
   return dirs;
 }
 
+/** Outcome of an add/refresh on one config file. */
+type WriteOutcome = 'added' | 'refreshed' | 'unchanged' | 'foreign';
+
 /**
- * Add ShieldCortex to a VS Code mcp.json file.
+ * Add (or refresh) ShieldCortex in a VS Code mcp.json file.
  * VS Code format: { "servers": { "name": { ... } } }
+ *
+ * On re-install, a stale ShieldCortex entry (e.g. an old `node dist/index.js`
+ * path or an `npx -y` command from a previous version) is UPDATED to the
+ * currently-resolved command rather than left in place — otherwise the editor
+ * keeps launching the wrong/old server forever. A foreign entry parked under
+ * our name is never touched.
  */
-function addToVsCode(configDir: string): boolean {
+function addToVsCode(configDir: string): WriteOutcome {
   const mcpPath = path.join(configDir, 'mcp.json');
   const config = readJson(mcpPath);
 
@@ -135,13 +188,20 @@ function addToVsCode(configDir: string): boolean {
   }
 
   const servers = config.servers as McpConfig;
+  const desired = serverEntry();
+
   if (servers[SERVER_NAME]) {
-    return false; // already configured
+    const verdict = classifyExisting(servers[SERVER_NAME], desired);
+    if (verdict === 'foreign') return 'foreign';
+    if (verdict === 'current') return 'unchanged';
+    servers[SERVER_NAME] = desired; // stale → refresh
+    writeJson(mcpPath, config);
+    return 'refreshed';
   }
 
-  servers[SERVER_NAME] = serverEntry();
+  servers[SERVER_NAME] = desired;
   writeJson(mcpPath, config);
-  return true;
+  return 'added';
 }
 
 /**
@@ -184,7 +244,7 @@ function findCursorDir(): string | null {
  * Add ShieldCortex to Cursor's mcp.json.
  * Cursor format: { "mcpServers": { "name": { ... } } }
  */
-function addToCursor(cursorDir: string): boolean {
+function addToCursor(cursorDir: string): WriteOutcome {
   const mcpPath = path.join(cursorDir, 'mcp.json');
   const config = readJson(mcpPath);
 
@@ -193,18 +253,20 @@ function addToCursor(cursorDir: string): boolean {
   }
 
   const servers = config.mcpServers as McpConfig;
+  const desired = cursorServerEntry(); // Cursor schema omits "type"
+
   if (servers[SERVER_NAME]) {
-    return false; // already configured
+    const verdict = classifyExisting(servers[SERVER_NAME], desired);
+    if (verdict === 'foreign') return 'foreign';
+    if (verdict === 'current') return 'unchanged';
+    servers[SERVER_NAME] = desired; // stale → refresh
+    writeJson(mcpPath, config);
+    return 'refreshed';
   }
 
-  // Cursor doesn't use "type" field
-  servers[SERVER_NAME] = {
-    command: 'node',
-    args: [MCP_ENTRY],
-  };
-
+  servers[SERVER_NAME] = desired;
   writeJson(mcpPath, config);
-  return true;
+  return 'added';
 }
 
 /**
@@ -240,16 +302,32 @@ export async function installCopilot(): Promise<void> {
 
   let installed = 0;
 
+  // Report an add/refresh/unchanged/foreign outcome with the right glyph + text,
+  // and count add+refresh toward `installed` (both mutate the config).
+  const report = (outcome: WriteOutcome, label: string, target: string): void => {
+    switch (outcome) {
+      case 'added':
+        console.log(`  ✓ ${label} — added to ${target}`);
+        installed++;
+        break;
+      case 'refreshed':
+        console.log(`  ↑ ${label} — refreshed stale entry in ${target}`);
+        installed++;
+        break;
+      case 'unchanged':
+        console.log(`  · ${label} — already configured`);
+        break;
+      case 'foreign':
+        console.warn(`  ! ${label} — '${SERVER_NAME}' exists but is not ShieldCortex-owned; leaving it alone`);
+        break;
+    }
+  };
+
   // VS Code
   const vscodeDirs = findVsCodeDirs();
   for (const dir of vscodeDirs) {
     const variant = path.basename(path.dirname(dir)); // "Code" or "Code - Insiders"
-    if (addToVsCode(dir)) {
-      console.log(`  ✓ VS Code (${variant}) — added to ${path.join(dir, 'mcp.json')}`);
-      installed++;
-    } else {
-      console.log(`  · VS Code (${variant}) — already configured`);
-    }
+    report(addToVsCode(dir), `VS Code (${variant})`, path.join(dir, 'mcp.json'));
   }
 
   if (vscodeDirs.length === 0) {
@@ -259,12 +337,7 @@ export async function installCopilot(): Promise<void> {
   // Cursor
   const cursorDir = findCursorDir();
   if (cursorDir) {
-    if (addToCursor(cursorDir)) {
-      console.log(`  ✓ Cursor — added to ${path.join(cursorDir, 'mcp.json')}`);
-      installed++;
-    } else {
-      console.log('  · Cursor — already configured');
-    }
+    report(addToCursor(cursorDir), 'Cursor', path.join(cursorDir, 'mcp.json'));
   } else {
     console.log('  · Cursor — not found');
   }

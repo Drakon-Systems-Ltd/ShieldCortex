@@ -243,6 +243,33 @@ function hashHookContent(content) {
 }
 
 /**
+ * Parse the scan_skill verdict from its structured markdown output.
+ *
+ * The MCP `scan_skill` tool emits a fixed `**Safe:** Yes|No` field (see
+ * server.ts). We parse THAT exact field rather than substring-matching the
+ * whole report. The old `result.includes("unsafe")` was wrong twice over: the
+ * report never even prints the literal word "unsafe" (the verdict field is
+ * `**Safe:** No`), and any finding `description`/`matchedText` that merely
+ * mentions "unsafe" (e.g. "unsafe deserialization") would false-positive a
+ * clean file into a bootstrap security warning.
+ *
+ * Returns:
+ *   true  → definitively unsafe (`**Safe:** No`)
+ *   false → definitively safe   (`**Safe:** Yes`)
+ *   null  → verdict could not be parsed (treat as indeterminate; don't cache)
+ *
+ * @param {string} result
+ * @returns {boolean|null}
+ */
+function parseScanSkillUnsafe(result) {
+  if (typeof result !== "string") return null;
+  // Tolerate optional markdown bold markers and surrounding whitespace.
+  const m = result.match(/\*{0,2}Safe:\*{0,2}\s*(Yes|No)\b/i);
+  if (!m) return null;
+  return m[1].toLowerCase() === "no";
+}
+
+/**
  * Scan one hook file, reusing a cached verdict when the content hash matches.
  * Mutates `cache` in place and sets `dirty.changed` when a fresh scan runs.
  * @returns {Promise<boolean>} true when the file is flagged unsafe
@@ -257,7 +284,10 @@ async function scanHookFileCached(content, name, format, cache, dirty) {
   // Only memoise a definitive verdict. A null/failed call is NOT cached, so a
   // transient MCP failure doesn't get pinned as "clean" for an unscanned file.
   if (result == null) return false;
-  const unsafe = result.includes("unsafe");
+  const unsafe = parseScanSkillUnsafe(result);
+  // Indeterminate parse (null) → don't flag and don't cache, so the next scan
+  // retries rather than pinning a guessed verdict.
+  if (unsafe === null) return false;
   cache[hash] = unsafe ? "unsafe" : "clean";
   dirty.changed = true;
   return unsafe;
@@ -732,8 +762,15 @@ async function proactiveRecall(event) {
       project: "*",
     });
 
-    if (result && typeof result === "string" && result.includes("Found") && !result.includes("Found 0")) {
-      if (event.messages) {
+    // Parse the structured `Found N memor(y|ies):` header (recall.ts) at the
+    // START of the result, rather than substring-matching "Found" anywhere —
+    // a recalled memory's own content can contain the word "Found" and the old
+    // `!result.includes("Found 0")` clause was dead (the empty result is
+    // "No memories found...", never "Found 0"). Surface only on N >= 1.
+    if (result && typeof result === "string") {
+      const m = result.match(/^Found\s+(\d+)\s+memor/m);
+      const count = m ? Number(m[1]) : 0;
+      if (count >= 1 && event.messages) {
         event.messages.push(`🧠 ${result}`);
       }
     }
