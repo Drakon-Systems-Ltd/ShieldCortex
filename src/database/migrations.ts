@@ -744,4 +744,33 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'audit_aggregates');
   }
+
+  // Migration: Phase 10 — scope the memories_au FTS trigger to UPDATE OF the
+  // indexed columns only (title, content, tags).
+  //
+  // The trigger originally shipped as `AFTER UPDATE ON memories` with no `OF`
+  // column list, so it fired a full FTS5 external-content delete+reinsert on
+  // ANY column update. The hottest write path — accessMemory() bumping
+  // access_count / last_accessed / salience on every recalled memory, plus the
+  // 5-minute decay-score persistence — never touches indexed text, so each read
+  // was re-tokenising and rewriting the FTS index for nothing (write
+  // amplification + WAL churn + more surface for FTS drift).
+  //
+  // A `CREATE TRIGGER IF NOT EXISTS` alone CANNOT replace the existing unscoped
+  // trigger on an upgraded DB, so we DROP it first, then recreate with the
+  // scoped form. Fresh installs already get the scoped trigger from
+  // schema.sql / inline-schema.ts; this block only matters for existing DBs.
+  try {
+    database.exec('DROP TRIGGER IF EXISTS memories_au');
+    database.exec(`
+      CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF title, content, tags ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
+        VALUES('delete', old.id, old.title, old.content, old.tags);
+        INSERT INTO memories_fts(rowid, title, content, tags)
+        VALUES (new.id, new.title, new.content, new.tags);
+      END;
+    `);
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'memories_au');
+  }
 }
