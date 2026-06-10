@@ -109,6 +109,19 @@ export function extractQueryTags(query: string): string[] {
 }
 
 /**
+ * Decode a persisted `memories.embedding` BLOB into a Float32Array view.
+ *
+ * The embedding column is written as the raw little-endian bytes of a 384-dim
+ * Float32Array (addMemory: `Buffer.from(embedding.buffer)`). better-sqlite3 hands
+ * it back as a Node Buffer; this returns a zero-copy Float32Array view over those
+ * bytes. Shared by `vectorSearch` and the recall reuse path (`findSimilarMemories`)
+ * so the BLOB→vector decode lives in exactly one place.
+ */
+export function decodeEmbeddingBlob(buf: Buffer): Float32Array {
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4);
+}
+
+/**
  * Score embedded memories against a query embedding and return the top-k by
  * cosine similarity. Selects ONLY `id, embedding` and returns lean
  * `{ id, similarity }` pairs — the sole caller (search-recall) needs nothing
@@ -139,18 +152,10 @@ export function vectorSearch(
   const rows = db.prepare(query).all(...params) as Array<{ id: number; embedding: Buffer }>;
 
   return rows
-    .map((row) => {
-      const embeddingBuffer = row.embedding;
-      const embedding = new Float32Array(
-        embeddingBuffer.buffer,
-        embeddingBuffer.byteOffset,
-        embeddingBuffer.length / 4,
-      );
-      return {
-        id: row.id,
-        similarity: cosineSimilarity(queryEmbedding, embedding),
-      };
-    })
+    .map((row) => ({
+      id: row.id,
+      similarity: cosineSimilarity(queryEmbedding, decodeEmbeddingBlob(row.embedding)),
+    }))
     .filter((result) => result.similarity > 0.3)
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, limit);

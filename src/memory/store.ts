@@ -664,6 +664,42 @@ export function getMemoryById(id: number, source?: DefenceSource): Memory | null
 }
 
 /**
+ * Recompute and persist the `memories.embedding` vector for a memory whose
+ * embedded text (title/content) just changed. Fire-and-forget, mirroring
+ * addMemory's write: the caller is expected to have already cleared the column
+ * (`embedding = NULL`) synchronously so no stale vector is readable in the gap
+ * before this lands. No-ops cleanly when embeddings are disabled/unavailable.
+ */
+function refreshEmbeddingAsync(memoryId: number, title: string, content: string): void {
+  const db = getDatabase();
+  generateEmbedding(title + ' ' + content)
+    .then((embedding) => {
+      try {
+        if (embedding && embedding.buffer) {
+          db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
+            .run(Buffer.from(embedding.buffer), memoryId);
+        }
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        if (/database connection is not open/i.test(errMsg)) return;
+        console.error('[shieldcortex] Failed to store refreshed embedding:', e);
+      }
+    })
+    .catch((e) => {
+      if (
+        e instanceof Error &&
+        (
+          e.message.includes('Embedding worker unavailable') ||
+          e.message.includes('Embeddings disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1')
+        )
+      ) {
+        return;
+      }
+      console.error('[shieldcortex] Failed to regenerate embedding:', e);
+    });
+}
+
+/**
  * Update a memory
  */
 export function updateMemory(
@@ -765,12 +801,29 @@ export function updateMemory(
     values.push(updates.memoryScope);
   }
 
+  // STALENESS: if the embedded text (title/content) changes, the persisted
+  // `memories.embedding` no longer reflects the current content. The recall reuse
+  // path (findSimilarMemories) scores candidates straight off this column, so a
+  // stale vector would let recall match on outdated content. Clear it in the SAME
+  // UPDATE — no window where the old vector is readable — then recompute below,
+  // mirroring addMemory's fire-and-forget embedding write. Cleared-but-not-yet-
+  // recomputed rows are simply absent from vector recall until the recompute
+  // lands (FTS still covers them); a stale match is the unacceptable outcome.
+  const embeddedTextChanged = updates.title !== undefined || updates.content !== undefined;
+  if (embeddedTextChanged) {
+    fields.push('embedding = NULL');
+  }
+
   if (fields.length === 0) return existing;
 
   values.push(id);
   db.prepare(`UPDATE memories SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
 
   const updatedMemory = getMemoryById(id)!;
+
+  if (embeddedTextChanged) {
+    refreshEmbeddingAsync(updatedMemory.id, updatedMemory.title, updatedMemory.content);
+  }
 
   const shouldRefreshGraph =
     updates.title !== undefined ||
@@ -916,6 +969,7 @@ export function mergeMemories(
           cloud_excluded = ?,
           access_count = ?,
           last_accessed = ?,
+          embedding = NULL,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
@@ -950,6 +1004,11 @@ export function mergeMemories(
     } catch (e) {
       console.error('[shieldcortex] Entity extraction refresh failed after merge:', e);
     }
+
+    // The merge UPDATE cleared `embedding` (the merged content differs from the
+    // pre-merge vector); recompute it for the new canonical content so the recall
+    // reuse path never scores against a stale pre-merge vector.
+    refreshEmbeddingAsync(updatedMemory.id, updatedMemory.title, updatedMemory.content);
 
     emitMemoryUpdated(updatedMemory);
     persistEvent('memory_updated', { memory: updatedMemory, mergedFromId: removed.id });
