@@ -150,7 +150,13 @@ async function searchMemoriesInternal(
     params.push(...options.tags);
   }
 
-  sql += ' ORDER BY m.salience DESC, m.last_accessed DESC LIMIT ?';
+  // Prefilter on the persisted decayed-score index (CLAUDE.md: "Persisted decay
+  // scores for efficient sorting", idx_memories_decayed_score). decayed_score is
+  // NULL until updateDecayScores() persists it (addMemory leaves it unset), so
+  // COALESCE back to raw salience for un-scored rows — identical to rowToMemory's
+  // `decayed_score ?? salience`. Without the COALESCE, NULL sorts last under DESC
+  // and would bury freshly-written high-salience memories out of the prefilter.
+  sql += ' ORDER BY COALESCE(m.decayed_score, m.salience) DESC, m.last_accessed DESC LIMIT ?';
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
@@ -256,6 +262,13 @@ async function searchMemoriesInternal(
   }
 
   const finalResults = sortedResults.slice(0, limit);
+
+  // Per-result contradiction links, then their counterpart titles. The title
+  // lookup was an N+1-within-N+1 (one SELECT title per contradiction per
+  // result); collect every counterpart id first and resolve all titles with a
+  // single `WHERE id IN (...)`, then read from the id→title map below.
+  const contradictionsByResult = new Map<number, Array<{ strength: number; other_id: number }>>();
+  const counterpartIds = new Set<number>();
   for (const result of finalResults) {
     const contradictions = db.prepare(`
       SELECT ml.strength,
@@ -264,12 +277,30 @@ async function searchMemoriesInternal(
       WHERE ml.relationship = 'contradicts'
         AND (ml.source_id = ? OR ml.target_id = ?)
     `).all(result.memory.id, result.memory.id, result.memory.id) as Array<{ strength: number; other_id: number }>;
-
     if (contradictions.length > 0) {
-      result.contradictions = contradictions.map((contradiction) => {
-        const other = db.prepare('SELECT title FROM memories WHERE id = ?').get(contradiction.other_id) as { title?: string } | undefined;
-        return { memoryId: contradiction.other_id, title: other?.title || 'Unknown', score: contradiction.strength };
-      });
+      contradictionsByResult.set(result.memory.id, contradictions);
+      for (const c of contradictions) counterpartIds.add(c.other_id);
+    }
+  }
+
+  const counterpartTitles = new Map<number, string | undefined>();
+  if (counterpartIds.size > 0) {
+    const ids = [...counterpartIds];
+    const placeholders = ids.map(() => '?').join(',');
+    const titleRows = db.prepare(
+      `SELECT id, title FROM memories WHERE id IN (${placeholders})`,
+    ).all(...ids) as Array<{ id: number; title?: string }>;
+    for (const tr of titleRows) counterpartTitles.set(tr.id, tr.title);
+  }
+
+  for (const result of finalResults) {
+    const contradictions = contradictionsByResult.get(result.memory.id);
+    if (contradictions && contradictions.length > 0) {
+      result.contradictions = contradictions.map((contradiction) => ({
+        memoryId: contradiction.other_id,
+        title: counterpartTitles.get(contradiction.other_id) || 'Unknown',
+        score: contradiction.strength,
+      }));
       if (result.explanation) {
         result.explanation.reasons.push(`${contradictions.length} contradiction link${contradictions.length === 1 ? '' : 's'} attached`);
       }
@@ -278,8 +309,21 @@ async function searchMemoriesInternal(
 
   if (source) {
     const db2 = getDatabase();
+    // ACL lookup was an N+1 (one `SELECT source, sensitivity_level WHERE id = ?`
+    // per result); fetch all result rows in one `WHERE id IN (...)` and read the
+    // per-result source/sensitivity from the map. checkAccess/logAccessDenial
+    // logic and filter order are unchanged.
+    const aclIds = finalResults.map((result) => result.memory.id);
+    const aclRows = new Map<number, Record<string, unknown>>();
+    if (aclIds.length > 0) {
+      const placeholders = aclIds.map(() => '?').join(',');
+      const fetched = db2.prepare(
+        `SELECT id, source, sensitivity_level FROM memories WHERE id IN (${placeholders})`,
+      ).all(...aclIds) as Record<string, unknown>[];
+      for (const row of fetched) aclRows.set(row.id as number, row);
+    }
     return finalResults.filter(result => {
-      const row = db2.prepare('SELECT source, sensitivity_level FROM memories WHERE id = ?').get(result.memory.id) as Record<string, unknown> | undefined;
+      const row = aclRows.get(result.memory.id);
       const policy = checkAccess(
         { id: result.memory.id, source: row?.source as string | null, sensitivity_level: row?.sensitivity_level as string | null },
         source,
@@ -432,9 +476,36 @@ function scoreWithRrf(input: ScoreWithRrfInput): SearchResult[] {
 
   // Vector and graph rank lists may contain ids the FTS WHERE would have
   // filtered out — fetch + filter to enforce the same constraints.
+  const sortedVectorIds = Array.from(vectorResults.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id);
+
+  const graphLimit = Math.max(limit * 3, 50);
+  const graphResults = query && query.trim()
+    ? graphRankFromQuery(query, db, { project: options.project, limit: graphLimit })
+    : [];
+  const candidateGraphIds = graphResults.map((r) => r.memoryId);
+
+  // Batch-hydrate every candidate not already covered by the FTS rows in ONE
+  // query (was an N+1: one `SELECT * WHERE id = ?` per vector/graph candidate).
+  // considerCandidate then reads from this prefetched map, keeping the exact
+  // per-id filter semantics, list order, and memoryMap side effect.
+  const candidateIdsToFetch = new Set<number>();
+  for (const id of sortedVectorIds) if (!memoryMap.has(id)) candidateIdsToFetch.add(id);
+  for (const id of candidateGraphIds) if (!memoryMap.has(id)) candidateIdsToFetch.add(id);
+  const prefetchedRows = new Map<number, Record<string, unknown>>();
+  if (candidateIdsToFetch.size > 0) {
+    const ids = [...candidateIdsToFetch];
+    const placeholders = ids.map(() => '?').join(',');
+    const fetched = db.prepare(
+      `SELECT * FROM memories WHERE id IN (${placeholders})`,
+    ).all(...ids) as Record<string, unknown>[];
+    for (const row of fetched) prefetchedRows.set(row.id as number, row);
+  }
+
   const considerCandidate = (id: number): boolean => {
     if (memoryMap.has(id)) return true;
-    const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    const row = prefetchedRows.get(id);
     if (!row) return false;
     const memory = rowToMemory(row);
     if (!candidatePassesFilters(memory, options)) return false;
@@ -442,16 +513,8 @@ function scoreWithRrf(input: ScoreWithRrfInput): SearchResult[] {
     return true;
   };
 
-  const vectorIds = Array.from(vectorResults.entries())
-    .sort((a, b) => b[1] - a[1])
-    .map(([id]) => id)
-    .filter(considerCandidate);
-
-  const graphLimit = Math.max(limit * 3, 50);
-  const graphResults = query && query.trim()
-    ? graphRankFromQuery(query, db, { project: options.project, limit: graphLimit })
-    : [];
-  const graphIds = graphResults.map((r) => r.memoryId).filter(considerCandidate);
+  const vectorIds = sortedVectorIds.filter(considerCandidate);
+  const graphIds = candidateGraphIds.filter(considerCandidate);
 
   return runHybridRanker({
     rankLists: [
@@ -583,7 +646,10 @@ export async function recallWithEmbeddings(
       params.push(options.project);
     }
 
-    sql += ' ORDER BY salience DESC, last_accessed DESC LIMIT 200';
+    // Prefilter the embedding-fallback candidate pool on the persisted decayed
+    // score (COALESCE to raw salience for rows not yet scored — see the FTS
+    // prefilter above for the NULL rationale).
+    sql += ' ORDER BY COALESCE(decayed_score, salience) DESC, last_accessed DESC LIMIT 200';
 
     const candidates = db.prepare(sql).all(...params) as Array<{ id: number; title: string; content: string }>;
 
@@ -603,14 +669,22 @@ export async function recallWithEmbeddings(
     const remainingSlots = limit - ftsMemories.length;
     const similar = await findSimilarMemories(query, newCandidates, remainingSlots, queryEmbedding);
 
-    // Filter by threshold and fetch full Memory objects
+    // Filter by threshold, then hydrate the survivors in ONE query. Was an N+1
+    // (one `SELECT * WHERE id = ?` per hit); now a single `WHERE id IN (...)`
+    // with an id→row map, mapping the threshold-passing ids through it so the
+    // original similarity order (and the skip-missing-row behaviour) is kept.
+    const hitIds = similar.filter((hit) => hit.score >= threshold).map((hit) => hit.id);
     const embeddingMemories: Memory[] = [];
-    for (const hit of similar) {
-      if (hit.score < threshold) continue;
-
-      const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(hit.id) as Record<string, unknown> | undefined;
-      if (row) {
-        embeddingMemories.push(rowToMemory(row));
+    if (hitIds.length > 0) {
+      const placeholders = hitIds.map(() => '?').join(',');
+      const rowsById = new Map<number, Record<string, unknown>>();
+      const fetched = db.prepare(
+        `SELECT * FROM memories WHERE id IN (${placeholders})`,
+      ).all(...hitIds) as Record<string, unknown>[];
+      for (const row of fetched) rowsById.set(row.id as number, row);
+      for (const id of hitIds) {
+        const row = rowsById.get(id);
+        if (row) embeddingMemories.push(rowToMemory(row));
       }
     }
 
