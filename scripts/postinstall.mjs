@@ -140,13 +140,18 @@ function verifyNativeModule() {
     return true;
   } catch (err) {
     const detail = err && err.message ? err.message : String(err);
+    // Install dir = this package's root (where better-sqlite3 lives). A bare
+    // `npm rebuild better-sqlite3` from $HOME is a silent no-op — the cd matters.
+    const installDir = join(dirname(fileURLToPath(import.meta.url)), '..');
     console.log('');
     console.warn('\x1b[33m[shieldcortex] ⚠  Database engine (better-sqlite3) failed to load.\x1b[0m');
     console.warn(`[shieldcortex] Node ${process.version} (ABI ${process.versions.modules}) has no matching`);
     console.warn('[shieldcortex] prebuilt binary and it was not compiled locally.');
-    console.warn('[shieldcortex] Fix one of these before running ShieldCortex:');
-    console.warn('[shieldcortex]   • npm rebuild better-sqlite3   (needs a C/C++ toolchain)');
-    console.warn('[shieldcortex]   • or run on Node LTS 20.x / 22.x (ships prebuilt binaries)');
+    console.warn('[shieldcortex] Fix it (one command, self-healing):');
+    console.warn('[shieldcortex]   \x1b[36mshieldcortex repair\x1b[0m');
+    console.warn('[shieldcortex] Or rebuild manually IN THE INSTALL DIR (the cd is required):');
+    console.warn(`[shieldcortex]   cd "${installDir}" && npm rebuild better-sqlite3`);
+    console.warn('[shieldcortex]   (rebuild needs a C/C++ toolchain — e.g. python3 make g++)');
     console.warn(`[shieldcortex] Underlying error: ${detail}`);
     return false;
   }

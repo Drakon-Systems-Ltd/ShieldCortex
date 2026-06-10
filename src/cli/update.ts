@@ -248,6 +248,28 @@ async function stepNpmPackage(
 }
 
 /**
+ * Verify the better-sqlite3 native binding loads and self-heal it if not.
+ *
+ * `npm install -g` reports success on its exit code even when the native
+ * binding never built for this platform/ABI (common on arm64 / a Node newer
+ * than the prebuilds) — leaving the package installed-but-broken. This step
+ * runs AFTER the install completes (not nested inside it), rebuilds the binding
+ * in the correct install dir if it's missing, and reports honestly.
+ */
+async function stepVerifyEngine(): Promise<{ remediation: string | null }> {
+  let remediation: string | null = null;
+  await step('Database engine', async () => {
+    const { ensureNativeBinding } = await import('../setup/native-binding.js');
+    const r = await ensureNativeBinding();
+    if (r.status === 'ok') return 'native binding OK';
+    if (r.status === 'healed') return 'rebuilt native binding';
+    remediation = r.remediation ?? null;
+    return { status: 'warn' as const, summary: 'binding failed — run `shieldcortex repair`' };
+  });
+  return { remediation };
+}
+
+/**
  * Is the realtime plugin registered with OpenClaw's plugin registry?
  *
  * OpenClaw's modern `openclaw plugins install` stores the package under
@@ -440,11 +462,24 @@ export async function runUpdate(): Promise<void> {
     // npm failure already surfaced by step(); continue with reconcile.
   }
 
+  // Verify (and self-heal) the native DB binding after the install completes.
+  // Runs unconditionally: a pre-existing broken binding heals on any update.
+  const engineResult = await stepVerifyEngine();
+
   await stepOpenClawPlugin(home);
   await stepOpenClawSkill(home);
   await stepClaudeHooks();
 
   footer(Date.now() - flowStart, mainUpdated);
+
+  // If the binding couldn't be auto-healed, print the exact copy-paste fix.
+  if (engineResult.remediation) {
+    process.stdout.write(`\n  ${paint('yellow', '⚠')}  ${paint('bold', 'Database engine could not be rebuilt automatically.')}\n`);
+    for (const line of engineResult.remediation.split('\n')) {
+      process.stdout.write(`     ${paint('gray', line)}\n`);
+    }
+    process.stdout.write('\n');
+  }
   maybePrint411Notice(currentVersion, mainUpdated);
   await maybePrintDashboardHint();
 }

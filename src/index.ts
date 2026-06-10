@@ -862,6 +862,14 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "repair" subcommand — heal a broken install in place (currently the
+  // better-sqlite3 native binding: rebuild in the install dir + re-verify).
+  if (process.argv[2] === 'repair') {
+    const { runRepair } = await import('./cli/repair.js');
+    await runRepair();
+    return;
+  }
+
   // Handle "graph" subcommand
   if (process.argv[2] === 'graph') {
     const action = process.argv[3];
@@ -1173,7 +1181,7 @@ ${bold}DOCS${reset}
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
 
-    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update',
+    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',

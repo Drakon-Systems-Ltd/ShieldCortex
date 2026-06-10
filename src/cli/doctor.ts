@@ -14,6 +14,7 @@ import { isDatabaseInitialized, getDatabase } from '../database/init.js';
 import { shouldShowProUpsell, UPSELL_CONSTANTS, type UpsellInputs } from './upsell.js';
 import { getUpsellState, markUpsellShown } from './upsell-state.js';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
+import { resolveSelfInstallDir } from '../setup/native-binding.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -151,7 +152,9 @@ async function checkDatabase(): Promise<CheckResult> {
       label: 'Database',
       status: 'fail',
       message: `cannot open — ${msg}`,
-      fix: 'Run `npm rebuild better-sqlite3` if you changed Node versions',
+      fix: /bindings file|napi|abi|MODULE_VERSION|was compiled against/i.test(msg)
+        ? `Native DB engine failed to load. Run \`shieldcortex repair\` (rebuilds better-sqlite3 in the install dir + re-verifies), or manually: cd "${resolveSelfInstallDir()}" && npm rebuild better-sqlite3`
+        : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server',
     };
   }
 }
