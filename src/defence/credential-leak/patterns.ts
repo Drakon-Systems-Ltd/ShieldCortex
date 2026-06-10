@@ -391,3 +391,29 @@ export const ALL_CREDENTIAL_PATTERNS: CredentialPattern[] = [
   ...GENERIC_SECRET_PATTERNS,
   ...ENV_SECRET_PATTERNS,
 ];
+
+// ── Single Source of Truth — pattern lookup by name (Phase 17 C3) ──
+
+/** Index of every credential pattern by its `name`, for cross-module reuse. */
+const PATTERNS_BY_NAME: ReadonlyMap<string, CredentialPattern> = new Map(
+  ALL_CREDENTIAL_PATTERNS.map((p) => [p.name, p]),
+);
+
+/**
+ * Fetch specific credential pattern SOURCES by name from the single source of
+ * truth. Lets other detectors (e.g. fragmentation entity extraction) reuse the
+ * canonical token regexes instead of maintaining their own divergent copies —
+ * WITHOUT pulling in the broad/low-confidence heuristics, so detection scope is
+ * unchanged. Throws on an unknown name so a rename can never silently drop a
+ * provider.
+ */
+export function getCredentialRegexesByName(names: string[]): RegExp[] {
+  return names.map((name) => {
+    const pattern = PATTERNS_BY_NAME.get(name);
+    if (!pattern) {
+      throw new Error(`Unknown credential pattern name: "${name}"`);
+    }
+    // Fresh RegExp so callers don't share lastIndex state with the source.
+    return new RegExp(pattern.regex.source, pattern.regex.flags);
+  });
+}

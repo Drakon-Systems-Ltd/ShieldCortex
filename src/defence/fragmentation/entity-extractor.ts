@@ -6,6 +6,7 @@
  */
 
 import { getDatabase } from '../../database/init.js';
+import { getCredentialRegexesByName } from '../credential-leak/patterns.js';
 
 export interface ExtractedEntity {
   type: 'url' | 'credential' | 'command' | 'file_path' | 'api_key' | 'ip_address';
@@ -16,13 +17,23 @@ export interface ExtractedEntity {
 
 const URL_PATTERN = /https?:\/\/[^\s"'<>)\]]+/gi;
 
+// Token-shaped provider regexes are sourced from the single source of truth
+// (credential-leak/patterns.ts) rather than re-declared here, so there is ONE
+// definition of "what an OpenAI / AWS / GitHub key looks like" across the
+// codebase (Phase 17 C3). We pull only the specific prefixed-token providers
+// this extractor already matched — NOT the broad/low-confidence heuristics
+// (bare 32-hex, UUID) — so the set of tokens classified as `api_key` is
+// unchanged. GitLab + the broad Slack-variant matcher have no canonical
+// equivalent, so they stay defined locally (different scope).
 const API_KEY_PATTERNS = [
-  /sk-[A-Za-z0-9]{20,}/g,       // OpenAI-style
-  /AKIA[A-Z0-9]{16}/g,          // AWS access key
-  /ghp_[A-Za-z0-9]{36,}/g,      // GitHub PAT
-  /gho_[A-Za-z0-9]{36,}/g,      // GitHub OAuth
-  /glpat-[A-Za-z0-9\-_]{20,}/g, // GitLab PAT
-  /xox[bposa]-[A-Za-z0-9\-]+/g, // Slack tokens
+  ...getCredentialRegexesByName([
+    'OpenAI API Key',                 // sk-...
+    'AWS Access Key ID',              // AKIA...
+    'GitHub Personal Access Token',   // ghp_...
+    'GitHub OAuth Token',             // gho_...
+  ]),
+  /glpat-[A-Za-z0-9\-_]{20,}/g, // GitLab PAT (no canonical equivalent)
+  /xox[bposa]-[A-Za-z0-9\-]+/g, // Slack tokens (broader than canonical xoxb rule)
 ];
 
 const CREDENTIAL_PATTERN = /(?:token|password|secret|key|auth)[=:\s]+["']?([A-Za-z0-9_\-]{20,})["']?/gi;

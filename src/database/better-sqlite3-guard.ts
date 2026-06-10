@@ -6,14 +6,39 @@
  * toolchain to compile from source), the native load fails — historically
  * with a bare `libc++abi: terminating ... Napi::Error` crash-loop and zero
  * guidance. This module is the single place better-sqlite3 is loaded at
- * runtime: it turns that failure into one actionable message and a clean
- * exit instead of an opaque abort.
+ * runtime: it turns that failure into one actionable, catchable error
+ * instead of an opaque abort.
+ *
+ * It must NEVER call `process.exit()`: this module is reachable from the
+ * library entry (`shieldcortex` → `initDatabase`), so a host app that merely
+ * imports the package must not be terminated. The load failure is thrown as a
+ * typed `NativeModuleLoadError`; a CLI/server entry point can catch it and
+ * decide to exit, but the module itself stays a well-behaved library.
  */
 
 import { createRequire } from 'module';
 import type DatabaseConstructor from 'better-sqlite3';
 
 const require = createRequire(import.meta.url);
+
+/**
+ * Thrown when the better-sqlite3 native binding cannot be loaded (missing /
+ * ABI-mismatched / wrong-arch prebuild, or the module is not installed).
+ *
+ * Carries the actionable, formatted guidance in `.message` so a caller can
+ * print it verbatim. Typed so entry points can distinguish an environmental
+ * install problem from a genuine runtime error and exit cleanly if they choose.
+ */
+export class NativeModuleLoadError extends Error {
+  /** The original error raised by `require('better-sqlite3')`. */
+  readonly cause: unknown;
+
+  constructor(message: string, cause: unknown) {
+    super(message);
+    this.name = 'NativeModuleLoadError';
+    this.cause = cause;
+  }
+}
 
 /**
  * Build the user-facing message for a native-load failure. Pure and
@@ -81,9 +106,10 @@ function loadBetterSqlite3(): typeof DatabaseConstructor {
       process.version,
       String(process.versions.modules),
     );
-    // Clean, single-message fatal exit — never the bare libc++abi crash-loop.
-    console.error(`\n${message}\n`);
-    process.exit(1);
+    // THROW, never exit: this module is imported by the library entry, so it
+    // must not kill a host app. The message carries the rebuild guidance; an
+    // entry point (CLI/server) may catch this and exit if it wants to.
+    throw new NativeModuleLoadError(message, err);
   }
 }
 

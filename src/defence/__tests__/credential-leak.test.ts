@@ -607,3 +607,62 @@ describe('Pipeline Integration', () => {
     expect(result.credentialScan).toBeUndefined();
   });
 });
+
+// ── Single Source of Truth — pattern dedup (Phase 17 C3) ──
+//
+// Credential patterns were duplicated across the credential-leak detector and
+// the fragmentation entity extractor. C3 makes credential-leak/patterns.ts the
+// single source; these tests assert the consolidation dropped no provider that
+// each previously-separate pass detected, and that the unified pattern source
+// (getCredentialRegexesByName) backs the entity extractor.
+describe('credential pattern single source of truth (C3)', () => {
+  it('the unified detector still flags a representative secret from each provider', () => {
+    // One representative secret per provider that the canonical set must catch.
+    const samples: Array<{ label: string; content: string }> = [
+      { label: 'openai', content: 'sk-abcdefghijklmnopqrstuvwxyz1234' },
+      { label: 'anthropic', content: 'sk-ant-abcdefghijklmnopqrstuvwxyz1234' },
+      { label: 'aws', content: 'AKIAIOSFODNN7EXAMPLE' },
+      { label: 'github-pat', content: 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl' },
+      { label: 'github-oauth', content: 'gho_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl' },
+      { label: 'stripe-live', content: 'sk_live_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ12' },
+      { label: 'slack', content: 'xoxb-' + '1234567890-ABCDEFGHIJKLMNOPQRSTUVWX' },
+      { label: 'google', content: 'AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456' },
+      { label: 'npm', content: 'npm_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl' },
+      { label: 'rsa-private-key', content: '-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----' },
+      { label: 'postgres-conn', content: 'postgres://admin:secret@db.host.com:5432/mydb' },
+    ];
+
+    for (const { label, content } of samples) {
+      const result = scanForCredentials(content);
+      expect({ label, leaked: result.leaked }).toEqual({ label, leaked: true });
+    }
+  });
+
+  it('preserves the Phase 17-A SHA / UUID allowlist (public identifiers are NOT flagged)', () => {
+    // A 40-hex git commit SHA and a UUID are public identifiers, not secrets.
+    const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+    expect(scanForCredentials(`commit ${sha}`).leaked).toBe(false);
+    expect(scanForCredentials(`id ${uuid}`).leaked).toBe(false);
+  });
+
+  it('entity extractor sources its token regexes from the single source and still classifies api_key tokens', async () => {
+    const { extractEntities } = await import('../fragmentation/entity-extractor.js');
+    // Same providers the extractor matched before C3 — must still be api_key.
+    for (const token of [
+      'sk-abcdefghijklmnopqrstuvwxyz1234',
+      'AKIAIOSFODNN7EXAMPLE',
+      'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl',
+      'gho_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl',
+      'glpat-abcdefghijklmnopqrst', // unique-to-extractor extra, must survive
+    ]) {
+      const entities = extractEntities(`leak: ${token}`);
+      expect(entities.some((e) => e.type === 'api_key')).toBe(true);
+    }
+  });
+
+  it('getCredentialRegexesByName throws on an unknown name (rename safety)', async () => {
+    const { getCredentialRegexesByName } = await import('../credential-leak/patterns.js');
+    expect(() => getCredentialRegexesByName(['No Such Pattern'])).toThrow(/Unknown credential pattern/);
+  });
+});
