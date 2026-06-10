@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import type { XRayFinding } from './types.js';
 import { scanFile } from './file-scanner.js';
 import { calculateTrustScore } from './trust-score.js';
+import { ALLOW_HIDDEN_DIRS } from './dir-scanner.js';
 import {
   appendActivity,
   emitDetectionEvent,
@@ -50,9 +51,17 @@ const IGNORE_PATH_PATTERNS = [
 
 // ── Helpers ─────────────────────────────────────────────────
 
-function shouldIgnore(filePath: string): boolean {
+export function shouldIgnore(filePath: string): boolean {
   const parts = filePath.split(path.sep);
   if (parts.some(p => IGNORE_DIRS.has(p))) return true;
+
+  // Security-relevant hidden dirs (.github/.claude/.cursor/.codex/.vscode/…)
+  // are explicitly in scope for watch mode — they hold the agent-instruction /
+  // CI surfaces X-Ray exists to protect. Shares ALLOW_HIDDEN_DIRS with the
+  // directory scanner so a scan and a watch agree on what's watched. `.git`,
+  // `node_modules`, `.venv` etc. are NOT in the allow-list and remain excluded
+  // via the IGNORE_DIRS check above (which runs first).
+  if (parts.some(p => ALLOW_HIDDEN_DIRS.has(p))) return false;
 
   // Resolve symlinks to check the real path
   let abs: string;

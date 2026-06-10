@@ -22,6 +22,30 @@ const SKIP_DIRS = new Set([
   'Caches', 'CacheStorage', 'IndexedDB', 'GPUCache',
 ]);
 
+/**
+ * Hidden directories worth scanning. These hold agent-instruction and CI
+ * surfaces (skills, slash commands, settings hooks, workflow YAML, editor
+ * tasks) — the primary prompt-injection / persistence vectors in an AI-agent
+ * codebase. By default `walkDir` skips ALL dot-directories; this allow-list
+ * carves out the ones X-Ray must inspect. `SKIP_DIRS` always wins, so `.git`
+ * et al. stay excluded even though they're hidden.
+ *
+ * Shared with watch mode (`watch.ts` imports this) so a scan and a watch agree
+ * on exactly which hidden dirs are in scope — one source of truth.
+ */
+export const ALLOW_HIDDEN_DIRS = new Set([
+  '.github', '.claude', '.cursor', '.codex', '.vscode', '.agents', '.openclaw',
+]);
+
+/**
+ * Whether to descend into a directory while walking. Recurse when it's not in
+ * the skip-list AND it's either not hidden or explicitly allow-listed. Exported
+ * so watch mode mirrors the identical rule.
+ */
+export function shouldWalkDir(name: string): boolean {
+  return !SKIP_DIRS.has(name) && (!name.startsWith('.') || ALLOW_HIDDEN_DIRS.has(name));
+}
+
 /** Absolute path prefixes to never scan — system/OS files that always produce false positives. */
 const SKIP_PATH_PREFIXES = [
   '/System/',
@@ -86,7 +110,7 @@ function walkDir(dirPath: string, files: string[], depth: number = 0): void {
     const fullPath = path.join(dirPath, entry.name);
 
     if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
+      if (shouldWalkDir(entry.name)) {
         walkDir(fullPath, files, depth + 1);
       }
     } else if (entry.isFile()) {
