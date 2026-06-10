@@ -202,24 +202,16 @@ export function getCloudConfig(): CloudConfig {
 }
 
 export function setCloudConfig(updates: Partial<CloudConfig>): void {
-  // Read-modify-write through the shared helpers: preserves every other field
+  // Read-modify-write through mutateRawConfig: preserves every other field
   // (defenceMode, deviceId, sync controls…) and writes atomically with the
   // embedded `_sig`. On a corrupt/unreadable file we do NOT silently start
-  // fresh — that would wipe a credential the user is still relying on; abort
-  // instead so the caller surfaces the problem rather than losing data.
-  const { data: existing, parseFailed } = readRawConfigState();
-  if (parseFailed) {
-    throw new Error(
-      '[ShieldCortex] Refusing to update cloud config: existing config.json is unreadable. ' +
-      'Fix or remove the corrupt file before changing cloud settings to avoid losing credentials.',
-    );
-  }
-
-  if (updates.cloudApiKey !== undefined) existing.cloudApiKey = updates.cloudApiKey;
-  if (updates.cloudBaseUrl !== undefined) existing.cloudBaseUrl = updates.cloudBaseUrl;
-  if (updates.cloudEnabled !== undefined) existing.cloudEnabled = updates.cloudEnabled;
-
-  writeRawConfig(existing);
+  // fresh — that would wipe a credential the user is still relying on; the
+  // helper throws so the caller surfaces the problem rather than losing data.
+  mutateRawConfig((existing) => {
+    if (updates.cloudApiKey !== undefined) existing.cloudApiKey = updates.cloudApiKey;
+    if (updates.cloudBaseUrl !== undefined) existing.cloudBaseUrl = updates.cloudBaseUrl;
+    if (updates.cloudEnabled !== undefined) existing.cloudEnabled = updates.cloudEnabled;
+  });
 
   // Invalidate the derived cloud-config cache (writeRawConfig already cleared
   // the raw cache and tamper flag).
@@ -245,7 +237,11 @@ function normalizeProjectList(value: unknown): string[] {
 }
 
 export function getCloudSyncControls(): CloudSyncControls {
-  const raw = readRawConfig();
+  // This is a READER. On a parse failure we must return the in-memory defaults
+  // and NOT write — readRawConfigState preserves `parseFailed` so the one-shot
+  // migration below never runs against a `{}` derived from a corrupt file
+  // (which would persist a near-empty, signed config and wipe cloudApiKey).
+  const { data: raw, parseFailed } = readRawConfigState();
 
   // One-shot v4.27 migration: pre-upgrade configs with cloud sync enabled
   // were silently shipping CONFIDENTIAL+ content because `excludeSensitive`
@@ -253,14 +249,22 @@ export function getCloudSyncControls(): CloudSyncControls {
   // no prior migration stamp) and rewrite them to the new safe default. If
   // the user later opts back in via `--cloud-include-sensitive`, that writes
   // `cloudSyncExcludeSensitive: false` explicitly and this branch is skipped.
+  // Skip entirely on parseFailed: never write through a reader path.
   if (
+    !parseFailed &&
     raw.cloudEnabled === true &&
     typeof raw.cloudSyncExcludeSensitive !== 'boolean' &&
     typeof raw.cloudSyncDefaultsMigratedAt !== 'string'
   ) {
+    // Route the migration write through the guarded helper (skip-policy: a
+    // reader must never throw). The earlier !parseFailed guard makes the skip
+    // path unreachable here, but going through mutateRawConfig keeps the
+    // single-source-of-truth invariant: no bare writeRawConfig outside it.
+    mutateRawConfig((m) => {
+      m.cloudSyncExcludeSensitive = true;
+      m.cloudSyncDefaultsMigratedAt = new Date().toISOString();
+    }, 'skip');
     raw.cloudSyncExcludeSensitive = true;
-    raw.cloudSyncDefaultsMigratedAt = new Date().toISOString();
-    writeRawConfig(raw);
   }
 
   const projectMode = raw.cloudSyncProjectMode;
@@ -281,12 +285,12 @@ export function getCloudSyncControls(): CloudSyncControls {
 }
 
 export function setCloudSyncControls(updates: Partial<CloudSyncControls>): void {
-  const raw = readRawConfig();
-  if (updates.projectMode !== undefined) raw.cloudSyncProjectMode = updates.projectMode;
-  if (updates.projects !== undefined) raw.cloudSyncProjects = normalizeProjectList(updates.projects);
-  if (updates.contentMode !== undefined) raw.cloudSyncContentMode = updates.contentMode;
-  if (updates.excludeSensitive !== undefined) raw.cloudSyncExcludeSensitive = updates.excludeSensitive;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    if (updates.projectMode !== undefined) raw.cloudSyncProjectMode = updates.projectMode;
+    if (updates.projects !== undefined) raw.cloudSyncProjects = normalizeProjectList(updates.projects);
+    if (updates.contentMode !== undefined) raw.cloudSyncContentMode = updates.contentMode;
+    if (updates.excludeSensitive !== undefined) raw.cloudSyncExcludeSensitive = updates.excludeSensitive;
+  });
 }
 
 export function shouldSyncProject(project: string | null | undefined, controls: CloudSyncControls = getCloudSyncControls()): boolean {
@@ -344,6 +348,15 @@ function readRawConfigState(): RawConfigState {
 
   try {
     if (existsSync(configFile)) {
+      // Capture mtime BEFORE reading the bytes. The cache key must describe the
+      // exact bytes we're about to read: if we stat AFTER readFileSync, a
+      // concurrent write between read and stat would cache the OLD bytes under
+      // the NEW mtime, so a later read at that mtime would serve stale content.
+      // Stat-before-read closes that window (a write after this stat bumps the
+      // mtime past the cached key, forcing a re-read next time).
+      let mtimeMsForCache: number | null = null;
+      try { mtimeMsForCache = statSync(configFile).mtimeMs; } catch { /* best-effort */ }
+
       const content = readFileSync(configFile, 'utf-8');
       // An empty file is treated as "no config yet", not a parse failure.
       if (content.trim().length === 0) {
@@ -372,12 +385,13 @@ function readRawConfigState(): RawConfigState {
       // can't leak into CloudConfig or get re-serialised as a normal field.
       delete data._sig;
 
-      // Populate the mtime cache from the parsed (sig-stripped) object.
-      try {
+      // Populate the mtime cache from the parsed (sig-stripped) object, keyed on
+      // the mtime captured BEFORE the read (matches the bytes actually parsed).
+      if (mtimeMsForCache !== null) {
         cachedRawConfig = { ...data };
         cachedRawConfigFile = configFile;
-        cachedRawConfigMtimeMs = statSync(configFile).mtimeMs;
-      } catch { /* caching is best-effort */ }
+        cachedRawConfigMtimeMs = mtimeMsForCache;
+      }
 
       return { data, parseFailed: false };
     }
@@ -420,6 +434,10 @@ function writeRawConfig(raw: Record<string, unknown>): void {
   const tmpFile = `${configFile}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
     writeFileSync(tmpFile, out, { mode: 0o600 });
+    // On Windows, renameSync over an EXISTING target can throw EPERM if another
+    // process has the destination open concurrently. This is non-corrupting:
+    // the original config is left intact and the catch below removes the tmp
+    // file and rethrows, so a write may FAIL rather than damage the config.
     renameSync(tmpFile, configFile);
   } catch (err) {
     try { if (existsSync(tmpFile)) rmSync(tmpFile, { force: true }); } catch { /* best-effort */ }
@@ -441,30 +459,74 @@ function writeRawConfig(raw: Record<string, unknown>): void {
   configTampered = false;
 }
 
+/**
+ * The ONLY sanctioned read-modify-write path for config.json.
+ *
+ * EVERY mutating accessor MUST go through this helper. Do NOT call
+ * `writeRawConfig` with a `raw` object obtained from a bare `readRawConfig()`:
+ * `readRawConfig()` collapses a parse failure to `{}`, discarding the
+ * `parseFailed` flag, so mutating that `{}` and writing it back atomically
+ * persists a near-empty, validly-signed config — wiping `cloudApiKey` and every
+ * other setting the corrupt file still holds, with no error signal. This helper
+ * reads through `readRawConfigState()` (which preserves `parseFailed`) and
+ * refuses to write when the on-disk config is unreadable.
+ *
+ * `onParseFail`:
+ *   - `'throw'` (default): surface corruption to user-facing/explicit setters so
+ *     the caller sees the problem rather than silently losing credentials.
+ *   - `'skip'`: silently no-op for automatic / hot-path writes that must NEVER
+ *     throw (background sync, read-with-migration). Returns false so the caller
+ *     can tell the write was skipped.
+ *
+ * Returns true if the mutation was applied and persisted, false if it was
+ * skipped because the config was unparseable (`onParseFail: 'skip'`).
+ */
+function mutateRawConfig(
+  fn: (raw: Record<string, unknown>) => void,
+  onParseFail: 'throw' | 'skip' = 'throw',
+): boolean {
+  const { data, parseFailed } = readRawConfigState();
+  if (parseFailed) {
+    console.error('[ShieldCortex] config.json is unreadable — refusing to overwrite (would wipe settings incl. cloudApiKey). Fix or remove the file.');
+    if (onParseFail === 'throw') {
+      throw new Error(
+        'ShieldCortex config.json is corrupt/unparseable; refusing to overwrite to avoid losing settings. ' +
+        'Fix or remove ~/.shieldcortex/config.json and retry.',
+      );
+    }
+    return false;
+  }
+  fn(data);
+  writeRawConfig(data);
+  return true;
+}
+
 export function getTrustedSkills(): string[] {
   const raw = readRawConfig();
   return Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
 }
 
 export function addTrustedSkill(path: string): void {
-  const raw = readRawConfig();
-  const list = Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
-  if (!list.includes(path)) {
-    list.push(path);
+  // Throw-policy explicit setter: on a corrupt config mutateRawConfig throws
+  // (surfacing the corruption) rather than wiping it. The closure is itself a
+  // no-op write when the skill is already present, which is acceptable churn on
+  // a VALID config and avoids a second bare read just to skip a write — the one
+  // case we must not silently swallow is the corrupt one, which the helper
+  // handles by throwing.
+  mutateRawConfig((raw) => {
+    const list = Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
+    if (!list.includes(path)) list.push(path);
     raw.trustedSkills = list;
-    writeRawConfig(raw);
-  }
+  });
 }
 
 export function removeTrustedSkill(path: string): void {
-  const raw = readRawConfig();
-  const list = Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
-  const idx = list.indexOf(path);
-  if (idx !== -1) {
-    list.splice(idx, 1);
+  mutateRawConfig((raw) => {
+    const list = Array.isArray(raw.trustedSkills) ? raw.trustedSkills as string[] : [];
+    const idx = list.indexOf(path);
+    if (idx !== -1) list.splice(idx, 1);
     raw.trustedSkills = list;
-    writeRawConfig(raw);
-  }
+  });
 }
 
 // ── Cloud Iron Dome Cache ─────────────────────────────
@@ -473,9 +535,9 @@ export function removeTrustedSkill(path: string): void {
  * Persist cloud Iron Dome data (patterns + policy) to config.json with HMAC integrity.
  */
 export function setCloudIronDomeCache(data: Record<string, unknown>): void {
-  const raw = readRawConfig();
-  raw.cloudIronDome = data;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    raw.cloudIronDome = data;
+  });
 }
 
 /**
@@ -517,18 +579,27 @@ export function updateLastSyncAt(): void {
 
 function persistLastSyncAt(nowMs: number): void {
   if (pendingLastSyncAt === null) return;
-  const { data: raw, parseFailed } = readRawConfigState();
-  if (parseFailed) return; // never clobber an unreadable config
-  raw.lastSyncAt = pendingLastSyncAt;
-  writeRawConfig(raw);
-  lastSyncPersistedAtMs = nowMs;
+  // Automatic / hot path (fires after cloud uploads): MUST NOT throw. The
+  // 'skip' policy makes mutateRawConfig a silent no-op on an unreadable config
+  // (returns false) instead of clobbering it. Only stamp the debounce clock
+  // when the write actually landed, so a skipped write is retried next call.
+  const written = mutateRawConfig((raw) => {
+    raw.lastSyncAt = pendingLastSyncAt;
+  }, 'skip');
+  if (written) lastSyncPersistedAtMs = nowMs;
 }
 
 /**
  * Force-persist the latest in-memory lastSyncAt regardless of the debounce
- * window. Intended for a shutdown path so the final sync timestamp isn't lost
- * if the process exits inside the debounce window. Safe no-op if nothing is
- * pending.
+ * window, so the final sync timestamp isn't lost if the process exits inside
+ * the debounce window. Safe no-op if nothing is pending.
+ *
+ * Available for a shutdown path (not currently wired): the existing
+ * SIGINT/SIGTERM/exit handlers (src/index.ts, src/api/visualization-server.ts)
+ * are MCP-server / dashboard lifecycle concerns and don't obviously own the
+ * cloud-sync clock, so wiring is left to whichever shutdown owner adopts it
+ * rather than bolted onto an unrelated handler. Losing at most one debounced
+ * timestamp on abrupt exit is non-critical (the next sync re-stamps it).
  */
 export function flushLastSyncAt(): void {
   persistLastSyncAt(Date.now());
@@ -570,9 +641,9 @@ export function setDefenceMode(mode: DefenceMode): void {
   if (!VALID_MODES.includes(mode)) {
     throw new Error(`Invalid defence mode: ${mode}. Must be one of: ${VALID_MODES.join(', ')}`);
   }
-  const raw = readRawConfig();
-  raw.defenceMode = mode;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    raw.defenceMode = mode;
+  });
 }
 
 // ── Verify Config ─────────────────────────────────────
@@ -609,12 +680,12 @@ export function getVerifyConfig(): VerifyConfig {
  * Persists LLM verification config to ~/.shieldcortex/config.json.
  */
 export function setVerifyConfig(updates: Partial<VerifyConfig>): void {
-  const raw = readRawConfig();
-  if (updates.verifyEnabled !== undefined) raw.verifyEnabled = updates.verifyEnabled;
-  if (updates.verifyMode !== undefined) raw.verifyMode = updates.verifyMode;
-  if (updates.verifyTriggers !== undefined) raw.verifyTriggers = updates.verifyTriggers;
-  if (updates.verifyTimeoutMs !== undefined) raw.verifyTimeoutMs = updates.verifyTimeoutMs;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    if (updates.verifyEnabled !== undefined) raw.verifyEnabled = updates.verifyEnabled;
+    if (updates.verifyMode !== undefined) raw.verifyMode = updates.verifyMode;
+    if (updates.verifyTriggers !== undefined) raw.verifyTriggers = updates.verifyTriggers;
+    if (updates.verifyTimeoutMs !== undefined) raw.verifyTimeoutMs = updates.verifyTimeoutMs;
+  });
 }
 
 // ── Review Copilot Config ───────────────────────────────
@@ -667,15 +738,15 @@ export function getReviewCopilotConfig(): ReviewCopilotConfig {
  * Persists local Review Copilot config.
  */
 export function setReviewCopilotConfig(updates: Partial<ReviewCopilotConfig>): void {
-  const raw = readRawConfig();
-  const existing = raw.reviewCopilot && typeof raw.reviewCopilot === 'object'
-    ? raw.reviewCopilot as Record<string, unknown>
-    : {};
-  raw.reviewCopilot = {
-    ...existing,
-    ...updates,
-  };
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    const existing = raw.reviewCopilot && typeof raw.reviewCopilot === 'object'
+      ? raw.reviewCopilot as Record<string, unknown>
+      : {};
+    raw.reviewCopilot = {
+      ...existing,
+      ...updates,
+    };
+  });
 }
 
 // ── Ranker Config ─────────────────────────────────────
@@ -744,15 +815,15 @@ export function getRankerConfig(): RankerConfig {
  * fields supplied in `updates` are written; other fields are preserved.
  */
 export function setRankerConfig(updates: Partial<RankerConfig>): void {
-  const raw = readRawConfig();
-  const existing = raw.ranker && typeof raw.ranker === 'object'
-    ? raw.ranker as Record<string, unknown>
-    : {};
-  if (updates.engine !== undefined) existing.engine = updates.engine;
-  if (updates.rrfK !== undefined) existing.rrfK = updates.rrfK;
-  if (updates.weights !== undefined) existing.weights = updates.weights;
-  raw.ranker = existing;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    const existing = raw.ranker && typeof raw.ranker === 'object'
+      ? raw.ranker as Record<string, unknown>
+      : {};
+    if (updates.engine !== undefined) existing.engine = updates.engine;
+    if (updates.rrfK !== undefined) existing.rrfK = updates.rrfK;
+    if (updates.weights !== undefined) existing.weights = updates.weights;
+    raw.ranker = existing;
+  });
 }
 
 // ── OpenClaw Memory Config ────────────────────────────
@@ -799,16 +870,16 @@ export function getOpenClawMemoryConfig(): OpenClawMemoryConfig {
  * Persists OpenClaw memory integration config.
  */
 export function setOpenClawMemoryConfig(updates: Partial<OpenClawMemoryConfig>): void {
-  const raw = readRawConfig();
-  if (updates.autoMemory !== undefined) raw.openclawAutoMemory = updates.autoMemory;
-  if (updates.dedupe !== undefined) raw.openclawAutoMemoryDedupe = updates.dedupe;
-  if (updates.noveltyThreshold !== undefined) {
-    raw.openclawAutoMemoryNoveltyThreshold = clamp(updates.noveltyThreshold, 0.6, 0.99);
-  }
-  if (updates.maxRecent !== undefined) {
-    raw.openclawAutoMemoryMaxRecent = Math.floor(clamp(updates.maxRecent, 50, 1000));
-  }
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    if (updates.autoMemory !== undefined) raw.openclawAutoMemory = updates.autoMemory;
+    if (updates.dedupe !== undefined) raw.openclawAutoMemoryDedupe = updates.dedupe;
+    if (updates.noveltyThreshold !== undefined) {
+      raw.openclawAutoMemoryNoveltyThreshold = clamp(updates.noveltyThreshold, 0.6, 0.99);
+    }
+    if (updates.maxRecent !== undefined) {
+      raw.openclawAutoMemoryMaxRecent = Math.floor(clamp(updates.maxRecent, 50, 1000));
+    }
+  });
 }
 
 /**
@@ -843,9 +914,9 @@ export function isProactiveRecallEnabled(): boolean {
  * Persists proactive recall preference to ~/.shieldcortex/config.json.
  */
 export function setProactiveRecall(enabled: boolean): void {
-  const raw = readRawConfig();
-  raw.proactiveRecall = enabled;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    raw.proactiveRecall = enabled;
+  });
 }
 
 /**
@@ -854,32 +925,32 @@ export function setProactiveRecall(enabled: boolean): void {
  * so the flip is a one-command undo.
  */
 export function restore410Defaults(): void {
-  const raw = readRawConfig();
-  raw.proactiveRecall = true;
-  const existingInterceptor = (raw.interceptor && typeof raw.interceptor === 'object')
-    ? raw.interceptor as Record<string, unknown>
-    : {};
-  const existingSeverity = (existingInterceptor.severityActions && typeof existingInterceptor.severityActions === 'object')
-    ? existingInterceptor.severityActions as Record<string, string>
-    : {};
-  raw.interceptor = {
-    ...existingInterceptor,
-    severityActions: {
-      ...existingSeverity,
-      low: 'log',
-      medium: 'warn',
-      high: 'require_approval',
-      critical: 'require_approval',
-    },
-  };
-  const existingSessionStart = (raw.sessionStart && typeof raw.sessionStart === 'object')
-    ? raw.sessionStart as Record<string, unknown>
-    : {};
-  raw.sessionStart = {
-    ...existingSessionStart,
-    preamble: 'minimal',
-  };
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    raw.proactiveRecall = true;
+    const existingInterceptor = (raw.interceptor && typeof raw.interceptor === 'object')
+      ? raw.interceptor as Record<string, unknown>
+      : {};
+    const existingSeverity = (existingInterceptor.severityActions && typeof existingInterceptor.severityActions === 'object')
+      ? existingInterceptor.severityActions as Record<string, string>
+      : {};
+    raw.interceptor = {
+      ...existingInterceptor,
+      severityActions: {
+        ...existingSeverity,
+        low: 'log',
+        medium: 'warn',
+        high: 'require_approval',
+        critical: 'require_approval',
+      },
+    };
+    const existingSessionStart = (raw.sessionStart && typeof raw.sessionStart === 'object')
+      ? raw.sessionStart as Record<string, unknown>
+      : {};
+    raw.sessionStart = {
+      ...existingSessionStart,
+      preamble: 'minimal',
+    };
+  });
 }
 
 // ── Auto-Memory Hook Config ───────────────────────────
@@ -917,14 +988,14 @@ export function getAutoMemoryEnableConfig(): AutoMemoryEnableConfig {
  * runtime gate cannot disagree.
  */
 export function setAutoMemoryEnableConfig(updates: Partial<AutoMemoryEnableConfig>): void {
-  const raw = readRawConfig();
-  const existing = raw.autoMemory && typeof raw.autoMemory === 'object'
-    ? raw.autoMemory as Record<string, unknown>
-    : {};
-  if (updates.enableStop !== undefined) existing.enableStop = updates.enableStop;
-  if (updates.enableSessionEnd !== undefined) existing.enableSessionEnd = updates.enableSessionEnd;
-  raw.autoMemory = existing;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    const existing = raw.autoMemory && typeof raw.autoMemory === 'object'
+      ? raw.autoMemory as Record<string, unknown>
+      : {};
+    if (updates.enableStop !== undefined) existing.enableStop = updates.enableStop;
+    if (updates.enableSessionEnd !== undefined) existing.enableSessionEnd = updates.enableSessionEnd;
+    raw.autoMemory = existing;
+  });
 }
 
 // ── Tool Response Scan Config ─────────────────────────
@@ -954,10 +1025,10 @@ export function getToolResponseScanConfig(): ToolResponseScanConfig {
  * Persists tool response scanning config.
  */
 export function setToolResponseScanConfig(updates: Partial<ToolResponseScanConfig>): void {
-  const raw = readRawConfig();
-  if (updates.scanToolResponses !== undefined) raw.scanToolResponses = updates.scanToolResponses;
-  if (updates.toolResponseMode !== undefined) raw.toolResponseMode = updates.toolResponseMode;
-  writeRawConfig(raw);
+  mutateRawConfig((raw) => {
+    if (updates.scanToolResponses !== undefined) raw.scanToolResponses = updates.scanToolResponses;
+    if (updates.toolResponseMode !== undefined) raw.toolResponseMode = updates.toolResponseMode;
+  });
 }
 
 // ── Device Identity ────────────────────────────────────
@@ -977,11 +1048,16 @@ export function getDeviceId(): string {
     // `{ deviceId }` over the corrupt bytes and destroy cloudApiKey and every
     // other setting the file still holds. Return an ephemeral id this run and
     // leave the file untouched — identity persists once the file is readable.
+    // (mutateRawConfig('skip') would no-op here too, but we want this specific
+    // diagnostic, so we short-circuit before calling it.)
     console.error('[ShieldCortex] config.json unreadable — using an ephemeral device id this run; identity was NOT persisted.');
     return id;
   }
-  raw.deviceId = id;
-  writeRawConfig(raw);
+  // Persist through the guarded helper so no bare writeRawConfig exists outside
+  // mutateRawConfig; skip-policy keeps this read-then-persist path non-throwing.
+  mutateRawConfig((m) => {
+    m.deviceId = id;
+  }, 'skip');
   return id;
 }
 
@@ -1000,7 +1076,8 @@ export function getDeviceName(): string {
     console.error('[ShieldCortex] config.json unreadable — using the live hostname this run; device name was NOT persisted.');
     return name;
   }
-  raw.deviceName = name;
-  writeRawConfig(raw);
+  mutateRawConfig((m) => {
+    m.deviceName = name;
+  }, 'skip');
   return name;
 }

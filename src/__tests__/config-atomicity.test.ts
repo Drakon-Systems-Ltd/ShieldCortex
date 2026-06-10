@@ -232,6 +232,88 @@ describe('config atomicity + integrity hardening', () => {
     });
   });
 
+  // ── Critical gap fix: EVERY mutating writer is parseFail-guarded ─────
+  //
+  // Phase 7 only guarded setCloudConfig/getDeviceId/getDeviceName. 12 other
+  // writers still read via readRawConfig() (which collapses a parse failure to
+  // {}), mutated that {}, and wrote it back — atomically persisting a
+  // near-empty, validly-signed config and DESTROYING cloudApiKey. These tests
+  // drive each writer against a corrupt config and assert it never wipes.
+  //
+  // The list is explicit so a future unguarded writer added by omission fails
+  // here. throw-policy writers MUST throw and leave the corrupt bytes intact;
+  // skip-policy writers MUST no-op and leave the corrupt bytes intact. Either
+  // way the on-disk file must be byte-identical (sentinel preserved in it).
+  describe('all config writers refuse to wipe a corrupt config', () => {
+    const SENTINEL = 'sc_live_SENTINEL';
+    // Bytes that JSON.parse throws on but still contain the sentinel, so we can
+    // assert the credential survived in the raw on-disk bytes.
+    const CORRUPT = `{ "cloudApiKey": "${SENTINEL}", THIS IS NOT VALID JSON`;
+
+    type Policy = 'throw' | 'skip';
+    interface WriterCase {
+      name: string;
+      policy: Policy;
+      invoke: (config: typeof import('../cloud/config.js')) => void;
+    }
+
+    // Every user-facing/explicit setter (throw) + every automatic/hot-path
+    // writer (skip) that performs a read-modify-write of config.json.
+    const writers: WriterCase[] = [
+      { name: 'setCloudConfig', policy: 'throw', invoke: (c) => c.setCloudConfig({ cloudApiKey: 'sc_live_OVERWRITE', cloudEnabled: true }) },
+      { name: 'setDefenceMode', policy: 'throw', invoke: (c) => c.setDefenceMode('strict') },
+      { name: 'setCloudSyncControls', policy: 'throw', invoke: (c) => c.setCloudSyncControls({ contentMode: 'metadata' }) },
+      { name: 'addTrustedSkill', policy: 'throw', invoke: (c) => c.addTrustedSkill('/some/new/skill.md') },
+      { name: 'removeTrustedSkill', policy: 'throw', invoke: (c) => c.removeTrustedSkill('/some/skill.md') },
+      { name: 'setCloudIronDomeCache', policy: 'throw', invoke: (c) => c.setCloudIronDomeCache({ patterns: [] }) },
+      { name: 'setProactiveRecall', policy: 'throw', invoke: (c) => c.setProactiveRecall(true) },
+      { name: 'restore410Defaults', policy: 'throw', invoke: (c) => c.restore410Defaults() },
+      { name: 'setVerifyConfig', policy: 'throw', invoke: (c) => c.setVerifyConfig({ verifyEnabled: true }) },
+      { name: 'setRankerConfig', policy: 'throw', invoke: (c) => c.setRankerConfig({ engine: 'legacy' }) },
+      { name: 'setOpenClawMemoryConfig', policy: 'throw', invoke: (c) => c.setOpenClawMemoryConfig({ autoMemory: false }) },
+      { name: 'setToolResponseScanConfig', policy: 'throw', invoke: (c) => c.setToolResponseScanConfig({ scanToolResponses: false }) },
+      { name: 'setReviewCopilotConfig', policy: 'throw', invoke: (c) => c.setReviewCopilotConfig({ enabled: true }) },
+      { name: 'setAutoMemoryEnableConfig', policy: 'throw', invoke: (c) => c.setAutoMemoryEnableConfig({ enableStop: true }) },
+      // Skip-policy: automatic / hot-path writers that must NEVER throw.
+      { name: 'getCloudSyncControls (migration write)', policy: 'skip', invoke: (c) => { c.getCloudSyncControls(); } },
+      { name: 'getDeviceId (lazy persist)', policy: 'skip', invoke: (c) => { c.getDeviceId(); } },
+      { name: 'getDeviceName (lazy persist)', policy: 'skip', invoke: (c) => { c.getDeviceName(); } },
+      { name: 'updateLastSyncAt → persistLastSyncAt', policy: 'skip', invoke: (c) => { c.updateLastSyncAt(); c.flushLastSyncAt(); } },
+    ];
+
+    for (const w of writers) {
+      it(`${w.name} (${w.policy}) does not wipe cloudApiKey on a corrupt config`, async () => {
+        const config = await import('../cloud/config.js');
+        // (a) Seed a valid config carrying the sentinel credential.
+        config.setCloudConfig({ cloudApiKey: SENTINEL, cloudEnabled: true });
+        expect(config.getCloudConfig().cloudApiKey).toBe(SENTINEL);
+
+        // (b) Write unparseable bytes over config.json.
+        writeFileSync(configFile, CORRUPT);
+        config.clearCloudConfigCache();
+
+        // (c) Invoke the writer with valid args.
+        let threw = false;
+        try {
+          w.invoke(config);
+        } catch {
+          threw = true;
+        }
+
+        // (d) Assert by policy. Either way the corrupt bytes must be intact and
+        // the sentinel must still be present in the raw on-disk bytes — no wipe.
+        if (w.policy === 'throw') {
+          expect(threw).toBe(true);
+        } else {
+          expect(threw).toBe(false);
+        }
+        const after = readFileSync(configFile, 'utf-8');
+        expect(after).toBe(CORRUPT); // byte-identical: corrupt bytes preserved
+        expect(after).toContain(SENTINEL); // credential never destroyed
+      });
+    }
+  });
+
   // ── Concurrency sanity: interleaved writes/reads never see {} or tamper ──
   describe('interleaved writes/reads', () => {
     it('a present config is never observed as {} and never false-tampers', async () => {
