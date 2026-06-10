@@ -9,6 +9,10 @@ inputs:
     description: 'Fail the check if high or critical findings exist'
     required: false
     default: 'true'
+  upload-sarif:
+    description: 'Upload findings to GitHub Code Scanning (Security tab). Requires security-events: write permission.'
+    required: false
+    default: 'true'
   node-version:
     description: 'Node.js version to use'
     required: false
@@ -17,10 +21,13 @@ inputs:
 outputs:
   grade:
     description: 'Security grade (A-F)'
+    value: ${{ steps.audit.outputs.grade }}
   findings:
     description: 'Number of findings'
+    value: ${{ steps.audit.outputs.findings }}
   report:
     description: 'Full JSON report'
+    value: ${{ steps.audit.outputs.report }}
 
 runs:
   using: 'composite'
@@ -45,16 +52,38 @@ runs:
 
         echo "grade=$GRADE" >> $GITHUB_OUTPUT
         echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
+        echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+        echo "high=$HIGH" >> $GITHUB_OUTPUT
         echo "report=$REPORT" >> $GITHUB_OUTPUT
 
         # Generate markdown for PR comment
         MARKDOWN=$(npx -y shieldcortex@latest audit --markdown 2>/dev/null || echo "ShieldCortex scan failed")
         echo "$MARKDOWN" >> $GITHUB_STEP_SUMMARY
 
-        # Fail if requested and critical/high findings exist
-        if [ "${{ inputs.fail-on-high }}" = "true" ]; then
-          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
-            echo "::error::ShieldCortex found $CRITICAL critical and $HIGH high severity findings"
-            exit 1
-          fi
+    - name: Generate SARIF
+      if: ${{ inputs.upload-sarif == 'true' }}
+      shell: bash
+      run: |
+        # Pure SARIF on stdout — write it to a file for upload.
+        npx -y shieldcortex@latest audit --sarif > shieldcortex.sarif 2>/dev/null || echo '{}' > shieldcortex.sarif
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: ${{ inputs.upload-sarif == 'true' && github.repository != '' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: shieldcortex.sarif
+        category: shieldcortex
+
+    - name: Enforce severity gate
+      if: ${{ always() && inputs.fail-on-high == 'true' }}
+      shell: bash
+      env:
+        CRITICAL: ${{ steps.audit.outputs.critical }}
+        HIGH: ${{ steps.audit.outputs.high }}
+      run: |
+        # Fail the check if critical/high findings exist. Runs after SARIF
+        # upload so findings still reach the Security tab when the gate fails.
+        if [ "${CRITICAL:-0}" -gt 0 ] || [ "${HIGH:-0}" -gt 0 ]; then
+          echo "::error::ShieldCortex found ${CRITICAL:-0} critical and ${HIGH:-0} high severity findings"
+          exit 1
         fi

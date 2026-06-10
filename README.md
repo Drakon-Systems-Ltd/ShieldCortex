@@ -134,6 +134,27 @@ shieldcortex xray ./my-project --ci --threshold=HIGH  # CI/CD gate
 
 Detects prompt injection in files, steganographic payloads, obfuscated code, network beacons, eval/exec patterns, credential leaks in metadata, and dependency risk indicators. Results appear in the dashboard X-Ray tab with actionable review, ignore, resolve, and quarantine workflows.
 
+**GitHub Code Scanning (SARIF)** — emit findings as SARIF 2.1.0 so they show up in your repository's **Security → Code scanning** tab. The `xray`, `audit`, and `mcp scan` commands all accept `--sarif`, which prints a SARIF document (and nothing else) to stdout:
+
+```bash
+shieldcortex xray ./src --sarif > shieldcortex.sarif
+shieldcortex audit --sarif > shieldcortex.sarif
+shieldcortex mcp scan --all --sarif > shieldcortex.sarif
+```
+
+The bundled GitHub Action (`Drakon-Systems-Ltd/ShieldCortex`) uploads this for you automatically (set `upload-sarif: false` to disable). To wire it into your own workflow:
+
+```yaml
+permissions:
+  security-events: write   # required for SARIF upload
+steps:
+  - run: npx shieldcortex@latest xray ./src --sarif > shieldcortex.sarif
+  - uses: github/codeql-action/upload-sarif@v3
+    if: always()           # upload even if a later gate fails the job
+    with:
+      sarif_file: shieldcortex.sarif
+```
+
 **Docker Install Safety** — auto-detects container environments and skips plugin install to avoid gateway crashes. No configuration needed.
 
 <br>
@@ -755,6 +776,7 @@ shieldcortex audit                # Dependency scanner (Pro)
 shieldcortex xray <path>          # Deep file analysis for hidden threats
 shieldcortex xray <path> --watch  # Real-time file watcher
 shieldcortex xray <path> --ci     # CI/CD gate (exits non-zero on findings)
+shieldcortex xray <path> --sarif  # SARIF 2.1.0 output (GitHub Code Scanning)
 shieldcortex cortex confirm       # Capture positive feedback
 shieldcortex config --key value   # Update configuration
 ```

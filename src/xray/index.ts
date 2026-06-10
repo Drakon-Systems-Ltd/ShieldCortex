@@ -19,6 +19,7 @@ import { scanDirectory } from './dir-scanner.js';
 import { inspectNpmPackage } from './npm-inspector.js';
 import { calculateTrustScore } from './trust-score.js';
 import { formatXRayReport, formatXRayMarkdown } from './report.js';
+import { toSarif } from './sarif.js';
 import { watchDirectory } from './watch.js';
 import { appendActivity, appendHistory, createHistoryEntry, type XRayTargetType } from './activity.js';
 
@@ -35,6 +36,8 @@ export { watchDirectory } from './watch.js';
 export { handlePreinstallCheck } from './preinstall.js';
 export { xrayMemoryContent } from './memory-guard.js';
 export type { MemoryGuardResult } from './memory-guard.js';
+export { toSarif } from './sarif.js';
+export type { SarifLog } from './sarif.js';
 
 // ── Usage tracking ──────────────────────────────────────────
 
@@ -105,6 +108,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
   const deep = flags.has('--deep');
   const jsonOutput = flags.has('--json');
   const markdownOutput = flags.has('--markdown');
+  const sarifOutput = flags.has('--sarif') || args.includes('--format=sarif');
   const ciMode = flags.has('--ci');
   const watchMode = flags.has('--watch');
   const ciThreshold = (() => {
@@ -121,6 +125,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
     console.error('  --deep      Deep scan with full analysis (Pro)');
     console.error('  --json      Output JSON result');
     console.error('  --markdown  Output markdown report');
+    console.error('  --sarif     Output SARIF 2.1.0 (GitHub Code Scanning)');
     console.error('  --ci        CI/CD mode: exit code 1 if risk >= threshold');
     console.error('  --threshold=LEVEL  Risk threshold for --ci (CRITICAL|HIGH|MEDIUM|LOW, default: HIGH)');
     console.error('  --watch     Watch directory for changes and scan incrementally');
@@ -229,7 +234,11 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
   });
 
   // Output
-  if (jsonOutput) {
+  if (sarifOutput) {
+    // Pure SARIF JSON on stdout — nothing else, so the file can be uploaded
+    // straight to GitHub Code Scanning.
+    console.log(JSON.stringify(toSarif(result.findings), null, 2));
+  } else if (jsonOutput) {
     console.log(JSON.stringify(result, null, 2));
   } else if (markdownOutput) {
     console.log(formatXRayMarkdown(result));

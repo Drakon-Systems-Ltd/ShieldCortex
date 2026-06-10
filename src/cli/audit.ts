@@ -8,6 +8,7 @@
  *   npx shieldcortex audit                  # Terminal report
  *   npx shieldcortex audit --json           # JSON output
  *   npx shieldcortex audit --markdown       # Markdown output
+ *   npx shieldcortex audit --sarif          # SARIF 2.1.0 output (GitHub Code Scanning)
  *   npx shieldcortex audit --ci             # CI mode (exit code reflects grade)
  *   npx shieldcortex audit --deps           # Also scan ./node_modules for malicious packages
  *   npx shieldcortex audit --deps-global    # Also scan global npm node_modules
@@ -33,9 +34,10 @@ import {
   calculateGrade,
 } from '../audit/index.js';
 import type { AuditReport, AuditSeverity, ScannerResult, AuditFinding } from '../audit/types.js';
+import { toSarif } from '../xray/sarif.js';
 
 interface AuditOptions {
-  format: 'terminal' | 'json' | 'markdown';
+  format: 'terminal' | 'json' | 'markdown' | 'sarif';
   ci: boolean;
   /** Scan node_modules when true */
   deps: boolean;
@@ -71,9 +73,12 @@ function parseAuditArgs(args: string[]): AuditOptions {
       options.format = 'json';
     } else if (arg === '--markdown' || arg === '--md') {
       options.format = 'markdown';
+    } else if (arg === '--sarif' || arg === '--format=sarif') {
+      options.format = 'sarif';
     } else if (arg === '--ci') {
       options.ci = true;
-      options.format = 'json';
+      // --ci defaults to JSON, but keep an explicit --sarif choice (order-independent).
+      if (options.format !== 'sarif') options.format = 'json';
     } else if (arg === '--deps') {
       options.deps = true;
       options.depsMode = 'local';
@@ -218,6 +223,10 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
 
   // Output report
   switch (options.format) {
+    case 'sarif':
+      // Pure SARIF JSON on stdout — uploadable straight to GitHub Code Scanning.
+      console.log(JSON.stringify(toSarif(allFindings, { version }), null, 2));
+      break;
     case 'json':
       console.log(formatJsonReport(report));
       break;
