@@ -54,7 +54,7 @@ export function applyExpiryRules(): { deleted: number; protected: number } {
     const cutoffDate = new Date(Date.now() - rule.maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
 
     // Build WHERE clause for this rule
-    let where = 'WHERE createdAt < ?';
+    let where = 'WHERE created_at < ?';
     const params: unknown[] = [cutoffDate];
 
     if (rule.category) {

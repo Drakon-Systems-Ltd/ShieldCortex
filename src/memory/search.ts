@@ -31,8 +31,6 @@ export interface SearchScoreValues {
   finalScore: number;
 }
 
-export type MemoryRowConverter = (row: Record<string, unknown>) => Memory;
-
 export function detectQueryCategory(query: string): MemoryCategory | null {
   const lower = query.toLowerCase();
 
@@ -110,16 +108,22 @@ export function extractQueryTags(query: string): string[] {
   );
 }
 
+/**
+ * Score embedded memories against a query embedding and return the top-k by
+ * cosine similarity. Selects ONLY `id, embedding` and returns lean
+ * `{ id, similarity }` pairs — the sole caller (search-recall) needs nothing
+ * more, so per-row Memory hydration (rowToMemory: 2 JSON parses + several
+ * `new Date()` per row) is deferred to whoever actually loads the survivors.
+ */
 export function vectorSearch(
   db: Database.Database,
-  rowToMemory: MemoryRowConverter,
   queryEmbedding: Float32Array,
   limit: number,
   project?: string,
   includeGlobal: boolean = true,
-): Array<{ memory: Memory; similarity: number }> {
+): Array<{ id: number; similarity: number }> {
   let query = `
-    SELECT * FROM memories
+    SELECT id, embedding FROM memories
     WHERE embedding IS NOT NULL
   `;
   const params: unknown[] = [];
@@ -132,18 +136,18 @@ export function vectorSearch(
     params.push(project);
   }
 
-  const rows = db.prepare(query).all(...params) as Record<string, unknown>[];
+  const rows = db.prepare(query).all(...params) as Array<{ id: number; embedding: Buffer }>;
 
   return rows
     .map((row) => {
-      const embeddingBuffer = row.embedding as Buffer;
+      const embeddingBuffer = row.embedding;
       const embedding = new Float32Array(
         embeddingBuffer.buffer,
         embeddingBuffer.byteOffset,
         embeddingBuffer.length / 4,
       );
       return {
-        memory: rowToMemory(row),
+        id: row.id,
         similarity: cosineSimilarity(queryEmbedding, embedding),
       };
     })

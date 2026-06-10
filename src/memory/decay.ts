@@ -195,7 +195,9 @@ export function processDecay(
     if (deleted > 0) {
       console.log(`[expiry] Deleted ${deleted} expired memories (${kept} protected)`);
     }
-  } catch { /* silent */ }
+  } catch (err) {
+    console.error('[expiry] applyExpiryRules failed:', err);
+  }
 
   return { toDelete, toPromote, updated };
 }

@@ -88,9 +88,9 @@ async function searchMemoriesInternal(
       if (!queryEmbedding) {
         throw new Error('query embedding unavailable');
       }
-      const vectorHits = vectorSearch(db, rowToMemory, queryEmbedding, limit * 2, options.project, includeGlobal);
+      const vectorHits = vectorSearch(db, queryEmbedding, limit * 2, options.project, includeGlobal);
       for (const hit of vectorHits) {
-        vectorResults.set(hit.memory.id, hit.similarity);
+        vectorResults.set(hit.id, hit.similarity);
       }
     } catch {
       if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
