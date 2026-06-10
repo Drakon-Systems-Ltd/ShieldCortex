@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.0] - 2026-06-10
+
+**Security & hardening release — a full audit pass.** A capability/optimisation audit of the package surfaced and this release fixes a large batch of issues spanning the defence pipeline, the local stores, packaging, and the integrations. The headline: several advertised defence layers were **silently disabled in shipped builds** by a bare-`require()`-under-ESM bug, and are now actually running.
+
+### Security
+
+- **Re-enabled defence layers that were silently dead.** The package is ESM, but several modules used a bare `require()` which throws `ReferenceError` at runtime and was swallowed by a surrounding `catch` — so built-in **and** custom firewall rules, Pro custom injection patterns, the **kill-phrase emergency stop**, custom Iron Dome policies, `safe-regex2` ReDoS vetting, quarantine auto-expiry, the env-scanner git-ignore check, and the legacy-DB merge all silently no-op'd. All converted to Node-20-safe static `import`/`createRequire`; a `dist`-level guard (`npm run test:dist`) now fails the build/publish if a bare `require()` reappears. (Note: `createRequire(esm)` only works on Node ≥22, so internal ESM modules use static `import`.)
+- **Kill switch is now cross-process.** Activating "Emergency Stop" from the dashboard (a separate process from the MCP server) now actually halts the MCP server's `remember`/`forget`/`recall` via a shared `control_state` row (≤1s propagation), instead of flipping an in-memory flag the other process never saw.
+- **Closed four Unicode/truncation detection bypasses:** a stateful global-regex `.test()` that missed zero-width/RTL payloads on alternate scans; the input sanitiser stripping zero-width/bidi bytes *before* the firewall could flag them; a single-homoglyph substitution defeating instruction detection (now folds Unicode confusables); and a >50KB padding bypass (detectors now scan in overlapping windows instead of truncating at 50 000 chars).
+- **Tool-response scanner brought to write-path parity** — it now decodes-and-rescans base64/hex, folds homoglyphs, and detects markdown-image exfiltration, instead of running only 2 of the detection layers.
+- **Installers no longer destroy user config on a parse hiccup.** `settings.json`, `~/.claude.json`, and VS Code/Cursor `mcp.json` are no longer overwritten with ShieldCortex-only contents when momentarily unparseable (JSONC/trailing comma/concurrent write) — reads abort instead of wiping, and writes are atomic (tmp+rename) with a `.bak-shieldcortex` backup.
+- **Cloud config (`cloudApiKey`) can no longer be wiped by a torn read.** The config file is written atomically with an embedded HMAC, every writer goes through one parse-failure-guarded path, and a corrupt config is never overwritten.
+- **Bulk `forget` now enforces access control**, audit logging, graph cleanup, cloud-delete sync, and dashboard events (previously a raw `DELETE` that a low-trust sub-agent could use to mass-delete protected memories).
+- **The library no longer calls `process.exit()`** on a native-module load failure — it throws a typed, catchable error, so importing the package can't kill a host application.
+- **Deep npm-tarball scanning is hardened against hostile packages** (decompressed-size cap, entry-count cap, bounded redirects, fetch timeout).
+- **`config.json` is written `0600`**, matching the other secret files.
+
+### Added
+
+- **Real semantic-analysis defence layer** (the advertised Layer 3 now exists). On the async/deep-scan path, content is embedded and cosine-compared against a curated attack-phrase corpus to catch paraphrased injections the regexes miss. Conservative, tunable threshold; additive-only (can escalate to QUARANTINE but never downgrades a BLOCK); degrades gracefully when no embedding model is present. The synchronous scan path stays regex-only.
+- **`shieldcortex mcp scan [server|--all]`** — connects to your configured MCP servers, lists their tools, and scans tool names/descriptions/schemas for **tool-description poisoning**; hashes each tool to detect **rug-pull drift** on re-scan.
+- **`shieldcortex/scan` subpath export** — a lightweight, edge-safe scan-only entry point with no `better-sqlite3` or ML dependency (verified). For CI/serverless/edge consumers who only need `scan()`.
+- **SARIF 2.1.0 output** (`--sarif`) for `xray`, `audit`, and `mcp scan`, plus GitHub Code Scanning upload in the action — findings now reach the Security tab.
+- **`shieldcortex remember` CLI command** — a real, non-hanging memory-write that runs through the defence pipeline and exits cleanly (replaces the long-standing "remember CLI hangs" gotcha).
+- **X-Ray now scans security-relevant hidden directories** (`.github`, `.claude`, `.cursor`, `.codex`, `.vscode`, `.agents`, `.openclaw`) — previously all dot-directories were skipped, leaving the primary agent-instruction/persistence surface unscanned. (`.git`/`node_modules` still excluded.)
+
+### Performance
+
+- **`@huggingface/transformers` is now an `optionalDependency`** — it installs by default but a failed native build no longer fails the whole install, and scan-only consumers can skip the ~349MB download.
+- **Per-prompt hook startup ~0.68s → ~0.24s** — hooks dispatch before the `npm ls -g` staleness check, and the server/express/ML/worker modules are lazy-loaded.
+- **OpenClaw realtime input scanning runs in-process** instead of spawning a cold MCP server per message (~6 cold boots/turn removed); hook scans are cached by content hash.
+- **`defence_audit` growth is bounded** (age + size-pressure retention) so it can no longer hit the 100MB hard limit and brick the database; lifetime stats survive purges via an aggregate rollup.
+- **The cloud "offline queue" is now durable** — transient errors (network/timeout/5xx/429) retry with capped backoff until the 7-day TTL instead of giving up after ~3.5 minutes; 4xx fail fast; MCP-only installs now drain the queue too.
+- **Memory recall:** vector search no longer hydrates every row to keep a few; recall-path N+1 query storms are batched; the candidate prefilter uses the persisted decayed-score index; and recall reuses the persisted `memories.embedding` column instead of re-embedding up to 200 candidates per query.
+- **FTS index** is no longer fully rewritten on every access-count/salience bump (the trigger is scoped to `title`/`content`/`tags`).
+- **Startup** runs a single DB integrity scan and stops eagerly inspecting every `.corrupt.*` backup.
+
+### Fixed
+
+- User-defined memory **expiry rules were 100% non-functional** (queried `createdAt` vs the real `created_at` column, error silently swallowed) — now work.
+- **Built-in firewall rules are now seeded on a fresh database's first run** (seeding had only run inside a migration path that early-returns on a new DB).
+- **Custom firewall rules honour their `condition_type`** — `keyword`/`domain` rules with regex metacharacters were being mis-compiled as regex and silently never matched.
+- **Quarantine cloud sync now respects the user's `CloudSyncControls`** (`excludeSensitive`/`contentMode`/project filter) — previously the most sensitive payload ignored them.
+- **`remember` dedupe** now genuinely updates the existing memory with new content instead of reporting "Updated…" while discarding it; embeddings are refreshed on content update/merge (no stale vectors).
+- **Pagination totals/`hasMore` are correct under `type`/`category`/`search` filters.**
+- **Credential detection no longer false-flags git SHAs and UUIDs**; credential patterns now have a single source of truth.
+- **WebSocket server** gained a heartbeat, a max-payload cap, and a connection limit.
+- **Codex/Copilot installers** write the resolved absolute MCP command (no `npx` hash-thrash) and refresh stale entries; the hook↔MCP protocol no longer mangles apostrophes or false-positives verdicts via substring matching.
+- **X-Ray findings** dedupe across all statuses, so a finding you've already resolved/ignored doesn't resurface on every re-scan; each file is read once per scan.
+- Removed 4 stale compiled `.js` duplicates from `src/xray/` that carried divergent trust-score weights; the trial/expiry/stats banners (dead behind a wrong guard) display again for interactive CLI commands.
+
 ## [4.31.2] - 2026-06-09
 
 **Fix (data loss): a missing better-sqlite3 native binding no longer renames your database.** better-sqlite3 resolves its native binding *lazily* inside `new Database()`, not at `require()` — so on a box where the binding is missing or ABI-mismatched (e.g. an arm64 host after a Node upgrade or a reinstall that didn't rebuild the module), the failure surfaced deep in the DB-open path and was **misclassified as file corruption**. The recovery logic then renamed the live `memories.db` to `memories.db.corrupt.<timestamp>` and crashed. Observed in the field on an arm64 fleet box.
