@@ -216,34 +216,15 @@ async function searchMemoriesInternal(
       reinforceFromSearch(result.memory.id);
     }
 
-    if (topResults.length >= 2) {
-      for (let i = 0; i < topResults.length; i++) {
-        for (let j = i + 1; j < topResults.length; j++) {
-          const idA = topResults[i].memory.id;
-          const idB = topResults[j].memory.id;
-          const existing = db.prepare(
-            'SELECT strength FROM memory_links WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
-          ).get(idA, idB, idB, idA) as { strength: number } | undefined;
-
-          if (existing) {
-            const newStrength = Math.min(1.0, existing.strength + 0.03);
-            db.prepare(
-              'UPDATE memory_links SET strength = ? WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
-            ).run(newStrength, idA, idB, idB, idA);
-          } else {
-            try {
-              db.prepare(
-                'INSERT INTO memory_links (source_id, target_id, relationship, strength) VALUES (?, ?, ?, ?)'
-              ).run(idA, idB, 'related', 0.2);
-            } catch (e) {
-              if (!(e instanceof Error && e.message.includes('UNIQUE constraint'))) {
-                console.warn('[shieldcortex] Unexpected error linking co-returned memories:', e);
-              }
-            }
-          }
-        }
-      }
-    }
+    // NOTE (Phase 17 B2): the automatic all-pairs "co-access" linking that used
+    // to run here was removed. It linked every pair of the top-K results as
+    // `related` (strength 0.2), creating C(K,2) ≈ K² spurious graph edges and
+    // running one `SELECT existing` + INSERT/UPDATE per pair on every recall.
+    // Co-appearing in a single search is not a genuine relationship — these
+    // edges polluted the knowledge graph and drove an N² per-pair query storm.
+    // Genuine links are still created elsewhere (addMemory similarity links,
+    // explicit contradiction/relationship links); recall now only reinforces
+    // individual results above.
 
     if (sortedResults.length > 0 && options.query && options.query.length > 30) {
       const topResult = sortedResults[0];

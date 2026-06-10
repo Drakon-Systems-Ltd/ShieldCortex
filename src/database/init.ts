@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { runMigrations } from './migrations.js';
 import { getInlineSchema } from './inline-schema.js';
+import { seedDefaultFirewallRules } from './seed-firewall-rules.js';
 
 const _currentFile = fileURLToPath(import.meta.url);
 const _currentDir = dirname(_currentFile);
@@ -479,7 +480,20 @@ export function initDatabase(dbPath?: string): Database.Database {
 
   console.error(`[database] Startup runtime=${resolveRuntimeInfo().kind} db=${expandedPath} wal=${existsSync(expandedPath + '-wal')} shm=${existsSync(expandedPath + '-shm')}`);
 
-  const healthyBackups = listHealthyBackups(expandedPath);
+  // Lazily inspect `.corrupt.*` backups (Phase 17 B4). Each backup inspection
+  // opens the file read-only and runs a FULL integrity check, so doing it
+  // unconditionally on every startup paid a per-backup scan even when the live
+  // DB opened cleanly. Defer it: the only consumers are the corruption /
+  // empty-live recovery branches below, so the scan now happens ONLY when
+  // recovery is actually invoked. Memoised so a branch that consults it twice
+  // still inspects each backup once.
+  let _healthyBackups: BackupCandidate[] | null = null;
+  const getHealthyBackups = (): BackupCandidate[] => {
+    if (_healthyBackups === null) {
+      _healthyBackups = listHealthyBackups(expandedPath);
+    }
+    return _healthyBackups;
+  };
 
   // Wrap the initial open in try/catch to handle corrupt files gracefully
   let database: Database.Database;
@@ -508,7 +522,7 @@ export function initDatabase(dbPath?: string): Database.Database {
     // Database file is corrupt or not a valid SQLite database
     console.error(`❌ Database open failed for ${expandedPath}: ${openError}`);
 
-    const latestHealthyBackup = healthyBackups[0];
+    const latestHealthyBackup = getHealthyBackups()[0];
     if (latestHealthyBackup) {
       console.error(`[database] Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
       restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'failed-open');
@@ -521,20 +535,29 @@ export function initDatabase(dbPath?: string): Database.Database {
     }
   }
 
-  // Integrity check on existing databases (skip for newly created files)
+  // Integrity check on existing databases (skip for newly created files).
+  // This is the SINGLE live-DB integrity scan on the startup path (Phase 17
+  // B4). `liveIntegrityOk` records its outcome so the empty-live heuristic
+  // below can reuse it instead of re-opening the file and scanning a second
+  // time. It stays true for freshly-created files (size 0, check skipped) and
+  // for connections rebuilt by a recovery branch — both are known-good.
+  let liveIntegrityOk = true;
   if (existsSync(expandedPath) && statSync(expandedPath).size > 0) {
     const integrityResult = runIntegrityCheck(database);
+    liveIntegrityOk = integrityResult === 'ok';
     if (integrityResult !== 'ok') {
       console.warn(`[database] WARNING: Database integrity check failed: ${integrityResult}`);
 
       if (isLikelyFtsIntegrityIssue(integrityResult) && attemptFtsRecovery(database)) {
         console.warn('[database] Preserved memory rows by repairing the FTS index in place.');
+        liveIntegrityOk = true; // FTS rebuild re-verified integrity == 'ok'.
       } else {
         const freshIntegrityResult = verifyOnDiskIntegrity(expandedPath);
         if (freshIntegrityResult === 'ok') {
           console.warn('[database] Integrity failure was transient. Reopening the on-disk database without destructive recovery.');
           database.close();
           database = new BetterSqlite3(expandedPath);
+          liveIntegrityOk = true; // On-disk re-check was clean.
         } else {
           console.warn(`[database] Fresh integrity check also failed: ${freshIntegrityResult}`);
 
@@ -546,7 +569,7 @@ export function initDatabase(dbPath?: string): Database.Database {
           if (recovered) {
             database = recovered;
           } else {
-            const latestHealthyBackup = healthyBackups[0];
+            const latestHealthyBackup = getHealthyBackups()[0];
             if (latestHealthyBackup) {
               console.error(`[database] Recovery failed. Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
               restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'recovery-failed');
@@ -561,26 +584,42 @@ export function initDatabase(dbPath?: string): Database.Database {
               database = new BetterSqlite3(expandedPath);
             }
           }
+          // Dump-recovery, backup-restore and fresh-create all yield a
+          // known-good DB — the empty-live heuristic can trust it.
+          liveIntegrityOk = true;
         }
       }
     }
   }
 
-  const currentInspection = inspectDatabaseFile(expandedPath);
-  const latestHealthyBackup = healthyBackups[0];
+  // Empty-live recovery heuristic (Phase 17 B4): this used to call
+  // `inspectDatabaseFile(expandedPath)`, which RE-OPENED the live file
+  // read-only and ran a SECOND full integrity check purely to obtain the row
+  // count — duplicating the scan already performed above. Now the count comes
+  // from the open connection and integrity is reused from `liveIntegrityOk`.
+  // `getHealthyBackups()` (the eager per-backup scan) is consulted ONLY when
+  // the live DB is actually healthy-but-empty, so a normal startup never
+  // inspects a backup at all.
+  let liveCount: number | null = null;
+  try {
+    liveCount = (database.prepare('SELECT COUNT(*) AS count FROM memories').get() as { count: number }).count;
+  } catch {
+    liveCount = null;
+  }
   const liveStats = existsSync(expandedPath) ? statSync(expandedPath) : null;
-  if (
-    currentInspection.integrity === 'ok'
-    && currentInspection.count === 0
-    && latestHealthyBackup
-    && latestHealthyBackup.count >= 100
-    && liveStats
-    && (liveStats.mtimeMs - latestHealthyBackup.mtimeMs) < (24 * 60 * 60 * 1000)
-  ) {
-    console.error(`[database] Empty live database detected alongside a recent healthy backup (${latestHealthyBackup.count} memories). Restoring ${latestHealthyBackup.path}`);
-    database.close();
-    restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'empty-live');
-    database = new BetterSqlite3(expandedPath);
+  if (liveIntegrityOk && liveCount === 0) {
+    const latestHealthyBackup = getHealthyBackups()[0];
+    if (
+      latestHealthyBackup
+      && latestHealthyBackup.count >= 100
+      && liveStats
+      && (liveStats.mtimeMs - latestHealthyBackup.mtimeMs) < (24 * 60 * 60 * 1000)
+    ) {
+      console.error(`[database] Empty live database detected alongside a recent healthy backup (${latestHealthyBackup.count} memories). Restoring ${latestHealthyBackup.path}`);
+      database.close();
+      restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'empty-live');
+      database = new BetterSqlite3(expandedPath);
+    }
   }
 
   db = database;
@@ -641,6 +680,18 @@ export function initDatabase(dbPath?: string): Database.Database {
   } else {
     // Inline schema if file not found (for bundled deployment)
     db.exec(getInlineSchema());
+  }
+
+  // Seed built-in firewall rules. This runs AFTER the schema so the
+  // firewall_rules table is guaranteed to exist — `runMigrations()` returns
+  // early on a fresh DB (no `memories` table), so seeding cannot live there or
+  // it never fires for new installs (the case the README's "seeded on first
+  // run" promise covers). Idempotent: the seeder no-ops when built_in rows are
+  // already present, so re-running on every startup is safe and cheap.
+  try {
+    seedDefaultFirewallRules(db);
+  } catch {
+    // Seeder is best-effort; a failure here must never block startup.
   }
 
   return db;

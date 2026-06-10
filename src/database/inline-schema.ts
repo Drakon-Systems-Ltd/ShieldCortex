@@ -295,10 +295,12 @@ export function getInlineSchema(): string {
       condition_value TEXT NOT NULL,
       action TEXT NOT NULL CHECK(action IN ('block', 'allow', 'quarantine')),
       enabled INTEGER NOT NULL DEFAULT 1,
+      built_in INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_firewall_rules_priority ON firewall_rules(priority);
     CREATE INDEX IF NOT EXISTS idx_firewall_rules_enabled ON firewall_rules(enabled);
+    CREATE INDEX IF NOT EXISTS idx_firewall_rules_built_in ON firewall_rules(built_in);
 
     CREATE TABLE IF NOT EXISTS rate_limits (
       source_key TEXT PRIMARY KEY,

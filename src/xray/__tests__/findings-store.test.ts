@@ -65,16 +65,31 @@ describe('FindingsStore', () => {
       expect(store.listFindings()).toHaveLength(1);
     });
 
-    it('does not deduplicate against non-new findings', () => {
-      const store = createFindingsStore(tmpDir);
-      const finding = makeFinding();
+    it('deduplicates against findings the user already triaged (Phase 17 B5)', () => {
+      // Re-detecting a finding the user has resolved or ignored must NOT
+      // re-create it as `new` — that would undo their triage on every scan.
+      for (const status of ['resolved', 'ignored', 'reviewed', 'quarantined'] as const) {
+        const dir = makeTempDir();
+        try {
+          const store = createFindingsStore(dir);
+          const finding = makeFinding();
 
-      const first = store.addFindings('scan-1', 'scan', '/project', [finding]);
-      store.updateFindingStatus(first[0].id, 'resolved');
+          const first = store.addFindings('scan-1', 'scan', '/project', [finding]);
+          expect(first).toHaveLength(1);
+          store.updateFindingStatus(first[0].id, status);
 
-      // Same finding should now be added since original is resolved
-      const second = store.addFindings('scan-2', 'scan', '/project', [finding]);
-      expect(second).toHaveLength(1);
+          // Same finding re-detected on a later scan — should be deduped away.
+          const second = store.addFindings('scan-2', 'scan', '/project', [finding]);
+          expect(second).toHaveLength(0);
+
+          // The triaged finding is untouched; no duplicate `new` row appeared.
+          const all = store.listFindings();
+          expect(all).toHaveLength(1);
+          expect(all[0].status).toBe(status);
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      }
     });
 
     it('enforces 500 max cap', () => {

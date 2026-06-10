@@ -25,7 +25,6 @@
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
-import { seedDefaultFirewallRules } from './seed-firewall-rules.js';
 
 /**
  * Log unexpected errors from idempotent DDL operations (v4.26.0).
@@ -496,12 +495,10 @@ export function runMigrations(database: Database.Database): void {
     // (pipeline handles missing column gracefully; this is informational)
   }
 
-  // Seed default built-in firewall rules on first init.
-  try {
-    seedDefaultFirewallRules(database);
-  } catch {
-    // Seeder runs idempotently; failures here should never block startup.
-  }
+  // Built-in firewall rule seeding now lives in `initDatabase()` AFTER the
+  // schema is applied — `runMigrations()` returns early on fresh databases
+  // (no `memories` table), so a seed call here never fired for new installs.
+  // The init-level call is idempotent and covers both fresh and existing DBs.
 
   // Migration: session_events.content_hash + dedupe UNIQUE index (v4.17).
   // DBs created between the foundation commit and the importer commit have

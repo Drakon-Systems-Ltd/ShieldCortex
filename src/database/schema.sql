@@ -360,6 +360,7 @@ CREATE TABLE IF NOT EXISTS firewall_rules (
 
 CREATE INDEX IF NOT EXISTS idx_firewall_rules_priority ON firewall_rules(priority);
 CREATE INDEX IF NOT EXISTS idx_firewall_rules_enabled ON firewall_rules(enabled);
+CREATE INDEX IF NOT EXISTS idx_firewall_rules_built_in ON firewall_rules(built_in);
 
 -- Rate limits (cross-process, persisted)
 CREATE TABLE IF NOT EXISTS rate_limits (

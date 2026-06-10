@@ -136,6 +136,54 @@ function requireProFeature(feature: GatedFeature) {
 // Track connected WebSocket clients
 const clients = new Set<WebSocket>();
 
+// ── WebSocket hardening (Phase 17 B3) ───────────────────────────────────────
+// This is a localhost dashboard socket, so the limits are deliberately tight.
+//   - WS_MAX_PAYLOAD     caps a single inbound frame (the client only sends a
+//                        tiny token in the query string; it never POSTs bulk
+//                        data over the socket, so 1 MiB is generous).
+//   - WS_MAX_CONNECTIONS rejects new sockets past a sane ceiling — one or two
+//                        browser tabs is the norm; 50 absorbs reconnect churn.
+//   - WS_HEARTBEAT_MS    ping/pong interval. A client that misses a round-trip
+//                        is terminated so dead sockets don't leak.
+export const WS_MAX_PAYLOAD = 1024 * 1024; // 1 MiB
+export const WS_MAX_CONNECTIONS = 50;
+export const WS_HEARTBEAT_MS = 30000;
+
+/** A WebSocket augmented with the liveness flag the heartbeat toggles. */
+type HeartbeatSocket = WebSocket & { isAlive?: boolean };
+
+/**
+ * Standard `ws` ping/pong heartbeat. Marks every socket alive on `pong`, and on
+ * each tick terminates any socket that didn't answer the previous ping. The
+ * returned interval is `unref()`'d so it never keeps the process alive on its
+ * own, and is cleared automatically when the server closes. Exported for unit
+ * testing (booting the full HTTP server in jest is impractical).
+ */
+export function setupWebSocketHeartbeat(
+  wss: Pick<WebSocketServer, 'clients' | 'on'>,
+  intervalMs: number = WS_HEARTBEAT_MS,
+): NodeJS.Timeout {
+  const interval = setInterval(() => {
+    for (const client of wss.clients as Set<HeartbeatSocket>) {
+      if (client.isAlive === false) {
+        client.terminate();
+        continue;
+      }
+      client.isAlive = false;
+      try {
+        client.ping();
+      } catch {
+        // Socket already gone — terminate defensively.
+        try { client.terminate(); } catch { /* already closed */ }
+      }
+    }
+  }, intervalMs);
+  interval.unref?.();
+
+  wss.on('close', () => clearInterval(interval));
+  return interval;
+}
+
 /**
  * Handler for `POST /api/v1/scan`.
  *
@@ -800,9 +848,12 @@ export function startVisualizationServer(dbPath?: string): void {
   // WEBSOCKET SERVER
   // ============================================
 
-  const wss = new WebSocketServer({ server, path: '/ws/events' });
+  const wss = new WebSocketServer({ server, path: '/ws/events', maxPayload: WS_MAX_PAYLOAD });
 
-  wss.on('connection', (ws: WebSocket, req) => {
+  // Ping/pong heartbeat — terminates dead sockets. Cleared on wss close.
+  const wsHeartbeatInterval = setupWebSocketHeartbeat(wss);
+
+  wss.on('connection', (ws: HeartbeatSocket, req) => {
     // Validate auth token from query string: ws://localhost:3001/ws/events?token=<token>
     const url = new URL(req.url ?? '', `http://${req.headers.host}`);
     const token = url.searchParams.get('token');
@@ -810,6 +861,18 @@ export function startVisualizationServer(dbPath?: string): void {
       ws.close(4401, 'Unauthorized');
       return;
     }
+
+    // Connection cap — this is a localhost dashboard, so a tight ceiling is
+    // fine. Reject (rather than queue) once we're at capacity.
+    if (clients.size >= WS_MAX_CONNECTIONS) {
+      console.warn(`[WS] Connection cap (${WS_MAX_CONNECTIONS}) reached — rejecting new client.`);
+      ws.close(4429, 'Too many connections');
+      return;
+    }
+
+    // Mark alive for the heartbeat and refresh on every pong.
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
 
     clients.add(ws);
     console.log(`[WS] Client connected. Total: ${clients.size}`);
@@ -983,6 +1046,7 @@ export function startVisualizationServer(dbPath?: string): void {
     clearInterval(eventPollInterval);
     clearInterval(cleanupInterval);
     clearInterval(xrayDetectionInterval);
+    clearInterval(wsHeartbeatInterval);
 
     // Close WebSocket connections
     for (const client of clients) {

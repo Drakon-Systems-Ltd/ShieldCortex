@@ -93,8 +93,16 @@ export function createFindingsStore(basePath?: string): FindingsStore {
       const now = new Date().toISOString();
       const existing = readFindings();
 
+      // Dedupe against EVERY retained finding regardless of status (Phase 17
+      // B5). Previously only `status === 'new'` findings seeded the dedupe set,
+      // so a finding the user had already triaged — ignored, resolved,
+      // reviewed or quarantined — resurfaced as a brand-new duplicate on every
+      // re-scan, undoing their decision. Matching across all statuses respects
+      // the prior triage. (Findings aged past the 30-day cleanup window below
+      // are no longer retained, so they may legitimately reappear — that's the
+      // intended TTL behaviour, not a dedupe miss.)
       const existingKeys = new Set(
-        existing.filter((f) => f.status === 'new').map((f) => findingDedupeKey(f.target, f)),
+        existing.map((f) => findingDedupeKey(f.target, f)),
       );
 
       const newFindings: ActionableXRayFinding[] = [];
