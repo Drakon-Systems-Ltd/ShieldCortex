@@ -367,7 +367,47 @@ export async function runDefencePipelineWithVerify(
   config?: DefenceConfig,
   project?: string,
 ): Promise<DefencePipelineResultWithVerify> {
-  const result = runDefencePipeline(content, title, source, config, project);
+  let result: DefencePipelineResultWithVerify = runDefencePipeline(content, title, source, config, project);
+
+  // Semantic-similarity layer (LOCAL, async-path only). Runs regardless of the
+  // cloud-verify gate below. Lazy-imported so the sync pipeline never pulls in
+  // the embedding worker. Degrades gracefully: when the model is unavailable
+  // `available` is false and we do nothing (no escalation, no field). When it
+  // flags, the escalation is ADDITIVE — it can lift ALLOW/QUARANTINE up to at
+  // least QUARANTINE, but it never downgrades an existing BLOCK.
+  try {
+    const { analyzeSemanticSimilarity } = await import('./semantic/index.js');
+    const semantic = await analyzeSemanticSimilarity(content);
+    if (semantic.available) {
+      result = {
+        ...result,
+        semanticSimilarity: {
+          maxSimilarity: semantic.maxSimilarity,
+          matchedPhrase: semantic.matchedPhrase,
+        },
+      };
+
+      if (semantic.flagged && result.firewall.result !== 'BLOCK') {
+        const threatIndicators = result.firewall.threatIndicators.includes('semantic_similarity')
+          ? result.firewall.threatIndicators
+          : [...result.firewall.threatIndicators, 'semantic_similarity' as const];
+        const reason = `Quarantined: semantic similarity to known attack phrasing (${semantic.maxSimilarity.toFixed(2)})`;
+        result = {
+          ...result,
+          allowed: false,
+          firewall: {
+            ...result.firewall,
+            result: 'QUARANTINE',
+            reason,
+            threatIndicators,
+          },
+        };
+      }
+    }
+  } catch {
+    // Semantic layer must never affect the local verdict on failure — keep the
+    // sync result as-is (the sync pipeline already fails closed on real errors).
+  }
 
   // Lazy import to avoid circular dependencies and keep sync pipeline clean
   const { getCloudConfig, getVerifyConfig } = await import('../cloud/config.js');

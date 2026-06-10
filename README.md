@@ -103,16 +103,27 @@ Your agent does not just store text. It gives you operator-grade visibility into
 
 ### Security that shows up exactly when it matters
 
-Every memory write passes through 6 defence layers before it's stored:
+Every memory write passes through the synchronous defence layers below before
+it's stored. The semantic layer is the one exception: it runs on the async /
+deep-scan path (not the sync hot path) and only when an embedding model is
+available — see the note under the table.
 
 ```diff
 + ✅ Input Sanitisation       → strips control chars, null bytes, dangerous formatting
 + ✅ Pattern Detection        → catches known injection patterns, encoding tricks
-+ ✅ Semantic Analysis        → embedding similarity to attack corpus — catches novel attacks
++ ~ ⚙️ Semantic Analysis      → async/deep-scan only: embedding similarity to a curated attack corpus (catches paraphrased attacks the regexes miss). Degrades gracefully when no model is present.
 + ✅ Structural Validation    → JSON integrity, format anomalies, fragmentation attempts
 + ✅ Behavioural Scoring      → entropy analysis, anomaly detection, baseline deviation
 + ✅ Credential Leak Detection → API keys, tokens, private keys — 25+ patterns, 11 providers
 ```
+
+The **Semantic Analysis** layer is a local, additive backstop: on the async
+path (`runDefencePipelineWithVerify`) and during deep skill scans, content is
+embedded and compared by cosine similarity against a curated corpus of attack
+phrasings. A clear paraphrase match escalates the verdict to at least
+QUARANTINE (it never downgrades a BLOCK). When the optional embedding model is
+not installed, the layer is a no-op — the regex and other layers still run. The
+synchronous hot path stays regex-only for speed and determinism.
 
 Blocked content goes to quarantine for review — nothing is silently dropped.
 

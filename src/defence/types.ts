@@ -20,6 +20,7 @@ export type ThreatIndicator =
   | 'fragmented_payload'
   | 'restricted_content'
   | 'pipeline_error'
+  | 'semantic_similarity'
   | 'custom_rule'
   | 'custom_pattern'
   | 'builtin_rule';
@@ -133,6 +134,16 @@ export interface DefencePipelineResultWithVerify extends DefencePipelineResult {
     action?: string;
     mode: 'advisory' | 'enforce';
     originalFirewallResult?: FirewallResult;
+  };
+  /**
+   * Result of the async-path semantic-similarity layer (embedding vs curated
+   * attack corpus). Present only when the embedding model was available; absent
+   * when it degraded. For observability — the verdict escalation it may trigger
+   * is reflected in `firewall`.
+   */
+  semanticSimilarity?: {
+    maxSimilarity: number;
+    matchedPhrase?: string;
   };
 }
 

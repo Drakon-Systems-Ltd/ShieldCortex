@@ -105,24 +105,45 @@ export async function runDeepScan(files: Array<{ name: string; content: string; 
     intentCounts[cat] = (intentCounts[cat] || 0) + 1;
   }
 
-  // Semantic analysis via embeddings (optional — degrades gracefully)
-  try {
-    const { generateEmbedding } = await import('../../embeddings/index.js');
-    // Test with a simple string to verify model is loaded
-    await generateEmbedding('test');
+  // Semantic analysis: embed each file and compare it against the curated
+  // attack corpus (real signal — not a counter). Degrades gracefully when the
+  // embedding model is unavailable. A file that scores at/above the threshold
+  // becomes a real cross-file correlation; the max similarity feeds the intent
+  // breakdown so the deep scan reports an actual semantic measurement.
+  const { analyzeSemanticSimilarity, SEMANTIC_SIMILARITY_THRESHOLD } = await import('../semantic/index.js');
+  let semanticAvailable = false;
+  const semanticFlaggedFiles: string[] = [];
+  let maxSemanticSimilarity = 0;
 
-    // If embeddings work, analyse semantic intent
-    for (const file of files) {
-      try {
-        const embedding = await generateEmbedding(file.content.slice(0, 1000));
-        if (embedding) {
-          intentCounts['Semantic analysis'] = (intentCounts['Semantic analysis'] || 0) + 1;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    try {
+      const semantic = await analyzeSemanticSimilarity(file.content);
+      if (semantic.available) {
+        semanticAvailable = true;
+        if (semantic.maxSimilarity > maxSemanticSimilarity) {
+          maxSemanticSimilarity = semantic.maxSimilarity;
         }
-      } catch {
-        // Individual file embedding failure is non-fatal
+        if (semantic.flagged) {
+          semanticFlaggedFiles.push(file.name || `file-${i}`);
+        }
       }
+    } catch {
+      // Individual file embedding failure is non-fatal
     }
-  } catch {
+  }
+
+  if (semanticAvailable) {
+    if (semanticFlaggedFiles.length > 0) {
+      // Count of files whose content semantically matches the attack corpus.
+      intentCounts['Semantic attack match'] = semanticFlaggedFiles.length;
+      correlations.push({
+        files: [...new Set(semanticFlaggedFiles)],
+        finding: `Content semantically resembles known attack phrasing (max similarity ${maxSemanticSimilarity.toFixed(2)}, threshold ${SEMANTIC_SIMILARITY_THRESHOLD})`,
+        severity: 'high',
+      });
+    }
+  } else {
     degraded = true;
     degradedReason = 'Embedding model unavailable — showing pattern-based analysis only';
   }

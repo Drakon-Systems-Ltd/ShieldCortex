@@ -41,6 +41,11 @@ export { classifySensitivity, redactContent, redactForDisplay } from './sensitiv
 // Fragmentation
 export { analyzeFragmentation, storeFragmentationData } from './fragmentation/index.js';
 
+// Semantic Analysis (Layer 3 — async/deep-scan path only; degrades gracefully)
+export { analyzeSemanticSimilarity, SEMANTIC_SIMILARITY_THRESHOLD } from './semantic/index.js';
+export type { SemanticAnalysisResult, Embedder } from './semantic/index.js';
+export { ATTACK_CORPUS } from './semantic/attack-corpus.js';
+
 // Credential Leak Detection (Layer 6)
 export { scanForCredentials, redactCredentials, DEFAULT_CREDENTIAL_CONFIG } from './credential-leak/index.js';
 export type { CredentialScanResult, CredentialFinding, CredentialDetectionConfig, CredentialType, CredentialSeverity } from './credential-leak/index.js';
