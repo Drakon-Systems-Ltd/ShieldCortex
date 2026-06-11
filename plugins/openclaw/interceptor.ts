@@ -27,6 +27,10 @@ export interface InterceptAuditEntry {
   firewallResult: string;
   threats: string[];
   anomalyScore: number;
+  trustScore: number;                 // from the pipeline result's trust score
+  sensitivityLevel: string;           // from the pipeline result's sensitivity level
+  fragmentationScore: number | null;  // from the pipeline result's fragmentation score, or null
+  pipelineDurationMs: number;         // wall-clock ms around the runDefencePipeline call
   action: InterceptAction | 'auto_deny' | 'rate_limit';
   outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied';
   preview: string;
@@ -271,6 +275,10 @@ function xrayMemoryGuard(content: string, title?: string): XRayGuardResult {
 
 // --- Interceptor Factory ---
 
+// Subset of shieldcortex/defence DefencePipelineResult (src/defence/pipeline.ts).
+// Field paths verified against src/defence/types.ts: trust.score (TrustScore.score),
+// sensitivity.level (SensitivityClassification.level), fragmentation.score
+// (FragmentationAnalysis.score; fragmentation itself is nullable).
 type PipelineRunner = (content: string, title: string, source: { type: string; identifier: string }) => {
   allowed: boolean;
   firewall: {
@@ -280,6 +288,9 @@ type PipelineRunner = (content: string, title: string, source: { type: string; i
     anomalyScore: number;
     blockedPatterns: string[];
   };
+  trust: { score: number };
+  sensitivity: { level: string };
+  fragmentation: { score: number } | null;
   auditId: number;
 };
 
@@ -319,7 +330,10 @@ export function createInterceptor(
       const xrayEntry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity: 'critical',
         firewallResult: 'BLOCK', threats: xrayResult.findings.map(f => f.category),
-        anomalyScore: 1, action: 'auto_deny', outcome: 'auto_denied',
+        anomalyScore: 1,
+        // X-Ray short-circuits before the pipeline runs — no pipeline result.
+        trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
+        action: 'auto_deny', outcome: 'auto_denied',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
       emitAudit(xrayEntry);
@@ -330,19 +344,30 @@ export function createInterceptor(
     let firewallResult: string;
     let threats: string[];
     let anomalyScore: number;
+    let trustScore: number;
+    let sensitivityLevel: string;
+    let fragmentationScore: number | null;
+    let pipelineDurationMs: number;
 
     try {
+      const pipelineStart = Date.now();
       const result = pipeline(content, title, { type: 'agent', identifier: 'openclaw' });
+      pipelineDurationMs = Date.now() - pipelineStart;
       severity = mapSeverity(result.firewall);
       firewallResult = result.firewall.result;
       threats = result.firewall.threatIndicators;
       anomalyScore = result.firewall.anomalyScore;
+      trustScore = result.trust.score;
+      sensitivityLevel = result.sensitivity.level;
+      fragmentationScore = result.fragmentation?.score ?? null;
     } catch (err) {
       log.warn(`[shieldcortex] ⚠️ Defence pipeline error: ${err instanceof Error ? err.message : err}`);
       const failAction = config.failurePolicy.high;
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity: 'high',
         firewallResult: 'ERROR', threats: ['pipeline_error'], anomalyScore: 0,
+        // Pipeline threw — no result in scope, use documented defaults.
+        trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
         action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
@@ -356,7 +381,8 @@ export function createInterceptor(
     if (denyCache.isDenied(context.toolName, fullContent)) {
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'auto_deny', outcome: 'auto_denied',
+        threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+        action: 'auto_deny', outcome: 'auto_denied',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
       emitAudit(entry);
@@ -368,7 +394,8 @@ export function createInterceptor(
     if (action === 'log') {
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'log', outcome: 'logged',
+        threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+        action: 'log', outcome: 'logged',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
       emitAudit(entry);
@@ -379,7 +406,8 @@ export function createInterceptor(
       log.warn(`[shieldcortex] ⚠️ ${severity} risk in ${context.toolName}: ${threats.join(', ') || 'anomaly detected'}`);
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'warn', outcome: 'warned',
+        threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+        action: 'warn', outcome: 'warned',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
       emitAudit(entry);
@@ -393,7 +421,8 @@ export function createInterceptor(
       log.warn(`[shieldcortex] ⚠️ requireApproval not available for ${severity} risk in ${context.toolName} — failure policy: ${failAction}`);
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'require_approval',
+        threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+        action: 'require_approval',
         outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
@@ -408,7 +437,8 @@ export function createInterceptor(
       log.warn('[shieldcortex] ⚠️ Too many approval prompts — auto-denying');
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'rate_limit', outcome: 'auto_denied',
+        threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+        action: 'rate_limit', outcome: 'auto_denied',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
       emitAudit(entry);
@@ -426,7 +456,8 @@ export function createInterceptor(
       log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'require_approval',
+        threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+        action: 'require_approval',
         outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
@@ -440,7 +471,8 @@ export function createInterceptor(
     if (approved) {
       const entry: InterceptAuditEntry = {
         type: 'intercept', tool: context.toolName, severity, firewallResult,
-        threats, anomalyScore, action: 'require_approval', outcome: 'approved',
+        threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+        action: 'require_approval', outcome: 'approved',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
       emitAudit(entry);
@@ -451,7 +483,8 @@ export function createInterceptor(
     denyCache.addDenial(context.toolName, fullContent);
     const entry: InterceptAuditEntry = {
       type: 'intercept', tool: context.toolName, severity, firewallResult,
-      threats, anomalyScore, action: 'require_approval', outcome: 'denied',
+      threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+      action: 'require_approval', outcome: 'denied',
       preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
     };
     emitAudit(entry);
