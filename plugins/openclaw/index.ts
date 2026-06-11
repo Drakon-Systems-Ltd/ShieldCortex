@@ -680,8 +680,9 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
         };
         auditLog(entry);
         loadConfig()
-          // Pass the local entry as-is; cloudSync strips the input preview/content
-          // before transmit (metadata-only egress). No raw LLM input leaves here.
+          // Pass the local entry as-is; cloudSync rebuilds a canonical metadata-only
+          // entry from named fields and never reads preview/content. No raw LLM input
+          // leaves here.
           .then(cfg => cloudSync(entry, cfg))
           .catch(() => {});
       }
