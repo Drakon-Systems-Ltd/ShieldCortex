@@ -66,6 +66,7 @@
     "bench:smoke": "SHIELDCORTEX_SKIP_EMBEDDINGS=1 tsx benchmark/longmemeval/run.ts --quiet",
     "audit:security": "npm audit --audit-level=moderate",
     "prepack": "node scripts/ensure-bin-executable.mjs",
+    "release:clawhub": "node scripts/clawhub-sync.mjs",
     "version": "node scripts/sync-plugin-version.mjs && git add plugins/openclaw/package.json plugins/openclaw/openclaw.plugin.json",
     "prepublishOnly": "node scripts/sync-plugin-version.mjs --check && npm run build && npm run test:dist"
   },
