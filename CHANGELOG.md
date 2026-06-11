@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.2] - 2026-06-11
+
+**OpenClaw fleet telemetry now reaches the cloud.** The OpenClaw plugin's two cloud-egress paths had been silently dropping all threat telemetry: the interceptor POSTed `{events:[…]}` to `/v1/audit/ingest` (which requires `{entries:[…]}` → HTTP 400), and the realtime scanner POSTed to `/v1/threats` (a route that never existed → HTTP 404). Both are fire-and-forget, so the failures were invisible — fleet boxes appeared online and synced memories while their audit/threat data went nowhere (the main package's direct `scan()` path was unaffected and always landed). This release fixes both paths to send the canonical `{entries:[<full pipeline entry>]}` shape the SaaS expects.
+
+### Fixed
+- **OpenClaw interceptor egress** (`plugins/openclaw/intercept-ingest.ts`): now posts canonical `{entries:[…]}` to `/v1/audit/ingest` with full pipeline data, not the rejected `{events:[…]}` shape.
+- **OpenClaw realtime egress** (`plugins/openclaw/cloud-sync.ts`): now posts canonical audit entries to `/v1/audit/ingest` instead of the non-existent `/v1/threats` route.
+
+### Changed
+- `InterceptAuditEntry` now carries `trustScore`, `sensitivityLevel`, `fragmentationScore`, and `pipelineDurationMs`, so cloud audit rows from OpenClaw intercepts include full pipeline metadata.
+- New shared `plugins/openclaw/audit-entry.ts` (`toAuditEntry`) builds the canonical entry for both egress paths; the privacy boundary is tightened from a delete-denylist to a named-field allowlist, so raw input content/preview can no longer leak.
+
 ## [4.32.1] - 2026-06-10
 
 **Self-healing native database engine.** On platforms where `better-sqlite3` has no matching prebuilt binary (arm64, or a Node newer than the prebuilds) the native binding may fail to build during `npm install` — and `npm install -g` still exits 0, leaving the package installed-but-broken with `Could not locate the bindings file`. This release detects and repairs that automatically.
