@@ -75,5 +75,43 @@ describe('native-binding helper', () => {
       expect(r.remediation).toContain('/opt/install/shieldcortex');
       expect(r.remediation).toContain('npm rebuild better-sqlite3');
     });
+
+    it('escalates to a forced source build when a plain rebuild reports success but does not heal, and surfaces the real build error', async () => {
+      const fromSourceFlags: boolean[] = [];
+      const r = await ensureNativeBinding({
+        verify: () => ({ ok: false, error: 'Could not locate the bindings file' }),
+        rebuild: async (_dir, opts) => {
+          fromSourceFlags.push(opts?.fromSource === true);
+          // The clawdbot1 trap: a plain rebuild reports success while the binary
+          // never built; the forced source build then reveals the real error.
+          return opts?.fromSource
+            ? { ok: false, output: 'gyp ERR! stack Error: not found: make\ng++: command not found' }
+            : { ok: false, output: 'rebuilt dependencies successfully' };
+        },
+        installDir: () => '/opt/install/shieldcortex',
+      });
+      // Plain rebuild first, then a forced source build.
+      expect(fromSourceFlags).toEqual([false, true]);
+      expect(r.status).toBe('failed');
+      // The failed result carries the REAL compiler error, not the misleading
+      // "rebuilt dependencies successfully".
+      expect(r.rebuildOutput).toContain('command not found');
+      expect(r.rebuildOutput).not.toContain('rebuilt dependencies successfully');
+      // The toolchain hint is ALWAYS present in the failed remediation — it must
+      // not be suppressed just because the (first) rebuild output had no error text.
+      expect(/apt|xcode-select|build tools/i.test(r.remediation ?? '')).toBe(true);
+    });
+
+    it('heals via the forced source build when the plain rebuild did not (no third attempt)', async () => {
+      let verifyCalls = 0;
+      let rebuilds = 0;
+      const r = await ensureNativeBinding({
+        verify: () => ({ ok: ++verifyCalls > 2 }), // fail, fail, then ok after the 2nd rebuild
+        rebuild: async () => { rebuilds++; return { ok: false, output: '' }; },
+        installDir: () => '/x',
+      });
+      expect(rebuilds).toBe(2);
+      expect(r.status).toBe('healed');
+    });
   });
 });

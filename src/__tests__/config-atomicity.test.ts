@@ -161,6 +161,68 @@ describe('config atomicity + integrity hardening', () => {
     });
   });
 
+  // ── Self-heal: stale embedded _sig but valid legacy sig → re-sign, no alarm ──
+  //
+  // Observed on a Mac after a cross-version config write: config.json carried an
+  // embedded _sig that no longer matched the canonical body, BUT the legacy
+  // .config-sig still validated over the exact file bytes. The old verifier saw
+  // only "embedded mismatch" and screamed tampering + forced strict mode. Since
+  // the legacy whole-file sig proves the bytes are authentic (same secret key;
+  // any body edit breaks both sigs), this must self-heal silently instead.
+  describe('self-heal on stale embedded _sig with a valid legacy sig', () => {
+    it('treats a stale-embedded / valid-legacy config as authentic, re-signs it, and drops the legacy sig', async () => {
+      const key = 'b'.repeat(64);
+      writeFileSync(integrityKeyFile, key, { mode: 0o600 });
+
+      // File carries a STALE (wrong) embedded _sig…
+      const fileContent =
+        JSON.stringify({ cloudApiKey: 'sc_live_heal', cloudEnabled: true, _sig: 'deadbeef'.repeat(8) }, null, 2) + '\n';
+      writeFileSync(configFile, fileContent);
+      // …but the legacy .config-sig validates over the EXACT bytes on disk.
+      const legacySig = createHmac('sha256', key).update(fileContent, 'utf-8').digest('hex');
+      writeFileSync(sigFile, legacySig, { mode: 0o600 });
+
+      const config = await import('../cloud/config.js');
+      const raw = config.readRawConfig();
+      expect(raw.cloudApiKey).toBe('sc_live_heal');
+      expect(config.isConfigTampered()).toBe(false);   // self-healed, NOT tampered
+      expect(config.getDefenceMode()).not.toBe('strict'); // not force-downgraded
+
+      // The self-heal rewrote the file: embedded _sig is now correct and the
+      // stale legacy sig file is gone.
+      expect(existsSync(sigFile)).toBe(false);
+      const onDisk = JSON.parse(readFileSync(configFile, 'utf-8'));
+      expect(typeof onDisk._sig).toBe('string');
+      expect(onDisk._sig).not.toBe('deadbeef'.repeat(8));
+      expect(onDisk.cloudApiKey).toBe('sc_live_heal');
+
+      // A fresh read now verifies via the embedded sig alone — no warning.
+      config.clearCloudConfigCache();
+      jest.resetModules();
+      const config2 = await import('../cloud/config.js');
+      config2.readRawConfig();
+      expect(config2.isConfigTampered()).toBe(false);
+    });
+
+    it('still detects genuine tampering when neither the embedded nor the legacy sig matches the bytes', async () => {
+      const key = 'c'.repeat(64);
+      writeFileSync(integrityKeyFile, key, { mode: 0o600 });
+
+      // Embedded sig is wrong AND the legacy sig is over DIFFERENT bytes (so it
+      // does not validate the current file) — a real tamper, not a stale sig.
+      const fileContent =
+        JSON.stringify({ cloudApiKey: 'sc_live_evil', cloudEnabled: true, _sig: 'deadbeef'.repeat(8) }, null, 2) + '\n';
+      writeFileSync(configFile, fileContent);
+      const sigOverOtherBytes = createHmac('sha256', key).update('some other content', 'utf-8').digest('hex');
+      writeFileSync(sigFile, sigOverOtherBytes, { mode: 0o600 });
+
+      const config = await import('../cloud/config.js');
+      config.readRawConfig();
+      expect(config.isConfigTampered()).toBe(true);
+      expect(config.getDefenceMode()).toBe('strict');
+    });
+  });
+
   // ── Fix 3: mtime-cached reads ───────────────────────────────────────
   describe('mtime-cached readRawConfig', () => {
     it('serves the cached value when the file is unchanged, and invalidates on write', async () => {

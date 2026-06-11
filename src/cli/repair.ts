@@ -30,6 +30,18 @@ export async function runRepair(): Promise<void> {
   // failed
   process.stdout.write(`  ${c('31', '✗')}  Database engine: still cannot load after a rebuild\n`);
   if (r.error) process.stdout.write(`     ${c('90', r.error.split('\n')[0])}\n`);
+
+  // Surface the REAL build error, not just the load failure. `rebuildOutput` is
+  // from the forced `--build-from-source` attempt, so it carries the actual
+  // compiler/node-gyp output (e.g. "g++: command not found") — the bit that
+  // tells the user WHY, instead of npm's misleading "rebuilt successfully".
+  const buildTail = (r.rebuildOutput ?? '').trim();
+  if (buildTail) {
+    const lines = buildTail.split('\n').slice(-12);
+    process.stdout.write(`\n  ${c('90', 'Build output (last lines):')}\n`);
+    for (const line of lines) process.stdout.write(`     ${c('90', line)}\n`);
+  }
+
   process.stdout.write(`\n  ${c('1', 'Fix it manually:')}\n`);
   for (const line of (r.remediation ?? '').split('\n')) {
     process.stdout.write(`     ${c('33', line)}\n`);

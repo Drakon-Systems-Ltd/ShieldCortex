@@ -139,8 +139,10 @@ function writeConfigSignature(jsonContent: string): void {
   try { chmodSync(sigFile, 0o600); } catch { /* best-effort */ }
 }
 
+type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered';
+
 /**
- * Verify a parsed config object's integrity.
+ * Verify a parsed config object's integrity, returning a three-way verdict.
  *
  * Two on-disk formats are supported for backward compatibility:
  *   - **Embedded (new, v4.32+):** the object carries a top-level `_sig` field;
@@ -151,16 +153,35 @@ function writeConfigSignature(jsonContent: string): void {
  *     install that hasn't been rewritten yet never false-tampers. The next
  *     write upgrades it to the embedded format.
  *
+ * **`'self-heal'`** — an embedded `_sig` is present but does NOT match, AND the
+ * legacy whole-file `.config-sig` still validates over the exact bytes on disk.
+ * That combination means the file content is provably authentic — only the
+ * embedded sig drifted (e.g. it was written by an older version whose canonical
+ * form differed, leaving the legacy sig behind). This is NOT tampering: both
+ * schemes HMAC with the same secret `.integrity-key` (0600), so an attacker who
+ * can't read that key can forge neither, and any edit to the body invalidates
+ * BOTH signatures. The caller re-signs silently rather than crying tampering and
+ * forcing strict mode. (Observed on a Mac after a cross-version config write.)
+ *
  * `rawFileContent` is the literal bytes read from disk (needed for the legacy
  * whole-file signature). On a missing legacy sig file we adopt the current
  * content as trusted (first run after upgrade), matching prior behaviour.
  */
-function verifyConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: string): boolean {
+function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: string): IntegrityVerdict {
   try {
     if (typeof parsed._sig === 'string') {
       // Embedded scheme: recompute over the canonical body (object minus _sig).
       const computed = signConfig(canonicalBodyForSig(parsed));
-      return constantTimeEqualHex(parsed._sig, computed);
+      if (constantTimeEqualHex(parsed._sig, computed)) return 'valid';
+      // Embedded sig mismatch — is the file otherwise authentic? If a legacy
+      // whole-file sig still validates these exact bytes, the content is intact
+      // and only the embedded sig is stale: heal, don't alarm.
+      const sigFile = getSigFile();
+      if (existsSync(sigFile)) {
+        const legacySig = readFileSync(sigFile, 'utf-8').trim();
+        if (constantTimeEqualHex(legacySig, signConfig(rawFileContent))) return 'self-heal';
+      }
+      return 'tampered';
     }
     // Legacy scheme: separate .config-sig file signed over the whole file.
     const sigFile = getSigFile();
@@ -169,13 +190,13 @@ function verifyConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: 
       // legacy sig so a subsequent read (before the next write upgrades it)
       // still verifies. Matches the prior behaviour to avoid a false tamper.
       writeConfigSignature(rawFileContent);
-      return true;
+      return 'valid';
     }
     const storedSig = readFileSync(sigFile, 'utf-8').trim();
     const computedSig = signConfig(rawFileContent);
-    return constantTimeEqualHex(storedSig, computedSig);
+    return constantTimeEqualHex(storedSig, computedSig) ? 'valid' : 'tampered';
   } catch {
-    return false;
+    return 'tampered';
   }
 }
 
@@ -374,7 +395,8 @@ function readRawConfigState(): RawConfigState {
       }
 
       // Verify HMAC integrity (embedded `_sig`, else legacy `.config-sig`).
-      if (!verifyConfigIntegrity(data, content)) {
+      const verdict = checkConfigIntegrity(data, content);
+      if (verdict === 'tampered') {
         configTampered = true;
         console.error('[ShieldCortex] WARNING: Config file integrity check failed — possible tampering detected. Falling back to strict mode.');
         // Force strict mode on tampered config
@@ -384,6 +406,27 @@ function readRawConfigState(): RawConfigState {
       // `_sig` is an integrity artefact, never config data — strip it so it
       // can't leak into CloudConfig or get re-serialised as a normal field.
       delete data._sig;
+
+      if (verdict === 'self-heal') {
+        // The bytes are authentic (legacy whole-file sig still validates) — only
+        // the embedded `_sig` drifted. Re-sign silently to converge on the
+        // embedded-only format and drop the stale legacy sig. This is a one-shot:
+        // after the rewrite the embedded sig matches, so subsequent reads return
+        // 'valid'. The rewrite changes the file's mtime, so skip the (now stale)
+        // cache population below and return the parsed data directly.
+        //
+        // Deliberately calls writeRawConfig DIRECTLY rather than via
+        // mutateRawConfig (the usual sole-writer rule): we're already inside the
+        // read, the content is parsed AND cryptographically authenticated (so the
+        // {}-wipe-on-parse-fail risk mutateRawConfig guards against cannot apply),
+        // and routing back through mutateRawConfig would re-enter readRawConfigState
+        // — re-hitting this same 'self-heal' verdict before the write lands and
+        // recursing. The direct write is what keeps it one-shot.
+        try {
+          writeRawConfig({ ...data });
+        } catch { /* best-effort: a failed heal just re-checks on the next read */ }
+        return { data, parseFailed: false };
+      }
 
       // Populate the mtime cache from the parsed (sig-stripped) object, keyed on
       // the mtime captured BEFORE the read (matches the bytes actually parsed).

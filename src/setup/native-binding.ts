@@ -13,6 +13,14 @@
  * successfully" — a no-op. So this module resolves the install dir from the
  * running code's own location and rebuilds there.
  *
+ * The second trap (observed on clawdbot1): even in the right dir, a plain
+ * `npm rebuild` can report "rebuilt dependencies successfully" while the binary
+ * never built — no matching prebuilt, and the source build silently no-op'd or
+ * its failure was swallowed. So when a plain rebuild doesn't heal, we escalate
+ * to `--build-from-source --foreground-scripts`, which forces a real compile and
+ * streams the build output — surfacing the ACTUAL error (almost always a missing
+ * C/C++ toolchain) instead of a misleading success.
+ *
  * Used by: `shieldcortex update` (verify+heal step), `shieldcortex repair`,
  * `shieldcortex doctor` (correct remediation text), and the postinstall guidance.
  */
@@ -44,7 +52,7 @@ export interface EnsureResult {
 /** Injection seam so the heal orchestration is testable without a real failure. */
 export interface BindingDeps {
   verify: () => VerifyResult;
-  rebuild: (dir: string) => Promise<{ ok: boolean; output: string }>;
+  rebuild: (dir: string, opts?: { fromSource?: boolean }) => Promise<{ ok: boolean; output: string }>;
   installDir: () => string;
 }
 
@@ -80,16 +88,27 @@ export function verifyNativeBinding(): VerifyResult {
 /**
  * Run `npm rebuild better-sqlite3` in the install dir. Async (the rebuild can
  * take tens of seconds) so callers can keep a spinner alive. Never throws.
+ *
+ * With `{ fromSource: true }` it forces a real compile (`--build-from-source`)
+ * and streams the build-script output (`--foreground-scripts`) so a failed
+ * compile surfaces its real error rather than npm's misleading
+ * "rebuilt dependencies successfully".
  */
-export function rebuildNativeBinding(installDir: string): Promise<{ ok: boolean; output: string }> {
+export function rebuildNativeBinding(
+  installDir: string,
+  opts: { fromSource?: boolean } = {},
+): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
     let output = '';
     let settled = false;
     const finish = (ok: boolean) => { if (!settled) { settled = true; resolve({ ok, output }); } };
 
+    const args = ['rebuild', 'better-sqlite3', '--no-audit', '--no-fund'];
+    if (opts.fromSource) args.push('--build-from-source', '--foreground-scripts');
+
     let child;
     try {
-      child = spawn('npm', ['rebuild', 'better-sqlite3', '--no-audit', '--no-fund'], {
+      child = spawn('npm', args, {
         cwd: installDir,
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
@@ -115,33 +134,41 @@ export function rebuildNativeBinding(installDir: string): Promise<{ ok: boolean;
 }
 
 /**
- * Platform-aware build-toolchain hint, tailored by error text when available.
+ * Platform-aware build-toolchain hint.
+ *
+ * Always emitted in the failed-remediation path: by the time we're generating
+ * remediation, BOTH a plain rebuild and a forced source build have failed to
+ * heal the binding, and on Linux/macOS the overwhelmingly common cause is a
+ * missing C/C++ toolchain. The old version gated this on recognising error text
+ * in the rebuild output — which silently suppressed the hint in exactly the
+ * worst case (a rebuild that reported success but never built the binary),
+ * leaving the user with no idea they needed to install a compiler.
  */
-function toolchainHint(rebuildOutput?: string): string {
-  const out = (rebuildOutput ?? '').toLowerCase();
-  const needsToolchain = !rebuildOutput || /gyp|python|make|g\+\+|cc1plus|no such file|command not found/.test(out);
-  if (!needsToolchain) return '';
+function toolchainHint(): string {
   if (process.platform === 'darwin') {
-    return 'If the rebuild fails for lack of a compiler: xcode-select --install';
+    return 'If it fails for lack of a compiler: xcode-select --install';
   }
   if (process.platform === 'win32') {
-    return 'If the rebuild fails for lack of a compiler: install the "Desktop development with C++" workload (Visual Studio Build Tools).';
+    return 'If it fails for lack of a compiler: install the "Desktop development with C++" workload (Visual Studio Build Tools).';
   }
-  return 'If the rebuild fails for lack of a compiler: sudo apt-get install -y python3 make g++  (or your distro\'s build-essential).';
+  return 'If it fails for lack of a compiler: sudo apt-get install -y python3 make g++  (Debian/Ubuntu; or your distro\'s build-essential).';
 }
 
 /**
  * The correct copy-paste remediation — the install-dir `cd` is the bit users
  * miss (a bare `npm rebuild better-sqlite3` from $HOME is a silent no-op).
+ *
+ * Uses `--build-from-source` because by the time we surface this, a plain
+ * rebuild has already failed to heal: forcing a source compile is both what
+ * actually produces the binary (when no prebuilt matches this Node/arch) and
+ * what reveals the real error if it can't.
  */
-export function nativeBindingRemediation(installDir: string, rebuildOutput?: string): string {
-  const lines = [
-    `cd "${installDir}" && npm rebuild better-sqlite3`,
-  ];
-  const hint = toolchainHint(rebuildOutput);
-  if (hint) lines.push(hint);
-  lines.push('Then restart Claude Code / the OpenClaw gateway so processes reload the binding.');
-  return lines.join('\n');
+export function nativeBindingRemediation(installDir: string): string {
+  return [
+    `cd "${installDir}" && npm rebuild better-sqlite3 --build-from-source`,
+    toolchainHint(),
+    'Then restart Claude Code / the OpenClaw gateway so processes reload the binding.',
+  ].join('\n');
 }
 
 /**
@@ -149,6 +176,12 @@ export function nativeBindingRemediation(installDir: string, rebuildOutput?: str
  * - 'ok'     — loaded first try (no rebuild).
  * - 'healed' — rebuilt and now loads.
  * - 'failed' — still broken after a rebuild; `remediation` carries the fix.
+ *
+ * Two rebuild attempts when needed: first a plain `npm rebuild` (fast, uses a
+ * matching prebuilt if one exists), then — only if that didn't heal it — a
+ * forced `--build-from-source` compile. The forced build is what surfaces the
+ * real error (and `rebuildOutput` in the failed result carries IT, not the
+ * earlier misleading "rebuilt dependencies successfully").
  */
 export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Promise<EnsureResult> {
   const verify = deps.verify ?? verifyNativeBinding;
@@ -159,14 +192,23 @@ export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Prom
   if (first.ok) return { status: 'ok' };
 
   const dir = installDir();
-  const rebuilt = await rebuild(dir);
-  const after = verify();
-  if (after.ok) return { status: 'healed', rebuildOutput: rebuilt.output };
+
+  // Attempt 1: a plain rebuild (matches a prebuilt for this platform/ABI if any).
+  const normal = await rebuild(dir);
+  const afterNormal = verify();
+  if (afterNormal.ok) return { status: 'healed', rebuildOutput: normal.output };
+
+  // Attempt 2: force a source compile. A plain rebuild can report success while
+  // never producing the binary; this forces the build and captures the real
+  // error so the failed remediation is honest about what went wrong.
+  const sourceBuild = await rebuild(dir, { fromSource: true });
+  const afterSource = verify();
+  if (afterSource.ok) return { status: 'healed', rebuildOutput: sourceBuild.output };
 
   return {
     status: 'failed',
-    error: after.error ?? first.error,
-    rebuildOutput: rebuilt.output,
-    remediation: nativeBindingRemediation(dir, rebuilt.output),
+    error: afterSource.error ?? afterNormal.error ?? first.error,
+    rebuildOutput: sourceBuild.output,
+    remediation: nativeBindingRemediation(dir),
   };
 }
