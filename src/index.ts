@@ -199,6 +199,16 @@ function parseArgs(): Args {
  * Start MCP server for Claude Code integration
  */
 async function startMcpServer(dbPath?: string): Promise<void> {
+  // MCP stdio contract: stdout is the JSON-RPC channel — NOTHING else may write
+  // to it, or the client's transport hits a non-JSON byte and reports
+  // "Connection closed". Route any stray console.log (ours, a lazily-imported
+  // module's, or a dependency's — notably the in-process brain worker started
+  // below) to stderr. The SDK's StdioServerTransport writes JSON-RPC via
+  // process.stdout.write directly, so it is unaffected. Defence-in-depth: each
+  // module also logs to stderr in its own right, but this guarantees the stream
+  // stays clean even if a future code path forgets.
+  console.log = (...args: unknown[]): void => { console.error(...args); };
+
   // Lazy-load heavy server/worker/embedding modules — only the actual MCP
   // server path needs them, so they stay out of fast CLI/hook startup.
   const { createServer } = await import('./server.js');

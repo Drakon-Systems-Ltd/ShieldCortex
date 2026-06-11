@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.4] - 2026-06-11
+
+**MCP stdio stream is now strictly JSON-RPC.** Fixes intermittent `Connection closed` failures when registering `shieldcortex` as an MCP server.
+
+### Fixed
+
+- **The in-process background worker no longer writes to stdout in MCP mode.** When the MCP stdio server starts, it runs the brain worker in-process for STM→LTM consolidation — but the worker's lifecycle diagnostics (`[BrainWorker] Starting…`, `Light tick interval…`, `Stopped`, tick summaries) were written via `console.log` to **stdout**, which the MCP server uses as its JSON-RPC channel. The first non-JSON line corrupts the stream, so a client's stdio transport reports `Connection closed` (clients that tolerate stray lines connected anyway, but a 15-minute light tick could still interleave a log line mid-session). All worker diagnostics now go to **stderr** (`console.error`).
+- **Defence-in-depth stdout guard.** On MCP server startup, `console.log` is now routed to stderr so any stray `console.log` — ours, a lazily-imported module's, or a dependency's — can never corrupt the JSON-RPC stream again. The SDK's stdio transport writes JSON-RPC via `process.stdout.write` directly and is unaffected. Pinned by a new end-to-end test that spawns the real server, performs an `initialize` handshake, and asserts every stdout line is valid JSON.
+
 ## [4.32.3] - 2026-06-11
 
 **Honest repair output + a config-integrity false alarm fixed.** Two reliability fixes for the self-healing/repair paths shipped in 4.32.1–4.32.2.

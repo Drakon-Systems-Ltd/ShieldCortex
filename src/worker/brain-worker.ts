@@ -141,17 +141,17 @@ export class BrainWorker {
    */
   start(): void {
     if (this.isRunning) {
-      console.log('[BrainWorker] Already running');
+      console.error('[BrainWorker] Already running');
       return;
     }
 
     this.isRunning = true;
-    console.log(`[BrainWorker] Starting background worker (profile=${this.config.profile} pid=${process.pid})`);
-    console.log(`[BrainWorker] Light tick interval: ${this.config.lightTickIntervalMs / 1000}s`);
+    console.error(`[BrainWorker] Starting background worker (profile=${this.config.profile} pid=${process.pid})`);
+    console.error(`[BrainWorker] Light tick interval: ${this.config.lightTickIntervalMs / 1000}s`);
     if (this.config.profile === 'full') {
-      console.log(`[BrainWorker] Medium tick interval: ${this.config.mediumTickIntervalMs / 1000}s`);
+      console.error(`[BrainWorker] Medium tick interval: ${this.config.mediumTickIntervalMs / 1000}s`);
     } else {
-      console.log('[BrainWorker] MCP profile — medium tick + cloud sync disabled');
+      console.error('[BrainWorker] MCP profile — medium tick + cloud sync disabled');
     }
 
     // Light tick — every 5 min (full) or every 15 min (mcp)
@@ -197,7 +197,7 @@ export class BrainWorker {
    */
   stop(): void {
     if (!this.isRunning) {
-      console.log('[BrainWorker] Not running');
+      console.error('[BrainWorker] Not running');
       return;
     }
 
@@ -218,7 +218,7 @@ export class BrainWorker {
       this.initialLightTickTimer = null;
     }
 
-    console.log('[BrainWorker] Stopped');
+    console.error('[BrainWorker] Stopped');
   }
 
   /**
@@ -251,7 +251,7 @@ export class BrainWorker {
       const decision = shouldTriggerPredictiveConsolidation(stats, this.config);
 
       if (decision.shouldRun) {
-        console.log(`[BrainWorker] Predictive consolidation triggered: ${decision.reason}`);
+        console.error(`[BrainWorker] Predictive consolidation triggered: ${decision.reason}`);
         result.predictiveConsolidation = consolidate();
         this.lastConsolidation = new Date();
         this.stats.consolidations++;
@@ -272,7 +272,7 @@ export class BrainWorker {
       try {
         const pressurePurged = purgeAuditUnderSizePressure();
         if (pressurePurged > 0) {
-          console.log(`[BrainWorker] Audit size-pressure valve purged ${pressurePurged} rows`);
+          console.error(`[BrainWorker] Audit size-pressure valve purged ${pressurePurged} rows`);
         }
 
         const now = result.timestamp.getTime();
@@ -283,7 +283,7 @@ export class BrainWorker {
           const purged = purgeOldAuditEntries();
           this.lastAuditPurge = result.timestamp;
           if (purged > 0) {
-            console.log(`[BrainWorker] Audit retention purged ${purged} entries older than 90d`);
+            console.error(`[BrainWorker] Audit retention purged ${purged} entries older than 90d`);
           }
         }
       } catch (auditErr) {
@@ -303,7 +303,7 @@ export class BrainWorker {
           this.config.profile === 'mcp' ? { maxRows: MCP_RETRY_QUEUE_BUDGET } : {},
         );
         if (retryResult.processed > 0) {
-          console.log(
+          console.error(
             `[BrainWorker] Sync retry queue: processed ${retryResult.processed} ` +
             `(${retryResult.succeeded} ok, ${retryResult.failed} retry, ${retryResult.permanentlyFailed} failed)`
           );
@@ -344,7 +344,7 @@ export class BrainWorker {
 
       // Log summary
       if (result.activationsPruned > 0 || result.predictiveConsolidation) {
-        console.log(
+        console.error(
           `[BrainWorker] Light tick: pruned ${result.activationsPruned} activations` +
           (result.predictiveConsolidation
             ? `, consolidated ${result.predictiveConsolidation.consolidated}`
@@ -397,7 +397,7 @@ export class BrainWorker {
       emitWorkerMediumTick(result);
 
       // Log summary
-      console.log(
+      console.error(
         `[BrainWorker] Medium tick: scanned ${result.memoriesScanned} memories, ` +
         `discovered ${result.linksDiscovered} links, ` +
         `found ${result.contradictionsFound} contradictions`
@@ -425,7 +425,7 @@ export class BrainWorker {
 
       const entityCount = (db.prepare('SELECT COUNT(*) as c FROM entities').get() as { c: number }).c;
       const tripleCount = (db.prepare('SELECT COUNT(*) as c FROM triples').get() as { c: number }).c;
-      console.log(`[brain-worker] Graph: ${entityCount} entities, ${tripleCount} triples${orphans.length > 0 ? `, pruned ${orphans.length} orphans` : ''}`);
+      console.error(`[brain-worker] Graph: ${entityCount} entities, ${tripleCount} triples${orphans.length > 0 ? `, pruned ${orphans.length} orphans` : ''}`);
     } catch (e) {
       console.error('[brain-worker] Graph maintenance failed:', e);
     }
@@ -434,7 +434,7 @@ export class BrainWorker {
     try {
       const purged = purgeOldEntries();
       if (purged > 0) {
-        console.log(`[BrainWorker] Purged ${purged} old sync queue entries`);
+        console.error(`[BrainWorker] Purged ${purged} old sync queue entries`);
       }
     } catch (e) {
       console.error('[BrainWorker] Sync queue purge failed:', e);

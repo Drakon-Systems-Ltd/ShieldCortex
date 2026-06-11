@@ -1,4 +1,4 @@
-import { describe, it, expect } from '@jest/globals';
+import { afterEach, describe, it, expect, jest } from '@jest/globals';
 import { BrainWorker } from '../worker/brain-worker.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS, DEFAULT_WORKER_CONFIG } from '../worker/types.js';
 
@@ -28,5 +28,40 @@ describe('BrainWorker — MCP profile (#45)', () => {
   it('honours an explicit lightTickIntervalMs override under mcp profile', () => {
     const worker = new BrainWorker({ profile: 'mcp', lightTickIntervalMs: 60_000 });
     expect(worker.getConfig().lightTickIntervalMs).toBe(60_000);
+  });
+
+  // The worker runs IN-PROCESS inside the MCP stdio server (index.ts), where
+  // stdout is the JSON-RPC channel. console.log goes to stdout and corrupts that
+  // stream → the client reports "Connection closed"; console.error goes to
+  // stderr and is safe. So the worker must log exclusively via console.error.
+  // (The end-to-end stdout-purity guarantee is pinned separately by
+  // mcp-stdout-purity.test.ts, which spawns the real server.)
+  describe('logs via console.error, never console.log (MCP protocol safety)', () => {
+    let logSpy: jest.SpiedFunction<typeof console.log>;
+    let errSpy: jest.SpiedFunction<typeof console.error>;
+
+    afterEach(() => {
+      logSpy?.mockRestore();
+      errSpy?.mockRestore();
+    });
+
+    const joined = (spy: jest.SpiedFunction<typeof console.log>) =>
+      spy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+
+    it('start() and stop() use console.error (stderr), not console.log (stdout)', () => {
+      const worker = new BrainWorker({ profile: 'mcp' });
+      // Spy AFTER construction so we only capture start()/stop() output.
+      logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      worker.start();
+      worker.stop();
+
+      // The smoking gun: nothing the worker logs may go to stdout (console.log).
+      expect(joined(logSpy)).not.toContain('[BrainWorker]');
+      // …and the diagnostics still happen — on stderr (console.error).
+      expect(joined(errSpy)).toContain('[BrainWorker] Starting background worker');
+      expect(joined(errSpy)).toContain('[BrainWorker] Stopped');
+    });
   });
 });
