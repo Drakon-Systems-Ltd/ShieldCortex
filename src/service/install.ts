@@ -139,6 +139,93 @@ function summarizeServiceMode(mode: ServiceMode): string {
   }
 }
 
+type ExecFn = (command: string, options?: Parameters<typeof execSync>[1]) => unknown;
+
+const MACOS_SERVICE_LABEL = 'com.shieldcortex.dashboard';
+const LINUX_SERVICE_UNIT = 'shieldcortex-dashboard.service';
+
+function macosGuiDomain(): string {
+  const uid = process.getuid?.();
+  return typeof uid === 'number' ? `gui/${uid}` : 'gui/501';
+}
+
+/**
+ * Load (or reload) the LaunchAgent via the modern bootstrap API.
+ *
+ * The legacy `launchctl load -w` lies on an already-loaded service: it prints
+ * "Load failed: 5: Input/output error" to stderr yet exits 0, so install
+ * claimed success while the old process kept running with the old service
+ * definition (launchd caches the plist at load time). bootout + bootstrap
+ * returns real exit codes and applies the plist that was just written.
+ */
+export async function activateMacosService(
+  servicePath: string,
+  opts: { exec?: ExecFn; retryDelayMs?: number; drainTimeoutMs?: number } = {},
+): Promise<{ reloaded: boolean }> {
+  const exec = opts.exec ?? execSync;
+  const retryDelayMs = opts.retryDelayMs ?? 500;
+  const drainTimeoutMs = opts.drainTimeoutMs ?? 30_000;
+  const domain = macosGuiDomain();
+  const target = `${domain}/${MACOS_SERVICE_LABEL}`;
+
+  const isLoaded = (): boolean => {
+    try {
+      exec(`launchctl print ${target}`, { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const wasLoaded = isLoaded();
+
+  if (wasLoaded) {
+    try {
+      exec(`launchctl bootout ${target}`, { stdio: 'inherit' });
+    } catch {
+      // Job vanished between the probe and the bootout (concurrent teardown).
+      // Already-gone is the state we wanted; fall through to bootstrap.
+    }
+    // bootout initiates teardown and returns in milliseconds, but launchd
+    // refuses to bootstrap the same label (EIO) until the old instance fully
+    // drains — ~5s under SIGTERM→SIGKILL escalation, up to the api server's
+    // 10s force-exit. `launchctl print` exits 0 while draining and non-zero
+    // once gone, so poll it rather than blind-retrying bootstrap.
+    const deadline = Date.now() + drainTimeoutMs;
+    while (isLoaded() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  // Replaces the persistence bit that `load -w` used to clear.
+  exec(`launchctl enable ${target}`, { stdio: 'inherit' });
+
+  // Safety net behind the drain poll. Gives up honestly — the caller reports
+  // the failure instead of claiming success.
+  const attempts = wasLoaded ? 3 : 1;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      exec(`launchctl bootstrap ${domain} "${servicePath}"`, { stdio: 'inherit' });
+      break;
+    } catch (err) {
+      if (attempt >= attempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+  return { reloaded: wasLoaded };
+}
+
+/**
+ * `enable --now` is a no-op start on an already-running unit, so reinstalls
+ * kept the old process (and old code) running. enable + restart covers both
+ * fresh installs and reinstalls.
+ */
+export function activateLinuxService(exec: ExecFn = execSync): void {
+  exec('systemctl --user daemon-reload', { stdio: 'inherit' });
+  exec(`systemctl --user enable ${LINUX_SERVICE_UNIT}`, { stdio: 'inherit' });
+  exec(`systemctl --user restart ${LINUX_SERVICE_UNIT}`, { stdio: 'inherit' });
+}
+
 function tryEnableLinuxLinger(): void {
   const username = process.env.USER || os.userInfo().username;
   try {
@@ -176,13 +263,15 @@ export async function installService(options: ServiceOptions = {}): Promise<void
 
   try {
     switch (platform) {
-      case 'macos':
-        execSync(`launchctl load -w "${servicePath}"`, { stdio: 'inherit' });
-        console.log('Service loaded via launchctl.');
+      case 'macos': {
+        const { reloaded } = await activateMacosService(servicePath);
+        console.log(reloaded
+          ? 'Service was already loaded — restarted with the new configuration.'
+          : 'Service loaded via launchctl.');
         break;
+      }
       case 'linux':
-        execSync('systemctl --user daemon-reload', { stdio: 'inherit' });
-        execSync('systemctl --user enable --now shieldcortex-dashboard.service', { stdio: 'inherit' });
+        activateLinuxService();
         if (mode === 'worker' || mode === 'api') {
           tryEnableLinuxLinger();
         }
@@ -195,7 +284,14 @@ export async function installService(options: ServiceOptions = {}): Promise<void
     }
   } catch (err: any) {
     console.error(`Failed to enable service: ${err.message}`);
-    console.log(`The service file was written to ${servicePath} — you can enable it manually.`);
+    if (platform === 'macos') {
+      // Common over ssh: no GUI session means no gui/<uid> domain to load
+      // into. The LaunchAgent still auto-starts at the next GUI login.
+      console.log(`The service file was written to ${servicePath} — it will auto-start at the next GUI login, or load it now with:`);
+      console.log(`  launchctl bootstrap gui/$(id -u) "${servicePath}"`);
+    } else {
+      console.log(`The service file was written to ${servicePath} — you can enable it manually.`);
+    }
     return;
   }
 
@@ -279,8 +375,7 @@ export async function serviceStatus(): Promise<void> {
   try {
     switch (platform) {
       case 'macos': {
-        const uid = process.getuid?.();
-        const domain = typeof uid === 'number' ? `gui/${uid}/com.shieldcortex.dashboard` : 'gui/501/com.shieldcortex.dashboard';
+        const domain = `${macosGuiDomain()}/${MACOS_SERVICE_LABEL}`;
         const out = execSync(`launchctl print ${domain} 2>&1`, { encoding: 'utf-8' });
         const pidMatch = out.match(/\bpid\s*=\s*(\d+)/i);
         const running = /\bstate\s*=\s*running\b/i.test(out) || Boolean(pidMatch);

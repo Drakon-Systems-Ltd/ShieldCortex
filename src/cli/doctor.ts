@@ -15,6 +15,7 @@ import { shouldShowProUpsell, UPSELL_CONSTANTS, type UpsellInputs } from './upse
 import { getUpsellState, markUpsellShown } from './upsell-state.js';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
+import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -1270,10 +1271,17 @@ function workerRecoveryFix(): string {
   if (process.platform === 'linux') {
     return 'For persistence, run `shieldcortex service install --headless` (recommended on headless hosts) or restart Claude Code';
   }
-  return 'Restart Claude Code or run `shieldcortex service install` to supervise the worker';
+  return 'Restart Claude Code (spawns a fresh MCP-hosted worker), or run `shieldcortex service install` to start — or restart — the supervised launchd service';
 }
 
-async function checkBrainWorker(): Promise<CheckResult> {
+// worker.json is last-writer-wins: an MCP-hosted worker dies with its Claude
+// Code session and leaves its dead pid in the file until a surviving worker's
+// next tick overwrites it — up to MCP_LIGHT_TICK_INTERVAL_MS for mcp-profile
+// survivors. Within that window (plus slack) a dead pid is expected churn,
+// not a failure.
+const WORKER_TAKEOVER_GRACE_MS = MCP_LIGHT_TICK_INTERVAL_MS + 5 * 60 * 1000;
+
+export async function checkBrainWorker(): Promise<CheckResult> {
   if (process.env.SHIELDCORTEX_DISABLE_WORKER === '1') {
     return {
       label: 'Brain worker',
@@ -1316,10 +1324,22 @@ async function checkBrainWorker(): Promise<CheckResult> {
     // nothing's coming". The fix-hint diverges accordingly.
     const alive = pid != null ? isPidAlive(pid) : null;
     if (pid != null && alive === false) {
+      // Grace applies only to mcp-profile hosts: they die with their Claude
+      // Code window, so a dead pid inside one takeover window is expected
+      // churn. A dead full-profile host (dashboard/api/worker — typically
+      // supervised) is a real failure, and a future-dated tick (clock skew)
+      // proves nothing — both warn immediately.
+      if (profile === 'mcp' && ageMs >= 0 && ageMs <= WORKER_TAKEOVER_GRACE_MS) {
+        return {
+          label: 'Brain worker',
+          status: 'info',
+          message: `host pid ${pid} exited (last tick ${ageMin}m ago, profile=${profile}) — expected when a Claude Code session closes; if another ShieldCortex process is running, its worker takes over on its next tick (≤${Math.round(MCP_LIGHT_TICK_INTERVAL_MS / 60000)} min). Re-run doctor to confirm`,
+        };
+      }
       return {
         label: 'Brain worker',
         status: 'warn',
-        message: `process gone (pid ${pid} dead, last tick ${ageMin}m ago, profile=${profile})`,
+        message: `process gone (pid ${pid} dead, last tick ${ageMin}m ago, profile=${profile}) and no surviving worker has taken over`,
         fix: workerRecoveryFix(),
       };
     }

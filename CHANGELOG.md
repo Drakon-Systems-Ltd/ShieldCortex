@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.6] - 2026-06-12
+
+**`service install` now actually (re)starts the service, and doctor stops crying wolf about freshly-closed sessions.** Two honesty fixes for the service installer and one false-positive fix for the brain-worker health check.
+
+### Fixed
+
+- **macOS `service install` now restarts an already-loaded service instead of silently doing nothing.** The legacy `launchctl load -w` exits 0 on an already-loaded service while printing `Load failed: 5: Input/output error` to stderr — so install reported "Service loaded via launchctl." and the OLD process kept running with the OLD service definition (launchd caches the plist at load time; one observed dashboard had been running 13-day-old code through several updates). Install now probes `launchctl print`, boots out a running instance, waits for launchd to finish draining the label (polling `launchctl print`, which exits 0 while draining and non-zero once gone — the post-bootout EIO window is ~5 s under SIGTERM→SIGKILL escalation, longer for api-mode graceful shutdown), then `launchctl enable` + `launchctl bootstrap`s the freshly written plist with real exit codes. Failures are reported honestly, with a copy-paste `launchctl bootstrap` command and a note that the LaunchAgent auto-starts at the next GUI login (relevant over ssh, where no `gui/<uid>` domain exists).
+- **Linux `service install` now restarts the unit on reinstall.** `systemctl --user enable --now` is a no-op start when the unit is already running, so reinstalls/updates never picked up new code — the same lying-success class as the macOS path. Install now runs `daemon-reload` + `enable` + `restart`, which covers fresh installs and reinstalls alike.
+- **Doctor no longer warns "Brain worker: process gone" right after a Claude Code window closes.** `state/worker.json` is a last-writer-wins heartbeat ticked by every live worker (5 min full profile, 15 min mcp). When an mcp-profile host exits with its session — the normal lifecycle — its dead pid sits in the file until a surviving worker's next tick overwrites it, and doctor flagged that window as a failure (and its fix-hint pointed at `service install`, which was a no-op per the bug above). A dead **mcp** pid with a tick fresher than 20 minutes (one 15-min mcp tick + slack) is now an info row ("awaiting takeover"), not a warning. Dead **full**-profile hosts (dashboard/api/worker — typically supervised) and future-dated ticks (clock skew) still warn immediately, and a dead pid past the grace window warns as before.
+
 ## [4.32.5] - 2026-06-12
 
 **`repair`/`update` now actually compile the native binding.** Fixes the self-heal shipped in 4.32.1–4.32.3, which could report success (or fail confusingly) without ever building `better_sqlite3.node`.
