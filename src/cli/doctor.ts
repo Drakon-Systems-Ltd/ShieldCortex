@@ -1371,7 +1371,7 @@ export async function checkBrainWorker(): Promise<CheckResult> {
  * basename collides with a `<something>-<basename>` form already in the
  * DB, point the user at `repair-project-keys`.
  */
-async function checkProjectKeyConsistency(): Promise<CheckResult> {
+export async function checkProjectKeyConsistency(): Promise<CheckResult> {
   const dbPath = getDbPath();
   if (!fs.existsSync(dbPath)) {
     return { label: 'Project keys', status: 'info', message: 'skipped (no DB yet)' };
@@ -1397,11 +1397,27 @@ async function checkProjectKeyConsistency(): Promise<CheckResult> {
       }
       const example = collisions.slice(0, 3).map((c) => `${c.legacy} ↔ ${c.canonical}`).join('; ');
       const more = collisions.length > 3 ? ` (+${collisions.length - 3} more)` : '';
+      // Doctor already knows both sides of each collision, so hand the user
+      // a runnable command with explicit --map pairs rather than a <root>
+      // placeholder. The repair tool defaults to long_term/episodic rows;
+      // when a colliding legacy key has rows outside that scope the default
+      // repair leaves them behind and this warning survives it — suggest
+      // --include-stm in that case.
+      const stmProbe = db.prepare(
+        "SELECT COUNT(*) AS n FROM memories WHERE project = ? AND type NOT IN ('long_term', 'episodic')"
+      );
+      const needsStm = collisions.some((c) => (stmProbe.get(c.legacy) as { n: number }).n > 0);
+      const mapFlags = collisions
+        .map((c) => {
+          const pair = `${c.legacy}=${c.canonical}`;
+          return `--map ${/\s/.test(pair) ? `"${pair}"` : pair}`;
+        })
+        .join(' ');
       return {
         label: 'Project keys',
         status: 'warn',
         message: `${collisions.length} legacy/canonical collision(s): ${example}${more}`,
-        fix: 'Run `shieldcortex memories repair-project-keys --scan-paths <root>` (dry-run by default)',
+        fix: `Run \`shieldcortex memories repair-project-keys ${mapFlags}${needsStm ? ' --include-stm' : ''}\` (dry-run by default; add --execute to apply)`,
       };
     } finally {
       db.close();

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.7] - 2026-06-12
+
+**Doctor's project-keys fix-hint is now a runnable command.** Follow-up to the 4.32.6 doctor polish, prompted by a real repair that the old hint couldn't complete.
+
+### Fixed
+
+- **The project-keys collision hint now emits explicit `--map legacy=canonical` pairs instead of a `--scan-paths <root>` placeholder.** Doctor already knows both sides of every collision it reports, so it now hands over the exact command (pairs shell-quoted when a key contains spaces). The literal `<root>` invited a paste-as-is zsh parse error, and `--scan-paths` can't resolve repos that live outside the scanned root anyway.
+- **The hint appends `--include-stm` when a colliding legacy key has short-term rows.** `repair-project-keys` defaults to long_term/episodic rows, but doctor's collision check scans ALL rows — so an STM-only collision sent users to a command that reported "No proposed rewrites — nothing to do" while the warning survived. Doctor now detects rows outside the repair tool's default scope and includes the flag only when it's actually needed.
+
 ## [4.32.6] - 2026-06-12
 
 **`service install` now actually (re)starts the service, and doctor stops crying wolf about freshly-closed sessions.** Two honesty fixes for the service installer and one false-positive fix for the brain-worker health check.
