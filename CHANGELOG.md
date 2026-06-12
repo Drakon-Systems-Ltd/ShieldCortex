@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.5] - 2026-06-12
+
+**`repair`/`update` now actually compile the native binding.** Fixes the self-heal shipped in 4.32.1–4.32.3, which could report success (or fail confusingly) without ever building `better_sqlite3.node`.
+
+### Fixed
+
+- **The native-binding self-heal now uses better-sqlite3's `build-release` (node-gyp), not `npm rebuild --build-from-source`.** On a platform with no matching prebuilt (e.g. arm64 on a Node the prebuilds don't cover), `npm rebuild better-sqlite3` — *even with* `--build-from-source` — goes through `prebuild-install`, which exits 0 **without building** and reports "rebuilt dependencies successfully". So `shieldcortex repair`/`update` could declare success while the binding stayed missing (proven on an arm64 / Node 22 box: `repair` ran the `--build-from-source` rebuild and the binding was still absent). The forced source build now runs `npm run build-release` **in the better-sqlite3 package directory**, which bypasses prebuild-install and invokes node-gyp directly — actually producing the binary, and surfacing the real compiler error if a toolchain is missing.
+- **Every "rebuild the native module" hint now points at the reliable command.** The DB-open error (`init.ts`), the native-load guard, `doctor`, `repair`, and the postinstall warning previously suggested the bare `npm rebuild better-sqlite3` (the silent no-op). They now point at `shieldcortex repair` and the manual `cd …/node_modules/better-sqlite3 && npm run build-release`.
+
 ## [4.32.4] - 2026-06-11
 
 **MCP stdio stream is now strictly JSON-RPC.** Fixes intermittent `Connection closed` failures when registering `shieldcortex` as an MCP server.

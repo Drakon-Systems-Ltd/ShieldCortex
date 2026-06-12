@@ -153,7 +153,7 @@ async function checkDatabase(): Promise<CheckResult> {
       status: 'fail',
       message: `cannot open — ${msg}`,
       fix: /bindings file|napi|abi|MODULE_VERSION|was compiled against/i.test(msg)
-        ? `Native DB engine failed to load. Run \`shieldcortex repair\` (rebuilds better-sqlite3 in the install dir + re-verifies), or manually: cd "${resolveSelfInstallDir()}" && npm rebuild better-sqlite3`
+        ? `Native DB engine failed to load. Run \`shieldcortex repair\` (compiles better-sqlite3 from source + re-verifies), or manually: cd "${path.join(resolveSelfInstallDir(), 'node_modules', 'better-sqlite3')}" && npm run build-release`
         : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server',
     };
   }

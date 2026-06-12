@@ -13,13 +13,15 @@
  * successfully" — a no-op. So this module resolves the install dir from the
  * running code's own location and rebuilds there.
  *
- * The second trap (observed on clawdbot1): even in the right dir, a plain
- * `npm rebuild` can report "rebuilt dependencies successfully" while the binary
- * never built — no matching prebuilt, and the source build silently no-op'd or
- * its failure was swallowed. So when a plain rebuild doesn't heal, we escalate
- * to `--build-from-source --foreground-scripts`, which forces a real compile and
- * streams the build output — surfacing the ACTUAL error (almost always a missing
- * C/C++ toolchain) instead of a misleading success.
+ * The second trap (proven on clawdbot1): even in the right dir, `npm rebuild
+ * better-sqlite3` — AND `npm rebuild … --build-from-source` — can report "rebuilt
+ * dependencies successfully" while the binary never built. better-sqlite3's
+ * install runs prebuild-install, which on a platform with no matching prebuilt
+ * exits 0 WITHOUT building (the `--build-from-source` flag does not reliably force
+ * it). So when a plain rebuild doesn't heal, we escalate to better-sqlite3's own
+ * `npm run build-release` (= `node-gyp rebuild --release`) IN its package dir,
+ * which bypasses prebuild-install and actually compiles — surfacing the real
+ * build error (almost always a missing C/C++ toolchain) if it can't.
  *
  * Used by: `shieldcortex update` (verify+heal step), `shieldcortex repair`,
  * `shieldcortex doctor` (correct remediation text), and the postinstall guidance.
@@ -86,30 +88,55 @@ export function verifyNativeBinding(): VerifyResult {
 }
 
 /**
- * Run `npm rebuild better-sqlite3` in the install dir. Async (the rebuild can
- * take tens of seconds) so callers can keep a spinner alive. Never throws.
+ * The command used to (re)build the binding — split out so the choice is
+ * unit-testable without actually spawning npm.
  *
- * With `{ fromSource: true }` it forces a real compile (`--build-from-source`)
- * and streams the build-script output (`--foreground-scripts`) so a failed
- * compile surfaces its real error rather than npm's misleading
- * "rebuilt dependencies successfully".
+ * - normal: `npm rebuild better-sqlite3` in the install dir. Fast, and places a
+ *   matching prebuilt when one exists for this platform/ABI.
+ * - fromSource: `npm run build-release` IN the better-sqlite3 dir — its own script
+ *   (`node-gyp rebuild --release`). This is the ONLY reliable force-compile:
+ *   `npm rebuild … --build-from-source` still goes through prebuild-install, which
+ *   on a platform with no matching prebuilt exits 0 WITHOUT building and reports
+ *   "rebuilt dependencies successfully" (proven on arm64 Node 22). build-release
+ *   bypasses prebuild-install entirely and invokes node-gyp directly.
+ */
+export function nativeRebuildCommand(
+  installDir: string,
+  fromSource = false,
+): { cmd: string; args: string[]; cwd: string } {
+  if (fromSource) {
+    return {
+      cmd: 'npm',
+      args: ['run', 'build-release'],
+      cwd: path.join(installDir, 'node_modules', 'better-sqlite3'),
+    };
+  }
+  return { cmd: 'npm', args: ['rebuild', 'better-sqlite3', '--no-audit', '--no-fund'], cwd: installDir };
+}
+
+/**
+ * Run the binding (re)build. Async (the compile can take tens of seconds) so
+ * callers can keep a spinner alive. Never throws.
+ *
+ * With `{ fromSource: true }` it forces a real compile via better-sqlite3's
+ * `build-release` (node-gyp) — bypassing prebuild-install's silent no-op — and
+ * captures the build output so a failed compile surfaces its real error rather
+ * than npm's misleading "rebuilt dependencies successfully".
  */
 export function rebuildNativeBinding(
   installDir: string,
   opts: { fromSource?: boolean } = {},
 ): Promise<{ ok: boolean; output: string }> {
+  const { cmd, args, cwd } = nativeRebuildCommand(installDir, opts.fromSource ?? false);
   return new Promise((resolve) => {
     let output = '';
     let settled = false;
     const finish = (ok: boolean) => { if (!settled) { settled = true; resolve({ ok, output }); } };
 
-    const args = ['rebuild', 'better-sqlite3', '--no-audit', '--no-fund'];
-    if (opts.fromSource) args.push('--build-from-source', '--foreground-scripts');
-
     let child;
     try {
-      child = spawn('npm', args, {
-        cwd: installDir,
+      child = spawn(cmd, args, {
+        cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
       });
@@ -155,17 +182,18 @@ function toolchainHint(): string {
 }
 
 /**
- * The correct copy-paste remediation — the install-dir `cd` is the bit users
- * miss (a bare `npm rebuild better-sqlite3` from $HOME is a silent no-op).
- *
- * Uses `--build-from-source` because by the time we surface this, a plain
- * rebuild has already failed to heal: forcing a source compile is both what
- * actually produces the binary (when no prebuilt matches this Node/arch) and
- * what reveals the real error if it can't.
+ * The correct copy-paste remediation. Two things users (and a naive
+ * `npm rebuild`) get wrong, both leading to a silent no-op:
+ *   1. running the rebuild outside the package's install dir, and
+ *   2. using `npm rebuild`/`--build-from-source`, which goes through
+ *      prebuild-install and exits 0 without building when no prebuilt matches.
+ * The reliable command is better-sqlite3's own `build-release` (node-gyp) run in
+ * its package dir, which compiles from source directly.
  */
 export function nativeBindingRemediation(installDir: string): string {
+  const pkgDir = path.join(installDir, 'node_modules', 'better-sqlite3');
   return [
-    `cd "${installDir}" && npm rebuild better-sqlite3 --build-from-source`,
+    `cd "${pkgDir}" && npm run build-release`,
     toolchainHint(),
     'Then restart Claude Code / the OpenClaw gateway so processes reload the binding.',
   ].join('\n');
@@ -179,9 +207,10 @@ export function nativeBindingRemediation(installDir: string): string {
  *
  * Two rebuild attempts when needed: first a plain `npm rebuild` (fast, uses a
  * matching prebuilt if one exists), then — only if that didn't heal it — a
- * forced `--build-from-source` compile. The forced build is what surfaces the
- * real error (and `rebuildOutput` in the failed result carries IT, not the
- * earlier misleading "rebuilt dependencies successfully").
+ * forced `npm run build-release` (node-gyp) source compile. The forced build is
+ * what actually produces the binary when no prebuilt matches AND surfaces the
+ * real error if it can't (and `rebuildOutput` in the failed result carries IT,
+ * not the earlier misleading "rebuilt dependencies successfully").
  */
 export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Promise<EnsureResult> {
   const verify = deps.verify ?? verifyNativeBinding;

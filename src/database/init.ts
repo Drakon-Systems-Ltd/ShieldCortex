@@ -512,9 +512,9 @@ export function initDatabase(dbPath?: string): Database.Database {
       throw new Error(
         'ShieldCortex could not load its database engine (the better-sqlite3 native module). ' +
         `This is an install / Node-version issue, NOT database corruption — your data at ${expandedPath} is untouched. ` +
-        'Rebuild the native module and retry:\n' +
-        '  cd "$(npm root -g)/shieldcortex" && npm rebuild better-sqlite3\n' +
-        '(install a C/C++ toolchain first if it fails to compile)\n' +
+        'Rebuild the native module and retry — easiest is `shieldcortex repair`, or manually:\n' +
+        '  cd "$(npm root -g)/shieldcortex/node_modules/better-sqlite3" && npm run build-release\n' +
+        '(install a C/C++ toolchain first if it fails to compile; a plain `npm rebuild` can silently no-op)\n' +
         `Underlying error: ${detail}`,
       );
     }

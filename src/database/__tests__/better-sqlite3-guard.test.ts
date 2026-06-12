@@ -29,9 +29,13 @@ describe('formatNativeLoadError', () => {
     expect(msg).toContain('better-sqlite3');
   });
 
-  it('gives the exact rebuild remediation command', () => {
+  it('gives the reliable source-compile remediation (build-release / repair, not the no-op npm rebuild)', () => {
     const msg = formatNativeLoadError(new Error('ERR_DLOPEN_FAILED'), nodeVersion, abi);
-    expect(msg).toContain('npm rebuild better-sqlite3');
+    expect(msg).toContain('npm run build-release');
+    expect(msg).toContain('shieldcortex repair');
+    // Must NOT suggest the bare `npm rebuild better-sqlite3`, which goes through
+    // prebuild-install and silently no-ops when no prebuilt matches this Node/arch.
+    expect(msg).not.toContain('npm rebuild better-sqlite3');
   });
 
   it('points users at a supported Node LTS when on bleeding-edge Node', () => {
@@ -74,8 +78,8 @@ describe('native-load failure must never kill the host (C1)', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.name).toBe('NativeModuleLoadError');
     expect(err.cause).toBe(cause);
-    // Keeps the helpful rebuild remediation in the thrown error.
-    expect(err.message).toContain('npm rebuild better-sqlite3');
+    // Keeps the helpful (reliable) compile remediation in the thrown error.
+    expect(err.message).toContain('npm run build-release');
     expect(err.message).toContain('better-sqlite3');
     // A binding-load error is recognised as native (routes away from the
     // destructive corrupt-DB recovery in init.ts).

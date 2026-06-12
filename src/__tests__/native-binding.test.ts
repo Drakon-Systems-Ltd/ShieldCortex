@@ -9,6 +9,7 @@ import {
   verifyNativeBinding,
   resolveSelfInstallDir,
   nativeBindingRemediation,
+  nativeRebuildCommand,
   ensureNativeBinding,
 } from '../setup/native-binding.js';
 import { existsSync, readFileSync } from 'fs';
@@ -31,11 +32,31 @@ describe('native-binding helper', () => {
     });
   });
 
+  describe('nativeRebuildCommand', () => {
+    it('normal rebuild uses `npm rebuild better-sqlite3` in the install dir', () => {
+      const c = nativeRebuildCommand('/opt/install/shieldcortex', false);
+      expect(c.cmd).toBe('npm');
+      expect(c.args).toEqual(['rebuild', 'better-sqlite3', '--no-audit', '--no-fund']);
+      expect(c.cwd).toBe('/opt/install/shieldcortex');
+    });
+
+    it('fromSource uses `npm run build-release` IN the better-sqlite3 dir (bypasses prebuild-install no-op)', () => {
+      const c = nativeRebuildCommand('/opt/install/shieldcortex', true);
+      expect(c.cmd).toBe('npm');
+      expect(c.args).toEqual(['run', 'build-release']);
+      expect(c.cwd).toBe(path.join('/opt/install/shieldcortex', 'node_modules', 'better-sqlite3'));
+      // It must NOT be the no-op `npm rebuild --build-from-source` form.
+      expect(c.args).not.toContain('--build-from-source');
+    });
+  });
+
   describe('nativeBindingRemediation', () => {
-    it('includes the install-dir cd, the rebuild command, and a toolchain hint', () => {
+    it('points at `npm run build-release` in the better-sqlite3 dir, with a toolchain hint', () => {
       const text = nativeBindingRemediation('/opt/install/shieldcortex');
-      expect(text).toContain('/opt/install/shieldcortex');
-      expect(text).toContain('npm rebuild better-sqlite3');
+      // The reliable forced compile — NOT the prebuild-install no-op forms.
+      expect(text).toContain(path.join('/opt/install/shieldcortex', 'node_modules', 'better-sqlite3'));
+      expect(text).toContain('npm run build-release');
+      expect(text).not.toContain('npm rebuild better-sqlite3');
       // platform toolchain hint — at least one of the known package managers
       expect(/apt|xcode-select|build tools|python3|make|g\+\+/.test(text)).toBe(true);
     });
@@ -73,7 +94,7 @@ describe('native-binding helper', () => {
       });
       expect(r.status).toBe('failed');
       expect(r.remediation).toContain('/opt/install/shieldcortex');
-      expect(r.remediation).toContain('npm rebuild better-sqlite3');
+      expect(r.remediation).toContain('npm run build-release');
     });
 
     it('escalates to a forced source build when a plain rebuild reports success but does not heal, and surfaces the real build error', async () => {
