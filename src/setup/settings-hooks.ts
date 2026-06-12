@@ -4,7 +4,7 @@
 
 import path from 'path';
 import os from 'os';
-import { setAutoMemoryEnableConfig } from '../cloud/config.js';
+import { getAutoMemoryEnableConfig, setAutoMemoryEnableConfig } from '../cloud/config.js';
 import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
@@ -142,7 +142,33 @@ function reconcileHookTimeouts(settings: Record<string, any>): number {
   return updated;
 }
 
-export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean }): void {
+export interface HookOptInOptions {
+  stopHook?: boolean;
+  sessionEnd?: boolean;
+}
+
+/**
+ * CLI flag → opt-in option mapping. An absent flag MUST map to undefined
+ * ("leave as-is"), never false: `process.argv.includes()` returning false for
+ * an absent flag is exactly how `setup --with-session-end` used to silently
+ * flip enableStop off (and vice versa). Disabling is its own explicit flag.
+ */
+export function parseHookOptInFlags(argv: string[]): HookOptInOptions {
+  const opts: HookOptInOptions = {};
+  if (argv.includes('--with-stop-hook')) opts.stopHook = true;
+  else if (argv.includes('--without-stop-hook')) opts.stopHook = false;
+  if (argv.includes('--with-session-end')) opts.sessionEnd = true;
+  else if (argv.includes('--without-session-end')) opts.sessionEnd = false;
+  return opts;
+}
+
+function removeCortexEntries(entries: HookEntry[]): HookEntry[] {
+  return entries.filter(
+    (e) => !e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('shieldcortex'))
+  );
+}
+
+export function setupHooks(options?: HookOptInOptions): void {
   const settings = readSettings();
   if (!settings.hooks) {
     settings.hooks = {};
@@ -155,22 +181,40 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
   // "re-run install to restore canonical timeouts" suggestion actually works.
   const timeoutsUpdated = reconcileHookTimeouts(settings);
 
-  // SessionEnd handling is now bidirectional:
-  //   - if --with-session-end was passed, install it (the .mjs gates execution
-  //     by config + OpenClaw env so it's safe to wire here);
-  //   - otherwise, remove any existing ShieldCortex SessionEnd entry to keep
-  //     the OpenClaw-safe default for users who don't explicitly opt in.
+  // SessionEnd handling:
+  //   - sessionEnd === true  → install below (the .mjs gates execution by
+  //     config + OpenClaw env so it's safe to wire);
+  //   - sessionEnd === false → explicit opt-out (--without-session-end):
+  //     remove the wiring; the gate sync below turns the gate off too;
+  //   - undefined            → PRESERVE an opted-in hook (runtime gate on).
+  //     Residue with the gate off is still cleaned up — that keeps the
+  //     OpenClaw-safe default for users who never opted in, without letting
+  //     an unrelated run (update.ts calls setupHooks() bare; `setup
+  //     --with-stop-hook` passes no sessionEnd) silently drop an opt-in.
   let removed = 0;
-  if (!options?.sessionEnd && settings.hooks.SessionEnd) {
-    const hadCortex = hasCortexHook(settings.hooks.SessionEnd);
-    if (hadCortex) {
-      settings.hooks.SessionEnd = settings.hooks.SessionEnd.filter(
-        (e: HookEntry) => !e.hooks?.some((h) => typeof h.command === 'string' && h.command.includes('shieldcortex'))
-      );
-      if (settings.hooks.SessionEnd.length === 0) delete settings.hooks.SessionEnd;
-      removed++;
-      console.log('  - Hook: SessionEnd (removed — opt in with `--with-session-end`)');
+  let dropSessionEnd = options?.sessionEnd === false;
+  if (options?.sessionEnd === undefined && settings.hooks.SessionEnd) {
+    try {
+      dropSessionEnd = getAutoMemoryEnableConfig().enableSessionEnd !== true;
+    } catch {
+      // Unreadable config — don't destroy wiring on a guess.
     }
+  }
+  if (dropSessionEnd && settings.hooks.SessionEnd && hasCortexHook(settings.hooks.SessionEnd)) {
+    settings.hooks.SessionEnd = removeCortexEntries(settings.hooks.SessionEnd);
+    if (settings.hooks.SessionEnd.length === 0) delete settings.hooks.SessionEnd;
+    removed++;
+    console.log('  - Hook: SessionEnd (removed — opt in with `--with-session-end`)');
+  }
+
+  // Explicit Stop opt-out (--without-stop-hook) removes the wiring too —
+  // gating off while leaving the hook wired is the "wired but runtime gate
+  // is off" warn state doctor exists to catch.
+  if (options?.stopHook === false && Array.isArray(settings.hooks.Stop) && hasCortexHook(settings.hooks.Stop)) {
+    settings.hooks.Stop = removeCortexEntries(settings.hooks.Stop);
+    if (settings.hooks.Stop.length === 0) delete settings.hooks.Stop;
+    removed++;
+    console.log('  - Hook: Stop (removed — opt in with `--with-stop-hook`)');
   }
 
   let added = 0;
@@ -237,8 +281,8 @@ export function setupHooks(options?: { stopHook?: boolean; sessionEnd?: boolean 
   // hook in settings.json without flipping autoMemory.enable* was the
   // silent-amnesia failure mode in #41 — passing --with-stop-hook wrote the
   // hook but the runtime gate (default false) made it bail on every fire.
-  // Always sync gate to install flag — including the false case, so removing
-  // a hook by re-running install without the flag also disables the gate.
+  // Explicit true/false syncs the gate; undefined leaves it alone — callers
+  // must never coerce an absent CLI flag to false (use parseHookOptInFlags).
   if (options?.stopHook !== undefined || options?.sessionEnd !== undefined) {
     const updates: { enableStop?: boolean; enableSessionEnd?: boolean } = {};
     if (options.stopHook !== undefined) updates.enableStop = options.stopHook;

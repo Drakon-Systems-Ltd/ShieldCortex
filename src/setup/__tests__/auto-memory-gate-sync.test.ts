@@ -43,6 +43,21 @@ describe('setupHooks aligns autoMemory enable gate with install flags (#41)', ()
     return JSON.parse(fs.readFileSync(file, 'utf-8'));
   }
 
+  /** Wire hooks in ~/.claude/settings.json as a prior opt-in would have. */
+  function seedSettings(wired: { stop?: boolean; sessionEnd?: boolean }): void {
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const cmd = (c: string) => ({ hooks: [{ type: 'command', command: c, timeout: 60 }] });
+    const hooks: Record<string, unknown> = {
+      PreCompact: [cmd('shieldcortex hook pre-compact')],
+      SessionStart: [cmd('shieldcortex hook session-start')],
+      UserPromptSubmit: [cmd('shieldcortex hook prompt-recall')],
+    };
+    if (wired.stop) hooks.Stop = [cmd('shieldcortex hook stop')];
+    if (wired.sessionEnd) hooks.SessionEnd = [cmd('shieldcortex hook session-end')];
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({ hooks }, null, 2) + '\n');
+  }
+
   it('--with-stop-hook flips autoMemory.enableStop=true so the runtime gate matches the wiring', async () => {
     jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
     const { setupHooks } = await import('../settings-hooks.js');
@@ -59,15 +74,20 @@ describe('setupHooks aligns autoMemory enable gate with install flags (#41)', ()
     expect((cfg.autoMemory as { enableSessionEnd?: boolean })?.enableSessionEnd).toBe(true);
   });
 
-  it('explicit stopHook:false flips autoMemory.enableStop=false (re-running setup without the flag disables the gate too)', async () => {
+  it('explicit stopHook:false (--without-stop-hook) flips autoMemory.enableStop=false AND unwires the hook', async () => {
     jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
-    // Pre-seed gate as on, simulating a prior --with-stop-hook install
+    // Pre-seed gate on + hook wired, simulating a prior --with-stop-hook install
     const seed = path.join(tmpScDir, 'config.json');
     fs.writeFileSync(seed, JSON.stringify({ autoMemory: { enableStop: true } }, null, 2) + '\n');
+    seedSettings({ stop: true });
     const { setupHooks } = await import('../settings-hooks.js');
     setupHooks({ stopHook: false });
     const cfg = readScConfig();
     expect((cfg.autoMemory as { enableStop?: boolean })?.enableStop).toBe(false);
+    // Gate off + wiring left behind is the "wired but gate off" warn state —
+    // explicit opt-out must remove both halves.
+    const after = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude', 'settings.json'), 'utf-8'));
+    expect(after.hooks.Stop).toBeUndefined();
   });
 
   it('calling setupHooks() with no opt-in fields leaves autoMemory untouched (no churn for default installs)', async () => {
@@ -89,6 +109,77 @@ describe('setupHooks aligns autoMemory enable gate with install flags (#41)', ()
     const liveConfig = getAutoMemoryConfig();
     expect(liveConfig.enableStop).toBe(true);
     expect(liveConfig.enableSessionEnd).toBe(true);
+  });
+
+  // Regression (2026-06-12): `setup --with-session-end` silently flipped
+  // enableStop off (and `update`'s bare setupHooks() unwired an opted-in
+  // SessionEnd hook). Absent options must PRESERVE the other hook's state;
+  // only an explicit false may disable, and SessionEnd residue cleanup must
+  // be gated on the runtime gate being off.
+  it('setupHooks({sessionEnd:true}) leaves an enabled Stop gate alone', async () => {
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    fs.writeFileSync(
+      path.join(tmpScDir, 'config.json'),
+      JSON.stringify({ autoMemory: { enableStop: true } }, null, 2) + '\n'
+    );
+    seedSettings({ stop: true });
+    const { setupHooks } = await import('../settings-hooks.js');
+    setupHooks({ sessionEnd: true });
+    const cfg = readScConfig();
+    expect((cfg.autoMemory as { enableStop?: boolean })?.enableStop).toBe(true);
+    expect((cfg.autoMemory as { enableSessionEnd?: boolean })?.enableSessionEnd).toBe(true);
+  });
+
+  it('bare setupHooks() (the `update` path) preserves an opted-in SessionEnd hook', async () => {
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    fs.writeFileSync(
+      path.join(tmpScDir, 'config.json'),
+      JSON.stringify({ autoMemory: { enableSessionEnd: true } }, null, 2) + '\n'
+    );
+    seedSettings({ sessionEnd: true });
+    const { setupHooks } = await import('../settings-hooks.js');
+    setupHooks();
+    const after = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude', 'settings.json'), 'utf-8'));
+    expect(after.hooks.SessionEnd).toBeDefined();
+    expect((readScConfig().autoMemory as { enableSessionEnd?: boolean })?.enableSessionEnd).toBe(true);
+  });
+
+  it('setupHooks({stopHook:true}) does not drop an opted-in SessionEnd hook', async () => {
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    fs.writeFileSync(
+      path.join(tmpScDir, 'config.json'),
+      JSON.stringify({ autoMemory: { enableSessionEnd: true } }, null, 2) + '\n'
+    );
+    seedSettings({ sessionEnd: true });
+    const { setupHooks } = await import('../settings-hooks.js');
+    setupHooks({ stopHook: true });
+    const after = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude', 'settings.json'), 'utf-8'));
+    expect(after.hooks.SessionEnd).toBeDefined();
+    expect((readScConfig().autoMemory as { enableSessionEnd?: boolean })?.enableSessionEnd).toBe(true);
+  });
+
+  it('explicit sessionEnd:false (--without-session-end) unwires AND gates off an opted-in SessionEnd', async () => {
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    fs.writeFileSync(
+      path.join(tmpScDir, 'config.json'),
+      JSON.stringify({ autoMemory: { enableSessionEnd: true } }, null, 2) + '\n'
+    );
+    seedSettings({ sessionEnd: true });
+    const { setupHooks } = await import('../settings-hooks.js');
+    setupHooks({ sessionEnd: false });
+    const after = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude', 'settings.json'), 'utf-8'));
+    expect(after.hooks.SessionEnd).toBeUndefined();
+    expect((readScConfig().autoMemory as { enableSessionEnd?: boolean })?.enableSessionEnd).toBe(false);
+  });
+
+  it('parseHookOptInFlags: absent flags map to undefined, --with/--without map to true/false', async () => {
+    const { parseHookOptInFlags } = await import('../settings-hooks.js');
+    expect(parseHookOptInFlags([])).toEqual({});
+    expect(parseHookOptInFlags(['--with-stop-hook'])).toEqual({ stopHook: true });
+    expect(parseHookOptInFlags(['--with-session-end'])).toEqual({ sessionEnd: true });
+    expect(parseHookOptInFlags(['--without-stop-hook', '--with-session-end']))
+      .toEqual({ stopHook: false, sessionEnd: true });
+    expect(parseHookOptInFlags(['--without-session-end'])).toEqual({ sessionEnd: false });
   });
 
   // Regression (2026-06-02): setup printed "Hook: SessionEnd (removed …)" but

@@ -197,7 +197,10 @@ function detectedInstallers(env: DetectionResult): Array<{ target: DetectedInsta
 async function runQuickstartTarget(target: QuickstartTarget): Promise<void> {
   switch (target) {
     case 'claude':
-      await setupClaudeMd({ stopHook: false });
+      // No opt-in fields: quickstart installs the defaults and must leave any
+      // existing Stop/SessionEnd opt-in untouched (explicit false would
+      // unwire it).
+      await setupClaudeMd({});
       return;
     case 'openclaw':
       await handleOpenClawCommand('install');

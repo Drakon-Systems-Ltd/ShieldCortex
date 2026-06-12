@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.32.8] - 2026-06-12
+
+**Opting into one auto-memory hook no longer silently disables the other.** Found live: `shieldcortex setup --with-session-end` flipped `autoMemory.enableStop` off while leaving the Stop hook wired — the exact "wired but runtime gate is off" silent-amnesia state doctor #41 exists to catch.
+
+### Fixed
+
+- **Absent setup flags now mean "leave as-is", not "disable".** The CLI parsed `--with-stop-hook`/`--with-session-end` with `process.argv.includes()`, so an absent flag became an explicit `false` and every `setup` run force-synced BOTH runtime gates. Three variants of the same bug: `setup --with-session-end` gated off an enabled Stop hook; `setup --with-stop-hook` unwired an opted-in SessionEnd hook; and `shieldcortex update` (which re-runs hook setup with no options) unwired an opted-in SessionEnd hook on every update. Flags now parse to true/false/undefined via `parseHookOptInFlags`, and undefined never touches wiring or gates.
+- **SessionEnd residue cleanup is now gated on the runtime gate.** The OpenClaw-safe default (remove a wired ShieldCortex SessionEnd entry when the user hasn't opted in) still applies — but only when `autoMemory.enableSessionEnd` is off. An opted-in hook survives unrelated setup/update runs.
+- **Explicit opt-out flags: `--without-stop-hook` / `--without-session-end`.** "Re-run setup without the flag" is no longer a disable mechanism, so opting out is now its own flag — and it removes the wiring AND the gate together (previously `stopHook: false` gated off but left the hook wired, manufacturing the warn state above).
+- **`quickstart` no longer passes an explicit `stopHook: false`** — re-running quickstart on a machine with an opted-in Stop hook now leaves it untouched.
+
 ## [4.32.7] - 2026-06-12
 
 **Doctor's project-keys fix-hint is now a runnable command.** Follow-up to the 4.32.6 doctor polish, prompted by a real repair that the old hint couldn't complete.

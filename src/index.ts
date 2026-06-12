@@ -686,6 +686,8 @@ ${bold}COMMANDS${reset}
   ${cyan}setup${reset}                 Install ShieldCortex into your project
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
+                               --without-stop-hook / --without-session-end (opt out)
+                               (absent flags leave existing opt-ins unchanged)
                                Pass either to opt in; re-run without to opt out.
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
@@ -753,10 +755,9 @@ ${bold}DOCS${reset}
       await uninstallSetup();
       return;
     }
-    const stopHook = process.argv.includes('--with-stop-hook');
-    const sessionEnd = process.argv.includes('--with-session-end');
+    const { parseHookOptInFlags } = await import('./setup/settings-hooks.js');
     const { setupClaudeMd } = await import('./setup/claude-md.js');
-    await setupClaudeMd({ stopHook, sessionEnd });
+    await setupClaudeMd(parseHookOptInFlags(process.argv));
     return;
   }
 
