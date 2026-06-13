@@ -13,7 +13,13 @@ import { getLicense, getTrialStatus } from '../license/index.js';
 import { isDatabaseInitialized, getDatabase } from '../database/init.js';
 import { shouldShowProUpsell, UPSELL_CONSTANTS, type UpsellInputs } from './upsell.js';
 import { getUpsellState, markUpsellShown } from './upsell-state.js';
-import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
+import {
+  resolveRealtimePluginInstallPath,
+  readInstalledRealtimePluginVersion,
+  readRealtimeProjectManifest,
+  findEoverrideRiskPins,
+  isRealtimePluginDisabledInConfig,
+} from '../integrations/openclaw-plugin-state.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 
@@ -1474,6 +1480,61 @@ async function checkHookTimeouts(): Promise<CheckResult> {
   }
 }
 
+// ── Check: OpenClaw managed-pin drift / disabled realtime plugin ─────────────
+/**
+ * Detects the OpenClaw `EOVERRIDE` trap that silently disables the realtime
+ * plugin on `openclaw update` (upstream openclaw/openclaw#91772).
+ *
+ * OpenClaw pins a plugin's shared deps in its generated project manifest's
+ * `dependencies` (managed peers) but NEVER advances them, while it imports its
+ * bundled workspace `overrides` afresh each release. When the two drift to
+ * different versions for the same package, npm's `assertRootOverrides` throws
+ * `EOVERRIDE` and OpenClaw disables the plugin (`enabled:false`) — so threat
+ * telemetry silently stops. This surfaces both the pre-failure drift (so it can
+ * be healed BEFORE the next update breaks it) and the already-disabled state.
+ * The fix is `shieldcortex openclaw repair`.
+ */
+export async function checkOpenClawManagedPinDrift(
+  home: string = os.homedir(),
+): Promise<CheckResult> {
+  const label = 'OpenClaw plugin pins';
+
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+  const manifest = readRealtimeProjectManifest(home);
+  if (!manifest) {
+    return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
+  }
+
+  const disabled = isRealtimePluginDisabledInConfig(home);
+  const risks = findEoverrideRiskPins(manifest);
+
+  if (disabled) {
+    const detail = risks.length
+      ? ` (manifest still has a version-drifted pin: ${risks.map((r) => r.name).join(', ')})`
+      : '';
+    return {
+      label,
+      status: 'fail',
+      message: `realtime plugin is DISABLED in OpenClaw config${detail} — threat telemetry is not flowing`,
+      fix: 'Run `shieldcortex openclaw repair` to reconcile the managed pins, reinstall, and re-enable the plugin.',
+    };
+  }
+
+  if (risks.length > 0) {
+    const list = risks.map((r) => `${r.name} (dep ${r.dependencyVersion} ≠ override ${r.overrideVersion})`).join(', ');
+    return {
+      label,
+      status: 'warn',
+      message: `managed-pin drift will EOVERRIDE on the next \`openclaw update\`: ${list}`,
+      fix: 'Run `shieldcortex openclaw repair` now to reconcile the pins before an update disables the plugin.',
+    };
+  }
+
+  return { label, status: 'pass', message: 'no managed-pin drift; plugin enabled' };
+}
+
 // ── Check: OpenClaw hook freshness (Task 6b) ─────────────
 /**
  * The cortex-memory hook is installed by FILE COPY into
@@ -1638,6 +1699,7 @@ export async function runDoctor(): Promise<void> {
     checkOpenClawPluginVersion,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
+    checkOpenClawManagedPinDrift,
     checkDefenceCanary,
     checkModelCache,
   ];

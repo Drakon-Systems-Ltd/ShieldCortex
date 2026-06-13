@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
+  resolveRealtimeProjectDir,
+  readRealtimeProjectManifest,
+  findEoverrideRiskPins,
+  isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 
 /**
@@ -78,5 +82,88 @@ describe('openclaw-plugin-state — on-disk version is ground truth', () => {
     fs.writeFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'), '{ not json');
     expect(() => readInstalledRealtimePluginVersion(home)).not.toThrow();
     expect(readInstalledRealtimePluginVersion(home)).toBeNull();
+  });
+});
+
+// ── EOVERRIDE drift detection (v4.33.0 auto-repair) ─────────────────────────
+
+describe('findEoverrideRiskPins — the EOVERRIDE drift signature', () => {
+  it('flags a package pinned in BOTH dependencies and overrides at DIFFERENT versions', () => {
+    const risks = findEoverrideRiskPins({
+      dependencies: { hono: '4.12.23', zod: '3.25.76' },
+      overrides: { hono: '4.12.21', axios: '1.16.0' },
+    });
+    expect(risks).toEqual([{ name: 'hono', dependencyVersion: '4.12.23', overrideVersion: '4.12.21' }]);
+  });
+
+  it('does NOT flag a package present in both at the SAME version (npm accepts that)', () => {
+    expect(findEoverrideRiskPins({ dependencies: { hono: '4.12.21' }, overrides: { hono: '4.12.21' } })).toEqual([]);
+  });
+
+  it('does NOT flag dependency-only or override-only packages', () => {
+    expect(findEoverrideRiskPins({ dependencies: { zod: '3.25.76' }, overrides: { axios: '1.16.0' } })).toEqual([]);
+  });
+
+  it('ignores non-string override values (nested override objects are not the trap)', () => {
+    expect(findEoverrideRiskPins({ dependencies: { hono: '4.12.23' }, overrides: { hono: { '.': '4.12.21' } } })).toEqual([]);
+  });
+
+  it('returns [] for empty / missing / non-object manifests', () => {
+    expect(findEoverrideRiskPins({})).toEqual([]);
+    expect(findEoverrideRiskPins(null)).toEqual([]);
+    expect(findEoverrideRiskPins({ dependencies: {}, overrides: {} })).toEqual([]);
+  });
+});
+
+describe('realtime managed-project manifest + disabled-state helpers', () => {
+  let home: string;
+  beforeEach(() => { home = makeHome(); });
+  afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); });
+
+  function projectRoot(hash = 'abc123'): string {
+    return path.join(home, '.openclaw', 'npm', 'projects', `drakon-systems-shieldcortex-realtime-${hash}`);
+  }
+  function writeProjectManifest(manifest: unknown, hash = 'abc123'): string {
+    const root = projectRoot(hash);
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest, null, 2));
+    return root;
+  }
+  function writeConfig(cfg: unknown): void {
+    const dir = path.join(home, '.openclaw');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'openclaw.json'), JSON.stringify(cfg, null, 2));
+  }
+
+  it('resolveRealtimeProjectDir returns the project ROOT, not the nested package dir', () => {
+    writeInstalledPackage(home, '4.32.8');          // <root>/node_modules/@drakon-systems/shieldcortex-realtime
+    const root = writeProjectManifest({ dependencies: { hono: '4.12.23' }, overrides: { hono: '4.12.21' } });
+    expect(resolveRealtimeProjectDir(home)).toBe(root);
+  });
+
+  it('readRealtimeProjectManifest reads the managed manifest (deps + overrides)', () => {
+    writeInstalledPackage(home, '4.32.8');
+    writeProjectManifest({ dependencies: { hono: '4.12.23' }, overrides: { hono: '4.12.21' } });
+    const m = readRealtimeProjectManifest(home);
+    expect(m?.dependencies).toEqual({ hono: '4.12.23' });
+    expect(findEoverrideRiskPins(m)).toEqual([{ name: 'hono', dependencyVersion: '4.12.23', overrideVersion: '4.12.21' }]);
+  });
+
+  it('readRealtimeProjectManifest returns null when nothing is installed', () => {
+    expect(readRealtimeProjectManifest(home)).toBeNull();
+    expect(resolveRealtimeProjectDir(home)).toBeNull();
+  });
+
+  it('isRealtimePluginDisabledInConfig is true only when enabled===false', () => {
+    writeConfig({ plugins: { entries: { 'shieldcortex-realtime': { enabled: false } } } });
+    expect(isRealtimePluginDisabledInConfig(home)).toBe(true);
+  });
+
+  it('isRealtimePluginDisabledInConfig is false when enabled, absent, or no config', () => {
+    expect(isRealtimePluginDisabledInConfig(home)).toBe(false); // no config file
+    writeConfig({ plugins: { entries: { 'shieldcortex-realtime': { enabled: true } } } });
+    expect(isRealtimePluginDisabledInConfig(home)).toBe(false);
+    writeConfig({ plugins: { entries: {} } });
+    expect(isRealtimePluginDisabledInConfig(home)).toBe(false);
   });
 });

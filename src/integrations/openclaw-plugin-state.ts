@@ -94,3 +94,110 @@ export function readInstalledRealtimePluginVersion(home: string): string | null 
     return null;
   }
 }
+
+// ── Managed-project manifest (the EOVERRIDE-drift surface) ──────────────────
+//
+// OpenClaw installs each plugin into its own npm "project" under
+// `~/.openclaw/npm/projects/<name>-<hash>/`, whose generated package.json holds
+// the managed `dependencies` (peer pins), `overrides` (imported from OpenClaw's
+// bundled pnpm-workspace.yaml), and an `openclaw.managedPeerDependencies` block.
+// That manifest — NOT the plugin's published package.json — is where the
+// EOVERRIDE trap lives.
+
+const PROJECTS_SUBDIR = path.join('.openclaw', 'npm', 'projects');
+
+/**
+ * The OpenClaw managed-project ROOT for the realtime plugin (the dir whose
+ * package.json carries the managed dependencies/overrides), or null.
+ *
+ * The recorded install path may point at the project root OR the nested package
+ * dir depending on layout, so we walk up to the direct child of `npm/projects`
+ * rather than assuming a fixed depth.
+ */
+export function resolveRealtimeProjectDir(home: string): string | null {
+  const projects = path.join(home, PROJECTS_SUBDIR);
+  const installPath = resolveRealtimePluginInstallPath(home);
+  if (installPath) {
+    let cur = installPath;
+    for (let i = 0; i < 8; i++) {
+      if (path.dirname(cur) === projects) {
+        return fs.existsSync(path.join(cur, 'package.json')) ? cur : null;
+      }
+      const parent = path.dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+  }
+  // Fallback: scan the projects dir for the realtime project root.
+  try {
+    for (const dir of fs.readdirSync(projects)) {
+      if (dir.includes(PLUGIN_ID) && fs.existsSync(path.join(projects, dir, 'package.json'))) {
+        return path.join(projects, dir);
+      }
+    }
+  } catch {
+    // no projects dir
+  }
+  return null;
+}
+
+/** Read+parse the realtime managed-project manifest, or null. */
+export function readRealtimeProjectManifest(home: string): Record<string, unknown> | null {
+  const dir = resolveRealtimeProjectDir(home);
+  if (!dir) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** A package pinned in BOTH `dependencies` and `overrides` at DIFFERENT
+ * versions — the exact shape that makes npm's `assertRootOverrides` throw
+ * `EOVERRIDE` on the next `openclaw plugins install` / `openclaw update`. */
+export interface EoverrideRiskPin {
+  name: string;
+  dependencyVersion: string;
+  overrideVersion: string;
+}
+
+/**
+ * Find EOVERRIDE-risk pins in an OpenClaw managed-project manifest: packages
+ * present as BOTH a direct dependency (a managed peer pin) AND a managed
+ * override, with mismatched versions. OpenClaw never advances the dependency
+ * pin while its bundled workspace overrides advance each release, so they drift
+ * apart and npm refuses the install — disabling the plugin. Same-version
+ * co-presence is accepted by npm and is NOT reported (only the drift is).
+ *
+ * Pure — takes a parsed manifest object so it can be unit-tested without disk.
+ */
+export function findEoverrideRiskPins(manifest: unknown): EoverrideRiskPin[] {
+  if (!manifest || typeof manifest !== 'object') return [];
+  const m = manifest as { dependencies?: unknown; overrides?: unknown };
+  const deps = m.dependencies && typeof m.dependencies === 'object' ? (m.dependencies as Record<string, unknown>) : {};
+  const overrides = m.overrides && typeof m.overrides === 'object' ? (m.overrides as Record<string, unknown>) : {};
+  const risks: EoverrideRiskPin[] = [];
+  for (const [name, depV] of Object.entries(deps)) {
+    const ovV = overrides[name];
+    // Only string↔string mismatches are the EOVERRIDE trap. Nested override
+    // objects ({".": "x"}) aren't how OpenClaw pins these, so skip non-strings.
+    if (typeof depV === 'string' && typeof ovV === 'string' && depV !== ovV) {
+      risks.push({ name, dependencyVersion: depV, overrideVersion: ovV });
+    }
+  }
+  return risks;
+}
+
+/** True when openclaw.json explicitly disables the realtime plugin
+ * (`plugins.entries.shieldcortex-realtime.enabled === false`) — the state
+ * OpenClaw leaves it in after an install failure auto-disables it. */
+export function isRealtimePluginDisabledInConfig(home: string): boolean {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')) as {
+      plugins?: { entries?: Record<string, { enabled?: unknown }> };
+    };
+    return cfg.plugins?.entries?.[PLUGIN_ID]?.enabled === false;
+  } catch {
+    return false;
+  }
+}

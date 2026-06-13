@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.33.0] - 2026-06-13
+
+**Detect and auto-repair the OpenClaw `EOVERRIDE` plugin-disable trap.** `openclaw update` could silently disable the realtime plugin (no plugin change can prevent it — it's an OpenClaw-side defect, upstream openclaw/openclaw#91772); now `shieldcortex doctor` flags it and `shieldcortex openclaw repair` heals it, with no manual manifest surgery.
+
+### Added
+
+- **`shieldcortex doctor` detects OpenClaw managed-pin drift.** OpenClaw pins a plugin's shared deps in its generated project manifest's `dependencies` (managed peers) but never advances them, while it re-imports its bundled `pnpm-workspace.yaml` `overrides` each release. When the two drift to different versions for the same package, npm's `assertRootOverrides` throws `EOVERRIDE` on the next `openclaw update` and OpenClaw silently disables the plugin (`enabled:false`) — so threat telemetry stops without warning. Doctor now **warns** on the pre-failure drift (so you can fix it before an update breaks it) and **fails** on the already-disabled state, pointing at the one-command fix. (Same-version co-presence is fine and is not flagged.)
+- **`shieldcortex openclaw repair` reconciles the drift and re-enables the plugin.** It strips the version-drifted dependency pins (OpenClaw's reinstall then re-derives them at the override version, so they match), advances the stale `shieldcortex` lib pin to the running version, re-enables the plugin if it was auto-disabled, reinstalls so the manifest recomputes consistently, and tells you to `openclaw gateway restart`. This mirrors the exact sequence validated by hand on an affected machine. The published `@drakon-systems/shieldcortex-realtime` plugin remains clean (zero dependencies/overrides) — the stale pin is entirely OpenClaw-injected.
+
 ## [4.32.8] - 2026-06-12
 
 **Opting into one auto-memory hook no longer silently disables the other.** Found live: `shieldcortex setup --with-session-end` flipped `autoMemory.enableStop` off while leaving the Stop hook wired — the exact "wired but runtime gate is off" silent-amnesia state doctor #41 exists to catch.

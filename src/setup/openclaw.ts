@@ -11,6 +11,12 @@ import path from 'path';
 import os from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
+import {
+  resolveRealtimeProjectDir,
+  readRealtimeProjectManifest,
+  findEoverrideRiskPins,
+  isRealtimePluginDisabledInConfig,
+} from '../integrations/openclaw-plugin-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1202,6 +1208,127 @@ export async function openClawHookStatus(): Promise<void> {
  * written to `~/.openclaw/openclaw.json.repair-backup-<ts>` so the user
  * can recover manually.
  */
+/** This package's own version (the shieldcortex lib the realtime plugin should
+ * run against), read from the package root. */
+function readSelfVersion(): string | null {
+  try {
+    const root = path.resolve(__dirname, '..', '..');
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf-8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+export type ManagedPinRepairStatus = 'not-installed' | 'clean' | 'healed' | 'failed';
+export interface ManagedPinRepairResult {
+  status: ManagedPinRepairStatus;
+  message: string;
+}
+
+/**
+ * Heal the OpenClaw `EOVERRIDE` trap that silently disables the realtime plugin
+ * on `openclaw update` (upstream openclaw/openclaw#91772).
+ *
+ * OpenClaw pins shared deps in the plugin's generated project manifest's
+ * `dependencies` (managed peers) but never advances them, while it re-imports
+ * its bundled workspace `overrides` each release. When the two drift to
+ * different versions for the same package, npm's `assertRootOverrides` throws
+ * and OpenClaw disables the plugin. The heal: strip the drifted dependency pins
+ * (OpenClaw's reinstall re-derives them at the override version, so they match),
+ * advance the stale `shieldcortex` lib pin to the running version, re-enable the
+ * plugin if it was auto-disabled, and reinstall so the manifest recomputes
+ * consistently. Validated by hand on a real box; mirrors that exact sequence.
+ *
+ * Returns a structured result; prints progress so `shieldcortex openclaw repair`
+ * reads coherently.
+ */
+export async function repairOpenClawManagedPins(homeArg?: string): Promise<ManagedPinRepairResult> {
+  const home = homeArg ?? resolveUserHome();
+  const pluginId = 'shieldcortex-realtime';
+  const pluginSpec = '@drakon-systems/shieldcortex-realtime@latest';
+
+  const projectDir = resolveRealtimeProjectDir(home);
+  const manifest = readRealtimeProjectManifest(home);
+  if (!projectDir || !manifest) {
+    return { status: 'not-installed', message: 'Realtime plugin not installed; no managed pins to reconcile.' };
+  }
+
+  const risks = findEoverrideRiskPins(manifest);
+  const disabled = isRealtimePluginDisabledInConfig(home);
+  const selfVersion = readSelfVersion();
+  const deps = (typeof manifest.dependencies === 'object' && manifest.dependencies
+    ? manifest.dependencies
+    : {}) as Record<string, unknown>;
+  const staleShieldcortex =
+    typeof deps.shieldcortex === 'string' && !!selfVersion && deps.shieldcortex !== selfVersion;
+
+  if (risks.length === 0 && !disabled && !staleShieldcortex) {
+    return { status: 'clean', message: 'Realtime plugin pins are consistent and the plugin is enabled. Nothing to reconcile.' };
+  }
+
+  console.log('Reconciling OpenClaw managed plugin pins (EOVERRIDE guard):');
+  if (risks.length) console.log(`  - version-drifted pins: ${risks.map((r) => `${r.name} (${r.dependencyVersion}→${r.overrideVersion})`).join(', ')}`);
+  if (staleShieldcortex) console.log(`  - stale shieldcortex lib pin: ${String(deps.shieldcortex)} → ${selfVersion}`);
+  if (disabled) console.log('  - plugin is disabled in config (auto-disabled after a failed update)');
+
+  // 1. Backup the project manifest before touching it.
+  const manifestPath = path.join(projectDir, 'package.json');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  try {
+    fs.writeFileSync(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(manifest, null, 2));
+    console.log(`  - safety backup: ${`${manifestPath}.repair-backup-${ts}`.replace(home, '~')}`);
+  } catch { /* best-effort */ }
+
+  // 2. Strip drifted pins (reinstall re-derives them at the override version)
+  //    and advance the stale shieldcortex pin.
+  for (const r of risks) delete deps[r.name];
+  if (staleShieldcortex && selfVersion) deps.shieldcortex = selfVersion;
+  (manifest as Record<string, unknown>).dependencies = deps;
+  try {
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 'failed', message: `Could not write the project manifest (${msg}). Backup left at ${manifestPath}.repair-backup-${ts}.` };
+  }
+
+  // 3. Resolve the openclaw binary.
+  let openclawBin: string;
+  try {
+    openclawBin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
+    if (!openclawBin || !fs.existsSync(openclawBin)) throw new Error('not on PATH');
+  } catch {
+    return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `openclaw plugins install --force ' + pluginSpec + '` then `openclaw gateway restart`.' };
+  }
+  const spawnEnv = { ...process.env, HOME: home };
+
+  // 4. Re-enable if it was auto-disabled.
+  if (disabled) {
+    spawnSync(openclawBin, ['plugins', 'enable', pluginId], { encoding: 'utf-8', env: spawnEnv, timeout: 30000 });
+  }
+
+  // 5. Reinstall so OpenClaw recomputes a consistent manifest (re-derives the
+  //    stripped pins at the override version — no more drift).
+  console.log(`  - reinstalling: openclaw plugins install --force ${pluginSpec}`);
+  const reinstall = spawnSync(openclawBin, ['plugins', 'install', '--force', pluginSpec], { encoding: 'utf-8', env: spawnEnv, timeout: 180000 });
+  if (reinstall.status !== 0) {
+    const out = `${reinstall.stderr ?? ''}${reinstall.stdout ?? ''}`.trim().split('\n').slice(-4).join('\n');
+    return { status: 'failed', message: `Reinstall failed after reconciling the manifest:\n${out}\nManifest backup: ${manifestPath}.repair-backup-${ts}` };
+  }
+
+  // 6. Verify no residual drift.
+  const after = readRealtimeProjectManifest(home);
+  const residual = after ? findEoverrideRiskPins(after) : [];
+  if (residual.length > 0) {
+    return { status: 'failed', message: `Reinstall succeeded but pins still drift: ${residual.map((r) => r.name).join(', ')}. Backup: ${manifestPath}.repair-backup-${ts}` };
+  }
+
+  const parts = [`Reconciled ${risks.length} drifted pin(s)`];
+  if (staleShieldcortex) parts.push(`advanced shieldcortex to ${selfVersion}`);
+  if (disabled) parts.push('re-enabled the plugin');
+  return { status: 'healed', message: `${parts.join(', ')}. Restart to load it: openclaw gateway restart` };
+}
+
 export async function repairOpenClawPlugin(): Promise<void> {
   const home = resolveUserHome();
   const openclawDir = path.join(home, '.openclaw');
@@ -1211,6 +1338,24 @@ export async function repairOpenClawPlugin(): Promise<void> {
   if (!fs.existsSync(openclawDir)) {
     console.log('OpenClaw not detected (~/.openclaw missing). Nothing to repair.');
     return;
+  }
+
+  // First concern: reconcile managed-pin drift / re-enable a plugin that
+  // OpenClaw auto-disabled after an EOVERRIDE on update (openclaw#91772).
+  try {
+    const pinResult = await repairOpenClawManagedPins(home);
+    if (pinResult.status === 'healed') {
+      console.log(`  ✓ ${pinResult.message}`);
+      console.log('');
+    } else if (pinResult.status === 'failed') {
+      console.log(`  ✗ ${pinResult.message}`);
+      console.log('');
+    }
+    // 'clean' / 'not-installed' → stay quiet and fall through to the dup check.
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`  ✗ managed-pin reconcile errored — ${msg}`);
+    console.log('');
   }
 
   // Find duplicate install locations (same scan as the doctor check).
