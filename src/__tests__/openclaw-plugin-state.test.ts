@@ -8,6 +8,8 @@ import {
   resolveRealtimeProjectDir,
   readRealtimeProjectManifest,
   findEoverrideRiskPins,
+  findLatentEoverridePins,
+  stripManagedPinsFromManifest,
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 
@@ -112,6 +114,79 @@ describe('findEoverrideRiskPins — the EOVERRIDE drift signature', () => {
     expect(findEoverrideRiskPins({})).toEqual([]);
     expect(findEoverrideRiskPins(null)).toEqual([]);
     expect(findEoverrideRiskPins({ dependencies: {}, overrides: {} })).toEqual([]);
+  });
+});
+
+// ── LATENT EOVERRIDE detection (v4.33.2) ────────────────────────────────────
+//
+// The v4.33.0 detector (findEoverrideRiskPins) only catches a CURRENT version
+// mismatch. But the field failure on edith (2026-06-14) showed the mismatch is
+// born DURING `openclaw plugins install`: OpenClaw refreshes the override from
+// its bundled workspace (hono 4.12.18 → 4.12.21) while preserving the stale
+// dependency pin (4.12.18) via `nextDependencies[x] = dependencies[x] ?? spec`.
+// At REST the manifest looked clean (4.12.18 == 4.12.18), so repair stripped
+// nothing and its own reinstall then threw EOVERRIDE. The durable signal is
+// CO-PRESENCE (a managed-peer pin that is also an override), regardless of
+// whether the versions currently match — those two values are maintained by
+// independent mechanisms that WILL drift on the next override bump.
+
+describe('findLatentEoverridePins — co-presence is the latent trap', () => {
+  it('flags a package present in BOTH dependencies and overrides even when versions MATCH', () => {
+    expect(findLatentEoverridePins({
+      dependencies: { hono: '4.12.18', shieldcortex: '4.33.1' },
+      overrides: { hono: '4.12.18', axios: '1.16.0' },
+    })).toEqual(['hono']);
+  });
+
+  it('flags a co-present package that is currently mismatched too', () => {
+    expect(findLatentEoverridePins({
+      dependencies: { hono: '4.12.18' },
+      overrides: { hono: '4.12.21' },
+    })).toEqual(['hono']);
+  });
+
+  it('does NOT flag dependency-only (e.g. shieldcortex/zod) or override-only packages', () => {
+    expect(findLatentEoverridePins({
+      dependencies: { shieldcortex: '4.33.1', zod: '3.25.76' },
+      overrides: { hono: '4.12.21', axios: '1.16.0' },
+    })).toEqual([]);
+  });
+
+  it('ignores non-string override values', () => {
+    expect(findLatentEoverridePins({ dependencies: { hono: '4.12.18' }, overrides: { hono: { '.': '4.12.18' } } })).toEqual([]);
+  });
+
+  it('returns [] for empty / missing / non-object manifests', () => {
+    expect(findLatentEoverridePins({})).toEqual([]);
+    expect(findLatentEoverridePins(null)).toEqual([]);
+  });
+});
+
+describe('stripManagedPinsFromManifest — removes latent pins from deps AND managedPeerDependencies', () => {
+  it('deletes the named pins from dependencies and from openclaw.managedPeerDependencies', () => {
+    const manifest = {
+      dependencies: { hono: '4.12.18', shieldcortex: '4.33.1', zod: '3.25.76' },
+      overrides: { hono: '4.12.18' },
+      openclaw: { managedPeerDependencies: ['ajv', 'express', 'hono', 'shieldcortex', 'zod'] },
+    };
+    const out = stripManagedPinsFromManifest(manifest, ['hono']);
+    expect((out.dependencies as Record<string, unknown>).hono).toBeUndefined();
+    expect((out.dependencies as Record<string, unknown>).shieldcortex).toBe('4.33.1'); // untouched
+    expect((out.openclaw as { managedPeerDependencies: string[] }).managedPeerDependencies)
+      .toEqual(['ajv', 'express', 'shieldcortex', 'zod']);
+  });
+
+  it('leaves overrides untouched (OpenClaw owns those; the override must govern)', () => {
+    const out = stripManagedPinsFromManifest(
+      { dependencies: { hono: '4.12.18' }, overrides: { hono: '4.12.18' }, openclaw: { managedPeerDependencies: ['hono'] } },
+      ['hono'],
+    );
+    expect((out.overrides as Record<string, unknown>).hono).toBe('4.12.18');
+  });
+
+  it('is a no-op for names not present, and tolerates a missing openclaw block', () => {
+    const out = stripManagedPinsFromManifest({ dependencies: { shieldcortex: '4.33.1' } }, ['hono']);
+    expect((out.dependencies as Record<string, unknown>).shieldcortex).toBe('4.33.1');
   });
 });
 

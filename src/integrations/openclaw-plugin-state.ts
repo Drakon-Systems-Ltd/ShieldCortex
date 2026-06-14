@@ -188,6 +188,66 @@ export function findEoverrideRiskPins(manifest: unknown): EoverrideRiskPin[] {
   return risks;
 }
 
+/**
+ * Find LATENT EOVERRIDE pins: packages present as BOTH a managed-peer
+ * dependency pin AND a managed override, REGARDLESS of whether the versions
+ * currently match.
+ *
+ * findEoverrideRiskPins only catches a *current* mismatch, but the field
+ * failure on edith (2026-06-14) proved the mismatch is created DURING
+ * `openclaw plugins install`: OpenClaw refreshes the override from its bundled
+ * workspace (hono 4.12.18 → 4.12.21) while preserving the stale dependency pin
+ * via `nextDependencies[x] = dependencies[x] ?? spec`. At rest the manifest
+ * looked clean, so repair stripped nothing and its own reinstall threw
+ * EOVERRIDE. Any co-present pin is therefore a latent landmine — the dep pin
+ * and the override are maintained by independent mechanisms that drift on the
+ * next override bump. Stripping the dep pin lets the reinstall re-derive it at
+ * the (current) override version, so they converge.
+ *
+ * Pure — takes a parsed manifest object so it can be unit-tested without disk.
+ */
+export function findLatentEoverridePins(manifest: unknown): string[] {
+  if (!manifest || typeof manifest !== 'object') return [];
+  const m = manifest as { dependencies?: unknown; overrides?: unknown };
+  const deps = m.dependencies && typeof m.dependencies === 'object' ? (m.dependencies as Record<string, unknown>) : {};
+  const overrides = m.overrides && typeof m.overrides === 'object' ? (m.overrides as Record<string, unknown>) : {};
+  const latent: string[] = [];
+  for (const [name, depV] of Object.entries(deps)) {
+    if (typeof depV === 'string' && typeof overrides[name] === 'string') latent.push(name);
+  }
+  return latent;
+}
+
+/**
+ * Remove the named managed-peer pins from a project manifest's `dependencies`
+ * AND its `openclaw.managedPeerDependencies` tracking list, in place, returning
+ * the same object. Overrides are deliberately left untouched — OpenClaw owns
+ * those and the override must remain to govern the re-derived version. This is
+ * the proven manual remediation: with the dep pin gone, the next install
+ * re-derives it at the current override version instead of preserving a stale
+ * value.
+ */
+export function stripManagedPinsFromManifest(
+  manifest: Record<string, unknown>,
+  names: string[],
+): Record<string, unknown> {
+  if (!manifest || typeof manifest !== 'object' || names.length === 0) return manifest;
+  const deps = manifest.dependencies;
+  if (deps && typeof deps === 'object') {
+    for (const n of names) delete (deps as Record<string, unknown>)[n];
+  }
+  const oc = manifest.openclaw;
+  if (oc && typeof oc === 'object') {
+    const mpd = (oc as { managedPeerDependencies?: unknown }).managedPeerDependencies;
+    if (Array.isArray(mpd)) {
+      (oc as { managedPeerDependencies: unknown[] }).managedPeerDependencies = mpd.filter(
+        (x) => !names.includes(x as string),
+      );
+    }
+  }
+  return manifest;
+}
+
 /** True when openclaw.json explicitly disables the realtime plugin
  * (`plugins.entries.shieldcortex-realtime.enabled === false`) — the state
  * OpenClaw leaves it in after an install failure auto-disables it. */

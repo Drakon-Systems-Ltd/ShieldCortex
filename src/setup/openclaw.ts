@@ -15,6 +15,8 @@ import {
   resolveRealtimeProjectDir,
   readRealtimeProjectManifest,
   findEoverrideRiskPins,
+  findLatentEoverridePins,
+  stripManagedPinsFromManifest,
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 
@@ -1255,6 +1257,13 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   }
 
   const risks = findEoverrideRiskPins(manifest);
+  // Strip-set: every managed peer co-present in overrides (latent EOVERRIDE),
+  // not just the currently-mismatched ones. OpenClaw refreshes the override
+  // from its bundled workspace mid-install while preserving the stale dep pin,
+  // so a manifest that looks clean at rest still throws EOVERRIDE on reinstall
+  // (edith, 2026-06-14). Stripping the co-present dep pin lets the reinstall
+  // re-derive it at the current override version.
+  const latentPins = findLatentEoverridePins(manifest);
   const disabled = isRealtimePluginDisabledInConfig(home);
   const selfVersion = readSelfVersion();
   const deps = (typeof manifest.dependencies === 'object' && manifest.dependencies
@@ -1268,7 +1277,8 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   }
 
   console.log('Reconciling OpenClaw managed plugin pins (EOVERRIDE guard):');
-  if (risks.length) console.log(`  - version-drifted pins: ${risks.map((r) => `${r.name} (${r.dependencyVersion}→${r.overrideVersion})`).join(', ')}`);
+  if (risks.length) console.log(`  - version-drifted now: ${risks.map((r) => `${r.name} (${r.dependencyVersion}→${r.overrideVersion})`).join(', ')}`);
+  if (latentPins.length) console.log(`  - stripping override-shadowed peer pin(s): ${latentPins.join(', ')} (re-derived at the current override on reinstall)`);
   if (staleShieldcortex) console.log(`  - stale shieldcortex lib pin: ${String(deps.shieldcortex)} → ${selfVersion}`);
   if (disabled) console.log('  - plugin is disabled in config (auto-disabled after a failed update)');
 
@@ -1280,9 +1290,12 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
     console.log(`  - safety backup: ${`${manifestPath}.repair-backup-${ts}`.replace(home, '~')}`);
   } catch { /* best-effort */ }
 
-  // 2. Strip drifted pins (reinstall re-derives them at the override version)
-  //    and advance the stale shieldcortex pin.
-  for (const r of risks) delete deps[r.name];
+  // 2. Strip co-present (latent) pins from deps AND managedPeerDependencies so
+  //    the reinstall re-derives them at the CURRENT override version, then
+  //    advance the stale shieldcortex lib pin. `deps` is the same object the
+  //    strip mutates in place; shieldcortex is never override-shadowed so it
+  //    survives the strip.
+  stripManagedPinsFromManifest(manifest as Record<string, unknown>, latentPins);
   if (staleShieldcortex && selfVersion) deps.shieldcortex = selfVersion;
   (manifest as Record<string, unknown>).dependencies = deps;
   try {
@@ -1323,7 +1336,7 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
     return { status: 'failed', message: `Reinstall succeeded but pins still drift: ${residual.map((r) => r.name).join(', ')}. Backup: ${manifestPath}.repair-backup-${ts}` };
   }
 
-  const parts = [`Reconciled ${risks.length} drifted pin(s)`];
+  const parts = [`Reconciled ${latentPins.length} override-shadowed pin(s)`];
   if (staleShieldcortex) parts.push(`advanced shieldcortex to ${selfVersion}`);
   if (disabled) parts.push('re-enabled the plugin');
   return { status: 'healed', message: `${parts.join(', ')}. Restart to load it: openclaw gateway restart` };

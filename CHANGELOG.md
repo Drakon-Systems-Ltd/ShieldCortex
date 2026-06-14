@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.33.2] - 2026-06-14
+
+**`shieldcortex openclaw repair` now heals the EOVERRIDE trap even when the manifest looks clean at rest.** Follow-up to the v4.33.0 auto-repair: it failed in the field (edith, 2026-06-14) when triggered by a version bump rather than a current pin drift.
+
+### Fixed
+
+- **Repair now strips managed peers that are *co-present* in `overrides`, not just currently-drifted ones.** The v4.33.0 detector (`findEoverrideRiskPins`) only saw a *current* version mismatch. But a 50 ms manifest watcher captured the real mechanism: the mismatch is born *during* `openclaw plugins install`. OpenClaw refreshes the override from its bundled workspace (`hono` 4.12.18 → 4.12.21) while preserving the stale dependency pin (4.12.18) via `nextDependencies[x] = dependencies[x] ?? spec`, so npm's `assertRootOverrides` throws and OpenClaw rolls back — leaving a manifest that looks clean (4.12.18 == 4.12.18) at rest. v4.33.0 repair, triggered by a stale `shieldcortex` lib pin, therefore stripped nothing and its own reinstall hit EOVERRIDE. New `findLatentEoverridePins` reports every package co-present in both `dependencies` and `overrides` regardless of current match, and `stripManagedPinsFromManifest` removes them from `dependencies` AND `openclaw.managedPeerDependencies` before reinstalling — so the install re-derives them at the *current* override version and they converge. This is the same manual remediation proven on the affected box; the published plugin remains clean (zero deps/overrides — the pin is OpenClaw-injected). Overrides are left untouched. +8 tests.
+
 ## [4.33.1] - 2026-06-14
 
 **Mid-sentence fragments no longer dominate recall and the SessionStart preamble.** Field finding (E.D.I.T.H. ops report, edith box): 43/43 long-term memories sat at raw salience exactly 1.0 and 81% of them were sentence fragments ("the resources this year.", "so you can actually run the test first?"), surfacing verbatim at "100% salience". Root cause: raw `salience` is a one-way ratchet, so the extraction-time quality signal that holds fragments down is erased for exactly the memories that survive to be recalled.
