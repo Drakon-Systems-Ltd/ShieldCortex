@@ -29,6 +29,7 @@ import {
 import {
   calculateReinforcementBoost,
   calculateDecayedScore,
+  AUTO_EXTRACT_SALIENCE_CAP,
 } from './decay.js';
 import { activateMemory as spreadActivation } from './activation.js';
 import { jaccardSimilarity } from './similarity.js';
@@ -141,12 +142,15 @@ export function accessMemory(
  */
 export function reinforceFromSearch(memoryId: number): void {
   const db = getDatabase();
-  const memory = db.prepare('SELECT salience, access_count FROM memories WHERE id = ?').get(memoryId) as any;
+  const memory = db.prepare('SELECT salience, access_count, capture_method FROM memories WHERE id = ?').get(memoryId) as any;
   if (!memory) return;
 
   // Small salience boost per search appearance (diminishing returns)
   const boost = Math.max(0.005, 0.02 / (1 + memory.access_count * 0.1));
-  const newSalience = Math.min(1.0, memory.salience + boost);
+  // Forward-only ratchet cap (Phase 1a): auto-extracted captures never reinforce
+  // past the 0.6 extraction cap; deliberate captures keep the 1.0 ceiling.
+  const ceiling = memory.capture_method === 'auto' ? AUTO_EXTRACT_SALIENCE_CAP : 1.0;
+  const newSalience = Math.min(ceiling, memory.salience + boost);
 
   db.prepare(`
     UPDATE memories

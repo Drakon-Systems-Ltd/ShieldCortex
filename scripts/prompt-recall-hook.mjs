@@ -22,6 +22,7 @@ import { truncatePreservingWords } from './lib/truncate.mjs';
 import { compareRecallResults } from './lib/recall-rank.mjs';
 import { computeEffectiveSalience } from './lib/salience.mjs';
 import { writeRecallLog } from './lib/recall-log.mjs';
+import { recordHookInvocation } from './lib/telemetry.mjs';
 import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
 
 // ==================== CONFIG ====================
@@ -535,6 +536,11 @@ process.stdin.on('end', async () => {
         UPDATE memories SET access_count = access_count + 1, last_accessed = datetime('now')
         WHERE id IN (${placeholders})
       `).run(...ids);
+      // Phase 0 measurement: record the recall injection in hook_invocations
+      // (reusing the connection we already opened). This is the cumulative
+      // "is the store actually read into prompts?" signal — fires = recalls
+      // that injected ≥1, memories_extracted = count injected. Best-effort.
+      recordHookInvocation(writeDb, { hookName: 'prompt-recall', memoriesExtracted: memories.length });
       writeDb.close();
     } catch {
       // Non-critical — don't block on access count update

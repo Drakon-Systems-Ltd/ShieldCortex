@@ -54,6 +54,13 @@ export function calculateDecayedScore(
 /**
  * Calculate reinforcement boost when memory is accessed
  */
+// Auto-extracted captures must never reinforce past the extraction cap — the
+// salience ratchet (reinforcement-on-access) is exactly what drove the 0.6-capped
+// auto memories up to the 1.0 wall (Phase 1a, 2026-06-14). Mirrors the canonical
+// AUTO_EXTRACT_SALIENCE_CAP in scripts/lib/extract-memorable-segments.mjs:24 (a
+// build-script .mjs outside the compiled src/ surface, so the value is mirrored).
+export const AUTO_EXTRACT_SALIENCE_CAP = 0.6;
+
 export function calculateReinforcementBoost(
   memory: Memory,
   config: MemoryConfig = DEFAULT_CONFIG
@@ -67,8 +74,10 @@ export function calculateReinforcementBoost(
   // New score after reinforcement
   let newScore = memory.salience + currentBoost;
 
-  // Cap at 1.0
-  return Math.min(1.0, newScore);
+  // Ceiling: 0.6 for auto-extracted captures (forward-only ratchet cap; lazily
+  // corrects a saturated legacy auto row on its next access), 1.0 otherwise.
+  const ceiling = memory.captureMethod === 'auto' ? AUTO_EXTRACT_SALIENCE_CAP : 1.0;
+  return Math.min(ceiling, newScore);
 }
 
 /**

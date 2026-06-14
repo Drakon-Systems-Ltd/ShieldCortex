@@ -450,7 +450,7 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       return {
         content: [{
           type: 'text',
-          text: result.success ? formatStats(result.stats!) : `Error: ${result.error}`
+          text: result.success ? formatStats(result.stats!, result.salience) : `Error: ${result.error}`
         }],
       };
     })

@@ -1185,7 +1185,11 @@ export function getHighPriorityMemories(
   filters?: MemoryListFilters,
 ): Memory[] {
   const db = getDatabase();
-  let sql = `SELECT * FROM memories WHERE salience >= 0.6`;
+  // Phase 1b: gate + order on EFFECTIVE salience (the decaying score), not raw
+  // salience. Raw salience is a one-way ratchet, so a stale long-lived row sits
+  // at 1.0 forever and used to top this no-re-rank path. COALESCE falls back to
+  // raw salience when decayed_score is unset (never-scored rows unaffected).
+  let sql = `SELECT * FROM memories WHERE COALESCE(decayed_score, salience) >= 0.6`;
   const params: unknown[] = [];
 
   if (project) {
@@ -1201,7 +1205,7 @@ export function getHighPriorityMemories(
     params.push(filters.category);
   }
 
-  sql += ' ORDER BY salience DESC, last_accessed DESC LIMIT ?';
+  sql += ' ORDER BY COALESCE(decayed_score, salience) DESC, last_accessed DESC LIMIT ?';
   params.push(source ? limit * 2 : limit);
 
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
@@ -1209,10 +1213,10 @@ export function getHighPriorityMemories(
   return rows.slice(0, limit).map(rowToMemory);
 }
 
-/** Count high-priority (salience >= 0.6) memories matching the filters. */
+/** Count high-priority memories (effective salience >= 0.6) matching the filters. */
 export function countHighPriorityMemories(project?: string, filters?: MemoryListFilters): number {
   const db = getDatabase();
-  let sql = `SELECT COUNT(*) as count FROM memories WHERE salience >= 0.6`;
+  let sql = `SELECT COUNT(*) as count FROM memories WHERE COALESCE(decayed_score, salience) >= 0.6`;
   const params: unknown[] = [];
   if (project) {
     sql += ' AND project = ?';

@@ -65,7 +65,11 @@ export function registerRecallRoutes(app: Express, requireNotLocked: Middleware)
       const misses = getRecentMemories(200, project).filter((memory) => {
         if (results.some((result) => result.memory.id === memory.id)) return false;
         if (memory.status === 'archived' || memory.status === 'suppressed') return false;
-        return memory.salience >= 0.65 || memory.pinned;
+        // Phase 1b: use EFFECTIVE (decayed) salience so this "near-miss" explainer
+        // matches real recall ranking — a stale-saturated row (raw 1.0) is no
+        // longer shown as a high-salience near-miss. decayedScore COALESCEs to
+        // raw salience in rowToMemory, so never-scored rows are unaffected.
+        return memory.decayedScore >= 0.65 || memory.pinned;
       }).slice(0, 5).map((memory) => ({
         id: memory.id,
         title: memory.title,

@@ -18,6 +18,8 @@ import {
   importMemories,
 } from '../memory/consolidate.js';
 import { getMemoryStats, getProjectMemories } from '../memory/store.js';
+import { getSalienceDistribution, type SalienceDistribution } from '../memory/metrics.js';
+import { getDatabase } from '../database/init.js';
 import { Memory, ContextSummary, ConsolidationResult } from '../memory/types.js';
 import { resolveProject } from '../context/project-context.js';
 
@@ -268,6 +270,7 @@ export const statsSchema = z.object({
 export function executeStats(input: { project?: string }): {
   success: boolean;
   stats?: ReturnType<typeof getMemoryStats>;
+  salience?: SalienceDistribution;
   error?: string;
 } {
   try {
@@ -276,7 +279,9 @@ export function executeStats(input: { project?: string }): {
     const projectFilter = resolvedProject ?? undefined;
 
     const stats = getMemoryStats(projectFilter);
-    return { success: true, stats };
+    // Phase 0: include the salience-wall instrument so memory_stats surfaces it.
+    const salience = getSalienceDistribution(getDatabase(), projectFilter);
+    return { success: true, stats, salience };
   } catch (error) {
     return {
       success: false,
@@ -285,7 +290,7 @@ export function executeStats(input: { project?: string }): {
   }
 }
 
-export function formatStats(stats: ReturnType<typeof getMemoryStats>): string {
+export function formatStats(stats: ReturnType<typeof getMemoryStats>, salience?: SalienceDistribution): string {
   const lines = [
     '## Memory Statistics',
     '',
@@ -301,6 +306,18 @@ export function formatStats(stats: ReturnType<typeof getMemoryStats>): string {
 
   for (const [category, count] of Object.entries(stats.byCategory)) {
     lines.push(`  - ${category}: ${count}`);
+  }
+
+  // Phase 0: the salience-wall instrument. Raw salience saturates for surviving
+  // memories, so a high wall % means the score has stopped discriminating.
+  if (salience) {
+    lines.push(
+      '',
+      '### Memory Quality',
+      `  - At salience wall (≥0.95): ${salience.wall.ltmAtOrAbove095}/${salience.wall.ltmTotal} long-term (${salience.wall.ltmPct}%)`,
+      `  - Fragments in wall: ${salience.fragments.atOrAbove095} (${salience.fragments.pctOfWall}%)`,
+    );
+    for (const w of salience.warnings) lines.push(`  ⚠ ${w}`);
   }
 
   return lines.join('\n');
