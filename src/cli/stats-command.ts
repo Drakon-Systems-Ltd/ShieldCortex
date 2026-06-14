@@ -5,6 +5,7 @@
 import { isDatabaseInitialized } from '../database/init.js';
 import { getLifetimeStats } from '../defence/audit/queries.js';
 import { getAuditStats } from '../defence/audit/queries.js';
+import { getSalienceDistribution, getHookYield } from '../memory/metrics.js';
 import { getLicense } from '../license/store.js';
 import { getTrialStatus } from '../license/trial.js';
 import { existsSync } from 'fs';
@@ -74,6 +75,34 @@ export async function runStatsCommand(): Promise<void> {
     console.log(row('Scans',       last7d.totalOperations));
     console.log(row('Blocked',     last7d.blockedCount));
     console.log(row('Quarantined', last7d.quarantinedCount));
+
+    // Phase 0 (measure-first): the salience-wall instrument. A high wall % means
+    // raw salience has saturated and stopped discriminating among survivors.
+    try {
+      const sal = getSalienceDistribution();
+      if (sal.total > 0) {
+        console.log(section('Memory Quality'));
+        console.log(row('Long-term memories', sal.wall.ltmTotal));
+        console.log(row('At salience wall (≥0.95)', `${sal.wall.ltmAtOrAbove095} (${sal.wall.ltmPct}%)`));
+        console.log(row('Fragments in wall', `${sal.fragments.atOrAbove095} (${sal.fragments.pctOfWall}%)`));
+        for (const w of sal.warnings) console.log(`  ${DIM}⚠ ${w}${RESET}`);
+      }
+    } catch { /* metrics are best-effort; never break the report */ }
+
+    // Phase 0: hook yield — fires vs extracted per hook. Surfaces the capture
+    // imbalance (e.g. pre-compact fires rarely vs stop firing every turn) and
+    // the recall-injection count ("is the store actually read into prompts?").
+    try {
+      const yld = getHookYield();
+      if (yld.totalFires > 0) {
+        console.log(section('Hook Activity (all-time)'));
+        for (const h of yld.hooks.slice(0, 6)) {
+          console.log(row(h.hook, `${n(h.fires)} fires · ${n(h.extracted)} extracted`));
+        }
+        const recall = yld.hooks.find((h) => h.hook === 'prompt-recall');
+        console.log(row('Recall injections', recall ? recall.extracted : 0));
+      }
+    } catch { /* best-effort */ }
 
     const threats = last7d.threatBreakdown;
     const threatEntries = Object.entries(threats).sort((a, b) => b[1] - a[1]).slice(0, 5);
