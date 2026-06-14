@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.33.1] - 2026-06-14
+
+**Mid-sentence fragments no longer dominate recall and the SessionStart preamble.** Field finding (E.D.I.T.H. ops report, edith box): 43/43 long-term memories sat at raw salience exactly 1.0 and 81% of them were sentence fragments ("the resources this year.", "so you can actually run the test first?"), surfacing verbatim at "100% salience". Root cause: raw `salience` is a one-way ratchet, so the extraction-time quality signal that holds fragments down is erased for exactly the memories that survive to be recalled.
+
+### Fixed
+
+- **Effective salience now includes a content-derived completeness factor.** `salience` only ever increases — reinforcement-on-access (up to +0.5), search-reinforce, and consolidation link-bonus all `Math.min(1.0, …)`, while temporal decay is diverted to a separate `decayed_score` column and never folded back. So every long-lived memory saturates at raw 1.0, and the 0.6 auto-extract cap + the v4.31.0 `-0.15` fragment penalty (both applied once, at extraction) are ratcheted away within days. `computeEffectiveSalience` now multiplies in a completeness factor recomputed from the (stable) content on every rank, so a fragment can't out-rank a complete fact of equal recency/access no matter how high the ratchet drove its raw score. A capture sliced mid-clause — beginning on a *lowercase* function word ("the/so/in/and/with…", so a real "The fix was…" sentence is untouched) or ending on a function word with no terminal punctuation — ranks at `fragmentFactor`× (default 0.5, env `SHIELDCORTEX_SALIENCE_FRAGMENT_FACTOR`). It only re-ranks — floored above 0, never drops a memory. Fixes all three consumers at once: the per-turn recall injection, recall ranking, and the SessionStart preamble. No data migration — legacy saturated rows are corrected at read time.
+
 ## [4.33.0] - 2026-06-13
 
 **Detect and auto-repair the OpenClaw `EOVERRIDE` plugin-disable trap.** `openclaw update` could silently disable the realtime plugin (no plugin change can prevent it — it's an OpenClaw-side defect, upstream openclaw/openclaw#91772); now `shieldcortex doctor` flags it and `shieldcortex openclaw repair` heals it, with no manual manifest surgery.

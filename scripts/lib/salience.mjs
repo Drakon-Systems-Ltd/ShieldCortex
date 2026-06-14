@@ -48,12 +48,75 @@ function pickNumber(override, envName, fallback) {
   return fallback;
 }
 
+// Function words a capture begins or ends on when it was sliced mid-clause.
+// Mirrors the extractor's DANGLING_TAIL vocabulary
+// (scripts/lib/extract-memorable-segments.mjs) — a closed grammatical class,
+// not business logic, so the small duplication is deliberate: importing the
+// ~29 KB extractor module into this read-time hot path (runs on every recall /
+// prompt) isn't worth the coupling or parse cost.
+const FRAGMENT_FUNCTION_WORDS = new Set([
+  'and', 'or', 'but', 'nor', 'the', 'a', 'an', 'to', 'of', 'in', 'on', 'at',
+  'by', 'for', 'with', 'without', 'from', 'as', 'is', 'are', 'was', 'were',
+  'be', 'been', 'that', 'which', 'who', 'whose', 'because', 'so', 'if', 'when',
+  'while', 'than', 'then', 'into', 'onto', 'over', 'under', 'via', 'per',
+  'about', 'after', 'before', 'between', 'during',
+]);
+
+function normaliseWord(w) {
+  return w.toLowerCase().replace(/[^a-z']/g, '');
+}
+
+// First / last word carrying letters, skipping pure-punctuation tokens
+// (em-dashes, markdown bullets, stray brackets) so "— the daily check" reads
+// as first-word "the".
+function edgeWords(text) {
+  const tokens = text.split(/\s+/);
+  let first = '';
+  for (const t of tokens) { const c = normaliseWord(t); if (c) { first = c; break; } }
+  let last = '';
+  for (let i = tokens.length - 1; i >= 0; i--) { const c = normaliseWord(tokens[i]); if (c) { last = c; break; } }
+  return { first, last };
+}
+
+/**
+ * Read-time completeness signal. Returns 1 for a self-contained capture, or
+ * `fragmentFactor` (<1) for one sliced mid-clause:
+ *   - BEGINS on a *lowercase* function word — cut before the clause started
+ *     ("the resources this year"). The lowercase test is load-bearing: a real
+ *     sentence opening "The fix was…" is complete and must NOT be penalised.
+ *   - ENDS on a function word with no terminal punctuation — cut after
+ *     ("…the normalisation step after the").
+ *
+ * Recomputed from the (stable) content on every call, so the salience ratchet
+ * (reinforcement / consolidation only ever ADD) cannot erase it. Re-ranks
+ * only — floored above 0, never drops a memory (cf. the downvote floor).
+ *
+ * @param {unknown} content
+ * @param {number} fragmentFactor
+ * @returns {number} 1 (complete) or fragmentFactor (fragment)
+ */
+function contentCompletenessFactor(content, fragmentFactor) {
+  if (typeof content !== 'string') return 1;
+  const t = content.trim();
+  if (!t) return 1;
+  const { first, last } = edgeWords(t);
+  const firstLetter = t.match(/[A-Za-z]/);
+  const firstIsLower = !!firstLetter && firstLetter[0] >= 'a' && firstLetter[0] <= 'z';
+  const startsMidClause = firstIsLower && FRAGMENT_FUNCTION_WORDS.has(first);
+  const endsMidClause = !/[.!?]["')\]]?$/.test(t) && FRAGMENT_FUNCTION_WORDS.has(last);
+  return startsMidClause || endsMidClause ? fragmentFactor : 1;
+}
+
 export function computeEffectiveSalience(memory, opts = {}) {
   const halfLifeDays = pickNumber(opts.halfLifeDays, 'SHIELDCORTEX_SALIENCE_HALF_LIFE_DAYS', 14);
   const accessNorm = pickNumber(opts.accessNorm, 'SHIELDCORTEX_SALIENCE_ACCESS_NORM', 10);
   const pinBoost = pickNumber(opts.pinBoost, 'SHIELDCORTEX_SALIENCE_PIN_BOOST', 1.5);
   const downvoteDecay = pickNumber(opts.downvoteDecay, 'SHIELDCORTEX_SALIENCE_DOWNVOTE_DECAY', 0.3);
   const accessFloor = pickNumber(opts.accessFloor, 'SHIELDCORTEX_ACCESS_FLOOR', 0.4);
+  // Fragment captures rank at fragmentFactor× a complete fact of equal recency
+  // /access. Default 0.5 halves them — enough to sink below complete facts in
+  // the candidate pool without excluding a genuinely-relevant one outright.
+  const fragmentFactor = pickNumber(opts.fragmentFactor, 'SHIELDCORTEX_SALIENCE_FRAGMENT_FACTOR', 0.5);
   const now = opts.now ?? Date.now();
 
   const base = typeof memory.salience === 'number' ? memory.salience : 0;
@@ -84,5 +147,10 @@ export function computeEffectiveSalience(memory, opts = {}) {
   const downvotes = Math.max(0, Number(memory.downvote_count) || 0);
   const downvotePenalty = Math.max(0.1, 1 - downvoteDecay * downvotes);
 
-  return base * recency * access * pin * downvotePenalty;
+  // Completeness: derived fresh from content each call so the raw-salience
+  // ratchet can't erase it (v4.33.1). Neutral (1) when no content is supplied,
+  // preserving v4.25 caller behaviour.
+  const completeness = contentCompletenessFactor(memory.content, fragmentFactor);
+
+  return base * recency * access * pin * downvotePenalty * completeness;
 }
