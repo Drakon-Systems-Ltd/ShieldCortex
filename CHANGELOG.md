@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.34.0] - 2026-06-14
+
+**Measure the salience wall, then stop it forming.** Follow-through on the v4.33.1 fragment fix: instruments to quantify the "salience wall" (raw salience saturates at 1.0 for long-lived memories, so it stops discriminating) plus the structural fix that prevents the wall from growing. Read-mostly and migration-free.
+
+### Added
+
+- **`shieldcortex stats` + the `memory_stats` tool now surface a Memory Quality section.** `getSalienceDistribution` (new `src/memory/metrics.ts`) reports the salience wall (% of long-term memories at ≥0.95), the fragment share within it, a per-band×type histogram, and WARNs over 40% wall / 30% fragments. A Hook Activity section (`getHookYield`) shows fires-vs-extracted per hook — the capture imbalance (pre-compact fires rarely vs the Stop hook firing every turn). All pure reads.
+- **Recall injection is now recorded as telemetry.** The recall hook writes a `prompt-recall` row to the existing `hook_invocations` table (no schema migration), so its cumulative count is the "is the store actually read into prompts?" signal — surfaced in Hook Activity.
+
+### Fixed
+
+- **The salience ratchet is capped forward-only for auto-extracted memories.** Reinforcement-on-access (`calculateReinforcementBoost`) and search reinforcement (`reinforceFromSearch`) drove 0.6-capped auto-extracts up to the 1.0 wall over time. Both now ceiling `capture_method === 'auto'` memories at `AUTO_EXTRACT_SALIENCE_CAP` (0.6); deliberate captures (manual/hook/plugin/api) keep the 1.0 ceiling. This stops the wall growing and lazily corrects a saturated legacy auto row on its next access — no bulk rewrite or migration.
+- **High-priority recall gates on effective salience, not raw.** `getHighPriorityMemories`/`countHighPriorityMemories` gated `salience >= 0.6` AND ordered by raw salience with no re-rank, so a ratchet-saturated stale row topped the MCP recall no-query path. They now gate + order on `COALESCE(decayed_score, salience)` (NULL falls back to raw salience, so never-scored rows are unaffected); the recall "near-miss" explainer matches.
+- **Constraints honoured (per the design critique):** decay is NOT folded into the `salience` column (the read-time ranker already applies recency — folding would double-apply it) and completeness/downvote are NOT folded into `decayed_score` (it is also a deletion gate — a multiplier there could silently delete a complete, recent memory). The `.mjs` hooks (session-start, prompt-recall) deliberately keep their low inclusive raw floors and rely on the JS effective-salience ranking (which carries the v4.33.1 completeness factor), because `decayed_score` is only refreshed by consolidation / the API server and goes stale on hooks-only deployments.
+
 ## [4.33.2] - 2026-06-14
 
 **`shieldcortex openclaw repair` now heals the EOVERRIDE trap even when the manifest looks clean at rest.** Follow-up to the v4.33.0 auto-repair: it failed in the field (edith, 2026-06-14) when triggered by a version bump rather than a current pin drift.
