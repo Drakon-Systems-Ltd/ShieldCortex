@@ -8,6 +8,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { getApiToken, invalidateApiToken } from './auth';
+import { shouldInvalidateTokenOnClose } from './ws-helpers';
 
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws/events';
 
@@ -40,7 +41,7 @@ export type WebSocketEventType =
 // Alias for backwards compatibility
 export type MemoryEventType = WebSocketEventType;
 
-interface WebSocketMessage {
+export interface WebSocketMessage {
   type: WebSocketEventType;
   data?: unknown;
 }
@@ -66,6 +67,10 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
   const reconnectAttemptsRef = useRef(0);
   const reconnectDelayRef = useRef(INITIAL_RECONNECT_DELAY);
   const connectRef = useRef<() => void>(() => {});
+  // Bumped on every effect cleanup. connect() is async (awaits a token), so a
+  // StrictMode double-mount can resolve a stale attempt after cleanup and orphan
+  // a socket. Each attempt captures the generation and bails if it's superseded.
+  const connectGenerationRef = useRef(0);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [lastEvent, setLastEvent] = useState<{
@@ -84,6 +89,8 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
   const connect = useCallback(async () => {
     if (!enabled || wsRef.current?.readyState === WebSocket.OPEN) return;
 
+    const myGeneration = connectGenerationRef.current;
+
     // Clear any pending reconnect timeout
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -92,8 +99,16 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
 
     try {
       const token = await getApiToken();
+      // The effect cleaned up (unmount / dep change / StrictMode) while we
+      // awaited the token — a newer generation owns the socket now, so abandon
+      // this attempt rather than assigning a stale, unmanaged socket.
+      if (myGeneration !== connectGenerationRef.current) return;
       const wsUrl = `${WS_BASE_URL}?token=${encodeURIComponent(token)}`;
       const ws = new WebSocket(wsUrl);
+      if (myGeneration !== connectGenerationRef.current) {
+        ws.close();
+        return;
+      }
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -160,11 +175,16 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               break;
 
             case 'defence_event':
-              // Defence pipeline triggered (BLOCK/QUARANTINE) — refresh agent data
+              // Defence pipeline triggered (BLOCK/QUARANTINE) — refresh agent +
+              // audit data, and the quarantine queue + per-agent operations
+              // (these are now poll-gated on the connection, so the WS must
+              // invalidate them or they'd go stale while connected).
               queryClient.invalidateQueries({ queryKey: ['agents'] });
               queryClient.invalidateQueries({ queryKey: ['agent-timeline'] });
+              queryClient.invalidateQueries({ queryKey: ['agent-operations'] });
               queryClient.invalidateQueries({ queryKey: ['audit-logs'] });
               queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
+              queryClient.invalidateQueries({ queryKey: ['quarantine'] });
               break;
 
             case 'kill_switch_activated':
@@ -220,8 +240,10 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
         setIsConnected(false);
         console.log('[WebSocket] Disconnected', event.code);
 
-        // If closed due to auth failure, invalidate cached token so reconnect fetches fresh
-        if (event.code === 1008 || event.code === 4001 || event.code === 4003) {
+        // If closed due to auth failure (incl. 4401 — stale token after a server
+        // restart that rotated the session secret), drop the cached token so the
+        // reconnect fetches a fresh one instead of looping on the dead token.
+        if (shouldInvalidateTokenOnClose(event.code)) {
           invalidateApiToken();
         }
 
@@ -264,6 +286,12 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
     }
 
     return () => {
+      // Supersede any in-flight connect() so it abandons its socket rather than
+      // assigning it after this cleanup (StrictMode double-mount safety).
+      // Reading/writing the live ref at cleanup time is the whole point here —
+      // it's a generation counter, not a captured DOM node.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      connectGenerationRef.current++;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }

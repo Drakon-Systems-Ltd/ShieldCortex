@@ -8,7 +8,8 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { useMemoryWebSocket, MemoryEventType } from '@/lib/websocket';
+import { MemoryEventType } from '@/lib/websocket';
+import { useMemoryWebSocketContext } from '@/components/MemoryWebSocketProvider';
 
 interface LogEntry {
   id: number;
@@ -90,8 +91,8 @@ export function ActivityLog() {
   const logContainerRef = useRef<HTMLDivElement>(null);
   const nextIdRef = useRef(1);
 
-  // Connect to WebSocket
-  const { lastEvent, isConnected } = useMemoryWebSocket();
+  // Read from the shared connection (mounted once in AppShell).
+  const { lastEvent, isConnected } = useMemoryWebSocketContext();
 
   // Process incoming events
   useEffect(() => {

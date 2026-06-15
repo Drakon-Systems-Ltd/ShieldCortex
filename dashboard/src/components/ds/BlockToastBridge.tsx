@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 import { toast } from 'sonner';
-import { useMemoryWebSocket } from '@/lib/websocket';
+import { useWebSocketEvent } from '@/components/MemoryWebSocketProvider';
 
 interface DefenceEventData {
   source_type?: string;
@@ -79,6 +79,6 @@ export function BlockToastBridge() {
     else toast.warning(title, opts);
   }, []);
 
-  useMemoryWebSocket({ onMessage: handleMessage });
+  useWebSocketEvent(handleMessage);
   return null;
 }
