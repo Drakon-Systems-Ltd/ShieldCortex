@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 import { Brain, ShieldAlert, ShieldCheck, Sparkles, TrendingUp } from 'lucide-react';
 import { GlassCard } from '@/components/ds/GlassCard';
+import { CardError } from '@/components/ds/CardError';
 import { useDigest, useDigestTimeline, type TimelineDay } from '@/hooks/useDigest';
 import { useDashboardStore } from '@/lib/store';
 
@@ -74,8 +75,8 @@ function formatDayShort(date: string): string {
  */
 export function WeeklyRollupCard() {
   const { projectFilter } = useDashboardStore();
-  const { data: digest, isLoading: digestLoading } = useDigest('7d', projectFilter);
-  const { data: timeline, isLoading: timelineLoading } = useDigestTimeline(7, projectFilter);
+  const { data: digest, isLoading: digestLoading, isError: digestError, refetch: refetchDigest } = useDigest('7d', projectFilter);
+  const { data: timeline, isLoading: timelineLoading, isError: timelineError } = useDigestTimeline(7, projectFilter);
 
   const sparklineValues = useMemo(() => timeline?.timeline.map((d) => d.scanned) ?? [], [timeline]);
   const sparklineMax = useMemo(() => Math.max(0, ...sparklineValues), [sparklineValues]);
@@ -86,6 +87,14 @@ export function WeeklyRollupCard() {
     return (
       <GlassCard className="p-5">
         <div className="text-xs text-[var(--sc-text-muted)]">Loading weekly rollup…</div>
+      </GlassCard>
+    );
+  }
+
+  if (digestError || timelineError) {
+    return (
+      <GlassCard className="p-5">
+        <CardError inline message="Weekly rollup unavailable" onRetry={() => refetchDigest()} />
       </GlassCard>
     );
   }

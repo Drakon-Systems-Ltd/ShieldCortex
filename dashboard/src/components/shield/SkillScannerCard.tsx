@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { FileSearch, Loader2, ArrowRight, CheckCircle2, XCircle } from 'lucide-react';
 import { useSkillScanAll } from '@/hooks/useSkillScan';
 import { useDashboardStore } from '@/lib/store';
+import { CardError } from '@/components/ds/CardError';
 import type { SkillScanAllResponse } from '@/types/skills';
 
 export function SkillScannerCard() {
@@ -37,6 +38,15 @@ export function SkillScannerCard() {
           Scan All
         </button>
       </div>
+
+      {scanAll.isError && (
+        <CardError
+          inline
+          className="mb-3"
+          message={scanAll.error instanceof Error ? scanAll.error.message : 'Skill scan failed'}
+          onRetry={handleScan}
+        />
+      )}
 
       {result ? (
         <div>

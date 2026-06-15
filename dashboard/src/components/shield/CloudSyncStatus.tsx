@@ -3,6 +3,7 @@
 import { AlertTriangle, CheckCircle2, Clock3, RefreshCw, Server } from 'lucide-react';
 import { useCloudSyncStatus } from '../../hooks/useCloudSyncStatus';
 import { useDashboardStore } from '@/lib/store';
+import { CardError } from '@/components/ds/CardError';
 
 function formatTimeAgo(isoString: string): string {
   const diff = Date.now() - new Date(isoString).getTime();
@@ -74,10 +75,12 @@ function statusTone(status: 'healthy' | 'queued' | 'warning' | 'disabled') {
 }
 
 export function CloudSyncStatus() {
-  const { data, isLoading } = useCloudSyncStatus();
+  const { data, isLoading, isError, refetch } = useCloudSyncStatus();
   const setViewMode = useDashboardStore((state) => state.setViewMode);
 
-  if (isLoading || !data) return null;
+  if (isLoading) return null;
+  if (isError) return <CardError message="Cloud sync status unavailable" onRetry={() => refetch()} />;
+  if (!data) return null;
 
   const { enabled, apiKeySet, lastSyncAt, queue, device } = data;
   const memoryQueue = queue.byKind.memory;

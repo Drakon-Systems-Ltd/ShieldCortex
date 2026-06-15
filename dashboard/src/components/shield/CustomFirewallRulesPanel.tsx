@@ -5,9 +5,10 @@ import { Shield, Plus, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
 import { ProFeatureGate } from './ProFeatureGate';
 import { useFirewallRules, useCreateFirewallRule, useUpdateFirewallRule, useDeleteFirewallRule } from '@/hooks/useFirewallRules';
 import { PREVIEW_FIREWALL_RULES } from '@/lib/pro-previews';
+import { CardError } from '@/components/ds/CardError';
 
 function RulesTable() {
-  const { data, isLoading, isLocked } = useFirewallRules();
+  const { data, isLoading, isError, isLocked, refetch } = useFirewallRules();
   const createRule = useCreateFirewallRule();
   const updateRule = useUpdateFirewallRule();
   const deleteRule = useDeleteFirewallRule();
@@ -73,7 +74,9 @@ function RulesTable() {
         </form>
       )}
 
-      {isLoading ? (
+      {isError ? (
+        <CardError inline className="py-4" message="Couldn't load firewall rules" onRetry={() => refetch()} />
+      ) : isLoading ? (
         <div className="text-xs text-[var(--sc-text-muted)] py-4 text-center">Loading rules...</div>
       ) : rules.length === 0 ? (
         <div className="text-xs text-[var(--sc-text-muted)] py-4 text-center">No custom rules yet. Click &quot;Add Rule&quot; to create one.</div>
