@@ -3,9 +3,10 @@
 import { Shield } from 'lucide-react';
 import { useIronDomeStatus, useIronDomeAudit, type IronDomeAuditLog } from '@/hooks/useIronDome';
 import { useDashboardStore } from '@/lib/store';
+import { CardError } from '@/components/ds/CardError';
 
 export function IronDomeCard() {
-  const { data: status, isLoading } = useIronDomeStatus();
+  const { data: status, isLoading, isError, refetch } = useIronDomeStatus();
   const { data: auditData } = useIronDomeAudit(100);
 
   const isActive = status?.enabled ?? false;
@@ -33,7 +34,9 @@ export function IronDomeCard() {
         </span>
       </div>
 
-      {isLoading ? (
+      {isError ? (
+        <CardError inline message="Iron Dome status unavailable" onRetry={() => refetch()} />
+      ) : isLoading ? (
         <div className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading...</div>
       ) : isActive ? (
         <>

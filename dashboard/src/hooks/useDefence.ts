@@ -2,28 +2,16 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { authFetch, readApiError } from '@/lib/auth';
+import { wsGatedInterval } from '@/lib/ws-helpers';
+import { useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
+import type { AuditEntry } from '@/types/audit';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 // ── Types ──
 
-export interface AuditEntry {
-  id: number;
-  memory_id: number | null;
-  project: string | null;
-  timestamp: string;
-  source_type: string;
-  source_identifier: string;
-  trust_score: number;
-  sensitivity_level: string;
-  firewall_result: 'ALLOW' | 'BLOCK' | 'QUARANTINE';
-  anomaly_score: number;
-  threat_indicators: string; // JSON array
-  blocked_patterns: string; // JSON array
-  reason: string | null;
-  fragmentation_score: number | null;
-  pipeline_duration_ms: number | null;
-}
+// Re-exported for ergonomics — the canonical definition lives in @/types/audit.
+export type { AuditEntry };
 
 export interface AuditStats {
   totalOperations: number;
@@ -200,28 +188,34 @@ export function useAuditLogs(options?: {
   project?: string;
   limit?: number;
 }) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['audit-logs', options],
     queryFn: () => fetchAuditLogs(options),
-    refetchInterval: 30000,
+    // defence_event invalidates ['audit-logs']; poll only when the socket is down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
     retry: 2,
   });
 }
 
 export function useAuditStats(timeRange: '24h' | '7d' | '30d' = '24h', project?: string) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['audit-stats', timeRange, project],
     queryFn: () => fetchAuditStats(timeRange, project),
-    refetchInterval: 30000,
+    // defence_event invalidates ['audit-stats']; poll only when the socket is down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
     retry: 2,
   });
 }
 
 export function useQuarantine(status: string = 'pending', limit: number = 50, project?: string, sourceType?: string) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['quarantine', status, limit, project, sourceType],
     queryFn: () => fetchQuarantine(status, limit, project, sourceType),
-    refetchInterval: 30000,
+    // defence_event (Phase 4) invalidates ['quarantine']; poll only when the socket is down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
     retry: 2,
   });
 }

@@ -18,6 +18,7 @@ import { StatCard } from '@/components/ds/StatCard';
 import { Badge } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
 import { PageHeader } from '@/components/ds/PageHeader';
+import { FirstRunGuide } from '@/components/overview/FirstRunGuide';
 import { useStats } from '@/hooks/useMemories';
 import { useAuditStats, useQuarantine } from '@/hooks/useDefence';
 import { useContradictions, useQuality } from '@/hooks/useMemories';
@@ -122,6 +123,14 @@ export function OverviewGlass() {
           eyebrow="ShieldCortex"
           title="Command Centre"
           subtitle="Stored-memory health, memory-file findings, threat pressure, and operational status at a glance."
+        />
+
+        {/* First-run guide — only on a genuinely fresh install (no data yet) */}
+        <FirstRunGuide
+          ready={stats !== undefined}
+          memoryCount={totalMemories}
+          scanCount={totalXRayScans}
+          blockedCount={blockedCount}
         />
 
         {/* Stats row */}

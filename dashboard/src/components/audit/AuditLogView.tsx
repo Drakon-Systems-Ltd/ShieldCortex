@@ -1,17 +1,8 @@
 'use client';
 
-import { AuditLogViewTerminal } from './AuditLogViewTerminal';
+// Glass-only after the 2026-06 theme cleanup.
 import { AuditLogViewGlass } from './AuditLogViewGlass';
 
 export function AuditLogView() {
-  return (
-    <>
-      <div className="contents theme-glass:hidden">
-        <AuditLogViewTerminal />
-      </div>
-      <div className="hidden theme-glass:contents">
-        <AuditLogViewGlass />
-      </div>
-    </>
-  );
+  return <AuditLogViewGlass />;
 }

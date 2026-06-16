@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Bell } from 'lucide-react';
+import { useWebSocketEvent } from '@/components/MemoryWebSocketProvider';
 
 interface DefenceAlert {
   id: number;
@@ -18,43 +19,23 @@ interface Props {
   agentFilter?: string;
 }
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws/events';
-
 export function AlertFeed({ agentFilter }: Props) {
   const [alerts, setAlerts] = useState<DefenceAlert[]>([]);
   const idCounter = useRef(0);
-  const wsRef = useRef<WebSocket | null>(null);
 
-  const handleMessage = useCallback((event: MessageEvent) => {
-    try {
-      const msg = JSON.parse(event.data);
-      if (msg.type !== 'defence_event') return;
+  // Ride the single authenticated connection — its own token-less socket was
+  // rejected with 4401, so this feed was silently dead before Phase 4.
+  useWebSocketEvent((msg) => {
+    if (msg.type !== 'defence_event') return;
 
-      const data = msg.data as DefenceAlert;
-      if (agentFilter && data.source_identifier !== agentFilter) return;
+    const data = msg.data as DefenceAlert;
+    if (agentFilter && data.source_identifier !== agentFilter) return;
 
-      setAlerts((prev) => [
-        { ...data, id: ++idCounter.current },
-        ...prev,
-      ].slice(0, 50));
-    } catch { /* ignore parse errors */ }
-  }, [agentFilter]);
-
-  useEffect(() => {
-    // Connect to existing WebSocket for defence events
-    try {
-      const ws = new WebSocket(WS_URL);
-      wsRef.current = ws;
-      ws.onmessage = handleMessage;
-      ws.onerror = () => {}; // Suppress — main WS hook handles reconnection
-      return () => {
-        ws.close();
-        wsRef.current = null;
-      };
-    } catch {
-      return;
-    }
-  }, [handleMessage]);
+    setAlerts((prev) => [
+      { ...data, id: ++idCounter.current },
+      ...prev,
+    ].slice(0, 50));
+  });
 
   if (alerts.length === 0) {
     return (

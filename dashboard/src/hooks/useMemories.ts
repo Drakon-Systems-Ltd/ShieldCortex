@@ -10,7 +10,8 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { authFetch } from '@/lib/auth';
 import { Memory, MemoryStats, MemoryLink } from '@/types/memory';
-import { useMemoryWebSocket } from '@/lib/websocket';
+import { wsGatedInterval } from '@/lib/ws-helpers';
+import { useMemoryWebSocketContext, useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -154,10 +155,12 @@ export function useMemories(options?: {
   mode?: 'recent' | 'important' | 'search';
   query?: string;
 }) {
+  const { isConnected } = useWebSocketStatus();
   const query = useQuery({
     queryKey: ['memories', options],
     queryFn: () => fetchMemories(options),
-    refetchInterval: 30000, // Fallback poll every 30 seconds (WebSocket handles real-time)
+    // WS invalidates ['memories']; poll only as a fallback when it's down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
   });
 
   // Extract memories array and pagination from response
@@ -170,19 +173,23 @@ export function useMemories(options?: {
 
 // Hook: Get memory stats
 export function useStats(project?: string) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['stats', project],
     queryFn: () => fetchStats(project),
-    refetchInterval: 30000, // Fallback poll every 30 seconds
+    // WS invalidates ['stats']; poll only when the socket is down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
   });
 }
 
 // Hook: Get memory links
 export function useMemoryLinks(project?: string) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['links', project],
     queryFn: () => fetchLinks(project),
-    refetchInterval: 60000, // Fallback poll every 60 seconds
+    // WS invalidates ['links'] (link_discovered/consolidation); poll as fallback.
+    refetchInterval: wsGatedInterval(isConnected, 60000),
   });
 }
 
@@ -213,8 +220,8 @@ export function useMemoriesWithRealtime(options?: {
   mode?: 'recent' | 'important' | 'search';
   query?: string;
 }) {
-  // Connect to WebSocket for real-time updates
-  const ws = useMemoryWebSocket();
+  // Read the shared connection (mounted once in AppShell).
+  const ws = useMemoryWebSocketContext();
 
   // Fetch memories with reduced polling (WebSocket handles most updates)
   const memories = useMemories(options);

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { FeatureLockedError } from '@/lib/auth';
-import { useMemoryWebSocket } from '@/lib/websocket';
+import { useWebSocketEvent } from '@/components/MemoryWebSocketProvider';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge, riskVariant } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
@@ -100,16 +100,14 @@ export function XRayOverview() {
   const latestError = scanMutation.error;
   const isFeatureLocked = latestError instanceof FeatureLockedError;
 
-  useMemoryWebSocket({
-    onMessage: (event) => {
-      if (event.type === 'xray_detection') {
-        const d = event.data as { summary?: string; riskLevel?: string };
-        toast.warning(d.summary || 'X-Ray detection', {
-          description: `Risk: ${d.riskLevel || 'unknown'}`,
-          duration: 8000,
-        });
-      }
-    },
+  useWebSocketEvent((event) => {
+    if (event.type === 'xray_detection') {
+      const d = event.data as { summary?: string; riskLevel?: string };
+      toast.warning(d.summary || 'X-Ray detection', {
+        description: `Risk: ${d.riskLevel || 'unknown'}`,
+        duration: 8000,
+      });
+    }
   });
 
   const selectedHistory = detailQuery.data?.entry ?? historyEntries.find((e) => e.id === effectiveHistoryId) ?? null;

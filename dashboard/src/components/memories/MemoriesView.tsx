@@ -1,17 +1,8 @@
 'use client';
 
-import { MemoriesViewTerminal } from './MemoriesViewTerminal';
+// Glass-only after the 2026-06 theme cleanup.
 import { MemoriesViewGlass } from './MemoriesViewGlass';
 
 export function MemoriesView() {
-  return (
-    <>
-      <div className="contents theme-glass:hidden">
-        <MemoriesViewTerminal />
-      </div>
-      <div className="hidden theme-glass:contents">
-        <MemoriesViewGlass />
-      </div>
-    </>
-  );
+  return <MemoriesViewGlass />;
 }

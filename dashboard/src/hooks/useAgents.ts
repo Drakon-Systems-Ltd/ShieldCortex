@@ -2,6 +2,8 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { authFetch } from '@/lib/auth';
+import { wsGatedInterval } from '@/lib/ws-helpers';
+import { useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
 import type { AgentInfo, AgentTimelinePoint } from '../types/agents';
 import type { AuditEntry } from './useDefence';
 
@@ -51,10 +53,12 @@ async function fetchAgentOperations(
 // ── Hooks ──
 
 export function useAgentRegistry(timeRange: '24h' | '7d' | '30d' = '24h', project?: string) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['agents', timeRange, project],
     queryFn: () => fetchAgentRegistry(timeRange, project),
-    refetchInterval: 30000,
+    // defence_event invalidates ['agents']; poll only when the socket is down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
     retry: 2,
   });
 }
@@ -64,11 +68,13 @@ export function useAgentTimeline(
   timeRange: '24h' | '7d' | '30d' = '24h',
   project?: string,
 ) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['agent-timeline', identifier, timeRange, project],
     queryFn: () => fetchAgentTimeline(identifier!, timeRange, project),
     enabled: !!identifier,
-    refetchInterval: 30000,
+    // defence_event invalidates ['agent-timeline']; poll only when the socket is down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
     retry: 2,
   });
 }
@@ -77,11 +83,13 @@ export function useAgentOperations(
   identifier: string | null,
   options?: { limit?: number; offset?: number; firewallResult?: string; project?: string },
 ) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['agent-operations', identifier, options],
     queryFn: () => fetchAgentOperations(identifier!, options),
     enabled: !!identifier,
-    refetchInterval: 30000,
+    // defence_event (Phase 4) invalidates ['agent-operations']; poll only when the socket is down.
+    refetchInterval: wsGatedInterval(isConnected, 30000),
     retry: 2,
   });
 }
