@@ -2,17 +2,13 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { authFetch } from '@/lib/auth';
+import type { AuditEntry } from '@/types/audit';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 interface ActivityDay {
   date: string;
   count: number;
-}
-
-interface AuditEntry {
-  timestamp: string;
-  firewall_result: string;
 }
 
 /**

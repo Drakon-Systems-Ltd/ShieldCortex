@@ -4,28 +4,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { authFetch, readApiError } from '@/lib/auth';
 import { wsGatedInterval } from '@/lib/ws-helpers';
 import { useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
+import type { AuditEntry } from '@/types/audit';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 // ── Types ──
 
-export interface AuditEntry {
-  id: number;
-  memory_id: number | null;
-  project: string | null;
-  timestamp: string;
-  source_type: string;
-  source_identifier: string;
-  trust_score: number;
-  sensitivity_level: string;
-  firewall_result: 'ALLOW' | 'BLOCK' | 'QUARANTINE';
-  anomaly_score: number;
-  threat_indicators: string; // JSON array
-  blocked_patterns: string; // JSON array
-  reason: string | null;
-  fragmentation_score: number | null;
-  pipeline_duration_ms: number | null;
-}
+// Re-exported for ergonomics — the canonical definition lives in @/types/audit.
+export type { AuditEntry };
 
 export interface AuditStats {
   totalOperations: number;

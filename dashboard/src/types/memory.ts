@@ -48,6 +48,10 @@ export interface Memory {
   scope?: 'project' | 'global';
   transferable?: boolean;
   cloudExcluded?: boolean;
+  // Graph entity ids attached by GET /api/memories (snake_case on the wire) so
+  // the constellation client can map list rows to nodes; also on memory_created
+  // / memory_accessed WS events. Consumed by useGraphPulse.
+  entity_ids?: number[];
 }
 
 export interface MemoryLink {
@@ -61,6 +65,9 @@ export interface MemoryLink {
   target_title?: string;
   source_category?: MemoryCategory;
   target_category?: MemoryCategory;
+  // GET /api/links joins the endpoint memories' node type onto each link row.
+  source_type?: MemoryType;
+  target_type?: MemoryType;
 }
 
 export interface MemoryStats {
