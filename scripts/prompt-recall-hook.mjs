@@ -24,6 +24,7 @@ import { computeEffectiveSalience } from './lib/salience.mjs';
 import { writeRecallLog } from './lib/recall-log.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
+import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
 
 // ==================== CONFIG ====================
 
@@ -135,6 +136,7 @@ function recallRelevant(db, project, prompt) {
         SELECT
           m.id, m.title, m.content, m.category, m.salience, fts.rank,
           m.pinned, m.access_count, m.last_accessed,
+          m.trust_score, m.sensitivity_level, m.metadata, m.reviewed_at,
           COALESCE(m.downvote_count, 0) AS downvote_count
         FROM memories m
         JOIN memories_fts fts ON m.id = fts.rowid
@@ -184,6 +186,7 @@ function recallRelevant(db, project, prompt) {
         SELECT
           id, title, content, category, salience,
           pinned, access_count, last_accessed,
+          trust_score, sensitivity_level, metadata, reviewed_at,
           COALESCE(downvote_count, 0) AS downvote_count
         FROM memories
         WHERE category = ?
@@ -514,6 +517,36 @@ process.stdin.on('end', async () => {
           relevanceDrops,
         });
         process.exit(0);
+      }
+    }
+
+    // ── RECALL-BOUNDARY DEFENCE (Feature #1) ─────────────────────────────
+    // Filter poisoned / RESTRICTED / credential-bearing rows OUT of the recalled
+    // set before they're formatted into the prompt. Runs after dedupe (acts on
+    // the final injected set) and before format + ring + telemetry (so those see
+    // only safe rows). FAIL-OPEN: a missing dist build leaves recall unchanged.
+    if (config.recallDefence !== false && memories.length > 0) {
+      try {
+        const defence = await loadRecallDefence();
+        if (defence) {
+          const minTrust = typeof config.recallDefenceMinTrust === 'number' ? config.recallDefenceMinTrust : 0;
+          const { kept: safe, actions } = defendRecallRows(memories, { minTrust, project }, defence);
+          const withheld = actions.filter((a) => a.action !== 'allowed');
+          if (withheld.length > 0) {
+            console.error(
+              `[shieldcortex] recall-defence withheld ${withheld.length} memory row(s): ` +
+                withheld.map((w) => `#${w.id}:${w.layer}`).join(', '),
+            );
+            // Only touch a writable audit connection when something was withheld.
+            ensureRecallAuditDb(defence, dbPath);
+            for (const a of withheld) {
+              emitRecallAudit(defence.logAudit, { memoryId: a.id, action: a.action, layer: a.layer, reason: a.reason, project });
+            }
+          }
+          memories = safe;
+        }
+      } catch (e) {
+        console.error('[shieldcortex] recall-defence skipped:', e?.message ?? e);
       }
     }
 
