@@ -59,6 +59,20 @@ describe('defendRecallRows — trust layer', () => {
     expect(kept.map((r: { id: number }) => r.id)).toEqual([1]);
   });
 
+  it('keeps a CONFIDENTIAL row with no declared context (regression: was universally dropped)', () => {
+    // metadata.context is never written on store, so the old context-equality
+    // gate silently dropped EVERY CONFIDENTIAL (any email/phone) row from recall.
+    const rows = [{ id: 1, trust_score: 1, sensitivity_level: 'CONFIDENTIAL', content: 'contact alberto@rizq.tech re: the contract' }];
+    const { kept } = defendRecallRows(rows, { minTrust: 0, project: 'proj' }, deps());
+    expect(kept.map((r: { id: number }) => r.id)).toEqual([1]);
+  });
+
+  it('still context-scopes a CONFIDENTIAL row that DOES declare a mismatched context', () => {
+    const rows = [{ id: 1, trust_score: 1, sensitivity_level: 'CONFIDENTIAL', content: 'x', metadata: '{"context":"other-proj"}' }];
+    const { kept } = defendRecallRows(rows, { minTrust: 0, project: 'proj' }, deps());
+    expect(kept).toHaveLength(0); // declared context 'other-proj' ≠ 'proj' → dropped
+  });
+
   it('does not mutate the input rows (metadata stays the raw string)', () => {
     const rows = [{ id: 1, trust_score: 1, sensitivity_level: 'CONFIDENTIAL', content: 'x', metadata: '{"context":"projX"}' }];
     defendRecallRows(rows, { minTrust: 0, project: 'projX' }, deps());
@@ -76,12 +90,23 @@ describe('defendRecallRows — content layer', () => {
     expect(actions).toContainEqual(expect.objectContaining({ id: 1, action: 'dropped', layer: 'instruction' }));
   });
 
-  it('drops a row with a leaked credential', () => {
+  it('drops a row with a BLOCKING credential finding', () => {
     const rows = [{ id: 1, trust_score: 1, content: 'AKIA...' }];
     const { kept } = defendRecallRows(rows, { minTrust: 0 }, deps({
-      scanForCredentials: () => ({ leaked: true, findings: [{ type: 'aws' }] }),
+      scanForCredentials: () => ({ leaked: true, findings: [{ type: 'aws', action: 'blocked' }] }),
     }));
     expect(kept).toHaveLength(0);
+  });
+
+  it('KEEPS a row whose only credential findings are non-blocking (warned/logged) — mirror the write path', () => {
+    // A benign high-entropy hash / cache key: leaked=true but action 'logged'.
+    // The write path stores it (blocks only on action==='blocked'); recall must
+    // not be stricter or it silently withholds legitimate notes.
+    const rows = [{ id: 1, trust_score: 1, content: 'cache key 9f86d081884c7d659a2feaa0c55ad015' }];
+    const { kept } = defendRecallRows(rows, { minTrust: 0 }, deps({
+      scanForCredentials: () => ({ leaked: true, findings: [{ type: 'high_entropy', action: 'logged' }] }),
+    }));
+    expect(kept.map((r: { id: number }) => r.id)).toEqual([1]);
   });
 
   it('decodes and rescans: a base64-hidden injection is dropped', () => {

@@ -721,6 +721,19 @@ export function updateMemory(
   const existing = getMemoryById(id);
   if (!existing) return null;
 
+  // DEFENCE: re-scan when content/title changes — the UPDATE path is otherwise
+  // an unscanned write (reachable via remember-dedup + the dashboard PATCH).
+  // Mirror mergeMemories: fail closed on a non-ALLOW verdict so a poison content
+  // replace can't overwrite a clean row unchecked.
+  if (updates.content !== undefined || updates.title !== undefined) {
+    const scanContent = updates.content !== undefined ? updates.content : existing.content;
+    const scanTitle = updates.title !== undefined ? updates.title : existing.title;
+    const defenceResult = runDefencePipeline(scanContent, scanTitle, UNATTRIBUTED_SOURCE, undefined, existing.project ?? undefined);
+    if (defenceResult.firewall.result !== 'ALLOW') {
+      throw new MemoryBlockedError(defenceResult.firewall.reason);
+    }
+  }
+
   const fields: string[] = [];
   const values: unknown[] = [];
 

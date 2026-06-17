@@ -192,9 +192,15 @@ export function defendRecallRows(rows, opts = {}, deps) {
       continue;
     }
 
+    // Mirror the WRITE path: drop only on a BLOCKING credential finding, not a
+    // warned/logged one. A benign high-entropy hash / cache key is stored
+    // (write blocks only on action==='blocked'), so recall must not be stricter
+    // or it silently withholds legitimate notes.
     const cred = deps.scanForCredentials(content);
-    if (cred && cred.leaked) {
-      actions.push({ id: row.id, action: 'dropped', layer: 'credential', reason: `credential:${(cred.findings ?? []).length}` });
+    const credBlocked = !!cred && Array.isArray(cred.findings) && cred.findings.some((f) => f && f.action === 'blocked');
+    if (credBlocked) {
+      const blocked = cred.findings.filter((f) => f && f.action === 'blocked');
+      actions.push({ id: row.id, action: 'dropped', layer: 'credential', reason: `credential:${blocked.length}` });
       continue;
     }
 
@@ -206,7 +212,8 @@ export function defendRecallRows(rows, opts = {}, deps) {
       for (const snippet of enc.decodedSnippets ?? []) {
         const di = deps.detectInstructions(snippet);
         const dc = deps.scanForCredentials(snippet);
-        if ((di && di.detected) || (dc && dc.leaked)) {
+        const dcBlocked = !!dc && Array.isArray(dc.findings) && dc.findings.some((f) => f && f.action === 'blocked');
+        if ((di && di.detected) || dcBlocked) {
           malicious = true;
           break;
         }

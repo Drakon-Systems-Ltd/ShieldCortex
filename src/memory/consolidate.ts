@@ -516,23 +516,28 @@ export function clusterAndSummarise(options?: { minClusterSize?: number }): {
         }
       }
 
-      addMemory(
-        {
-          type: 'long_term',
-          category: category as any,
-          title: summaryTitle,
-          content: summaryContent,
-          project: bestProject || undefined,
-          tags: ['auto-summary'],
-          salience: 0.6,
-        },
-        undefined,
-        // System-generated consolidation summary — honest cli provenance
-        // (trust 0.9, above the auto-quarantine band so it isn't held).
-        { type: 'cli', identifier: 'consolidate:summary' },
-      );
-
-      summariesCreated++;
+      try {
+        addMemory(
+          {
+            type: 'long_term',
+            category: category as any,
+            title: summaryTitle,
+            content: summaryContent,
+            project: bestProject || undefined,
+            tags: ['auto-summary'],
+            salience: 0.6,
+          },
+          undefined,
+          // System-generated consolidation summary — honest cli provenance
+          // (trust 0.9, above the auto-quarantine band so it isn't held).
+          { type: 'cli', identifier: 'consolidate:summary' },
+        );
+        summariesCreated++;
+      } catch {
+        // A summary whose content trips the (now-unconditional) defence scan
+        // must NOT abort the whole consolidation transaction — skip it, like the
+        // per-row guard in importMemories.
+      }
     }
 
     return { clusters, summariesCreated };

@@ -20,9 +20,13 @@ export function filterByTrust<
       // Filter below minimum trust
       if (score < minTrust) return false;
 
-      // CONFIDENTIAL: only include if context matches
+      // CONFIDENTIAL: context-scope only when the row actually DECLARES a
+      // context. metadata.context is not written on store today, so requiring
+      // equality dropped every CONFIDENTIAL (any email/phone-bearing) row from
+      // recall — silent amnesia. Drop only a declared-but-mismatched context.
       if (item.sensitivity_level === 'CONFIDENTIAL') {
-        if (!context || item.metadata?.context !== context) return false;
+        const rowContext = item.metadata?.context;
+        if (rowContext != null && context != null && rowContext !== context) return false;
       }
 
       return true;
