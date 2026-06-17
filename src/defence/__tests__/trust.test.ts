@@ -66,9 +66,14 @@ describe('Trust Source Scorer', () => {
     expect(scoreSource({ type: 'web', identifier: 'unattributed' }).score).toBeLessThan(0.5);
   });
 
-  it('scores the import source (file:import) at 0.6 and the dashboard source (api:dashboard) at 0.7', async () => {
+  it('pins file:import below the quarantine band (0.4) and dashboard (api:dashboard) at 0.7', async () => {
     const { scoreSource } = await import('../trust/source-scorer.js');
-    expect(scoreSource({ type: 'file', identifier: 'import' }).score).toBe(0.6);
+    // The generic `file` type is 0.6 — INSIDE the 0.5–0.7 auto-quarantine band,
+    // which would wrongly quarantine every imported row. file:import is pinned
+    // to 0.4 (BASE_SCORES override): below the band, so a benign backup restore
+    // succeeds, but still scanned + low-trust.
+    expect(scoreSource({ type: 'file', identifier: 'import' }).score).toBe(0.4);
+    expect(scoreSource({ type: 'file', identifier: 'import' }).score).toBeLessThan(0.5);
     expect(scoreSource({ type: 'api', identifier: 'dashboard' }).score).toBe(0.7);
   });
 });

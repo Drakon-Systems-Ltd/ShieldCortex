@@ -659,17 +659,24 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         return res.status(400).json({ error: 'Title and content required' });
       }
 
-      const memory = addMemory({
-        title,
-        content,
-        type: type || 'short_term',
-        category: category || 'note',
-        project,
-        tags: tags || [],
-        salience,
-        memoryPurpose: memoryPurpose || undefined,
-        memoryScope: memoryScope || undefined,
-      });
+      const memory = addMemory(
+        {
+          title,
+          content,
+          type: type || 'short_term',
+          category: category || 'note',
+          project,
+          tags: tags || [],
+          salience,
+          memoryPurpose: memoryPurpose || undefined,
+          memoryScope: memoryScope || undefined,
+        },
+        undefined,
+        // Operator-attributable dashboard write → api:dashboard (trust 0.7):
+        // scanned like every write, but stays broadly recallable (above the
+        // sub-agent band) rather than the generic unattributed 0.3.
+        { type: 'api', identifier: 'dashboard' },
+      );
 
       res.status(201).json(memory);
     } catch (error) {
@@ -678,6 +685,15 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
           error: 'Memory creation is paused',
           paused: true,
           message: 'Use the dashboard control panel to resume memory creation.',
+        });
+      }
+      // The dashboard write is now scanned — surface a defence block as a 422,
+      // not a generic 500.
+      if ((error as Error).name === 'MemoryBlockedError') {
+        return res.status(422).json({
+          error: 'Blocked by the defence pipeline',
+          blocked: true,
+          message: (error as Error).message,
         });
       }
       res.status(500).json({ error: (error as Error).message });

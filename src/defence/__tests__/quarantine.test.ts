@@ -172,19 +172,28 @@ describe('Quarantine Review Promotion', () => {
     expect(result?.memoryId).toBeDefined();
 
     const memory = db.prepare(
-      'SELECT title, project, source_kind, capture_method, source FROM memories WHERE id = ?'
+      'SELECT title, project, source_kind, capture_method, source, trust_score, metadata FROM memories WHERE id = ?'
     ).get(result?.memoryId) as {
       title: string;
       project: string;
       source_kind: string;
       capture_method: string;
       source: string;
+      trust_score: number;
+      metadata: string;
     };
     expect(memory.title).toBe('Production restart runbook');
     expect(memory.project).toBe('ShieldCortex-Project');
     expect(memory.source_kind).toBe('api');
     expect(memory.capture_method).toBe('review');
-    expect(memory.source).toBe('api:dashboard:quarantine-test');
+    // Promotion now admits at operator-approved trust (a human approved it) and
+    // re-runs the pipeline; the ORIGINAL source is preserved in metadata, not
+    // laundered onto the source column at its original trust.
+    expect(memory.source).toBe('user:approved');
+    expect(memory.trust_score).toBe(0.9);
+    const meta = JSON.parse(memory.metadata) as { originalSourceType?: string; originalSourceIdentifier?: string };
+    expect(meta.originalSourceType).toBe('api');
+    expect(meta.originalSourceIdentifier).toBe('dashboard:quarantine-test');
 
     const quarantineRow = db.prepare(
       'SELECT status, reviewed_by FROM quarantine WHERE id = ?'
