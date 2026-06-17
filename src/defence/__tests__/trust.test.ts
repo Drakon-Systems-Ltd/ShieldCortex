@@ -54,4 +54,21 @@ describe('Trust Source Scorer', () => {
     const result = scoreSource(source);
     expect(result.source).toEqual(source);
   });
+
+  // Load-bearing invariants for the write-bypass fix (Feature #2). The synthetic
+  // source for unattributed writes MUST stay strictly below the 0.5–0.7
+  // auto-quarantine band, or every source-less write (dashboard, consolidate,
+  // quarantine-promote) starts THROWING MemoryBlockedError. If TYPE_SCORES
+  // changes and breaks these, the bypass fix's safety assumption is gone.
+  it('scores the unattributed-write source (web:unattributed) at 0.3 — below the quarantine band', async () => {
+    const { scoreSource } = await import('../trust/source-scorer.js');
+    expect(scoreSource({ type: 'web', identifier: 'unattributed' }).score).toBe(0.3);
+    expect(scoreSource({ type: 'web', identifier: 'unattributed' }).score).toBeLessThan(0.5);
+  });
+
+  it('scores the import source (file:import) at 0.6 and the dashboard source (api:dashboard) at 0.7', async () => {
+    const { scoreSource } = await import('../trust/source-scorer.js');
+    expect(scoreSource({ type: 'file', identifier: 'import' }).score).toBe(0.6);
+    expect(scoreSource({ type: 'api', identifier: 'dashboard' }).score).toBe(0.7);
+  });
 });
