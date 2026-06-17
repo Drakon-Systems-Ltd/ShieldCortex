@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.35.0] - 2026-06-17
+
+**Dashboard cleanup: gut the bundled dashboard to its essentials and repair the real-time feed.** A six-phase cleanup of the dashboard that ships inside the npm tarball — repairs the broken live defence feed, surfaces previously-silent failure states, collapses to a single theme, and deletes ~9.4K lines of dead 3D-visualisation code. Dashboard-only; no change to the package's public API or `src/` core.
+
+### Added
+
+- **Behavioural test net (jsdom) for the dashboard.** Stood up first as the safety guard before the cleanup, locking in dashboard behaviour through the refactor (0 → 38 tests).
+- **First-run guide + positioning.** A fresh install now shows a data-driven first-run panel on the Overview — what the dashboard is for vs the CLI, and how to generate data — instead of empty voids; it disappears once there's any activity.
+
+### Fixed
+
+- **Real-time defence feed reconnected.** The dashboard WebSocket was opened without an auth token and rejected with a `4401` close, silently killing the live threat feed, the connection-status dot, and the knowledge-graph pulse. The duplicated socket clients are consolidated into one authenticated connection (a fan-out provider) and all consumers repaired, plus a stale-token (4401) reconnect fix, a StrictMode connect guard, and connection-gated polling to kill the refetch race.
+- **Silent-blank cards now show error and empty states.** Cards that rendered nothing on a failed fetch or a no-data response now surface explicit error/empty UI with retry instead of a blank panel.
+
+### Changed
+
+- **Single Glass theme.** Collapsed the dual Terminal/Glass theming to Glass-only and removed the theme-toggle wedge, eliminating page-level theme branching.
+- **Typed the snake_case data seam.** The API→dashboard boundary (the API returns snake_case while internal types are camelCase) is now explicitly typed — `AuditEntry` de-duplicated to one source, and `Memory.entity_ids` / `MemoryLink` node types declared.
+
+### Removed
+
+- **~9.4K lines of dead dashboard code + 5 three.js dependencies.** Removed the unused 3D-visualisation paths (brain/chip), orphan graph variants, and the dead SPA shell, shrinking the dashboard bundled inside the npm tarball.
+
 ## [4.34.0] - 2026-06-14
 
 **Measure the salience wall, then stop it forming.** Follow-through on the v4.33.1 fragment fix: instruments to quantify the "salience wall" (raw salience saturates at 1.0 for long-lived memories, so it stops discriminating) plus the structural fix that prevents the wall from growing. Read-mostly and migration-free.
