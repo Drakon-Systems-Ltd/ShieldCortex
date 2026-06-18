@@ -63,6 +63,24 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(row.type).toBe('short_term');
   });
 
+  it('persists the COMPUTED hook trust + sensitivity, not the schema default 1.0', async () => {
+    // The busiest write path scanned content but its INSERT omitted
+    // trust_score/sensitivity_level, so every hook-captured memory landed at the
+    // schema DEFAULT trust 1.0 — silently over-trusting the bulk of the store and
+    // undercutting the recall shim's trust filter.
+    await saveAutoExtractedMemory(
+      db,
+      makeMemory({ title: 'Trust persist check', content: 'A benign architecture note about the build pipeline and nothing sensitive.' }),
+      'p',
+      { source: 'session-end-hook' },
+    );
+    const row = db.prepare("SELECT trust_score, sensitivity_level FROM memories WHERE title = 'Trust persist check'")
+      .get() as { trust_score: number; sensitivity_level: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.trust_score).toBe(0.8); // hook source — NOT the schema DEFAULT 1.0
+    expect(['PUBLIC', 'INTERNAL']).toContain(row!.sensitivity_level);
+  });
+
   it('generates a unique UUID per insert (no collision on bulk auto-extract)', async () => {
     // Five genuinely distinct findings (distinct titles AND content) so the
     // T8 near-dup gate doesn't fold them — this test asserts UUID uniqueness

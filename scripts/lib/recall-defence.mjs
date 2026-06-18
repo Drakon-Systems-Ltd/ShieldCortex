@@ -36,12 +36,13 @@ export async function loadRecallDefence(distRootOverride) {
   if (_recallDefenceCache && _recallDefenceCacheKey === distRoot) return _recallDefenceCache;
 
   try {
-    const [trustMod, firewallMod, credMod, auditMod, initMod] = await Promise.all([
+    const [trustMod, firewallMod, credMod, auditMod, initMod, sanitiseMod] = await Promise.all([
       import(pathToFileURL(resolve(distRoot, 'defence', 'trust', 'recall-filter.js')).href),
       import(pathToFileURL(resolve(distRoot, 'defence', 'firewall', 'index.js')).href),
       import(pathToFileURL(resolve(distRoot, 'defence', 'credential-leak', 'index.js')).href),
       import(pathToFileURL(resolve(distRoot, 'defence', 'audit', 'logger.js')).href),
       import(pathToFileURL(resolve(distRoot, 'database', 'init.js')).href),
+      import(pathToFileURL(resolve(distRoot, 'defence', 'input-sanitisation', 'index.js')).href).catch(() => ({})),
     ]);
 
     if (
@@ -57,8 +58,13 @@ export async function loadRecallDefence(distRootOverride) {
 
     _recallDefenceCache = {
       filterByTrust: trustMod.filterByTrust,
+      // Optional — strips zero-width/RTL/control bytes before scanning so a
+      // hidden injection can't dodge the regex detectors; defendRecallRows guards.
+      sanitiseInput: sanitiseMod.sanitiseInput,
       detectInstructions: firewallMod.detectInstructions,
       detectEncoding: firewallMod.detectEncoding,
+      // Optional — older dist builds may not export it; defendRecallRows guards.
+      detectMarkdownImageExfil: firewallMod.detectMarkdownImageExfil,
       scanForCredentials: credMod.scanForCredentials,
       logAudit: auditMod.logAudit,
       initDatabase: initMod.initDatabase,
@@ -185,8 +191,13 @@ export function defendRecallRows(rows, opts = {}, deps) {
     }
 
     const content = typeof row.content === 'string' ? row.content : '';
+    // Sanitise (strip zero-width / RTL / control bytes) BEFORE scanning — the
+    // write path does this, so an injection hidden behind zero-width chars
+    // otherwise dodges the read-path regex detectors. Scan the sanitised form;
+    // the original (benign zero-width is harmless) is what gets injected.
+    const scanContent = deps.sanitiseInput ? (deps.sanitiseInput(content)?.sanitised ?? content) : content;
 
-    const instr = deps.detectInstructions(content);
+    const instr = deps.detectInstructions(scanContent);
     if (instr && instr.detected) {
       actions.push({ id: row.id, action: 'dropped', layer: 'instruction', reason: `instruction:${(instr.patterns ?? []).join(',')}` });
       continue;
@@ -196,7 +207,7 @@ export function defendRecallRows(rows, opts = {}, deps) {
     // warned/logged one. A benign high-entropy hash / cache key is stored
     // (write blocks only on action==='blocked'), so recall must not be stricter
     // or it silently withholds legitimate notes.
-    const cred = deps.scanForCredentials(content);
+    const cred = deps.scanForCredentials(scanContent);
     const credBlocked = !!cred && Array.isArray(cred.findings) && cred.findings.some((f) => f && f.action === 'blocked');
     if (credBlocked) {
       const blocked = cred.findings.filter((f) => f && f.action === 'blocked');
@@ -206,7 +217,7 @@ export function defendRecallRows(rows, opts = {}, deps) {
 
     // Decode-and-rescan: a bare encoding flag is NOT a drop (base64 hashes are
     // common) — only drop if a DECODED snippet itself trips a detector.
-    const enc = deps.detectEncoding(content);
+    const enc = deps.detectEncoding(scanContent);
     if (enc && enc.detected) {
       let malicious = false;
       for (const snippet of enc.decodedSnippets ?? []) {
@@ -220,6 +231,17 @@ export function defendRecallRows(rows, opts = {}, deps) {
       }
       if (malicious) {
         actions.push({ id: row.id, action: 'dropped', layer: 'encoding', reason: `encoding-payload:${(enc.encodingTypes ?? []).join(',')}` });
+        continue;
+      }
+    }
+
+    // Markdown-image exfil: a stored ![alt](url?d=<smuggled>) is a click-free
+    // data-leak shape the write firewall catches but the read path didn't.
+    // detectMarkdownImageExfil only flags data-bearing image URLs (low FP).
+    if (deps.detectMarkdownImageExfil) {
+      const mdImg = deps.detectMarkdownImageExfil(scanContent);
+      if (mdImg && mdImg.detected) {
+        actions.push({ id: row.id, action: 'dropped', layer: 'markdown-image-exfil', reason: `markdown-image-exfil:${(mdImg.urls ?? []).length}` });
         continue;
       }
     }
