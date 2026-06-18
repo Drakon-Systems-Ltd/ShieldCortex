@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.36.0] - 2026-06-18
+
+**Memory-defence boundary: scan every write, and filter recalled memory before it reaches the prompt.** A defence-gap audit found the product's headline boundary undefended on its busiest paths — most writes skipped the pipeline and the read hooks injected stored memory verbatim. This closes both, adversarially reviewed. No breaking changes.
+
+### Fixed
+
+- **Every write is now scanned (closed the `if (source)` bypass).** `addMemory` ran the defence pipeline only when given a source; source-less writes were stamped trust 1.0 / INTERNAL with no scan — so a credential or injection written without attribution was admitted unchecked. Now all writes run the pipeline: unattributed writes get a synthetic low-trust source (`web:unattributed`, 0.3 — below the auto-quarantine band so they're stamped, not force-quarantined). The peer write paths are closed too: `importMemories` routes each row through the pipeline (`file:import`, 0.4) instead of a raw INSERT; quarantine-approve refuses originally-BLOCK rows and re-admits soft-held rows at operator-approved trust with a re-scan; the dashboard create + consolidation summaries carry honest, band-safe sources.
+- **The busiest write path persists its computed trust.** The auto-capture hook scanned content but its INSERT omitted `trust_score`/`sensitivity_level`, so every hook-captured memory landed at the schema default trust 1.0 instead of the computed `hook` 0.8 — over-trusting the bulk of the store. It now persists the scanned values.
+- **`updateMemory` / `enrichMemory` re-scan on content change.** The content-replace and recall-query-append paths wrote unscanned; both now re-scan and fail closed, mirroring `mergeMemories`.
+
+### Added
+
+- **Recall-boundary defence shim.** The `prompt-recall` + `session-start` hooks now filter recalled memory before formatting it into the prompt: trust/quarantine filtering, RESTRICTED redaction, and content detectors (instruction / credential / encoded-payload / markdown-image-exfil) — with zero-width/RTL sanitisation before scanning so hidden injections can't dodge the regex. Human-reviewed or pinned memories bypass the content scan (trust/RESTRICTED still apply). Config-gated (`recallDefence`, default on); fails open if the build is missing so recall is never blanked. Withheld rows are audited.
+
+### Notes
+
+- Recall defence is wired into the two `.mjs` read hooks; the MCP `recall`/`get_context` and dashboard read paths, a persisted tool-output firewall, the semantic layer on the sync path, and PII (`checkPII`) classification are tracked follow-ups.
+
 ## [4.35.0] - 2026-06-17
 
 **Dashboard cleanup: gut the bundled dashboard to its essentials and repair the real-time feed.** A six-phase cleanup of the dashboard that ships inside the npm tarball — repairs the broken live defence feed, surfaces previously-silent failure states, collapses to a single theme, and deletes ~9.4K lines of dead 3D-visualisation code. Dashboard-only; no change to the package's public API or `src/` core.
