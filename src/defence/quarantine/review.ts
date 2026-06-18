@@ -1,5 +1,5 @@
 import { getDatabase, withTransaction } from '../../database/init.js';
-import { addMemory } from '../../memory/store.js';
+import { addMemory, MemoryBlockedError } from '../../memory/store.js';
 import type { Memory, MemorySourceKind } from '../../memory/types.js';
 
 type QuarantineRow = {
@@ -10,6 +10,7 @@ type QuarantineRow = {
   source_type: string | null;
   source_identifier: string | null;
   reason: string | null;
+  firewall_result: 'BLOCK' | 'QUARANTINE';
 };
 
 export interface QuarantineReviewResult {
@@ -29,7 +30,7 @@ export interface QuarantineBulkReviewResult {
 function getPendingQuarantineRow(id: number): QuarantineRow | null {
   const db = getDatabase();
   const row = db.prepare(
-    `SELECT id, original_title, original_content, project, source_type, source_identifier, reason
+    `SELECT id, original_title, original_content, project, source_type, source_identifier, reason, firewall_result
        FROM quarantine
       WHERE id = ? AND status = 'pending'`
   ).get(id) as QuarantineRow | undefined;
@@ -53,26 +54,32 @@ function normalizeSourceKind(sourceType: string | null): MemorySourceKind {
 }
 
 function promoteApprovedQuarantineRow(row: QuarantineRow, reviewedBy: string): Memory {
-  return addMemory({
-    title: row.original_title?.trim() || `Recovered quarantined memory ${row.id}`,
-    content: row.original_content,
-    project: row.project ?? undefined,
-    tags: ['quarantine-approved'],
-    metadata: {
-      approvedFromQuarantine: true,
-      quarantineId: row.id,
-      quarantineReason: row.reason ?? null,
-      originalSourceType: row.source_type ?? null,
-      originalSourceIdentifier: row.source_identifier ?? null,
+  return addMemory(
+    {
+      title: row.original_title?.trim() || `Recovered quarantined memory ${row.id}`,
+      content: row.original_content,
+      project: row.project ?? undefined,
+      tags: ['quarantine-approved'],
+      metadata: {
+        approvedFromQuarantine: true,
+        quarantineId: row.id,
+        quarantineReason: row.reason ?? null,
+        // Original provenance is preserved here (the trust now reflects the
+        // human approval, not the original source).
+        originalSourceType: row.source_type ?? null,
+        originalSourceIdentifier: row.source_identifier ?? null,
+      },
+      captureMethod: 'review',
+      reviewedBy,
+      sourceKind: normalizeSourceKind(row.source_type),
     },
-    captureMethod: 'review',
-    reviewedBy,
-    sourceKind: normalizeSourceKind(row.source_type),
-    source:
-      row.source_type && row.source_identifier
-        ? `${row.source_type}:${row.source_identifier}`
-        : 'quarantine:review',
-  });
+    undefined,
+    // A human approving the item IS the parent-approval the quarantine was
+    // waiting for, so admit at user:approved (0.9 — out of the 0.5–0.7 auto-
+    // quarantine band, so it isn't re-quarantined in a loop). The pipeline still
+    // RE-SCANS, so genuinely-malicious content fails closed (caller catches it).
+    { type: 'user', identifier: 'approved' },
+  );
 }
 
 function markPendingRowReviewed(id: number, status: 'approved' | 'rejected', reviewedBy: string): void {
@@ -96,7 +103,25 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): Quar
     };
   }
 
-  const memory = promoteApprovedQuarantineRow(row, reviewedBy);
+  // Never re-admit content the pipeline HARD-BLOCKED. Approving a BLOCK item
+  // rejects it instead of laundering hard-rejected poison back into memory.
+  if (row.firewall_result === 'BLOCK') {
+    markPendingRowReviewed(row.id, 'rejected', reviewedBy);
+    return { id: row.id, status: 'rejected' };
+  }
+
+  // QUARANTINE (soft hold): re-admit through the pipeline at operator-approved
+  // trust. If the content now hard-blocks, fail closed — reject, don't admit.
+  let memory: Memory;
+  try {
+    memory = promoteApprovedQuarantineRow(row, reviewedBy);
+  } catch (e) {
+    if (e instanceof MemoryBlockedError) {
+      markPendingRowReviewed(row.id, 'rejected', reviewedBy);
+      return { id: row.id, status: 'rejected' };
+    }
+    throw e;
+  }
   markPendingRowReviewed(row.id, 'approved', reviewedBy);
 
   return {

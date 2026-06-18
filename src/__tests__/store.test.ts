@@ -864,15 +864,14 @@ describe('Semantic Linking', () => {
       initDatabase(':memory:');
       const db = getDatabase();
 
-      // Two memories that each LOOK clean to the regex on their own — the
-      // suffix `AKIAIOSFODNN7EXAMPLE` is a full AWS Access Key ID, but it
-      // lives entirely inside `remove.content` here. The point of the test
-      // is that mergeMemories must re-scan the *merged* output regardless of
-      // how the credential got there: a previous version of the code wrote
-      // the merge with a raw UPDATE and skipped the pipeline entirely, so
-      // any credential present in either source row (e.g. added without a
-      // `source` to bypass addMemory's defence) would survive into the
-      // canonical memory unchecked.
+      // The point of the test is that mergeMemories must re-scan the *merged*
+      // output regardless of how a credential got into a source row. We plant a
+      // full AWS Access Key ID into `remove` via a raw UPDATE below — simulating
+      // a legacy / externally-inserted row whose content never passed the
+      // write-time scan. (Source-less writes no longer bypass the pipeline since
+      // the write-bypass fix, so addMemory itself would now block this content;
+      // the raw UPDATE faithfully reproduces the unchecked-content scenario the
+      // merge re-scan defends against.)
       const credential = 'AKIA' + 'IOSFODNN7EXAMPLE'; // split to keep this file's own scanners happy
       let keepId: number | undefined;
       let removeId: number | undefined;
@@ -886,13 +885,17 @@ describe('Semantic Linking', () => {
         });
         const remove = addMemory({
           title: 'AWS deploy notes',
-          content: `Key for the throwaway sandbox account is ${credential}.`,
+          content: 'Notes for the throwaway sandbox account.',
           category: 'note',
           project: 'test-project',
           type: 'long_term',
         });
         keepId = keep.id;
         removeId = remove.id;
+        // Inject the unchecked credential directly (bypasses the write scan the
+        // way a legacy/external row would have).
+        db.prepare('UPDATE memories SET content = ? WHERE id = ?')
+          .run(`Key for the throwaway sandbox account is ${credential}.`, remove.id);
 
         const auditBefore = (db.prepare('SELECT COUNT(*) as c FROM defence_audit').get() as { c: number }).c;
         const keptContentBefore = keep.content;

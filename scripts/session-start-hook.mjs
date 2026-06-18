@@ -25,6 +25,7 @@ import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
 import { orderByEffectiveSalience } from './lib/session-context.mjs';
+import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -94,7 +95,8 @@ function getProjectContext(db, project) {
   // computeEffectiveSalience.
   const candidates = db.prepare(`
     SELECT id, title, content, category, type, salience, tags, created_at,
-           pinned, access_count, last_accessed, COALESCE(downvote_count, 0) AS downvote_count
+           pinned, access_count, last_accessed, trust_score, sensitivity_level, metadata, reviewed_at,
+           COALESCE(downvote_count, 0) AS downvote_count
     FROM memories
     WHERE (project = ? OR project IS NULL)
       AND salience >= ?
@@ -111,7 +113,8 @@ function getProjectContext(db, project) {
     const excludeIds = memories.map(m => m.id);
     const placeholders = excludeIds.length > 0 ? excludeIds.map(() => '?').join(',') : '0';
     const recent = db.prepare(`
-      SELECT id, title, content, category, type, salience, tags, created_at
+      SELECT id, title, content, category, type, salience, tags, created_at,
+             pinned, trust_score, sensitivity_level, metadata, reviewed_at
       FROM memories
       WHERE (project = ? OR project IS NULL)
         AND id NOT IN (${placeholders})
@@ -208,7 +211,7 @@ process.stdin.on('readable', () => {
   }
 });
 
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   try {
     const hookData = JSON.parse(input || '{}');
     const source = typeof hookData.source === 'string' ? hookData.source : 'startup';
@@ -239,8 +242,37 @@ process.stdin.on('end', () => {
     } else {
       const db = new Database(DB_PATH, { readonly: true, timeout: 5000 });
       memories = getProjectContext(db, project);
-      context = formatContext(memories, project);
       db.close();
+
+      // ── RECALL-BOUNDARY DEFENCE (Feature #1) ───────────────────────────
+      // Same shim as prompt-recall: drop poisoned / RESTRICTED / credential
+      // rows from the session preamble before they're formatted. FAIL-OPEN if
+      // the dist build is missing (recall preamble unchanged).
+      if (config.recallDefence !== false && memories.length > 0) {
+        try {
+          const defence = await loadRecallDefence();
+          if (defence) {
+            const minTrust = typeof config.recallDefenceMinTrust === 'number' ? config.recallDefenceMinTrust : 0;
+            const { kept: safe, actions } = defendRecallRows(memories, { minTrust, project }, defence);
+            const withheld = actions.filter((a) => a.action !== 'allowed');
+            if (withheld.length > 0) {
+              console.error(
+                `[shieldcortex] recall-defence (session-start) withheld ${withheld.length} memory row(s): ` +
+                  withheld.map((w) => `#${w.id}:${w.layer}`).join(', '),
+              );
+              ensureRecallAuditDb(defence, DB_PATH);
+              for (const a of withheld) {
+                emitRecallAudit(defence.logAudit, { memoryId: a.id, action: a.action, layer: a.layer, reason: a.reason, project });
+              }
+            }
+            memories = safe;
+          }
+        } catch (e) {
+          console.error('[shieldcortex] recall-defence skipped:', e?.message ?? e);
+        }
+      }
+
+      context = formatContext(memories, project);
     }
 
     if (context) {

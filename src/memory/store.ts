@@ -60,6 +60,14 @@ import { createMemoryLink, detectRelationships } from './links.js';
 // Exported because lifecycle.ts also enforces this budget inside enrichMemory.
 export const MAX_CONTENT_SIZE = 10 * 1024;
 
+// Synthetic source for writes that arrive without an attributed DefenceSource
+// (dashboard REST POST, bulk paths, etc). It MUST score strictly below the
+// 0.5–0.7 auto-quarantine band (web = 0.3) so unattributed writes are SCANNED
+// + stamped low-trust rather than admitted unscanned at trust 1.0 — but are not
+// force-quarantined (which would make every source-less write throw). Closing
+// the old `if (source)` defence-pipeline bypass.
+export const UNATTRIBUTED_SOURCE: DefenceSource = { type: 'web', identifier: 'unattributed' };
+
 // Track truncation info globally for the last addMemory call
 let lastTruncationInfo: { wasTruncated: boolean; originalLength: number; truncatedLength: number } | null = null;
 
@@ -394,46 +402,51 @@ export function addMemory(
     throw new MemoryBlockedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
   }
 
-  // DEFENCE PIPELINE: Scan content before storage
-  let defenceResult: DefencePipelineResult | null = null;
-  if (source) {
-    defenceResult = runDefencePipeline(input.content, input.title, source, undefined, input.project);
+  // DEFENCE PIPELINE: Scan EVERY write before storage. Source-less writes get a
+  // conservative low-trust synthetic source (UNATTRIBUTED_SOURCE = web:0.3) so
+  // they are still scanned + stamped low-trust instead of admitted unscanned at
+  // trust 1.0 — closing the old `if (source)` bypass. Rate-limiting stays gated
+  // on an explicit source (above) so bulk source-less/import writes aren't
+  // throttled by the shared synthetic key.
+  const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
+  const defenceResult: DefencePipelineResult = runDefencePipeline(
+    input.content, input.title, effectiveSource, undefined, input.project,
+  );
 
-    // Auto-quarantine sub-agent writes (trust 0.5–0.7)
-    const trust = defenceResult.trust.score;
-    if (defenceResult.allowed && trust >= 0.5 && trust < 0.7) {
-      defenceResult.allowed = false;
-      defenceResult.firewall.result = 'QUARANTINE';
-      defenceResult.firewall.reason = `Sub-agent write (trust=${trust.toFixed(3)}) requires parent approval`;
+  // Auto-quarantine sub-agent writes (trust 0.5–0.7)
+  const trust = defenceResult.trust.score;
+  if (defenceResult.allowed && trust >= 0.5 && trust < 0.7) {
+    defenceResult.allowed = false;
+    defenceResult.firewall.result = 'QUARANTINE';
+    defenceResult.firewall.reason = `Sub-agent write (trust=${trust.toFixed(3)}) requires parent approval`;
 
-      // Pipeline returned ALLOW so pipeline.ts didn't sync quarantine content.
-      // Sync it now since we've overridden to QUARANTINE post-pipeline.
-      if (isFeatureEnabled('cloud_sync')) try {
-        const indicators = defenceResult.firewall.threatIndicators.map(t =>
-          typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
-        );
-        syncQuarantineToCloud({
-          original_content: input.content,
-          original_title: input.title,
-          source_type: source.type,
-          source_identifier: source.identifier,
-          reason: defenceResult.firewall.reason,
-          threat_indicators: indicators,
-          anomaly_score: defenceResult.firewall.anomalyScore,
-          firewall_result: defenceResult.firewall.result,
-          project: input.project ?? null,
-          sensitivity_level: defenceResult.sensitivity.level,
-        });
-      } catch {
-        // Cloud sync must never affect local quarantine flow
-      }
+    // Pipeline returned ALLOW so pipeline.ts didn't sync quarantine content.
+    // Sync it now since we've overridden to QUARANTINE post-pipeline.
+    if (isFeatureEnabled('cloud_sync')) try {
+      const indicators = defenceResult.firewall.threatIndicators.map(t =>
+        typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
+      );
+      syncQuarantineToCloud({
+        original_content: input.content,
+        original_title: input.title,
+        source_type: effectiveSource.type,
+        source_identifier: effectiveSource.identifier,
+        reason: defenceResult.firewall.reason,
+        threat_indicators: indicators,
+        anomaly_score: defenceResult.firewall.anomalyScore,
+        firewall_result: defenceResult.firewall.result,
+        project: input.project ?? null,
+        sensitivity_level: defenceResult.sensitivity.level,
+      });
+    } catch {
+      // Cloud sync must never affect local quarantine flow
     }
+  }
 
-    if (!defenceResult.allowed) {
-      // Store in quarantine instead of memory
-      quarantineMemory(input, source, defenceResult);
-      throw new MemoryBlockedError(defenceResult.firewall.reason);
-    }
+  if (!defenceResult.allowed) {
+    // Store in quarantine instead of memory
+    quarantineMemory(input, effectiveSource, defenceResult);
+    throw new MemoryBlockedError(defenceResult.firewall.reason);
   }
 
   const db = getDatabase();
@@ -454,7 +467,7 @@ export function addMemory(
   const scope = input.scope ??
     (detectGlobalPattern(input.content, category, tags) ? 'global' : 'project');
   const transferable = input.transferable ?? (scope === 'global' ? 1 : 0);
-  const sourceDetails = inferSourceDetails({ ...input, tags }, source);
+  const sourceDetails = inferSourceDetails({ ...input, tags }, effectiveSource);
   const status = input.status ?? 'active';
   const pinned = input.pinned ? 1 : 0;
   const cloudExcluded = input.cloudExcluded ? 1 : 0;
@@ -503,13 +516,11 @@ export function addMemory(
       input.memoryScope || 'private'
     );
 
-    if (defenceResult) {
-      db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ? WHERE id = ?`)
-        .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, result.lastInsertRowid);
-    } else {
-      db.prepare(`UPDATE memories SET source = ?, trust_score = COALESCE(trust_score, ?), sensitivity_level = COALESCE(sensitivity_level, ?) WHERE id = ?`)
-        .run(sourceDetails.sourceValue, input.trustScore ?? 1.0, input.sensitivityLevel ?? 'INTERNAL', result.lastInsertRowid);
-    }
+    // defenceResult is always set now (every write is scanned), so always stamp
+    // the pipeline's real trust + sensitivity alongside the resolved source —
+    // no source-less branch can default to trust 1.0 / unscanned INTERNAL.
+    db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ? WHERE id = ?`)
+      .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, result.lastInsertRowid);
 
     return result.lastInsertRowid as number;
   })();
@@ -564,13 +575,13 @@ export function addMemory(
     console.error('[shieldcortex] Auto-link failed:', e);
   }
 
-  // DEFENCE: Store fragmentation data for cross-memory payload detection
-  if (source) {
-    try {
-      storeFragmentationData(memory.id, truncationResult.content);
-    } catch (e) {
-      console.warn('[shieldcortex] Fragmentation data storage failed:', e instanceof Error ? e.message : e);
-    }
+  // DEFENCE: Store fragmentation data for cross-memory payload detection.
+  // Un-gated from `if (source)` so source-less writes also feed the temporal
+  // assembly corpus (a blind spot the write-bypass left).
+  try {
+    storeFragmentationData(memory.id, truncationResult.content);
+  } catch (e) {
+    console.warn('[shieldcortex] Fragmentation data storage failed:', e instanceof Error ? e.message : e);
   }
 
   // SEMANTIC SEARCH: Generate embedding asynchronously (don't block INSERT)
@@ -709,6 +720,19 @@ export function updateMemory(
   const db = getDatabase();
   const existing = getMemoryById(id);
   if (!existing) return null;
+
+  // DEFENCE: re-scan when content/title changes — the UPDATE path is otherwise
+  // an unscanned write (reachable via remember-dedup + the dashboard PATCH).
+  // Mirror mergeMemories: fail closed on a non-ALLOW verdict so a poison content
+  // replace can't overwrite a clean row unchecked.
+  if (updates.content !== undefined || updates.title !== undefined) {
+    const scanContent = updates.content !== undefined ? updates.content : existing.content;
+    const scanTitle = updates.title !== undefined ? updates.title : existing.title;
+    const defenceResult = runDefencePipeline(scanContent, scanTitle, UNATTRIBUTED_SOURCE, undefined, existing.project ?? undefined);
+    if (defenceResult.firewall.result !== 'ALLOW') {
+      throw new MemoryBlockedError(defenceResult.firewall.reason);
+    }
+  }
 
   const fields: string[] = [];
   const values: unknown[] = [];

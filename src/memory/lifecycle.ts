@@ -40,6 +40,12 @@ import {
 } from '../api/events.js';
 import { createMemoryLink } from './links.js';
 import type { DefenceSource } from '../defence/types.js';
+import { runDefencePipeline } from '../defence/index.js';
+
+// Enrichment text is recall-query / caller-derived (attacker-influenced); scan
+// it before persisting. Trust doesn't matter here (the row keeps its own) — we
+// only act on the firewall verdict, so a low-trust web source is fine.
+const ENRICH_SOURCE: DefenceSource = { type: 'web', identifier: 'enrichment' };
 // Cyclic import — see header. getMemoryById/rowToMemory/getMemoriesByType
 // live in store.ts; MAX_CONTENT_SIZE is the per-memory content budget
 // that both truncateContent (store.ts) and enrichMemory (here) honour.
@@ -252,6 +258,15 @@ export function enrichMemory(
   const newContent = memory.content + enrichmentBlock;
   if (newContent.length > MAX_CONTENT_SIZE - 500) {
     return { enriched: false, reason: 'Content size limit reached' };
+  }
+
+  // DEFENCE: re-scan the merged content before persisting — the read-path
+  // analogue of mergeMemories. The appended text comes from a recall query /
+  // caller and could straddle an injection or credential into a clean stored
+  // row. Skip (don't poison) on a non-ALLOW verdict.
+  const defenceResult = runDefencePipeline(newContent, memory.title, ENRICH_SOURCE, undefined, memory.project ?? undefined);
+  if (defenceResult.firewall.result !== 'ALLOW') {
+    return { enriched: false, reason: `Enrichment blocked by defence: ${defenceResult.firewall.reason}` };
   }
 
   // Update memory

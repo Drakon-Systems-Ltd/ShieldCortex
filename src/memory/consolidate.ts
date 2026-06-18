@@ -516,17 +516,28 @@ export function clusterAndSummarise(options?: { minClusterSize?: number }): {
         }
       }
 
-      addMemory({
-        type: 'long_term',
-        category: category as any,
-        title: summaryTitle,
-        content: summaryContent,
-        project: bestProject || undefined,
-        tags: ['auto-summary'],
-        salience: 0.6,
-      });
-
-      summariesCreated++;
+      try {
+        addMemory(
+          {
+            type: 'long_term',
+            category: category as any,
+            title: summaryTitle,
+            content: summaryContent,
+            project: bestProject || undefined,
+            tags: ['auto-summary'],
+            salience: 0.6,
+          },
+          undefined,
+          // System-generated consolidation summary — honest cli provenance
+          // (trust 0.9, above the auto-quarantine band so it isn't held).
+          { type: 'cli', identifier: 'consolidate:summary' },
+        );
+        summariesCreated++;
+      } catch {
+        // A summary whose content trips the (now-unconditional) defence scan
+        // must NOT abort the whole consolidation transaction — skip it, like the
+        // per-row guard in importMemories.
+      }
     }
 
     return { clusters, summariesCreated };
@@ -1027,32 +1038,47 @@ export function exportMemories(project?: string): string {
  * Import memories from JSON
  */
 export function importMemories(json: string): number {
-  // Wrap in transaction for atomic import
+  // Wrap in transaction for atomic import. addMemory opens its own nested
+  // transaction (better-sqlite3 SAVEPOINT), so a per-row block rolls back only
+  // that row and the clean rows still commit.
   return withTransaction(() => {
-    const db = getDatabase();
     const memories = JSON.parse(json) as Record<string, unknown>[];
 
-    const stmt = db.prepare(`
-      INSERT INTO memories (type, category, title, content, project, tags, salience, metadata)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    // SELECT * exports store tags/metadata as JSON TEXT — parse back to the
+    // array/object shapes addMemory expects.
+    const parseJsonField = <T>(value: unknown, fallback: T): T => {
+      if (typeof value !== 'string') return (value as T) ?? fallback;
+      try {
+        return JSON.parse(value) as T;
+      } catch {
+        return fallback;
+      }
+    };
 
     let imported = 0;
     for (const memory of memories) {
       try {
-        stmt.run(
-          memory.type,
-          memory.category,
-          memory.title,
-          memory.content,
-          memory.project || null,
-          memory.tags || '[]',
-          memory.salience || 0.5,
-          memory.metadata || '{}'
+        // Route every imported row through the defence pipeline + attribute it
+        // to file:import (trust 0.4 — below the auto-quarantine band). Closes
+        // the raw-INSERT bypass that admitted unscanned rows at trust 1.0 /
+        // 'user:direct'. The pipeline BLOCKs poisoned rows (caught below).
+        addMemory(
+          {
+            type: memory.type as Parameters<typeof addMemory>[0]['type'],
+            category: memory.category as Parameters<typeof addMemory>[0]['category'],
+            title: String(memory.title ?? ''),
+            content: String(memory.content ?? ''),
+            project: typeof memory.project === 'string' ? memory.project : undefined,
+            tags: parseJsonField<string[]>(memory.tags, []),
+            salience: typeof memory.salience === 'number' ? memory.salience : 0.5,
+            metadata: parseJsonField<Record<string, unknown>>(memory.metadata, {}),
+          },
+          DEFAULT_CONFIG,
+          { type: 'file', identifier: 'import' },
         );
         imported++;
       } catch {
-        // Skip duplicates or invalid entries
+        // Skip rows the defence pipeline blocks (poisoned), or invalid entries.
       }
     }
 

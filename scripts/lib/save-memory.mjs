@@ -76,7 +76,11 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
   const decision = result.firewall.result;
 
   if (decision === 'ALLOW') {
-    insertMemoryRow(db, memory, project, sourceIdentifier);
+    // Persist the COMPUTED trust + sensitivity from the scan — not the schema
+    // DEFAULT (trust 1.0 / INTERNAL). The INSERT used to omit these columns, so
+    // every hook-captured memory was over-trusted at 1.0, undercutting the
+    // recall shim's trust filter.
+    insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, result.sensitivity?.level);
     return;
   }
 
@@ -99,7 +103,7 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
 
 // ==================== Internal: writes ====================
 
-function insertMemoryRow(db, memory, project, sourceIdentifier) {
+function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel) {
   const timestamp = new Date().toISOString();
 
   // Cross-call, CROSS-PATH exact-title dedup: the hook fires repeatedly (per
@@ -153,9 +157,10 @@ function insertMemoryRow(db, memory, project, sourceIdentifier) {
     INSERT INTO memories (
       uuid, title, content, type, category, salience, tags, project,
       memory_purpose, source, source_kind, capture_method,
+      trust_score, sensitivity_level,
       created_at, last_accessed
     )
-    VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?)
+    VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?, ?, ?)
   `).run(
     randomUUID(),
     memory.title,
@@ -166,6 +171,10 @@ function insertMemoryRow(db, memory, project, sourceIdentifier) {
     project || null,
     memory.memoryPurpose ?? 'project',
     `hook:${sourceIdentifier}`,
+    // Computed by the scan above (hook source → 0.8). Fall back to the schema
+    // defaults only if the pipeline somehow returned no trust/sensitivity.
+    typeof trustScore === 'number' ? trustScore : 1.0,
+    sensitivityLevel ?? 'INTERNAL',
     timestamp,
     timestamp,
   );

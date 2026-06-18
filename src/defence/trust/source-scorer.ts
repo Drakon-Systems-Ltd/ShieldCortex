@@ -8,6 +8,11 @@ import { scoreAgent, buildAgentHierarchy } from './agent-scorer.js';
 const BASE_SCORES: Record<string, number> = {
   'user:direct': 1.0,
   'user:approved': 0.9,
+  // Bulk import (restore from a backup/JSON). The generic `file` type is 0.6,
+  // which sits inside the 0.5–0.7 auto-quarantine band and would quarantine
+  // every imported row. Pin below the band so a benign restore succeeds while
+  // imported file data stays scanned + low-trust until reviewed.
+  'file:import': 0.4,
 };
 
 const TYPE_SCORES: Record<DefenceSource['type'], number> = {
