@@ -37,7 +37,7 @@ npm-debug.log*
 
 # Test coverage
 coverage/
-.jest-localstorage
+.jest-localstorage*
 
 # Local config
 .mcp.json

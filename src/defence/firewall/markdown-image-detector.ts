@@ -91,3 +91,37 @@ export function detectMarkdownImageExfil(content: string): MarkdownImageExfilRes
     urls,
   };
 }
+
+/** Replacement for a neutralised exfil image: a dead host carrying no data. */
+export const NEUTRALISED_IMAGE = '![redacted](https://blocked.invalid/shieldcortex-redacted)';
+
+/**
+ * Strip markdown-image exfiltration links from content for enforce mode.
+ *
+ * Re-runs the SAME regex + urlLooksLikeExfil predicate as detection and replaces
+ * each offending `![alt](url)` match WHOLE (alt dropped too — it can itself carry
+ * data). Splices by match offset, so it does not depend on substring equality
+ * with a previously-captured (truncated) URL and is unaffected by any other
+ * mutation applied to the content first. Benign images are left untouched.
+ */
+export function neutraliseMarkdownImageExfil(content: string): { content: string; stripped: number } {
+  const spans: Array<{ start: number; end: number }> = [];
+
+  MARKDOWN_IMAGE_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = MARKDOWN_IMAGE_PATTERN.exec(content)) !== null) {
+    if (urlLooksLikeExfil(match[1])) {
+      spans.push({ start: match.index, end: match.index + match[0].length });
+    }
+  }
+
+  if (spans.length === 0) return { content, stripped: 0 };
+
+  // Splice from the end so earlier offsets stay valid.
+  let result = content;
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const { start, end } = spans[i];
+    result = result.slice(0, start) + NEUTRALISED_IMAGE + result.slice(end);
+  }
+  return { content: result, stripped: spans.length };
+}

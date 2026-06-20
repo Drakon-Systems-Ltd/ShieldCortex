@@ -17,9 +17,12 @@
  * It deliberately does NOT pull in the write-path's trust scoring, anomaly,
  * privilege, fragmentation or sensitivity layers — those are write concerns.
  *
- * Advisory by default: logs threats but never blocks tool responses. Only the
- * audit/event firewall_result reflects enforce mode; the scan itself never hard
- * blocks tool execution.
+ * Advisory by default: logs threats but leaves the response untouched. In
+ * enforce mode the scanner additionally computes `sanitisedContent` — the bytes
+ * the agent should actually receive (injection withheld, secrets redacted, exfil
+ * links stripped) — via the neutraliseToolResponse action layer. Callers
+ * (withResponseScan, the scan_tool_response tool) swap in sanitisedContent when
+ * present; the scanner never blocks tool EXECUTION, only the threatening output.
  */
 
 import { scanForInjection } from './iron-dome/injection-scanner.js';
@@ -27,6 +30,7 @@ import { scanForCredentials } from './credential-leak/index.js';
 import { detectInstructions } from './firewall/instruction-detector.js';
 import { detectEncoding } from './firewall/encoding-detector.js';
 import { detectMarkdownImageExfil } from './firewall/markdown-image-detector.js';
+import { neutraliseToolResponse } from './tool-response-enforce.js';
 import { logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
@@ -52,6 +56,12 @@ const HIGH_RISK_TOOLS = new Set([
   'export_memories',
   'detect_contradictions',
 ]);
+
+// Instruction-detector pattern groups that are WRITE-path concerns and over-fire
+// on legitimate tool OUTPUT (instructional docs telling the agent which tool to
+// call). Excluded from the read-path instruction signal; real injection groups
+// (system_prompt_marker, hidden_instruction, prompt_extraction, …) still apply.
+const READ_PATH_EXCLUDED_INSTRUCTION_PATTERNS = new Set(['imperative_tool_call']);
 
 // Tools that only return metadata/stats (not worth scanning)
 const METADATA_ONLY_TOOLS = new Set([
@@ -100,6 +110,9 @@ export function scanToolResponse(
       summary: `Tool response from "${toolName}" skipped (too short)`,
       durationMs: Math.round(performance.now() - startTime),
       auditId: -1,
+      sanitisedContent: null,
+      blocked: false,
+      enforceActions: [],
     };
   }
 
@@ -109,7 +122,19 @@ export function scanToolResponse(
 
   // 2. Write-path detectors (parity). detectInstructions folds homoglyphs and
   //    scans in windows; detectEncoding decodes base64/hex/url blobs.
-  const instructions = detectInstructions(content);
+  //
+  //    FP reduction on the READ path: `imperative_tool_call` ("call the X tool")
+  //    exists to catch injected directives at WRITE time. On tool OUTPUT it is
+  //    legitimate instructional content (docs telling the agent which tool to
+  //    use), so we exclude it here. Real injection phrasing ("ignore previous
+  //    instructions", "you are now…") lives in the other groups + Iron Dome and
+  //    is unaffected. Decoded snippets (below) keep full detection — an encoded
+  //    imperative is inherently suspicious.
+  const instructionsRaw = detectInstructions(content);
+  const instructionPatterns = instructionsRaw.patterns.filter(
+    (p) => !READ_PATH_EXCLUDED_INSTRUCTION_PATTERNS.has(p),
+  );
+  const instructions = { detected: instructionPatterns.length > 0, patterns: instructionPatterns };
   const encoding = detectEncoding(content);
 
   // 2b. Decode-and-rescan: re-run instruction + credential detection on each
@@ -173,6 +198,33 @@ export function scanToolResponse(
     !credentials.leaked;
   const durationMs = Math.round(performance.now() - startTime);
 
+  // 5b. Enforce action layer. Advisory mode only logs; enforce mode computes the
+  //     content the agent should ACTUALLY receive (block injection, redact
+  //     secrets, strip exfil links). Single source of truth in
+  //     neutraliseToolResponse — the scanner just feeds it the signals it found.
+  let sanitisedContent: string | null = null;
+  let blocked = false;
+  let enforceActions: string[] = [];
+  if (!clean && resolvedMode === 'enforce') {
+    const neutralisation = neutraliseToolResponse(content, {
+      injectionRisk: injection.riskLevel,
+      instructionsDetected: instructions.detected,
+      decodedInjection,
+      encodingDetected: encoding.detected,
+      markdownImageUrls: markdownImage.urls,
+      credentialsLeaked: credentials.leaked,
+      decodedCredentialLeak,
+    });
+    sanitisedContent = neutralisation.sanitised;
+    blocked = neutralisation.blocked;
+    enforceActions = neutralisation.actions;
+  }
+
+  // Truthful firewall_result: advisory only observes (ALLOW); enforce that
+  // withholds the whole payload is a BLOCK; enforce that surgically redacts but
+  // still delivers is a QUARANTINE.
+  const firewallResult = resolvedMode !== 'enforce' ? 'ALLOW' : blocked ? 'BLOCK' : 'QUARANTINE';
+
   // 6. Build summary
   let summary: string;
   if (clean) {
@@ -215,7 +267,7 @@ export function scanToolResponse(
         source_identifier: toolName,
         trust_score: 0.5,
         sensitivity_level: (credentials.leaked || decodedCredentialLeak) ? 'CONFIDENTIAL' : 'PUBLIC',
-        firewall_result: resolvedMode === 'enforce' ? 'BLOCK' : 'ALLOW',
+        firewall_result: firewallResult,
         anomaly_score: anomalyScore,
         threat_indicators: JSON.stringify(threatIndicators),
         blocked_patterns: JSON.stringify(blockedPatterns),
@@ -232,7 +284,7 @@ export function scanToolResponse(
       persistEvent('defence_event', {
         source_type: 'tool_response',
         source_identifier: toolName,
-        firewall_result: resolvedMode === 'enforce' ? 'BLOCK' : 'ALLOW',
+        firewall_result: firewallResult,
         trust_score: 0.5,
         anomaly_score: anomalyScore,
         reason: summary,
@@ -254,5 +306,8 @@ export function scanToolResponse(
     summary,
     durationMs,
     auditId,
+    sanitisedContent,
+    blocked,
+    enforceActions,
   };
 }

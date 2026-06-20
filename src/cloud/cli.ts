@@ -15,6 +15,8 @@ import {
   restore410Defaults,
   getRankerConfig,
   setRankerConfig,
+  getToolResponseScanConfig,
+  setToolResponseScanConfig,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -39,9 +41,11 @@ export function handleCloudConfig(args: string[]): void {
     const openclawAutoMemory = getOpenClawAutoMemory();
     const ranker = getRankerConfig();
     const syncControls = getCloudSyncControls();
+    const toolFirewall = getToolResponseScanConfig();
     const rankerOverridden = !!process.env.SHIELDCORTEX_RANKER;
     console.log('\nShieldCortex Configuration:');
     console.log(`  Defence Mode: ${mode}`);
+    console.log(`  Tool-Output Firewall: ${toolFirewall.scanToolResponses ? toolFirewall.toolResponseMode : 'Off'}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
     console.log(`  API Key:  ${config.cloudApiKey ? config.cloudApiKey.substring(0, 12) + '...' : 'Not set'}`);
     console.log(`  Base URL: ${config.cloudBaseUrl}`);
@@ -229,6 +233,30 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  if (args.includes('--tool-firewall-enforce')) {
+    setToolResponseScanConfig({ scanToolResponses: true, toolResponseMode: 'enforce' });
+    console.log('Tool-output firewall set to ENFORCE — threatening tool output will be redacted/withheld before the agent sees it.');
+    changed = true;
+  }
+
+  if (args.includes('--tool-firewall-advisory')) {
+    setToolResponseScanConfig({ scanToolResponses: true, toolResponseMode: 'advisory' });
+    console.log('Tool-output firewall set to ADVISORY — threats are logged but tool output is delivered intact (default).');
+    changed = true;
+  }
+
+  if (args.includes('--tool-firewall-off')) {
+    setToolResponseScanConfig({ scanToolResponses: false });
+    console.log('Tool-output firewall disabled — tool responses are no longer scanned.');
+    changed = true;
+  }
+
+  if (args.includes('--tool-firewall-on')) {
+    setToolResponseScanConfig({ scanToolResponses: true });
+    console.log('Tool-output firewall enabled (scanning on).');
+    changed = true;
+  }
+
   if (args.includes('--upsell-mute')) {
     setUpsellState({ proMuted: true });
     console.log('Pro upsell muted. Re-enable with --upsell-unmute.');
@@ -256,6 +284,9 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (default: off)');
     console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (default: off — adds latency)');
     console.log('  --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)');
+    console.log('  --tool-firewall-enforce   Redact/withhold threatening tool output before the agent sees it');
+    console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
+    console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('  --upsell-mute          Suppress the Pro upsell footer in doctor');
     console.log('  --upsell-unmute        Allow the Pro upsell footer to surface again');
