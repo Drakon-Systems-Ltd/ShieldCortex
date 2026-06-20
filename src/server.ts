@@ -20,7 +20,7 @@ import {
 
 // Import tools
 import { rememberSchema, executeRemember, formatRememberResult } from './tools/remember.js';
-import { recallSchema, executeRecall, formatRecallResult, getMemorySchema, executeGetMemory, formatMemory } from './tools/recall.js';
+import { recallSchema, executeRecall, formatRecallResult, getMemorySchema, executeGetMemory, executeGetRelated, formatMemory } from './tools/recall.js';
 import { forgetSchema, executeForget, formatForgetResult } from './tools/forget.js';
 import {
   getContextSchema, executeGetContext,
@@ -512,10 +512,12 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     'Export memories as JSON for backup.',
     {
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for all projects.'),
+      source: sourceParam,
     },
     { title: 'Export Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('export_memories', async (args) => {
-      const result = executeExport(args);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'export_memories');
+      const result = executeExport({ ...args, source });
       return {
         content: [{
           type: 'text',
@@ -571,10 +573,16 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     'Get memories related to a specific memory. Shows connections and relationships.',
     {
       id: z.number().describe('Memory ID to find relationships for'),
+      source: sourceParam,
     },
     { title: 'Get Related Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('get_related', async (args) => {
-      const related = getRelatedMemories(args.id);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_related');
+      const result = executeGetRelated({ id: args.id, source });
+      if (!result.success) {
+        return { content: [{ type: 'text', text: `Error: ${result.error}` }], isError: true };
+      }
+      const related = result.related!;
       if (related.length === 0) {
         return { content: [{ type: 'text', text: 'No related memories found.' }] };
       }

@@ -22,6 +22,8 @@ import { getSalienceDistribution, type SalienceDistribution } from '../memory/me
 import { getDatabase } from '../database/init.js';
 import { Memory, ContextSummary, ConsolidationResult } from '../memory/types.js';
 import { resolveProject } from '../context/project-context.js';
+import { guardReadMemories } from '../defence/trust/read-guard.js';
+import type { DefenceSource } from '../defence/types.js';
 
 // Input schema for getting context
 export const getContextSchema = z.object({
@@ -52,13 +54,26 @@ export async function executeGetContext(input: GetContextInput): Promise<{
     const resolvedProject = resolveProject(input.project);
     const projectFilter = resolvedProject ?? undefined;
 
+    // Read ACL: generateContextSummary / getSuggestedContext fetch without a
+    // caller identity, so guard every row they surface against the resolved
+    // source before it's formatted into the context (drops quarantined + rows
+    // this caller may not read — RESTRICTED isolation / own-only for low trust).
+    const source = input.source as DefenceSource | undefined;
+
     // Generate context summary
-    const summary = await generateContextSummary(projectFilter);
+    const rawSummary = await generateContextSummary(projectFilter);
+    const summary: ContextSummary = {
+      ...rawSummary,
+      recentMemories: guardReadMemories(rawSummary.recentMemories, source),
+      keyDecisions: guardReadMemories(rawSummary.keyDecisions, source),
+      activePatterns: guardReadMemories(rawSummary.activePatterns, source),
+      pendingItems: guardReadMemories(rawSummary.pendingItems, source),
+    };
 
     // If there's a query, also get specifically relevant memories
     let relevantMemories: Memory[] = [];
     if (input.query) {
-      relevantMemories = await getSuggestedContext(input.query, projectFilter, 5);
+      relevantMemories = guardReadMemories(await getSuggestedContext(input.query, projectFilter, 5), source);
     }
 
     // Format based on requested format
@@ -328,7 +343,7 @@ export const exportSchema = z.object({
   project: z.string().optional().describe('Export only memories for this project'),
 });
 
-export function executeExport(input: { project?: string }): {
+export function executeExport(input: { project?: string; source?: DefenceSource }): {
   success: boolean;
   data?: string;
   count?: number;
@@ -342,7 +357,8 @@ export function executeExport(input: { project?: string }): {
     const resolvedProject = resolveProject(input.project);
     const projectFilter = resolvedProject ?? undefined;
 
-    const data = exportMemories(projectFilter);
+    // Read ACL: filter the bulk dump to rows this caller may read.
+    const data = exportMemories(projectFilter, input.source);
     const memories = JSON.parse(data);
     return {
       success: true,
