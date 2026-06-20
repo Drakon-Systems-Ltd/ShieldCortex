@@ -17,9 +17,12 @@
  * It deliberately does NOT pull in the write-path's trust scoring, anomaly,
  * privilege, fragmentation or sensitivity layers — those are write concerns.
  *
- * Advisory by default: logs threats but never blocks tool responses. Only the
- * audit/event firewall_result reflects enforce mode; the scan itself never hard
- * blocks tool execution.
+ * Advisory by default: logs threats but leaves the response untouched. In
+ * enforce mode the scanner additionally computes `sanitisedContent` — the bytes
+ * the agent should actually receive (injection withheld, secrets redacted, exfil
+ * links stripped) — via the neutraliseToolResponse action layer. Callers
+ * (withResponseScan, the scan_tool_response tool) swap in sanitisedContent when
+ * present; the scanner never blocks tool EXECUTION, only the threatening output.
  */
 
 import { scanForInjection } from './iron-dome/injection-scanner.js';
@@ -27,6 +30,7 @@ import { scanForCredentials } from './credential-leak/index.js';
 import { detectInstructions } from './firewall/instruction-detector.js';
 import { detectEncoding } from './firewall/encoding-detector.js';
 import { detectMarkdownImageExfil } from './firewall/markdown-image-detector.js';
+import { neutraliseToolResponse } from './tool-response-enforce.js';
 import { logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
@@ -100,6 +104,9 @@ export function scanToolResponse(
       summary: `Tool response from "${toolName}" skipped (too short)`,
       durationMs: Math.round(performance.now() - startTime),
       auditId: -1,
+      sanitisedContent: null,
+      blocked: false,
+      enforceActions: [],
     };
   }
 
@@ -173,6 +180,33 @@ export function scanToolResponse(
     !credentials.leaked;
   const durationMs = Math.round(performance.now() - startTime);
 
+  // 5b. Enforce action layer. Advisory mode only logs; enforce mode computes the
+  //     content the agent should ACTUALLY receive (block injection, redact
+  //     secrets, strip exfil links). Single source of truth in
+  //     neutraliseToolResponse — the scanner just feeds it the signals it found.
+  let sanitisedContent: string | null = null;
+  let blocked = false;
+  let enforceActions: string[] = [];
+  if (!clean && resolvedMode === 'enforce') {
+    const neutralisation = neutraliseToolResponse(content, {
+      injectionRisk: injection.riskLevel,
+      instructionsDetected: instructions.detected,
+      decodedInjection,
+      encodingDetected: encoding.detected,
+      markdownImageUrls: markdownImage.urls,
+      credentialsLeaked: credentials.leaked,
+      decodedCredentialLeak,
+    });
+    sanitisedContent = neutralisation.sanitised;
+    blocked = neutralisation.blocked;
+    enforceActions = neutralisation.actions;
+  }
+
+  // Truthful firewall_result: advisory only observes (ALLOW); enforce that
+  // withholds the whole payload is a BLOCK; enforce that surgically redacts but
+  // still delivers is a QUARANTINE.
+  const firewallResult = resolvedMode !== 'enforce' ? 'ALLOW' : blocked ? 'BLOCK' : 'QUARANTINE';
+
   // 6. Build summary
   let summary: string;
   if (clean) {
@@ -215,7 +249,7 @@ export function scanToolResponse(
         source_identifier: toolName,
         trust_score: 0.5,
         sensitivity_level: (credentials.leaked || decodedCredentialLeak) ? 'CONFIDENTIAL' : 'PUBLIC',
-        firewall_result: resolvedMode === 'enforce' ? 'BLOCK' : 'ALLOW',
+        firewall_result: firewallResult,
         anomaly_score: anomalyScore,
         threat_indicators: JSON.stringify(threatIndicators),
         blocked_patterns: JSON.stringify(blockedPatterns),
@@ -232,7 +266,7 @@ export function scanToolResponse(
       persistEvent('defence_event', {
         source_type: 'tool_response',
         source_identifier: toolName,
-        firewall_result: resolvedMode === 'enforce' ? 'BLOCK' : 'ALLOW',
+        firewall_result: firewallResult,
         trust_score: 0.5,
         anomaly_score: anomalyScore,
         reason: summary,
@@ -254,5 +288,8 @@ export function scanToolResponse(
     summary,
     durationMs,
     auditId,
+    sanitisedContent,
+    blocked,
+    enforceActions,
   };
 }

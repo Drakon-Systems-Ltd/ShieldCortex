@@ -42,6 +42,15 @@ export interface ToolResponseScanResult {
   summary: string;
   durationMs: number;
   auditId: number;
+  /**
+   * Enforce-mode replacement content the agent should actually receive.
+   * `null` in advisory mode and whenever the response is clean (nothing to do).
+   */
+  sanitisedContent: string | null;
+  /** True when enforce mode withheld the whole payload (vs. surgically redacting). */
+  blocked: boolean;
+  /** Human-readable actions taken in enforce mode (empty otherwise). */
+  enforceActions: string[];
 }
 
 export interface FirewallAnalysis {

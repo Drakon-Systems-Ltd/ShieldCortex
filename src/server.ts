@@ -73,7 +73,7 @@ const sourceParam = z.object({
  * Enforce mode: can redact credential leaks.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function withResponseScan(toolName: string, handler: (...args: any[]) => any): (...args: any[]) => any {
+export function withResponseScan(toolName: string, handler: (...args: any[]) => any): (...args: any[]) => any {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return async (...handlerArgs: any[]) => {
     const result = await handler(...handlerArgs);
@@ -90,8 +90,24 @@ function withResponseScan(toolName: string, handler: (...args: any[]) => any): (
     const scan = scanToolResponse(toolName, textContent, config.toolResponseMode);
     if (scan.clean) return result;
 
-    // Append warning to the response
+    // Enforce mode: swap the threatening text for the sanitised payload the
+    // scanner produced (injection withheld, secrets redacted, exfil stripped).
+    // Non-text blocks (e.g. images) are preserved. Advisory mode keeps the
+    // observe-only behaviour: leave the response intact, append a warning.
+    if (scan.mode === 'enforce' && scan.sanitisedContent !== null) {
+      const nonText = result.content.filter((c: { type: string }) => c.type !== 'text');
+      return {
+        ...result,
+        content: [
+          ...nonText,
+          { type: 'text' as const, text: scan.sanitisedContent },
+        ],
+      };
+    }
+
+    // Advisory: append warning to the response.
     return {
+      ...result,
       content: [
         ...result.content,
         {
@@ -884,6 +900,22 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
 
       if (scan.auditId > 0) {
         lines.push(`**Audit ID:** ${scan.auditId}`);
+      }
+
+      // Enforce mode produced an actioned payload — surface it so callers using
+      // this tool as a programmatic firewall receive the safe content, not just
+      // a verdict. Advisory scans leave sanitisedContent null (verdict only).
+      if (scan.sanitisedContent !== null) {
+        lines.push('');
+        lines.push(`### Enforcement (${scan.blocked ? 'BLOCKED' : 'REDACTED'})`);
+        for (const action of scan.enforceActions) {
+          lines.push(`- ${action}`);
+        }
+        lines.push('');
+        lines.push('**Sanitised content (deliver this instead):**');
+        lines.push('```');
+        lines.push(scan.sanitisedContent);
+        lines.push('```');
       }
 
       lines.push('');
