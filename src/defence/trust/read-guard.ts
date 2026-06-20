@@ -21,7 +21,7 @@
 
 import { checkAccess } from './access-control.js';
 import type { DefenceSource } from '../types.js';
-import type { Memory } from '../../memory/types.js';
+import type { Memory, ContextSummary } from '../../memory/types.js';
 
 /**
  * Core read decision, shared by the camelCase (Memory) and snake_case (raw row)
@@ -67,6 +67,32 @@ export function guardReadRows<T extends Record<string, unknown>>(
       source,
     ),
   );
+}
+
+/**
+ * Sensitivity-only guard for SHARED-CONTEXT bootstrap surfaces (get_context,
+ * start_session, the memory:// resources, restore_context, detect_contradictions).
+ *
+ * These surfaces feed the prompt / a broadly-shared project summary, so they must
+ * NEVER surface RESTRICTED or quarantined rows to ANYONE (matching the .mjs
+ * prompt hooks) — but, unlike the per-caller fetch tools, they do NOT apply the
+ * source-relative own-only tier, so a low-trust subagent still receives the
+ * INTERNAL project context it legitimately needs. Credential isolation without
+ * the availability blackout.
+ */
+export function guardReadBySensitivity(memories: Memory[]): Memory[] {
+  return memories.filter((m) => m.trustScore !== 0 && m.sensitivityLevel !== 'RESTRICTED');
+}
+
+/** Apply the sensitivity guard to every memory list in a context summary. */
+export function guardContextSummary(summary: ContextSummary): ContextSummary {
+  return {
+    ...summary,
+    recentMemories: guardReadBySensitivity(summary.recentMemories),
+    keyDecisions: guardReadBySensitivity(summary.keyDecisions),
+    activePatterns: guardReadBySensitivity(summary.activePatterns),
+    pendingItems: guardReadBySensitivity(summary.pendingItems),
+  };
 }
 
 /** Guard a single memory; returns null if the caller may not read it. */

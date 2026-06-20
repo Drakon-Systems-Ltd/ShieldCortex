@@ -22,7 +22,7 @@ import { getSalienceDistribution, type SalienceDistribution } from '../memory/me
 import { getDatabase } from '../database/init.js';
 import { Memory, ContextSummary, ConsolidationResult } from '../memory/types.js';
 import { resolveProject } from '../context/project-context.js';
-import { guardReadMemories } from '../defence/trust/read-guard.js';
+import { guardReadBySensitivity, guardContextSummary } from '../defence/trust/read-guard.js';
 import type { DefenceSource } from '../defence/types.js';
 
 // Input schema for getting context
@@ -54,26 +54,20 @@ export async function executeGetContext(input: GetContextInput): Promise<{
     const resolvedProject = resolveProject(input.project);
     const projectFilter = resolvedProject ?? undefined;
 
-    // Read ACL: generateContextSummary / getSuggestedContext fetch without a
-    // caller identity, so guard every row they surface against the resolved
-    // source before it's formatted into the context (drops quarantined + rows
-    // this caller may not read — RESTRICTED isolation / own-only for low trust).
-    const source = input.source as DefenceSource | undefined;
+    // Read guard: get_context is a SHARED-CONTEXT bootstrap surface that feeds
+    // the prompt, so strip RESTRICTED + quarantined for everyone (matching the
+    // .mjs prompt hooks) but keep INTERNAL project context available — a
+    // sensitivity guard, not the per-caller own-only ACL, so a low-trust
+    // subagent isn't blacked out from the context it needs. Owner-specific
+    // RESTRICTED retrieval is the explicit get_memory tool's job.
 
     // Generate context summary
-    const rawSummary = await generateContextSummary(projectFilter);
-    const summary: ContextSummary = {
-      ...rawSummary,
-      recentMemories: guardReadMemories(rawSummary.recentMemories, source),
-      keyDecisions: guardReadMemories(rawSummary.keyDecisions, source),
-      activePatterns: guardReadMemories(rawSummary.activePatterns, source),
-      pendingItems: guardReadMemories(rawSummary.pendingItems, source),
-    };
+    const summary = guardContextSummary(await generateContextSummary(projectFilter));
 
     // If there's a query, also get specifically relevant memories
     let relevantMemories: Memory[] = [];
     if (input.query) {
-      relevantMemories = guardReadMemories(await getSuggestedContext(input.query, projectFilter, 5), source);
+      relevantMemories = guardReadBySensitivity(await getSuggestedContext(input.query, projectFilter, 5));
     }
 
     // Format based on requested format
@@ -190,7 +184,10 @@ export async function executeStartSession(input: { project?: string }): Promise<
     const projectFilter = resolvedProject ?? undefined;
 
     const { sessionId, context } = await startSession(projectFilter);
-    const formattedContext = formatContextSummary(context);
+    // Read guard: start_session is a shared-context bootstrap surface (sibling of
+    // get_context) — strip RESTRICTED + quarantined before formatting so the
+    // session preamble never leaks credential-class memories.
+    const formattedContext = formatContextSummary(guardContextSummary(context));
 
     return {
       success: true,

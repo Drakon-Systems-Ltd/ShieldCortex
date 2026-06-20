@@ -12,8 +12,10 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { initDatabase, closeDatabase, getDatabase } from '../database/init.js';
 import { addMemory, createMemoryLink } from '../memory/store.js';
-import { executeGetMemory, executeGetRelated } from '../tools/recall.js';
-import { executeGetContext, executeExport } from '../tools/context.js';
+import { executeGetMemory, executeGetRelated, executeRecall } from '../tools/recall.js';
+import { executeGetContext, executeExport, executeStartSession } from '../tools/context.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
+import { resolveToolSource } from '../defence/trust/resolve-tool-source.js';
 import type { DefenceSource } from '../defence/types.js';
 
 const PROJECT = 'mcp-read-acl';
@@ -75,12 +77,102 @@ describe('get_related read ACL', () => {
   });
 });
 
-describe('get_context read ACL', () => {
-  it('excludes a RESTRICTED memory from the context surfaced to a low-trust caller', async () => {
-    seed({ title: 'context secret', restricted: true });
-    const res = await executeGetContext({ project: PROJECT, format: 'raw', source: LOW_TRUST });
+describe('get_context read guard (sensitivity — shared bootstrap surface)', () => {
+  it('strips RESTRICTED for ALL callers but keeps INTERNAL context for a low-trust caller (no blackout)', async () => {
+    seed({ title: 'ctx restricted secret', restricted: true });
+    seed({ title: 'ctx internal note' }); // INTERNAL
+
+    const low = await executeGetContext({ project: PROJECT, format: 'raw', source: LOW_TRUST });
+    expect(low.success).toBe(true);
+    expect(low.context ?? '').not.toContain('ctx restricted secret'); // RESTRICTED never surfaced
+    expect(low.context ?? '').toContain('ctx internal note'); // subagent keeps INTERNAL project context
+
+    const owner = await executeGetContext({ project: PROJECT, format: 'raw', source: OWNER });
+    expect(owner.context ?? '').not.toContain('ctx restricted secret'); // stripped even for the owner
+  });
+});
+
+describe('start_session read guard (sensitivity)', () => {
+  it('excludes RESTRICTED from the session preamble', async () => {
+    seed({ title: 'ss restricted secret', restricted: true });
+    seed({ title: 'ss internal note' });
+
+    const res = await executeStartSession({ project: PROJECT });
     expect(res.success).toBe(true);
-    expect(res.context ?? '').not.toContain('context secret');
+    expect(res.context ?? '').not.toContain('ss restricted secret');
+  });
+});
+
+describe('recall read ACL (tool level)', () => {
+  it('a low-trust caller does not recall RESTRICTED rows', async () => {
+    seed({ title: 'recall secret', restricted: true });
+    const res = await executeRecall({
+      mode: 'recent', limit: 50, project: PROJECT, source: LOW_TRUST,
+      includeGlobal: true, includeDecayed: true,
+    } as Parameters<typeof executeRecall>[0]);
+    expect((res.memories ?? []).some((m) => m.sensitivityLevel === 'RESTRICTED')).toBe(false);
+  });
+
+  it('the owner recalls their own rows', async () => {
+    const id = seed({ title: 'recall own note' });
+    const res = await executeRecall({
+      mode: 'recent', limit: 50, project: PROJECT, source: OWNER,
+      includeGlobal: true, includeDecayed: true,
+    } as Parameters<typeof executeRecall>[0]);
+    expect((res.memories ?? []).some((m) => m.id === id)).toBe(true);
+  });
+});
+
+describe('read-guard invariants (regression canaries)', () => {
+  it('trust assumptions the security cases rest on hold', () => {
+    expect(scoreSource(LOW_TRUST).score).toBeLessThan(0.5);
+    expect(scoreSource(OWNER).score).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it('NO-REGRESSION: a high-trust NON-owner still reads other-source INTERNAL memories (read-all tier)', () => {
+    const id = seed({ title: 'shared internal note' }); // owned by cli:owner-cli
+    const highNonOwner: DefenceSource = { type: 'cli', identifier: 'other-cli' }; // 0.9, not the owner
+    const res = executeGetMemory({ id, source: highNonOwner });
+    expect(res.success).toBe(true);
+    expect(res.memory?.id).toBe(id);
+  });
+
+  it('quarantined (trust 0) rows are invisible via get_memory even to the owner', () => {
+    const id = seed({ title: 'pending review note' });
+    getDatabase().prepare(`UPDATE memories SET trust_score = 0 WHERE id = ?`).run(id);
+    const res = executeGetMemory({ id, source: OWNER });
+    expect(res.success).toBe(false);
+  });
+
+  it('quarantined (trust 0) rows are excluded from a bulk export even for the owner', () => {
+    const id = seed({ title: 'quarantined export note' });
+    getDatabase().prepare(`UPDATE memories SET trust_score = 0 WHERE id = ?`).run(id);
+    const res = executeExport({ project: PROJECT, source: OWNER });
+    expect(res.data ?? '').not.toContain('quarantined export note');
+  });
+});
+
+describe('end-to-end shipping path (resolveToolSource composed with the guard)', () => {
+  afterEach(() => {
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
+  });
+
+  it('a subagent (env-resolved low-trust source) is denied a RESTRICTED get_memory', () => {
+    const id = seed({ title: 'e2e restricted', restricted: true });
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent'; // env ceiling => agent-spawned (0.3)
+    const source = resolveToolSource(undefined, { toolName: 'get_memory', project: PROJECT });
+    const res = executeGetMemory({ id, source });
+    expect(res.success).toBe(false);
+  });
+
+  it('a spoofed declared user:direct is clamped to the env ceiling and still denied RESTRICTED', () => {
+    const id = seed({ title: 'e2e spoof restricted', restricted: true });
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
+    // Caller lies and claims user:direct (1.0) — resolveToolSource must clamp it
+    // down to the env ceiling so the escalation doesn't grant RESTRICTED access.
+    const source = resolveToolSource({ type: 'user', identifier: 'direct' }, { toolName: 'get_memory', project: PROJECT });
+    const res = executeGetMemory({ id, source });
+    expect(res.success).toBe(false);
   });
 });
 

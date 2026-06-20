@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from '@jest/globals';
-import { guardReadMemories, guardReadMemory, guardReadRows } from '../trust/read-guard.js';
+import { guardReadMemories, guardReadMemory, guardReadRows, guardReadBySensitivity } from '../trust/read-guard.js';
 import type { Memory } from '../../memory/types.js';
 import type { DefenceSource } from '../types.js';
 
@@ -81,6 +81,28 @@ describe('guardReadRows (raw snake_case rows, e.g. export)', () => {
     const rows = [row({ id: 1, trust_score: 0 }), row({ id: 2 })];
     expect(guardReadRows(rows, HIGH).map((r) => r.id)).toEqual([2]);
     expect(guardReadRows(rows, undefined).map((r) => r.id)).toEqual([2]);
+  });
+});
+
+describe('guardReadBySensitivity (shared-context bootstrap surfaces)', () => {
+  it('drops RESTRICTED and quarantined regardless of caller (even high-trust/owner)', () => {
+    const rows = [
+      mem({ id: 1, sensitivityLevel: 'RESTRICTED' }),
+      mem({ id: 2, trustScore: 0 }),
+      mem({ id: 3, sensitivityLevel: 'INTERNAL' }),
+    ];
+    // Source is irrelevant — sensitivity-only.
+    expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([3]);
+  });
+
+  it('KEEPS INTERNAL/CONFIDENTIAL shared context for everyone (no own-only blackout)', () => {
+    // The key difference from full checkAccess: a low-trust subagent still sees
+    // INTERNAL project context from other sources — it is not a leak.
+    const rows = [
+      mem({ id: 1, sensitivityLevel: 'INTERNAL', source: 'user:direct' }),
+      mem({ id: 2, sensitivityLevel: 'CONFIDENTIAL', source: 'user:direct' }),
+    ];
+    expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([1, 2]);
   });
 });
 
