@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.37.0] - 2026-06-19
+
+**Tool-output firewall: enforce mode now actually enforces.** ShieldCortex already scanned the output of MCP read tools for injection, credential leaks, encoded payloads and markdown-image exfiltration — but "enforce" mode only logged a verdict and appended a warning; the threatening bytes still reached the agent verbatim. Enforce now changes what the agent receives. Free for all tiers — it's a security control, not a paywalled feature. Adversarially reviewed (a 40-agent pass caught and fixed a real exfil bypass before release). No breaking changes; advisory remains the default.
+
+### Added
+
+- **Enforce-mode action layer.** In `enforce` mode the scanner computes the content the agent should actually receive: prompt-injection / decoded payloads cause the whole tool output to be **withheld** (placeholder + `isError`, so the agent distinguishes "blocked" from "empty"); plaintext credential leaks and markdown-image-exfil URLs are **surgically redacted/stripped** and the cleaned payload delivered. The untrusted-origin tag is carried out-of-band (a separate response block) so redacted structured output (JSON/CSV) stays parseable. Audit `firewall_result` is now truthful: `ALLOW` (advisory), `BLOCK` (withheld), `QUARANTINE` (redacted-and-delivered).
+- **`config --tool-firewall-{enforce,advisory,off,on}`** CLI flags + a status line — the switch to turn the firewall from observe-only to acting (previously reachable only by hand-editing config.json).
+- **`scan_tool_response`** now surfaces the sanitised payload + the actions taken, so it can be used as a programmatic firewall.
+
+### Fixed
+
+- **Markdown-image exfil bypass in enforce mode.** When a flagged exfiltration image URL carried a credential-shaped data blob, credential redaction ran first and rewrote the URL bytes, so the subsequent strip missed it — a live exfil image was delivered (firing on render) while the output was tagged "sanitised". Markdown-image neutralisation now runs first via a full-match regex (offset splice — no substring equality, no URL-length cap) and fails safe (escalates to withhold if a flagged image can't be neutralised).
+- **Read-path false positives.** The write-path-only `imperative_tool_call` pattern ("call the X tool") no longer fires on legitimate instructional tool output; genuine injection patterns and Iron Dome detection are unaffected.
+
+### Notes
+
+- Coverage is the MCP read-tool surface (ShieldCortex's own tools). A broad `PostToolUse` interceptor that scans *all* tool output is a tracked follow-up; the persisted tool-output scan, provenance ledger, MCP `recall`/`get_context` + dashboard read paths, the semantic layer on the sync path, and PII classification remain follow-ups.
+
 ## [4.36.0] - 2026-06-18
 
 **Memory-defence boundary: scan every write, and filter recalled memory before it reaches the prompt.** A defence-gap audit found the product's headline boundary undefended on its busiest paths — most writes skipped the pipeline and the read hooks injected stored memory verbatim. This closes both, adversarially reviewed. No breaking changes.
