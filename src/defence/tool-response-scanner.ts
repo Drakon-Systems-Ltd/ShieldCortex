@@ -57,6 +57,12 @@ const HIGH_RISK_TOOLS = new Set([
   'detect_contradictions',
 ]);
 
+// Instruction-detector pattern groups that are WRITE-path concerns and over-fire
+// on legitimate tool OUTPUT (instructional docs telling the agent which tool to
+// call). Excluded from the read-path instruction signal; real injection groups
+// (system_prompt_marker, hidden_instruction, prompt_extraction, …) still apply.
+const READ_PATH_EXCLUDED_INSTRUCTION_PATTERNS = new Set(['imperative_tool_call']);
+
 // Tools that only return metadata/stats (not worth scanning)
 const METADATA_ONLY_TOOLS = new Set([
   'memory_stats',
@@ -116,7 +122,19 @@ export function scanToolResponse(
 
   // 2. Write-path detectors (parity). detectInstructions folds homoglyphs and
   //    scans in windows; detectEncoding decodes base64/hex/url blobs.
-  const instructions = detectInstructions(content);
+  //
+  //    FP reduction on the READ path: `imperative_tool_call` ("call the X tool")
+  //    exists to catch injected directives at WRITE time. On tool OUTPUT it is
+  //    legitimate instructional content (docs telling the agent which tool to
+  //    use), so we exclude it here. Real injection phrasing ("ignore previous
+  //    instructions", "you are now…") lives in the other groups + Iron Dome and
+  //    is unaffected. Decoded snippets (below) keep full detection — an encoded
+  //    imperative is inherently suspicious.
+  const instructionsRaw = detectInstructions(content);
+  const instructionPatterns = instructionsRaw.patterns.filter(
+    (p) => !READ_PATH_EXCLUDED_INSTRUCTION_PATTERNS.has(p),
+  );
+  const instructions = { detected: instructionPatterns.length > 0, patterns: instructionPatterns };
   const encoding = detectEncoding(content);
 
   // 2b. Decode-and-rescan: re-run instruction + credential detection on each

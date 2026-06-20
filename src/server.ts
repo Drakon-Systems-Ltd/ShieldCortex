@@ -41,6 +41,7 @@ import { scanExistingMemories } from './defence/scanner/index.js';
 import type { FirewallResult as FwResult, DefenceSource } from './defence/types.js';
 import { resolveToolSource as resolveToolSourceImpl } from './defence/trust/resolve-tool-source.js';
 import { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
+import { UNTRUSTED_TOOL_TAG } from './defence/tool-response-enforce.js';
 import { getToolResponseScanConfig } from './cloud/config.js';
 import { checkKillPhrase } from './defence/iron-dome/index.js';
 
@@ -96,11 +97,23 @@ export function withResponseScan(toolName: string, handler: (...args: any[]) => 
     // observe-only behaviour: leave the response intact, append a warning.
     if (scan.mode === 'enforce' && scan.sanitisedContent !== null) {
       const nonText = result.content.filter((c: { type: string }) => c.type !== 'text');
+      if (scan.blocked) {
+        // Whole payload withheld → surface as a tool error so the agent can tell
+        // "withheld by firewall" apart from "no results / empty".
+        return {
+          ...result,
+          content: [...nonText, { type: 'text' as const, text: scan.sanitisedContent }],
+          isError: true,
+        };
+      }
+      // Redacted-and-delivered → cleaned payload + the untrusted-origin tag in a
+      // SEPARATE block, so redacted structured output (JSON/CSV) stays parseable.
       return {
         ...result,
         content: [
           ...nonText,
           { type: 'text' as const, text: scan.sanitisedContent },
+          { type: 'text' as const, text: UNTRUSTED_TOOL_TAG },
         ],
       };
     }
@@ -911,11 +924,18 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
         for (const action of scan.enforceActions) {
           lines.push(`- ${action}`);
         }
+        if (!scan.blocked) {
+          lines.push(`- origin: ${UNTRUSTED_TOOL_TAG}`);
+        }
         lines.push('');
         lines.push('**Sanitised content (deliver this instead):**');
-        lines.push('```');
+        // Dynamic fence longer than any backtick run in the content, so content
+        // containing ``` cannot break out of the code block.
+        const longestRun = Math.max(0, ...(scan.sanitisedContent.match(/`+/g) || []).map((s) => s.length));
+        const fence = '`'.repeat(Math.max(3, longestRun + 1));
+        lines.push(fence);
         lines.push(scan.sanitisedContent);
-        lines.push('```');
+        lines.push(fence);
       }
 
       lines.push('');
