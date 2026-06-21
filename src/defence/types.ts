@@ -176,6 +176,9 @@ export interface QuarantineEntry {
   audit_id: number | null;
 }
 
+/** Operation that produced an audit row (provenance ledger discriminator). */
+export type AuditOperation = 'write' | 'read' | 'delete' | 'update';
+
 export interface AuditEntry {
   id: number;
   memory_id: number | null;
@@ -186,6 +189,14 @@ export interface AuditEntry {
   trust_score: number;
   sensitivity_level: string;
   firewall_result: FirewallResult;
+  /**
+   * The operation that produced this row. Required on every new emission so the
+   * ledger is queryable by read/write/delete; `null` only on legacy rows written
+   * before the provenance-ledger column existed.
+   */
+  operation: AuditOperation | null;
+  /** SHA-256 of the content at write time (tamper-evidence); null for read/delete rows. */
+  content_hash?: string | null;
   anomaly_score: number;
   threat_indicators: string; // JSON array
   blocked_patterns: string; // JSON array

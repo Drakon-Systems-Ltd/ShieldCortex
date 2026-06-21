@@ -47,6 +47,7 @@ export function resolveToolSource(
         trust_score: ceilingScore,
         sensitivity_level: 'PUBLIC',
         firewall_result: 'BLOCK',
+        operation: null, // source-resolution meta-event, not a memory read/write/delete
         anomaly_score: 0,
         threat_indicators: JSON.stringify(['privilege_escalation']),
         blocked_patterns: '[]',
@@ -77,6 +78,7 @@ export function resolveToolSource(
         trust_score: 0,
         sensitivity_level: 'PUBLIC',
         firewall_result: 'ALLOW',
+        operation: null, // source-resolution meta-event, not a memory read/write/delete
         anomaly_score: 0,
         threat_indicators: '[]',
         blocked_patterns: '[]',

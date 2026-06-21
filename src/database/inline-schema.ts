@@ -36,6 +36,7 @@ export function getInlineSchema(): string {
       trust_score REAL DEFAULT 1.0,
       sensitivity_level TEXT DEFAULT 'INTERNAL',
       source TEXT DEFAULT 'user:direct',
+      content_hash TEXT,
       status TEXT DEFAULT 'active' CHECK(status IN ('active', 'archived', 'suppressed', 'canonical')),
       pinned INTEGER DEFAULT 0,
       reviewed_at TIMESTAMP,
@@ -84,6 +85,8 @@ export function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_memories_decayed_score ON memories(decayed_score DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
+    CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
 
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,6 +171,8 @@ export function getInlineSchema(): string {
       trust_score REAL NOT NULL,
       sensitivity_level TEXT NOT NULL DEFAULT 'INTERNAL',
       firewall_result TEXT NOT NULL CHECK(firewall_result IN ('ALLOW', 'BLOCK', 'QUARANTINE')),
+      operation TEXT,
+      content_hash TEXT,
       anomaly_score REAL DEFAULT 0.0,
       threat_indicators TEXT DEFAULT '[]',
       blocked_patterns TEXT DEFAULT '[]',
@@ -182,6 +187,7 @@ export function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
     CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
     CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
+    CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation);
 
     -- Cumulative audit aggregate (single row, id=1) — retention rollup target.
     -- See schema.sql for the rationale.

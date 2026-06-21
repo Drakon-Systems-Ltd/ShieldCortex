@@ -31,6 +31,7 @@ export function logIronDomeAudit(event: IronDomeAuditEvent): void {
       trust_score: 0,
       sensitivity_level: 'PUBLIC',
       firewall_result: event.allowed ? 'ALLOW' : 'BLOCK',
+      operation: null, // iron-dome kill-switch / defence event, not a memory read/write/delete
       anomaly_score: 0,
       threat_indicators: '[]',
       blocked_patterns: '[]',

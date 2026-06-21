@@ -2,13 +2,17 @@
 name: shieldcortex
 description: >
   Persistent memory and security system for AI agents. Stores memories with
-  semantic search, knowledge graphs, and decay. Scans agent inputs/outputs for
-  prompt injection, credential leaks, and poisoning. Audits agent instruction
-  files and MCP configs. Includes Cortex mistake-learning module (Pro tier).
+  semantic search, knowledge graphs, and decay. Scans AND enforces at the memory
+  read/write boundary and on tool output — not scan-only: it quarantines/blocks
+  poisoned writes, trust/ACL-filters recalled memory before it reaches the agent,
+  and (in enforce mode) redacts or withholds malicious tool output, with a
+  read/write/delete provenance ledger. Detects prompt injection, credential
+  leaks, and poisoning; audits agent instruction files and MCP configs. Includes
+  Cortex mistake-learning module (Pro tier).
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.31.2
+  version: 4.39.0
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -69,7 +73,9 @@ permissions:
 
 # ShieldCortex — Persistent Memory & Security for AI Agents
 
-Memory system with built-in security. Gives agents persistent memory (semantic search, knowledge graphs, decay, contradiction detection) and protects it with a 6-layer defence pipeline (prompt injection, credential leaks, poisoning, privilege escalation, PII filtering, behavioural analysis). Skill threat patterns (tool injection, scope escalation, data exfiltration, persistence, supply-chain, agent manipulation, stealth instructions) now also block at memory-write time, not just on skill-file scans.
+Memory system with built-in security. Gives agents persistent memory (semantic search, knowledge graphs, decay, contradiction detection) and protects it with a 6-layer defence pipeline (prompt injection, credential leaks, poisoning, privilege escalation, PII filtering, behavioural analysis). Skill threat patterns (tool injection, scope escalation, data exfiltration, persistence, supply-chain, agent manipulation, stealth instructions) block at memory-write time, not just on skill-file scans.
+
+This is an enforcing memory boundary, not a passive scanner. Across the read/write boundary it actively: **quarantines or blocks** poisoned/credential-bearing writes; **trust/ACL-filters recalled memory** (RESTRICTED isolation, own-only for low-trust callers) before it reaches the agent, on both the prompt hooks and the MCP read tools; runs a **tool-output firewall** that, in enforce mode, redacts or withholds malicious tool results before the model sees them (advisory by default); and keeps a **provenance ledger** recording read/write/delete operations with content hashes for forensics. Enforcement that could surprise is opt-in (the tool-output firewall defaults to advisory; `shieldcortex config --tool-firewall-enforce` turns on blocking).
 
 ## Provenance & Trust
 
@@ -88,7 +94,9 @@ Memory system with built-in security. Gives agents persistent memory (semantic s
 
 This section explains every privileged operation the tool performs and why.
 
+- **Active interception, not scan-only.** Beyond read-only scans, ShieldCortex *enforces* at the boundary: writes failing the pipeline are quarantined/blocked; recalled memory is trust/ACL-filtered before the agent sees it; in enforce mode the tool-output firewall redacts/withholds malicious tool results; and the OpenClaw `before_tool_call` interceptor + Iron Dome kill-switch can block operations. Surprising enforcement is opt-in (tool-output firewall defaults to advisory). `shieldcortex status` and `iron-dome status` report which controls are active.
 - **User-initiated only.** Setup is a manual step the user runs in their terminal. Nothing auto-executes on install. The `quickstart` command asks before each action.
+- **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (no lifecycle scripts).
 - **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync (team tier) requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
 - **File access is declared and scoped.** Security scans read agent config directories listed in the permissions block above — the same directories the agent itself already has access to. They do not traverse arbitrary directories.
 - **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.
