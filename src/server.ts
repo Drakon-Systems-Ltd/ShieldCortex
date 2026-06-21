@@ -20,7 +20,7 @@ import {
 
 // Import tools
 import { rememberSchema, executeRemember, formatRememberResult } from './tools/remember.js';
-import { recallSchema, executeRecall, formatRecallResult, getMemorySchema, executeGetMemory, formatMemory } from './tools/recall.js';
+import { recallSchema, executeRecall, formatRecallResult, getMemorySchema, executeGetMemory, executeGetRelated, formatMemory } from './tools/recall.js';
 import { forgetSchema, executeForget, formatForgetResult } from './tools/forget.js';
 import {
   getContextSchema, executeGetContext,
@@ -42,6 +42,7 @@ import type { FirewallResult as FwResult, DefenceSource } from './defence/types.
 import { resolveToolSource as resolveToolSourceImpl } from './defence/trust/resolve-tool-source.js';
 import { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
 import { UNTRUSTED_TOOL_TAG } from './defence/tool-response-enforce.js';
+import { guardReadBySensitivity, guardContextSummary } from './defence/trust/read-guard.js';
 import { getToolResponseScanConfig } from './cloud/config.js';
 import { checkKillPhrase } from './defence/iron-dome/index.js';
 
@@ -512,10 +513,12 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     'Export memories as JSON for backup.',
     {
       project: z.string().optional().describe('Project scope. Auto-detected if not provided. Use "*" for all projects.'),
+      source: sourceParam,
     },
     { title: 'Export Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('export_memories', async (args) => {
-      const result = executeExport(args);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'export_memories');
+      const result = executeExport({ ...args, source });
       return {
         content: [{
           type: 'text',
@@ -571,10 +574,16 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     'Get memories related to a specific memory. Shows connections and relationships.',
     {
       id: z.number().describe('Memory ID to find relationships for'),
+      source: sourceParam,
     },
     { title: 'Get Related Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('get_related', async (args) => {
-      const related = getRelatedMemories(args.id);
+      const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_related');
+      const result = executeGetRelated({ id: args.id, source });
+      if (!result.success) {
+        return { content: [{ type: 'text', text: `Error: ${result.error}` }], isError: true };
+      }
+      const related = result.related!;
       if (related.length === 0) {
         return { content: [{ type: 'text', text: 'No related memories found.' }] };
       }
@@ -687,7 +696,11 @@ but you can use this tool to check for new contradictions at any time.`,
         category: args.category,
         minScore: args.minScore,
         limit: args.limit,
-      });
+      }).filter(
+        // Drop a pair if either side is RESTRICTED/quarantined (don't leak a
+        // credential-class memory's title via a contradiction listing).
+        (c) => guardReadBySensitivity([c.memoryA, c.memoryB]).length === 2,
+      );
 
       if (contradictions.length === 0) {
         return { content: [{ type: 'text', text: 'No contradictions detected.' }] };
@@ -1221,7 +1234,8 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
       if (isKillSwitchActive()) {
         return { contents: [{ uri: 'memory://context', mimeType: 'text/plain', text: '[KILL SWITCH ACTIVE] Memory access blocked.' }] };
       }
-      const summary = await generateContextSummary();
+      // Shared-context resource: strip RESTRICTED + quarantined (sensitivity guard).
+      const summary = guardContextSummary(await generateContextSummary());
       return {
         contents: [{
           uri: 'memory://context',
@@ -1240,7 +1254,8 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
       if (isKillSwitchActive()) {
         return { contents: [{ uri: 'memory://important', mimeType: 'text/plain', text: '[KILL SWITCH ACTIVE] Memory access blocked.' }] };
       }
-      const memories = getHighPriorityMemories(20);
+      // Shared-context resource: strip RESTRICTED + quarantined before exposing content.
+      const memories = guardReadBySensitivity(getHighPriorityMemories(20));
       const text = memories.map(m =>
         `## ${m.title}\n${m.content}\n*${m.category} | ${(m.salience * 100).toFixed(0)}% salience*\n`
       ).join('\n');
@@ -1263,7 +1278,8 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
       if (isKillSwitchActive()) {
         return { contents: [{ uri: 'memory://recent', mimeType: 'text/plain', text: '[KILL SWITCH ACTIVE] Memory access blocked.' }] };
       }
-      const memories = getRecentMemories(15);
+      // Shared-context resource: strip RESTRICTED + quarantined before exposing content.
+      const memories = guardReadBySensitivity(getRecentMemories(15));
       const text = memories.map(m =>
         `- **${m.title}** (${m.category}): ${m.content.slice(0, 100)}...`
       ).join('\n');
@@ -1292,7 +1308,8 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
           messages: [{ role: 'user' as const, content: { type: 'text' as const, text: '[KILL SWITCH ACTIVE] Context restoration blocked. Use iron_dome_resume to resume.' } }],
         };
       }
-      const summary = await generateContextSummary();
+      // Shared-context prompt: strip RESTRICTED + quarantined (sensitivity guard).
+      const summary = guardContextSummary(await generateContextSummary());
       const context = formatContextSummary(summary);
 
       return {

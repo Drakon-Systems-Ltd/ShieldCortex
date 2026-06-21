@@ -11,6 +11,8 @@
 import type Database from 'better-sqlite3';
 import { getDatabase, withTransaction } from '../database/init.js';
 import { expireQuarantineItems } from '../defence/quarantine/auto-expire.js';
+import { guardReadRows } from '../defence/trust/read-guard.js';
+import type { DefenceSource } from '../defence/types.js';
 import {
   Memory,
   MemoryConfig,
@@ -1019,7 +1021,7 @@ export async function getSuggestedContext(
 /**
  * Export memories as JSON (for backup/transfer)
  */
-export function exportMemories(project?: string): string {
+export function exportMemories(project?: string, source?: DefenceSource): string {
   const db = getDatabase();
 
   let sql = 'SELECT * FROM memories';
@@ -1030,8 +1032,12 @@ export function exportMemories(project?: string): string {
   }
   sql += ' ORDER BY created_at ASC';
 
-  const rows = db.prepare(sql).all(...params);
-  return JSON.stringify(rows, null, 2);
+  const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+  // Read ACL: a bulk export is the sharpest exfil vector, so apply the same
+  // read guard as the per-tool paths — drop quarantined + rows the caller may
+  // not read (RESTRICTED isolation / own-only for low trust). With no caller
+  // source, only quarantined rows are dropped.
+  return JSON.stringify(guardReadRows(rows, source), null, 2);
 }
 
 /**

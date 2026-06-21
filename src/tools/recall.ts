@@ -5,13 +5,14 @@
  */
 
 import { z } from 'zod';
-import { searchMemories, recallWithEmbeddings, accessMemory, getRecentMemories, getHighPriorityMemories } from '../memory/store.js';
+import { searchMemories, recallWithEmbeddings, accessMemory, getRecentMemories, getHighPriorityMemories, getRelatedMemories } from '../memory/store.js';
 import { formatTimeSinceAccess } from '../memory/decay.js';
 import { Memory, SearchResult } from '../memory/types.js';
 import { MemoryNotFoundError, formatErrorForMcp } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
 import { memoryFreshnessWarning } from '../memory/staleness.js';
 import type { DefenceSource } from '../defence/types.js';
+import { guardReadMemories, guardReadMemory } from '../defence/trust/read-guard.js';
 
 const sourceSchema = z.object({
   type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
@@ -119,6 +120,12 @@ export async function executeRecall(input: RecallInput): Promise<{
         break;
     }
 
+    // Read ACL: drop quarantined + rows this caller may not read (RESTRICTED
+    // isolation / own-only for low trust). Belt-and-braces — the recent/important
+    // store helpers + search already apply access control, but this keeps every
+    // recall mode uniform and never reinforces a row the caller can't see.
+    memories = guardReadMemories(memories, source);
+
     // Access each memory to reinforce it
     memories = memories.map(m => accessMemory(m.id, undefined, source) || m);
 
@@ -216,14 +223,42 @@ export function executeGetMemory(input: { id: number; source?: DefenceSource }):
 } {
   try {
     const memory = accessMemory(input.id, undefined, input.source);
-    if (!memory) {
+    // Read ACL: a caller that may not read this memory gets a not-found, never
+    // the content (don't reveal existence of RESTRICTED / other-source rows).
+    const allowed = guardReadMemory(memory, input.source);
+    if (!allowed) {
       const error = new MemoryNotFoundError(input.id);
       return {
         success: false,
         error: error.toUserMessage(),
       };
     }
-    return { success: true, memory };
+    return { success: true, memory: allowed };
+  } catch (error) {
+    return {
+      success: false,
+      error: formatErrorForMcp(error),
+    };
+  }
+}
+
+/**
+ * Execute the get_related tool — related memories, ACL-filtered.
+ *
+ * Related links can cross trust/sensitivity boundaries, so the same read ACL
+ * applies: a caller only sees related memories it is permitted to read.
+ */
+export function executeGetRelated(input: { id: number; source?: DefenceSource }): {
+  success: boolean;
+  related?: ReturnType<typeof getRelatedMemories>;
+  error?: string;
+} {
+  try {
+    const related = getRelatedMemories(input.id);
+    const allowedIds = new Set(
+      guardReadMemories(related.map((r) => r.memory), input.source).map((m) => m.id),
+    );
+    return { success: true, related: related.filter((r) => allowedIds.has(r.memory.id)) };
   } catch (error) {
     return {
       success: false,
