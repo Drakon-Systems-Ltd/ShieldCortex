@@ -794,4 +794,35 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'mcp_tool_hashes');
   }
+
+  // Migration: provenance ledger (v4.39.0) — add an `operation` discriminator
+  // (read/write/delete) and a `content_hash` (write-time tamper-evidence) to
+  // defence_audit, a `content_hash` to memories, and an index on memories.source
+  // for revoke-by-source. Existing rows keep operation/content_hash NULL (legacy,
+  // unclassifiable). Fresh installs get these from schema.sql / inline-schema.ts.
+  try {
+    const auditCols = database.prepare("PRAGMA table_info(defence_audit)").all() as { name: string }[];
+    if (auditCols.length > 0) {
+      const auditColNames = new Set(auditCols.map((c) => c.name));
+      if (!auditColNames.has('operation')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN operation TEXT');
+        database.exec('CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation)');
+      }
+      if (!auditColNames.has('content_hash')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN content_hash TEXT');
+      }
+    }
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'defence_audit provenance columns (operation, content_hash)');
+  }
+
+  if (!columnNames.has('content_hash')) {
+    database.exec('ALTER TABLE memories ADD COLUMN content_hash TEXT');
+  }
+  try {
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)');
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'memories content_hash/source indexes');
+  }
 }

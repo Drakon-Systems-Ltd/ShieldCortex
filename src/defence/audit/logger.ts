@@ -18,12 +18,12 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
     const stmt = db.prepare(`
       INSERT INTO defence_audit (
         memory_id, project, timestamp, source_type, source_identifier,
-        trust_score, sensitivity_level, firewall_result,
+        trust_score, sensitivity_level, firewall_result, operation, content_hash,
         anomaly_score, threat_indicators, blocked_patterns,
         reason, fragmentation_score, pipeline_duration_ms
       ) VALUES (
         @memory_id, @project, @timestamp, @source_type, @source_identifier,
-        @trust_score, @sensitivity_level, @firewall_result,
+        @trust_score, @sensitivity_level, @firewall_result, @operation, @content_hash,
         @anomaly_score, @threat_indicators, @blocked_patterns,
         @reason, @fragmentation_score, @pipeline_duration_ms
       )
@@ -38,6 +38,8 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
       trust_score: entry.trust_score,
       sensitivity_level: entry.sensitivity_level,
       firewall_result: entry.firewall_result,
+      operation: entry.operation ?? null,
+      content_hash: entry.content_hash ?? null,
       anomaly_score: entry.anomaly_score ?? 0,
       threat_indicators: entry.threat_indicators ?? '[]',
       blocked_patterns: entry.blocked_patterns ?? '[]',

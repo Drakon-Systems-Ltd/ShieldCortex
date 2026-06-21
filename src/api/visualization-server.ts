@@ -217,6 +217,7 @@ export function handleV1Scan(req: Request, res: Response): void {
           trust_score: 0,
           sensitivity_level: 'RESTRICTED',
           firewall_result: 'BLOCK',
+          operation: 'write',
           anomaly_score: 0.5,
           threat_indicators: '["config_tampering"]',
           blocked_patterns: '[]',

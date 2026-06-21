@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS memories (
   trust_score REAL DEFAULT 1.0,
   sensitivity_level TEXT DEFAULT 'INTERNAL',
   source TEXT DEFAULT 'user:direct',
+  content_hash TEXT,
   status TEXT DEFAULT 'active' CHECK(status IN ('active', 'archived', 'suppressed', 'canonical')),
   pinned INTEGER DEFAULT 0,
   reviewed_at TIMESTAMP,
@@ -85,6 +86,8 @@ CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
 CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_source_kind ON memories(source_kind);
+CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
+CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
 
 -- Session tracking for consolidation
 CREATE TABLE IF NOT EXISTS sessions (
@@ -214,6 +217,8 @@ CREATE TABLE IF NOT EXISTS defence_audit (
   trust_score REAL NOT NULL,
   sensitivity_level TEXT NOT NULL DEFAULT 'INTERNAL',
   firewall_result TEXT NOT NULL CHECK(firewall_result IN ('ALLOW', 'BLOCK', 'QUARANTINE')),
+  operation TEXT,                       -- provenance ledger: 'read' | 'write' | 'delete' (NULL on legacy rows)
+  content_hash TEXT,                    -- SHA-256 of content at write time (tamper-evidence)
   anomaly_score REAL DEFAULT 0.0,
   threat_indicators TEXT DEFAULT '[]',  -- JSON array of ThreatIndicator strings
   blocked_patterns TEXT DEFAULT '[]',   -- JSON array of matched patterns
@@ -228,6 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON defence_audit(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
 CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
 CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
+CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation);
 
 -- Defence: cumulative audit aggregate (single row, id=1). Retention purges roll
 -- the to-be-deleted rows' lifetime-stat contributions into this row BEFORE

@@ -92,6 +92,10 @@ export function queryAuditLogs(options: AuditQueryOptions = {}): AuditEntry[] {
     conditions.push('da.firewall_result = @firewallResult');
     params.firewallResult = options.firewallResult;
   }
+  if (options.operation) {
+    conditions.push('da.operation = @operation');
+    params.operation = options.operation;
+  }
   if (options.source) {
     conditions.push('da.source_type = @source');
     params.source = options.source;

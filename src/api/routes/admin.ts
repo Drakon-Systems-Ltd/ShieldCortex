@@ -129,6 +129,7 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
       if (req.query.endTime) options.endTime = req.query.endTime;
       if (req.query.source) options.source = req.query.source;
       if (req.query.firewallResult) options.firewallResult = req.query.firewallResult;
+      if (req.query.operation) options.operation = req.query.operation as string;
       if (req.query.limit) options.limit = parseInt(req.query.limit as string, 10);
       if (req.query.project) options.project = req.query.project as string;
 

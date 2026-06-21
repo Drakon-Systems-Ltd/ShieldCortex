@@ -23,7 +23,7 @@ import { analyzeFirewall } from './firewall/index.js';
 import { classifySensitivity } from './sensitivity/index.js';
 import { analyzeFragmentation } from './fragmentation/index.js';
 import { scanForCredentials, type CredentialScanResult } from './credential-leak/index.js';
-import { logAudit } from './audit/index.js';
+import { logAudit, createContentHash } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
 import { syncToCloud } from '../cloud/sync.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
@@ -234,6 +234,8 @@ export function runDefencePipeline(
       trust_score: trust.score,
       sensitivity_level: sensitivity.level,
       firewall_result: firewall.result,
+      operation: 'write',
+      content_hash: createContentHash(content),
       anomaly_score: firewall.anomalyScore,
       threat_indicators: JSON.stringify(firewall.threatIndicators),
       blocked_patterns: JSON.stringify(firewall.blockedPatterns),
@@ -319,6 +321,7 @@ export function runDefencePipeline(
       trust_score: 0,
       sensitivity_level: 'RESTRICTED',
       firewall_result: 'BLOCK',
+      operation: 'write',
       anomaly_score: 1.0,
       threat_indicators: '["pipeline_error"]',
       blocked_patterns: '[]',

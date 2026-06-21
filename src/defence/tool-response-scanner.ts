@@ -268,6 +268,7 @@ export function scanToolResponse(
         trust_score: 0.5,
         sensitivity_level: (credentials.leaked || decodedCredentialLeak) ? 'CONFIDENTIAL' : 'PUBLIC',
         firewall_result: firewallResult,
+        operation: 'read',
         anomaly_score: anomalyScore,
         threat_indicators: JSON.stringify(threatIndicators),
         blocked_patterns: JSON.stringify(blockedPatterns),

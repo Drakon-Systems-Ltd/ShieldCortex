@@ -5,7 +5,7 @@
  */
 
 import { z } from 'zod';
-import { searchMemories, recallWithEmbeddings, accessMemory, getRecentMemories, getHighPriorityMemories, getRelatedMemories } from '../memory/store.js';
+import { searchMemories, recallWithEmbeddings, accessMemory, getRecentMemories, getHighPriorityMemories, getRelatedMemories, logAllowedRead } from '../memory/store.js';
 import { formatTimeSinceAccess } from '../memory/decay.js';
 import { Memory, SearchResult } from '../memory/types.js';
 import { MemoryNotFoundError, formatErrorForMcp } from '../errors.js';
@@ -138,6 +138,9 @@ export async function executeRecall(input: RecallInput): Promise<{
       return m;
     });
 
+    // Provenance ledger: one allowed-read row per recall call (not per memory).
+    if (source) logAllowedRead(source, `recall:${input.mode}`, memories.map(m => m.id), projectFilter);
+
     return {
       success: true,
       memories,
@@ -233,6 +236,7 @@ export function executeGetMemory(input: { id: number; source?: DefenceSource }):
         error: error.toUserMessage(),
       };
     }
+    if (input.source) logAllowedRead(input.source, 'get_memory', [allowed.id], allowed.project ?? null);
     return { success: true, memory: allowed };
   } catch (error) {
     return {
@@ -258,6 +262,9 @@ export function executeGetRelated(input: { id: number; source?: DefenceSource })
     const allowedIds = new Set(
       guardReadMemories(related.map((r) => r.memory), input.source).map((m) => m.id),
     );
+    if (input.source && allowedIds.size > 0) {
+      logAllowedRead(input.source, 'get_related', [...allowedIds]);
+    }
     return { success: true, related: related.filter((r) => allowedIds.has(r.memory.id)) };
   } catch (error) {
     return {

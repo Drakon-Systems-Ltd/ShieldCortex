@@ -17,7 +17,7 @@ import {
   exportMemories,
   importMemories,
 } from '../memory/consolidate.js';
-import { getMemoryStats, getProjectMemories } from '../memory/store.js';
+import { getMemoryStats, getProjectMemories, logAllowedRead } from '../memory/store.js';
 import { getSalienceDistribution, type SalienceDistribution } from '../memory/metrics.js';
 import { getDatabase } from '../database/init.js';
 import { Memory, ContextSummary, ConsolidationResult } from '../memory/types.js';
@@ -89,6 +89,17 @@ export async function executeGetContext(input: GetContextInput): Promise<{
           ).join('\n');
         }
         break;
+    }
+
+    // Provenance ledger: one allowed-read row per get_context call, covering
+    // every memory surfaced into the context.
+    const source = input.source as DefenceSource | undefined;
+    if (source) {
+      const surfacedIds = [
+        ...summary.recentMemories, ...summary.keyDecisions,
+        ...summary.activePatterns, ...summary.pendingItems, ...relevantMemories,
+      ].map(m => m.id);
+      logAllowedRead(source, 'get_context', [...new Set(surfacedIds)], projectFilter);
     }
 
     return {
@@ -356,7 +367,11 @@ export function executeExport(input: { project?: string; source?: DefenceSource 
 
     // Read ACL: filter the bulk dump to rows this caller may read.
     const data = exportMemories(projectFilter, input.source);
-    const memories = JSON.parse(data);
+    const memories = JSON.parse(data) as Array<{ id: number }>;
+    // Provenance ledger: a bulk export is the highest-value read to audit.
+    if (input.source) {
+      logAllowedRead(input.source, 'export_memories', memories.map(m => m.id), projectFilter);
+    }
     return {
       success: true,
       data,

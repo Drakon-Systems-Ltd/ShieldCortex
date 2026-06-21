@@ -44,10 +44,10 @@ import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { syncGraphDeleteForMemoryToCloud, syncGraphForMemoryToCloud } from '../cloud/graph-sync.js';
 import { syncMemoryDeleteToCloud, syncMemoryUpsertToCloud } from '../cloud/memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
-import type { DefenceSource, DefencePipelineResult } from '../defence/types.js';
+import type { DefenceSource, DefencePipelineResult, AuditOperation } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
-import { logAudit } from '../defence/audit/logger.js';
+import { logAudit, createContentHash } from '../defence/audit/logger.js';
 import { dispatchWebhook } from '../events/webhooks.js';
 import { safeJsonParse } from './fts.js';
 // Internal use of the link API. links.ts also imports from store.ts (getMemoryById,
@@ -280,7 +280,12 @@ function checkRateLimit(source: DefenceSource): boolean {
 
 // Exported because search-recall.ts also calls logAccessDenial inside its
 // post-search ACL filter (cycle artifact, not intended public API).
-export function logAccessDenial(memoryId: number, source: DefenceSource, reason: string): void {
+export function logAccessDenial(
+  memoryId: number,
+  source: DefenceSource,
+  reason: string,
+  operation: AuditOperation = 'read',
+): void {
   const trust = scoreSource(source).score;
   logAudit({
     memory_id: memoryId,
@@ -291,12 +296,71 @@ export function logAccessDenial(memoryId: number, source: DefenceSource, reason:
     trust_score: trust,
     sensitivity_level: 'INTERNAL',
     firewall_result: 'BLOCK',
+    operation,
     anomaly_score: 0,
     threat_indicators: '[]',
     blocked_patterns: '[]',
     reason: `Access denied: ${reason}`,
     fragmentation_score: null,
     pipeline_duration_ms: 0,
+  });
+}
+
+/**
+ * Provenance ledger: record an ALLOWED read. Emitted ONCE per tool call (not per
+ * row) to keep the audit table bounded — recall returns up to 50 rows, so a
+ * per-row emit would flood it. memory_id carries the single id for single-target
+ * reads; the full id list (capped) goes in blocked_patterns for forensics.
+ */
+export function logAllowedRead(
+  source: DefenceSource,
+  tool: string,
+  memoryIds: number[],
+  project?: string | null,
+): void {
+  if (memoryIds.length === 0) return;
+  logAudit({
+    memory_id: memoryIds.length === 1 ? memoryIds[0] : null,
+    project: project ?? null,
+    timestamp: new Date().toISOString(),
+    source_type: source.type,
+    source_identifier: source.identifier,
+    trust_score: scoreSource(source).score,
+    sensitivity_level: 'INTERNAL',
+    firewall_result: 'ALLOW',
+    operation: 'read',
+    anomaly_score: 0,
+    threat_indicators: '[]',
+    blocked_patterns: JSON.stringify(memoryIds.slice(0, 50)),
+    reason: `read ${memoryIds.length} memor${memoryIds.length === 1 ? 'y' : 'ies'} via ${tool}`,
+    fragmentation_score: null,
+    pipeline_duration_ms: null,
+  });
+}
+
+/**
+ * Provenance ledger: record an ALLOWED delete (one row per deleted memory).
+ * memory_id is NULL by design — the row is emitted after the DELETE, and the
+ * audit.memory_id FK is ON DELETE SET NULL, so a live reference can't survive.
+ * The deleted id is preserved in `reason` + `blocked_patterns` for forensics.
+ */
+export function logAllowedDelete(memoryId: number, source: DefenceSource, project?: string | null): void {
+  logAudit({
+    memory_id: null,
+    project: project ?? null,
+    timestamp: new Date().toISOString(),
+    source_type: source.type,
+    source_identifier: source.identifier,
+    trust_score: scoreSource(source).score,
+    sensitivity_level: 'INTERNAL',
+    firewall_result: 'ALLOW',
+    operation: 'delete',
+    anomaly_score: 0,
+    threat_indicators: '[]',
+    blocked_patterns: JSON.stringify([memoryId]),
+    reason: `deleted memory #${memoryId}`,
+    fragmentation_score: null,
+    pipeline_duration_ms: null,
   });
 }
 
@@ -392,6 +456,7 @@ export function addMemory(
       trust_score: scoreSource(source).score,
       sensitivity_level: 'INTERNAL',
       firewall_result: 'BLOCK',
+      operation: 'write',
       anomaly_score: 1.0,
       threat_indicators: JSON.stringify(['rate_limit_exceeded']),
       blocked_patterns: '[]',
@@ -519,8 +584,8 @@ export function addMemory(
     // defenceResult is always set now (every write is scanned), so always stamp
     // the pipeline's real trust + sensitivity alongside the resolved source —
     // no source-less branch can default to trust 1.0 / unscanned INTERNAL.
-    db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ? WHERE id = ?`)
-      .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, result.lastInsertRowid);
+    db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ?, content_hash = ? WHERE id = ?`)
+      .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(truncationResult.content), result.lastInsertRowid);
 
     return result.lastInsertRowid as number;
   })();
@@ -1063,7 +1128,7 @@ export function deleteMemory(id: number, source?: DefenceSource): boolean {
         'delete',
       );
       if (!policy.canDelete) {
-        logAccessDenial(id, source, policy.reason);
+        logAccessDenial(id, source, policy.reason, 'delete');
         return false;
       }
     }
@@ -1084,6 +1149,12 @@ export function deleteMemory(id: number, source?: DefenceSource): boolean {
 
   // Emit event for real-time dashboard (in-process)
   if (result.changes > 0 && memory) {
+    // Provenance ledger: record the allowed delete (one row per memory) when the
+    // caller is attributed. Internal source-less deletes (merge/consolidation)
+    // are machinery, not user actions, so they're not audited here.
+    if (source) {
+      logAllowedDelete(id, source, (memory.project as string | undefined) ?? null);
+    }
     if (isFeatureEnabled('cloud_sync')) {
       syncMemoryDeleteToCloud(memory);
       syncGraphDeleteForMemoryToCloud(memory);
