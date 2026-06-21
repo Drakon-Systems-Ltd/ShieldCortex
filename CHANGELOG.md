@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.38.0] - 2026-06-21
+
+**Read-boundary completion: enforce memory access control on the MCP read tools.** v4.36.0 filtered recalled memory in the two prompt hooks, but the MCP read *tools* still returned rows without applying the access-control engine consistently — so a low-trust or compromised caller could pull RESTRICTED or other-source memories verbatim by calling the tools directly. This closes that path across every read surface, adversarially reviewed. No breaking change for normal use (a Claude Code session resolves to a high-trust source, so the guard is a no-op); only genuinely untrusted callers are restricted.
+
+### Fixed
+
+- **MCP read tools now enforce read access control.** `get_memory` (direct-ID fetch), `get_related`, and `export_memories` (bulk dump) previously applied no per-row ACL; `get_context` and `recall` are covered too. A new read guard drops quarantined rows always and, for an untrusted/non-owner caller, drops rows they may not read (RESTRICTED credential isolation below trust 0.7, own-only below 0.5). A denied `get_memory` returns not-found (never the content); a denied bulk export omits the row.
+- **Shared-context surfaces never surface RESTRICTED.** `get_context`, `start_session`, the `memory://recent|important|context` resources, the `restore_context` prompt, and `detect_contradictions` now strip RESTRICTED and quarantined memories for *every* caller (matching the prompt hooks) — while still sharing INTERNAL project context, so collaborating sub-agents aren't blacked out. (`start_session`, the resources, the prompt, and contradictions previously had no guard at all.)
+
+### Notes
+
+- Two-mode policy: shared-context bootstrap surfaces use a sensitivity guard (no RESTRICTED to anyone); explicit fetch/bulk tools (`get_memory`/`get_related`/`export_memories`/`recall`) use full per-caller access control (the owner retains full access to their own RESTRICTED memories via `get_memory`).
+- The HTTP visualization API (port 3001, owner-localhost) still returns content without per-row ACL — tracked as a boundary-hardening follow-up, along with the provenance ledger, the persisted tool-output scan, MCP cross-agent identity, the semantic layer on the sync path, and PII classification.
+
 ## [4.37.0] - 2026-06-19
 
 **Tool-output firewall: enforce mode now actually enforces.** ShieldCortex already scanned the output of MCP read tools for injection, credential leaks, encoded payloads and markdown-image exfiltration — but "enforce" mode only logged a verdict and appended a warning; the threatening bytes still reached the agent verbatim. Enforce now changes what the agent receives. Free for all tiers — it's a security control, not a paywalled feature. Adversarially reviewed (a 40-agent pass caught and fixed a real exfil bypass before release). No breaking changes; advisory remains the default.
