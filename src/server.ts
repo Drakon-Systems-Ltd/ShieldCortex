@@ -338,6 +338,8 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       confirm: z.boolean().optional().default(false)
         .describe('Confirm bulk delete'),
       source: sourceParam,
+      fromSource: z.string().optional()
+        .describe('Revoke-by-source: delete all memories written by this source ("type:identifier", or "type:*" for a whole type). Authorised by the trust-hierarchy revoke ACL (own the source or outrank it). Use project:"*" to revoke across all projects.'),
     },
     { title: 'Delete Memories', readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     withKillSwitchGuard('memory_write', async (args) => {

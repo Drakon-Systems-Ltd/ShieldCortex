@@ -1152,17 +1152,23 @@ export function mergeMemories(
 /**
  * Delete a memory
  */
-export function deleteMemory(id: number, source?: DefenceSource): boolean {
+export function deleteMemory(
+  id: number,
+  source?: DefenceSource,
+  opts?: { mode?: 'delete' | 'revoke' },
+): boolean {
   const db = getDatabase();
+  const aclOp = opts?.mode ?? 'delete';
 
-  // ACCESS CONTROL: Check delete permission
+  // ACCESS CONTROL: Check delete permission. mode 'revoke' uses the
+  // trust-hierarchy rule (own OR outrank); 'delete' (default) stays own-only.
   if (source) {
     const row = db.prepare('SELECT id, source, sensitivity_level FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (row) {
       const policy = checkAccess(
         { id: row.id as number, source: row.source as string | null, sensitivity_level: row.sensitivity_level as string | null },
         source,
-        'delete',
+        aclOp,
       );
       if (!policy.canDelete) {
         logAccessDenial(id, source, policy.reason, 'delete');
