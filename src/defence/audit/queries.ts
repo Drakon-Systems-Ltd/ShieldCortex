@@ -30,7 +30,7 @@ export interface AgentTimelinePoint {
 export interface AuditQueryOptions {
   startTime?: string;
   endTime?: string;
-  operation?: 'write' | 'read' | 'delete' | 'update';
+  operation?: 'write' | 'read' | 'delete' | 'update' | 'revoke';
   source?: string;
   firewallResult?: FirewallResult;
   memoryId?: number;

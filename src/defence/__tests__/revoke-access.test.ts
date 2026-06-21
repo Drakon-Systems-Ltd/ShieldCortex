@@ -42,4 +42,19 @@ describe("checkAccess('revoke')", () => {
     // HIGH does not own agent:agent-spawned → a plain delete is still denied
     expect(checkAccess({ id: 1, source: 'agent:agent-spawned' }, HIGH, 'delete').canDelete).toBe(false);
   });
+
+  it('fail-safe: unattributed (null) target memories are NOT revocable, even by high-trust', () => {
+    expect(checkAccess({ id: 1, source: null }, HIGH, 'revoke').canDelete).toBe(false);
+    expect(checkAccess({ id: 1, source: '__system:unattributed' }, HIGH, 'revoke').canDelete).toBe(false);
+  });
+
+  it('trust floor boundary: exactly-0.7 caller outranks a lower target but not an equal/higher one', () => {
+    const AT_0_7: DefenceSource = { type: 'api', identifier: 'dashboard' }; // exactly 0.7
+    // 0.7 caller revoking a NON-OWNED 0.4 (file:import) target → allowed (0.7 >= 0.7 and 0.7 > 0.4)
+    expect(checkAccess({ id: 1, source: 'file:import' }, AT_0_7, 'revoke').canDelete).toBe(true);
+    // 0.7 caller revoking a NON-OWNED 0.8 (hook) target → 0.7 not > 0.8 → denied
+    expect(checkAccess({ id: 1, source: 'hook:session-end' }, AT_0_7, 'revoke').canDelete).toBe(false);
+    // a sub-0.7 caller (file:import 0.4) revoking a lower non-owned target → below floor → denied
+    expect(checkAccess({ id: 1, source: 'web:unattributed' }, MID, 'revoke').canDelete).toBe(false);
+  });
 });

@@ -1074,6 +1074,24 @@ export function setToolResponseScanConfig(updates: Partial<ToolResponseScanConfi
   });
 }
 
+// ── Revoke-by-source gate ─────────────────────────────
+
+/**
+ * revoke-by-source (bulk delete all memories from a source) is a destructive
+ * mass-delete primitive. Because a prompt-injection adversary runs AS the agent
+ * at the agent's own trust, no in-band (trust) check can distinguish "the human
+ * asked" from "an injection asked". So it is gated OFF by default and can only
+ * be enabled by an out-of-band human action (editing config / the CLI flag) that
+ * a hijacked agent cannot perform.
+ */
+export function isRevokeBySourceEnabled(): boolean {
+  return readRawConfig().allowRevokeBySource === true;
+}
+
+export function setRevokeBySourceEnabled(enabled: boolean): void {
+  mutateRawConfig((raw) => { raw.allowRevokeBySource = enabled; });
+}
+
 // ── Device Identity ────────────────────────────────────
 
 /**

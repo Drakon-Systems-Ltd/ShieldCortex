@@ -13,7 +13,15 @@ import {
   formatErrorForMcp,
 } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
+import { isRevokeBySourceEnabled } from '../cloud/config.js';
 import type { DefenceSource } from '../defence/types.js';
+
+/**
+ * Upper bound on rows a single revoke-by-source call may delete. Caps the blast
+ * radius of the mass-delete primitive — a larger match must be narrowed (by
+ * project/category/etc.) or paged.
+ */
+const MAX_REVOKE_ROWS = 500;
 
 // Input schema for the forget tool
 export const forgetSchema = z.object({
@@ -54,6 +62,16 @@ export async function executeForget(input: ForgetInput): Promise<{
 }> {
   try {
     const db = getDatabase();
+
+    // Revoke-by-source gate: a destructive mass-delete primitive that a hijacked
+    // agent must not be able to invoke. OFF by default; only an out-of-band human
+    // action (`shieldcortex config --allow-revoke-by-source`) enables it.
+    if (input.fromSource !== undefined && !isRevokeBySourceEnabled()) {
+      return {
+        success: false,
+        error: 'revoke-by-source is disabled. Enable it deliberately with `shieldcortex config --allow-revoke-by-source` (an out-of-band action), then re-run.',
+      };
+    }
 
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
@@ -170,6 +188,16 @@ export async function executeForget(input: ForgetInput): Promise<{
 
     if (affected.length === 0) {
       return { success: true, deleted: 0, memories: [] };
+    }
+
+    // Blast-radius cap on revoke-by-source: refuse a single call that would
+    // delete more than MAX_REVOKE_ROWS — narrow it (by project/category/etc.).
+    if (input.fromSource !== undefined && affected.length > MAX_REVOKE_ROWS) {
+      return {
+        success: false,
+        wouldDelete: affected.length,
+        error: `revoke-by-source matched ${affected.length} memories (cap ${MAX_REVOKE_ROWS}). Narrow the scope (project/category/query) and re-run.`,
+      };
     }
 
     // Dry run - just show what would be deleted

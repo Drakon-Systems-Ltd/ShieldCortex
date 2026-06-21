@@ -9,6 +9,7 @@ import { initDatabase, closeDatabase } from '../database/init.js';
 import { addMemory, getMemoryById } from '../memory/store.js';
 import { executeForget } from '../tools/forget.js';
 import { queryAuditLogs } from '../defence/audit/queries.js';
+import { setRevokeBySourceEnabled } from '../cloud/config.js';
 import type { DefenceSource } from '../defence/types.js';
 
 const PROJECT = 'revoke-test';
@@ -22,8 +23,24 @@ function seed(source: string, title: string): number {
 const forget = (args: Record<string, unknown>) =>
   executeForget(args as Parameters<typeof executeForget>[0]);
 
-beforeEach(() => initDatabase(':memory:'));
-afterEach(() => closeDatabase());
+beforeEach(() => {
+  initDatabase(':memory:');
+  setRevokeBySourceEnabled(true); // mechanics tests need the gate ON
+});
+afterEach(() => {
+  setRevokeBySourceEnabled(false); // contain the flag (per-worker config sandbox)
+  closeDatabase();
+});
+
+describe('revoke-by-source gate', () => {
+  it('rejects fromSource when the gate is OFF (default)', async () => {
+    setRevokeBySourceEnabled(false);
+    seed('agent:agent-spawned', 'should survive while gate off');
+    const res = await forget({ fromSource: 'agent:agent-spawned', confirm: true, source: HIGH, project: '*' });
+    expect(res.success).toBe(false);
+    expect(res.error ?? '').toMatch(/disabled/i);
+  });
+});
 
 describe('revoke-by-source', () => {
   it('high-trust caller revokes a lower-trust source; outranked memories deleted, others preserved', async () => {
@@ -38,9 +55,9 @@ describe('revoke-by-source', () => {
     expect(getMemoryById(a2)).toBeNull();
     expect(getMemoryById(own)).not.toBeNull(); // different source — untouched
 
-    // provenance: the revoke produced ALLOW delete-audit rows
-    const deletes = queryAuditLogs({ operation: 'delete', limit: 50 });
-    expect(deletes.filter(r => r.firewall_result === 'ALLOW').length).toBeGreaterThanOrEqual(2);
+    // provenance: the revoke produced ALLOW rows tagged operation='revoke'
+    const revokes = queryAuditLogs({ operation: 'revoke', limit: 50 });
+    expect(revokes.filter(r => r.firewall_result === 'ALLOW').length).toBeGreaterThanOrEqual(2);
   });
 
   it('owner can revoke their own source', async () => {
@@ -78,5 +95,21 @@ describe('revoke-by-source', () => {
     seed('cli:mcp', 'should survive');
     const res = await forget({ fromSource: '*', confirm: true, source: HIGH, project: '*' });
     expect(res.success).toBe(false);
+  });
+
+  it('dry-run previews without deleting', async () => {
+    const id = seed('agent:agent-spawned', 'dry-run target');
+    const res = await forget({ fromSource: 'agent:agent-spawned', dryRun: true, source: HIGH, project: '*' });
+    expect(res.wouldDelete).toBe(1);
+    expect(res.deleted).toBeUndefined();
+    expect(getMemoryById(id)).not.toBeNull(); // untouched
+  });
+
+  it('requires confirm for a multi-row revoke', async () => {
+    seed('agent:agent-spawned', 'r1');
+    seed('agent:agent-spawned', 'r2');
+    const res = await forget({ fromSource: 'agent:agent-spawned', source: HIGH, project: '*' }); // no confirm
+    expect(res.success).toBe(false);
+    expect(res.wouldDelete).toBe(2);
   });
 });

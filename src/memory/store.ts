@@ -344,7 +344,12 @@ export function logAllowedRead(
  * audit.memory_id FK is ON DELETE SET NULL, so a live reference can't survive.
  * The deleted id is preserved in `reason` + `blocked_patterns` for forensics.
  */
-export function logAllowedDelete(memoryId: number, source: DefenceSource, project?: string | null): void {
+export function logAllowedDelete(
+  memoryId: number,
+  source: DefenceSource,
+  project?: string | null,
+  operation: AuditOperation = 'delete',
+): void {
   logAudit({
     memory_id: null,
     project: project ?? null,
@@ -354,7 +359,7 @@ export function logAllowedDelete(memoryId: number, source: DefenceSource, projec
     trust_score: scoreSource(source).score,
     sensitivity_level: 'INTERNAL',
     firewall_result: 'ALLOW',
-    operation: 'delete',
+    operation,
     anomaly_score: 0,
     threat_indicators: '[]',
     blocked_patterns: JSON.stringify([memoryId]),
@@ -1171,7 +1176,7 @@ export function deleteMemory(
         aclOp,
       );
       if (!policy.canDelete) {
-        logAccessDenial(id, source, policy.reason, 'delete');
+        logAccessDenial(id, source, policy.reason, aclOp);
         return false;
       }
     }
@@ -1196,7 +1201,7 @@ export function deleteMemory(
     // caller is attributed. Internal source-less deletes (merge/consolidation)
     // are machinery, not user actions, so they're not audited here.
     if (source) {
-      logAllowedDelete(id, source, (memory.project as string | undefined) ?? null);
+      logAllowedDelete(id, source, (memory.project as string | undefined) ?? null, aclOp);
     }
     if (isFeatureEnabled('cloud_sync')) {
       syncMemoryDeleteToCloud(memory);

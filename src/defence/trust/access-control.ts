@@ -96,14 +96,21 @@ export function checkAccess(
     if (isOwner && trust >= 0.5) {
       return { canRead: true, canWrite: false, canDelete: true, writeRequiresQuarantine: false, reason: 'Owner revoke' };
     }
+    // Fail-safe: never mass-revoke unattributed / unclassifiable memories. They
+    // have no clear owner to outrank, and a 0-trust target would be outranked by
+    // any caller — so a high-trust caller must NOT be able to sweep null-source
+    // rows by source.
+    if (!memory.source || memorySource === '__system:unattributed') {
+      return deny('Revoke denied: unattributed memories cannot be revoked by source');
+    }
     const targetTrust = scoreSource(parseStoredSource(memorySource)).score;
-    if (trust >= 0.7 && trust > targetTrust) {
+    if (targetTrust > 0 && trust >= 0.7 && trust > targetTrust) {
       return {
         canRead: true, canWrite: false, canDelete: true, writeRequiresQuarantine: false,
         reason: `Trust-hierarchy revoke (caller ${trust.toFixed(2)} > target ${targetTrust.toFixed(2)})`,
       };
     }
-    return deny('Revoke denied: must own the source or outrank it (trust ≥0.7 and strictly > target source trust)');
+    return deny('Revoke denied: must own the source or outrank it (trust ≥0.7 and strictly > a known target source trust)');
   }
 
   return deny('Unknown operation');
