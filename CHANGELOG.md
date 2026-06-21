@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.39.0] - 2026-06-21
+
+**Provenance ledger: the audit log now records reads, writes, and deletes with a queryable operation type and write-time content hashes.** The defence audit previously captured only write scans and access *denials* — allowed reads and deletes were invisible, the advertised `operation` query filter did nothing, and content hashing was unused. This turns the audit into a real forensic ledger. Adversarially reviewed; safe schema migration for existing databases. No breaking changes.
+
+### Added
+
+- **`operation` discriminator on every audit row** (`read` / `write` / `delete` / `update`) — and the `operation` query filter now works end to end: the `audit_query` MCP tool, the `GET /v1/audit` HTTP route, and `queryAuditLogs` all filter by it (previously accepted and silently ignored). Legacy rows written before this column keep `operation = NULL` and are correctly excluded by an operation filter.
+- **Allowed reads and deletes are now audited.** A successful read emits one ledger row per tool call (`recall` / `get_memory` / `get_related` / `get_context` / `export_memories`) — not per memory, to keep the table bounded; a successful delete emits one row per memory. Combined with the existing denial logging, the ledger now covers the full read/write/delete lifecycle.
+- **`content_hash` (write-time tamper-evidence).** Every write records a SHA-256 of the content on both the memory row and the write-audit row; it is recomputed whenever a memory's content is edited (update / merge / enrich) so it never goes stale.
+
+### Fixed
+
+- **Dashboard / HTTP deletes are now on the ledger.** The dashboard `DELETE /api/memories/:id` (and the quarantine-then-delete path) previously deleted without attribution, leaving the most common human-initiated delete with no provenance row. They are now attributed and recorded.
+- **Audit retention protects forensic rows under size pressure.** The size-pressure purge previously evicted strictly by age, so a high volume of routine reads could push the oldest `BLOCK`/`QUARANTINE` threat records out from under the row cap. It now evicts low-value `ALLOW` read/delete rows first and only falls back to threat rows once those are exhausted.
+
+### Changed
+
+- **Skill card (`SKILL.md`) corrected for accuracy** (clears the static security-audit disclosure findings): described as an *enforcing* memory boundary rather than scan-only, the active-interception controls and the setup-time legacy-directory migration are now disclosed, and the version metadata is current.
+
+### Notes
+
+- Schema migration adds `defence_audit.operation` / `defence_audit.content_hash` / `memories.content_hash` (+ indexes) to existing databases via the guarded migration path; fresh installs get them from the canonical schema. Deferred follow-ups: revoke-by-source delete, a dashboard `operation` filter UI, and HTTP-API per-row read ACL.
+
 ## [4.38.0] - 2026-06-21
 
 **Read-boundary completion: enforce memory access control on the MCP read tools.** v4.36.0 filtered recalled memory in the two prompt hooks, but the MCP read *tools* still returned rows without applying the access-control engine consistently — so a low-trust or compromised caller could pull RESTRICTED or other-source memories verbatim by calling the tools directly. This closes that path across every read surface, adversarially reviewed. No breaking change for normal use (a Claude Code session resolves to a high-trust source, so the guard is a no-op); only genuinely untrusted callers are restricted.
