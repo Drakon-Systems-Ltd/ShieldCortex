@@ -707,7 +707,10 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
   }), (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id as string, 10);
-      const success = deleteMemory(id);
+      // Attribute the dashboard delete so it lands on the provenance ledger
+      // (the primary human-initiated delete — the source-less exemption is only
+      // for internal consolidate/merge machinery).
+      const success = deleteMemory(id, { type: 'api', identifier: `dashboard:memory-delete:${id}` });
       if (!success) {
         return res.status(404).json({ error: 'Memory not found' });
       }
@@ -1403,7 +1406,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         new Date().toISOString(),
       );
 
-      deleteMemory(id);
+      deleteMemory(id, { type: 'api', identifier: `dashboard:quarantine-delete:${id}` });
       res.json({ success: true, quarantined: id });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });

@@ -41,6 +41,7 @@ import {
 import { createMemoryLink } from './links.js';
 import type { DefenceSource } from '../defence/types.js';
 import { runDefencePipeline } from '../defence/index.js';
+import { createContentHash } from '../defence/audit/logger.js';
 
 // Enrichment text is recall-query / caller-derived (attacker-influenced); scan
 // it before persisting. Trust doesn't matter here (the row keeps its own) — we
@@ -269,13 +270,15 @@ export function enrichMemory(
     return { enriched: false, reason: `Enrichment blocked by defence: ${defenceResult.firewall.reason}` };
   }
 
-  // Update memory
+  // Update memory (recompute content_hash — the integrity snapshot must track
+  // the enriched content, not the pre-enrichment original).
   db.prepare(`
     UPDATE memories
     SET content = ?,
+        content_hash = ?,
         last_accessed = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(newContent, memoryId);
+  `).run(newContent, createContentHash(newContent), memoryId);
 
   // Update cooldown timestamp
   enrichmentTimestamps.set(memoryId, now);

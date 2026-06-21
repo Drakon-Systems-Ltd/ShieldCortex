@@ -806,7 +806,6 @@ export function runMigrations(database: Database.Database): void {
       const auditColNames = new Set(auditCols.map((c) => c.name));
       if (!auditColNames.has('operation')) {
         database.exec('ALTER TABLE defence_audit ADD COLUMN operation TEXT');
-        database.exec('CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation)');
       }
       if (!auditColNames.has('content_hash')) {
         database.exec('ALTER TABLE defence_audit ADD COLUMN content_hash TEXT');
@@ -819,10 +818,14 @@ export function runMigrations(database: Database.Database): void {
   if (!columnNames.has('content_hash')) {
     database.exec('ALTER TABLE memories ADD COLUMN content_hash TEXT');
   }
+  // Indexes in an unconditional, self-healing block: CREATE INDEX IF NOT EXISTS
+  // no-ops if the column already had its index, and back-fills it if the column
+  // exists without it (e.g. a column added by a prior partial run).
   try {
+    database.exec('CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation)');
     database.exec('CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)');
     database.exec('CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)');
   } catch (err) {
-    logIfUnexpectedDdlError(err, 'memories content_hash/source indexes');
+    logIfUnexpectedDdlError(err, 'provenance ledger indexes (audit operation, memories content_hash/source)');
   }
 }

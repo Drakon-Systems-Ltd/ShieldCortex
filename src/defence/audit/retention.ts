@@ -163,24 +163,35 @@ export function purgeAuditUnderSizePressure(
     const total = (db.prepare('SELECT COUNT(*) AS c FROM defence_audit').get() as { c: number }).c;
     if (total <= maxRows) return 0;
 
-    // Trim down to the cap by deleting the OLDEST rows. Find the cutoff id: keep
-    // the newest `maxRows` by timestamp, purge everything older.
-    const cutoffRow = db.prepare(`
-      SELECT timestamp FROM defence_audit
-      ORDER BY timestamp DESC
-      LIMIT 1 OFFSET ?
-    `).get(maxRows) as { timestamp: string } | undefined;
+    const over = total - maxRows;
 
-    if (!cutoffRow) return 0;
+    // Forensic-aware eviction: trim the `over` oldest rows, but evict
+    // LOW-VALUE provenance rows first (ALLOW reads/deletes — the high-volume,
+    // low-forensic-value entries) and only fall back to threat rows
+    // (BLOCK/QUARANTINE, or anything with threat_indicators) once the low-value
+    // rows are exhausted. Otherwise a flood of routine reads would push the
+    // oldest injection/credential-leak records out from under the row cap.
+    const ids = (db.prepare(`
+      SELECT id FROM defence_audit
+      ORDER BY
+        CASE WHEN firewall_result = 'ALLOW'
+                  AND operation IN ('read', 'delete')
+                  AND (threat_indicators IS NULL OR threat_indicators IN ('', '[]'))
+             THEN 0 ELSE 1 END ASC,
+        timestamp ASC
+      LIMIT ?
+    `).all(over) as { id: number }[]).map((r) => r.id);
 
-    const where = 'timestamp <= ?';
-    const params = [cutoffRow.timestamp];
+    if (ids.length === 0) return 0;
 
-    const delta = computeDelta(where, params);
+    const placeholders = ids.map(() => '?').join(',');
+    const where = `id IN (${placeholders})`;
+
+    const delta = computeDelta(where, ids);
     if (delta.total_scans === 0) return 0;
 
     rollIntoAggregate(delta);
-    const res = db.prepare(`DELETE FROM defence_audit WHERE ${where}`).run(...params);
+    const res = db.prepare(`DELETE FROM defence_audit WHERE ${where}`).run(...ids);
     return Number(res.changes ?? 0);
   })();
 }

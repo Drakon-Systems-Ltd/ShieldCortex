@@ -585,7 +585,10 @@ export function addMemory(
     // the pipeline's real trust + sensitivity alongside the resolved source —
     // no source-less branch can default to trust 1.0 / unscanned INTERNAL.
     db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ?, content_hash = ? WHERE id = ?`)
-      .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(truncationResult.content), result.lastInsertRowid);
+      // content_hash = SHA-256 of the SUBMITTED content (a write-time provenance
+      // snapshot), matching the write-audit row in pipeline.ts. Consistent for
+      // >10KB memories too (where the STORED content is truncated).
+      .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
 
     return result.lastInsertRowid as number;
   })();
@@ -903,6 +906,15 @@ export function updateMemory(
     fields.push('embedding = NULL');
   }
 
+  // STALENESS: content_hash is a write-time integrity snapshot. When content
+  // changes it must be recomputed in the SAME UPDATE — otherwise the stored hash
+  // refers to the old content and any tamper check false-positives on a
+  // legitimately-edited memory.
+  if (updates.content !== undefined) {
+    fields.push('content_hash = ?');
+    values.push(createContentHash(updates.content));
+  }
+
   if (fields.length === 0) return existing;
 
   values.push(id);
@@ -930,6 +942,29 @@ export function updateMemory(
     } catch (e) {
       console.error('[shieldcortex] Entity extraction refresh failed:', e);
     }
+  }
+
+  // Provenance ledger: a content/title change is an update-class mutation.
+  if (updates.content !== undefined || updates.title !== undefined) {
+    const changed = [updates.title !== undefined ? 'title' : null, updates.content !== undefined ? 'content' : null].filter(Boolean).join('+');
+    logAudit({
+      memory_id: id,
+      project: updatedMemory.project ?? null,
+      timestamp: new Date().toISOString(),
+      source_type: 'cli',
+      source_identifier: 'memory-update',
+      trust_score: updatedMemory.trustScore ?? 1,
+      sensitivity_level: updatedMemory.sensitivityLevel ?? 'INTERNAL',
+      firewall_result: 'ALLOW',
+      operation: 'update',
+      content_hash: updates.content !== undefined ? createContentHash(updates.content) : null,
+      anomaly_score: 0,
+      threat_indicators: '[]',
+      blocked_patterns: '[]',
+      reason: `updated memory #${id} (${changed})`,
+      fragmentation_score: null,
+      pipeline_duration_ms: null,
+    });
   }
 
   // Emit event for real-time dashboard (in-process)
@@ -1043,6 +1078,7 @@ export function mergeMemories(
     db.prepare(`
       UPDATE memories
       SET content = ?,
+          content_hash = ?,
           tags = ?,
           salience = ?,
           project = ?,
@@ -1063,6 +1099,7 @@ export function mergeMemories(
       WHERE id = ?
     `).run(
       mergedContent,
+      createContentHash(mergedContent),
       JSON.stringify(mergedTags),
       mergedSalience,
       mergedProject,
