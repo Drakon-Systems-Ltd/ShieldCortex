@@ -467,6 +467,66 @@ describe('API route mutation regressions', () => {
     });
   });
 
+  describe('/api/memories/:id content placeholder guard', () => {
+    it('never overwrites real content with the RESTRICTED redaction placeholder', async () => {
+      const initModule = await import('../../database/init.js');
+      const storeModule = await import('../../memory/store.js');
+      const routeModule = await import('../routes/memories.js');
+      const { RESTRICTED_CONTENT_PLACEHOLDER } = await import('../../defence/trust/read-guard.js');
+      initModule.initDatabase(':memory:');
+
+      const memory = storeModule.addMemory({
+        title: 'Secret holder',
+        content: 'the real secret value',
+        project: 'ShieldCortex-Project',
+      });
+
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.patch.get('/api/memories/:id');
+      expect(handlers).toBeDefined();
+
+      const res = await invokeHandlers(handlers!, {
+        params: { id: String(memory.id) },
+        body: { content: RESTRICTED_CONTENT_PLACEHOLDER, title: 'Renamed' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const updated = storeModule.getMemoryById(memory.id);
+      // The title edit lands, but the placeholder must NOT overwrite the real content.
+      expect(updated?.title).toBe('Renamed');
+      expect(updated?.content).toBe('the real secret value');
+    });
+
+    it('persists a genuine content edit', async () => {
+      const initModule = await import('../../database/init.js');
+      const storeModule = await import('../../memory/store.js');
+      const routeModule = await import('../routes/memories.js');
+      initModule.initDatabase(':memory:');
+
+      const memory = storeModule.addMemory({ title: 'Doc', content: 'old', project: 'ShieldCortex-Project' });
+
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+
+      const handlers = routes.patch.get('/api/memories/:id');
+      const res = await invokeHandlers(handlers!, {
+        params: { id: String(memory.id) },
+        body: { content: 'new real content' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(storeModule.getMemoryById(memory.id)?.content).toBe('new real content');
+    });
+  });
+
   describe('/api/memories/prune', () => {
     it('rejects salienceLte outside [0, 1]', async () => {
       const initModule = await import('../../database/init.js');

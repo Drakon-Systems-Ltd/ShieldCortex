@@ -191,6 +191,8 @@ export function emitMemoryUpdated(memory: Memory): void {
 }
 
 export function emitMemoryDeleted(memoryId: number, title: string): void {
+  // The bare `title` is masked centrally when broadcast (deepRedactRestrictedContent
+  // scrubs every title-keyed string), so no per-emit redaction is needed here.
   memoryEvents.emit('memory_deleted', { memoryId, title });
 }
 

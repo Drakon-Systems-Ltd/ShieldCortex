@@ -17,6 +17,8 @@ import { getDatabase, initDatabase, checkpointWal } from '../database/init.js';
 import { MemoryConfig, DEFAULT_CONFIG } from '../memory/types.js';
 import { getRecentMemories, getMemoryStats, rowToMemory, updateDecayScores } from '../memory/store.js';
 import { calculateDecayedScore } from '../memory/decay.js';
+import { deepRedactRestrictedContent, redactRestrictedForDisplay } from '../defence/trust/read-guard.js';
+import { redactRestrictedResponses } from './redact-response.js';
 import {
   memoryEvents,
   MemoryEvent,
@@ -351,6 +353,12 @@ export function startVisualizationServer(dbPath?: string): void {
     }
     next();
   });
+
+  // ── RESTRICTED content redaction ────────────────────────
+  // Deep-redact RESTRICTED (credential-class) memory content from every JSON
+  // response — the dashboard is a browser surface, so the secret must never reach
+  // the DOM. The row stays visible so the owner can manage it. See the middleware.
+  app.use(redactRestrictedResponses);
 
   // Token handshake — dashboard claims on load (survives page refresh)
   app.get('/api/auth/session-token', (_req: Request, res: Response) => {
@@ -878,9 +886,11 @@ export function startVisualizationServer(dbPath?: string): void {
     clients.add(ws);
     console.log(`[WS] Client connected. Total: ${clients.size}`);
 
-    // Send initial state
+    // Send initial state. The WS feed renders in the same browser surface as the
+    // REST API but does not pass through the res.json interceptor, so redact
+    // RESTRICTED content here explicitly.
     const stats = getMemoryStats();
-    const memories = getRecentMemories(100);
+    const memories = redactRestrictedForDisplay(getRecentMemories(100));
     const memoriesWithDecay = memories.map(m => ({
       ...m,
       decayedScore: calculateDecayedScore(m),
@@ -911,9 +921,11 @@ export function startVisualizationServer(dbPath?: string): void {
     });
   });
 
-  // Broadcast events to all connected clients
+  // Broadcast events to all connected clients. memory_created/updated/accessed
+  // events carry the full memory in `data.memory`, so redact RESTRICTED content
+  // before it leaves over the WS (mirrors the REST response interceptor).
   function broadcast(event: MemoryEvent): void {
-    const message = JSON.stringify(event);
+    const message = JSON.stringify(deepRedactRestrictedContent(event));
     for (const client of clients) {
       try {
         if (client.readyState === WebSocket.OPEN) {

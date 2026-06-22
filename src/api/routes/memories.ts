@@ -32,6 +32,7 @@ import {
 import { getActivationStats, getActiveMemories } from '../../memory/activation.js';
 import { detectContradictions, getContradictionsFor } from '../../memory/contradiction.js';
 import { emitConsolidation } from '../events.js';
+import { guardDashboardContextSummary, RESTRICTED_CONTENT_PLACEHOLDER } from '../../defence/trust/read-guard.js';
 import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
 
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
@@ -314,6 +315,10 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       }
 
       const hasMore = offset + limit < total;
+      // RESTRICTED content is redacted globally by the response interceptor; no
+      // per-row dropping here (the dashboard is a management surface — low-trust
+      // rows must stay visible to be triaged, and dropping post-slice would also
+      // desync total/hasMore).
       const paginatedMemories = memories.slice(offset, offset + limit);
 
       // Batch-load entity_ids per memory so the constellation graph client
@@ -1106,7 +1111,10 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
   app.get('/api/context', requireNotLocked, async (req: Request, res: Response) => {
     try {
       const project = typeof req.query.project === 'string' ? req.query.project : undefined;
-      const summary = await generateContextSummary(project);
+      // Redact RESTRICTED content BEFORE formatting — the `formatted` string bakes
+      // content in, so the response interceptor (which only walks structured JSON)
+      // cannot reach it. Guarding the summary first covers both fields.
+      const summary = guardDashboardContextSummary(await generateContextSummary(project));
       res.json({
         summary,
         formatted: formatContextSummary(summary),
@@ -1308,7 +1316,11 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
 
       const updates: Record<string, unknown> = {};
       if (title !== undefined) updates.title = title.trim();
-      if (content !== undefined) updates.content = content;
+      // Never persist the redaction placeholder as real content. RESTRICTED content
+      // is withheld from the browser, so a dashboard edit form can only echo the
+      // placeholder back — writing it would silently destroy the real secret. Drop
+      // a content update that is exactly the placeholder (true edits are unaffected).
+      if (content !== undefined && content !== RESTRICTED_CONTENT_PLACEHOLDER) updates.content = content;
       if (category !== undefined) updates.category = category;
       if (tags !== undefined) updates.tags = tags;
       if (importance !== undefined) updates.salience = importance;
