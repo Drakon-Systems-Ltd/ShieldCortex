@@ -12,7 +12,7 @@ description: >
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.40.0
+  version: 4.41.0
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -98,6 +98,7 @@ This section explains every privileged operation the tool performs and why.
 - **User-initiated only.** Setup is a manual step the user runs in their terminal. Nothing auto-executes on install. The `quickstart` command asks before each action.
 - **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (no lifecycle scripts).
 - **Destructive `forget` is bounded and gated.** Per-memory and filtered bulk deletes go through a delete ACL (own-only) and are recorded in the audit ledger. Revoke-by-source (`forget --fromSource`, bulk-delete every memory from one source — for purging a poisoned agent) is **disabled by default** and only enabled by an out-of-band human action (`shieldcortex config --allow-revoke-by-source`); even then it is bounded by a trust-hierarchy ACL (you must own the source or out-rank it) and a per-call row cap. A compromised agent cannot mass-delete your memory.
+- **The bundled dashboard never renders RESTRICTED content.** The local visualization API and its WebSocket feed redact credential-class (`RESTRICTED`) memory content before it reaches the browser — the row stays visible (title/metadata) so you can manage it, but the secret is withheld (view full content via the CLI). Credential patterns in titles/metadata are masked too. This is a display-surface safeguard on top of the on-disk store; it does not weaken the firewall.
 - **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync (team tier) requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
 - **File access is declared and scoped.** Security scans read agent config directories listed in the permissions block above — the same directories the agent itself already has access to. They do not traverse arbitrary directories.
 - **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.

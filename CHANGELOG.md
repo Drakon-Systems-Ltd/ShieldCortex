@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.41.0] - 2026-06-22
+
+**Per-row read ACL for the bundled dashboard + a dashboard UX pass.** The visualization API and its WebSocket feed now redact RESTRICTED (credential-class) content before it reaches the browser, closing the last verbatim read surface (4.38.0 guarded the MCP read tools). Plus four dashboard fixes. No breaking changes.
+
+### Added
+
+- **Read ACL on the visualization API + WebSocket feed.** A RESTRICTED memory's `content` is withheld (replaced with a placeholder) from every dashboard response and WS frame, while the row stays visible so the owner can still see/manage it; full content remains available via the CLI. A single deep-walking `res.json` interceptor covers every nesting depth (list, recall `results[].memory`, openclaw `sessions[].memories[]`, review-queue, contradictions); `/api/context`'s pre-rendered summary string and the WS `initial_state`/`broadcast` paths are redacted explicitly. Because sensitivity is classified on title+content, credential spans in titles and string metadata are masked too (benign labels pass through). Low-trust rows are **not** hidden — the dashboard is a management surface.
+- **Bulk review triage.** New `POST /api/memories/review/bulk` applies one reversible review action (keep/suppress/archive/…) to many memories in a transaction (capped, best-effort), and the dashboard review queue gains a multi-select "Bulk select" mode with a confirm step — so the large triage queues can be cleared without one card at a time. Reversible actions only; no bulk delete.
+
+### Fixed
+
+- Dashboard X-Ray scan cards no longer clip long file paths (flex `min-w-0` + wrapping).
+- The Local AI Explainer's "disabled" state now shows the enable command (`shieldcortex review-copilot enable`) instead of a dead-end.
+- The knowledge graph is legible and fluid: node labels are culled by zoom + degree (only hubs at default zoom), drawn on background pills, with hover-to-focus that dims everything outside the hovered node's neighbourhood; tighter zoom-to-fit and a calmer settle.
+- Read-ACL hardening (adversarial review): a secret in a memory's **title** is now masked (not just content); a dashboard content edit can never round-trip the redaction placeholder back over the real secret; and the memory list no longer drops trust-0 rows post-pagination (the count stayed honest).
+
 ## [4.40.0] - 2026-06-22
 
 **Revoke-by-source: purge every memory from a given source in one operation — the remediation tool for a poisoned agent.** Gated behind an explicit, off-by-default opt-in because it is a destructive mass-delete; adversarially reviewed and hardened. No breaking changes.
