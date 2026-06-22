@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.40.0] - 2026-06-22
+
+**Revoke-by-source: purge every memory from a given source in one operation — the remediation tool for a poisoned agent.** Gated behind an explicit, off-by-default opt-in because it is a destructive mass-delete; adversarially reviewed and hardened. No breaking changes.
+
+### Added
+
+- **`forget --fromSource <source>`** bulk-deletes every memory written by a source — an exact `type:identifier` or a `type:*` prefix for a whole source type. Authorised by a trust-hierarchy delete ACL: you must **own** the source, or be **high-trust (≥0.7) and strictly out-rank** the target source's trust (so a 0.9 agent can clean up a 0.3 sub-agent's poisoned memories, but can never delete `user:direct` memories). Deletes route through the normal per-memory path, so graph cleanup, cloud-delete, dashboard events, and provenance audit (`operation='revoke'`) all apply.
+- **`shieldcortex config --allow-revoke-by-source` / `--disallow-revoke-by-source`** — revoke is **disabled by default** and only enabled by this out-of-band action, so a compromised agent cannot invoke it. A per-call cap (500 rows) and a fail-safe (unattributed/null-source memories are never revocable) bound the blast radius further.
+
+### Notes
+
+- Single-memory and filtered bulk `forget` are unchanged (own-only delete ACL). The trust-hierarchy override is reachable only through the gated `--fromSource` path. Deferred Tier 2 follow-ups: a dashboard `operation` filter UI, HTTP-API per-row read ACL, PII classification, the semantic layer on the sync path.
+
 ## [4.39.0] - 2026-06-21
 
 **Provenance ledger: the audit log now records reads, writes, and deletes with a queryable operation type and write-time content hashes.** The defence audit previously captured only write scans and access *denials* — allowed reads and deletes were invisible, the advertised `operation` query filter did nothing, and content hashing was unused. This turns the audit into a real forensic ledger. Adversarially reviewed; safe schema migration for existing databases. No breaking changes.
