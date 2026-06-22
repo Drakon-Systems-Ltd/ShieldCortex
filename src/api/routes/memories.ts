@@ -2,7 +2,7 @@ import type { Express, Request, Response } from 'express';
 import { homedir } from 'os';
 import { join } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
-import { getDatabase } from '../../database/init.js';
+import { getDatabase, withTransaction } from '../../database/init.js';
 import { Memory } from '../../memory/types.js';
 import {
   searchMemories,
@@ -39,6 +39,35 @@ type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) 
 interface MemoryRouteDeps {
   requireNotLocked: Middleware;
   requireIronDomeAction: (options: IronDomeRouteGuardOptions) => IronDomeMiddleware;
+}
+
+/** Upper bound on memories a single bulk-review call may touch (actions are reversible). */
+const MAX_BULK_REVIEW = 1000;
+
+type ReviewActionOptions = { reviewedBy?: string; project?: string | null; scope?: 'project' | 'global' };
+
+/**
+ * Resolve a review action keyword into the `updateMemory` field updates. Shared
+ * by the single PATCH /api/memories/:id/review route and the bulk endpoint so the
+ * action vocabulary lives in one place. Returns null for an unknown action.
+ */
+function buildReviewUpdates(action: string, opts: ReviewActionOptions): Record<string, unknown> | null {
+  const reviewActor = typeof opts.reviewedBy === 'string' && opts.reviewedBy.trim() ? opts.reviewedBy.trim() : 'dashboard';
+  const map: Record<string, Record<string, unknown>> = {
+    archive: { status: 'archived', reviewedBy: reviewActor },
+    suppress: { status: 'suppressed', reviewedBy: reviewActor },
+    restore: { status: 'active', reviewedBy: reviewActor },
+    pin: { pinned: true, reviewedBy: reviewActor },
+    unpin: { pinned: false, reviewedBy: reviewActor },
+    canonicalize: { status: 'canonical', pinned: true, reviewedBy: reviewActor },
+    excludeCloud: { cloudExcluded: true, reviewedBy: reviewActor },
+    includeCloud: { cloudExcluded: false, reviewedBy: reviewActor },
+    rescopeProject: { scope: 'project', project: opts.project ?? null, reviewedBy: reviewActor },
+    rescopeGlobal: { scope: 'global', project: null, reviewedBy: reviewActor },
+  };
+  const updates = map[action];
+  if (!updates) return null;
+  return { ...updates, ...(opts.scope ? { scope: opts.scope } : {}) };
 }
 
 export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void {
@@ -1347,33 +1376,67 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         return res.status(400).json({ error: 'Invalid memory ID' });
       }
 
-      const reviewActor = typeof reviewedBy === 'string' && reviewedBy.trim() ? reviewedBy.trim() : 'dashboard';
-      const actionMap: Record<string, Record<string, unknown>> = {
-        archive: { status: 'archived', reviewedBy: reviewActor },
-        suppress: { status: 'suppressed', reviewedBy: reviewActor },
-        restore: { status: 'active', reviewedBy: reviewActor },
-        pin: { pinned: true, reviewedBy: reviewActor },
-        unpin: { pinned: false, reviewedBy: reviewActor },
-        canonicalize: { status: 'canonical', pinned: true, reviewedBy: reviewActor },
-        excludeCloud: { cloudExcluded: true, reviewedBy: reviewActor },
-        includeCloud: { cloudExcluded: false, reviewedBy: reviewActor },
-        rescopeProject: { scope: 'project', project: project ?? null, reviewedBy: reviewActor },
-        rescopeGlobal: { scope: 'global', project: null, reviewedBy: reviewActor },
-      };
-
-      if (!action || !actionMap[action]) {
+      const updates = buildReviewUpdates(action ?? '', { reviewedBy, project, scope });
+      if (!updates) {
         return res.status(400).json({ error: 'Unsupported review action' });
       }
 
-      const updates = {
-        ...actionMap[action],
-        ...(scope ? { scope } : {}),
-      };
       const updated = updateMemory(id, updates);
       if (!updated) {
         return res.status(404).json({ error: 'Memory not found' });
       }
       res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Bulk review: apply one reversible review action to many memories at once, so
+  // the dashboard's large triage queues (Never Used, Noisy Auto, …) can be cleared
+  // without one round-trip per card. Mirrors the quarantine bulk-approve pattern.
+  // Reversible actions only (archive/suppress/restore/pin/…) — there is no bulk
+  // delete here. Best-effort with a per-row failure list; capped at MAX_BULK_REVIEW.
+  app.post('/api/memories/review/bulk', requireNotLocked, requireIronDomeAction({
+    action: 'modify_records',
+    channel: 'dashboard',
+    sourceIdentifier: 'dashboard:memory-review-bulk',
+    enforceAmber: true,
+  }), (req: Request, res: Response) => {
+    try {
+      const { ids, action, reviewedBy, project, scope } = req.body as {
+        ids?: unknown;
+        action?: string;
+        reviewedBy?: string;
+        project?: string | null;
+        scope?: 'project' | 'global';
+      };
+
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: 'ids must be a non-empty array' });
+      }
+      const numericIds = Array.from(new Set(ids.filter((x): x is number => Number.isInteger(x))));
+      if (numericIds.length === 0) {
+        return res.status(400).json({ error: 'ids must contain integers' });
+      }
+      if (numericIds.length > MAX_BULK_REVIEW) {
+        return res.status(400).json({ error: `Too many ids (max ${MAX_BULK_REVIEW}) — narrow the selection.` });
+      }
+
+      const updates = buildReviewUpdates(action ?? '', { reviewedBy, project, scope });
+      if (!updates) {
+        return res.status(400).json({ error: 'Unsupported review action' });
+      }
+
+      let updated = 0;
+      const failed: number[] = [];
+      withTransaction(() => {
+        for (const id of numericIds) {
+          if (updateMemory(id, updates)) updated += 1;
+          else failed.push(id);
+        }
+      });
+
+      res.json({ success: true, updated, total: numericIds.length, failed });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

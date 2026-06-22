@@ -467,6 +467,60 @@ describe('API route mutation regressions', () => {
     });
   });
 
+  describe('/api/memories/review/bulk', () => {
+    async function setup() {
+      const initModule = await import('../../database/init.js');
+      const storeModule = await import('../../memory/store.js');
+      const routeModule = await import('../routes/memories.js');
+      initModule.initDatabase(':memory:');
+      const { app, routes } = createFakeApp();
+      routeModule.registerMemoryRoutes(app as never, {
+        requireNotLocked: (_req, _res, next) => next(),
+        requireIronDomeAction: () => (_req, _res, next) => next(),
+      });
+      const handlers = routes.post.get('/api/memories/review/bulk');
+      expect(handlers).toBeDefined();
+      return { storeModule, handlers: handlers! };
+    }
+
+    it('applies one action to many memories and reports the count', async () => {
+      const { storeModule, handlers } = await setup();
+      const a = storeModule.addMemory({ title: 'A', content: 'one', project: 'P' });
+      const b = storeModule.addMemory({ title: 'B', content: 'two', project: 'P' });
+
+      const res = await invokeHandlers(handlers, { body: { ids: [a.id, b.id], action: 'archive' } });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toMatchObject({ success: true, updated: 2, total: 2, failed: [] });
+      expect(storeModule.getMemoryById(a.id)?.status).toBe('archived');
+      expect(storeModule.getMemoryById(b.id)?.status).toBe('archived');
+    });
+
+    it('rejects an unsupported action', async () => {
+      const { storeModule, handlers } = await setup();
+      const a = storeModule.addMemory({ title: 'A', content: 'one', project: 'P' });
+      const res = await invokeHandlers(handlers, { body: { ids: [a.id], action: 'nuke' } });
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({ error: 'Unsupported review action' });
+      expect(storeModule.getMemoryById(a.id)?.status).toBe('active');
+    });
+
+    it('rejects an empty id list', async () => {
+      const { handlers } = await setup();
+      const res = await invokeHandlers(handlers, { body: { ids: [], action: 'suppress' } });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('is best-effort: applies valid ids and reports missing ones as failed', async () => {
+      const { storeModule, handlers } = await setup();
+      const a = storeModule.addMemory({ title: 'A', content: 'one', project: 'P' });
+      const res = await invokeHandlers(handlers, { body: { ids: [a.id, 999999], action: 'suppress' } });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toMatchObject({ updated: 1, failed: [999999] });
+      expect(storeModule.getMemoryById(a.id)?.status).toBe('suppressed');
+    });
+  });
+
   describe('/api/memories/prune', () => {
     it('rejects salienceLte outside [0, 1]', async () => {
       const initModule = await import('../../database/init.js');

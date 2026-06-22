@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Layers, ShieldAlert } from 'lucide-react';
-import { useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
+import { useBulkReview, useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
 import { useDashboardStore } from '@/lib/store';
 import { Button } from '@/components/ds/Button';
 import { ReviewCard, type ReviewCardAction } from './ReviewCard';
@@ -67,9 +67,13 @@ export function ReviewQueueView() {
   const { data, isLoading } = useReviewQueue(projectFilter);
   const reviewAction = useReviewAction();
   const mergeMutation = useMergeMemories();
+  const bulkReview = useBulkReview();
 
   const [activeQueue, setActiveQueue] = useState<QueueKey>('lowTrust');
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkConfirm, setBulkConfirm] = useState<{ action: 'restore' | 'suppress' | 'archive'; label: string } | null>(null);
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [exiting, setExiting] = useState(false);
   const cardKey = useRef(0);
@@ -96,7 +100,18 @@ export function ReviewQueueView() {
     setReviewFocus(null);
   }, [reviewFocus, data, setReviewFocus]);
 
-  const busy = reviewAction.isPending || mergeMutation.isPending || exiting;
+  const busy = reviewAction.isPending || mergeMutation.isPending || bulkReview.isPending || exiting;
+
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+    setBulkConfirm(null);
+  };
+  const toggleSelected = (id: number) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
 
   const items: Memory[] = data?.sections[activeQueue] ?? [];
   const total = items.length;
@@ -116,6 +131,23 @@ export function ReviewQueueView() {
     setActiveQueue(queue);
     setCurrentIndex(0);
     setFeedback(null);
+    clearSelection(); // selection is queue-scoped
+  };
+
+  const runBulk = async (action: 'restore' | 'suppress' | 'archive', label: string) => {
+    const ids = items.filter((m) => selectedIds.has(m.id)).map((m) => m.id);
+    if (ids.length === 0) return;
+    setBulkConfirm(null);
+    try {
+      setFeedback(null);
+      const result = await bulkReview.mutateAsync({ ids, action, reviewedBy: 'dashboard-review' });
+      clearSelection();
+      const noun = result.updated === 1 ? 'memory' : 'memories';
+      const failedNote = result.failed.length ? ` (${result.failed.length} failed)` : '';
+      showFeedback('success', `${label} ${result.updated} ${noun}${failedNote}`);
+    } catch (error) {
+      showFeedback('error', error instanceof Error ? error.message : 'Bulk action failed');
+    }
   };
 
   const showFeedback = (kind: 'success' | 'error', message: string) => {
@@ -218,26 +250,34 @@ export function ReviewQueueView() {
 
   return (
     <div className="space-y-6">
-      {/* Filter pills */}
-      <div className="flex flex-wrap gap-2">
-        {QUEUE_ORDER.map((key) => {
-          const meta = QUEUE_META[key];
-          const count = data?.summary[key] ?? 0;
-          const isActive = activeQueue === key;
-          return (
-            <button
-              key={key}
-              onClick={() => switchQueue(key)}
-              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                isActive
-                  ? 'border-[var(--sc-coral)]/50 bg-[var(--sc-coral)] text-white'
-                  : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-secondary)] hover:border-[var(--sc-text-muted)]'
-              }`}
-            >
-              {meta.label} {count}
-            </button>
-          );
-        })}
+      {/* Filter pills + mode toggle */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          {QUEUE_ORDER.map((key) => {
+            const meta = QUEUE_META[key];
+            const count = data?.summary[key] ?? 0;
+            const isActive = activeQueue === key;
+            return (
+              <button
+                key={key}
+                onClick={() => switchQueue(key)}
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  isActive
+                    ? 'border-[var(--sc-coral)]/50 bg-[var(--sc-coral)] text-white'
+                    : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-secondary)] hover:border-[var(--sc-text-muted)]'
+                }`}
+              >
+                {meta.label} {count}
+              </button>
+            );
+          })}
+        </div>
+        <button
+          onClick={() => { setBulkMode((m) => !m); clearSelection(); }}
+          className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-3 py-1.5 text-xs font-semibold text-[var(--sc-text-secondary)] transition-colors hover:border-[var(--sc-text-muted)]"
+        >
+          {bulkMode ? 'Single card' : 'Bulk select'}
+        </button>
       </div>
 
       {/* Feedback toast */}
@@ -254,8 +294,77 @@ export function ReviewQueueView() {
         </div>
       )}
 
-      {/* Current review card */}
-      {current ? (
+      {/* Bulk multi-select list OR the single review card */}
+      {bulkMode ? (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-surface)]/50 px-4 py-3">
+            <button
+              type="button"
+              onClick={() => (selectedIds.size === items.length && items.length > 0 ? clearSelection() : setSelectedIds(new Set(items.map((m) => m.id))))}
+              disabled={items.length === 0}
+              className="rounded-full border border-[var(--sc-border)] px-3 py-1 text-xs font-semibold text-[var(--sc-text-secondary)] transition-colors hover:border-[var(--sc-text-muted)] disabled:opacity-30"
+            >
+              {selectedIds.size === items.length && items.length > 0 ? 'Clear all' : `Select all ${items.length}`}
+            </button>
+            <span className="text-xs text-[var(--sc-text-muted)]">{selectedIds.size} selected</span>
+            <div className="ml-auto flex gap-2">
+              <Button variant="cyan" size="sm" disabled={busy || selectedIds.size === 0} onClick={() => setBulkConfirm({ action: 'restore', label: 'Keep' })}>Keep</Button>
+              <Button variant="outline" size="sm" disabled={busy || selectedIds.size === 0} onClick={() => setBulkConfirm({ action: 'suppress', label: 'Suppress' })}>Suppress</Button>
+              <Button variant="ghost" size="sm" disabled={busy || selectedIds.size === 0} onClick={() => setBulkConfirm({ action: 'archive', label: 'Archive' })}>Archive</Button>
+            </div>
+          </div>
+
+          {bulkConfirm && (
+            <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/10 px-4 py-3 text-sm">
+              <span className="text-[var(--sc-text-primary)]">
+                {bulkConfirm.label} {selectedIds.size} {selectedIds.size === 1 ? 'memory' : 'memories'}? This is reversible.
+              </span>
+              <div className="ml-auto flex gap-2">
+                <Button variant="cyan" size="sm" disabled={busy} onClick={() => runBulk(bulkConfirm.action, bulkConfirm.label)}>Confirm</Button>
+                <Button variant="ghost" size="sm" onClick={() => setBulkConfirm(null)}>Cancel</Button>
+              </div>
+            </div>
+          )}
+
+          {items.length === 0 ? (
+            <div className="glass-card-strong p-8 text-center">
+              <p className="text-sm text-[var(--sc-text-secondary)]">No {QUEUE_META[activeQueue].label.toLowerCase()} memories to review.</p>
+            </div>
+          ) : (
+            <div className="max-h-[60vh] space-y-1.5 overflow-y-auto rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/40 p-2">
+              {items.map((m) => {
+                const checked = selectedIds.has(m.id);
+                return (
+                  <label
+                    key={m.id}
+                    className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition-colors ${
+                      checked ? 'border-[var(--sc-cyan)]/50 bg-[var(--sc-cyan)]/5' : 'border-transparent hover:bg-[var(--sc-surface-interactive)]'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleSelected(m.id)}
+                      className="mt-1 h-4 w-4 shrink-0 accent-[var(--sc-cyan)]"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-[var(--sc-text-primary)]">{m.title}</div>
+                      <div className="mt-0.5 line-clamp-1 text-xs text-[var(--sc-text-secondary)]">{m.content}</div>
+                      <div className="mt-1 flex flex-wrap gap-1.5">
+                        {buildReasons(m, activeQueue).map((r, i) => (
+                          <span key={i} className="rounded-full bg-[var(--sc-surface-interactive)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--sc-text-muted)]">
+                            {r.label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : current ? (
         <>
           {/* Progress bar + nav ABOVE the card so buttons don't shift */}
           <div className="space-y-2">
