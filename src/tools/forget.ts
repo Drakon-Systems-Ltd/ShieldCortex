@@ -13,7 +13,15 @@ import {
   formatErrorForMcp,
 } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
+import { isRevokeBySourceEnabled } from '../cloud/config.js';
 import type { DefenceSource } from '../defence/types.js';
+
+/**
+ * Upper bound on rows a single revoke-by-source call may delete. Caps the blast
+ * radius of the mass-delete primitive — a larger match must be narrowed (by
+ * project/category/etc.) or paged.
+ */
+const MAX_REVOKE_ROWS = 500;
 
 // Input schema for the forget tool
 export const forgetSchema = z.object({
@@ -35,6 +43,8 @@ export const forgetSchema = z.object({
     type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
   }).optional().describe('Caller identity for access control'),
+  fromSource: z.string().optional()
+    .describe('Revoke-by-source: delete all memories written by this source. Exact "type:identifier", or a "type:*" / "type:" prefix to revoke a whole source type. Authorised by the trust-hierarchy revoke ACL (you must own the source or outrank it). Distinct from `source` (the caller).'),
 });
 
 export type ForgetInput = z.infer<typeof forgetSchema>;
@@ -52,6 +62,16 @@ export async function executeForget(input: ForgetInput): Promise<{
 }> {
   try {
     const db = getDatabase();
+
+    // Revoke-by-source gate: a destructive mass-delete primitive that a hijacked
+    // agent must not be able to invoke. OFF by default; only an out-of-band human
+    // action (`shieldcortex config --allow-revoke-by-source`) enables it.
+    if (input.fromSource !== undefined && !isRevokeBySourceEnabled()) {
+      return {
+        success: false,
+        error: 'revoke-by-source is disabled. Enable it deliberately with `shieldcortex config --allow-revoke-by-source` (an out-of-band action), then re-run.',
+      };
+    }
 
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
@@ -130,6 +150,28 @@ export async function executeForget(input: ForgetInput): Promise<{
       params.push(input.belowSalience);
     }
 
+    // Revoke-by-source: target every memory written by a given source. Exact
+    // "type:identifier", or a "type:*" / "type:" prefix for a whole source type.
+    // Per-row authorisation is the trust-hierarchy revoke ACL (in deleteMemory
+    // via mode:'revoke') — this clause only SELECTS the candidates. Project scope
+    // still applies; pass project:"*" to revoke a source across all projects.
+    if (input.fromSource !== undefined) {
+      const fs = input.fromSource.trim();
+      if (!fs || fs === '*' || fs === ':' || fs === ':*') {
+        return {
+          success: false,
+          error: 'fromSource must name a source (e.g. "agent:agent-spawned" or "agent:*"), not a blanket wildcard.',
+        };
+      }
+      if (fs.endsWith(':*') || fs.endsWith(':')) {
+        conditions.push('source LIKE ?');
+        params.push(`${fs.replace(/:\*?$/, '')}:%`);
+      } else {
+        conditions.push('source = ?');
+        params.push(fs);
+      }
+    }
+
     if (conditions.length === 0) {
       return {
         success: false,
@@ -146,6 +188,16 @@ export async function executeForget(input: ForgetInput): Promise<{
 
     if (affected.length === 0) {
       return { success: true, deleted: 0, memories: [] };
+    }
+
+    // Blast-radius cap on revoke-by-source: refuse a single call that would
+    // delete more than MAX_REVOKE_ROWS — narrow it (by project/category/etc.).
+    if (input.fromSource !== undefined && affected.length > MAX_REVOKE_ROWS) {
+      return {
+        success: false,
+        wouldDelete: affected.length,
+        error: `revoke-by-source matched ${affected.length} memories (cap ${MAX_REVOKE_ROWS}). Narrow the scope (project/category/query) and re-run.`,
+      };
     }
 
     // Dry run - just show what would be deleted
@@ -175,10 +227,13 @@ export async function executeForget(input: ForgetInput): Promise<{
     // delete, and the dashboard `memory_deleted` event. A low-trust / non-owner
     // caller therefore can't mass-delete protected memories. better-sqlite3 is
     // synchronous, so the per-row loop stays inside one transaction atomically.
+    // revoke-by-source uses the trust-hierarchy revoke ACL (own OR outrank);
+    // every other bulk forget stays own-only.
+    const deleteMode = input.fromSource !== undefined ? 'revoke' : 'delete';
     const deletedMemories: { id: number; title: string }[] = [];
     withTransaction(() => {
       for (const memory of affected) {
-        if (deleteMemory(memory.id, source)) {
+        if (deleteMemory(memory.id, source, { mode: deleteMode })) {
           deletedMemories.push(memory);
         }
       }

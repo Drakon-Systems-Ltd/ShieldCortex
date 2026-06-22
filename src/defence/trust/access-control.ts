@@ -30,10 +30,17 @@ export interface AccessCheckMemory {
 /**
  * Check whether a source has access to a memory for a given operation.
  */
+/** Parse a stored "type:identifier" source string back into a DefenceSource. */
+function parseStoredSource(stored: string): DefenceSource {
+  const i = stored.indexOf(':');
+  if (i === -1) return { type: 'agent', identifier: stored }; // unknown shape → low-trust agent
+  return { type: stored.slice(0, i) as DefenceSource['type'], identifier: stored.slice(i + 1) };
+}
+
 export function checkAccess(
   memory: AccessCheckMemory,
   source: DefenceSource,
-  operation: 'read' | 'write' | 'delete',
+  operation: 'read' | 'write' | 'delete' | 'revoke',
 ): AccessPolicy {
   const trust = scoreSource(source).score;
   const memorySource = memory.source || '__system:unattributed';
@@ -78,6 +85,32 @@ export function checkAccess(
       return { canRead: true, canWrite: false, canDelete: true, writeRequiresQuarantine: false, reason: 'Owner deletion' };
     }
     return deny('Can only delete own memories (trust ≥0.5)');
+  }
+
+  if (operation === 'revoke') {
+    // Trust-hierarchy revoke (revoke-by-source remediation): own cleanup, OR a
+    // high-trust caller may purge a STRICTLY lower-trust source's memories.
+    // Equal/higher-trust targets are protected, so a 0.9 agent can never revoke
+    // user:direct (1.0). Single-row 'delete' stays own-only — this override is
+    // reachable only through the explicit revoke path.
+    if (isOwner && trust >= 0.5) {
+      return { canRead: true, canWrite: false, canDelete: true, writeRequiresQuarantine: false, reason: 'Owner revoke' };
+    }
+    // Fail-safe: never mass-revoke unattributed / unclassifiable memories. They
+    // have no clear owner to outrank, and a 0-trust target would be outranked by
+    // any caller — so a high-trust caller must NOT be able to sweep null-source
+    // rows by source.
+    if (!memory.source || memorySource === '__system:unattributed') {
+      return deny('Revoke denied: unattributed memories cannot be revoked by source');
+    }
+    const targetTrust = scoreSource(parseStoredSource(memorySource)).score;
+    if (targetTrust > 0 && trust >= 0.7 && trust > targetTrust) {
+      return {
+        canRead: true, canWrite: false, canDelete: true, writeRequiresQuarantine: false,
+        reason: `Trust-hierarchy revoke (caller ${trust.toFixed(2)} > target ${targetTrust.toFixed(2)})`,
+      };
+    }
+    return deny('Revoke denied: must own the source or outrank it (trust ≥0.7 and strictly > a known target source trust)');
   }
 
   return deny('Unknown operation');

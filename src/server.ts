@@ -40,6 +40,7 @@ import { queryAuditLogs, getAuditStats, getLifetimeStats } from './defence/audit
 import { scanExistingMemories } from './defence/scanner/index.js';
 import type { FirewallResult as FwResult, DefenceSource } from './defence/types.js';
 import { resolveToolSource as resolveToolSourceImpl } from './defence/trust/resolve-tool-source.js';
+import { inferSourceFromEnvironment } from './defence/trust/env-detector.js';
 import { scanToolResponse, shouldScanToolResponse } from './defence/tool-response-scanner.js';
 import { UNTRUSTED_TOOL_TAG } from './defence/tool-response-enforce.js';
 import { guardReadBySensitivity, guardContextSummary } from './defence/trust/read-guard.js';
@@ -338,10 +339,17 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       confirm: z.boolean().optional().default(false)
         .describe('Confirm bulk delete'),
       source: sourceParam,
+      fromSource: z.string().optional()
+        .describe('Revoke-by-source: delete all memories written by this source ("type:identifier", or "type:*" for a whole type). Authorised by the trust-hierarchy revoke ACL (own the source or outrank it). Use project:"*" to revoke across all projects.'),
     },
     { title: 'Delete Memories', readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     withKillSwitchGuard('memory_write', async (args) => {
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'forget');
+      // Delete is destructive, and revoke-by-source grants cross-identity power,
+      // so the caller identity MUST be the unspoofable runtime identity — derive
+      // it from the environment, NOT the MCP-declared `source` param. Honouring a
+      // declared identity would let a caller claim ownership of any peer source's
+      // memories (the clamp only caps trust SCORE, not identity).
+      const source = inferSourceFromEnvironment().source;
       const result = await executeForget({ ...args, source });
       return {
         content: [{ type: 'text', text: formatForgetResult(result) }],

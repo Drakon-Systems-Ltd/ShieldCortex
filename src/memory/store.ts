@@ -344,7 +344,12 @@ export function logAllowedRead(
  * audit.memory_id FK is ON DELETE SET NULL, so a live reference can't survive.
  * The deleted id is preserved in `reason` + `blocked_patterns` for forensics.
  */
-export function logAllowedDelete(memoryId: number, source: DefenceSource, project?: string | null): void {
+export function logAllowedDelete(
+  memoryId: number,
+  source: DefenceSource,
+  project?: string | null,
+  operation: AuditOperation = 'delete',
+): void {
   logAudit({
     memory_id: null,
     project: project ?? null,
@@ -354,7 +359,7 @@ export function logAllowedDelete(memoryId: number, source: DefenceSource, projec
     trust_score: scoreSource(source).score,
     sensitivity_level: 'INTERNAL',
     firewall_result: 'ALLOW',
-    operation: 'delete',
+    operation,
     anomaly_score: 0,
     threat_indicators: '[]',
     blocked_patterns: JSON.stringify([memoryId]),
@@ -1152,20 +1157,26 @@ export function mergeMemories(
 /**
  * Delete a memory
  */
-export function deleteMemory(id: number, source?: DefenceSource): boolean {
+export function deleteMemory(
+  id: number,
+  source?: DefenceSource,
+  opts?: { mode?: 'delete' | 'revoke' },
+): boolean {
   const db = getDatabase();
+  const aclOp = opts?.mode ?? 'delete';
 
-  // ACCESS CONTROL: Check delete permission
+  // ACCESS CONTROL: Check delete permission. mode 'revoke' uses the
+  // trust-hierarchy rule (own OR outrank); 'delete' (default) stays own-only.
   if (source) {
     const row = db.prepare('SELECT id, source, sensitivity_level FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (row) {
       const policy = checkAccess(
         { id: row.id as number, source: row.source as string | null, sensitivity_level: row.sensitivity_level as string | null },
         source,
-        'delete',
+        aclOp,
       );
       if (!policy.canDelete) {
-        logAccessDenial(id, source, policy.reason, 'delete');
+        logAccessDenial(id, source, policy.reason, aclOp);
         return false;
       }
     }
@@ -1190,7 +1201,7 @@ export function deleteMemory(id: number, source?: DefenceSource): boolean {
     // caller is attributed. Internal source-less deletes (merge/consolidation)
     // are machinery, not user actions, so they're not audited here.
     if (source) {
-      logAllowedDelete(id, source, (memory.project as string | undefined) ?? null);
+      logAllowedDelete(id, source, (memory.project as string | undefined) ?? null, aclOp);
     }
     if (isFeatureEnabled('cloud_sync')) {
       syncMemoryDeleteToCloud(memory);

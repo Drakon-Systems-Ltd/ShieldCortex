@@ -17,6 +17,8 @@ import {
   setRankerConfig,
   getToolResponseScanConfig,
   setToolResponseScanConfig,
+  isRevokeBySourceEnabled,
+  setRevokeBySourceEnabled,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -46,6 +48,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('\nShieldCortex Configuration:');
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Tool-Output Firewall: ${toolFirewall.scanToolResponses ? toolFirewall.toolResponseMode : 'Off'}`);
+    console.log(`  Revoke-by-source: ${isRevokeBySourceEnabled() ? 'Enabled (destructive)' : 'Disabled (default)'}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
     console.log(`  API Key:  ${config.cloudApiKey ? config.cloudApiKey.substring(0, 12) + '...' : 'Not set'}`);
     console.log(`  Base URL: ${config.cloudBaseUrl}`);
@@ -257,6 +260,18 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  if (args.includes('--allow-revoke-by-source')) {
+    setRevokeBySourceEnabled(true);
+    console.log('Revoke-by-source ENABLED. `forget --fromSource` can now bulk-delete a source\'s memories (trust-hierarchy ACL still applies). Disable again with --disallow-revoke-by-source when done.');
+    changed = true;
+  }
+
+  if (args.includes('--disallow-revoke-by-source')) {
+    setRevokeBySourceEnabled(false);
+    console.log('Revoke-by-source disabled (default).');
+    changed = true;
+  }
+
   if (args.includes('--upsell-mute')) {
     setUpsellState({ proMuted: true });
     console.log('Pro upsell muted. Re-enable with --upsell-unmute.');
@@ -287,6 +302,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --tool-firewall-enforce   Redact/withhold threatening tool output before the agent sees it');
     console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
     console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
+    console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('  --upsell-mute          Suppress the Pro upsell footer in doctor');
     console.log('  --upsell-unmute        Allow the Pro upsell footer to surface again');
