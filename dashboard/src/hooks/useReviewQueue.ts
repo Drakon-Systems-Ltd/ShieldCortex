@@ -213,6 +213,40 @@ export function useReviewAction() {
   });
 }
 
+interface BulkReviewResult {
+  success: boolean;
+  updated: number;
+  total: number;
+  failed: number[];
+}
+
+async function postBulkReview(input: { ids: number[]; action: string; reviewedBy?: string }): Promise<BulkReviewResult> {
+  const response = await authFetch(`${API_BASE}/api/memories/review/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await readApiError(response, 'Bulk review failed'));
+  }
+  return response.json() as Promise<BulkReviewResult>;
+}
+
+export function useBulkReview() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: postBulkReview,
+    onSuccess: () => {
+      // Refetch authoritative queues rather than reconciling many rows by hand.
+      queryClient.invalidateQueries({ queryKey: ['review-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['quality'] });
+      queryClient.invalidateQueries({ queryKey: ['contradictions'] });
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+    },
+  });
+}
+
 export function useMergeMemories() {
   const queryClient = useQueryClient();
   return useMutation({

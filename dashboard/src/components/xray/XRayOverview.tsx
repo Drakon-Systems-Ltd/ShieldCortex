@@ -255,9 +255,9 @@ export function XRayOverview() {
                     {/* Result header */}
                     <div className="flex items-start gap-6">
                       <TrustGauge score={visibleResult.trustScore} size={120} />
-                      <div className="flex-1">
+                      <div className="flex-1 min-w-0">
                         <div className="flex flex-wrap items-center gap-3">
-                          <h4 className="text-lg font-semibold text-[var(--sc-text-primary)]">{visibleResult.target}</h4>
+                          <h4 className="min-w-0 break-words text-lg font-semibold text-[var(--sc-text-primary)]">{visibleResult.target}</h4>
                           <Badge variant={riskVariant(visibleResult.riskLevel)}>{visibleResult.riskLevel}</Badge>
                         </div>
                         <div className="mt-2 flex flex-wrap gap-2">
@@ -450,8 +450,8 @@ export function XRayOverview() {
                 <GlassCard strong className="p-6">
                   <div className="flex items-start gap-5">
                     <TrustGauge score={visibleResult.trustScore} size={100} />
-                    <div className="flex-1">
-                      <h4 className="text-lg font-semibold text-[var(--sc-text-primary)]">{visibleResult.target}</h4>
+                    <div className="flex-1 min-w-0">
+                      <h4 className="break-words text-lg font-semibold text-[var(--sc-text-primary)]">{visibleResult.target}</h4>
                       <div className="mt-2 flex flex-wrap gap-2">
                         <Badge variant={riskVariant(visibleResult.riskLevel)}>{visibleResult.riskLevel}</Badge>
                         <Badge variant="muted">{visibleResult.filesScanned} files</Badge>

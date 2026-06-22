@@ -187,6 +187,9 @@ export function ConstellationGraph({
   const graphRef = useRef<FGRef | undefined>(undefined);
   const hoveredRef = useRef<string | null>(null);
   const zoomRef = useRef(1);
+  // When a node is hovered, the set of {hovered} ∪ direct neighbours; null when
+  // nothing is hovered. Drives the neighbourhood-focus dimming in render*.
+  const neighbourhoodRef = useRef<Set<string> | null>(null);
   const [driver, setDriver] = useState<PulseDriver | null>(null);
   const [activeCluster, setActiveCluster] = useState<string | null>(null);
   const [anchorId, setAnchorId] = useState<string | null>(null);
@@ -312,6 +315,19 @@ export function ConstellationGraph({
 
   const graphData = activeCluster && detailGraphData ? detailGraphData : clusterGraphData;
 
+  // Node degree (link count) — drives label culling so only well-connected hub
+  // nodes are labelled at low zoom, instead of every high-memory node at once.
+  const nodeDegrees = useMemo(() => {
+    const deg = new Map<string, number>();
+    for (const l of graphData.links) {
+      const s = typeof l.source === 'object' ? String((l.source as GNode).id) : String(l.source);
+      const t = typeof l.target === 'object' ? String((l.target as GNode).id) : String(l.target);
+      deg.set(s, (deg.get(s) ?? 0) + 1);
+      deg.set(t, (deg.get(t) ?? 0) + 1);
+    }
+    return deg;
+  }, [graphData.links]);
+
   // ── PulseDriver lifecycle ───────────────────────────────
 
   useEffect(() => {
@@ -380,7 +396,7 @@ export function ConstellationGraph({
   useEffect(() => {
     if (hasInitialFit.current || !graphData.nodes.length) return;
     hasInitialFit.current = true;
-    const t = setTimeout(() => graphRef.current?.zoomToFit(reducedMotion ? 0 : 400, 80), 1500);
+    const t = setTimeout(() => graphRef.current?.zoomToFit(reducedMotion ? 0 : 600, 40), 1500);
     return () => clearTimeout(t);
   }, [graphData.nodes.length, reducedMotion]);
 
@@ -433,8 +449,21 @@ export function ConstellationGraph({
   }, [controls, onSelectEntity]);
 
   const handleNodeHover = useCallback((node: NodeObject<GNode> | null) => {
-    hoveredRef.current = node ? String((node as GNode).id) : null;
-  }, []);
+    const id = node ? String((node as GNode).id) : null;
+    hoveredRef.current = id;
+    if (!id) {
+      neighbourhoodRef.current = null;
+      return;
+    }
+    const nb = new Set<string>([id]);
+    for (const l of graphData.links) {
+      const s = typeof l.source === 'object' ? String((l.source as GNode).id) : String(l.source);
+      const t = typeof l.target === 'object' ? String((l.target as GNode).id) : String(l.target);
+      if (s === id) nb.add(t);
+      else if (t === id) nb.add(s);
+    }
+    neighbourhoodRef.current = nb;
+  }, [graphData.links]);
 
   // ── Painting (hybrid: legacy cluster paint + new entity paint) ──
 
@@ -468,6 +497,11 @@ export function ConstellationGraph({
         return;
       }
 
+      // Neighbourhood focus: while a node is hovered, dim entities (and their
+      // labels) outside its neighbourhood so the local structure stands out.
+      const nb = neighbourhoodRef.current;
+      if (nb && !nb.has(id)) ctx.globalAlpha = 0.18;
+
       // Entity branch — delegate to the new module.
       const energy = driver?.getEnergy(id) ?? 0;
       const recallEnergy = driver?.getRecallEnergy(id) ?? 0;
@@ -496,12 +530,17 @@ export function ConstellationGraph({
         ctx.stroke();
       }
 
-      // Labels — zoom-gated, legacy thresholds.
+      // Labels — culled by zoom AND node degree, so at default zoom only the
+      // well-connected hubs are labelled (the old `mc > 100` blanket labelled
+      // ~half the graph at once, which was the clutter). On hover, the whole
+      // neighbourhood is labelled for context.
       const mc = gn.memoryCount || 1;
-      const show = isSelected || isHovered ||
+      const degree = nodeDegrees.get(id) ?? 0;
+      const inNeighbourhood = nb?.has(id) ?? false;
+      const show = isSelected || isHovered || inNeighbourhood ||
         (zoom >= 3) ||
-        (zoom >= 1.5 && mc > 30) ||
-        (zoom >= 0.8 && mc > 100);
+        (zoom >= 1.5 && (mc > 30 || degree > 3)) ||
+        (zoom >= 0.8 && degree > 6);
 
       if (show) {
         const r = baseRadius * (1 + energy * settings.breathAmp);
@@ -509,13 +548,26 @@ export function ConstellationGraph({
         ctx.font = `${fs}px Inter, system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillStyle = isSelected ? '#ffffff' : isHovered ? '#f0f4ffcc' : '#f0f4ff66';
-        ctx.fillText(gn.name, gn.x, gn.y + r + 2);
+        // Background pill so the label stays legible over nodes/links.
+        const pad = 2.5 / Math.max(zoom, 0.4);
+        const tw = ctx.measureText(gn.name).width;
+        const ly = gn.y + r + 1.5;
+        const lx = gn.x - tw / 2 - pad;
+        ctx.fillStyle = 'rgba(6,10,20,0.6)';
+        if (typeof ctx.roundRect === 'function') {
+          ctx.beginPath();
+          ctx.roundRect(lx, ly, tw + pad * 2, fs + pad, pad);
+          ctx.fill();
+        } else {
+          ctx.fillRect(lx, ly, tw + pad * 2, fs + pad);
+        }
+        ctx.fillStyle = isSelected ? '#ffffff' : isHovered ? '#f4f7ff' : '#dde6ffcc';
+        ctx.fillText(gn.name, gn.x, ly + pad / 2);
       }
 
       ctx.restore();
     },
-    [selectedEntityId, anchorId, settings, driver],
+    [selectedEntityId, anchorId, settings, driver, nodeDegrees],
   );
 
   // ── Link paint (delegates to module; ghost/cluster links keep faded look) ──
@@ -532,6 +584,13 @@ export function ConstellationGraph({
       const srcEnergy = driver?.getEnergy(srcId) ?? 0;
       const dstEnergy = driver?.getEnergy(tgtId) ?? 0;
 
+      // Neighbourhood focus: when hovering, heavily fade links not touching the
+      // hovered node so its connections read clearly.
+      const hovered = hoveredRef.current;
+      const connected = !hovered || srcId === hovered || tgtId === hovered;
+
+      ctx.save();
+      if (!connected) ctx.globalAlpha = 0.08;
       paintLink({
         ctx,
         link: {
@@ -541,6 +600,7 @@ export function ConstellationGraph({
         srcEnergy,
         dstEnergy,
       });
+      ctx.restore();
     },
     [driver],
   );
@@ -624,7 +684,7 @@ export function ConstellationGraph({
           onBackgroundClick={handleBackgroundClick}
           onZoom={handleZoom}
           onRenderFramePre={onFramePre}
-          d3AlphaDecay={0.02}
+          d3AlphaDecay={0.01}
           d3VelocityDecay={0.3}
           cooldownTicks={300}
           warmupTicks={80}
@@ -634,7 +694,7 @@ export function ConstellationGraph({
           onEngineStop={() => {
             if (!hasInitialFit.current && graphData.nodes.length) {
               hasInitialFit.current = true;
-              graphRef.current?.zoomToFit(reducedMotion ? 0 : 400, 80);
+              graphRef.current?.zoomToFit(reducedMotion ? 0 : 600, 40);
             }
           }}
         />

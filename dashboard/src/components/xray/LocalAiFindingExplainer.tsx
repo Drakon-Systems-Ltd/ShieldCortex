@@ -236,10 +236,37 @@ export function LocalAiFindingExplainer({ finding, target }: { finding: Explaina
       )}
 
       {explainMutation.error && (
-        <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">
-          {explainMutation.error instanceof Error ? explainMutation.error.message : 'Local explanation failed'}
-        </div>
+        <ExplainerError message={explainMutation.error instanceof Error ? explainMutation.error.message : 'Local explanation failed'} />
       )}
+    </div>
+  );
+}
+
+/**
+ * Render an explainer failure. When the failure is the opt-in/disabled state
+ * (rather than a genuine error) show HOW to turn it on — the explainer is
+ * off by default and the bare "disabled" message left users with a dead-end.
+ */
+function ExplainerError({ message }: { message: string }) {
+  const lower = message.toLowerCase();
+  const isOptIn = lower.includes('disabled') || lower.includes('not cached') || lower.includes('not enabled');
+
+  if (!isOptIn) {
+    return (
+      <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">
+        {message}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)]/40 p-3 text-sm text-[var(--sc-text-secondary)]">
+      <p className="font-medium text-[var(--sc-text-primary)]">{message}</p>
+      <p>The Local AI Explainer is opt-in. Enable it from a terminal:</p>
+      <pre className="overflow-x-auto rounded bg-black/30 p-2 text-xs text-[var(--sc-text-primary)]">shieldcortex review-copilot enable --accept-download</pre>
+      <p className="text-xs text-[var(--sc-text-muted)]">
+        Runs a small local model (Qwen2.5-0.5B) on this machine — nothing leaves your device. Requires a Pro licence.
+      </p>
     </div>
   );
 }
