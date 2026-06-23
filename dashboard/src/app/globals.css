@@ -377,6 +377,86 @@
   border-color: var(--term-neon);
 }
 
+/* ── CIC immersive effects layer (gated by the motion policy) ── */
+
+.cic-fx {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 229, 204, 0.02) 0,
+    rgba(0, 229, 204, 0.02) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: screen;
+  opacity: 0.55;
+}
+
+.cic-fx::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 28vh;
+  background: linear-gradient(to bottom, transparent, var(--cic-cyan-glow), transparent);
+  opacity: 0.07;
+  animation: cic-sweep 7s linear infinite;
+}
+
+.cic-fx[data-animate='0']::after {
+  display: none;
+}
+
+@keyframes cic-sweep {
+  0% { transform: translateY(-30vh); }
+  100% { transform: translateY(130vh); }
+}
+
+.cic-boot {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  background: var(--cic-void);
+  color: var(--cic-cyan);
+  cursor: pointer;
+}
+
+.cic-boot-line {
+  font-size: 1.1rem;
+  letter-spacing: 0.18em;
+  text-shadow: 0 0 12px var(--cic-cyan-glow);
+}
+
+/* Phosphor bloom — apply to accent text/glyphs that should "glow". */
+.cic-bloom {
+  text-shadow: 0 0 8px currentColor;
+}
+
+/* Glass theme never gets the CRT layer. */
+[data-theme='glass'] .cic-fx,
+[data-theme='glass'] .cic-boot {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cic-fx::after,
+  .pulse-cyan,
+  .pulse-coral,
+  .glow-cyan-pulse,
+  .scan-sweep::after,
+  .cli-cursor {
+    animation: none !important;
+  }
+  .cic-bloom {
+    text-shadow: 0 0 4px currentColor;
+  }
+}
+
 /* ── CLI cursor ── */
 
 @keyframes cli-blink {
