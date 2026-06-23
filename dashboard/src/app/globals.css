@@ -54,29 +54,57 @@
 :root {
   --radius: 0.625rem;
 
-  /* Core terminal palette */
-  --term-bg: #0a0e1a;
-  --term-surface: #0d1321;
-  --term-surface-2: #141c30;
-  --term-border: #1e2a45;
-  --term-border-strong: #2a3a5e;
+  /* ── CIC brand-phosphor (24th-century terminal) — canonical tokens ──
+     The default ("terminal") theme. Multi-spectral phosphor on a near-black
+     void, keyed to MEANING (see src/lib/cic/regions.ts). */
+  --cic-void: #04060c;
+  --cic-surface: #070b14;
+  --cic-surface-2: #0b1120;
+  --cic-border: #16203a;
+  --cic-border-strong: #233456;
+  --cic-grid: rgba(0, 229, 204, 0.045);
 
-  --term-text: #e5e7eb;
-  --term-text-dim: #d1d5db;
-  --term-text-muted: #6b7280;
-  --term-text-faint: #4b5563;
+  /* Semantic / regional phosphor */
+  --cic-cyan: #00e5cc;    /* MEMORY · live · safe · system · link */
+  --cic-coral: #ff4d4d;   /* DEFENCE · threat · block · danger */
+  --cic-amber: #f5a623;   /* QUARANTINE · warn · pending */
+  --cic-violet: #a78bfa;  /* INTEGRITY · consolidation · links · recall */
+  --cic-cyan-fg: #5ff4e2;
+  --cic-coral-fg: #ff6b6b;
+  --cic-cyan-glow: rgba(0, 229, 204, 0.35);
+  --cic-coral-glow: rgba(255, 77, 77, 0.35);
+  --cic-amber-glow: rgba(245, 166, 35, 0.32);
+  --cic-violet-glow: rgba(167, 139, 250, 0.32);
 
-  --term-electric: #3b82f6;
-  --term-electric-fg: #60a5fa;
-  --term-neon: #22c55e;
-  --term-neon-fg: #4ade80;
-  --term-warn: #fbbf24;
-  --term-danger: #ef4444;
+  --cic-text: #d7e3f4;
+  --cic-text-dim: #8aa0bf;
+  --cic-text-muted: #51637e;
+  --cic-text-faint: #33415a;
 
-  /* Traffic-light dots (window chrome) */
-  --term-light-red: rgba(239, 68, 68, 0.7);
-  --term-light-yellow: rgba(245, 158, 11, 0.7);
-  --term-light-green: rgba(34, 197, 94, 0.7);
+  /* Legacy terminal palette now POINTS AT the CIC tokens, so every existing
+     --term-* / --sc-* consumer inherits the brand-phosphor look for free. */
+  --term-bg: var(--cic-void);
+  --term-surface: var(--cic-surface);
+  --term-surface-2: var(--cic-surface-2);
+  --term-border: var(--cic-border);
+  --term-border-strong: var(--cic-border-strong);
+
+  --term-text: var(--cic-text);
+  --term-text-dim: var(--cic-text-dim);
+  --term-text-muted: var(--cic-text-muted);
+  --term-text-faint: var(--cic-text-faint);
+
+  --term-electric: var(--cic-coral);     /* primary-action / defence role = coral */
+  --term-electric-fg: var(--cic-coral-fg);
+  --term-neon: var(--cic-cyan);          /* live / memory role = cyan */
+  --term-neon-fg: var(--cic-cyan-fg);
+  --term-warn: var(--cic-amber);
+  --term-danger: var(--cic-coral);
+
+  /* Window chrome dots — re-keyed to the phosphor palette */
+  --term-light-red: rgba(255, 77, 77, 0.75);
+  --term-light-yellow: rgba(245, 166, 35, 0.75);
+  --term-light-green: rgba(0, 229, 204, 0.75);
 
   /* Legacy aliases — keep so existing class-name consumers keep rendering.
      Every --sc-* below maps to its terminal-palette equivalent. */
@@ -100,10 +128,10 @@
   --sc-surface-interactive: var(--term-surface-2);
   --sc-surface-interactive-hover: var(--term-border);
 
-  --sc-glow-coral: rgba(59, 130, 246, 0.18);
-  --sc-glow-coral-mid: rgba(59, 130, 246, 0.28);
-  --sc-glow-cyan: rgba(34, 197, 94, 0.18);
-  --sc-glow-cyan-mid: rgba(34, 197, 94, 0.28);
+  --sc-glow-coral: var(--cic-coral-glow);
+  --sc-glow-coral-mid: rgba(255, 77, 77, 0.30);
+  --sc-glow-cyan: var(--cic-cyan-glow);
+  --sc-glow-cyan-mid: rgba(0, 229, 204, 0.30);
 
   --sc-transition: 0.15s linear;
 
