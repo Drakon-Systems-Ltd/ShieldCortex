@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.42.3] - 2026-06-24
+
+**Brand-compliant favicon.** Per the brand guidelines, the browser-tab favicon is the *simple shield* (which reads cleanly at 16px), not the detailed circuit-brain emblem (4.42.2 shipped the emblem as the favicon — detail is lost at small sizes). The emblem remains the dashboard's header/app logo and the apple-touch (home-screen) icon. Dashboard-only; no API change.
+
 ## [4.42.2] - 2026-06-24
 
 **Dashboard auto-restarts after an update, and the brand mark is now consistent everywhere.** Two dashboard-layer fixes; no change to the defence pipeline, MCP tools, or any package API.
