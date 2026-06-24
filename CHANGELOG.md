@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.42.0] - 2026-06-24
+
+**The bundled dashboard becomes a CIC ("Combat Information Center") terminal console — a 24th-century command surface.** A full visual + interaction redesign of the local dashboard, with a *real* command rail at its heart. Dashboard-only: no change to the defence pipeline, MCP tools, CLI, or any package API. The Glass theme is retained and one click away.
+
+### Added
+
+- **CIC terminal theme (new default).** A brand-phosphor palette (coral = defence/threat, cyan = memory/live, amber = quarantine, violet = integrity) on a near-black void, with holographic panel chrome, tactical headers, and cognitive "regions" that colour the constellation graph by what each cluster means. Glass remains available via the theme toggle.
+- **A real command rail.** Not decorative — a genuine command line (`⌘K` to focus) backed by a parser + registry where every command drives an actual action: `recall`, `scan`, `forget`, `consolidate`, `quarantine [approve|reject]`, `irondome`, `remember`, `go`, `theme`, `help`. Output streams into the console; `↑/↓` walks history.
+- **Immersive effects layer.** A fixed CRT scanline, slow phosphor sweep, and a one-shot boot sequence — all gated by a **calm toggle** and `prefers-reduced-motion`, so the motion is opt-out and accessible (non-negotiable for a console you work in).
+- **Ambient telemetry rail.** 7-day sparklines for at-a-glance trend context alongside the live feed.
+
+### Changed
+
+- The dashboard shell, navigation rail, and overview were rebuilt around the CIC language; the knowledge graph, entity detail, and cards were retoned to the brand-phosphor tokens. Behaviour and data are unchanged.
+
 ## [4.41.0] - 2026-06-22
 
 **Per-row read ACL for the bundled dashboard + a dashboard UX pass.** The visualization API and its WebSocket feed now redact RESTRICTED (credential-class) content before it reaches the browser, closing the last verbatim read surface (4.38.0 guarded the MCP read tools). Plus four dashboard fixes. No breaking changes.
