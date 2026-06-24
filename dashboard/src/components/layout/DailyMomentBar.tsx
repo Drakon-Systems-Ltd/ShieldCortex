@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Activity, ArrowDown, ArrowUp, Brain, Minus, ShieldAlert, ShieldCheck, Sparkles } from 'lucide-react';
 import { useDigest, type DigestMoment, type DigestWindow } from '@/hooks/useDigest';
 import { useDashboardStore } from '@/lib/store';
+import { ThemeToggle } from '@/components/ds/ThemeToggle';
 
 const WINDOWS: Array<{ id: DigestWindow; label: string }> = [
   { id: '24h', label: '24h' },
@@ -142,6 +143,9 @@ export function DailyMomentBar() {
         )}
 
         <div className="ml-auto flex items-center gap-3">
+          <div onClick={(e) => e.stopPropagation()}>
+            <ThemeToggle />
+          </div>
           <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
           {WINDOWS.map((w) => (
             <button
