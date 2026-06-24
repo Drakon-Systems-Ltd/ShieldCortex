@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.42.1] - 2026-06-24
+
+**Fix: the theme switch is reachable from both shells.** 4.42.0 made the CIC terminal theme the default and kept Glass, but the only theme control lived in the terminal command rail — so a user whose `sc-theme` was persisted to `glass` (e.g. carried over from a pre-CIC build) landed in the Glass shell with no UI path back to terminal. Added a `Theme` toggle to both shells' chrome (the Glass top bar and the terminal ops bar), so Glass ↔ Terminal is always one click. Dashboard-only.
+
 ## [4.42.0] - 2026-06-24
 
 **The bundled dashboard becomes a CIC ("Combat Information Center") terminal console — a 24th-century command surface.** A full visual + interaction redesign of the local dashboard, with a *real* command rail at its heart. Dashboard-only: no change to the defence pipeline, MCP tools, CLI, or any package API. The Glass theme is retained and one click away.
