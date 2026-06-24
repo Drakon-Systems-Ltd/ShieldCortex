@@ -21,6 +21,7 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
+import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 
 const require = createRequire(import.meta.url);
@@ -1674,6 +1675,37 @@ async function checkModelCache(): Promise<CheckResult> {
 }
 
 // ── Main runner ───────────────────────────────────────────
+/**
+ * Detect a stale dashboard service — the launchd parent serving an OLD build
+ * from memory after a global update (it doesn't re-exec on npm install). The
+ * postinstall auto-kick handles this on update; this is the safety net + the
+ * visible signal when it didn't fire (e.g. updated via a path postinstall skips).
+ */
+export async function checkDashboardFreshness(): Promise<CheckResult> {
+  const label = 'Dashboard freshness';
+  try {
+    const r = detectStaleDashboard(realDeps());
+    if (r.stale) {
+      return {
+        label,
+        status: 'warn',
+        message: `dashboard service (pid ${r.pid}) predates the installed build — serving stale code (old theme/assets)`,
+        fix: 'launchctl kickstart -k gui/$(id -u)/com.shieldcortex.dashboard',
+      };
+    }
+    if (r.reason === 'process-current') {
+      return { label, status: 'pass', message: 'dashboard service is running the current build' };
+    }
+    if (r.reason === 'not-darwin' || r.reason === 'service-not-loaded' || r.reason === 'service-not-running') {
+      return { label, status: 'info', message: 'no managed dashboard service running' };
+    }
+    // process-start-unknown / install-mtime-unknown — couldn't determine; don't claim "current".
+    return { label, status: 'info', message: 'could not determine dashboard build freshness' };
+  } catch {
+    return { label, status: 'info', message: 'could not probe the dashboard service' };
+  }
+}
+
 export async function runDoctor(): Promise<void> {
   console.log(`\n${bold}ShieldCortex Doctor${reset} v${pkg.version}\n`);
 
@@ -1692,6 +1724,7 @@ export async function runDoctor(): Promise<void> {
     checkBrainWorker,
     checkProjectKeyConsistency,
     checkProcesses,
+    checkDashboardFreshness,
     checkDiskUsage,
     checkLockFile,
     checkOpenClawResidue,
