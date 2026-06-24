@@ -1,14 +1,6 @@
 ---
 name: shieldcortex
-description: >
-  Persistent memory and security system for AI agents. Stores memories with
-  semantic search, knowledge graphs, and decay. Scans AND enforces at the memory
-  read/write boundary and on tool output — not scan-only: it quarantines/blocks
-  poisoned writes, trust/ACL-filters recalled memory before it reaches the agent,
-  and (in enforce mode) redacts or withholds malicious tool output, with a
-  read/write/delete provenance ledger. Detects prompt injection, credential
-  leaks, and poisoning; audits agent instruction files and MCP configs. Includes
-  Cortex mistake-learning module (Pro tier).
+description: "Memory and defence for AI agents: semantic recall, knowledge graph and decay, plus a memory firewall that scans and enforces against prompt injection, credential leaks and poisoning."
 license: MIT-0
 metadata:
   author: Drakon Systems
