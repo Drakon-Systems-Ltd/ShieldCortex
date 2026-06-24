@@ -26,7 +26,7 @@ export function EcosystemStrip({ sources = [], max = 4 }: { sources?: EcosystemS
   const shown = sources.slice(0, max);
   const extra = sources.length - shown.length;
   return (
-    <div className="flex items-center gap-2 overflow-hidden">
+    <div className="flex shrink-0 items-center gap-2">
       <span className="shrink-0 text-[var(--cic-text-faint)]">ECOSYSTEM ▸</span>
       {shown.length === 0 ? (
         <span className="text-[var(--cic-text-faint)]">no signals</span>

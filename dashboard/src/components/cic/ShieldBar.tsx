@@ -11,7 +11,7 @@ export function ShieldBar({ blocked = 0 }: { blocked?: number }) {
   const hot = blocked > 0;
   const colour = hot ? 'var(--cic-coral)' : 'var(--cic-cyan)';
   return (
-    <div className="flex items-center gap-2" title={`Shield: 6 layers armed · ${blocked} blocked`}>
+    <div className="flex shrink-0 items-center gap-2" title={`Shield: 6 layers armed · ${blocked} blocked`}>
       <span className="text-[var(--cic-text-faint)]">SHIELD</span>
       <span className="flex gap-0.5">
         {LAYERS.map((l) => (
