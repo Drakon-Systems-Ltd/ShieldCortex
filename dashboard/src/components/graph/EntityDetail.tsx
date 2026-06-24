@@ -46,7 +46,7 @@ export function EntityDetail({ entity, relatedEntities, recentMemories, onNaviga
         <div className="flex items-start gap-3">
           <span
             className="mt-1 h-3 w-3 shrink-0 rounded-full"
-            style={{ backgroundColor: TYPE_BADGE[entity.type] === 'coral' ? '#ff4d4d' : TYPE_BADGE[entity.type] === 'amber' ? '#f59e0b' : '#00e5cc' }}
+            style={{ backgroundColor: TYPE_BADGE[entity.type] === 'coral' ? '#ff4d4d' : TYPE_BADGE[entity.type] === 'amber' ? '#f5a623' : '#00e5cc' }}
           />
           <div className="min-w-0">
             <h2 className="truncate text-lg font-semibold text-[var(--sc-text-primary)]">
@@ -78,7 +78,7 @@ export function EntityDetail({ entity, relatedEntities, recentMemories, onNaviga
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     className="h-2 w-2 shrink-0 rounded-full"
-                    style={{ backgroundColor: TYPE_BADGE[re.type] === 'coral' ? '#ff4d4d' : TYPE_BADGE[re.type] === 'amber' ? '#f59e0b' : '#00e5cc' }}
+                    style={{ backgroundColor: TYPE_BADGE[re.type] === 'coral' ? '#ff4d4d' : TYPE_BADGE[re.type] === 'amber' ? '#f5a623' : '#00e5cc' }}
                   />
                   <span className="truncate text-sm text-[var(--sc-text-primary)]">{re.label}</span>
                 </div>

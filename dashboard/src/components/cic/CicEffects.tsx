@@ -24,6 +24,13 @@ export function CicEffects() {
   // Mount flag avoids an SSR/client hydration mismatch on the boot overlay.
   useEffect(() => setMounted(true), []);
 
+  // Mirror the motion decision onto <html> so CSS can still ALL ambient motion
+  // (cursor blink, status pulses, sweep) under the calm toggle — a CSS media
+  // query can only see the OS reduced-motion preference, not the in-app toggle.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-cic-motion', animate ? 'on' : 'off');
+  }, [animate]);
+
   useEffect(() => {
     if (!mounted) return;
     let alreadyBooted = false;

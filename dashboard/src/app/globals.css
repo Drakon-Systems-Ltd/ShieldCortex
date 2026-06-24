@@ -77,9 +77,9 @@
   --cic-violet-glow: rgba(167, 139, 250, 0.32);
 
   --cic-text: #d7e3f4;
-  --cic-text-dim: #8aa0bf;
-  --cic-text-muted: #51637e;
-  --cic-text-faint: #33415a;
+  --cic-text-dim: #a6b4cd;     /* secondary — ~7:1 on void */
+  --cic-text-muted: #7e8fae;   /* tertiary — ~4.6:1, passes AA normal */
+  --cic-text-faint: #5e6f90;   /* quaternary labels — ~3.2:1, no longer 1.97:1 */
 
   /* Legacy terminal palette now POINTS AT the CIC tokens, so every existing
      --term-* / --sc-* consumer inherits the brand-phosphor look for free. */
@@ -123,10 +123,13 @@
 
   --sc-border: var(--term-border);
   --sc-border-accent: var(--term-electric);
+  --sc-border-subtle: var(--cic-border);
   --sc-card-bg: var(--term-surface);
   --sc-card-bg-strong: var(--term-surface);
   --sc-surface-interactive: var(--term-surface-2);
   --sc-surface-interactive-hover: var(--term-border);
+  --sc-surface-glass: var(--cic-surface-2);
+  --sc-accent-cyan: var(--cic-cyan);
 
   --sc-glow-coral: var(--cic-coral-glow);
   --sc-glow-coral-mid: rgba(255, 77, 77, 0.30);
@@ -192,10 +195,13 @@
 
   --sc-border: rgba(136, 146, 176, 0.15);
   --sc-border-accent: rgba(255, 77, 77, 0.3);
+  --sc-border-subtle: rgba(136, 146, 176, 0.12);
   --sc-card-bg: rgba(10, 15, 26, 0.65);
   --sc-card-bg-strong: rgba(10, 15, 26, 0.8);
   --sc-surface-interactive: rgba(255, 255, 255, 0.06);
   --sc-surface-interactive-hover: rgba(255, 255, 255, 0.1);
+  --sc-surface-glass: rgba(255, 255, 255, 0.04);
+  --sc-accent-cyan: #00e5cc;
 
   --sc-glow-coral: rgba(255, 77, 77, 0.15);
   --sc-glow-coral-mid: rgba(255, 77, 77, 0.25);
@@ -465,6 +471,22 @@
 [data-theme='glass'] .cic-fx,
 [data-theme='glass'] .cic-boot {
   display: none;
+}
+
+/* Calm toggle (set on <html> by CicEffects) stills ALL ambient motion — not just
+   the sweep/boot. The prefers-reduced-motion @media block below covers the OS
+   preference; this covers the in-app toggle, which a CSS media query cannot read. */
+[data-cic-motion='off'] .cic-fx::after,
+[data-cic-motion='off'] .pulse-cyan,
+[data-cic-motion='off'] .pulse-coral,
+[data-cic-motion='off'] .glow-cyan-pulse,
+[data-cic-motion='off'] .scan-sweep::after,
+[data-cic-motion='off'] .cli-cursor {
+  animation: none !important;
+}
+
+[data-cic-motion='off'] .cic-bloom {
+  text-shadow: 0 0 4px currentColor;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -29,8 +29,8 @@ export interface NodePaintOpts {
   _paintHook?: (info: { nodeId: string; radius: number; energy: number; recallEnergy: number }) => void;
 }
 
-const SUN_COLOUR = '#fde68a';
-const RECALL_GLOW_COLOUR = '#fb923c';
+const SUN_COLOUR = '#d9faf5'; // bright cyan-white — the focal cortex core
+const RECALL_GLOW_COLOUR = '#a78bfa'; // CIC violet — recall = integrity region (matches the palette)
 
 /**
  * Paint one node. Preserves existing cluster-halo + inner-core-glow + label
@@ -75,7 +75,7 @@ export function paintNode(input: NodePaintInput, opts: NodePaintOpts = {}): void
     ctx.fillStyle = SUN_COLOUR;
     ctx.fill();
     ctx.lineWidth = 1.5;
-    ctx.strokeStyle = '#fbbf24';
+    ctx.strokeStyle = '#00e5cc';
     ctx.stroke();
     return;
   }
