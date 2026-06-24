@@ -7,6 +7,7 @@ import { useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
 import { EcosystemStrip } from './EcosystemStrip';
 import { ShieldBar } from './ShieldBar';
 import { ThemeToggle } from '@/components/ds/ThemeToggle';
+import { Logo } from '@/components/ds/Logo';
 
 function Counter({ label, value, colour }: { label: string; value: number; colour: string }) {
   return (
@@ -43,8 +44,11 @@ export function OpsBar() {
 
   return (
     <header className="flex items-center gap-5 overflow-x-auto border-b border-[var(--cic-border)] bg-[var(--cic-surface)]/80 px-4 py-2 font-mono text-xs whitespace-nowrap">
-      <span className="cic-bloom shrink-0 font-semibold tracking-[0.18em] text-[var(--cic-cyan)]">
-        ◢ SHIELDCORTEX·CIC ◤
+      <span className="flex shrink-0 items-center gap-2">
+        <Logo size={18} className="shrink-0" />
+        <span className="cic-bloom font-semibold tracking-[0.18em] text-[var(--cic-cyan)]">
+          SHIELDCORTEX·CIC
+        </span>
       </span>
       <EcosystemStrip sources={sources} />
       <ShieldBar blocked={a?.blockedCount ?? 0} />

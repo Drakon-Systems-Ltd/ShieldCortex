@@ -2,8 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Menu, Pin, PinOff, Shield, X } from 'lucide-react';
+import { Menu, Pin, PinOff, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Logo } from '@/components/ds/Logo';
 import { NAV_ITEMS } from '@/components/layout/route-config';
 import { useDashboardStore } from '@/lib/store';
 import { useVersion } from '@/hooks/useMemories';
@@ -60,9 +61,7 @@ export function SidebarGlass() {
       >
         {/* Logo */}
         <div className="flex h-16 items-center gap-3 border-b border-[var(--sc-border)] px-4">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[var(--sc-coral)] to-[var(--sc-coral-dark)]">
-            <Shield size={16} className="text-white" />
-          </div>
+          <Logo size={32} className="shrink-0" />
           <div className={cn('overflow-hidden whitespace-nowrap transition-all duration-300', expanded ? 'w-auto opacity-100' : 'w-0 opacity-0')}>
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--sc-coral)]">ShieldCortex</div>
             <div className="text-xs text-[var(--sc-text-muted)]">Dashboard</div>
