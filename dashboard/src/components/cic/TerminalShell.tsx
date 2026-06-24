@@ -3,6 +3,7 @@
 import { OpsBar } from './OpsBar';
 import { NavRail } from './NavRail';
 import { CommandRail } from './CommandRail';
+import { TelemetryRail } from './TelemetryRail';
 
 /**
  * The CIC console shell: ops bar across the top, nav rail down the left, the
@@ -17,6 +18,7 @@ export function TerminalShell({ children }: { children: React.ReactNode }) {
         <NavRail />
         <main className="min-w-0 flex-1 overflow-auto">{children}</main>
       </div>
+      <TelemetryRail />
       <CommandRail />
     </div>
   );
