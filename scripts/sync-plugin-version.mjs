@@ -65,6 +65,42 @@ for (const target of targets) {
   );
 }
 
+// SKILL.md (the ClawHub skill) is YAML-frontmatter-in-markdown, not JSON, so it
+// was never covered above — its metadata.version silently drifted (stuck at 4.41.0
+// across several releases). Keep it aligned too. The regex matches the single
+// `<indent>version: <value>` frontmatter line; `minVersion:` does not match (the
+// char before "version" there is "n", not whitespace).
+const skillMdPath = path.join(repoRoot, 'skills', 'shieldcortex', 'SKILL.md');
+const SKILL_VERSION_RE = /^(\s+)version:[ \t]*(.+)$/m;
+try {
+  const raw = await fs.readFile(skillMdPath, 'utf-8');
+  const match = raw.match(SKILL_VERSION_RE);
+  if (!match) {
+    console.error('[sync-plugin-version] skills/shieldcortex/SKILL.md: no metadata version line found');
+    process.exit(1);
+  }
+  const currentVersion = match[2].trim();
+  if (currentVersion === rootVersion) {
+    console.log(`[sync-plugin-version] skills/shieldcortex/SKILL.md in sync at ${rootVersion}`);
+  } else {
+    drifted = true;
+    if (checkOnly) {
+      console.error(
+        `[sync-plugin-version] skills/shieldcortex/SKILL.md out of sync: ${currentVersion} != root ${rootVersion}`,
+      );
+    } else {
+      await fs.writeFile(skillMdPath, raw.replace(SKILL_VERSION_RE, `$1version: ${rootVersion}`), 'utf-8');
+      changed = true;
+      console.log(
+        `[sync-plugin-version] changed: skills/shieldcortex/SKILL.md from ${currentVersion} to ${rootVersion}`,
+      );
+    }
+  }
+} catch (err) {
+  console.error(`[sync-plugin-version] could not read skills/shieldcortex/SKILL.md: ${err.message}`);
+  process.exit(1);
+}
+
 if (checkOnly && drifted) {
   process.exit(1);
 }
