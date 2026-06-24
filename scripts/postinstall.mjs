@@ -13,7 +13,7 @@ import { existsSync, copyFileSync, mkdirSync, readdirSync, readFileSync, writeFi
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { spawnSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { createRequire } from 'module';
 import { getDashboardHint } from './lib/dashboard-hint.mjs';
 
@@ -160,14 +160,38 @@ function verifyNativeModule() {
   }
 }
 
+/**
+ * After a global update the macOS LaunchAgent keeps serving the OLD dashboard
+ * build from memory — launchd does not re-exec the running parent on npm
+ * install. If the live dashboard process predates this freshly-written build,
+ * kick the service so it respawns from the new install. macOS-only and fully
+ * fail-soft (the detection module never throws; this wrapper swallows the rest),
+ * so it can never break `npm install`. Logs ONLY when it actually restarts.
+ */
+async function kickStaleDashboardIfNeeded(distDir) {
+  try {
+    const modUrl = pathToFileURL(join(distDir, 'service', 'dashboard-staleness.js')).href;
+    const mod = await import(modUrl);
+    const result = mod.autoKickStaleDashboardFromInstall?.();
+    if (result?.kicked) {
+      console.log('');
+      console.log('[shieldcortex] ♻  Dashboard was running an older build — restarted the service to load this update.');
+    }
+  } catch {
+    /* never fail postinstall on the dashboard auto-kick */
+  }
+}
+
 // ── Main postinstall logic ──
 
 if (isGlobal && !isCI) {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
-  const cliPath = join(__dirname, '..', 'dist', 'index.js');
+  const distDir = join(__dirname, '..', 'dist');
+  const cliPath = join(distDir, 'index.js');
 
   verifyNativeModule();
+  await kickStaleDashboardIfNeeded(distDir);
 
   const isFreshInstall = writeFreshInstallDefaults();
   const state = getOpenClawState();
