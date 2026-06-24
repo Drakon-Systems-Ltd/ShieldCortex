@@ -9,6 +9,10 @@ const mockCtx: CommandContext = {
   scan: jest.fn(async () => ({ target: '/a', riskLevel: 'SAFE', trustScore: 100, filesScanned: 3, findingsCount: 0 })),
   forget: jest.fn(async () => undefined),
   consolidate: jest.fn(async () => ({ consolidated: 1, decayed: 0, deleted: 0 })),
+  quarantineList: jest.fn(async () => []),
+  quarantineReview: jest.fn(async () => undefined),
+  ironDome: jest.fn(async () => 'iron dome: inactive'),
+  remember: jest.fn(async () => ({ id: 1 })),
   routes: [
     { label: 'Memory', href: '/memory' },
     { label: 'Protection', href: '/protection' },

@@ -17,6 +17,13 @@ function mockCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     })),
     forget: jest.fn(async () => undefined),
     consolidate: jest.fn(async () => ({ consolidated: 2, decayed: 1, deleted: 0 })),
+    quarantineList: jest.fn(async () => [
+      { id: 11, title: 'stealth instruction in CLAUDE.md' },
+      { id: 12, title: 'low-trust agent write' },
+    ]),
+    quarantineReview: jest.fn(async () => undefined),
+    ironDome: jest.fn(async (action) => (action === 'status' ? 'iron dome: ACTIVE' : `iron dome → ${action}`)),
+    remember: jest.fn(async () => ({ id: 99 })),
     routes: [
       { label: 'Memory', href: '/memory' },
       { label: 'Protection', href: '/protection' },
@@ -116,6 +123,68 @@ describe('runCommand', () => {
     const res = await runCommand('consolidate', ctx);
     expect(ctx.consolidate).toHaveBeenCalled();
     expect(res.lines.join('\n')).toMatch(/consolidat/i);
+  });
+
+  it('quarantine (no arg) lists pending items', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('quarantine', ctx);
+    expect(ctx.quarantineList).toHaveBeenCalled();
+    expect(res.lines.join('\n')).toContain('stealth instruction');
+  });
+
+  it('quarantine approve <id> reviews by id', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('quarantine approve 11', ctx);
+    expect(ctx.quarantineReview).toHaveBeenCalledWith(11, 'approve');
+    expect(res.ok).toBe(true);
+  });
+
+  it('quarantine reject <id> reviews by id', async () => {
+    const ctx = mockCtx();
+    await runCommand('quarantine reject 12', ctx);
+    expect(ctx.quarantineReview).toHaveBeenCalledWith(12, 'reject');
+  });
+
+  it('quarantine approve rejects a non-numeric id', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('quarantine approve xyz', ctx);
+    expect(ctx.quarantineReview).not.toHaveBeenCalled();
+    expect(res.ok).toBe(false);
+  });
+
+  it('irondome status reports state', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('irondome status', ctx);
+    expect(ctx.ironDome).toHaveBeenCalledWith('status');
+    expect(res.lines.join(' ')).toMatch(/iron dome/i);
+  });
+
+  it('irondome on activates', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('irondome on', ctx);
+    expect(ctx.ironDome).toHaveBeenCalledWith('on');
+    expect(res.ok).toBe(true);
+  });
+
+  it('irondome rejects an unknown action', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('irondome sideways', ctx);
+    expect(ctx.ironDome).not.toHaveBeenCalled();
+    expect(res.ok).toBe(false);
+  });
+
+  it('remember stores a memory from the quoted text', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('remember "the auth bug was an expired JWT"', ctx);
+    expect(ctx.remember).toHaveBeenCalledWith('the auth bug was an expired JWT');
+    expect(res.lines.join(' ')).toMatch(/#99/);
+  });
+
+  it('remember errors with no text', async () => {
+    const ctx = mockCtx();
+    const res = await runCommand('remember', ctx);
+    expect(ctx.remember).not.toHaveBeenCalled();
+    expect(res.ok).toBe(false);
   });
 
   it('surfaces an adapter error as an error line', async () => {

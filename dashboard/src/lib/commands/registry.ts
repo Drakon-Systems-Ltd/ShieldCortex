@@ -40,6 +40,10 @@ export interface CommandContext {
   scan: (target: string, deep: boolean) => Promise<ScanSummary>;
   forget: (id: number) => Promise<void>;
   consolidate: () => Promise<ConsolidateSummary>;
+  quarantineList: () => Promise<RecallHit[]>;
+  quarantineReview: (id: number, action: 'approve' | 'reject') => Promise<void>;
+  ironDome: (action: 'on' | 'off' | 'status') => Promise<string>;
+  remember: (text: string) => Promise<{ id: number }>;
   routes: RouteRef[];
 }
 
@@ -138,6 +142,53 @@ const consolidate: Command = {
   },
 };
 
+const quarantine: Command = {
+  name: 'quarantine',
+  usage: 'quarantine [approve <id> | reject <id>]',
+  summary: 'list pending quarantine, or approve/reject by id',
+  run: async (ctx, { args }) => {
+    const sub = args[0]?.toLowerCase();
+    if (!sub || sub === 'list') {
+      const items = await ctx.quarantineList();
+      if (items.length === 0) return ok(['quarantine: nothing pending']);
+      return ok([`quarantine pending → ${items.length}`, ...items.slice(0, 10).map((h) => `  #${h.id} ${h.title}`)]);
+    }
+    if (sub === 'approve' || sub === 'reject') {
+      const id = Number(args[1]);
+      if (!Number.isInteger(id)) return err([`quarantine ${sub}: give a numeric id`]);
+      await ctx.quarantineReview(id, sub);
+      return ok([`▸ ${sub === 'approve' ? 'approved' : 'rejected'} #${id}`]);
+    }
+    return err(['quarantine: use list | approve <id> | reject <id>']);
+  },
+};
+
+const irondome: Command = {
+  name: 'irondome',
+  usage: 'irondome <on|off|status>',
+  summary: 'arm/disarm the Iron Dome, or report its state',
+  run: async (ctx, { args }) => {
+    const sub = args[0]?.toLowerCase();
+    if (sub !== 'on' && sub !== 'off' && sub !== 'status') {
+      return err(['irondome: use on | off | status']);
+    }
+    const line = await ctx.ironDome(sub);
+    return ok([line]);
+  },
+};
+
+const remember: Command = {
+  name: 'remember',
+  usage: 'remember "<text>"',
+  summary: 'store a new memory',
+  run: async (ctx, { args }) => {
+    const text = args.join(' ').trim();
+    if (!text) return err(['remember: give the text to store, e.g. remember "the fix was X"']);
+    const m = await ctx.remember(text);
+    return ok([`▸ remembered #${m.id}`]);
+  },
+};
+
 const help: Command = {
   name: 'help',
   usage: 'help',
@@ -150,6 +201,9 @@ export const COMMANDS: Record<string, Command> = {
   scan,
   forget,
   consolidate,
+  quarantine,
+  irondome,
+  remember,
   go,
   theme,
   help,

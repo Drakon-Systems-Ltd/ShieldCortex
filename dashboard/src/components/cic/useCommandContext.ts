@@ -6,6 +6,7 @@ import { authFetch, readApiError } from '@/lib/auth';
 import { useTheme } from '@/hooks/useTheme';
 import { useXRayScan } from '@/hooks/useXRay';
 import { useDeleteMemory, useConsolidate } from '@/hooks/useMemories';
+import { useApproveQuarantine, useRejectQuarantine } from '@/hooks/useDefence';
 import { NAV_ITEMS } from '@/components/layout/route-config';
 import type { CommandContext } from '@/lib/commands/registry';
 
@@ -22,6 +23,8 @@ export function useCommandContext(): CommandContext {
   const xray = useXRayScan();
   const del = useDeleteMemory();
   const cons = useConsolidate();
+  const approveQ = useApproveQuarantine();
+  const rejectQ = useRejectQuarantine();
 
   return useMemo<CommandContext>(
     () => ({
@@ -52,8 +55,44 @@ export function useCommandContext(): CommandContext {
         const r = await cons.mutateAsync();
         return { consolidated: r.consolidated, decayed: r.decayed, deleted: r.deleted };
       },
+      quarantineList: async () => {
+        const res = await authFetch(`${API_BASE}/api/v1/quarantine?status=pending&limit=20`);
+        if (!res.ok) throw new Error(await readApiError(res, 'quarantine list failed'));
+        const data = (await res.json()) as { items?: { id: number; original_title?: string; title?: string }[] };
+        return (data.items ?? []).map((i) => ({ id: i.id, title: i.original_title ?? i.title ?? `item ${i.id}` }));
+      },
+      quarantineReview: async (id, action) => {
+        if (action === 'approve') await approveQ.mutateAsync(id);
+        else await rejectQ.mutateAsync({ id });
+      },
+      ironDome: async (action) => {
+        if (action === 'status') {
+          const res = await authFetch(`${API_BASE}/api/iron-dome/status`);
+          if (!res.ok) throw new Error(await readApiError(res, 'iron dome status failed'));
+          const data = (await res.json()) as { enabled?: boolean };
+          return `iron dome: ${data.enabled ? 'ACTIVE' : 'inactive'}`;
+        }
+        const path = action === 'on' ? 'activate' : 'deactivate';
+        const res = await authFetch(`${API_BASE}/api/iron-dome/${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!res.ok) throw new Error(await readApiError(res, `iron dome ${action} failed`));
+        return `▸ iron dome ${action === 'on' ? 'ACTIVE' : 'disabled'}`;
+      },
+      remember: async (text) => {
+        const res = await authFetch(`${API_BASE}/api/memories`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: text.slice(0, 80), content: text }),
+        });
+        if (!res.ok) throw new Error(await readApiError(res, 'remember failed'));
+        const data = (await res.json()) as { id?: number };
+        return { id: data.id ?? 0 };
+      },
       routes: NAV_ITEMS.map((n) => ({ label: n.label, href: n.href })),
     }),
-    [router, setTheme, xray, del, cons],
+    [router, setTheme, xray, del, cons, approveQ, rejectQ],
   );
 }
