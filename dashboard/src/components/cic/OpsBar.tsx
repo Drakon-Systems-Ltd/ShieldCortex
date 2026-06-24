@@ -6,6 +6,7 @@ import { useAuditStats } from '@/hooks/useDefence';
 import { useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
 import { EcosystemStrip } from './EcosystemStrip';
 import { ShieldBar } from './ShieldBar';
+import { ThemeToggle } from '@/components/ds/ThemeToggle';
 
 function Counter({ label, value, colour }: { label: string; value: number; colour: string }) {
   return (
@@ -65,6 +66,7 @@ export function OpsBar() {
         <span className="tabular-nums text-[var(--cic-text-muted)]" suppressHydrationWarning>
           {clock}
         </span>
+        <ThemeToggle />
       </span>
     </header>
   );
