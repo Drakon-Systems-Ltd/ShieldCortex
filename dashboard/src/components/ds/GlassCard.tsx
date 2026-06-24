@@ -66,16 +66,16 @@ export function GlassCard({
       role={onClick ? 'button' : undefined}
       tabIndex={onClick ? 0 : undefined}
     >
-      {/* Title bar — terminal mode only. Glass mode renders no chrome,
-          so the children sit directly inside the card body. */}
+      {/* Tactical title bar — terminal mode only. Reads as a ship's-console
+          system readout: a glowing region marker + the system name + a live dot.
+          Glass mode renders no chrome (children sit directly in the body). */}
       {title !== undefined && (
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--term-border)] bg-[var(--term-surface-2)] theme-glass:hidden">
-          <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-red)]" />
-          <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-yellow)]" />
-          <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-green)]" />
-          <span className="ml-2 text-xs select-none truncate text-[var(--term-text-muted)]">
+        <div className="flex items-center gap-2 border-b border-[var(--term-border)] bg-[var(--term-surface-2)]/50 px-4 py-1.5 theme-glass:hidden">
+          <span aria-hidden className="cic-bloom text-[var(--cic-cyan)]">▸</span>
+          <span className="cic-bloom select-none truncate text-xs font-semibold uppercase tracking-[0.14em] text-[var(--cic-cyan)]">
             {title}
           </span>
+          <span aria-hidden className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cic-cyan)]/60" />
         </div>
       )}
       <div className={cn(bodyPadding ? 'p-5' : '')}>{children}</div>

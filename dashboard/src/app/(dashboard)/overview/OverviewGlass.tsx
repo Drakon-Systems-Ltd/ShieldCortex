@@ -133,40 +133,43 @@ export function OverviewGlass() {
           blockedCount={blockedCount}
         />
 
-        {/* Stats row */}
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-          <StatCard
-            label="Stored Memories"
-            value={totalMemories.toLocaleString()}
-            icon={Database}
-            accent="cyan"
-            trend={healthPercent > 0 ? { value: healthPercent, label: 'healthy' } : undefined}
-          />
-          <StatCard
-            label="Memory Files Flagged"
-            value={pendingMemoryFileFindings.toLocaleString()}
-            icon={FileText}
-            accent={pendingMemoryFileFindings > 0 ? 'amber' : 'muted'}
-          />
-          <StatCard
-            label="Threats Blocked"
-            value={blockedCount.toLocaleString()}
-            icon={ShieldAlert}
-            accent={blockedCount > 0 ? 'coral' : 'muted'}
-          />
-          <StatCard
-            label="X-Ray Scans"
-            value={totalXRayScans.toLocaleString()}
-            icon={ScanSearch}
-            accent="cyan"
-          />
-          <StatCard
-            label="Health Score"
-            value={`${healthPercent}%`}
-            icon={Shield}
-            accent={healthPercent >= 80 ? 'cyan' : healthPercent >= 50 ? 'amber' : 'coral'}
-          />
-        </div>
+        {/* Stats row — framed as a tactical readout panel (terminal); the panel
+            chrome is theme-glass:hidden so Glass keeps the bare card grid. */}
+        <GlassCard title="SYSTEM STATUS" bodyPadding={false}>
+          <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-5">
+            <StatCard
+              label="Stored Memories"
+              value={totalMemories.toLocaleString()}
+              icon={Database}
+              accent="cyan"
+              trend={healthPercent > 0 ? { value: healthPercent, label: 'healthy' } : undefined}
+            />
+            <StatCard
+              label="Memory Files Flagged"
+              value={pendingMemoryFileFindings.toLocaleString()}
+              icon={FileText}
+              accent={pendingMemoryFileFindings > 0 ? 'amber' : 'muted'}
+            />
+            <StatCard
+              label="Threats Blocked"
+              value={blockedCount.toLocaleString()}
+              icon={ShieldAlert}
+              accent={blockedCount > 0 ? 'coral' : 'muted'}
+            />
+            <StatCard
+              label="X-Ray Scans"
+              value={totalXRayScans.toLocaleString()}
+              icon={ScanSearch}
+              accent="cyan"
+            />
+            <StatCard
+              label="Health Score"
+              value={`${healthPercent}%`}
+              icon={Shield}
+              accent={healthPercent >= 80 ? 'cyan' : healthPercent >= 50 ? 'amber' : 'coral'}
+            />
+          </div>
+        </GlassCard>
 
         {/* Health gauge + Urgent actions */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_1fr]">

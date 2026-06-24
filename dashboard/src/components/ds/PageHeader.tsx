@@ -33,14 +33,14 @@ export function PageHeader({
           <div className="theme-glass:hidden">
             {eyebrow && (
               <p className="text-[11px] uppercase tracking-wider text-[var(--term-text-muted)]">
-                <span className="text-[var(--term-electric-fg)]">›</span> {eyebrow}
+                <span className="text-[var(--cic-cyan)]">›</span> {eyebrow}
               </p>
             )}
             <h1 className="mt-1 flex items-baseline flex-wrap gap-2 text-base font-mono text-[var(--term-text)] sm:text-lg">
-              <span className="text-[var(--term-electric-fg)]" aria-hidden>$</span>
+              <span className="text-[var(--cic-cyan)]" aria-hidden>$</span>
               <span>shieldcortex</span>
               <span className="text-[var(--term-text-dim)]">{title.toLowerCase()}</span>
-              <span className="cli-cursor text-[var(--term-electric-fg)]" aria-hidden />
+              <span className="cli-cursor text-[var(--cic-cyan)]" aria-hidden />
             </h1>
             {subtitle && (
               <p className="mt-1 text-xs text-[var(--term-text-muted)]">

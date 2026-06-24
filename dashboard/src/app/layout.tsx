@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/Providers";
+import { CicEffects } from "@/components/cic/CicEffects";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -18,6 +19,10 @@ export const metadata: Metadata = {
   description: "AI Memory Security Dashboard — Defence pipeline, audit logs, quarantine review",
 };
 
+// Runs before paint: resolve the persisted theme so the CIC terminal look (or a
+// previously-chosen glass) is applied with no flash. Defaults to terminal.
+const THEME_BOOTSTRAP = `try{var t=localStorage.getItem('sc-theme');document.documentElement.setAttribute('data-theme',t==='glass'?'glass':'terminal');}catch(e){}`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -27,12 +32,16 @@ export default function RootLayout({
     <html
       lang="en"
       className="dark"
-      data-theme="glass"
+      data-theme="terminal"
       suppressHydrationWarning
     >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
+      </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-slate-950`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <CicEffects />
         <Providers>{children}</Providers>
       </body>
     </html>

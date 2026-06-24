@@ -12,6 +12,7 @@ import { INTENSITY, REDUCED_INTENSITY, isReducedMotion, loadIntensity, type Inte
 import { wireControls } from './constellation/controls';
 import { PulseDebugPanel } from './PulseDebugPanel';
 import { useGraphPulse } from '@/hooks/useGraphPulse';
+import { REGIONS, regionForCluster } from '@/lib/cic/regions';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -45,16 +46,11 @@ const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false 
 
 // ── Cluster colour fallback ───────────────────────────────
 
-const CLUSTER_COLOURS: Record<string, string> = {
-  tool: '#00e5cc',
-  concept: '#ff4d4d',
-  project: '#f59e0b',
-  file: '#5a6480',
-  service: '#a78bfa',
-  person: '#34d399',
-  language: '#a78bfa',
-  pattern: '#fb923c',
-};
+// Every neuron is coloured by the cognitive region it belongs to
+// (memory · defence · quarantine · integrity), so the cortex reads as the second
+// brain in sections rather than a uniform cloud. Canvas-painted, so it reads the
+// resolved hex from the region map (CSS vars are unavailable on a 2D context).
+const regionHex = (type: string): string => REGIONS[regionForCluster(type)].hex;
 
 // ── Props ─────────────────────────────────────────────────
 
@@ -216,7 +212,7 @@ export function ConstellationGraph({
         name: c.type,
         type: c.type,
         memoryCount: c.entities.reduce((sum, e) => sum + e.memoryCount, 0),
-        colour: c.colour,
+        colour: regionHex(c.type),
         isCluster: true,
         clusterType: c.type,
         entityCount: c.entities.length,
@@ -255,7 +251,7 @@ export function ConstellationGraph({
       name: e.name,
       type: e.type,
       memoryCount: e.memoryCount,
-      colour: cluster.colour,
+      colour: regionHex(e.type),
     }));
 
     // Ghost nodes for other clusters
@@ -278,7 +274,7 @@ export function ConstellationGraph({
           name: type,
           type,
           memoryCount: count,
-          colour: CLUSTER_COLOURS[type] || '#8892b0',
+          colour: regionHex(type),
           isCluster: true,
           clusterType: type,
           entityCount: count,
