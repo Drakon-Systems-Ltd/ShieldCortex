@@ -114,13 +114,13 @@ function StatCard({
   icon: typeof Server;
 }) {
   return (
-    <div className="glass-card p-4">
-      <div className="flex items-center justify-between">
-        <span className="text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">{label}</span>
-        <Icon size={15} className="text-[var(--sc-text-muted)]" />
+    <div className="glass-card p-4 min-w-0">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">{label}</span>
+        <Icon size={15} className="shrink-0 text-[var(--sc-text-muted)]" />
       </div>
-      <div className="mt-2 text-2xl font-semibold text-[var(--sc-text-primary)]">{value}</div>
-      <div className="mt-1 text-xs text-[var(--sc-text-secondary)]">{detail}</div>
+      <div className="mt-2 truncate text-2xl font-semibold text-[var(--sc-text-primary)]" title={String(value)}>{value}</div>
+      <div className="mt-1 truncate text-xs text-[var(--sc-text-secondary)]" title={detail}>{detail}</div>
     </div>
   );
 }

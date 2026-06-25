@@ -61,7 +61,7 @@ export function SidebarGlass() {
       >
         {/* Logo */}
         <div className="flex h-16 items-center gap-3 border-b border-[var(--sc-border)] px-4">
-          <Logo size={32} className="shrink-0" />
+          <Logo size={44} className="shrink-0" />
           <div className={cn('overflow-hidden whitespace-nowrap transition-all duration-300', expanded ? 'w-auto opacity-100' : 'w-0 opacity-0')}>
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--sc-coral)]">ShieldCortex</div>
             <div className="text-xs text-[var(--sc-text-muted)]">Dashboard</div>

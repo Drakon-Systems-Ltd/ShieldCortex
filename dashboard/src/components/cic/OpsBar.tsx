@@ -45,7 +45,7 @@ export function OpsBar() {
   return (
     <header className="flex items-center gap-5 overflow-x-auto border-b border-[var(--cic-border)] bg-[var(--cic-surface)]/80 px-4 py-2 font-mono text-xs whitespace-nowrap">
       <span className="flex shrink-0 items-center gap-2">
-        <Logo size={18} className="shrink-0" />
+        <Logo size={36} className="shrink-0" />
         <span className="cic-bloom font-semibold tracking-[0.18em] text-[var(--cic-cyan)]">
           SHIELDCORTEX·CIC
         </span>
