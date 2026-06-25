@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.42.4] - 2026-06-25
+
+**Dashboard polish: a prominent brand logo, and no more text spilling out of cards.** Dashboard-only; no API change.
+
+### Fixed
+
+- **The logo rendered tiny.** The emblem PNG is only ~56% hexagon inside a transparent frame, so every header `<img>` showed roughly half a logo floating in empty space. Ship a trimmed mark (cropped margins) and size the `Logo` by height with the mark's natural aspect ratio, so it fills its box — the brand mark now reads properly in the Glass sidebar (44px) and the CIC ops bar (36px).
+- **Cloud-sync diagnostics cards overflowed.** Long values (device hostname, cloud-target URL) spilled out of their cards into neighbours. The stat cards now constrain + truncate the value (full text on hover), so content stays inside its box.
+
 ## [4.42.3] - 2026-06-24
 
 **Brand-compliant favicon.** Per the brand guidelines, the browser-tab favicon is the *simple shield* (which reads cleanly at 16px), not the detailed circuit-brain emblem (4.42.2 shipped the emblem as the favicon — detail is lost at small sizes). The emblem remains the dashboard's header/app logo and the apple-touch (home-screen) icon. Dashboard-only; no API change.
