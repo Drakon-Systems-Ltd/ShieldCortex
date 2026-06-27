@@ -366,6 +366,13 @@ function printUsage(): void {
   console.log('      body bleed, path-label fragments, etc. Use --dry-run to');
   console.log('      preview matches; --execute writes a full DB copy to the');
   console.log('      backup dir (default ~/.shieldcortex/backups/) before delete.');
+  console.log('');
+  console.log('  recalc [--apply] [--db <path>] [--backup-dir <path>]');
+  console.log('      Back-catalogue cleanup (#49): re-flag auto-captured fragments');
+  console.log('      (mid-sentence start / trailing `?`) into the review queue as');
+  console.log('      suppressed, and re-score stale salience>0.6 auto rows (>7d) under');
+  console.log('      current rules. DRY-RUN BY DEFAULT — pass --apply to commit.');
+  console.log('      Backup auto-saved before any change; purge later with `prune`.');
 }
 
 export async function handleMemoriesCommand(args: string[]): Promise<void> {
@@ -394,6 +401,10 @@ export async function handleMemoriesCommand(args: string[]): Promise<void> {
   }
   if (sub === 'purge') {
     await runPurge(args.slice(1));
+    return;
+  }
+  if (sub === 'recalc') {
+    await runRecalc(args.slice(1));
     return;
   }
   printUsage();
@@ -481,6 +492,179 @@ export async function purgeMalformed(opts: PurgeMalformedOptions): Promise<Purge
     return report;
   } finally {
     db.close();
+  }
+}
+
+// ============================================================
+// recalc auto-captures (issue #49 back-catalogue cleanup)
+// ============================================================
+
+interface RecalcOptions {
+  /** Path to memories.db (defaults to ~/.shieldcortex/memories.db). */
+  dbPath?: string;
+  /** Default false → dry-run. Only true mutates the DB. */
+  apply?: boolean;
+  /** Where to write the pre-apply backup. Defaults next to the DB. */
+  backupDir?: string;
+}
+
+interface RecalcFlag {
+  id: number;
+  title: string;
+  reason: string;
+}
+
+interface RecalcRescore {
+  id: number;
+  title: string;
+  oldSalience: number;
+  newSalience: number;
+}
+
+export interface RecalcReport {
+  apply: boolean;
+  scanned: number;
+  flagged: RecalcFlag[];
+  rescored: RecalcRescore[];
+  backupPath?: string;
+}
+
+// Auto-extracted rows are stamped with the `auto-extracted` tag by the shared
+// chunker (extractTags). Re-scoring only touches rows whose stored salience
+// still sits ABOVE the auto cap (the historical 1.0 inflation) and that are
+// older than this many days — recent rows are left for the live pipeline.
+const RECALC_STALE_AGE_DAYS = 7;
+
+/**
+ * One-off back-catalogue maintenance for issue #49:
+ *   (a) re-flag auto-captured FRAGMENTS (mid-sentence start / trailing `?` /
+ *       any current rejection-corpus hit) into the review queue by setting
+ *       status='suppressed' via the store `updateMemory` primitive — excluded
+ *       from recall and eligible for the standard `prune` purge. No hand-delete.
+ *   (b) re-score stale auto rows whose salience exceeds the 0.6 auto cap and
+ *       that are older than 7 days, under the CURRENT (capped) rules.
+ *
+ * Defaults to dry-run; only `apply: true` mutates. Manual (non-auto) rows are
+ * never touched.
+ */
+export async function recalcAutoCaptures(opts: RecalcOptions): Promise<RecalcReport> {
+  const dbPath = opts.dbPath ?? DEFAULT_TARGET;
+  const apply = opts.apply === true;
+
+  if (!fs.existsSync(dbPath)) {
+    throw new Error(`memories DB not found at ${dbPath}`);
+  }
+
+  // @ts-expect-error -- importing a .mjs hook util (no type decls)
+  const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
+  const shouldRejectCandidate = mod.shouldRejectCandidate as (
+    seg: { title: string; content: string },
+  ) => { rejected: boolean; reason: string };
+  const calcSalience = mod.calculateSalience as (text: string, o?: { autoExtractMode?: boolean }) => number;
+  const completenessAdjustment = mod.completenessAdjustment as (content: string) => number;
+  const AUTO_CAP = mod.AUTO_EXTRACT_SALIENCE_CAP as number;
+
+  const { initDatabase, getDatabase, closeDatabase } = await import('../database/init.js');
+  const { updateMemory } = await import('../memory/store.js');
+
+  initDatabase(dbPath);
+
+  const report: RecalcReport = { apply, scanned: 0, flagged: [], rescored: [] };
+
+  try {
+    const db = getDatabase();
+    const rows = db
+      .prepare(
+        `SELECT id, title, content, salience,
+                (julianday('now') - julianday(created_at)) AS age_days
+           FROM memories
+          WHERE tags LIKE '%auto-extracted%'
+            AND COALESCE(status, 'active') = 'active'`,
+      )
+      .all() as Array<{ id: number; title: string; content: string; salience: number; age_days: number }>;
+
+    report.scanned = rows.length;
+
+    for (const row of rows) {
+      const verdict = shouldRejectCandidate({ title: row.title ?? '', content: row.content ?? '' });
+      if (verdict.rejected) {
+        report.flagged.push({ id: row.id, title: row.title ?? '', reason: verdict.reason });
+        continue;
+      }
+      // Not a fragment — consider re-scoring an inflated stale row.
+      if (row.salience > AUTO_CAP && row.age_days >= RECALC_STALE_AGE_DAYS) {
+        const base = calcSalience(`${row.title ?? ''} ${row.content ?? ''}`, { autoExtractMode: true });
+        const adjusted = Math.max(0, Math.min(AUTO_CAP, base) + completenessAdjustment(row.content ?? ''));
+        const newSalience = Math.round(adjusted * 1000) / 1000;
+        report.rescored.push({ id: row.id, title: row.title ?? '', oldSalience: row.salience, newSalience });
+      }
+    }
+
+    if (!apply || (report.flagged.length === 0 && report.rescored.length === 0)) {
+      return report;
+    }
+
+    // Snapshot the DB before any mutation (mirrors backupMemoriesDb; written
+    // next to the DB so a custom --db stays self-contained).
+    const backupDir = opts.backupDir ?? path.join(path.dirname(dbPath), 'backups');
+    fs.mkdirSync(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = path.join(backupDir, `memories-recalc-${stamp}.db`);
+    await db.backup(backupPath);
+    report.backupPath = backupPath;
+
+    // Reuse the store review primitive — never a raw DELETE / UPDATE.
+    for (const f of report.flagged) {
+      updateMemory(f.id, { status: 'suppressed', reviewedBy: 'maintenance:recalc-issue-49' });
+    }
+    for (const r of report.rescored) {
+      updateMemory(r.id, { salience: r.newSalience });
+    }
+
+    return report;
+  } finally {
+    closeDatabase();
+  }
+}
+
+async function runRecalc(args: string[]): Promise<void> {
+  const apply = args.includes('--apply');
+  const backupDir = flagValue(args, '--backup-dir');
+  const dbPath = flagValue(args, '--db');
+
+  const report = await recalcAutoCaptures({ apply, backupDir, dbPath });
+
+  const banner = report.apply ? '' : '[DRY RUN] ';
+  console.log(`${banner}Recalc auto-captures (issue #49) — scanned ${report.scanned} auto-extracted rows.`);
+  console.log(`  Fragments to flag for purge: ${report.flagged.length}`);
+  console.log(`  Stale inflated rows to re-score: ${report.rescored.length}`);
+
+  if (report.flagged.length > 0) {
+    console.log('');
+    console.log('Flag (→ suppressed, review/purge queue):');
+    for (const f of report.flagged.slice(0, 50)) {
+      console.log(`  #${String(f.id).padStart(5)}  ${f.reason.padEnd(20)}  ${f.title.slice(0, 70)}`);
+    }
+    if (report.flagged.length > 50) console.log(`  … and ${report.flagged.length - 50} more`);
+  }
+
+  if (report.rescored.length > 0) {
+    console.log('');
+    console.log('Re-score (inflated → current 0.6-capped rules):');
+    for (const r of report.rescored.slice(0, 50)) {
+      console.log(`  #${String(r.id).padStart(5)}  ${r.oldSalience.toFixed(2)} → ${r.newSalience.toFixed(2)}  ${r.title.slice(0, 60)}`);
+    }
+    if (report.rescored.length > 50) console.log(`  … and ${report.rescored.length - 50} more`);
+  }
+
+  if (!report.apply && (report.flagged.length > 0 || report.rescored.length > 0)) {
+    console.log('');
+    console.log('Re-run with --apply to commit (a DB backup is written first).');
+    console.log('Then purge the suppressed fragments with: shieldcortex memories prune --execute');
+  } else if (report.apply) {
+    console.log('');
+    console.log(`Applied. Flagged ${report.flagged.length}, re-scored ${report.rescored.length}.`);
+    if (report.backupPath) console.log(`Backup: ${report.backupPath}`);
   }
 }
 

@@ -113,4 +113,26 @@ describe('Defect 3: chunker rejection corpus from fixture', () => {
     const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
     expect(mod.AUTO_EXTRACT_SALIENCE_CAP).toBe(0.6);
   });
+
+  // Issue #49: the corpus is extended with the live fragment-capture defects —
+  // conjunction-led / pronoun-tail openers and trailing interrogatives — that
+  // the original six rules did not cover.
+  it('rejects conjunction-led and interrogative fragments (issue #49)', async () => {
+    const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
+    const reject: (segment: { title: string; content: string }) => { rejected: boolean; reason: string } = mod.shouldRejectCandidate;
+
+    const fragments = [
+      'and so they sit at project equals null until reconciliation runs',
+      "you're going to need a much bigger instance for that replay job",
+      "it's filed under the wrong project key across every single row",
+      'should we just buy a brand new development computer for the team?',
+      'is the apostrophe really splitting into two separate sub tokens?',
+    ];
+
+    for (const content of fragments) {
+      const verdict = reject({ title: '', content });
+      expect(verdict.rejected).toBe(true);
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
 });

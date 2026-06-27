@@ -466,6 +466,14 @@ export function extractMemorableSegments(conversationText, opts = {}) {
       let match;
       while ((match = pattern.exec(text)) !== null) {
         const content = match[1].trim();
+        // Issue #49: a capture group can begin part-way through a sentence (the
+        // trigger word was mid-clause) or trail off into a question. Enforce a
+        // true sentence-START boundary here so the segmenter never emits a
+        // mid-clause slice or an interrogative — the same defects the rejection
+        // corpus screens, applied at the source so they never become candidates.
+        if (beginsWithContinuation(content) || endsWithInterrogative(content)) {
+          continue;
+        }
         if (content.length >= 20) {
           // v4.24.3: headline = first sentence (sentence-bounded), not
           // the first 50 chars. Eliminates mid-clause garbage in the
@@ -491,6 +499,79 @@ const SUBORDINATE_START_WORDS = new Set([
   'the', 'a', 'an', 'for', 'to', 'of', 'with', 'by', 'from', 'on', 'in',
   'at', 'that', 'which', 'who', 'where', 'when',
 ]);
+
+// Issue #49: tokens that, when a captured segment BEGINS with them, mark it as
+// a mid-clause CONTINUATION — the chunker hit a trigger word part-way through a
+// sentence and grabbed the tail of a thought that started earlier (leading
+// conjunctions, dangling auxiliaries, pronoun-contraction tails). A genuine
+// durable fact never opens on one of these. Closed list, case-insensitive.
+const CONTINUATION_START_TOKENS = new Set([
+  'and', 'so', 'but', 'yet', 'or', 'because', 'also', 'then', 'plus',
+  'have', 'has', "he's", "she's", "you're", "it's", "that's", "there's",
+  "we're", "they're", "i'm",
+]);
+
+// Verb-shaped tokens (small whitelist + a deterministic suffix heuristic).
+// Hoisted so both the subordinate-clause fragment check and the whole-segment
+// bare-clause check share one definition.
+const VERB_WHITELIST = new Set([
+  'is', 'was', 'are', 'were', 'be', 'been', 'being',
+  'has', 'have', 'had', 'do', 'does', 'did',
+  'uses', 'used', 'wraps', 'consists', 'lives', 'runs', 'sits',
+  'returns', 'accepts', 'requires', 'breaks', 'fails', 'works',
+  'hosts', 'holds', 'adds', 'applies', 'splits', 'flushes', 'writes',
+]);
+
+function normalizeApostrophes(s) {
+  // Fold the curly apostrophe (U+2019) and modifier letter apostrophe onto the
+  // ASCII one so "it’s" matches the same token as "it's".
+  return s.replace(/[‘’ʼ]/g, "'");
+}
+
+function isVerbShaped(token) {
+  const t = normalizeApostrophes(token.toLowerCase()).replace(/[^a-z']/g, '');
+  if (!t) return false;
+  if (VERB_WHITELIST.has(t)) return true;
+  // -ing / -ed are strong verb signals; -es/-s is noisier (plurals) but kept
+  // for backward-compatibility with the original fragment heuristic.
+  return /(?:ing|ed|es|s)$/.test(t) && t.length > 3;
+}
+
+function hasVerbLike(content) {
+  return content.trim().split(/\s+/).some(isVerbShaped);
+}
+
+// First word-token of a capture, apostrophe-normalised and lowercased, with a
+// trailing contraction kept intact ("you're" stays "you're").
+function leadingToken(content) {
+  const cleaned = normalizeApostrophes(content.trim().toLowerCase());
+  const m = cleaned.match(/^([a-z]+(?:'[a-z]+)?)/);
+  return m ? m[1] : '';
+}
+
+// (a) Mid-clause continuation opener — see CONTINUATION_START_TOKENS.
+function beginsWithContinuation(content) {
+  return CONTINUATION_START_TOKENS.has(leadingToken(content));
+}
+
+// (b) Trailing interrogative — a question is not a durable declarative fact.
+// Allows an optional closing quote/paren after the `?`.
+function endsWithInterrogative(content) {
+  return /\?["')\]]?\s*$/.test(content.trim());
+}
+
+// (d) Meaningful tokens: word-ish tokens with at least two alphanumerics.
+// Single letters / bare punctuation don't count toward a complete thought.
+const MIN_MEANINGFUL_TOKENS = 3;
+function meaningfulTokenCount(content) {
+  return content.trim().split(/\s+/).filter((t) => /[a-z0-9]{2,}/i.test(t)).length;
+}
+
+// (c) Bare clause: a short capture with no verb-shaped token at all — a noun
+// phrase rather than a subject+verb statement ("the brand new build machine").
+function looksLikeBareClause(content) {
+  return meaningfulTokenCount(content) <= 6 && !hasVerbLike(content);
+}
 
 // Bare imperative verbs that almost always indicate the original sentence
 // began with a modal or negation that the chunker dropped (e.g. "never
@@ -644,6 +725,19 @@ export function shouldRejectCandidate(segment, conversationText) {
   }
   if (hasLeadingNegation(segment, conversationText)) {
     return { rejected: true, reason: 'negation_scope' };
+  }
+  // Issue #49 fragment defects:
+  if (beginsWithContinuation(content)) {
+    return { rejected: true, reason: 'continuation_start' };
+  }
+  if (endsWithInterrogative(content)) {
+    return { rejected: true, reason: 'interrogative' };
+  }
+  if (meaningfulTokenCount(content) < MIN_MEANINGFUL_TOKENS) {
+    return { rejected: true, reason: 'too_few_tokens' };
+  }
+  if (looksLikeBareClause(content)) {
+    return { rejected: true, reason: 'bare_clause' };
   }
   if (looksLikeFragment(content)) {
     return { rejected: true, reason: 'subordinate_start_fragment' };
