@@ -61,3 +61,5 @@ ROADMAP.md
 # README), but the per-question report is regenerated on every run.
 benchmark/longmemeval/report.json
 .superpowers/
+:memory:
+:memory:.lock

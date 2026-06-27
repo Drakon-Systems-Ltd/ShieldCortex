@@ -143,10 +143,50 @@ function detectCodeReferences(content: string): boolean {
   return CODE_REFERENCE_PATTERNS.some(pattern => pattern.test(content));
 }
 
+// Issue #49: tokens that mark a candidate as a mid-clause CONTINUATION rather
+// than the start of a self-contained statement (leading conjunctions, dangling
+// auxiliaries, pronoun-contraction tails). Mirrors the chunker's list in
+// scripts/lib/extract-memorable-segments.mjs.
+const CONTINUATION_START_TOKENS = new Set([
+  'and', 'so', 'but', 'yet', 'or', 'because', 'also', 'then', 'plus',
+  'have', 'has', "he's", "she's", "you're", "it's", "that's", "there's",
+  "we're", "they're", "i'm",
+]);
+
+function leadingToken(text: string): string {
+  const cleaned = text.trim().toLowerCase().replace(/[‘’ʼ]/g, "'");
+  const m = cleaned.match(/^([a-z]+(?:'[a-z]+)?)/);
+  return m ? m[1] : '';
+}
+
 /**
- * Suggest a category based on content analysis
+ * Issue #49 — fact gate. A candidate is a DURABLE DECLARATIVE statement only if
+ * it is not interrogative, does not open on a sentence-continuation token, and
+ * carries enough meaningful tokens to be a complete thought. This runs BEFORE
+ * keyword classification so a question or a conjunction-led fragment is never
+ * forced into a (usually wrong) category.
  */
-export function suggestCategory(input: MemoryInput): MemoryCategory {
+export function isDurableFact(input: MemoryInput): boolean {
+  const content = (input.content ?? input.title ?? '').trim();
+  if (!content) return false;
+  // (b) interrogative
+  if (/\?["')\]]?\s*$/.test(content)) return false;
+  // (a) conjunction / continuation-led opener
+  if (CONTINUATION_START_TOKENS.has(leadingToken(content))) return false;
+  // (d) minimum meaningful-token count
+  const meaningful = content.split(/\s+/).filter((t) => /[a-z0-9]{2,}/i.test(t));
+  if (meaningful.length < 3) return false;
+  return true;
+}
+
+/**
+ * Classify a candidate, or return null when it is not a durable fact. This is
+ * the gated entry point: callers that must drop non-facts use this and treat
+ * null as "reject". `suggestCategory` wraps it with a non-null fallback.
+ */
+export function classifyCategory(input: MemoryInput): MemoryCategory | null {
+  if (!isDurableFact(input)) return null;
+
   const text = `${input.title} ${input.content}`.toLowerCase();
 
   if (detectKeywords(text, ARCHITECTURE_KEYWORDS)) return 'architecture';
@@ -165,6 +205,18 @@ export function suggestCategory(input: MemoryInput): MemoryCategory {
 
   // Default to note
   return 'note';
+}
+
+/**
+ * Suggest a category based on content analysis.
+ *
+ * Non-destructive wrapper over the gated `classifyCategory`: a non-fact falls
+ * back to 'note' rather than a confidently-wrong specific label (issue #49 — a
+ * question must not be filed as a `preference`). The manual MCP remember path
+ * still keeps the memory; it just stops mislabelling it.
+ */
+export function suggestCategory(input: MemoryInput): MemoryCategory {
+  return classifyCategory(input) ?? 'note';
 }
 
 /**
