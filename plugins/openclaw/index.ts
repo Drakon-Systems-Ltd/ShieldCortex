@@ -794,6 +794,7 @@ export default {
             enabled: rawInterceptorConfig.enabled ?? DEFAULT_INTERCEPTOR_CONFIG.enabled,
             severityActions: { ...DEFAULT_INTERCEPTOR_CONFIG.severityActions, ...rawInterceptorConfig.severityActions },
             failurePolicy: { ...DEFAULT_INTERCEPTOR_CONFIG.failurePolicy, ...rawInterceptorConfig.failurePolicy },
+            actionGuard: { ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: false }), ...(rawInterceptorConfig.actionGuard ?? {}) },
           } : {}),
           logger: { info: api.logger?.info ?? console.log, warn: (api.logger as any)?.warn ?? console.warn },
         };
@@ -812,13 +813,19 @@ export default {
         if (typeof defenceMod.runDefencePipeline !== 'function') return null;
 
         interceptorReady = createInterceptor(interceptorConfig, defenceMod.runDefencePipeline as Parameters<typeof createInterceptor>[1], {
+          evaluateToolCall: typeof (defenceMod as any).evaluateToolCall === 'function'
+            ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
+            : undefined,
           onAuditEntry: (entry) => syncInterceptEvent(entry, {
             cloudApiKey: (scConfig as any).cloudApiKey ?? '',
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
             cloudEnabled: (scConfig as any).cloudEnabled ?? false,
           }),
         });
-        api.logger?.info?.('[shieldcortex] Interceptor active — watching: remember, mcp__memory__remember');
+        const guardState = interceptorConfig.actionGuard?.enabled
+          ? (interceptorConfig.actionGuard.enforce ? 'Action Guard: enforce' : 'Action Guard: warn')
+          : 'Action Guard: off';
+        api.logger?.info?.(`[shieldcortex] Interceptor active — memory writes + ${guardState} (shell/file/network/git)`);
         return interceptorReady;
       } catch (err) {
         (api.logger as any)?.warn?.(`[shieldcortex] Interceptor init failed: ${err instanceof Error ? err.message : err}`);
