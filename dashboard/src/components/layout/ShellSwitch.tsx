@@ -14,6 +14,7 @@ import { TerminalShell } from '@/components/cic/TerminalShell';
  */
 export function ShellSwitch({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional client-only mount gate for SSR hydration parity (see jsdoc above)
   useEffect(() => setMounted(true), []);
   const [theme] = useTheme();
   const effective = mounted ? theme : 'terminal';

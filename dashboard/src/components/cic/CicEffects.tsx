@@ -22,6 +22,7 @@ export function CicEffects() {
   const [typed, setTyped] = useState('');
 
   // Mount flag avoids an SSR/client hydration mismatch on the boot overlay.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional client-only mount gate
   useEffect(() => setMounted(true), []);
 
   // Mirror the motion decision onto <html> so CSS can still ALL ambient motion
@@ -46,6 +47,7 @@ export function CicEffects() {
       /* ignore */
     }
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot session boot trigger, guarded by mounted + sessionStorage
     setBooting(true);
     if (!animate) {
       setTyped(BOOT_TEXT);

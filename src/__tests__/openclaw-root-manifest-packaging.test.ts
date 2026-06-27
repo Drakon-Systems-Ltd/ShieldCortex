@@ -44,11 +44,27 @@ describe('shieldcortex bare-package OpenClaw discovery contract (post-v4.21.1)',
   let packedFiles: string[];
 
   beforeAll(() => {
-    const out = execFileSync('npm', ['pack', '--dry-run', '--json'], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    // This suite only needs the packed file MANIFEST, not a real build. Run
+    // pack with `--ignore-scripts` so the `prepack` lifecycle (which chmods
+    // dist/index.js and `process.exit(1)`s when dist/ is absent) cannot make
+    // `npm pack` exit non-zero. Without this the suite failed on CI with a
+    // bare "Command failed: npm pack" whenever dist/ wasn't present at the
+    // moment pack ran (e.g. another test having rebuilt it). The file list is
+    // identical with or without scripts. Capture stderr too, so any future
+    // pack failure surfaces its reason instead of being swallowed.
+    let out: string;
+    try {
+      out = execFileSync(
+        'npm',
+        ['pack', '--dry-run', '--json', '--ignore-scripts'],
+        { cwd: repoRoot, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    } catch (err) {
+      const e = err as { stderr?: string; message?: string };
+      throw new Error(
+        `npm pack failed: ${e.message ?? err}\n--- npm stderr ---\n${e.stderr ?? '(none)'}`,
+      );
+    }
     const meta = JSON.parse(out) as Array<{ files: Array<{ path: string }> }>;
     packedFiles = meta[0].files.map((f) => f.path.replace(/\\/g, '/'));
   }, 60000);
