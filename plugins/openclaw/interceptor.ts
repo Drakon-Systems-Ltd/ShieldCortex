@@ -7,10 +7,37 @@ export type Severity = 'low' | 'medium' | 'high' | 'critical';
 export type InterceptAction = 'log' | 'warn' | 'require_approval';
 export type FailureAction = 'allow' | 'deny';
 
+/**
+ * Action Guard config — gates what the agent DOES (shell/file/network/git),
+ * not just what it remembers. Catastrophic operations (rm -rf /, fork bombs,
+ * disk wipes, secret exfil) are always blocked when `enabled`; recognised
+ * dangerous ops require approval when `enforce` is set, otherwise they are
+ * surfaced (warn + audit) but allowed through — so the guard never nags on
+ * routine work by default.
+ */
+export interface ActionGuardConfig {
+  enabled: boolean;
+  enforce: boolean;
+}
+
+/** Structural shape of a Tool Action Guard verdict (kept local to avoid a
+ * compile-time dependency on the main package across the plugin build boundary;
+ * the real `evaluateToolCall` from `shieldcortex/defence` is compatible). */
+export interface ToolGuardVerdictLike {
+  decision: 'allow' | 'require_approval' | 'block';
+  severity: 'benign' | 'sensitive' | 'dangerous' | 'catastrophic' | string;
+  family: string;
+  action: string;
+  reason: string;
+  signals: string[];
+}
+export type ToolGuardEvaluator = (toolName: string, args: Record<string, unknown>) => ToolGuardVerdictLike;
+
 export interface InterceptorConfig {
   enabled: boolean;
   severityActions: Record<Severity, InterceptAction>;
   failurePolicy: Record<Severity, FailureAction>;
+  actionGuard?: ActionGuardConfig;
   logger?: { info: (msg: string) => void; warn: (msg: string) => void };
 }
 
@@ -62,6 +89,12 @@ const DEFAULT_CONFIG: InterceptorConfig = {
     medium: 'allow',
     high: 'deny',
     critical: 'deny',
+  },
+  // Action Guard on by default: catastrophic ops are blocked out of the box;
+  // dangerous ops are surfaced (warn+audit) but allowed unless `enforce` is set.
+  actionGuard: {
+    enabled: true,
+    enforce: false,
   },
 };
 
@@ -202,6 +235,32 @@ export function formatApprovalPrompt(input: ApprovalPromptInput): string {
   ].join('\n');
 }
 
+/** One-line summary of tool args for audit previews (bounded, no secrets dumped). */
+export function summariseToolArgs(args: Record<string, unknown> | undefined): string {
+  if (!args) return '';
+  const parts: string[] = [];
+  for (const [k, val] of Object.entries(args)) {
+    if (typeof val === 'string') parts.push(`${k}=${val.slice(0, 80)}`);
+    else if (typeof val === 'number' || typeof val === 'boolean') parts.push(`${k}=${val}`);
+  }
+  return parts.join(' ').slice(0, 160);
+}
+
+/** Operator-facing approval prompt for a gated action (not a memory write). */
+export function formatActionGuardPrompt(toolName: string, v: ToolGuardVerdictLike): string {
+  return [
+    '🛡️ ShieldCortex — Action Intercepted',
+    '',
+    `Tool:       ${toolName}`,
+    `Action:     ${v.action}`,
+    `Risk:       ${v.severity}`,
+    `Signals:    ${v.signals.join(', ') || 'none'}`,
+    `Reason:     ${v.reason}`,
+    '',
+    '[Approve]  [Deny]',
+  ].join('\n');
+}
+
 // --- Audit Logging (local JSONL) ---
 
 const AUDIT_DIR = join(homedir(), '.shieldcortex', 'audit');
@@ -297,6 +356,8 @@ type PipelineRunner = (content: string, title: string, source: { type: string; i
 interface InterceptorOptions {
   maxPromptsPerMinute?: number;
   onAuditEntry?: (entry: InterceptAuditEntry) => void;
+  /** Tool Action Guard evaluator, injected from `shieldcortex/defence` at runtime. */
+  evaluateToolCall?: ToolGuardEvaluator;
 }
 
 export function createInterceptor(
@@ -311,14 +372,100 @@ export function createInterceptor(
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
+  const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: false };
+  const evaluateToolCall = options?.evaluateToolCall;
 
   function emitAudit(entry: InterceptAuditEntry): void {
     writeAuditEntry(entry);
     onAuditEntry?.(entry);
   }
 
+  function guardAuditBase(toolName: string, v: ToolGuardVerdictLike, preview: string): Omit<InterceptAuditEntry, 'action' | 'outcome'> {
+    return {
+      type: 'intercept', tool: toolName,
+      severity: v.severity === 'catastrophic' ? 'critical' : 'high',
+      firewallResult: 'ACTION_GUARD', threats: v.signals,
+      anomalyScore: v.decision === 'block' ? 1 : 0.6,
+      trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
+      preview: preview.slice(0, 200), ts: new Date().toISOString(),
+    };
+  }
+
+  // Action Guard: gates non-memory tool calls (shell / file / network / git).
+  // This is what makes "Iron Dome protects what the agent DOES" true at runtime.
+  async function runActionGuard(context: ToolCallContext): Promise<void> {
+    if (!actionGuardCfg.enabled || typeof evaluateToolCall !== 'function') return;
+
+    let v: ToolGuardVerdictLike;
+    try {
+      v = evaluateToolCall(context.toolName, context.arguments || {});
+    } catch (err) {
+      // A guard error must never break the agent — log and allow. (The memory
+      // pipeline is the hard-fail path; the action guard is best-effort.)
+      log.warn(`[shieldcortex] ⚠️ action-guard error (allowing ${context.toolName}): ${err instanceof Error ? err.message : err}`);
+      return;
+    }
+    if (v.decision === 'allow') return;
+
+    const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
+    const base = guardAuditBase(context.toolName, v, preview);
+    const severity: Severity = v.severity === 'catastrophic' ? 'critical' : 'high';
+
+    // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
+    if (v.decision === 'block') {
+      emitAudit({ ...base, action: 'auto_deny', outcome: 'auto_denied' });
+      throw new Error(`ShieldCortex: tool call blocked — ${v.reason}`);
+    }
+
+    // require_approval — warn-only by default (never nags), prompt when enforcing.
+    if (!actionGuardCfg.enforce) {
+      log.warn(`[shieldcortex] ⚠️ Action Guard: ${context.toolName} — ${v.reason}`);
+      emitAudit({ ...base, action: 'warn', outcome: 'warned' });
+      return;
+    }
+
+    if (typeof context.requireApproval !== 'function') {
+      const failAction = config.failurePolicy[severity];
+      emitAudit({ ...base, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
+      if (failAction === 'deny') {
+        throw new Error(`ShieldCortex: tool call blocked — ${v.reason} (no approver, failure policy: deny)`);
+      }
+      return;
+    }
+
+    if (!rateLimiter.shouldAllow()) {
+      emitAudit({ ...base, action: 'rate_limit', outcome: 'auto_denied' });
+      throw new Error('ShieldCortex: tool call auto-denied (approval rate limit exceeded)');
+    }
+
+    let approved: boolean;
+    try {
+      approved = await context.requireApproval(formatActionGuardPrompt(context.toolName, v));
+    } catch (err) {
+      const failAction = config.failurePolicy[severity];
+      log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
+      emitAudit({ ...base, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
+      if (failAction === 'deny') {
+        throw new Error('ShieldCortex: tool call blocked — approval error, failure policy: deny');
+      }
+      return;
+    }
+
+    if (approved) {
+      emitAudit({ ...base, action: 'require_approval', outcome: 'approved' });
+      return;
+    }
+    emitAudit({ ...base, action: 'require_approval', outcome: 'denied' });
+    throw new Error('ShieldCortex: tool call denied by user');
+  }
+
   async function handleToolCall(context: ToolCallContext): Promise<void> {
-    if (!(WATCHED_TOOLS as readonly string[]).includes(context.toolName)) return;
+    // Non-memory tools go through the Action Guard (what the agent DOES); the
+    // memory-write tools continue through the content defence pipeline below.
+    if (!(WATCHED_TOOLS as readonly string[]).includes(context.toolName)) {
+      await runActionGuard(context);
+      return;
+    }
 
     const { title, content } = extractContent(context.toolName, context.arguments);
     const fullContent = [title, content].filter(Boolean).join(' ');
