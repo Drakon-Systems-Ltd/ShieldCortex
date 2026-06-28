@@ -1,0 +1,20 @@
+# ShieldCortex — Hermes plugin manifest.
+#
+# Follows the Hermes plugin convention (plugin.yaml + __init__.py exposing
+# register(ctx)). The exact manifest schema should be verified against the Hermes
+# docs on first install:
+#   ~/.hermes/hermes-agent/website/docs/guides/build-a-hermes-plugin.md
+# (TARS is the live test bed — fields here are a best-effort P1 and may need a
+# tweak when dogfooded.)
+name: shieldcortex
+version: 0.1.0
+description: >-
+  ShieldCortex defence for Hermes. Gates tool calls through ShieldCortex's
+  defence pipeline via pre_tool_call. Advisory by default; set
+  SHIELDCORTEX_ENFORCE=1 to block. Requires a running ShieldCortex API server
+  (default http://127.0.0.1:3001, override with SHIELDCORTEX_API_URL).
+entrypoint: __init__:register
+hooks:
+  - pre_tool_call
+requires:
+  shieldcortex_api: http://127.0.0.1:3001
