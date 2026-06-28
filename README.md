@@ -446,6 +446,8 @@ What it checks:
 - 🫥 **Hidden-instruction detection** — `display:none`, `visibility:hidden`, zero font-size, off-screen positioning, same-colour text, ARIA-hidden, HTML comments, inline scripts, Unicode bidi overrides, zero-width characters, meta refreshes
 - 🎯 **Two-surface injection scan** — visible text and hidden text are scanned separately; a prompt-injection pattern found inside hidden content marks the page hostile regardless of the domain, because humans will never see it
 
+**Automatic runtime coverage.** The hidden-instruction detection above also runs **automatically** inside the tool-response scanner — so when the agent fetches a web page through a tool, a concealed "ignore previous instructions" (white-on-white text, a `display:none` span, an HTML comment, or bidi/zero-width tricks) is caught and (in enforce mode) neutralised before it becomes context, with no manual `env scan` required. Full provenance scoring needs the source URL, so it stays on the explicit `env scan` path for now and is on the roadmap for the live fetch path.
+
 Library usage:
 
 ```javascript

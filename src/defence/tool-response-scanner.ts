@@ -30,6 +30,7 @@ import { scanForCredentials } from './credential-leak/index.js';
 import { detectInstructions } from './firewall/instruction-detector.js';
 import { detectEncoding } from './firewall/encoding-detector.js';
 import { detectMarkdownImageExfil } from './firewall/markdown-image-detector.js';
+import { detectHiddenWebInjection } from './hidden-web-injection.js';
 import { neutraliseToolResponse } from './tool-response-enforce.js';
 import { logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
@@ -160,6 +161,12 @@ export function scanToolResponse(
   // 4. Credential leak scan (retained from the original 2-layer read path).
   const credentials = scanForCredentials(content);
 
+  // 4b. Environment Firewall (runtime): hidden-instruction injection in fetched
+  //     web content — a concealed "ignore previous instructions" in white-on-white
+  //     text, a display:none span, an HTML comment, or bidi/zero-width tricks.
+  //     Runs only on HTML-ish content; memory/metadata tool output is unaffected.
+  const hiddenWeb = detectHiddenWebInjection(content);
+
   // 5. Collect threat indicators across every layer.
   const threatIndicators: ThreatIndicator[] = [];
   const pushIndicator = (indicator: ThreatIndicator): void => {
@@ -188,6 +195,9 @@ export function scanToolResponse(
   if (credentials.leaked || decodedCredentialLeak) {
     pushIndicator('credential_leak');
   }
+  if (hiddenWeb.detected) {
+    pushIndicator('instruction_injection');
+  }
 
   const clean =
     injection.clean &&
@@ -195,7 +205,8 @@ export function scanToolResponse(
     !encoding.detected &&
     !decodedInjection &&
     !markdownImage.detected &&
-    !credentials.leaked;
+    !credentials.leaked &&
+    !hiddenWeb.detected;
   const durationMs = Math.round(performance.now() - startTime);
 
   // 5b. Enforce action layer. Advisory mode only logs; enforce mode computes the
@@ -208,7 +219,7 @@ export function scanToolResponse(
   if (!clean && resolvedMode === 'enforce') {
     const neutralisation = neutraliseToolResponse(content, {
       injectionRisk: injection.riskLevel,
-      instructionsDetected: instructions.detected,
+      instructionsDetected: instructions.detected || hiddenWeb.detected,
       decodedInjection,
       encodingDetected: encoding.detected,
       markdownImageUrls: markdownImage.urls,
@@ -238,6 +249,7 @@ export function scanToolResponse(
     if (markdownImage.detected) parts.push(`markdown-image exfil: ${markdownImage.urls.length} URL(s)`);
     if (credentials.leaked) parts.push(`credentials: ${credentials.findings.length} finding(s)`);
     else if (decodedCredentialLeak) parts.push('decoded payload contains credentials');
+    if (hiddenWeb.detected) parts.push(`hidden web injection: ${hiddenWeb.techniques.join('/')}`);
     summary = `THREAT in "${toolName}" response: ${parts.join('; ')} (${durationMs}ms)`;
   }
 
@@ -253,6 +265,7 @@ export function scanToolResponse(
     ...encoding.encodingTypes,
     ...(decodedInjection ? ['decoded_injection'] : []),
     ...(markdownImage.detected ? ['markdown_image_exfil'] : []),
+    ...(hiddenWeb.detected ? hiddenWeb.techniques.map(t => `hidden_${t}`) : []),
   ];
 
   // 8. Audit log (threats only)
