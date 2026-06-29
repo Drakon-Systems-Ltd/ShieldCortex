@@ -497,6 +497,39 @@ export async function checkAutoMemoryHooks(): Promise<CheckResult[]> {
 }
 
 // ── Check 5: Process check ────────────────────────────────
+// ── Check: OpenClaw Telegram approval buttons (recommendation) ──
+// ShieldCortex / Codex approval prompts render as tappable buttons on Telegram
+// only when channels.telegram.capabilities.inlineButtons allows the surface;
+// otherwise they fall back to "/approve …" text. Advisory only — ShieldCortex
+// never rewrites the host's OpenClaw channel config, it just recommends.
+export async function checkOpenClawApprovalButtons(
+  cfgPath: string = path.join(os.homedir(), '.openclaw', 'openclaw.json'),
+): Promise<CheckResult[]> {
+  if (!fs.existsSync(cfgPath)) return [];
+  let tg: { enabled?: boolean; capabilities?: { inlineButtons?: string } } | undefined;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    tg = cfg?.channels?.telegram;
+  } catch {
+    return []; // best-effort — never break the doctor on an unparseable host config
+  }
+  if (!tg || tg.enabled === false) return []; // Telegram not configured
+  const scope = tg.capabilities?.inlineButtons;
+  if (scope === 'all' || scope === 'dm' || scope === 'group') {
+    return [{
+      label: 'OpenClaw approval buttons',
+      status: 'pass',
+      message: `Telegram inline approval buttons enabled (inlineButtons: ${scope})`,
+    }];
+  }
+  return [{
+    label: 'OpenClaw approval buttons',
+    status: 'info',
+    message: `Telegram approval prompts fall back to "/approve" text (inlineButtons: ${scope ?? 'unset → allowlist'})`,
+    fix: "Make approvals tappable: set channels.telegram.capabilities.inlineButtons to 'all' (or 'dm'/'group' for a tighter surface) via `openclaw config patch`, then restart the gateway.",
+  }];
+}
+
 async function checkProcesses(): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const env = detectEnvironment();
@@ -1733,6 +1766,7 @@ export async function runDoctor(): Promise<void> {
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkOpenClawManagedPinDrift,
+    checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkModelCache,
   ];
