@@ -414,6 +414,10 @@ export function createInterceptor(
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
     if (v.decision === 'block') {
       emitAudit({ ...base, action: 'auto_deny', outcome: 'auto_denied' });
+      // Surface the block to the gateway log (journald). Blocks are recorded in
+      // the ShieldCortex audit jsonl, but were otherwise invisible to an operator
+      // tailing the gateway; a denial — especially a false positive — must be seen.
+      log.warn(`[shieldcortex] action-guard BLOCKED ${context.toolName}: ${v.reason} [${v.signals.join(", ")}]`);
       throw new Error(`ShieldCortex: tool call blocked — ${v.reason}`);
     }
 

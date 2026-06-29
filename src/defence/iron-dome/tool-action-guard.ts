@@ -185,6 +185,42 @@ function looksExternal(url: string, text: string): boolean {
   return /https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(hay) || /[a-z0-9.-]+\.[a-z]{2,}\b/i.test(url);
 }
 
+// ── Use/mention discipline for shell commands ────────────────────────────────
+// A dangerous token inside a real shell command is only an *action* if it sits
+// in command position. If it is merely printed (`echo "rm -rf /"`) or commented
+// (`# rm -rf /`) it is inert. We recognise those two unambiguous inert forms and
+// refuse to recognise anything that could re-activate text — operators,
+// redirection, command substitution, `eval`, or variable expansion.
+//
+// We deliberately DON'T strip quoted spans wholesale: `"rm" -rf /` quotes the
+// command name yet still executes, so blanket quote-removal would be a bypass.
+// Fail-safe by construction — when in doubt, the original command text is scanned.
+const SHELL_REACTIVATORS = /[;&|><`]|\$\(|\$\{|\$\w|\beval\b/;
+
+/** A command whose sole effect is to print its arguments (cannot execute them). */
+function isPurePrint(cmd: string): boolean {
+  const c = cmd.trim();
+  if (SHELL_REACTIVATORS.test(c)) return false;            // chaining / redirect / expansion → not pure
+  const body = c.replace(/^(?:\w+=\S*\s+)*/, '').replace(/^sudo\s+/, '');
+  return /^(?:echo|printf)\b/.test(body);
+}
+
+/** Strip `#` comments so a token mentioned only in a comment is not an action. */
+function stripComments(cmd: string): string {
+  return cmd.replace(/(^|\s)#[^\n]*/g, '$1 ');
+}
+
+/**
+ * The text of a shell command that is actually *executed*, for danger scanning.
+ * Returns '' for a pure print; strips comments otherwise; never trusts quote
+ * removal (see note above) so it cannot be evaded by quoting a command name.
+ */
+export function commandScanText(cmd: string): string {
+  if (!cmd) return '';
+  if (isPurePrint(cmd)) return '';
+  return stripComments(cmd);
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 const ACTION_BY_FAMILY: Record<ToolFamily, string> = {
@@ -225,12 +261,15 @@ export function evaluateToolCall(
     return verdict('allow', 'benign', family, 'read_file', 'read-only operation', []);
   }
 
-  // The inspectable surface: the command for exec, plus path/url and any raw
-  // string args (so e.g. a delete tool's `path: "/"` or a fetch body is seen).
-  const blob = [command, path, url, rawStringArgs(args)].filter(Boolean).join('   ');
+  // Field discipline: danger patterns scan the EXECUTION SURFACE
+  // (command/path/url) only — never content the agent produces
+  // (a message body, file contents). See commandScanText for the
+  // printed/commented-token suppression within a shell command.
+  const execCommand = commandScanText(command);
+  const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
 
   // 1) Catastrophic — hard block, cannot fail open, ignores config.
-  const catastrophicSignals = allMatches(CATASTROPHIC, blob);
+  const catastrophicSignals = allMatches(CATASTROPHIC, execSurface);
   if (catastrophicSignals.length > 0) {
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       `catastrophic operation blocked (${catastrophicSignals.join(', ')})`, catastrophicSignals);
@@ -244,8 +283,8 @@ export function evaluateToolCall(
   }
 
   // 1b) Secret exfiltration: external egress carrying a credential/secret.
-  const egress = family === 'network' || EXTERNAL_EGRESS.test(blob);
-  if (egress && SECRET_HINT.test(blob) && looksExternal(url, blob)) {
+  const egress = family === 'network' || EXTERNAL_EGRESS.test(execCommand) || EXTERNAL_EGRESS.test(url);
+  if (egress && SECRET_HINT.test(`${execSurface}   ${rawStringArgs(args)}`) && looksExternal(url, execSurface)) {
     return verdict('block', 'catastrophic', family, 'data_exfiltration',
       'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress']);
   }
@@ -257,9 +296,9 @@ export function evaluateToolCall(
   }
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
-  const dangerSignals = allMatches(DANGEROUS, blob);
+  const dangerSignals = allMatches(DANGEROUS, execSurface);
   // External egress (even without a detected secret) is a potential exfil vector.
-  if (egress && looksExternal(url, blob) && (family === 'network' || /\bpost\b|\bput\b|upload|-d\s|--data/i.test(blob))) {
+  if (egress && looksExternal(url, execSurface) && (family === 'network' || /\bpost\b|\bput\b|upload|-d\s|--data/i.test(execSurface))) {
     dangerSignals.push('external-egress');
   }
   // A structured delete tool is inherently a delete, even with no "rm" in any arg.
@@ -271,7 +310,7 @@ export function evaluateToolCall(
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
-  const sensitiveSignal = firstMatch(SENSITIVE, blob);
+  const sensitiveSignal = firstMatch(SENSITIVE, execSurface);
   if (sensitiveSignal) {
     return verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`, [sensitiveSignal]);
   }
