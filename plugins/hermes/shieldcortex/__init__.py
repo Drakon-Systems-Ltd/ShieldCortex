@@ -51,11 +51,18 @@ def register(ctx):
             source_type="tool",
             source_id="hermes",
         )
+        # Observability: every decision leaves a log line so advisory mode is
+        # actually visible (a silent gate is indistinguishable from a no-op —
+        # see the missing-auth fail-open caught in the ATHENA dogfood).
         if verdict.blocked:
             log.warning(
                 "[shieldcortex] %s on tool %r: %s",
                 verdict.result, tool_name, verdict.reason or verdict.threats,
             )
+        elif not verdict.available:
+            log.warning("[shieldcortex] fail-open on tool %r (scanner unavailable): %s", tool_name, verdict.reason)
+        else:
+            log.info("[shieldcortex] %s on tool %r", verdict.result, tool_name)
         # None -> allow ; {"action":"block","message":...} -> block (first block wins)
         return tool_call_decision(verdict, enforce=enforce)
 

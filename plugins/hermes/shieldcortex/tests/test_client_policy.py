@@ -5,6 +5,7 @@ or `python3 -m unittest`.
 """
 import io
 import json
+import os
 import sys
 import unittest
 from contextlib import contextmanager
@@ -23,6 +24,17 @@ def fake_opener(response: dict | None, *, raises: Exception | None = None):
     def _opener(req, timeout=None):
         if raises is not None:
             raise raises
+        yield io.BytesIO(json.dumps(response).encode("utf-8"))
+
+    return _opener
+
+
+def capturing_opener(captured: dict, response: dict):
+    """Opener that records the outgoing request's Authorization header."""
+
+    @contextmanager
+    def _opener(req, timeout=None):
+        captured["auth"] = req.get_header("Authorization")
         yield io.BytesIO(json.dumps(response).encode("utf-8"))
 
     return _opener
@@ -58,6 +70,18 @@ class TestScanClient(unittest.TestCase):
     def test_never_raises_on_garbage(self):
         v = scan("x", opener=fake_opener({"not_firewall": True}))
         self.assertEqual(v.result, "ALLOW")  # missing firewall -> safe default
+
+
+class TestAuth(unittest.TestCase):
+    def test_sends_bearer_token_from_env(self):
+        # Missing this header was a silent 401 -> fail-open no-op (ATHENA dogfood).
+        captured = {}
+        os.environ["SHIELDCORTEX_API_TOKEN"] = "tok_test_123"
+        try:
+            scan("x", opener=capturing_opener(captured, {"firewall": {"result": "ALLOW"}}))
+        finally:
+            os.environ.pop("SHIELDCORTEX_API_TOKEN", None)
+        self.assertEqual(captured["auth"], "Bearer tok_test_123")
 
 
 class TestPolicy(unittest.TestCase):
