@@ -29,6 +29,7 @@ The defensive root `openclaw.plugin.json` is kept for one release on the main pa
 |------|--------|
 | `llm_input` | Scans prompts and history through the ShieldCortex defence pipeline. Threats are logged to audit and can forward to ShieldCortex Cloud. |
 | `llm_output` | Extracts high-signal memories from assistant replies and writes them into ShieldCortex with novelty filtering and dedupe. |
+| `before_tool_call` | Runs the Action Guard before tools execute. Catastrophic shell/file/network/git actions are blocked; dangerous actions warn by default or request approval when enforcement is enabled. |
 
 The plugin is intentionally fire-and-forget: it should not stall the OpenClaw turn loop if ShieldCortex is unavailable.
 
@@ -82,6 +83,9 @@ Example:
     "entries": {
       "shieldcortex-realtime": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {
           "binaryPath": "/usr/local/bin/shieldcortex",
           "openclawAutoMemory": true,

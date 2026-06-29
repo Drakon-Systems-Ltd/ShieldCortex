@@ -1,8 +1,10 @@
 /**
  * ShieldCortex Real-time Scanning Plugin for OpenClaw v2026.3.22+
  *
- * Uses explicit capability registration (registerHook + registerCommand)
- * for llm_input/llm_output scanning and optional memory extraction.
+ * Uses typed OpenClaw plugin hooks (`api.on`) for llm_input/llm_output
+ * scanning and before_tool_call interception. `api.registerHook` registers
+ * internal HOOK-style automation and does not participate in the agent-loop
+ * block/approval semantics ShieldCortex needs.
  * All scanning operations are fire-and-forget.
  */
 
@@ -14,7 +16,7 @@ import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
-import type { InterceptorConfig, ToolCallContext } from './interceptor.js';
+import type { InterceptorConfig } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 
@@ -190,9 +192,26 @@ type AgentCtx = {
   agentId?: string; sessionKey?: string; sessionId?: string;
   workspaceDir?: string; messageProvider?: string;
 };
+type TypedBeforeToolCallEvent = {
+  toolName: string;
+  params?: Record<string, unknown>;
+};
+type TypedBeforeToolCallResult = {
+  block?: boolean;
+  blockReason?: string;
+  requireApproval?: {
+    title: string;
+    description: string;
+    severity?: "info" | "warning" | "critical";
+    timeoutMs?: number;
+    timeoutBehavior?: "allow" | "deny";
+    allowedDecisions?: Array<"allow-once" | "allow-always" | "deny">;
+    onResolution?: (decision: "allow-once" | "allow-always" | "deny" | "timeout" | "cancelled") => Promise<void> | void;
+  };
+};
 type PluginApi = {
   id: string; name: string; logger: { info: (m: string) => void };
-  on: (hook: string, handler: (...args: any[]) => any) => void;
+  on: (hook: string, handler: (...args: any[]) => any, opts?: Record<string, unknown>) => void;
   [k: string]: any;
 };
 
@@ -756,6 +775,73 @@ function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
   })();
 }
 
+class TypedApprovalRequest extends Error {
+  request: NonNullable<TypedBeforeToolCallResult["requireApproval"]>;
+
+  constructor(message: string, request: NonNullable<TypedBeforeToolCallResult["requireApproval"]>) {
+    super(message);
+    this.name = "TypedApprovalRequest";
+    this.request = request;
+  }
+}
+
+function truncateApprovalText(text: string, maxLength: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeToolCallResult["requireApproval"]> {
+  const lines = message
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^\[(?:Approve|Deny)\]/i.test(line));
+  const rawTitle = (lines[0] || "ShieldCortex approval required").replace(/^🛡️\s*/u, "");
+  const details = lines.slice(1).join(" | ") || rawTitle;
+  const riskText = message.toLowerCase();
+  const severity = /\b(?:critical|catastrophic|auto[-_\s]?deny|exfil|rm\s+-rf)\b/u.test(riskText)
+    ? "critical"
+    : /\b(?:high|dangerous|sensitive|risk|intercepted)\b/u.test(riskText)
+      ? "warning"
+      : "info";
+
+  return {
+    title: truncateApprovalText(rawTitle, 80),
+    description: truncateApprovalText(details, 256),
+    severity,
+    timeoutMs: 120_000,
+    timeoutBehavior: "deny",
+    allowedDecisions: ["allow-once", "deny"],
+  };
+}
+
+async function handleTypedBeforeToolCall(
+  event: TypedBeforeToolCallEvent,
+  interceptor: ReturnType<typeof createInterceptor>,
+  logger: PluginApi["logger"],
+): Promise<TypedBeforeToolCallResult | void> {
+  try {
+    await interceptor.handleToolCall({
+      toolName: event.toolName,
+      arguments: event.params ?? {},
+      requireApproval: async (message: string) => {
+        throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message));
+      },
+    });
+  } catch (err) {
+    if (err instanceof TypedApprovalRequest) {
+      return { requireApproval: err.request };
+    }
+
+    if (err instanceof Error && err.message.startsWith("ShieldCortex:")) {
+      return { block: true, blockReason: err.message };
+    }
+
+    (logger as any)?.warn?.(`[shieldcortex] before_tool_call error (allowing tool call): ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 // ==================== PLUGIN EXPORT ====================
 
 export default {
@@ -833,42 +919,23 @@ export default {
       }
     }
 
-    // Register before_tool_call with lazy-init wrapper
-    api.registerHook('before_tool_call', async (context: ToolCallContext) => {
+    // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
+    // can block or require approval before the selected tool executes.
+    api.on('before_tool_call', async (event: TypedBeforeToolCallEvent) => {
       const interceptor = await initInterceptor();
       if (!interceptor) return;
-      try {
-        await interceptor.handleToolCall(context);
-      } catch (err) {
-        // Intentional blocks from the interceptor (ShieldCortex: ...) should propagate
-        if (err instanceof Error && err.message.startsWith('ShieldCortex:')) throw err;
-        // Unexpected errors (DB crash, etc.) — log and allow the tool call through
-        (api.logger as any)?.warn?.(`[shieldcortex] Interceptor error (allowing tool call): ${err instanceof Error ? err.message : err}`);
-      }
-    }, {
-      name: 'shieldcortex-intercept-tool',
-      description: 'Active threat gating on tool calls',
-    });
+      return handleTypedBeforeToolCall(event, interceptor, api.logger);
+    }, { priority: 80, timeoutMs: 30_000 });
 
     // Try to register session_end for cache cleanup
     try {
-      api.registerHook('session_end', () => { interceptorReady?.resetSession(); }, {
-        name: 'shieldcortex-session-cleanup',
-        description: 'Clear interceptor deny cache on session end',
-      });
+      api.on('session_end', () => { interceptorReady?.resetSession(); });
     } catch {
       // session_end may not be a supported hook — TTL safety net handles this
     }
 
-    // Explicit capability registration (replaces legacy api.on)
-    api.registerHook("llm_input", handleLlmInput, {
-      name: "shieldcortex-scan-input",
-      description: "Real-time threat scanning on LLM input",
-    });
-    api.registerHook("llm_output", handleLlmOutput, {
-      name: "shieldcortex-scan-output",
-      description: "Memory extraction from LLM output",
-    });
+    api.on("llm_input", handleLlmInput, { timeoutMs: 30_000 });
+    api.on("llm_output", handleLlmOutput, { timeoutMs: 30_000 });
 
     // Register a lightweight status command so the plugin is not hook-only
     api.registerCommand({
