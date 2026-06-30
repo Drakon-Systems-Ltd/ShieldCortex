@@ -1,0 +1,23 @@
+# ShieldCortex — Hermes plugin manifest.
+#
+# Hermes plugin convention: plugin.yaml + __init__.py exposing register(ctx).
+#
+# `kind: standalone` is REQUIRED. Without it Hermes auto-classifies this as an
+# `exclusive` provider — the `MemoryProvider` TYPE_CHECKING import in __init__.py
+# trips that heuristic — so the plugin is discovered but skipped ("activate via
+# <category>.provider config") and the pre_tool_call hook never fires.
+# (Found + fixed on the ATHENA Hermes dogfood, 2026-06-29.)
+name: shieldcortex
+kind: standalone
+version: 0.1.0
+description: >-
+  ShieldCortex defence for Hermes. Gates tool calls through ShieldCortex's
+  defence pipeline via pre_tool_call. Advisory by default; set
+  SHIELDCORTEX_ENFORCE=1 to block. Requires a running ShieldCortex API server
+  (default http://127.0.0.1:3001, override with SHIELDCORTEX_API_URL) and its
+  Bearer token (SHIELDCORTEX_API_TOKEN or ~/.shieldcortex/.api-token).
+entrypoint: __init__:register
+provides_hooks:
+  - pre_tool_call
+requires:
+  shieldcortex_api: http://127.0.0.1:3001
