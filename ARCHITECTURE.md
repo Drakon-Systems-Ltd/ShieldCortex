@@ -2,7 +2,7 @@
 
 ## Overview
 
-ShieldCortex is a security layer and brain-like memory system for AI agents. It combines persistent memory (STM/LTM/episodic) with a 6-layer defence pipeline that scans every memory write for threats.
+ShieldCortex is a security layer and brain-like memory system for AI agents. It protects **three surfaces**: what the agent *stores* (the memory-write defence pipeline below), what it *does* (the Iron Dome Action Guard, which gates tool calls at runtime), and what it *sees* (the Environment Firewall, which scrubs fetched/tool content before it becomes authority). It runs in two agent runtimes — **OpenClaw** (an in-process plugin on the `before_tool_call` bus) and **Hermes** (a `pre_tool_call` plugin via the local REST API) — both advisory-first and fail-open.
 
 ```
 Agent → ShieldCortex → Memory Store (SQLite)
@@ -127,6 +127,33 @@ Optional async layer for content that Tier 1 flags as QUARANTINE. Submits conten
 ```
 
 **API**: `runDefencePipelineWithVerify()` wraps the sync pipeline and adds optional verification. Returns `DefencePipelineResultWithVerify` which extends the standard result with a `verification` field.
+
+## Runtime Defence
+
+The memory-write pipeline above protects what the agent **stores**. Two further layers run at tool-execution time to protect what the agent **does** and **sees**.
+
+### Iron Dome — Action Guard (`src/defence/iron-dome/`)
+
+Gates what the agent *does*. `evaluateToolCall(toolName, args)` classifies each tool call into a family (exec / write / delete / network / git / read / memory) and scans the **execution surface** — the shell command, the target path, and the egress URL — against catastrophic, dangerous, and sensitive patterns:
+
+- **Catastrophic** (recursive root deletes, fork bombs, `mkfs`, `dd` to a raw disk, `curl | sh`, secret exfiltration) → **hard block**, and this can never fail open regardless of config.
+- **Dangerous** (plain deletes, `sudo`, force-push, service stops, external egress) → `require_approval`.
+- **Benign** → allowed silently; the guard never nags on routine work (`ls`, `git status`, `npm test`).
+
+The guard scans only the *execution surface*, never content the agent *produces* — a message body or file contents that merely quote a command is data, not an action (v4.44.0). Within a shell command, tokens that are only printed (`echo`) or commented are treated as inert, without trusting quote-stripping (which would be a bypass). Advisory by default; every block is audited to `~/.shieldcortex/audit/`.
+
+### Environment Firewall (`src/defence/`)
+
+Protects what the agent *sees*. Runs the firewall over fetched web pages and tool output **before** that content reaches the model, auto-catching hidden/prompt injection that would otherwise become authority (v4.43.0).
+
+### Runtime integrations
+
+| Runtime | Hook | Package |
+|---------|------|---------|
+| OpenClaw | `before_tool_call` (typed-hook bus) + `llm_input` / `llm_output` | `@drakon-systems/shieldcortex-realtime` (npm) |
+| Hermes | `pre_tool_call` → REST `POST /api/v1/scan` | `plugins/hermes/shieldcortex/` (repo) |
+
+Both integrations are **advisory-first** and **fail-open**: an unreachable or erroring guard never wedges the agent.
 
 ## Knowledge Graph (`src/graph/`)
 

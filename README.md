@@ -656,6 +656,27 @@ Every time you type a message, ShieldCortex automatically recalls relevant memor
 
 <br>
 
+## 🌀 Hermes Integration
+
+ShieldCortex also runs natively on **Hermes** — the Python agent runtime — not as a shim but as a Hermes-native plugin.
+
+Drop the plugin folder in and enable it:
+
+```bash
+# from a clone of this repo
+cp -r plugins/hermes/shieldcortex ~/.hermes/plugins/shieldcortex
+hermes plugins enable shieldcortex
+```
+
+It registers a **`pre_tool_call` gate**: before every Hermes tool execution it scans the tool + arguments through ShieldCortex's defence pipeline via the local REST API (`POST /api/v1/scan`).
+
+- 🛡️ **Advisory-first** — `enforce` is off by default; it logs what it *would* block. Set `SHIELDCORTEX_ENFORCE=1` to actively block.
+- 🪂 **Fail-open** — if the ShieldCortex API is unreachable, the gate never blocks. A down scanner must not wedge the agent; every fail-open is logged.
+- 🔒 **Authenticated** — reads the API token from `SHIELDCORTEX_API_TOKEN` or `~/.shieldcortex/.api-token` and sends `Authorization: Bearer`.
+- 📦 **Isolated** — installs under `~/.hermes/plugins/shieldcortex/`, touching nothing else on the host. Coexists cleanly with an OpenClaw ShieldCortex on the same machine (separate state dirs, no shared-SQLite contention).
+
+**Requires** a running ShieldCortex API server (`http://127.0.0.1:3001` by default; override with `SHIELDCORTEX_API_URL`).
+
 ## 📊 Dashboard
 
 Built-in visual dashboard with keyboard shortcuts throughout — press <kbd>?</kbd> to see them all.

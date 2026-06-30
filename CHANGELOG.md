@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.45.0] - 2026-06-30
+
+**ShieldCortex for Hermes, and a doctor recommendation for tappable approval buttons.**
+
+### Added
+
+- **Hermes runtime plugin (`plugins/hermes/shieldcortex/`).** A Hermes-native Python plugin that gates every tool call through ShieldCortex via a `pre_tool_call` hook → REST `POST /api/v1/scan`. **Advisory-first** (`SHIELDCORTEX_ENFORCE=1` to enforce), **fail-open** (an unreachable scanner never blocks the agent), and **install-isolated** to `~/.hermes/plugins/shieldcortex/`. Sends `Authorization: Bearer` from `SHIELDCORTEX_API_TOKEN` / `~/.shieldcortex/.api-token`. Dogfooded on a live Hermes runtime coexisting cleanly with an OpenClaw ShieldCortex on the same host (separate state dirs, no shared-SQLite contention). Ships via the repo for Hermes runtimes to pull — not via npm.
+- **Doctor: approval-buttons recommendation.** `shieldcortex doctor` emits an info-level hint to enable Telegram inline approval buttons when OpenClaw + Telegram are configured but the capability isn't set — recommend-only; it never rewrites the host's channel config.
+
+## [4.44.0] - 2026-06-29
+
+**Hardening pass on the runtime guard, plus a claims-proof suite and the overseer guard.**
+
+### Added
+
+- **Claims-proof suite (#55).** Every public security claim is now backed by a firing test — 12/12 proven, 0 gaps.
+- **Overseer-manipulation guard, P1 (#56).** Detects attempts to manipulate the human approver at the approval boundary.
+
+### Fixed
+
+- **Action Guard field discipline.** Command-pattern matching now scans only the *execution surface* (the shell command, target path, egress URL) — never content the agent *produces* (a chat-message body, file contents, a commit message). Previously a tool call whose arguments merely *quoted* a destructive command (e.g. a status update mentioning `rm -rf /`) tripped a hard block. A conservative shell use/mention refinement also suppresses tokens that are only printed (`echo`) or commented, without trusting quote-stripping (which would be a bypass). 56/56 guard + 61/61 related tests.
+- **OpenClaw typed-hook registration.** The realtime Action Guard now registers on OpenClaw's typed-hook bus (`before_tool_call`) so it actually intercepts tool calls in-process, and catastrophic blocks are surfaced to the gateway log.
+- **Release tooling:** resolve `clawhub` from the npm-global prefix rather than a bare `PATH` lookup.
+
+## [4.43.0] - 2026-06-28
+
+**Two new runtime defence layers: the Action Guard and the Environment Firewall.**
+
+### Added
+
+- **Iron Dome Action Guard (#53).** Gates what the agent *does* at runtime: recognises destructive shell / file / network / git tool calls, hard-blocks the unambiguously catastrophic ones (recursive root deletes, fork bombs, `mkfs`, `dd` to a disk, `curl | sh`, secret exfiltration) regardless of config, and routes the rest through the RED/AMBER/GREEN approval vocabulary. Positive-recognition, not deny-all — benign work is never interrupted.
+- **Environment Firewall (#54).** Runs at runtime to protect what the agent *sees* — auto-catches hidden web/prompt injection in fetched pages and tool output before their content becomes authority.
+
 ## [4.42.4] - 2026-06-25
 
 **Dashboard polish: a prominent brand logo, and no more text spilling out of cards.** Dashboard-only; no API change.
