@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.45.2] - 2026-06-30
+
+**A native `shieldcortex vacuum` command — so reclaiming disk space no longer assumes a `sqlite3` CLI that isn't there.**
+
+### Added
+
+- **`shieldcortex vacuum` (alias `compact`).** Checkpoints the WAL and runs `VACUUM` through the bundled `better-sqlite3`, then reports the before → after size and MB reclaimed. `consolidate`/`prune` free *rows*, but SQLite keeps the freed pages in the file; only `VACUUM` shrinks it on disk, and until now nothing exposed that without a separate tool.
+
+### Fixed
+
+- **The 4.45.1 disk remedy recommended a binary ShieldCortex doesn't ship.** When the live DB was the bulk of the overflow, `doctor` advised ``sqlite3 ~/.shieldcortex/memories.db 'VACUUM'`` — but the standalone `sqlite3` CLI is not a dependency and is absent on minimal boxes (a fleet agent had no `sqlite3` at all, so the advice was a dead end). `doctor` now points at `shieldcortex vacuum`, which uses the engine already bundled with the install.
+
 ## [4.45.1] - 2026-06-30
 
 **`doctor` disk check now names the real space consumer and points at the fix that actually works.**

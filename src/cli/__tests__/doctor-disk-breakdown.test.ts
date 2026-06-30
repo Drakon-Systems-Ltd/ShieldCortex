@@ -52,11 +52,16 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.message).toMatch(/DB .* · backups .* · logs/);
   });
 
-  it('points at VACUUM when the live DB itself is the bulk', async () => {
+  it('points at `shieldcortex vacuum` when the live DB itself is the bulk', async () => {
     writeBytes('memories.db', 60 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
     expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/VACUUM/);
+    // Must be the native command, NOT an invocation of the `sqlite3` binary — that
+    // CLI is not bundled and is absent on minimal boxes (a fleet agent had none).
+    // Mentioning "no sqlite3 CLI needed" in prose is fine; recommending you RUN
+    // `sqlite3 ~/… 'VACUUM'` is the bug. Forbid only the command form.
+    expect(result.fix).toMatch(/shieldcortex vacuum/);
+    expect(result.fix).not.toMatch(/sqlite3 ['"~]/);
   });
 
   it('flags audit/log files when those dominate', async () => {

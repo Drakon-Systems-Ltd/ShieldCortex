@@ -696,7 +696,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         return `${formatBytes(backupsSize)} is stale DB backups (memories.db.* migration snapshots). Clear them — \`rm ~/.shieldcortex/memories.db.{pre-backfill,empty-live,stub,bak}*\` keeps the live DB; v4.45.1+ also auto-prunes them on start.`;
       }
       if (liveDbSize > limit * 0.5) {
-        return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. Reclaim free space with \`sqlite3 ~/.shieldcortex/memories.db 'VACUUM'\`; if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
+        return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
       }
       if (logsSize > limit * 0.2) {
         return `${formatBytes(logsSize)} is audit/log files — safe to rotate or clear under ~/.shieldcortex/{logs,audit}/.`;

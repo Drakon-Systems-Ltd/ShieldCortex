@@ -675,6 +675,7 @@ ${bold}COMMANDS${reset}
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
   ${cyan}doctor${reset}                Diagnose installation issues
+  ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
@@ -1168,6 +1169,40 @@ ${bold}DOCS${reset}
     process.exit(0);
   }
 
+  // Handle "vacuum" subcommand (alias "compact", 4.45.2) — reclaim DB file space.
+  // consolidate/prune free *rows*, but SQLite keeps the freed pages in the file;
+  // only VACUUM shrinks it on disk. Runs via the bundled better-sqlite3, so it
+  // needs no standalone sqlite3 CLI — which minimal boxes (EDITH had none) lack,
+  // and which the old doctor remedy wrongly assumed was present.
+  if (process.argv[2] === 'vacuum' || process.argv[2] === 'compact') {
+    const { initDatabase, getDatabase } = await import('./database/init.js');
+    const { statSync } = await import('fs');
+    initDatabase();
+    const db = getDatabase();
+    const dbFile = db.name;
+    const sizeMB = (p: string): number => { try { return statSync(p).size / 1048576; } catch { return 0; } };
+    const pageSize = db.pragma('page_size', { simple: true }) as number;
+    const freelist = db.pragma('freelist_count', { simple: true }) as number;
+    const before = sizeMB(dbFile);
+    console.log(`🧹 Compacting ${dbFile}`);
+    console.log(`   ${(freelist * pageSize / 1048576).toFixed(1)} MB of free pages to reclaim`);
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)'); // flush pending WAL so VACUUM sees everything
+      db.exec('VACUUM');
+      // In WAL mode VACUUM rewrites pages through the WAL, so the main file does NOT
+      // shrink until the next checkpoint. Checkpoint again before measuring, or we'd
+      // report "reclaimed 0 MB" while the file is still its old size on disk.
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch (err) {
+      console.error(`❌ Vacuum failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.error('   The DB is likely locked by a running ShieldCortex process — stop it (or wait until idle) and retry.');
+      process.exit(1);
+    }
+    const after = sizeMB(dbFile);
+    console.log(`✅ ${before.toFixed(1)} MB → ${after.toFixed(1)} MB (reclaimed ${(before - after).toFixed(1)} MB)`);
+    process.exit(0);
+  }
+
   // Handle "xray" subcommand — package/file/plugin risk inspector
   if (process.argv[2] === 'xray') {
     const { handleXRayCommand } = await import('./xray/index.js');
@@ -1196,7 +1231,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
