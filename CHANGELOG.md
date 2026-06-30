@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.45.1] - 2026-06-30
+
+**`doctor` disk check now names the real space consumer and points at the fix that actually works.**
+
+### Fixed
+
+- **Disk-over-limit remedy was misleading.** When `~/.shieldcortex/` crossed the 100 MB safety limit, `shieldcortex doctor` always advised `memories prune` / `memories dedupe` — but those only trim the live memory table. They cannot reclaim what usually causes the overflow: stale migration backups (`memories.db.pre-backfill-*`, `.empty-live.*`, `.stub*`, `.bak*` — each a full-DB-sized copy) or session-capture rows inside the DB. The check now buckets the data (live DB / backups / logs), shows the breakdown in the message, and points at the remedy that matches the actual consumer — clearing backups, `VACUUM`, or log rotation — instead of a blanket prune/dedupe that does nothing.
+- **Migration backups accumulated unbounded.** `cleanupStaleBackups` only ever reaped `.corrupt.*` / `.recovery-failed.*` (7-day TTL) and kept every `.pre-backfill-*` for 30 days. The `.empty-live.*` and `.stub*` snapshots were never cleaned at all, and a run of back-to-back releases left a stack of full-DB `.pre-backfill-*` copies that tripped the disk limit (exactly what a fleet agent hit after 4.43 → 4.44 → 4.45). Cleanup now also covers `.empty-live.*`, `.stub*`, and `.bak*` (7-day TTL) and keeps only the most recent `.pre-backfill-*` as the restore point.
+
 ## [4.45.0] - 2026-06-30
 
 **ShieldCortex for Hermes, and a doctor recommendation for tappable approval buttons.**

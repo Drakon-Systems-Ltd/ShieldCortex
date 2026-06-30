@@ -129,7 +129,7 @@ describe('database integrity recovery', () => {
   });
 
   describe('cleanupStaleBackups', () => {
-    it('reaps pre-backfill snapshots older than 30 days but keeps recent ones', () => {
+    it('keeps only the newest pre-backfill snapshot, reaping older ones (keep-latest-1)', () => {
       const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
       const dbPath = join(tempDir, 'memories.db');
 
@@ -138,9 +138,10 @@ describe('database integrity recovery', () => {
       writeFileSync(oldSnapshot, 'old snapshot', 'utf-8');
       writeFileSync(recentSnapshot, 'recent snapshot', 'utf-8');
 
-      // Force the old snapshot's mtime to 31 days ago; leave the recent one as-is.
-      const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
-      utimesSync(oldSnapshot, thirtyOneDaysAgo, thirtyOneDaysAgo);
+      // Both are recent (well inside any TTL) — keep-latest-1 still drops the older
+      // one by mtime, so full-DB pre-backfill copies cannot stack up after releases.
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      utimesSync(oldSnapshot, yesterday, yesterday);
 
       __databaseTestUtils.cleanupStaleBackups(dbPath);
 
@@ -150,40 +151,62 @@ describe('database integrity recovery', () => {
       rmSync(tempDir, { recursive: true, force: true });
     });
 
-    it('keeps a pre-backfill snapshot only 8 days old (30-day TTL, not 7)', () => {
+    it('keeps a lone pre-backfill snapshot as the restore point regardless of age', () => {
       const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
       const dbPath = join(tempDir, 'memories.db');
 
       const snapshot = `${dbPath}.pre-backfill-1700000000000`;
       writeFileSync(snapshot, 'snapshot', 'utf-8');
-      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
-      utimesSync(snapshot, eightDaysAgo, eightDaysAgo);
+      const longAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      utimesSync(snapshot, longAgo, longAgo);
 
       __databaseTestUtils.cleanupStaleBackups(dbPath);
 
-      // 8 days exceeds the 7-day corrupt/recovery TTL but is well inside the
-      // 30-day pre-backfill window, so the restore point must survive.
+      // The most recent pre-backfill is always retained as a usable restore point —
+      // there is no newer snapshot to supersede it, so age alone never deletes it.
       expect(existsSync(snapshot)).toBe(true);
 
       rmSync(tempDir, { recursive: true, force: true });
     });
 
-    it('still reaps corrupt/recovery backups older than 7 days', () => {
+    it('reaps corrupt/recovery/empty-live/stub/bak backups older than 7 days', () => {
       const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
       const dbPath = join(tempDir, 'memories.db');
 
-      const oldCorrupt = `${dbPath}.corrupt.2020-01-01T00-00-00-000Z`;
-      const oldRecovery = `${dbPath}.recovery-failed.2020-01-01T00-00-00-000Z`;
-      writeFileSync(oldCorrupt, 'corrupt', 'utf-8');
-      writeFileSync(oldRecovery, 'recovery', 'utf-8');
+      // Real on-disk suffix shapes: .stub<n>-<epoch>, .empty-live.<iso>, .bak.<iso>.
+      const stale = [
+        `${dbPath}.corrupt.2020-01-01T00-00-00-000Z`,
+        `${dbPath}.recovery-failed.2020-01-01T00-00-00-000Z`,
+        `${dbPath}.empty-live.2020-01-01T00-00-00-000Z`,
+        `${dbPath}.stub5-1577836800`,
+        `${dbPath}.bak.2020-01-01T00-00-00-000Z`,
+      ];
       const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
-      utimesSync(oldCorrupt, eightDaysAgo, eightDaysAgo);
-      utimesSync(oldRecovery, eightDaysAgo, eightDaysAgo);
+      for (const p of stale) {
+        writeFileSync(p, 'x', 'utf-8');
+        utimesSync(p, eightDaysAgo, eightDaysAgo);
+      }
 
       __databaseTestUtils.cleanupStaleBackups(dbPath);
 
-      expect(existsSync(oldCorrupt)).toBe(false);
-      expect(existsSync(oldRecovery)).toBe(false);
+      for (const p of stale) expect(existsSync(p)).toBe(false);
+
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('keeps fresh empty-live/stub snapshots inside the 7-day window', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+
+      const freshEmptyLive = `${dbPath}.empty-live.${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      const freshStub = `${dbPath}.stub5-${Math.floor(Date.now() / 1000)}`;
+      writeFileSync(freshEmptyLive, 'x', 'utf-8');
+      writeFileSync(freshStub, 'x', 'utf-8');
+
+      __databaseTestUtils.cleanupStaleBackups(dbPath);
+
+      expect(existsSync(freshEmptyLive)).toBe(true);
+      expect(existsSync(freshStub)).toBe(true);
 
       rmSync(tempDir, { recursive: true, force: true });
     });

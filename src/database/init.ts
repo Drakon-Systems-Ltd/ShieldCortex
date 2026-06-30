@@ -344,30 +344,56 @@ function attemptDumpRecovery(dbPath: string): Database.Database | null {
 /**
  * Remove stale backup files. Runs once at startup after successful init —
  * prevents unbounded accumulation.
- * - .corrupt.* / .recovery-failed.*  — older than 7 days
- * - .pre-backfill-*                  — older than 30 days (longer TTL so the
- *   revert-backfill CLI keeps a usable restore point for a reasonable window)
+ * - .corrupt.* / .recovery-failed.* / .empty-live.* / .stub* / .bak*  — older than 7 days
+ * - .pre-backfill-*  — keep only the most recent restore point; older full-DB
+ *   snapshots are pure bloat once a newer one exists (and trip the disk limit)
  */
 function cleanupStaleBackups(dbPath: string): void {
   const dir = dirname(dbPath);
   const base = basename(dbPath);
   const maxAge = 7 * 24 * 60 * 60 * 1000;
-  const preBackfillMaxAge = 30 * 24 * 60 * 60 * 1000;
   const now = Date.now();
 
   try {
-    for (const name of readdirSync(dir)) {
-      const isCorruptOrRecovery =
-        name.startsWith(base + '.corrupt.') || name.startsWith(base + '.recovery-failed.');
-      const isPreBackfill = name.startsWith(base + '.pre-backfill-');
-      if (!isCorruptOrRecovery && !isPreBackfill) continue;
+    const entries = readdirSync(dir);
+
+    // Short-lived recovery/migration snapshots: delete after 7 days. Note this now
+    // also covers .empty-live.* and .stub* copies, which were previously never
+    // cleaned and accumulated next to the live DB after every migration.
+    for (const name of entries) {
+      const isShortTtl =
+        name.startsWith(base + '.corrupt.') ||
+        name.startsWith(base + '.recovery-failed.') ||
+        name.startsWith(base + '.empty-live.') ||
+        name.startsWith(base + '.stub') ||
+        name.startsWith(base + '.bak');
+      if (!isShortTtl) continue;
       const filePath = join(dir, name);
       try {
-        const age = now - statSync(filePath).mtimeMs;
-        const ttl = isPreBackfill ? preBackfillMaxAge : maxAge;
-        if (age > ttl) {
+        if (now - statSync(filePath).mtimeMs > maxAge) {
           unlinkSync(filePath);
         }
+      } catch {
+        // Best-effort — file may have been removed by another process
+      }
+    }
+
+    // .pre-backfill-* are full-DB copies. Keep only the newest as a restore point;
+    // a stack of them after back-to-back releases is full DB-sized bloat and is
+    // exactly what trips the 100 MB disk limit after a rapid release sequence.
+    const preBackfill: Array<{ name: string; mtime: number }> = [];
+    for (const name of entries) {
+      if (!name.startsWith(base + '.pre-backfill-')) continue;
+      try {
+        preBackfill.push({ name, mtime: statSync(join(dir, name)).mtimeMs });
+      } catch {
+        // Skip — file may have vanished
+      }
+    }
+    preBackfill.sort((a, b) => b.mtime - a.mtime);
+    for (const { name } of preBackfill.slice(1)) {
+      try {
+        unlinkSync(join(dir, name));
       } catch {
         // Best-effort — file may have been removed by another process
       }

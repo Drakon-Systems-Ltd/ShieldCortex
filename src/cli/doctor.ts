@@ -616,7 +616,7 @@ async function checkProcesses(): Promise<CheckResult[]> {
  * under `~/.shieldcortex/`, producing a false `Disk: at limit!` for any
  * user with a local AI model cached.
  */
-export async function checkDiskUsage(scDir: string = getShieldCortexDir()): Promise<CheckResult> {
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = 100 * 1024 * 1024): Promise<CheckResult> {
   if (!fs.existsSync(scDir)) {
     return { label: 'Disk', status: 'pass', message: '0 B / 100 MB limit (directory not yet created)' };
   }
@@ -657,24 +657,66 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir()): Prom
       }
     }
 
-    const limit = 100 * 1024 * 1024; // 100 MB applies to the data portion only
+    // Bucket the data so the remedy can name the actual consumer rather than always
+    // pointing at prune/dedupe — which only touch the live memory table and cannot
+    // reclaim backups, session-capture rows, or logs (the real culprits). (4.45.1)
+    let backupsSize = 0;
+    let liveDbSize = 0;
+    let logsSize = 0;
+    const BACKUP_RE = /^memories\.db\.(pre-backfill|empty-live|stub|corrupt|recovery-failed|bak)/;
+    const LIVE_DB = new Set(['memories.db', 'memories.db-wal', 'memories.db-shm']);
+    const LOG_DIRS = new Set(['logs', 'audit', 'recall-log', 'precompact-log', 'quarantine']);
+    const sizeOf = (target: string): number => {
+      try {
+        const st = fs.statSync(target);
+        if (st.isFile()) return st.size;
+        let total = 0;
+        for (const e of fs.readdirSync(target, { withFileTypes: true })) total += sizeOf(path.join(target, e.name));
+        return total;
+      } catch {
+        return 0;
+      }
+    };
+    for (const entry of fs.readdirSync(scDir, { withFileTypes: true })) {
+      const fp = path.join(scDir, entry.name);
+      if (entry.isFile() && BACKUP_RE.test(entry.name)) backupsSize += sizeOf(fp);
+      else if (entry.isFile() && LIVE_DB.has(entry.name)) liveDbSize += sizeOf(fp);
+      else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += sizeOf(fp);
+    }
+
+    const limit = limitBytes; // 100 MB by default; applies to the data portion only
+    const limitMb = Math.round(limit / (1024 * 1024));
     const pct = (dataSize / limit) * 100;
-    const dataStr = `${formatBytes(dataSize)} / 100 MB limit`;
+    const dataStr = `${formatBytes(dataSize)} / ${limitMb} MB limit`;
     const modelsStr = modelsSize > 0 ? ` + ${formatBytes(modelsSize)} models` : '';
+    const breakdown = `DB ${formatBytes(liveDbSize)} · backups ${formatBytes(backupsSize)} · logs ${formatBytes(logsSize)}`;
+
+    const remedy = (): string => {
+      if (backupsSize >= liveDbSize || backupsSize > limit * 0.15) {
+        return `${formatBytes(backupsSize)} is stale DB backups (memories.db.* migration snapshots). Clear them — \`rm ~/.shieldcortex/memories.db.{pre-backfill,empty-live,stub,bak}*\` keeps the live DB; v4.45.1+ also auto-prunes them on start.`;
+      }
+      if (liveDbSize > limit * 0.5) {
+        return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. Reclaim free space with \`sqlite3 ~/.shieldcortex/memories.db 'VACUUM'\`; if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
+      }
+      if (logsSize > limit * 0.2) {
+        return `${formatBytes(logsSize)} is audit/log files — safe to rotate or clear under ~/.shieldcortex/{logs,audit}/.`;
+      }
+      return 'Run `shieldcortex memories prune --execute` or `memories dedupe --execute` to trim the live memory table.';
+    };
 
     if (pct >= 95) {
       return {
         label: 'Disk',
         status: 'fail',
-        message: `${dataStr}${modelsStr} — at limit!`,
-        fix: 'Run `shieldcortex memories prune --execute` or `memories dedupe --execute` to trim the DB',
+        message: `${dataStr}${modelsStr} — at limit! (${breakdown})`,
+        fix: remedy(),
       };
     } else if (pct >= 80) {
       return {
         label: 'Disk',
         status: 'warn',
-        message: `${dataStr}${modelsStr} — approaching limit`,
-        fix: 'Consider running `shieldcortex memories prune` or `memories dedupe`',
+        message: `${dataStr}${modelsStr} — approaching limit (${breakdown})`,
+        fix: remedy(),
       };
     } else {
       return { label: 'Disk', status: 'pass', message: `${dataStr}${modelsStr}` };
