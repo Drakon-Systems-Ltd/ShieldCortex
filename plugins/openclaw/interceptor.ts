@@ -384,7 +384,7 @@ export function createInterceptor(
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
-  const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: false };
+  const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
 
   function emitAudit(entry: InterceptAuditEntry): void {

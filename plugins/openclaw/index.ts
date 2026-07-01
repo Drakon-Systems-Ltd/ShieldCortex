@@ -880,7 +880,7 @@ export default {
             enabled: rawInterceptorConfig.enabled ?? DEFAULT_INTERCEPTOR_CONFIG.enabled,
             severityActions: { ...DEFAULT_INTERCEPTOR_CONFIG.severityActions, ...rawInterceptorConfig.severityActions },
             failurePolicy: { ...DEFAULT_INTERCEPTOR_CONFIG.failurePolicy, ...rawInterceptorConfig.failurePolicy },
-            actionGuard: { ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: false }), ...(rawInterceptorConfig.actionGuard ?? {}) },
+            actionGuard: { ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] }), ...(rawInterceptorConfig.actionGuard ?? {}) },
           } : {}),
           logger: { info: api.logger?.info ?? console.log, warn: (api.logger as any)?.warn ?? console.warn },
         };
