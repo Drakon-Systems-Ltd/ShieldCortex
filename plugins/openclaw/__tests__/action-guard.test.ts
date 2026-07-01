@@ -42,9 +42,30 @@ describe('interceptor — Action Guard wiring', () => {
     await expect(i.handleToolCall({ toolName: 'Bash', arguments: { command: 'ls -la && npm test' } })).resolves.toBeUndefined();
   });
 
-  it('warn mode (default) surfaces dangerous ops but does NOT block', async () => {
+  it('enforce-by-default: an unattended dangerous op is fail-closed (denied)', async () => {
+    // Default config now enforces (P1/WS1). With no approver present — an
+    // unattended agent (cron/heartbeat) — a recognised-dangerous op must be
+    // denied, not warned-and-allowed.
     const i = makeInterceptor();
-    await expect(i.handleToolCall({ toolName: 'Bash', arguments: { command: 'sudo systemctl stop ssh' } })).resolves.toBeUndefined();
+    await expect(
+      i.handleToolCall({ toolName: 'Bash', arguments: { command: 'sudo systemctl stop ssh' } }),
+    ).rejects.toThrow(/blocked|deny/i);
+  });
+
+  it('autoApprove: an unattended dangerous op on the per-agent allowlist passes', async () => {
+    // The escape hatch that keeps enforce-by-default from breaking unattended
+    // agents doing legitimate dangerous work (matches family/action/signal).
+    const i = makeInterceptor({ actionGuard: { enabled: true, enforce: true, autoApprove: ['file-delete'] } });
+    await expect(
+      i.handleToolCall({ toolName: 'Bash', arguments: { command: 'rm /home/u/notes.txt' } }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('advisory opt-down: enforce:false restores warn-and-allow for dangerous ops', async () => {
+    const i = makeInterceptor({ actionGuard: { enabled: true, enforce: false } });
+    await expect(
+      i.handleToolCall({ toolName: 'Bash', arguments: { command: 'sudo systemctl stop ssh' } }),
+    ).resolves.toBeUndefined();
   });
 
   it('enforce mode: a DENIED dangerous op throws', async () => {

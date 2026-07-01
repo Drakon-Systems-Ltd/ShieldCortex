@@ -427,6 +427,33 @@ describe('C. Iron Dome (what it does)', () => {
     // Structured (non-shell) delete of root is blocked too.
     expect(evaluateToolCall('delete_file', { path: '/' }).decision).toBe('block');
   });
+
+  it('claim 10 (gating): a representative dangerous op is gated — require_approval, never silent-allow', () => {
+    // P1/WS1 — the `dangerous` tier must be gated by default, not advisory
+    // pass-through. Prove the classification the enforce-by-default posture
+    // rests on: broad delete, privilege escalation, and history-rewriting push
+    // all resolve to `require_approval` (dangerous) with a firing signal — so a
+    // runtime that honours the verdict (OpenClaw interceptor: enforce-by-default)
+    // gates them and can never silently allow them.
+    const dangerous = [
+      'rm /home/u/notes.txt',
+      'sudo systemctl stop ssh',
+      'git push --force origin main',
+    ];
+    for (const command of dangerous) {
+      const v = evaluateToolCall('Bash', { command });
+      expect(v.decision).toBe('require_approval');
+      expect(v.severity).toBe('dangerous');
+      expect(v.signals.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('claim 10 (precision): a benign op is untouched — no over-blocking on the newly-enforcing tier', () => {
+    // The false-positive guard for enforce-by-default: ordinary work must stay
+    // `allow`, or promoting `dangerous` to enforce would nag on routine actions.
+    expect(evaluateToolCall('Bash', { command: 'ls -la && npm test' }).decision).toBe('allow');
+    expect(evaluateToolCall('Read', { file_path: '/etc/hosts' }).decision).toBe('allow');
+  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

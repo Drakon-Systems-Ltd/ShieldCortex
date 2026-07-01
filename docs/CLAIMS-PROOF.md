@@ -27,12 +27,15 @@ npm test -- claims-proof
 | 8 | RESTRICTED isolation + own-only for low-trust callers, applied before recall reaches the agent | SKILL "trust/ACL-filters recalled memory (RESTRICTED isolation, own-only…) before it reaches the agent" | B·claim 8 — source trust scoring, ACL `checkAccess`, the MCP `get_memory` tool, related-recall, and the recall path all exclude RESTRICTED / low-trust | ✅ |
 | 9 | Dashboard API + WebSocket never emit RESTRICTED content | SKILL "the bundled dashboard never renders RESTRICTED content … redacts before it reaches the browser" | B·claim 9 — REST and WebSocket payloads carry the placeholder content, masked titles, and metadata only | ✅ |
 | 10 | Iron Dome Action Guard hard-blocks catastrophic tool calls out of the box | README Iron Dome; SKILL "Iron Dome kill-switch can block operations" | C·claim 10 — `rm -rf /`, fork bomb, and delete-root all return `decision=block, severity=catastrophic` | ✅ |
+| 10a | `dangerous` tier is gated by default (require_approval, never silent-allow) with benign precision | P1/WS1 — internal posture proof; OpenClaw interceptor enforces-by-default on this verdict (core-wide default flip still pending) | C·claim 10 (gating) — broad `rm`, `sudo`, force-push all return `require_approval/dangerous` with a firing signal; (precision) — benign shell/read stay `allow` | ✅ |
 | 11 | Environment Firewall detects hidden web injection; enforce mode redacts before the model sees it (advisory by default) | README Environment Firewall | D·claim 11 — advisory passes content through (flagged, not blocked); enforce withholds/redacts; a clean page is not flagged in either mode | ✅ |
 | 12 | Provenance ledger records read/write/delete with content hashes | SKILL "a provenance ledger recording read/write/delete operations with content hashes" | E·claim 12 — ledger rows written for each operation, each carrying a content hash | ✅ |
 
 ## Verdict
 
 **12 / 12 public claims proven by a firing adversarial test. 0 gaps, 0 unwired claims.**
+
+_P1/WS1 adds internal posture proof **10a** (dangerous-tier gated by default + benign precision). Not counted as a new public claim: it hardens the posture behind claim 10 rather than asserting a new marketing line._
 
 The pillars aren't just documented — they hold under attack, and now there's one runnable
 file that proves it.

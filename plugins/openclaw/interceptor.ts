@@ -10,14 +10,22 @@ export type FailureAction = 'allow' | 'deny';
 /**
  * Action Guard config — gates what the agent DOES (shell/file/network/git),
  * not just what it remembers. Catastrophic operations (rm -rf /, fork bombs,
- * disk wipes, secret exfil) are always blocked when `enabled`; recognised
- * dangerous ops require approval when `enforce` is set, otherwise they are
- * surfaced (warn + audit) but allowed through — so the guard never nags on
- * routine work by default.
+ * disk wipes, secret exfil) are always blocked when `enabled`.
+ *
+ * Recognised-dangerous ops (`rm <path>`, `sudo`, force-push, external egress,
+ * touching secret paths) are ENFORCED by default (P1/WS1): with an approver in
+ * the loop they prompt; unattended (no approver) they fail closed on the failure
+ * policy. `enforce:false` opts back down to warn-and-allow (advisory).
+ *
+ * `autoApprove` is the per-agent escape hatch: a dangerous op whose family,
+ * action, or signal matches an entry passes without gating — so enforce-by-default
+ * does not break unattended agents doing legitimate dangerous work. It NEVER
+ * relaxes catastrophic ops (those hard-block regardless).
  */
 export interface ActionGuardConfig {
   enabled: boolean;
   enforce: boolean;
+  autoApprove?: string[];
 }
 
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
@@ -91,10 +99,14 @@ const DEFAULT_CONFIG: InterceptorConfig = {
     critical: 'deny',
   },
   // Action Guard on by default: catastrophic ops are blocked out of the box;
-  // dangerous ops are surfaced (warn+audit) but allowed unless `enforce` is set.
+  // recognised-dangerous ops are ENFORCED by default (P1/WS1) — attended → prompt,
+  // unattended → fail closed on failurePolicy. Populate `autoApprove` per agent to
+  // pre-approve the dangerous ops it legitimately needs unattended; set
+  // `enforce:false` to opt back down to warn-and-allow.
   actionGuard: {
     enabled: true,
-    enforce: false,
+    enforce: true,
+    autoApprove: [],
   },
 };
 
@@ -421,7 +433,26 @@ export function createInterceptor(
       throw new Error(`ShieldCortex: tool call blocked — ${v.reason}`);
     }
 
-    // require_approval — warn-only by default (never nags), prompt when enforcing.
+    // Per-agent autoApprove allowlist: a recognised-dangerous op whose family,
+    // action, or signal is pre-approved passes without gating. This is the escape
+    // hatch that lets enforce-by-default coexist with unattended agents doing
+    // legitimate dangerous work. It NEVER applies to catastrophic ops — those
+    // hard-block above, before this branch is reached.
+    const autoApprove = actionGuardCfg.autoApprove ?? [];
+    if (autoApprove.length > 0) {
+      const hay = [v.family, v.action, ...v.signals].map(s => String(s).toLowerCase());
+      const matched = autoApprove.some(a => {
+        const n = a.toLowerCase();
+        return hay.some(h => h === n || h.includes(n));
+      });
+      if (matched) {
+        emitAudit({ ...base, action: 'require_approval', outcome: 'approved' });
+        return;
+      }
+    }
+
+    // require_approval — ENFORCED by default (P1/WS1). `enforce:false` opts back
+    // down to warn-and-allow (advisory) for operators who want the old behaviour.
     if (!actionGuardCfg.enforce) {
       log.warn(`[shieldcortex] ⚠️ Action Guard: ${context.toolName} — ${v.reason}`);
       emitAudit({ ...base, action: 'warn', outcome: 'warned' });
@@ -429,9 +460,14 @@ export function createInterceptor(
     }
 
     if (typeof context.requireApproval !== 'function') {
+      // Unattended (no approver, e.g. cron/heartbeat): fail closed on the failure
+      // policy. High-severity dangerous defaults to deny — surfaced loudly to the
+      // gateway log so an operator sees it, because a silent no-op is exactly the
+      // failure mode we are eliminating.
       const failAction = config.failurePolicy[severity];
       emitAudit({ ...base, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
       if (failAction === 'deny') {
+        log.warn(`[shieldcortex] action-guard DENIED (unattended, no approver) ${context.toolName}: ${v.reason} [${v.signals.join(", ")}]`);
         throw new Error(`ShieldCortex: tool call blocked — ${v.reason} (no approver, failure policy: deny)`);
       }
       return;
