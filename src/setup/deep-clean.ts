@@ -484,6 +484,22 @@ export async function restartOpenClawGateway(): Promise<{
   method: string;
   detail?: string;
 }> {
+  // Restarting the gateway kills every in-flight agent turn on the host, so
+  // this must never fire from a test runner — unmocked install-path tests were
+  // bouncing live gateways during `npm test`.
+  if (
+    process.env.JEST_WORKER_ID !== undefined ||
+    process.env.NODE_ENV === 'test' ||
+    process.env.SHIELDCORTEX_SKIP_GATEWAY_RESTART === '1'
+  ) {
+    return {
+      attempted: false,
+      restarted: false,
+      method: 'skipped',
+      detail: 'gateway restart suppressed (test runner or SHIELDCORTEX_SKIP_GATEWAY_RESTART=1)',
+    };
+  }
+
   const platform = process.platform;
 
   if (platform === 'linux') {
