@@ -24,6 +24,31 @@ beside the memory — it *is* what makes the memory usable in production.
 
 ---
 
+## 1a. The zeroth law — never break the host
+
+Standing directive (Michael, 2026-07-02): **ShieldCortex must never break the OpenClaw
+gateway or the agent it protects.** A protection layer that can take down its own host is
+worse than none. Concretely:
+
+- **No implicit gateway restarts.** `restartOpenClawGateway()` is the single choke point:
+  it refuses under any test runner (`JEST_WORKER_ID` / `NODE_ENV=test`), and in any
+  non-interactive session unless `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1` is set —
+  deliberate automation only (e.g. a fleet-upgrade runbook that has checked for in-flight
+  work). A restart kills every in-flight agent turn on the host, frequently including the
+  agent that ran the install. A human at a TTY keeps the normal setup behaviour.
+- **Tests never touch live services** (PR #64) — guard plus regression tests pin it.
+- **The realtime plugin fails open.** A plugin crash or scan timeout degrades to
+  advisory/no-op; it must never stall or kill the gateway.
+- **Hooks stay bounded.** Claude Code hooks run with canonical timeouts (doctor verifies);
+  a hung hook must never wedge an agent turn.
+- **Enforcement must not strand unattended agents.** Fail-closed changes (P1/WS1) ship
+  only after the fleet autoApprove audit, so no legitimate unattended job starts failing
+  on upgrade.
+
+Violations of this section are release-blockers regardless of what else a change delivers.
+
+---
+
 ## 2. The one-organism model
 
 Two systems sharing one data path. The brain thinks; the immune system guards every surface
