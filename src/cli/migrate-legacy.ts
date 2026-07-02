@@ -352,7 +352,8 @@ function printUsage(): void {
   console.log('');
   console.log('  repair-project-keys [--scan-paths <dir,dir,...>]');
   console.log('                      [--map basename=canonical]   (repeatable)');
-  console.log('                      [--project <key>] [--include-stm] [--execute]');
+  console.log('                      [--project <key>] [--db <path>]');
+  console.log('                      [--include-stm] [--execute]');
   console.log('      Relabel memories tagged under a legacy basename project key');
   console.log('      to their canonical owner-repo key (#42). DRY-RUN BY DEFAULT.');
   console.log('      Backup auto-saved before any rewrite; per-rewrite log written');
@@ -770,8 +771,8 @@ function parseScanPaths(args: string[]): string[] {
     .filter(Boolean);
 }
 
+/** Interactive y/N prompt — only ever called when stdin is a TTY. */
 async function confirmExecute(prompt: string): Promise<boolean> {
-  if (!process.stdin.isTTY) return false;
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
     const answer = await new Promise<string>((resolve) => rl.question(prompt, resolve));
@@ -812,7 +813,7 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
       if (legacy === canonical) return;
       if (opts.onlyProject && legacy !== opts.onlyProject) return;
       if (!dbProjects.has(legacy)) return;
-      const key = `${legacy} ${canonical}`;
+      const key = `${legacy}\u0000${canonical}`;
       if (seen.has(key)) return;
       seen.add(key);
       const countQ = db
@@ -882,11 +883,21 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
     }
 
     // 4. Confirm + backup + write.
+    //
+    // Only prompt when stdin is a real TTY. Headless callers (agents, cron,
+    // CI, SSH exec — the tool's primary audience) have already consented via
+    // the explicit `--execute` flag; from v4.14.0 to v4.45.2 this gate
+    // instead auto-answered "no" without a TTY, making `--execute` a
+    // guaranteed no-op that printed "Aborted" and exited 0.
     if (!opts.noConfirm) {
-      const ok = await confirmExecute(`\nApply ${proposals.length} rewrite(s) to ${totalRows} rows? [y/N] `);
-      if (!ok) {
-        console.log('Aborted — no changes written.');
-        return report;
+      if (!process.stdin.isTTY) {
+        console.log('Non-interactive session — proceeding (--execute given; backup written first).');
+      } else {
+        const ok = await confirmExecute(`\nApply ${proposals.length} rewrite(s) to ${totalRows} rows? [y/N] `);
+        if (!ok) {
+          console.log('Aborted — no changes written.');
+          return report;
+        }
       }
     }
 
@@ -942,7 +953,8 @@ async function runRepairProjectKeys(args: string[]): Promise<void> {
   const map = parseMapFlags(args);
   const scanPaths = parseScanPaths(args);
   const onlyProject = flagValue(args, '--project');
+  const dbPath = flagValue(args, '--db');
   const includeStm = args.includes('--include-stm');
   const execute = args.includes('--execute');
-  await repairProjectKeys({ map, scanPaths, onlyProject, includeStm, execute });
+  await repairProjectKeys({ dbPath, map, scanPaths, onlyProject, includeStm, execute });
 }

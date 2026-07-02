@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import Database from 'better-sqlite3';
 
-import { repairProjectKeys } from '../cli/migrate-legacy.js';
+import { handleMemoriesCommand, repairProjectKeys } from '../cli/migrate-legacy.js';
 
 /**
  * #42 data recovery — verify the repair-project-keys CLI rewrites legacy
@@ -156,5 +156,61 @@ describe('shieldcortex memories repair-project-keys (#42 migration)', () => {
     });
     expect(report.applied).toBe(3);
     expect(projectCounts().other).toBe(1);
+  });
+
+  async function withNonTtyStdin(fn: () => Promise<void>): Promise<void> {
+    const original = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+    try {
+      await fn();
+    } finally {
+      if (original) Object.defineProperty(process.stdin, 'isTTY', original);
+      else Reflect.deleteProperty(process.stdin, 'isTTY');
+    }
+  }
+
+  it('non-interactive --execute applies without prompting (headless no-op regression)', async () => {
+    // Regression: from v4.14.0 the confirm gate returned false whenever stdin
+    // was not a TTY, so `--execute` printed "Aborted — no changes written."
+    // in every agent/cron/SSH-exec context — the tool's primary audience —
+    // while exiting 0. `--execute` is itself the consent; a non-TTY session
+    // must proceed (dry-run stays the default, backup still written first).
+    await withNonTtyStdin(async () => {
+      const report = await repairProjectKeys({
+        dbPath,
+        map: { myrepo: 'acme-myrepo' },
+        execute: true,
+        // noConfirm deliberately absent — this is the production path.
+      });
+      expect(report.dryRun).toBe(false);
+      expect(report.applied).toBe(3);
+      expect(fs.existsSync(report.backupPath as string)).toBe(true);
+    });
+    expect(projectCounts().myrepo).toBeUndefined();
+  });
+
+  it('CLI arg path honours --db/--map/--include-stm/--execute together (Edith incident shape)', async () => {
+    const db = new Database(dbPath);
+    db.prepare(
+      `INSERT INTO memories (uuid, type, category, title, content, project, salience)
+       VALUES (?, 'short_term', 'note', 'stm-legacy', 'stm-legacy', 'myrepo', 0.5)`
+    ).run(crypto.randomUUID());
+    db.close();
+
+    await withNonTtyStdin(async () => {
+      await handleMemoriesCommand([
+        'repair-project-keys',
+        '--db',
+        dbPath,
+        '--map',
+        'myrepo=acme-myrepo',
+        '--include-stm',
+        '--execute',
+      ]);
+    });
+
+    const counts = projectCounts();
+    expect(counts.myrepo).toBeUndefined();
+    expect(counts['acme-myrepo']).toBe(7); // 4 rewritten (3 LTM + 1 STM) + 3 originals
   });
 });

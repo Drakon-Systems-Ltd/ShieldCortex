@@ -1453,57 +1453,113 @@ export async function checkBrainWorker(): Promise<CheckResult> {
  * basename collides with a `<something>-<basename>` form already in the
  * DB, point the user at `repair-project-keys`.
  */
+export interface ProjectKeyCollision {
+  legacy: string;
+  /** First canonical candidate — the auto-fix target when unambiguous. */
+  canonical: string;
+  /** Every canonical key ending in `-<legacy>`; >1 means ambiguous. */
+  candidates: string[];
+}
+
+export interface ProjectKeyScan {
+  keyCount: number;
+  collisions: ProjectKeyCollision[];
+  /** True when a colliding legacy key has rows outside long_term/episodic. */
+  needsStm: boolean;
+}
+
+/**
+ * Shared collision scanner behind both the doctor check and
+ * `doctor --fix-project-keys`. A key is "legacy-looking" when it has no
+ * hyphen (a raw cwd basename); it collides when another key ends with
+ * `-<legacy>` (the canonical owner-repo form).
+ */
+export function scanProjectKeyCollisions(dbPath: string = getDbPath()): ProjectKeyScan {
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const rows = db
+      .prepare("SELECT DISTINCT project FROM memories WHERE project IS NOT NULL AND project != ''")
+      .all() as Array<{ project: string }>;
+    const keys = rows.map((r) => r.project);
+    const collisions: ProjectKeyCollision[] = [];
+    for (const candidate of keys) {
+      if (candidate.includes('-')) continue;
+      const suffix = `-${candidate}`;
+      const candidates = keys.filter((k) => k !== candidate && k.endsWith(suffix));
+      if (candidates.length > 0) {
+        collisions.push({ legacy: candidate, canonical: candidates[0], candidates });
+      }
+    }
+    const stmProbe = db.prepare(
+      "SELECT COUNT(*) AS n FROM memories WHERE project = ? AND type NOT IN ('long_term', 'episodic')"
+    );
+    const needsStm = collisions.some((c) => (stmProbe.get(c.legacy) as { n: number }).n > 0);
+    return { keyCount: keys.length, collisions, needsStm };
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Auto-heal for the project-key collision warning: apply the repair doctor
+ * already computed, restricted to unambiguous collisions (exactly one
+ * canonical candidate). Ambiguous ones are left for a human `--map` call.
+ * Delegates to `repairProjectKeys` so backup + JSON rewrite log apply.
+ */
+export async function fixProjectKeyCollisions(
+  opts: { dbPath?: string } = {}
+): Promise<{ applied: number; skippedAmbiguous: number; remaining: number; backupPath?: string }> {
+  const dbPath = opts.dbPath ?? getDbPath();
+  const scan = scanProjectKeyCollisions(dbPath);
+  const unambiguous = scan.collisions.filter((c) => c.candidates.length === 1);
+  const skippedAmbiguous = scan.collisions.length - unambiguous.length;
+  if (unambiguous.length === 0) {
+    return { applied: 0, skippedAmbiguous, remaining: scan.collisions.length };
+  }
+  const map = Object.fromEntries(unambiguous.map((c) => [c.legacy, c.canonical]));
+  const { repairProjectKeys } = await import('./migrate-legacy.js');
+  const report = await repairProjectKeys({
+    dbPath,
+    map,
+    includeStm: scan.needsStm,
+    execute: true,
+    noConfirm: true,
+  });
+  const remaining = scanProjectKeyCollisions(dbPath).collisions.length;
+  return { applied: report.applied, skippedAmbiguous, remaining, backupPath: report.backupPath };
+}
+
 export async function checkProjectKeyConsistency(): Promise<CheckResult> {
   const dbPath = getDbPath();
   if (!fs.existsSync(dbPath)) {
     return { label: 'Project keys', status: 'info', message: 'skipped (no DB yet)' };
   }
   try {
-    const Database = require('better-sqlite3');
-    const db = new Database(dbPath, { readonly: true });
-    try {
-      const rows = db
-        .prepare("SELECT DISTINCT project FROM memories WHERE project IS NOT NULL AND project != ''")
-        .all() as Array<{ project: string }>;
-      const keys = rows.map((r) => r.project);
-      const collisions: Array<{ legacy: string; canonical: string }> = [];
-      for (const candidate of keys) {
-        // A candidate is "legacy-looking" if it has no hyphen (cwd basename).
-        if (candidate.includes('-')) continue;
-        const suffix = `-${candidate}`;
-        const matched = keys.find((k) => k !== candidate && k.endsWith(suffix));
-        if (matched) collisions.push({ legacy: candidate, canonical: matched });
-      }
-      if (collisions.length === 0) {
-        return { label: 'Project keys', status: 'pass', message: `${keys.length} distinct, no legacy/canonical collisions` };
-      }
-      const example = collisions.slice(0, 3).map((c) => `${c.legacy} ↔ ${c.canonical}`).join('; ');
-      const more = collisions.length > 3 ? ` (+${collisions.length - 3} more)` : '';
-      // Doctor already knows both sides of each collision, so hand the user
-      // a runnable command with explicit --map pairs rather than a <root>
-      // placeholder. The repair tool defaults to long_term/episodic rows;
-      // when a colliding legacy key has rows outside that scope the default
-      // repair leaves them behind and this warning survives it — suggest
-      // --include-stm in that case.
-      const stmProbe = db.prepare(
-        "SELECT COUNT(*) AS n FROM memories WHERE project = ? AND type NOT IN ('long_term', 'episodic')"
-      );
-      const needsStm = collisions.some((c) => (stmProbe.get(c.legacy) as { n: number }).n > 0);
-      const mapFlags = collisions
-        .map((c) => {
-          const pair = `${c.legacy}=${c.canonical}`;
-          return `--map ${/\s/.test(pair) ? `"${pair}"` : pair}`;
-        })
-        .join(' ');
-      return {
-        label: 'Project keys',
-        status: 'warn',
-        message: `${collisions.length} legacy/canonical collision(s): ${example}${more}`,
-        fix: `Run \`shieldcortex memories repair-project-keys ${mapFlags}${needsStm ? ' --include-stm' : ''}\` (dry-run by default; add --execute to apply)`,
-      };
-    } finally {
-      db.close();
+    const { keyCount, collisions, needsStm } = scanProjectKeyCollisions(dbPath);
+    if (collisions.length === 0) {
+      return { label: 'Project keys', status: 'pass', message: `${keyCount} distinct, no legacy/canonical collisions` };
     }
+    const example = collisions.slice(0, 3).map((c) => `${c.legacy} ↔ ${c.canonical}`).join('; ');
+    const more = collisions.length > 3 ? ` (+${collisions.length - 3} more)` : '';
+    // Doctor already knows both sides of each collision, so hand the user
+    // a runnable command with explicit --map pairs rather than a <root>
+    // placeholder. The repair tool defaults to long_term/episodic rows;
+    // when a colliding legacy key has rows outside that scope the default
+    // repair leaves them behind and this warning survives it — suggest
+    // --include-stm in that case.
+    const mapFlags = collisions
+      .map((c) => {
+        const pair = `${c.legacy}=${c.canonical}`;
+        return `--map ${/\s/.test(pair) ? `"${pair}"` : pair}`;
+      })
+      .join(' ');
+    return {
+      label: 'Project keys',
+      status: 'warn',
+      message: `${collisions.length} legacy/canonical collision(s): ${example}${more}`,
+      fix: `Run \`shieldcortex doctor --fix-project-keys\` to auto-repair, or \`shieldcortex memories repair-project-keys ${mapFlags}${needsStm ? ' --include-stm' : ''}\` (dry-run by default; add --execute to apply)`,
+    };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Project keys', status: 'warn', message: `check failed — ${msg}` };
@@ -1781,7 +1837,7 @@ export async function checkDashboardFreshness(): Promise<CheckResult> {
   }
 }
 
-export async function runDoctor(): Promise<void> {
+export async function runDoctor(args: string[] = []): Promise<void> {
   console.log(`\n${bold}ShieldCortex Doctor${reset} v${pkg.version}\n`);
 
   const results: CheckResult[] = [];
@@ -1824,6 +1880,28 @@ export async function runDoctor(): Promise<void> {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       results.push({ label: 'Unknown', status: 'fail', message: `check crashed — ${msg}` });
+    }
+  }
+
+  // --fix-project-keys: auto-repair the project-key collision warning
+  // (unambiguous mappings only; backup + rewrite log via repairProjectKeys),
+  // then re-run the check so the printed report reflects the post-fix state.
+  if (args.includes('--fix-project-keys')) {
+    const idx = results.findIndex((r) => r.label === 'Project keys');
+    if (idx !== -1 && results[idx].status === 'warn') {
+      try {
+        const fix = await fixProjectKeyCollisions();
+        const refreshed = await checkProjectKeyConsistency();
+        const notes = [`auto-fixed ${fix.applied} row(s)`];
+        if (fix.backupPath) notes.push(`backup: ${fix.backupPath}`);
+        if (fix.skippedAmbiguous > 0) notes.push(`${fix.skippedAmbiguous} ambiguous mapping(s) skipped — resolve with --map`);
+        results[idx] = { ...refreshed, message: `${refreshed.message} — ${notes.join('; ')}` };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results[idx] = { ...results[idx], message: `${results[idx].message} — auto-fix failed: ${msg}` };
+      }
+    } else if (idx !== -1) {
+      console.log(`  ${dim}--fix-project-keys: nothing to fix (no collision warning).${reset}\n`);
     }
   }
 
