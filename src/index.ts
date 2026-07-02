@@ -738,7 +738,7 @@ ${bold}DOCS${reset}
   // Handle "doctor" subcommand
   if (process.argv[2] === 'doctor') {
     const { runDoctor } = await import('./cli/doctor.js');
-    await runDoctor();
+    await runDoctor(process.argv.slice(3));
     return;
   }
 
