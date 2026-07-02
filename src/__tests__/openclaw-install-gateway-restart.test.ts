@@ -71,3 +71,34 @@ describe('openclaw install — auto gateway restart (v4.12.6)', () => {
     expect(openclawSource).toMatch(/launchctl kickstart -k gui\/\$UID\/ai\.openclaw\.gateway/);
   });
 });
+
+describe('restartOpenClawGateway — never fires from a test runner', () => {
+  // Unmocked install-path tests were restarting the LIVE gateway on the host
+  // during `npm test` (Jarvis 2026-07-02: 8 live bounces in one morning, each
+  // killing every in-flight agent turn). The implementation must refuse to
+  // exec when running under Jest, regardless of what any test passes in.
+  it('returns skipped under JEST_WORKER_ID without exec-ing anything', async () => {
+    const { restartOpenClawGateway } = await import('../setup/deep-clean.js');
+    expect(process.env.JEST_WORKER_ID).toBeDefined();
+    const result = await restartOpenClawGateway();
+    expect(result.attempted).toBe(false);
+    expect(result.restarted).toBe(false);
+    expect(result.method).toBe('skipped');
+  });
+
+  it('source guards on JEST_WORKER_ID, NODE_ENV=test, and the manual escape hatch', () => {
+    const thisFile = fileURLToPath(import.meta.url);
+    const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
+    const deepCleanSource = fs.readFileSync(
+      path.join(repoRoot, 'src', 'setup', 'deep-clean.ts'),
+      'utf-8',
+    );
+    const guard = deepCleanSource.match(
+      /restartOpenClawGateway[\s\S]{0,800}?JEST_WORKER_ID[\s\S]{0,300}?SHIELDCORTEX_SKIP_GATEWAY_RESTART/,
+    );
+    expect(guard).not.toBeNull();
+    // The guard must come before the first execSync in the function body.
+    const fnBody = deepCleanSource.slice(deepCleanSource.indexOf('export async function restartOpenClawGateway'));
+    expect(fnBody.indexOf('JEST_WORKER_ID')).toBeLessThan(fnBody.indexOf('execSync'));
+  });
+});
