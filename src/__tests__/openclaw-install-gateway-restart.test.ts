@@ -102,3 +102,79 @@ describe('restartOpenClawGateway — never fires from a test runner', () => {
     expect(fnBody.indexOf('JEST_WORKER_ID')).toBeLessThan(fnBody.indexOf('execSync'));
   });
 });
+
+describe('restartOpenClawGateway — host-safety invariant: no implicit restart headless', () => {
+  // Directive (Michael, 2026-07-02): ShieldCortex must never break the
+  // gateway or the agent. The remaining auto-vector after PR #64 was
+  // `shieldcortex setup`/`update` run headless (agent, cron, SSH exec):
+  // installOpenClawHook ends with a best-effort gateway restart that would
+  // kill every in-flight turn on the host — including the agent running
+  // the install. Non-TTY sessions now require the explicit
+  // SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1 consent to restart.
+  function withEnv(patch: Record<string, string | undefined>, fn: () => Promise<void>): Promise<void> {
+    const saved = new Map<string, string | undefined>();
+    for (const key of Object.keys(patch)) saved.set(key, process.env[key]);
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    return fn().finally(() => {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+  }
+
+  it('non-TTY without consent env returns the non-interactive skip (never reaches exec)', async () => {
+    const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+    try {
+      await withEnv(
+        { JEST_WORKER_ID: undefined, NODE_ENV: 'production', SHIELDCORTEX_SKIP_GATEWAY_RESTART: undefined, SHIELDCORTEX_ALLOW_GATEWAY_RESTART: undefined },
+        async () => {
+          const { restartOpenClawGateway } = await import('../setup/deep-clean.js');
+          const result = await restartOpenClawGateway();
+          expect(result.attempted).toBe(false);
+          expect(result.restarted).toBe(false);
+          expect(result.method).toBe('skipped');
+          expect(result.detail).toMatch(/non-interactive/);
+        },
+      );
+    } finally {
+      if (originalIsTTY) Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      else Reflect.deleteProperty(process.stdin, 'isTTY');
+    }
+  });
+
+  it('consent env cannot bypass the test-runner guard (ordering)', async () => {
+    await withEnv({ SHIELDCORTEX_ALLOW_GATEWAY_RESTART: '1' }, async () => {
+      const { restartOpenClawGateway } = await import('../setup/deep-clean.js');
+      expect(process.env.JEST_WORKER_ID).toBeDefined();
+      const result = await restartOpenClawGateway();
+      expect(result.attempted).toBe(false);
+      expect(result.detail).toMatch(/test runner/);
+    });
+  });
+
+  it('source shape: consent gate sits after the test-runner guard and before execSync', () => {
+    const thisFile = fileURLToPath(import.meta.url);
+    const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
+    const deepCleanSource = fs.readFileSync(
+      path.join(repoRoot, 'src', 'setup', 'deep-clean.ts'),
+      'utf-8',
+    );
+    const fnBody = deepCleanSource.slice(
+      deepCleanSource.indexOf('export async function restartOpenClawGateway'),
+    );
+    const jestGuard = fnBody.indexOf('JEST_WORKER_ID');
+    const consentGate = fnBody.indexOf('SHIELDCORTEX_ALLOW_GATEWAY_RESTART');
+    const ttyCheck = fnBody.indexOf('process.stdin.isTTY');
+    const firstExec = fnBody.indexOf('execSync');
+    expect(jestGuard).toBeGreaterThan(-1);
+    expect(consentGate).toBeGreaterThan(jestGuard);
+    expect(ttyCheck).toBeGreaterThan(jestGuard);
+    expect(firstExec).toBeGreaterThan(consentGate);
+    expect(firstExec).toBeGreaterThan(ttyCheck);
+  });
+});

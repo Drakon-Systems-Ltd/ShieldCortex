@@ -500,6 +500,24 @@ export async function restartOpenClawGateway(): Promise<{
     };
   }
 
+  // Host-safety invariant (2026-07-02): ShieldCortex must never break the
+  // gateway or the agent it protects. Headless callers — agents, cron, CI,
+  // SSH exec — get no implicit restart, because they are frequently running
+  // *inside* the very gateway this would kill, along with every other
+  // in-flight turn on the host. Consent is a human at a TTY, or an explicit
+  // SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1 from deliberate automation
+  // (e.g. a fleet-upgrade runbook that has checked for in-flight work).
+  if (process.env.SHIELDCORTEX_ALLOW_GATEWAY_RESTART !== '1' && !process.stdin.isTTY) {
+    return {
+      attempted: false,
+      restarted: false,
+      method: 'skipped',
+      detail:
+        'non-interactive session — gateway restart skipped (it kills every in-flight agent turn on this host). ' +
+        'Restart manually when ready, or set SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1 for deliberate automation.',
+    };
+  }
+
   const platform = process.platform;
 
   if (platform === 'linux') {
