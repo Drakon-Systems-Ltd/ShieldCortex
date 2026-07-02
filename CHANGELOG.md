@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.46.0] - 2026-07-02
+
+**The dangerous tier enforces by default, the zeroth law makes breaking the host a release-blocker, and the project-key repair finally works for the agents it was built for.**
+
+### Added
+
+- **Action Guard: `dangerous` tier enforces by default (P1/WS1).** Previously only *catastrophic* operations were enforced; `dangerous` (sudo systemctl, `rm -rf` on real paths, forced git rewrites, …) warned and allowed. The interceptor default is now `enforce: true`, with a per-agent `autoApprove` escape hatch (matches by family/action/signal; never relaxes catastrophic) for unattended jobs that legitimately run dangerous ops. Unattended + no approver fails closed on the failure policy; `enforce: false` still opts a runtime back down to advisory.
+- **`shieldcortex doctor --fix-project-keys`.** One-shot auto-heal for the legacy/canonical project-key collision warning: applies exactly the repair doctor computed (unambiguous single-candidate mappings only, `--include-stm` when the collision has short-term rows), backs up first, then re-runs the check. Ambiguous collisions are skipped and reported for a human `--map` decision.
+- **`memories repair-project-keys --db <path>`** for parity with `recalc` and safe testing against scratch databases.
+- **The zeroth law (SCOPE.md 1a): never break the host.** ShieldCortex must never break the gateway or the agent it protects — no implicit gateway restarts, tests never touch live services, the realtime plugin fails open, hooks stay timeout-bounded, and enforcement flips ship only after a fleet autoApprove audit. Violations are release-blockers.
+
+### Fixed
+
+- **`memories repair-project-keys --execute` was a guaranteed no-op for every headless caller.** The confirm gate auto-answered "no" whenever stdin was not a TTY, so agents, cron jobs, and SSH sessions — the tool's primary audience — got the plan, then `Aborted — no changes written.`, exit 0. Doctor kept re-warning about collisions its own suggested fix could never repair. `--execute` is now the consent in non-interactive sessions (dry-run stays the default, backup still written first); the y/N prompt remains for real terminals.
+- **Tests could restart the live OpenClaw gateway.** `openclaw-setup.test.ts` ran the real install path unmocked, and its post-install restart bounced the host gateway on every full-suite run — killing every in-flight agent turn on the box, repeatedly. `restartOpenClawGateway()` now hard-refuses under any test runner (`JEST_WORKER_ID` / `NODE_ENV=test`), with regression tests pinning the guard.
+- **Headless installs no longer restart the gateway implicitly.** `shieldcortex setup`/`update` run non-interactively (agent, cron, SSH exec) skips the post-install gateway restart unless `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1` is explicitly set — a restart kills every in-flight agent turn on the host, often including the agent running the install. A human at a TTY keeps the auto-restart behaviour.
+- **Literal NUL bytes in three source files.** Raw U+0000 bytes inside template-literal separator keys made `grep`/`ugrep`/`git diff` classify `migrate-legacy.ts`, `mcp.ts`, and `mcp-tools-scanner.test.ts` as binary — silently hiding their contents from every text sweep of the repo. Replaced with escape sequences; a new `source-hygiene` test fails on any raw NUL in `src/` or `plugins/`.
+
 ## [4.45.2] - 2026-06-30
 
 **A native `shieldcortex vacuum` command — so reclaiming disk space no longer assumes a `sqlite3` CLI that isn't there.**
