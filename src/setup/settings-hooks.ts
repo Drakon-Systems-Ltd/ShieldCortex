@@ -7,7 +7,14 @@ import os from 'os';
 import { getAutoMemoryEnableConfig, setAutoMemoryEnableConfig } from '../cloud/config.js';
 import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
 
-const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
+// Resolved per call, not at import: an import-time constant freezes whichever
+// home os.homedir() saw when the module FIRST loaded, so any later redirection
+// (an os.homedir mock in a cached-module test, a future homedir override)
+// silently writes to the wrong settings.json. Call-time resolution keeps the
+// target honest no matter when this module was imported.
+function settingsPath(): string {
+  return path.join(os.homedir(), '.claude', 'settings.json');
+}
 
 interface HookEntry {
   hooks: Array<{ type: string; command?: string; prompt?: string; timeout?: number }>;
@@ -30,6 +37,15 @@ const CORTEX_HOOKS: Record<string, HookEntry> = {
     // any IO pressure, dropping recall context with no user-visible error
     // (#43). 5 s leaves ~3 s headroom on a busy host.
     hooks: [{ type: 'command', command: 'shieldcortex hook prompt-recall', timeout: 5 }],
+  },
+  PreToolUse: {
+    // Action guard (P1/WS1 carried over from the OpenClaw plugin): catastrophic
+    // ops deny, dangerous ops route through Claude Code's native "ask" dialog.
+    // Enforce-by-default — the runtime opt-down lives in ~/.shieldcortex/
+    // config.json (`actionGuard.enforce:false` → advisory, `enabled:false` →
+    // off) so posture changes never require re-editing settings.json.
+    matcher: '*',
+    hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool', timeout: 10 }],
   },
 };
 
@@ -77,12 +93,12 @@ function hasCortexHook(entries: HookEntry[]): boolean {
 // rather than write a hooks-only file over the user's permissions/env/model
 // settings. Mirrors uninstall.ts's "aborting to avoid corruption" discipline.
 function readSettings(): Record<string, any> {
-  return readJsonConfigOrAbort(SETTINGS_PATH);
+  return readJsonConfigOrAbort(settingsPath());
 }
 
 // Backs up an existing settings.json before overwriting it.
 function writeSettings(settings: Record<string, any>): void {
-  writeJsonConfigWithBackup(SETTINGS_PATH, settings);
+  writeJsonConfigWithBackup(settingsPath(), settings);
 }
 
 /**

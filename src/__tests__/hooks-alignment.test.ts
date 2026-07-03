@@ -17,6 +17,10 @@ describe('Claude Code hooks — doctor/install alignment (guards against #23)', 
     );
   });
 
+  it('includes PreToolUse — the WS1 action guard carried over to Claude Code', () => {
+    expect(REQUIRED_HOOK_NAMES).toContain('PreToolUse');
+  });
+
   it('is immutable (cannot be mutated by callers at runtime)', () => {
     expect(() => {
       (REQUIRED_HOOK_NAMES as string[]).push('SessionEnd');

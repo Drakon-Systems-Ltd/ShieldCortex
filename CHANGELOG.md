@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [Unreleased]
+
+**The Action Guard reaches Claude Code: the same enforce-by-default that guards OpenClaw agents now gates every Claude Code tool call through the native permission dialog.**
+
+### Added
+
+- **Claude Code PreToolUse action guard (P1/WS1 carry-over).** `shieldcortex install`/`update` now wire a `PreToolUse` hook (matcher `*`) that runs every tool call through the shared Iron Dome tool-action-guard. Catastrophic operations (`rm -rf /`, fork bombs, raw disk writes, secret exfiltration) emit `permissionDecision: "deny"` — always, even under `actionGuard.enforce:false`, mirroring the plugin's hard-block tier. Recognised-dangerous operations emit `permissionDecision: "ask"`, routing through Claude Code's own confirmation dialog; headless runs (`claude --print`) cannot prompt, so unattended dangerous calls fail closed, matching the plugin's no-approver posture. `actionGuard.enforce:false` opts down to a stderr warning with no decision; an `actionGuard.autoApprove` match (family/action/signal) emits no decision at all — the guard defers to Claude Code's own permission system and never widens what the user's settings allow. Verdicts append to the same `~/.shieldcortex/audit/realtime-*.jsonl` stream as the OpenClaw plugin, tagged `origin: "claude-code-hook"`. Config is shared with the plugin (`~/.shieldcortex/config.json` → `actionGuard`), so one opt-down governs both surfaces. Failure posture is fail-open with a stderr note (a broken guard must not break the agent), pending WS2 fail-closed.
+- **Hook-script packaging contract test.** package.json `files` whitelists hook scripts individually; a new test locks every `BUILT_IN_HOOKS` script to that whitelist so a future hook can't ship as settings.json wiring pointing at a file npm never packed.
+
+### Fixed
+
+- **`settingsPath()` resolved per call.** The `~/.claude/settings.json` path was captured at module import; under a cached module any later homedir redirection (test harness, future override) silently wrote to the wrong — real — settings file.
+
 ## [4.46.0] - 2026-07-02
 
 **The dangerous tier enforces by default, the zeroth law makes breaking the host a release-blocker, and the project-key repair finally works for the agents it was built for.**

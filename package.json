@@ -157,6 +157,7 @@
     "scripts/session-start-hook.mjs",
     "scripts/stop-hook.mjs",
     "scripts/prompt-recall-hook.mjs",
+    "scripts/pre-tool-hook.mjs",
     "scripts/lib",
     "dashboard/.next/standalone"
   ]
