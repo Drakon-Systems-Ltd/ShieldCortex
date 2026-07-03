@@ -18,14 +18,17 @@ const __dirname = path.dirname(__filename);
 // Scripts are in ../scripts/ relative to dist/setup/
 const SCRIPTS_DIR = path.resolve(__dirname, '..', '..', 'scripts');
 
-const BUILT_IN_HOOKS: Record<string, string> = {
+// Exported for the packaging contract test: every script listed here must
+// also be whitelisted in package.json "files", or the published tarball
+// ships settings.json wiring that points at a missing file.
+export const BUILT_IN_HOOKS: Readonly<Record<string, string>> = Object.freeze({
   'pre-compact': 'pre-compact-hook.mjs',
   'session-start': 'session-start-hook.mjs',
   'session-end': 'session-end-hook.mjs',
   'stop': 'stop-hook.mjs',
   'prompt-recall': 'prompt-recall-hook.mjs',
   'pre-tool': 'pre-tool-hook.mjs',
-};
+});
 
 interface CustomHookConfig {
   command: string;    // path to script or command to run
