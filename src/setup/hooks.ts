@@ -24,6 +24,7 @@ const BUILT_IN_HOOKS: Record<string, string> = {
   'session-end': 'session-end-hook.mjs',
   'stop': 'stop-hook.mjs',
   'prompt-recall': 'prompt-recall-hook.mjs',
+  'pre-tool': 'pre-tool-hook.mjs',
 };
 
 interface CustomHookConfig {
