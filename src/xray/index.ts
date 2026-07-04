@@ -4,15 +4,16 @@
  * Main entry point for the `shieldcortex xray` CLI command.
  * Inspects npm packages, local files, and directories for hidden risk.
  *
- * Free tier: local scans only (no npm registry), max 5 scans/day.
- * Pro tier:  npm registry analysis, deep scanning, unlimited scans.
+ * Everything is Free: npm registry analysis, deep scanning (--deep), and
+ * unlimited scans — the old Pro gate and daily limit were removed with the
+ * Free + Enterprise repricing.
  */
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-import { isFeatureEnabled, requireFeature } from '../license/gate.js';
+import { requireFeature } from '../license/gate.js';
 import type { XRayResult } from './types.js';
 import { scanFile } from './file-scanner.js';
 import { scanDirectory } from './dir-scanner.js';
@@ -42,7 +43,6 @@ export type { SarifLog } from './sarif.js';
 // ── Usage tracking ──────────────────────────────────────────
 
 const USAGE_FILE = path.join(os.homedir(), '.shieldcortex', 'xray-usage.json');
-const FREE_DAILY_LIMIT = 5;
 
 interface UsageData {
   date: string;
@@ -75,16 +75,6 @@ function incrementUsage(): void {
     fs.mkdirSync(dir, { recursive: true });
   }
   fs.writeFileSync(USAGE_FILE, JSON.stringify(usage));
-}
-
-function checkFreeLimit(): boolean {
-  if (isFeatureEnabled('xray_deep')) return true; // Pro users are unlimited
-
-  const today = new Date().toISOString().slice(0, 10);
-  const usage = getUsage();
-
-  if (usage.date !== today) return true; // New day
-  return usage.count < FREE_DAILY_LIMIT;
 }
 
 // ── Target detection ────────────────────────────────────────
@@ -122,7 +112,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
     console.error('Usage: shieldcortex xray <target> [--deep] [--json] [--markdown] [--watch]');
     console.error('');
     console.error('  target:     npm package name, local file path, or directory path');
-    console.error('  --deep      Deep scan with full analysis (Pro)');
+    console.error('  --deep      Deep scan with full analysis');
     console.error('  --json      Output JSON result');
     console.error('  --markdown  Output markdown report');
     console.error('  --sarif     Output SARIF 2.1.0 (GitHub Code Scanning)');
@@ -140,7 +130,9 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
 
   const target = positional[0];
 
-  // Deep scan requires Pro (checked before watch mode to prevent bypass)
+  // Deep scan and unlimited daily scans are Free — the old Pro gate and
+  // 5-scans/day free limit were removed with the Free + Enterprise repricing.
+  // requireFeature stays as the single source of truth should gating change.
   if (deep) {
     try {
       requireFeature('xray_deep');
@@ -150,14 +142,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
     }
   }
 
-  // Check free tier limit (checked before watch mode to prevent bypass)
-  if (!checkFreeLimit()) {
-    console.error('Daily scan limit reached. Upgrade to Pro for unlimited scans.');
-    console.error('  https://shieldcortex.ai/pricing');
-    process.exit(1);
-  }
-
-  // Watch mode — delegate to watchDirectory (after license/usage gates)
+  // Watch mode — delegate to watchDirectory
   if (watchMode) {
     const resolved = path.resolve(target);
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
@@ -172,13 +157,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
   let targetType: XRayTargetType = 'file';
 
   if (isNpmPackageName(target)) {
-    // NPM package inspection
-    if (!isFeatureEnabled('xray_deep')) {
-      console.error('npm registry inspection requires a Pro licence.');
-      console.error('Free tier supports local file and directory scans only.');
-      console.error('  Upgrade: https://shieldcortex.ai/pricing');
-      process.exit(1);
-    }
+    // NPM package inspection — Free (un-gated with the repricing)
     targetType = 'npm';
     result = await inspectNpmPackage(target, deep);
   } else {

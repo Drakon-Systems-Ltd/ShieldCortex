@@ -7,7 +7,6 @@ import { Badge, riskVariant } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { LocalAiExplanationPanel, type ExplainAction } from '@/components/local-ai/LocalAiExplanationPanel';
-import { ProFeatureGate } from '@/components/shield/ProFeatureGate';
 import { useLocalAiExplain, type LocalAiExplanation } from '@/hooks/useLocalAiExplainer';
 import { useMemoryFileScan, type MemoryFileScanRecord } from '@/hooks/useMemoryFiles';
 import { buildEditorUrl } from '@/lib/editor-url';
@@ -226,97 +225,95 @@ export function MemoryFilesView() {
   };
 
   return (
-    <ProFeatureGate feature="memory_file_scan" label="Scan persistent agent memory files for poisoned instructions and credential leaks.">
-      <div className="space-y-4">
-        <GlassCard className="p-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <ScanLine size={17} className="text-[var(--sc-cyan)]" />
-                <h2 className="text-base font-semibold text-[var(--sc-text-primary)]">Memory Files</h2>
-              </div>
-              {data && (
-                <p className="mt-1 text-xs text-[var(--sc-text-muted)]">
-                  Scanned {formatDate(data.scannedAt)}
-                </p>
-              )}
+    <div className="space-y-4">
+      <GlassCard className="p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <ScanLine size={17} className="text-[var(--sc-cyan)]" />
+              <h2 className="text-base font-semibold text-[var(--sc-text-primary)]">Memory Files</h2>
             </div>
-
-            <Button variant="cyan" size="sm" onClick={handleScan} disabled={scanMutation.isPending}>
-              {scanMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <ScanLine size={14} />}
-              {scanMutation.isPending ? 'Scanning' : 'Scan Memory Files'}
-            </Button>
+            {data && (
+              <p className="mt-1 text-xs text-[var(--sc-text-muted)]">
+                Scanned {formatDate(data.scannedAt)}
+              </p>
+            )}
           </div>
 
-          {data && (
-            <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-5">
-              <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Total</div>
-                <div className="mt-1 text-xl font-semibold text-[var(--sc-text-primary)]">{data.summary.total}</div>
-              </div>
-              <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Safe</div>
-                <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-cyan)]">
-                  <CheckCircle2 size={16} />
-                  {data.summary.safe}
-                </div>
-              </div>
-              <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Flagged</div>
-                <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-amber)]">
-                  <AlertTriangle size={16} />
-                  {data.summary.flagged}
-                </div>
-              </div>
-              <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">High</div>
-                <div className="mt-1 text-xl font-semibold text-[var(--sc-coral-mid)]">{data.summary.high}</div>
-              </div>
-              <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Critical</div>
-                <div className="mt-1 text-xl font-semibold text-[var(--sc-coral)]">{data.summary.critical}</div>
-              </div>
-            </div>
-          )}
+          <Button variant="cyan" size="sm" onClick={handleScan} disabled={scanMutation.isPending}>
+            {scanMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <ScanLine size={14} />}
+            {scanMutation.isPending ? 'Scanning' : 'Scan Memory Files'}
+          </Button>
+        </div>
 
-          {data && data.quarantine.created + data.quarantine.updated > 0 && (
-            <div className="mt-4 rounded-lg border border-[var(--sc-amber)]/25 bg-[var(--sc-amber)]/10 px-3 py-2 text-xs text-[var(--sc-amber)]">
-              {data.quarantine.created + data.quarantine.updated} flagged file{data.quarantine.created + data.quarantine.updated === 1 ? '' : 's'} queued in Quarantine for manual review.
+        {data && (
+          <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-5">
+            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Total</div>
+              <div className="mt-1 text-xl font-semibold text-[var(--sc-text-primary)]">{data.summary.total}</div>
             </div>
-          )}
+            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Safe</div>
+              <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-cyan)]">
+                <CheckCircle2 size={16} />
+                {data.summary.safe}
+              </div>
+            </div>
+            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Flagged</div>
+              <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-amber)]">
+                <AlertTriangle size={16} />
+                {data.summary.flagged}
+              </div>
+            </div>
+            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">High</div>
+              <div className="mt-1 text-xl font-semibold text-[var(--sc-coral-mid)]">{data.summary.high}</div>
+            </div>
+            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Critical</div>
+              <div className="mt-1 text-xl font-semibold text-[var(--sc-coral)]">{data.summary.critical}</div>
+            </div>
+          </div>
+        )}
+
+        {data && data.quarantine.created + data.quarantine.updated > 0 && (
+          <div className="mt-4 rounded-lg border border-[var(--sc-amber)]/25 bg-[var(--sc-amber)]/10 px-3 py-2 text-xs text-[var(--sc-amber)]">
+            {data.quarantine.created + data.quarantine.updated} flagged file{data.quarantine.created + data.quarantine.updated === 1 ? '' : 's'} queued in Quarantine for manual review.
+          </div>
+        )}
+      </GlassCard>
+
+      {scanMutation.error && (
+        <GlassCard className="border-[var(--sc-coral)]/30 p-4">
+          <p className="text-sm text-[var(--sc-coral)]">
+            {scanMutation.error instanceof Error ? scanMutation.error.message : 'Memory file scan failed'}
+          </p>
         </GlassCard>
+      )}
 
-        {scanMutation.error && (
-          <GlassCard className="border-[var(--sc-coral)]/30 p-4">
-            <p className="text-sm text-[var(--sc-coral)]">
-              {scanMutation.error instanceof Error ? scanMutation.error.message : 'Memory file scan failed'}
-            </p>
-          </GlassCard>
-        )}
+      {data && files.length === 0 && (
+        <GlassCard className="p-8 text-center">
+          <CheckCircle2 size={24} className="mx-auto text-[var(--sc-cyan)]" />
+          <p className="mt-3 text-sm text-[var(--sc-text-secondary)]">No memory files found.</p>
+        </GlassCard>
+      )}
 
-        {data && files.length === 0 && (
-          <GlassCard className="p-8 text-center">
-            <CheckCircle2 size={24} className="mx-auto text-[var(--sc-cyan)]" />
-            <p className="mt-3 text-sm text-[var(--sc-text-secondary)]">No memory files found.</p>
-          </GlassCard>
-        )}
-
-        {files.length > 0 && (
-          <div className="grid grid-cols-1 gap-3">
-            {files.map((file) => (
-              <MemoryFileCard
-                key={file.id}
-                file={file}
-                isActive={activeFileId === file.id}
-                explaining={activeFileId === file.id && explainMutation.isPending}
-                explanation={activeFileId === file.id ? explainMutation.data?.explanation : undefined}
-                explainError={activeFileId === file.id ? explainMutation.error : null}
-                onExplain={handleExplain}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </ProFeatureGate>
+      {files.length > 0 && (
+        <div className="grid grid-cols-1 gap-3">
+          {files.map((file) => (
+            <MemoryFileCard
+              key={file.id}
+              file={file}
+              isActive={activeFileId === file.id}
+              explaining={activeFileId === file.id && explainMutation.isPending}
+              explanation={activeFileId === file.id ? explainMutation.data?.explanation : undefined}
+              explainError={activeFileId === file.id ? explainMutation.error : null}
+              onExplain={handleExplain}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

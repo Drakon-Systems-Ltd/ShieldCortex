@@ -250,14 +250,17 @@ describe('formatXRayReport', () => {
     expect(output).toContain('10');
   });
 
-  it('shows Pro upsell for non-deep scans', () => {
+  it('shows the --deep hint for non-deep scans (no purchase copy)', () => {
     const output = formatXRayReport(baseResult);
-    expect(output).toContain('shieldcortex.ai/pricing');
+    expect(output).toContain('--deep');
+    expect(output).not.toContain('shieldcortex.ai/pricing');
+    expect(output).not.toContain('Upgrade');
   });
 
-  it('does not show Pro upsell for deep scans', () => {
+  it('does not show the --deep hint for deep scans', () => {
     const deepResult = { ...baseResult, deepScan: true };
     const output = formatXRayReport(deepResult);
+    expect(output).not.toContain('Run with --deep');
     expect(output).not.toContain('shieldcortex.ai/pricing');
   });
 });

@@ -2,7 +2,7 @@
 
 Use ShieldCortex when you want an MCP-compatible memory and security layer that works across agents, not just one editor.
 
-Fresh installs with no paid licence automatically get a 14-day Pro trial. That covers Pro-gated local features; Team or higher is still required if you want cloud sync and shared cloud workflows.
+Every local feature is free — no trial, no licence key. Full cloud sync and shared cloud workflows are Enterprise (sales@drakonsystems.com); the cloud free tier (audit metadata, 500 scans/month) just needs your email.
 
 ## Install
 
@@ -25,7 +25,7 @@ shieldcortex status
 For headless Linux hosts or always-on cloud boxes, connect the machine to ShieldCortex Cloud with the persistent worker:
 
 ```bash
-shieldcortex license activate <team-key>
+shieldcortex license activate <enterprise-key>
 shieldcortex config --cloud-api-key <cloud-api-key>
 shieldcortex config --cloud-enable
 shieldcortex service install --headless

@@ -2,7 +2,7 @@ import { describe, expect, it } from '@jest/globals';
 import { shouldShowInteractiveBanner } from '../index.js';
 
 /**
- * D3 regression: the trial-welcome / trial-expiry / stats banner must show for
+ * D3 regression: the stats banner must show for
  * normal interactive CLI commands (status, scan, doctor, audit, …) but NOT for
  * the MCP stdio server path or the per-prompt hook path.
  *

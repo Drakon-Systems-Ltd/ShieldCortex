@@ -7,7 +7,6 @@ import { Cloud, CreditCard, Plug, Settings } from 'lucide-react';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge } from '@/components/ds/Badge';
-import { Button } from '@/components/ds/Button';
 import { CloudSyncDiagnosticsView } from '@/components/cloud/CloudSyncDiagnosticsView';
 import { IntegrationsView } from '@/components/settings/IntegrationsView';
 import { MaintenanceCard } from '@/components/settings/MaintenanceCard';
@@ -64,16 +63,13 @@ function SettingsContent() {
             <div className="space-y-6">
               <LicenseStatusCard />
               <GlassCard className="p-6">
-                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Upgrade</h3>
+                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Enterprise</h3>
                 <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
-                  Pro unlocks deep X-Ray scanning, custom firewall rules, custom Iron Dome policies, audit exports, and more.
-                  Team adds cloud sync and team management.
-                </p>
-                <div className="mt-4 flex gap-3">
-                  <a href="https://shieldcortex.ai/pricing" target="_blank" rel="noopener noreferrer">
-                    <Button variant="coral" glow>View pricing</Button>
+                  Cloud replication, team management, shared patterns, self-hosted deployments, and fleets:{' '}
+                  <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-accent-cyan)] hover:underline">
+                    sales@drakonsystems.com
                   </a>
-                </div>
+                </p>
               </GlassCard>
             </div>
           )}

@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { Shield, Plus, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
-import { ProFeatureGate } from './ProFeatureGate';
 import { useFirewallRules, useCreateFirewallRule, useUpdateFirewallRule, useDeleteFirewallRule } from '@/hooks/useFirewallRules';
 import { PREVIEW_FIREWALL_RULES } from '@/lib/pro-previews';
 import { CardError } from '@/components/ds/CardError';
@@ -139,9 +138,7 @@ function PreviewContent() {
 export function CustomFirewallRulesPanel() {
   return (
     <div className="bg-[var(--sc-bg-surface)]/50 border border-[var(--sc-border)] rounded-xl p-4">
-      <ProFeatureGate feature="custom_firewall_rules" label="Add custom rules to control what gets blocked, allowed, or quarantined.">
-        <RulesTable />
-      </ProFeatureGate>
+      <RulesTable />
     </div>
   );
 }

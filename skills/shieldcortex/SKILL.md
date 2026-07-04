@@ -56,7 +56,7 @@ permissions:
     - http://localhost:3030 (local worker health check — loopback only)
   env:
     - SHIELDCORTEX_CONFIG_DIR: Override config directory (default ~/.shieldcortex/)
-    - SHIELDCORTEX_API_KEY: Cloud sync API key (team tier only, optional)
+    - SHIELDCORTEX_API_KEY: Cloud sync API key (optional; only used when Cloud is enabled)
     - SHIELDCORTEX_LICENSE_TIER: Override licence tier (development use)
     - SHIELDCORTEX_SKIP_EMBEDDINGS: Disable embedding generation
     - SHIELDCORTEX_HOST: Override dashboard/API bind host
@@ -91,7 +91,7 @@ This section explains every privileged operation the tool performs and why.
 - **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (no lifecycle scripts).
 - **Destructive `forget` is bounded and gated.** Per-memory and filtered bulk deletes go through a delete ACL (own-only) and are recorded in the audit ledger. Revoke-by-source (`forget --fromSource`, bulk-delete every memory from one source — for purging a poisoned agent) is **disabled by default** and only enabled by an out-of-band human action (`shieldcortex config --allow-revoke-by-source`); even then it is bounded by a trust-hierarchy ACL (you must own the source or out-rank it) and a per-call row cap. A compromised agent cannot mass-delete your memory.
 - **The bundled dashboard never renders RESTRICTED content.** The local visualization API and its WebSocket feed redact credential-class (`RESTRICTED`) memory content before it reaches the browser — the row stays visible (title/metadata) so you can manage it, but the secret is withheld (view full content via the CLI). Credential patterns in titles/metadata are masked too. This is a display-surface safeguard on top of the on-disk store; it does not weaken the firewall.
-- **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync (team tier) requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
+- **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync is opt-in and requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
 - **File access is declared and scoped.** Security scans read agent config directories listed in the permissions block above — the same directories the agent itself already has access to. They do not traverse arbitrary directories.
 - **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.
 - **Network is off by default.** No outbound connections unless Cloud sync is explicitly enabled by the user. The dashboard and worker bind to localhost only.
@@ -110,11 +110,11 @@ ShieldCortex is **local-first**: memory, scanning, and audit run entirely on you
 - **Subprocess execution.** The OpenClaw integration spawns short-lived `npx mcporter` subprocesses (via `execFile`, no shell) to talk to your **local** ShieldCortex MCP server over stdio. No remote code is fetched or executed.
 - **Cloud sync — off by default, opt-in, explicit.** No data leaves your machine unless you run `shieldcortex config --cloud-enable --cloud-api-key <key>`. When enabled:
   - **Audit telemetry** (`/v1/audit/ingest`): scan **metadata only** — trust scores, threat indicators, categories, timings, device name. **No memory content.**
-  - **Memory sync** (`/v1/sync/memories`, Team tier): transmits **full memory title + content** of PUBLIC/INTERNAL memories so they sync across your team. CONFIDENTIAL/RESTRICTED memories are **excluded by default**; switch to metadata-only with the `contentMode` control.
-  - **Quarantine sync** (Team tier): flagged content is sent with **detected credentials redacted**.
+  - **Memory sync** (`/v1/sync/memories`, Enterprise licence — grandfathered Team keys also unlock it): transmits **full memory title + content** of PUBLIC/INTERNAL memories so they sync across your team. CONFIDENTIAL/RESTRICTED memories are **excluded by default**; switch to metadata-only with the `contentMode` control.
+  - **Quarantine sync** (Enterprise licence): flagged content is sent with **detected credentials redacted**.
   - **OpenClaw realtime plugin** (optional): scans live input and output **locally**. When it flags something, only **threat metadata** (type, scores, timestamps — **never the input text itself**) is forwarded, and only when Cloud sync is enabled. Flagged-content previews are kept in your **local** audit log; they are never transmitted.
 
-  Raw conversation/input text is never transmitted by the audit, threat, or interceptor paths — they carry metadata only. The single exception is **Memory sync** above, which uploads the content of memories you chose to store (PUBLIC/INTERNAL, off by default, Team tier). You can disable any of the above at any time, and the realtime plugin and lifecycle handlers can be removed entirely.
+  Raw conversation/input text is never transmitted by the audit, threat, or interceptor paths — they carry metadata only. The single exception is **Memory sync** above, which uploads the content of memories you chose to store (PUBLIC/INTERNAL, off by default, Enterprise licence). You can disable any of the above at any time, and the realtime plugin and lifecycle handlers can be removed entirely.
 
 ## What it does NOT do
 
@@ -155,7 +155,7 @@ shieldcortex audit                          # Full security audit (memory, env, 
 shieldcortex iron-dome status               # Iron Dome behavioural protection status
 ```
 
-### Cortex — Mistake Learning (Pro)
+### Cortex — Mistake Learning
 ```bash
 shieldcortex cortex capture --task "..." --mistake "..." --fix "..."  # Log a mistake
 shieldcortex cortex preflight --task "deploy to production"           # Pre-task check
@@ -185,7 +185,7 @@ shieldcortex config --proactive-recall true|false  # Enable/disable proactive re
 ```bash
 shieldcortex config --cloud-enable --cloud-api-key <key>  # Enable cloud sync
 shieldcortex cloud sync --full    # Backfill memories + graph to cloud
-shieldcortex license activate sc_pro_...  # Activate Pro/Team licence
+shieldcortex license activate <key>  # Activate an Enterprise (or legacy) licence key
 shieldcortex license status       # Check licence tier
 ```
 
@@ -211,7 +211,7 @@ shieldcortex update              # Self-update (npm package + OpenClaw plugin + 
 
 ## What Gets Uploaded to Cloud
 
-Cloud sync is **Team tier only** and **off by default**.
+Cloud sync is **off by default**. Audit metadata sync is included on the cloud free tier; full memory/graph replication requires an Enterprise licence (grandfathered Team keys keep working).
 
 - **Uploaded when Cloud sync is enabled by the user:** selected memory records, related embeddings/metadata, and knowledge-graph entities/relationships required for sync.
 - **Not uploaded by default:** local agent configs, MCP configs, raw rules files, shell configs, SSH keys, secrets, `.env` contents, or arbitrary project files.
@@ -220,22 +220,25 @@ Cloud sync is **Team tier only** and **off by default**.
 
 ## Licence Tiers
 
-| Feature | Free | Pro | Team |
-|---------|------|-----|------|
-| Memory (store/recall/search/graph) | ✅ | ✅ | ✅ |
-| Proactive recall (auto-inject on prompts) | ✅ | ✅ | ✅ |
-| Defence pipeline (scan, Iron Dome) | ✅ | ✅ | ✅ |
-| Audit & scan-skills | ✅ | ✅ | ✅ |
-| Dashboard | ✅ | ✅ | ✅ |
-| Custom injection patterns | ❌ | ✅ | ✅ |
-| Custom Iron Dome policies | ❌ | ✅ | ✅ |
-| Custom firewall rules | ❌ | ✅ | ✅ |
-| Audit export | ❌ | ✅ | ✅ |
-| Deep skill scanning | ❌ | ✅ | ✅ |
-| Cortex (mistake learning) | ❌ | ✅ | ✅ |
-| Cloud sync | ❌ | ❌ | ✅ |
-| Team management | ❌ | ❌ | ✅ |
-| Shared patterns | ❌ | ❌ | ✅ |
+Public tiers are **Free** and **Enterprise** (sales@drakonsystems.com). Every local feature is Free; grandfathered Pro/Team keys keep working.
+
+| Feature | Free | Enterprise |
+|---------|------|------------|
+| Memory (store/recall/search/graph) | ✅ | ✅ |
+| Proactive recall (auto-inject on prompts) | ✅ | ✅ |
+| Defence pipeline (scan, Iron Dome) | ✅ | ✅ |
+| Audit & scan-skills | ✅ | ✅ |
+| Dashboard | ✅ | ✅ |
+| Custom injection patterns | ✅ | ✅ |
+| Custom Iron Dome policies | ✅ | ✅ |
+| Custom firewall rules | ✅ | ✅ |
+| Audit export | ✅ | ✅ |
+| Deep skill scanning | ✅ | ✅ |
+| Cortex (mistake learning) | ✅ | ✅ |
+| Cloud audit sync (metadata, 500 scans/mo, 7-day retention) | ✅ | ✅ |
+| Cloud memory/graph sync | ❌ | ✅ |
+| Team management | ❌ | ✅ |
+| Shared patterns | ❌ | ✅ |
 
 ## Links
 

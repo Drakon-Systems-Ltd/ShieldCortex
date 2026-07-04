@@ -109,9 +109,11 @@ export const __test__ = {
 const gatedCounters: Record<string, number> = {};
 
 /**
- * Express middleware that gates an endpoint behind a Pro/Team licence feature.
+ * Express middleware that gates an endpoint behind a licence feature.
  * Wraps requireFeature() — one source of truth for tier checks.
  * Returns a structured 403 (FeatureGatedResponse) if the feature isn't enabled.
+ * Under the Free + Enterprise model this only fires for genuinely
+ * cloud/org-side features; every local feature is Free.
  */
 function requireProFeature(feature: GatedFeature) {
   return (_req: Request, res: Response, next: (err?: unknown) => void) => {
@@ -122,11 +124,11 @@ function requireProFeature(feature: GatedFeature) {
       if (err instanceof FeatureGatedError) {
         gatedCounters[err.feature] = (gatedCounters[err.feature] || 0) + 1;
         const body: FeatureGatedResponse = {
-          error: 'Feature requires upgrade',
+          error: 'Feature requires an Enterprise licence',
           code: 'FEATURE_GATED',
           feature: err.feature,
           requiredTier: err.requiredTier,
-          upgradeUrl: 'https://shieldcortex.ai/pricing',
+          upgradeUrl: 'mailto:sales@drakonsystems.com',
         };
         return res.status(403).json(body);
       }

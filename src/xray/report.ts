@@ -158,9 +158,8 @@ export function formatXRayReport(result: XRayResult): string {
   lines.push(`  ${c.dim}Files scanned: ${result.filesScanned}  |  ${result.scannedAt.toISOString()}${c.reset}`);
 
   if (!result.deepScan) {
-    lines.push(`  ${c.dim}Upgrade to Pro for deep scanning: npm registry analysis, binary inspection,${c.reset}`);
+    lines.push(`  ${c.dim}Run with --deep for deep scanning: npm registry analysis, binary inspection,${c.reset}`);
     lines.push(`  ${c.dim}dependency graph risk, and AI-directive detection in metadata.${c.reset}`);
-    lines.push(`  ${c.dim}  https://shieldcortex.ai/pricing${c.reset}`);
   }
 
   lines.push('');

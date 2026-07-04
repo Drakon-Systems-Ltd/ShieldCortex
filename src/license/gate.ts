@@ -1,9 +1,13 @@
 /**
- * Feature gating — the central guard for Pro/Team features.
+ * Feature gating — the central guard for licence-gated features.
+ *
+ * Under the Free + Enterprise model every LOCAL feature is Free. Only
+ * genuinely cloud/org-side features stay gated (team-rank in TIER_RANK, so
+ * Enterprise keys and grandfathered Team keys both unlock them).
  *
  * Usage:
- *   requireFeature('custom_injection_patterns');  // throws FeatureGatedError if not Pro+
- *   isFeatureEnabled('cloud_sync');               // returns boolean (soft check)
+ *   requireFeature('cloud_sync');     // throws FeatureGatedError if not licensed
+ *   isFeatureEnabled('cloud_sync');   // returns boolean (soft check)
  */
 
 import { getLicenseTier } from './store.js';
@@ -36,30 +40,34 @@ export type GatedFeature =
   | 'review_copilot'
   | 'xray_deep';
 
+// Every LOCAL feature is 'free' (D1 of the Free + Enterprise repricing).
+// The four 'team'-rank entries are genuinely cloud/org-side — full memory/graph
+// replication, team management, shared patterns, and team memory scopes — and
+// are unlocked by Enterprise licences (and grandfathered Team keys).
 const FEATURE_TIERS: Record<GatedFeature, LicenseTier> = {
-  custom_injection_patterns: 'pro',
-  custom_iron_dome_policies: 'pro',
-  custom_firewall_rules: 'pro',
-  audit_export: 'pro',
-  skill_scanner_deep: 'pro',
+  custom_injection_patterns: 'free',
+  custom_iron_dome_policies: 'free',
+  custom_firewall_rules: 'free',
+  audit_export: 'free',
+  skill_scanner_deep: 'free',
   cloud_audit_sync: 'free',
   cloud_sync: 'team',
   team_management: 'team',
   shared_patterns: 'team',
-  cortex_learning: 'pro',
-  deps_quarantine: 'pro',
-  deps_clean: 'pro',
-  deps_auto_protect: 'pro',
-  deps_global_scan: 'pro',
-  memory_types: 'pro',
+  cortex_learning: 'free',
+  deps_quarantine: 'free',
+  deps_clean: 'free',
+  deps_auto_protect: 'free',
+  deps_global_scan: 'free',
+  memory_types: 'free',
   memory_scopes: 'team',
-  dream_mode: 'pro',
-  llm_reranking: 'pro',
-  positive_feedback: 'pro',
-  local_ai_explainer: 'pro',
-  memory_file_scan: 'pro',
-  review_copilot: 'pro',
-  xray_deep: 'pro',
+  dream_mode: 'free',
+  llm_reranking: 'free',
+  positive_feedback: 'free',
+  local_ai_explainer: 'free',
+  memory_file_scan: 'free',
+  review_copilot: 'free',
+  xray_deep: 'free',
 };
 
 const FEATURE_DESCRIPTIONS: Record<GatedFeature, string> = {
@@ -95,12 +103,14 @@ export class FeatureGatedError extends Error {
     public feature: GatedFeature,
     public requiredTier: LicenseTier,
   ) {
-    const tierLabel = requiredTier.charAt(0).toUpperCase() + requiredTier.slice(1);
     const desc = FEATURE_DESCRIPTIONS[feature];
+    // The only remaining gated features are cloud/org-side, and the only tier
+    // sold is Enterprise — grandfathered Pro/Team keys keep working via
+    // TIER_RANK, but the message never advertises a purchasable self-serve tier.
     super(
-      `This feature requires a ${tierLabel} licence.\n\n` +
+      `This feature requires an Enterprise licence.\n\n` +
       `${desc}\n\n` +
-      `  Upgrade:  https://shieldcortex.ai/pricing\n` +
+      `  Contact:  sales@drakonsystems.com\n` +
       `  Activate: shieldcortex license activate <key>`,
     );
     this.name = 'FeatureGatedError';

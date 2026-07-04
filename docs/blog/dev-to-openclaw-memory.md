@@ -48,7 +48,7 @@ When `openclawAutoMemory` is enabled and you run `/new` to start a fresh session
 - Things you learned ("turns out the API requires...")
 - Your preferences ("always use British spelling")
 
-It saves these to a local SQLite database by default. No cloud account is required for the core local workflow, and fresh installs with no paid licence automatically get a 14-day Pro trial for Pro-gated local features.
+It saves these to a local SQLite database by default. No cloud account is required for the core local workflow — every local feature is free, with no trial and no licence key.
 
 ### 2. Injects Past Context on Startup
 

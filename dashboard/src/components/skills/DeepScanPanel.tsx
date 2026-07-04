@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { Search, AlertTriangle, FileSearch } from 'lucide-react';
-import { ProFeatureGate } from '../shield/ProFeatureGate';
 import { gatedFetch, FeatureLockedError } from '@/lib/auth';
 import { PREVIEW_DEEP_SCAN } from '@/lib/pro-previews';
 
@@ -198,9 +197,7 @@ function PreviewContent() {
 export function DeepScanPanel() {
   return (
     <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
-      <ProFeatureGate feature="skill_scanner_deep" label="Deep skill scanning with multi-file analysis and semantic intent detection.">
-        <DeepScanForm />
-      </ProFeatureGate>
+      <DeepScanForm />
     </div>
   );
 }
