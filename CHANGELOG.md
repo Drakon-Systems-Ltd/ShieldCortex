@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
-## [Unreleased]
+## [4.47.0] - 2026-07-04
 
 **Pricing model change: public tiers are now Free + Enterprise. Every local feature is free — the self-serve Pro (£29/mo) and Team (£99/mo) tiers are retired, the auto 14-day Pro trial is removed, and cloud signup is open to everyone.**
 
