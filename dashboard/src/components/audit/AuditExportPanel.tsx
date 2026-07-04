@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { Download, FileJson, FileText } from 'lucide-react';
-import { ProFeatureGate } from '../shield/ProFeatureGate';
 import { useAuditExport } from '@/hooks/useAuditExport';
 
 function ExportForm() {
@@ -55,9 +54,7 @@ function ExportForm() {
 export function AuditExportPanel() {
   return (
     <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
-      <ProFeatureGate feature="audit_export" label="Export your full audit trail as JSON or CSV for compliance reporting.">
-        <ExportForm />
-      </ProFeatureGate>
+      <ExportForm />
     </div>
   );
 }

@@ -49,7 +49,6 @@
 }
 
 /* ── ShieldCortex Terminal Design System ── */
-/* Aesthetic reference: shieldcortex-site/src/pages/customizer.astro */
 
 :root {
   --radius: 0.625rem;

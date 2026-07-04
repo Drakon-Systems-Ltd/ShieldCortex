@@ -56,11 +56,11 @@ function detectTargetType(target: string): 'npm' | 'file' | 'dir' {
 
 function toFeatureGateBody(err: FeatureGatedError): FeatureGatedResponse {
   return {
-    error: 'Feature requires upgrade',
+    error: 'Feature requires an Enterprise licence',
     code: 'FEATURE_GATED',
     feature: err.feature,
     requiredTier: err.requiredTier,
-    upgradeUrl: 'https://shieldcortex.ai/pricing',
+    upgradeUrl: 'mailto:sales@drakonsystems.com',
   };
 }
 
@@ -220,16 +220,8 @@ export function registerXRayRoutes(app: Express, requireNotLocked: Middleware): 
       }
 
       const targetType = detectTargetType(target);
-
-      if (targetType === 'npm' && !isFeatureEnabled('xray_deep')) {
-        return res.status(403).json({
-          error: 'npm registry inspection requires a Pro licence.',
-          code: 'FEATURE_GATED',
-          feature: 'xray_deep',
-          requiredTier: 'pro',
-          upgradeUrl: 'https://shieldcortex.ai/pricing',
-        } satisfies FeatureGatedResponse);
-      }
+      // npm registry inspection is Free (xray_deep was un-gated with the
+      // Free + Enterprise repricing) — no per-target licence branch needed.
 
       let result: XRayResult;
 

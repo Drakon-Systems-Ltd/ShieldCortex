@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { Shield, Plus, Trash2, Check } from 'lucide-react';
-import { ProFeatureGate } from '../shield/ProFeatureGate';
 import { useCustomPolicies, useCreatePolicy, useDeletePolicy, useActivatePolicy } from '@/hooks/useCustomPolicies';
 import { PREVIEW_POLICIES } from '@/lib/pro-previews';
 
@@ -122,9 +121,7 @@ function PreviewContent() {
 export function CustomPoliciesPanel() {
   return (
     <div className="bg-[var(--sc-bg-surface)]/50 border border-[var(--sc-border)] rounded-xl p-4">
-      <ProFeatureGate feature="custom_iron_dome_policies" label="Create custom Iron Dome policies with tailored action gates and trust levels.">
-        <PoliciesTable />
-      </ProFeatureGate>
+      <PoliciesTable />
     </div>
   );
 }

@@ -35,7 +35,6 @@ export const TIER_BG: Record<LicenseTier, string> = {
   enterprise: 'bg-[var(--sc-amber)]/10',
 };
 
-export const PLAN_PRICING: Record<'pro' | 'team', { label: string; price: string }> = {
-  pro: { label: 'Pro', price: '£29/mo' },
-  team: { label: 'Team', price: '£99/mo' },
-};
+// PLAN_PRICING was removed with the Free + Enterprise repricing — there are no
+// self-serve paid plans. TIER_LABELS/COLOURS/BG stay: existing customers'
+// (grandfathered Pro/Team, Enterprise) tiers still display.

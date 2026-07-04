@@ -7,8 +7,6 @@ import { getLifetimeStats } from '../defence/audit/queries.js';
 import { getAuditStats } from '../defence/audit/queries.js';
 import { getSalienceDistribution, getHookYield } from '../memory/metrics.js';
 import { getLicense } from '../license/store.js';
-import { getTrialStatus } from '../license/trial.js';
-import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -21,7 +19,6 @@ function n(num: number): string {
 const BOLD  = '\x1b[1m';
 const DIM   = '\x1b[2m';
 const GREEN = '\x1b[32m';
-const CYAN  = '\x1b[36m';
 const RESET = '\x1b[0m';
 
 function row(label: string, value: string | number, width = 36): string {
@@ -52,10 +49,8 @@ export async function runStatsCommand(): Promise<void> {
     const last24h   = getAuditStats('24h');
     const last7d    = getAuditStats('7d');
 
-    const licenseFile = join(homedir(), '.shieldcortex', 'license.json');
     const license = getLicense();
-    const trial   = getTrialStatus(existsSync(licenseFile));
-    const tier    = license.valid ? license.tier : (trial?.active ? 'pro (trial)' : 'free');
+    const tier    = license.valid ? license.tier : 'free';
 
     console.log(`\n  ${BOLD}🛡️  ShieldCortex Security Report${RESET}  ${DIM}[${tier}]${RESET}`);
 
@@ -111,12 +106,6 @@ export async function runStatsCommand(): Promise<void> {
       for (const [type, count] of threatEntries) {
         console.log(row(type, count));
       }
-    }
-
-    const isPro = license.valid || trial?.active;
-    if (!isPro) {
-      console.log(`\n  ${DIM}Upgrade to Pro for custom detection patterns.${RESET}`);
-      console.log(`  ${CYAN}https://shieldcortex.ai/pricing${RESET}`);
     }
 
     console.log();

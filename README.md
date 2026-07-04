@@ -25,7 +25,7 @@ shieldcortex quickstart
 ```
 
 > [!NOTE]
-> ShieldCortex is MIT licensed and free for core local use. On first install, machines with no paid licence also get a 14-day Pro trial automatically. Team or higher is still required for cloud sync and multi-device cloud workflows.
+> ShieldCortex is MIT licensed and **free — every local feature is included**, with no trial and no licence key. An optional cloud free tier adds centralised audit visibility (500 scans/month, 7-day retention, 1 member — sign in with just your email). Teams, servers, and fleets are Enterprise: sales@drakonsystems.com.
 
 **Works with** Claude Code · Codex CLI / VS Code · Cursor · VS Code · OpenClaw · LangChain · MCP agents · Python via REST API
 
@@ -37,7 +37,7 @@ shieldcortex quickstart
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing and Trial](#-licensing-and-trial) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Environment Firewall](#-environment-firewall) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing](#-licensing) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Environment Firewall](#-environment-firewall) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -99,7 +99,7 @@ Your agent does not just store text. It gives you operator-grade visibility into
 - 📊 **Reproducible retrieval benchmark** — `npm run bench` produces `SCORECARD.md` with R@5, R@10, MRR, and per-question diff between RRF and legacy engines on LongMemEval-S
 - 🔔 **Webhooks** — POST notifications on memory events, HMAC-SHA256 signed
 - 📅 **Expiry rules** — auto-delete TODOs after 30 days, keep architecture decisions forever
-- 🧠 **Mistake learning** — capture mistakes, run pre-flight checks, graduate mastered rules (Pro)
+- 🧠 **Mistake learning** — capture mistakes, run pre-flight checks, graduate mastered rules
 
 ### Security that shows up exactly when it matters
 
@@ -127,7 +127,7 @@ synchronous hot path stays regex-only for speed and determinism.
 
 Blocked content goes to quarantine for review — nothing is silently dropped.
 
-**Dependency Scanner** (Pro) — detect malicious packages, typosquats, and suspicious install scripts in your project dependencies:
+**Dependency Scanner** — detect malicious packages, typosquats, and suspicious install scripts in your project dependencies:
 
 ```bash
 shieldcortex audit
@@ -196,13 +196,12 @@ shieldcortex doctor
 ✅ API server: running (port 3001)
 ```
 
-## 💳 Licensing and Trial
+## 💳 Licensing
 
-ShieldCortex has three distinct states:
+ShieldCortex has two tiers:
 
-- **Free + MIT local core** — local memory, recall, review, dashboard, Iron Dome, and OpenClaw/Codex integrations all work without a cloud account
-- **14-day Pro trial** — automatically starts on first install when no paid licence exists, unlocking Pro-gated local features
-- **Team / Enterprise cloud** — required for cloud sync, shared cloud review, multi-device visibility, and team workflows
+- **Free (MIT)** — every local feature, forever: memory, recall, review, dashboard, Iron Dome, custom injection patterns, custom policies, custom firewall rules, audit export, the dependency scanner, Cortex mistake learning, unlimited X-Ray (including npm deep scans and the CI/CD gate), and the OpenClaw/Codex integrations. No trial, no licence key, no signup. The cloud free tier is included too: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email.
+- **Enterprise** — full cloud memory/graph replication, team management, shared patterns, servers and fleets, self-hosted deployments, SLA. Contact **sales@drakonsystems.com**.
 
 Check the current state at any time:
 
@@ -212,9 +211,8 @@ shieldcortex license status
 
 Important:
 
-- the first-run trial is automatic; there is no signup step for it
-- an active paid licence always overrides the trial
-- cloud sync remains Team-gated even while the local Pro trial is active
+- there is no trial and nothing to unlock locally — a fresh install already has every local feature
+- existing licence keys (including grandfathered Pro/Team keys) keep working: `shieldcortex license activate <key>`
 - cloud API keys are scope-based, so cloud features may still require the right key scopes in addition to the right licence tier
 
 ### Always-on servers and cloud boxes
@@ -230,10 +228,10 @@ This installs the background worker that keeps cloud heartbeat, sync retries, an
 
 ## ☁️ Connect Servers to Cloud
 
-If you want Linux servers or always-on boxes to appear as online devices in ShieldCortex Cloud, you need four things on each machine:
+Servers and fleets are an Enterprise capability (**sales@drakonsystems.com**). If you want Linux servers or always-on boxes to appear as online devices in ShieldCortex Cloud, you need four things on each machine:
 
 1. the latest CLI
-2. a Team or higher licence
+2. an Enterprise licence key (grandfathered Team keys keep working)
 3. a cloud API key with the scopes needed for sync
 4. the persistent headless worker service
 
@@ -241,7 +239,7 @@ Exact flow:
 
 ```bash
 npm install -g shieldcortex@latest
-shieldcortex license activate <team-key>
+shieldcortex license activate <key>
 shieldcortex config --cloud-api-key <cloud-api-key>
 shieldcortex config --cloud-enable
 shieldcortex service install --headless
@@ -258,7 +256,7 @@ shieldcortex service status
 
 Expected result:
 
-- `Tier: Team` or higher
+- `Tier: Enterprise` (or a grandfathered Team tier)
 - `Cloud Enabled: Yes`
 - API key present
 - `Mode: worker`
@@ -267,7 +265,7 @@ Expected result:
 Important:
 
 - In ShieldCortex Cloud, **Online means a recent ShieldCortex heartbeat**, not just that the machine is powered on.
-- If a server is on but still shows `Offline`, the usual causes are missing cloud config, missing Team licence, or an old service install.
+- If a server is on but still shows `Offline`, the usual causes are missing cloud config, a missing licence, or an old service install.
 - On headless Linux systems, you may also need:
 
 ```bash
@@ -716,7 +714,7 @@ The key shift is that memory is no longer a black box:
 
 ![X-Ray Scanner](docs/images/dashboard-xray.png)
 
-**Cloud Diagnostics** — inspect local-to-cloud queue health, retry pressure, sync policy, device identity, and Team-gated cloud replica controls from the local dashboard.
+**Cloud Diagnostics** — inspect local-to-cloud queue health, retry pressure, sync policy, device identity, and Enterprise cloud replica controls from the local dashboard.
 
 **Replay (v4.18)** — scrubbable timeline of every captured session. Three-column layout: sessions on the left (sortable by recency or event count), centred timeline with kind-coloured ticks and a draggable playhead, focused event detail on the right with payload pretty-printed. Transport controls: prev/play-pause/next, 0.5×–4× speed segmented control, jump-to-start/end. Keyboard: `space` toggle, `←`/`→` step, `shift+arrows` jump, `[`/`]` speed cycle. Live capture wires in via the `prompt-recall`, `session-end`, and `pre-compact` hooks; existing transcripts at `~/.claude/projects/**/*.jsonl` are backfillable via the dashboard's "Import JSONL" button or `shieldcortex import-jsonl` CLI. Idempotent: `content_hash + UNIQUE` index means re-imports are no-ops.
 
@@ -806,7 +804,7 @@ openclaw plugins install @drakon-systems/shieldcortex-realtime
 shieldcortex openclaw status      # Check OpenClaw hook status
 shieldcortex codex install        # Connect Codex CLI / VS Code
 shieldcortex consolidate          # Run Dream Mode (merge, archive, contradict)
-shieldcortex audit                # Dependency scanner (Pro)
+shieldcortex audit                # Dependency scanner
 shieldcortex xray <path>          # Deep file analysis for hidden threats
 shieldcortex xray <path> --watch  # Real-time file watcher
 shieldcortex xray <path> --ci     # CI/CD gate (exits non-zero on findings)
@@ -859,11 +857,11 @@ Full reference: [docs/configuration.md](docs/configuration.md)
 
 ## 💚 Free and Open Source
 
-ShieldCortex is **MIT licensed** and **free for core unlimited local use**.
+ShieldCortex is **MIT licensed** and **free — every local feature, unlimited, forever**. No trial, no licence key.
 
-If no paid licence is present, ShieldCortex also starts a **14-day Pro trial** automatically on first install. That trial unlocks Pro-gated local features, but **cloud sync and shared cloud workflows still require Team or higher**.
+The [cloud free tier](https://shieldcortex.ai/pricing) is included: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email from the local dashboard.
 
-[ShieldCortex Cloud](https://shieldcortex.ai/pricing) adds Team-gated cloud sync, shared review, Replay, Verify, Device Doctor, key scopes, and multi-device visibility.
+**Enterprise** adds full cloud memory/graph replication, shared review, Replay, Verify, Device Doctor, key scopes, multi-device fleets, and self-hosted deployments — contact **sales@drakonsystems.com**.
 
 ---
 

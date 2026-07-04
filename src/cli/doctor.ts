@@ -9,10 +9,6 @@ import os from 'os';
 import semver from 'semver';
 import { createRequire } from 'module';
 import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
-import { getLicense, getTrialStatus } from '../license/index.js';
-import { isDatabaseInitialized, getDatabase } from '../database/init.js';
-import { shouldShowProUpsell, UPSELL_CONSTANTS, type UpsellInputs } from './upsell.js';
-import { getUpsellState, markUpsellShown } from './upsell-state.js';
 import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
@@ -1934,87 +1930,9 @@ export async function runDoctor(args: string[] = []): Promise<void> {
     }
   }
 
-  // Optional Pro upsell \u2014 gentle 3-step nudge gated on tier/trial/usage/engagement.
-  // Best-effort; never affects the doctor's exit code or check results.
-  try {
-    const decision = computeUpsellDecision();
-    if (decision.show && decision.copy) {
-      console.log('');
-      for (const line of decision.copy.split('\n')) {
-        console.log(`  ${dim}${line}${reset}`);
-      }
-      markUpsellShown();
-    }
-  } catch {
-    /* best-effort */
-  }
+  // (The Pro upsell footer that used to render here was removed with the
+  // Free + Enterprise repricing \u2014 there is no self-serve tier to nudge
+  // towards. `config --upsell-mute/--upsell-unmute` remain accepted no-ops.)
 
   console.log('');
-}
-
-/**
- * Gather inputs and compute the Pro upsell decision for the doctor footer.
- * Reuses existing license + trial helpers and a direct SQL count of the
- * `defence_audit` table + `memories` table for usage / engagement signals.
- *
- * Sync (no I/O outside what doctor checks have already done). Returns a
- * `show: false` decision when any input cannot be gathered \u2014 failure is
- * always silent.
- */
-function computeUpsellDecision(): ReturnType<typeof shouldShowProUpsell> {
-  // Tier: same resolution as src/api/routes/system.ts:98
-  const license = getLicense();
-  const licenseFileExists = fs.existsSync(path.join(getShieldCortexDir(), 'license.json'));
-  const trial = getTrialStatus(licenseFileExists);
-  const tier: UpsellInputs['tier'] = license.valid
-    ? license.tier
-    : trial?.active
-      ? 'pro'
-      : 'free';
-
-  let monthlyScanCount = 0;
-  let daysActive = 0;
-  let memoryCount = 0;
-  try {
-    if (isDatabaseInitialized()) {
-      const db = getDatabase();
-      const scanRow = db
-        .prepare(
-          `SELECT COUNT(*) AS c FROM defence_audit WHERE timestamp >= datetime('now', 'start of month')`,
-        )
-        .get() as { c: number } | undefined;
-      monthlyScanCount = scanRow?.c ?? 0;
-
-      const oldestRow = db.prepare(`SELECT MIN(created_at) AS t FROM memories`).get() as
-        | { t: string | null }
-        | undefined;
-      if (oldestRow?.t) {
-        const oldestMs = new Date(oldestRow.t).getTime();
-        if (Number.isFinite(oldestMs)) {
-          daysActive = Math.floor((Date.now() - oldestMs) / 86_400_000);
-        }
-      }
-      const countRow = db.prepare(`SELECT COUNT(*) AS c FROM memories`).get() as
-        | { c: number }
-        | undefined;
-      memoryCount = countRow?.c ?? 0;
-    }
-  } catch {
-    /* metrics stay at 0 \u2192 no usage/engagement trigger */
-  }
-
-  const state = getUpsellState();
-  return shouldShowProUpsell({
-    tier,
-    trial:
-      trial && trial.expiresAt
-        ? { active: trial.active, expiresAt: trial.expiresAt }
-        : null,
-    monthlyScanCount,
-    monthlyScanLimit: UPSELL_CONSTANTS.FREE_MONTHLY_SCAN_LIMIT,
-    daysActive,
-    memoryCount,
-    proLastShownAt: state.proLastShownAt,
-    proMuted: state.proMuted,
-  });
 }

@@ -16,9 +16,9 @@ import {
 import { GlassCard } from '@/components/ds/GlassCard';
 import { StatCard } from '@/components/ds/StatCard';
 import { Badge } from '@/components/ds/Badge';
-import { Button } from '@/components/ds/Button';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { FirstRunGuide } from '@/components/overview/FirstRunGuide';
+import { CloudUpsellCard } from '@/components/shield/CloudUpsellCard';
 import { useStats } from '@/hooks/useMemories';
 import { useAuditStats, useQuarantine } from '@/hooks/useDefence';
 import { useContradictions, useQuality } from '@/hooks/useMemories';
@@ -303,25 +303,17 @@ export function OverviewGlass() {
             <div>
               <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Licence</h3>
               <p className="mt-1 text-sm text-[var(--sc-text-muted)]">
-                Current tier and feature access.
+                Current tier and feature access. Every local feature is included on Free.
               </p>
             </div>
             <Badge variant={license?.tier === 'pro' ? 'cyan' : license?.tier === 'team' ? 'coral' : 'muted'}>
               {TIER_LABELS[license?.tier ?? 'free']}
             </Badge>
           </div>
-          {license?.tier === 'free' && (
-            <div className="mt-4 flex items-center gap-4 rounded-xl bg-gradient-to-r from-[var(--sc-coral)]/5 to-[var(--sc-cyan)]/5 p-4">
-              <div className="flex-1">
-                <p className="text-sm font-medium text-[var(--sc-text-primary)]">Unlock deep scanning, custom policies, and audit exports</p>
-                <p className="mt-1 text-xs text-[var(--sc-text-muted)]">Pro starts at £29/mo with 10K cloud scans and 90-day retention.</p>
-              </div>
-              <a href="https://shieldcortex.ai/pricing" target="_blank" rel="noopener noreferrer">
-                <Button variant="coral" size="sm" glow>Upgrade</Button>
-              </a>
-            </div>
-          )}
         </GlassCard>
+
+        {/* Cloud signup — free tier, shown while cloud sync isn't configured */}
+        <CloudUpsellCard />
       </div>
     </div>
   );

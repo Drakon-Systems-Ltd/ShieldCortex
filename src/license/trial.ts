@@ -1,18 +1,21 @@
 /**
- * 14-day Pro trial — auto-granted on first install, no signup required.
+ * Trial machinery — RETIRED (Free + Enterprise pricing model).
  *
- * Trial state is stored in ~/.shieldcortex/trial.json.
- * It is NEVER reset on reinstall (file persists across npm updates).
- * An active paid license always takes priority over the trial.
+ * The auto 14-day Pro trial used to start on first install and unlock the
+ * Pro-gated local features. Those features are all Free now, so:
+ *   - no new trials ever start (no trial.json is created)
+ *   - existing trial.json files are ignored (left on disk, never read into
+ *     licence-tier decisions) — in-flight trials degrade to the same
+ *     Free-with-everything state
+ *   - no trial welcome banners or expiry nags render anywhere
+ *
+ * The exports are kept as inert stubs because they are part of the public
+ * API surface (re-exported via src/license/index.ts) and older callers may
+ * still import them. Licence-key machinery (activation, Ed25519 validation,
+ * revocation polling) lives elsewhere and is untouched.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
-import { homedir } from 'os';
-
-const TRIAL_DURATION_DAYS = 14;
-
-// ── Types ────────────────────────────────────────────────
+// ── Types (kept for API compatibility) ───────────────────
 
 export interface TrialFile {
   startedAt: string;       // ISO timestamp
@@ -25,137 +28,36 @@ export interface TrialStatus {
   daysRemaining: number;
   startedAt: string;
   expiresAt: string;
-  justCreated: boolean;    // true only on the very first run that created the file
+  justCreated: boolean;
 }
 
-// ── Cache ────────────────────────────────────────────────
+// ── Public API (inert) ────────────────────────────────────
 
-let cachedTrial: TrialStatus | null | undefined = undefined; // undefined = not loaded yet
-
-function getConfigDir(): string {
-  return process.env.SHIELDCORTEX_CONFIG_DIR || join(homedir(), '.shieldcortex');
-}
-
-function getTrialFile(): string {
-  return join(getConfigDir(), 'trial.json');
-}
-
-/** Clear the in-memory trial cache (useful for testing). */
+/** Clear the in-memory trial cache — retained as a no-op for callers/tests. */
 export function clearTrialCache(): void {
-  cachedTrial = undefined;
-}
-
-// ── Helpers ──────────────────────────────────────────────
-
-function computeStatus(data: TrialFile, justCreated = false): TrialStatus {
-  const startMs = new Date(data.startedAt).getTime();
-  const expiryMs = startMs + data.durationDays * 24 * 60 * 60 * 1000;
-  const nowMs = Date.now();
-  const msRemaining = expiryMs - nowMs;
-  const daysRemaining = Math.max(0, Math.ceil(msRemaining / (24 * 60 * 60 * 1000)));
-
-  return {
-    active: nowMs < expiryMs,
-    daysRemaining,
-    startedAt: data.startedAt,
-    expiresAt: new Date(expiryMs).toISOString(),
-    justCreated,
-  };
-}
-
-// ── Public API ────────────────────────────────────────────
-
-/**
- * Read (and lazily create) the trial state.
- *
- * - If `trial.json` already exists: read and return its status.
- * - If `trial.json` does NOT exist AND `license.json` does NOT exist: create it now (first install).
- * - If `trial.json` does NOT exist AND `license.json` DOES exist: don't create — user already has a paid license.
- * - Returns null if no trial applies.
- *
- * Pass `licenseFileExists` to avoid a second disk read inside store.ts.
- */
-export function getTrialStatus(licenseFileExists: boolean): TrialStatus | null {
-  // Skip trial if env var set (useful for tests and CI)
-  if (process.env.SHIELDCORTEX_SKIP_TRIAL === '1') return null;
-
-  if (cachedTrial !== undefined) return cachedTrial;
-
-  try {
-    const trialFile = getTrialFile();
-
-    if (existsSync(trialFile)) {
-      const data: TrialFile = JSON.parse(readFileSync(trialFile, 'utf-8'));
-      // Return full status whether active or expired — callers use status.active to distinguish.
-      // Only return null when no trial file exists at all.
-      const status = computeStatus(data, false);
-      cachedTrial = status;
-      return cachedTrial;
-    }
-
-    // No trial file — only create on first install (no license either)
-    if (licenseFileExists) {
-      cachedTrial = null;
-      return null;
-    }
-
-    // First run — create the trial file
-    mkdirSync(getConfigDir(), { recursive: true });
-    const now = new Date().toISOString();
-    const trialData: TrialFile = {
-      startedAt: now,
-      durationDays: TRIAL_DURATION_DAYS,
-      acknowledged: false,
-    };
-    writeFileSync(trialFile, JSON.stringify(trialData, null, 2) + '\n', { mode: 0o600 });
-
-    const status = computeStatus(trialData, true);
-    cachedTrial = status; // always active on creation
-    return cachedTrial;
-  } catch {
-    cachedTrial = null;
-    return null;
-  }
+  // No cache — trials are retired.
 }
 
 /**
- * Whether a trial is currently active (Pro features unlocked by trial).
- * Only returns true when no paid license is in effect — callers should
- * check the license first and only fall back to this.
+ * Trials are retired: never creates trial.json, never reports an active
+ * trial. Always returns null. The `_licenseFileExists` parameter is kept so
+ * existing call sites compile unchanged.
  */
-export function isTrialActive(licenseFileExists: boolean): boolean {
-  return getTrialStatus(licenseFileExists)?.active === true;
+export function getTrialStatus(_licenseFileExists: boolean): TrialStatus | null {
+  return null;
 }
 
-/**
- * Days remaining in the trial (0 if expired or no trial).
- */
-export function getTrialDaysRemaining(licenseFileExists: boolean): number {
-  return getTrialStatus(licenseFileExists)?.daysRemaining ?? 0;
+/** Always false — no trial can be active. */
+export function isTrialActive(_licenseFileExists: boolean): boolean {
+  return false;
 }
 
-/**
- * Mark the welcome message as acknowledged (suppress on subsequent runs).
- */
+/** Always 0 — no trial exists to count down. */
+export function getTrialDaysRemaining(_licenseFileExists: boolean): number {
+  return 0;
+}
+
+/** No-op — there is no trial welcome to acknowledge, and nothing is written. */
 export function acknowledgeTrialWelcome(): void {
-  try {
-    const trialFile = getTrialFile();
-    if (!existsSync(trialFile)) return;
-    const data: TrialFile = JSON.parse(readFileSync(trialFile, 'utf-8'));
-    if (!data.acknowledged) {
-      data.acknowledged = true;
-      writeFileSync(trialFile, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
-    }
-    // Update cache
-    if (cachedTrial) {
-      cachedTrial = { ...cachedTrial, justCreated: false };
-    }
-  } catch {
-    // Best effort
-  }
-}
-
-/** Exposed for tests — returns the full trial file path */
-export function getTrialFilePath(): string {
-  return getTrialFile();
+  // Intentionally does nothing.
 }

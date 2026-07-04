@@ -125,7 +125,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * Should the interactive trial/stats banner print for this invocation?
+ * Should the interactive stats banner print for this invocation?
  *
  * It must print for normal interactive CLI commands (status, scan, doctor,
  * audit, setup, …) but NEVER for:
@@ -571,10 +571,10 @@ async function isLocalDashboardRunning(): Promise<boolean> {
  */
 async function main() {
   // Dispatch the "hook" subcommand FIRST — before checkVersionStaleness() and
-  // the trial/stats banner. Hooks fire on every UserPromptSubmit, so this path
+  // the stats banner. Hooks fire on every UserPromptSubmit, so this path
   // must be as cheap as possible: no `npm ls -g` staleness probe (hooks were
   // migrated to the global binary, where the warning is meaningless) and no
-  // trial/stats banners. handleHookCommand is imported lazily so the rest of
+  // stats banners. handleHookCommand is imported lazily so the rest of
   // the installer surface stays out of hook startup.
   if (process.argv[2] === 'hook') {
     const { handleHookCommand } = await import('./setup/hooks.js');
@@ -586,65 +586,13 @@ async function main() {
   checkVersionStaleness();
   const parsedArgs = parseArgs();
 
-  // ── Trial welcome / expiry warning ──────────────────────
+  // ── Interactive stats banner ─────────────────────────────
   // Only show for interactive CLI commands. shouldShowInteractiveBanner gates
   // out the MCP stdio server path (bare / --mode mcp / --db) where stdout is
   // the JSON-RPC channel; the per-prompt `hook` path already returned above.
+  // (The trial welcome/expiry banner that used to render here was removed with
+  // the auto Pro trial — every local feature is Free now.)
   if (shouldShowInteractiveBanner(process.argv, parsedArgs.mode)) {
-    try {
-      const { existsSync } = await import('fs');
-      const { join } = await import('path');
-      const { homedir } = await import('os');
-      const { getTrialStatus } = await import('./license/trial.js');
-      const { acknowledgeTrialWelcome } = await import('./license/trial.js');
-      const { getLicense } = await import('./license/store.js');
-
-      const licenseFile = join(homedir(), '.shieldcortex', 'license.json');
-      const licenseFileExists = existsSync(licenseFile);
-      const activeLicense = getLicense();
-
-      // Only show trial messages when no paid license is active
-      if (!activeLicense.valid) {
-        const trial = getTrialStatus(licenseFileExists);
-
-        if (trial?.justCreated) {
-          // First ever run — show welcome message
-          const expiryDate = new Date(trial.expiresAt).toLocaleDateString();
-          const bold = '\x1b[1m';
-          const reset = '\x1b[0m';
-          const green = '\x1b[32m';
-          const cyan = '\x1b[36m';
-          const yellow = '\x1b[33m';
-
-          console.log(`\n${bold}🎁 Welcome to ShieldCortex!${reset}\n`);
-          console.log(`You have a ${yellow}14-day Pro trial${reset} — all Pro features are unlocked.\n`);
-          console.log(`  ${green}✓${reset} Custom injection patterns (up to 50)`);
-          console.log(`  ${green}✓${reset} Custom Iron Dome policies`);
-          console.log(`  ${green}✓${reset} Custom firewall rules`);
-          console.log(`  ${green}✓${reset} Audit export (JSON/CSV)`);
-          console.log(`  ${green}✓${reset} Skill scanner deep mode`);
-          console.log(`\nYour trial expires on ${bold}${expiryDate}${reset}. Upgrade anytime at:`);
-          console.log(`  ${cyan}https://shieldcortex.ai/pricing${reset}`);
-          console.log(`\nRun: shieldcortex license status\n`);
-
-          acknowledgeTrialWelcome();
-
-        } else if (trial?.active && trial.daysRemaining <= 3) {
-          // Trial expiring soon — show warning
-          const yellow = '\x1b[33m';
-          const cyan = '\x1b[36m';
-          const reset = '\x1b[0m';
-          const days = trial.daysRemaining;
-
-          console.error(`${yellow}⚠️  Pro trial expires in ${days} day${days !== 1 ? 's' : ''}. Upgrade to keep Pro features:${reset}`);
-          console.error(`    shieldcortex license activate <key>`);
-          console.error(`    ${cyan}https://shieldcortex.ai/pricing${reset}\n`);
-        }
-      }
-    } catch {
-      // Best effort — never let trial messaging crash the CLI
-    }
-
     // Show stats banner (threats blocked etc.) for interactive CLI modes
     try {
       const { printStatsBanner } = await import('./cli/stats-banner.js');
@@ -781,7 +729,7 @@ ${bold}DOCS${reset}
   }
 
   // NOTE: the "hook" subcommand is dispatched at the very top of main(),
-  // before checkVersionStaleness() and the trial/stats banner — it must stay
+  // before checkVersionStaleness() and the stats banner — it must stay
   // fast (fires on every UserPromptSubmit) and never run `npm ls -g`.
 
   // Handle "openclaw" subcommand (backward compat: "clawdbot" also accepted)

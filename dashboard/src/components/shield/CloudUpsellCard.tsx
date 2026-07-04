@@ -1,18 +1,16 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Cloud, ArrowRight, Loader2, CheckCircle2, X, ExternalLink } from 'lucide-react';
+import { Cloud, ArrowRight, Loader2, CheckCircle2, X } from 'lucide-react';
 import { authFetch } from '@/lib/auth';
 import { useAuditStats } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
-import { useLicenseStatus } from '@/hooks/useLicense';
 
 type CardState = 'upsell' | 'polling' | 'success' | 'hidden';
 
 export function CloudUpsellCard() {
   const { projectFilter } = useDashboardStore();
   const { data: stats } = useAuditStats('30d', projectFilter || undefined);
-  const { data: license } = useLicenseStatus();
   const [state, setState] = useState<CardState>('upsell');
   const [email, setEmail] = useState('');
   const [setupId, setSetupId] = useState<string | null>(null);
@@ -117,46 +115,11 @@ export function CloudUpsellCard() {
 
   if (state === 'hidden') return null;
 
+  // No tier gate: the cloud free tier is open to everyone (500 scans/month,
+  // 7-day audit retention, 1 member) — whenever cloud sync isn't configured,
+  // every user sees the email → magic-link signup flow below.
   const blockedCount = stats?.blockedCount ?? 0;
   const totalOps = stats?.totalOperations ?? 0;
-  const tier = license?.tier ?? 'free';
-  const hasCloudAccess = tier === 'team' || tier === 'enterprise';
-
-  // Free/Pro users: show upgrade prompt instead of cloud setup
-  if (!hasCloudAccess && state === 'upsell') {
-    return (
-      <div className="mt-4 bg-gradient-to-br from-slate-900 via-[var(--sc-bg-surface)] to-violet-950/20 border border-[var(--sc-coral)]/30 rounded-xl p-5 relative">
-        <button
-          onClick={handleDismiss}
-          className="absolute top-3 right-3 text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
-          title="Dismiss for 30 days"
-        >
-          <X size={16} />
-        </button>
-        <div className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Cloud size={20} className="text-[var(--sc-coral)]" />
-            <h3 className="text-sm font-semibold text-[var(--sc-text-primary)]">Cloud Sync</h3>
-            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded text-[var(--sc-coral)] bg-[var(--sc-coral)]/10">Team</span>
-          </div>
-          <p className="text-sm text-[var(--sc-text-primary)]">
-            {blockedCount > 0
-              ? `You've blocked ${blockedCount} threats locally. Upgrade to Team to sync across devices and give your team visibility.`
-              : 'Sync defence data across devices, share audit logs with your team, and get centralised alerts.'}
-          </p>
-          <a
-            href="https://shieldcortex.ai/pricing"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--sc-coral)] hover:bg-[var(--sc-coral)] rounded-lg text-sm font-medium text-[var(--sc-text-primary)] transition-colors"
-          >
-            Upgrade to Team
-            <ExternalLink size={12} />
-          </a>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="mt-4 bg-gradient-to-br from-slate-900 via-[var(--sc-bg-surface)] to-cyan-950/30 border border-[var(--sc-cyan)]/30 rounded-xl p-5 relative">
@@ -207,7 +170,7 @@ export function CloudUpsellCard() {
             <p className="text-xs text-[var(--sc-coral)]">{error}</p>
           )}
 
-          <p className="text-[10px] text-[var(--sc-text-muted)]">Your Team licence includes cloud sync. Enter your email to connect.</p>
+          <p className="text-[10px] text-[var(--sc-text-muted)]">Cloud free tier: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email. Teams, servers, and fleets are Enterprise: sales@drakonsystems.com.</p>
         </div>
       )}
 

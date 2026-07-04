@@ -41,7 +41,7 @@ function StatusBanner() {
 
   let tone = 'border-[var(--sc-border)] bg-[var(--sc-bg-surface)]/70 text-[var(--sc-text-primary)]';
   let title = 'Cloud sync disabled';
-  let detail = 'Enable cloud sync and activate a Team licence to start replicating local data.';
+  let detail = 'Enable cloud sync to start replicating local data. The cloud free tier includes 500 scans/month with 7-day audit retention — sign in with just your email from the Overview page.';
   let Icon = Cloud;
   const replicationPending = sync.queue.byKind.memory.pending + sync.queue.byKind.graph.pending;
   const replicationFailed = sync.queue.byKind.memory.failed + sync.queue.byKind.graph.failed;
@@ -53,7 +53,7 @@ function StatusBanner() {
   if (sync.enabled && sync.apiKeySet && !sync.featureEnabled) {
     tone = 'border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/10 text-[var(--sc-amber)]';
     title = 'Cloud configured but licence locked';
-    detail = `Cloud sync requires the ${TIER_LABELS[sync.requiredTier]} tier. Current tier: ${TIER_LABELS[license?.tier ?? 'free']}.`;
+    detail = `Full memory/graph replication requires an Enterprise licence (audit metadata sync is included free) — sales@drakonsystems.com. Current tier: ${TIER_LABELS[license?.tier ?? 'free']}.`;
     Icon = KeyRound;
   } else if (sync.enabled && sync.apiKeySet && replicationPending > 0 && replicationFailed > 0) {
     tone = 'border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 text-[var(--sc-coral)]';

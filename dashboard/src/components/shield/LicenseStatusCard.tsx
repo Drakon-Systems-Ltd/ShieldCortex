@@ -1,31 +1,16 @@
 'use client';
 
 import { useState } from 'react';
-import { Shield, Key, CheckCircle2, XCircle, Loader2, Sparkles, Lock, ChevronDown, ChevronUp } from 'lucide-react';
+import { Shield, Key, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { useLicenseStatus, useActivateLicense, useDeactivateLicense } from '@/hooks/useLicense';
-import { useBillingSetup } from '@/hooks/useBillingSetup';
-import { TIER_LABELS, TIER_COLOURS, TIER_BG, PLAN_PRICING } from '@/lib/license';
-
-/** Pro features shown in the free-tier CTA — short, punchy descriptions */
-const PRO_HIGHLIGHTS = [
-  'Custom injection patterns',
-  'Custom Iron Dome policies',
-  'Custom firewall rules',
-  'Audit export (JSON/CSV)',
-  'Skill scanner deep mode',
-];
-
-type UpgradeView = 'default' | 'checkout' | 'activate';
+import { TIER_LABELS, TIER_COLOURS, TIER_BG } from '@/lib/license';
 
 export function LicenseStatusCard() {
   const { data: license, isLoading } = useLicenseStatus();
   const activateMutation = useActivateLicense();
   const deactivateMutation = useDeactivateLicense();
-  const billing = useBillingSetup();
   const [keyInput, setKeyInput] = useState('');
-  const [upgradeView, setUpgradeView] = useState<UpgradeView>('default');
-  const [email, setEmail] = useState('');
-  const [plan, setPlan] = useState<'pro' | 'team'>('pro');
+  const [showActivate, setShowActivate] = useState(false);
   const [showFeatures, setShowFeatures] = useState(false);
 
   if (isLoading || !license) {
@@ -48,197 +33,81 @@ export function LicenseStatusCard() {
     activateMutation.mutate(keyInput.trim(), {
       onSuccess: () => {
         setKeyInput('');
-        setUpgradeView('default');
+        setShowActivate(false);
       },
     });
   };
 
   const handleDeactivate = () => {
-    if (!confirm(`Remove your ${TIER_LABELS[tier]} licence key? You will lose access to paid features.`)) return;
+    if (!confirm(`Remove your ${TIER_LABELS[tier]} licence key? You will lose access to licensed features.`)) return;
     deactivateMutation.mutate();
   };
 
-  // ── Free tier: prominent upgrade banner ──
+  // ── Free tier: everything local is included; key activation for Enterprise/legacy keys ──
   if (!isPaid) {
     return (
-      <div className="relative overflow-hidden rounded-xl mb-4 bg-gradient-to-br from-slate-900 via-[var(--sc-bg-surface)] to-cyan-950/30 border border-[var(--sc-cyan)]/30">
-        {/* Subtle glow accent */}
-        <div className="absolute top-0 right-0 w-32 h-32 bg-[var(--sc-cyan)]/5 rounded-full blur-2xl -translate-y-1/2 translate-x-1/2" />
-
-        <div className="relative p-5">
-          {/* Header row */}
-          <div className="flex items-start justify-between mb-4">
-            <div className="flex items-center gap-2.5">
-              <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--sc-cyan)]/10 border border-[var(--sc-cyan)]/20">
-                <Sparkles size={16} className="text-[var(--sc-cyan)]" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-[var(--sc-text-primary)]">Unlock Pro Features</h3>
-                <p className="text-[11px] text-[var(--sc-text-secondary)] mt-0.5">
-                  Your defence pipeline is fully active. Upgrade for advanced controls.
-                </p>
-              </div>
-            </div>
-            <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)]">
-              Free
-            </span>
+      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-5 mb-4">
+        <div className="flex items-start justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Shield size={16} className="text-[var(--sc-cyan)]" />
+            <h3 className="text-sm font-semibold text-[var(--sc-text-primary)]">Licence</h3>
           </div>
-
-          {/* Pro feature highlights */}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mb-4">
-            {PRO_HIGHLIGHTS.map((feature) => (
-              <div key={feature} className="flex items-center gap-1.5 text-xs">
-                <Lock size={10} className="text-[var(--sc-cyan)]/60 shrink-0" />
-                <span className="text-[var(--sc-text-secondary)]">{feature}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Actions */}
-          {billing.state === 'complete' ? (
-            <div className="flex items-center gap-2 p-3 bg-[var(--sc-cyan)]/10 border border-[var(--sc-cyan)]/20 rounded-lg">
-              <CheckCircle2 size={16} className="text-[var(--sc-cyan)] shrink-0" />
-              <span className="text-xs text-[var(--sc-cyan)]">Pro activated! Your dashboard is refreshing...</span>
-            </div>
-          ) : billing.state === 'polling' || billing.state === 'activating' ? (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 p-3 bg-[var(--sc-cyan)]/10 border border-[var(--sc-cyan)]/20 rounded-lg">
-                <Loader2 size={14} className="text-[var(--sc-cyan)] animate-spin shrink-0" />
-                <span className="text-xs text-[var(--sc-cyan)]">
-                  {billing.state === 'activating' ? 'Activating licence...' : 'Complete payment in the Stripe tab...'}
-                </span>
-              </div>
-              <button
-                onClick={() => { billing.reset(); setUpgradeView('default'); }}
-                className="text-[10px] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : upgradeView === 'checkout' ? (
-            <div className="space-y-3">
-              <div>
-                <label className="text-[10px] text-[var(--sc-text-muted)] mb-1 block">Email</label>
-                <input
-                  type="email"
-                  placeholder="you@company.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-cyan)]"
-                  autoFocus
-                />
-              </div>
-              <div className="flex gap-2">
-                {(['pro', 'team'] as const).map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => setPlan(p)}
-                    className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg border transition-colors ${
-                      plan === p
-                        ? 'bg-[var(--sc-cyan)]/20 border-[var(--sc-cyan)]/50 text-[var(--sc-cyan)]'
-                        : 'bg-[var(--sc-bg-elevated)] border-[var(--sc-border)] text-[var(--sc-text-secondary)] hover:border-[var(--sc-border)]'
-                    }`}
-                  >
-                    {PLAN_PRICING[p].label} — {PLAN_PRICING[p].price}
-                  </button>
-                ))}
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => billing.startCheckout(email, plan)}
-                  disabled={billing.state === 'submitting' || !email.trim()}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] disabled:opacity-50 text-[var(--sc-text-primary)] rounded-lg transition-colors"
-                >
-                  {billing.state === 'submitting' ? (
-                    <Loader2 size={12} className="animate-spin" />
-                  ) : (
-                    'Continue to Checkout'
-                  )}
-                </button>
-                <button
-                  onClick={() => { setUpgradeView('default'); billing.reset(); }}
-                  className="px-3 py-2 text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
-                >
-                  Back
-                </button>
-              </div>
-              {billing.error && (
-                <p className="text-xs text-[var(--sc-coral)]">{billing.error}</p>
-              )}
-            </div>
-          ) : upgradeView === 'activate' ? (
-            <div className="space-y-2">
-              <form onSubmit={handleActivate} className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="sc_pro_..."
-                  value={keyInput}
-                  onChange={(e) => setKeyInput(e.target.value)}
-                  className="flex-1 bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-cyan)]"
-                  autoFocus
-                />
-                <button
-                  type="submit"
-                  disabled={activateMutation.isPending || !keyInput.trim()}
-                  className="px-4 py-2 text-xs font-medium bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] disabled:opacity-50 text-[var(--sc-text-primary)] rounded-lg transition-colors"
-                >
-                  {activateMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Activate'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setUpgradeView('default'); setKeyInput(''); activateMutation.reset(); }}
-                  className="px-3 py-2 text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
-                >
-                  Back
-                </button>
-              </form>
-              {activateMutation.isError && (
-                <p className="text-xs text-[var(--sc-coral)]">
-                  {activateMutation.error instanceof Error ? activateMutation.error.message : 'Activation failed'}
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => setUpgradeView('checkout')}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] text-[var(--sc-text-primary)] rounded-lg transition-colors"
-                >
-                  Upgrade to Pro
-                </button>
-                <button
-                  onClick={() => setUpgradeView('activate')}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-[var(--sc-bg-elevated)] hover:bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)] rounded-lg transition-colors border border-[var(--sc-border)]"
-                >
-                  <Key size={12} />
-                  I Have a Key
-                </button>
-              </div>
-              {billing.error && (
-                <div className="space-y-2">
-                  <p className="text-xs text-[var(--sc-coral)]">{billing.error}</p>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => { billing.reset(); setUpgradeView('checkout'); }}
-                      className="text-[10px] text-[var(--sc-cyan)] hover:text-[var(--sc-cyan)] transition-colors"
-                    >
-                      Try Again
-                    </button>
-                    <span className="text-[10px] text-[var(--sc-text-muted)]">·</span>
-                    <button
-                      onClick={() => { billing.reset(); setUpgradeView('activate'); }}
-                      className="text-[10px] text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
-                    >
-                      I Have a Key
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)]">
+            Free
+          </span>
         </div>
+
+        <p className="text-xs text-[var(--sc-text-secondary)] mb-4">
+          Every local feature is included on the Free tier — custom patterns, policies, firewall
+          rules, audit export, deep scanning, and Cortex. Enterprise adds cloud replication, team
+          management, and shared patterns:{' '}
+          <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-cyan)] hover:underline">
+            sales@drakonsystems.com
+          </a>
+        </p>
+
+        {showActivate ? (
+          <div className="space-y-2">
+            <form onSubmit={handleActivate} className="flex gap-2">
+              <input
+                type="text"
+                placeholder="sc_ent_..."
+                value={keyInput}
+                onChange={(e) => setKeyInput(e.target.value)}
+                className="flex-1 bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-cyan)]"
+                autoFocus
+              />
+              <button
+                type="submit"
+                disabled={activateMutation.isPending || !keyInput.trim()}
+                className="px-4 py-2 text-xs font-medium bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] disabled:opacity-50 text-[var(--sc-text-primary)] rounded-lg transition-colors"
+              >
+                {activateMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Activate'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowActivate(false); setKeyInput(''); activateMutation.reset(); }}
+                className="px-3 py-2 text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
+              >
+                Back
+              </button>
+            </form>
+            {activateMutation.isError && (
+              <p className="text-xs text-[var(--sc-coral)]">
+                {activateMutation.error instanceof Error ? activateMutation.error.message : 'Activation failed'}
+              </p>
+            )}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowActivate(true)}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-[var(--sc-bg-elevated)] hover:bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)] rounded-lg transition-colors border border-[var(--sc-border)]"
+          >
+            <Key size={12} />
+            I Have a Key
+          </button>
+        )}
       </div>
     );
   }

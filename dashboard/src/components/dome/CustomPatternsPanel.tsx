@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { Zap, Plus, Trash2, Play } from 'lucide-react';
-import { ProFeatureGate } from '../shield/ProFeatureGate';
 import { useCustomPatterns, useCreatePattern, useDeletePattern, useTestPattern } from '@/hooks/useCustomPatterns';
 import { PREVIEW_PATTERNS } from '@/lib/pro-previews';
 
@@ -158,9 +157,7 @@ function PreviewContent() {
 export function CustomPatternsPanel() {
   return (
     <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4">
-      <ProFeatureGate feature="custom_injection_patterns" label="Define up to 50 custom regex patterns for detecting domain-specific threats.">
-        <PatternsTable />
-      </ProFeatureGate>
+      <PatternsTable />
     </div>
   );
 }

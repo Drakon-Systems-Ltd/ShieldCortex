@@ -25,10 +25,6 @@ import { getQueueStats, reconcileSyncQueue } from '../../cloud/sync-queue.js';
 import { getDatabase } from '../../database/init.js';
 import { getRequiredTier, isFeatureEnabled } from '../../license/gate.js';
 import { getLicense } from '../../license/store.js';
-import { getTrialStatus } from '../../license/trial.js';
-import { existsSync } from 'fs';
-import { join } from 'path';
-import { homedir } from 'os';
 import { getControlStatus, isKillSwitchActive, pause, resume } from '../control.js';
 import {
   checkForUpdates,
@@ -50,18 +46,7 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
 
   app.get('/api/system/status', (_req: Request, res: Response) => {
     try {
-      const licenseFile = join(homedir(), '.shieldcortex', 'license.json');
-      const licenseFileExists = existsSync(licenseFile);
       const license = getLicense();
-      const trial = getTrialStatus(licenseFileExists);
-
-      const trialInfo = trial
-        ? {
-            active: trial.active,
-            daysRemaining: trial.daysRemaining,
-            expiresAt: trial.expiresAt.slice(0, 10), // YYYY-MM-DD
-          }
-        : null;
 
       // Stats (best effort — never fail the status endpoint)
       let stats: Record<string, unknown> | null = null;
@@ -95,9 +80,10 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
       }
 
       res.json({
-        tier: license.valid ? license.tier : (trial?.active ? 'pro' : 'free'),
+        tier: license.valid ? license.tier : 'free',
         licenseValid: license.valid,
-        trial: trialInfo,
+        // Auto Pro trial retired — field kept (always null) for consumer compat.
+        trial: null,
         ...(stats ? { stats } : {}),
       });
     } catch (error) {

@@ -132,20 +132,12 @@ export function getLicense(): LicenseInfo {
 
 /**
  * Quick accessor for the current licence tier.
- * Returns 'pro' during an active trial (if no paid license is active).
- * Returns 'free' otherwise.
+ * A valid paid licence returns its tier; everything else is 'free'.
+ * (The auto Pro trial is retired — absent licence = Free with all local
+ * features; see src/license/trial.ts.)
  */
 export function getLicenseTier(): LicenseTier {
-  const license = getLicense();
-
-  // Paid license takes priority — trial is irrelevant
-  if (license.valid) return license.tier;
-
-  // No paid license: check if trial is active
-  const licenseFileExists = existsSync(getLicenseFilePath());
-  if (isTrialActive(licenseFileExists)) return 'pro';
-
-  return license.tier; // 'free'
+  return getLicense().tier; // 'free' when no valid licence
 }
 
 /**

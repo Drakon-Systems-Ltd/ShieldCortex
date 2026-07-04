@@ -15,7 +15,6 @@ import {
 } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
 import { AlertTriangle, Bot, Check, Loader2, Sparkles, Tags, Wand2, X, CheckSquare, Square, MinusSquare } from 'lucide-react';
-import { ProFeatureGate } from '@/components/shield/ProFeatureGate';
 
 function ConfirmationDialog({
   action,
@@ -286,62 +285,60 @@ export function QuarantineView() {
         </div>
       )}
 
-      <ProFeatureGate feature="local_ai_explainer" label="Use a local model to explain and group quarantined items without sending content to the cloud.">
-        <div className="glass-card p-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--sc-text-primary)]">
-                  <Sparkles size={16} className="text-[var(--sc-cyan)]" />
-                  Local AI Explainer
-                </h3>
-                <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
-                  copilotStatus?.enabled
-                    ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
-                    : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
-                }`}>
-                  {copilotStatus?.enabled ? 'enabled' : 'disabled'}
-                </span>
-                <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
-                  copilotStatus?.modelCached
-                    ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
-                    : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
-                }`}>
-                  {copilotStatus?.modelCached ? 'model cached' : 'model not cached'}
-                </span>
-              </div>
-              <div className="mt-2 text-xs leading-5 text-[var(--sc-text-secondary)]">
-                {!copilotStatus?.enabled
-                  ? 'Enable from the CLI first: shieldcortex review-copilot enable'
-                  : !copilotStatus.modelCached
-                    ? 'Download the local model first: shieldcortex review-copilot download-model'
-                    : 'Explain unreviewed quarantine items locally; approve and reject decisions stay manual.'}
-              </div>
-              <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-[var(--sc-text-muted)]">
-                <span className={needsAiReviewItems.length > 0 ? 'text-[var(--sc-amber)]' : ''}>
-                  {needsAiReviewItems.length} need explanation
-                </span>
-                <span>{annotatedItems.length} explained in this view</span>
-                {annotationGroups.map(([key, count]) => (
-                  <span key={key} className="inline-flex items-center gap-1">
-                    <Tags size={11} /> {key}: {count}
-                  </span>
-                ))}
-              </div>
+      <div className="glass-card p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--sc-text-primary)]">
+                <Sparkles size={16} className="text-[var(--sc-cyan)]" />
+                Local AI Explainer
+              </h3>
+              <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                copilotStatus?.enabled
+                  ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
+                  : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
+              }`}>
+                {copilotStatus?.enabled ? 'enabled' : 'disabled'}
+              </span>
+              <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                copilotStatus?.modelCached
+                  ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
+                  : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
+              }`}>
+                {copilotStatus?.modelCached ? 'model cached' : 'model not cached'}
+              </span>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={handleAnnotatePending}
-                disabled={!canAnnotate || copilotBusy || needsAiReviewItems.length === 0}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--sc-cyan)]/10 px-3 py-1.5 text-xs font-semibold text-[var(--sc-cyan)] transition-colors hover:bg-[var(--sc-cyan)]/20 disabled:pointer-events-none disabled:opacity-45"
-              >
-                {annotatePendingMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
-                Explain all
-              </button>
+            <div className="mt-2 text-xs leading-5 text-[var(--sc-text-secondary)]">
+              {!copilotStatus?.enabled
+                ? 'Enable from the CLI first: shieldcortex review-copilot enable'
+                : !copilotStatus.modelCached
+                  ? 'Download the local model first: shieldcortex review-copilot download-model'
+                  : 'Explain unreviewed quarantine items locally; approve and reject decisions stay manual.'}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-[var(--sc-text-muted)]">
+              <span className={needsAiReviewItems.length > 0 ? 'text-[var(--sc-amber)]' : ''}>
+                {needsAiReviewItems.length} need explanation
+              </span>
+              <span>{annotatedItems.length} explained in this view</span>
+              {annotationGroups.map(([key, count]) => (
+                <span key={key} className="inline-flex items-center gap-1">
+                  <Tags size={11} /> {key}: {count}
+                </span>
+              ))}
             </div>
           </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleAnnotatePending}
+              disabled={!canAnnotate || copilotBusy || needsAiReviewItems.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--sc-cyan)]/10 px-3 py-1.5 text-xs font-semibold text-[var(--sc-cyan)] transition-colors hover:bg-[var(--sc-cyan)]/20 disabled:pointer-events-none disabled:opacity-45"
+            >
+              {annotatePendingMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
+              Explain all
+            </button>
+          </div>
         </div>
-      </ProFeatureGate>
+      </div>
 
       {/* Filters and bulk actions */}
       <div className="glass-card p-5">

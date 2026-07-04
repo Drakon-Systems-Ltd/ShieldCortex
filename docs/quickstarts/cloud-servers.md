@@ -10,12 +10,12 @@ The important distinction is:
 ## What you need on each server
 
 1. ShieldCortex `3.4.29` or newer
-2. a Team or higher licence key
+2. an Enterprise licence key (grandfathered Team keys keep working) — sales@drakonsystems.com
 3. a cloud API key with sync access
 4. the persistent headless worker service
 
 > [!IMPORTANT]
-> The automatic 14-day Pro trial does **not** unlock cloud sync. Servers still need a Team or higher licence to appear in ShieldCortex Cloud and stay online there.
+> Every local feature is free, but servers and fleets are an Enterprise capability. A server needs an Enterprise licence (or a grandfathered Team key) to appear in ShieldCortex Cloud and stay online there — contact sales@drakonsystems.com.
 
 ## Install
 
@@ -26,7 +26,7 @@ npm install -g shieldcortex@latest
 ## Connect the server to your account
 
 ```bash
-shieldcortex license activate <team-key>
+shieldcortex license activate <enterprise-key>
 shieldcortex config --cloud-api-key <cloud-api-key>
 shieldcortex config --cloud-enable
 shieldcortex service install --headless
@@ -49,13 +49,13 @@ shieldcortex service status
 
 You want to see:
 
-- `Tier: Team` or higher
+- `Tier: Enterprise` (or a grandfathered Team tier)
 - `Cloud Enabled: Yes`
 - API key present
 - `Mode: worker`
 - `Running: yes`
 
-If you manage keys in ShieldCortex Cloud, remember that keys are scope-based. A valid Team licence is necessary but not sufficient on its own if the selected key cannot access the required cloud surfaces.
+If you manage keys in ShieldCortex Cloud, remember that keys are scope-based. A valid Enterprise licence is necessary but not sufficient on its own if the selected key cannot access the required cloud surfaces.
 
 ## Linux note
 

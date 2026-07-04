@@ -272,15 +272,15 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  // Accepted no-ops: the Pro upsell was retired with the Free + Enterprise
+  // repricing, but fleet scripts still call these flags — they must not error.
   if (args.includes('--upsell-mute')) {
     setUpsellState({ proMuted: true });
-    console.log('Pro upsell muted. Re-enable with --upsell-unmute.');
     changed = true;
   }
 
   if (args.includes('--upsell-unmute')) {
     setUpsellState({ proMuted: false });
-    console.log('Pro upsell un-muted.');
     changed = true;
   }
 
@@ -304,8 +304,6 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
     console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
-    console.log('  --upsell-mute          Suppress the Pro upsell footer in doctor');
-    console.log('  --upsell-unmute        Allow the Pro upsell footer to surface again');
     console.log('');
     console.log('LLM Verification:');
     console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
@@ -325,7 +323,8 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
       process.exit(1);
     }
     if (!isFeatureEnabled('cloud_sync')) {
-      console.error('Cloud memory sync requires a Team or higher licence.');
+      console.error('Full cloud memory sync requires an Enterprise licence — sales@drakonsystems.com');
+      console.error('(Audit metadata sync is included on the cloud free tier.)');
       process.exit(1);
     }
 

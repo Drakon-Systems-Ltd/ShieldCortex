@@ -1,5 +1,11 @@
 'use client';
 
+// DORMANT billing code — intentionally unreferenced since the Free + Enterprise
+// repricing removed the in-dashboard Stripe checkout (LicenseStatusCard no
+// longer invokes startCheckout). Kept per the "billing code stays dormant, not
+// deleted" policy: the SaaS quick-checkout endpoints remain deployed for
+// in-flight sessions and any future manually-arranged checkout.
+
 import { useState, useEffect, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { authFetch } from '@/lib/auth';

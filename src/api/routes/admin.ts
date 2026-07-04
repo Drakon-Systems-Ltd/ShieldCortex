@@ -8,7 +8,7 @@ import {
   rejectQuarantineItem,
   rejectQuarantineItems,
 } from '../../defence/quarantine/review.js';
-import { getLicense, getLicenseTier, getTrialStatus, activateLicense, deactivateLicense } from '../../license/store.js';
+import { getLicense, getLicenseTier, activateLicense, deactivateLicense } from '../../license/store.js';
 import { listFeatures } from '../../license/gate.js';
 import type { GatedFeature } from '../../license/gate.js';
 import { isFeatureEnabled } from '../../license/gate.js';
@@ -692,8 +692,6 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
   app.get('/api/license/status', (_req: Request, res: Response) => {
     try {
       const info = getLicense();
-      const licenseFile = join(process.env.SHIELDCORTEX_CONFIG_DIR || join(homedir(), '.shieldcortex'), 'license.json');
-      const trial = getTrialStatus(existsSync(licenseFile));
       res.json({
         tier: getLicenseTier(),
         valid: info.valid,
@@ -701,13 +699,8 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
         expiresAt: info.expiresAt?.toISOString() ?? null,
         daysUntilExpiry: info.daysUntilExpiry,
         teamId: info.teamId,
-        trial: trial
-          ? {
-              active: trial.active,
-              daysRemaining: trial.daysRemaining,
-              expiresAt: trial.expiresAt,
-            }
-          : null,
+        // Auto Pro trial retired — field kept (always null) for dashboard compat.
+        trial: null,
         features: listFeatures(),
       });
     } catch (error) {

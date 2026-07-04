@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+**Pricing model change: public tiers are now Free + Enterprise. Every local feature is free — the self-serve Pro (£29/mo) and Team (£99/mo) tiers are retired, the auto 14-day Pro trial is removed, and cloud signup is open to everyone.**
+
+### Changed
+
+- **Every local feature is now Free.** Custom injection patterns, custom Iron Dome policies, custom firewall rules, audit export, deep skill scanning, the dependency scanner (quarantine/clean/auto-protect/global scan), Cortex mistake learning, local AI explainer, memory types, Dream Mode, LLM reranking, positive feedback, memory-file scanning, review copilot, and unlimited X-Ray (deep scans, npm registry inspection, CI/CD gate — the 5-scans/day free limit is gone) no longer require a licence. Only genuinely cloud/org-side features stay licence-gated: full cloud memory/graph sync, team management, shared patterns, and team memory scopes — these are Enterprise (sales@drakonsystems.com); grandfathered Pro/Team keys keep working unchanged.
+- **Cloud signup is open to all.** The local dashboard's cloud-signup card (email → magic link → auto-configured sync) is no longer gated to Team/Enterprise tiers — anyone can connect the cloud free tier (500 scans/month, 7-day audit retention, 1 member). The card now renders on the Overview page whenever cloud sync isn't configured.
+- **Gated-feature errors point at Enterprise contact.** `FeatureGatedError` and the API's 403 `FEATURE_GATED` responses now say "requires an Enterprise licence" with sales@drakonsystems.com instead of linking a purchase page.
+
+### Removed
+
+- **Auto 14-day Pro trial.** New installs no longer create a trial; existing in-flight trials degrade gracefully to the same Free-with-everything state (the trial file is ignored, never deleted). All trial welcome banners, expiry warnings, and `license status` trial countdowns are gone. Licence-key machinery (activation, offline Ed25519 validation, 24h revocation polling) is untouched.
+- **All self-serve upsells.** The doctor footer nudge, `stats` Pro hint, X-Ray report upgrade footer, and the dashboard's upgrade banners (Overview, Settings, the licence card's plan picker with in-dashboard Stripe checkout, and the Upgrade-to-Team cloud card) are removed. `config --upsell-mute/--upsell-unmute` remain as accepted silent no-ops so fleet scripts don't break.
+
 **The Action Guard reaches Claude Code: the same enforce-by-default that guards OpenClaw agents now gates every Claude Code tool call through the native permission dialog.**
 
 ### Added
