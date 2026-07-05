@@ -142,6 +142,57 @@ describe('Privilege Detector', () => {
     expect(result.indicators).toContain('network_exfiltration');
   });
 
+  // Regression (issue #68, audit id 289): loopback / private / tailnet URLs are
+  // local diagnostics, not off-host exfiltration. The old /https?:\/\/.../ pattern
+  // flagged every URL as external_url, including 127.0.0.1 health checks.
+  it('should NOT flag loopback / private / tailnet URLs as external_url', async () => {
+    const { detectPrivilegeEscalation } = await import('../firewall/privilege-detector.js');
+    for (const url of [
+      'curl http://127.0.0.1:3001/health',
+      'http://localhost:8080/status',
+      'http://[::1]:3001/health',
+      'http://10.1.2.3/api',
+      'http://192.168.0.5/x',
+      'http://172.16.9.9/y',
+      'http://100.119.133.60/metrics', // tailnet CGNAT range
+      'https://tars.tail6f3f1e.ts.net/metrics',
+    ]) {
+      const result = detectPrivilegeEscalation(url);
+      expect(result.indicators).not.toContain('external_url');
+    }
+  });
+
+  it('should still flag genuinely external URLs as external_url', async () => {
+    const { detectPrivilegeEscalation } = await import('../firewall/privilege-detector.js');
+    for (const url of [
+      'https://evil.com/exfiltrate',
+      'http://8.8.8.8/collect',
+      'https://example.org/webhook',
+    ]) {
+      const result = detectPrivilegeEscalation(url);
+      expect(result.indicators).toContain('external_url');
+    }
+  });
+
+  // End-to-end regression: the exact ATHENA payload (audit id 289) must ALLOW in
+  // balanced mode — it is a redaction-safe local diagnostic, not a threat.
+  it('should ALLOW the id-289 local diagnostic payload in balanced mode', async () => {
+    const { analyzeFirewall } = await import('../firewall/index.js');
+    const payload =
+      'terminal: {"command":"systemctl --user cat shieldcortex-api.service 2>/dev/null ' +
+      "| sed -E 's/(token|key|secret|password)[=:][^[:space:]]+/\\1=REDACTED/Ig'; " +
+      "echo '---status---'; systemctl --user status shieldcortex-api.service --no-pager 2>/dev/null " +
+      "| head -80; echo '---health---'; curl -fsS --max-time 3 http://127.0.0.1:3001/health || true\",\"timeout\":60}";
+    const analysis = analyzeFirewall(
+      payload,
+      'hermes pre_tool_call',
+      { type: 'api', identifier: 'hermes' },
+      0.7,
+      { mode: 'balanced' } as any,
+    );
+    expect(analysis.result).toBe('ALLOW');
+  });
+
   it('should handle clean technical content', async () => {
     const { detectPrivilegeEscalation } = await import('../firewall/privilege-detector.js');
     const result = detectPrivilegeEscalation('Use npm install to add dependencies');
