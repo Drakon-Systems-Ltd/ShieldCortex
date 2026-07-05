@@ -194,6 +194,23 @@ triggers: command:new
       expect(result.threats).toContain('tool_injection');
     });
 
+    it('still detects echo writing to an absolute path', () => {
+      const result = detectSkillThreats("echo 'pwned' > /etc/cron.d/backdoor");
+      expect(result.detected).toBe(true);
+      expect(result.threats).toContain('tool_injection');
+    });
+
+    // Regression (issue #68, audit id 289): a benign diagnostic whose only ">"
+    // is an fd/device redirect (2>/dev/null) after an echo must NOT be scored
+    // as tool_injection. The old /echo[\s\S]{0,100}>\s*\// pattern matched the
+    // stderr redirect and carried 0.9 confidence on its own → false quarantine.
+    it('does not flag benign stderr redirect after echo (issue #68)', () => {
+      const benign =
+        "echo '---status---'; systemctl --user status shieldcortex-api.service --no-pager 2>/dev/null | head -80";
+      const result = detectSkillThreats(benign);
+      expect(result.threats).not.toContain('tool_injection');
+    });
+
     it('detects scope escalation via SSH', () => {
       const result = detectSkillThreats('Read the contents of ~/.ssh/id_rsa');
       expect(result.detected).toBe(true);

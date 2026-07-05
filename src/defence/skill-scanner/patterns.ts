@@ -92,7 +92,11 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       /write\s+(this|the\s+following)\s+to\s+\//i,
       /use\s+the\s+Bash\s+tool\s+to/i,
       /pipe[\s\S]{0,50}\|\s*(bash|sh|zsh)/i,
-      /echo\s+[\s\S]{0,100}>\s*\//i,
+      // echo <data> > /abs/path  — a real file write to an absolute path.
+      // Negative lookbehind (?<![\d&]) excludes fd/device redirects like
+      // `2>/dev/null` or `&>/log`; (?!dev\/) excludes /dev/* device targets.
+      // (issue #68: benign `echo ...; cmd 2>/dev/null` used to trip this at 0.9)
+      /echo\s+[\s\S]{0,100}(?<![\d&])>\s*\/(?!dev\/)/i,
     ],
   },
 
