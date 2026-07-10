@@ -14,6 +14,7 @@ export type FirewallResult = 'ALLOW' | 'BLOCK' | 'QUARANTINE';
 export type ThreatIndicator =
   | 'instruction_injection'
   | 'privilege_escalation'
+  | 'credential_exfil'
   | 'encoding_obfuscation'
   | 'credential_leak'
   | 'external_url'

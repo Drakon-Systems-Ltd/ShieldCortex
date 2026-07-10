@@ -22,6 +22,8 @@ import type { InstructionDetectionResult } from './instruction-detector.js';
 import { detectPrivilegeEscalation } from './privilege-detector.js';
 import type { PrivilegeDetectionResult } from './privilege-detector.js';
 
+import { detectCredentialExfil } from './credential-exfil-detector.js';
+
 import { detectEncoding } from './encoding-detector.js';
 import type { EncodingDetectionResult } from './encoding-detector.js';
 
@@ -62,6 +64,7 @@ export function analyzeFirewall(
 ): FirewallAnalysis {
   const instructions = detectInstructions(content);
   const privilege = detectPrivilegeEscalation(content);
+  const credentialExfil = detectCredentialExfil(content);
   const encoding = detectEncoding(content);
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
@@ -96,6 +99,14 @@ export function analyzeFirewall(
     blockedPatterns.push(...instructions.patterns);
   }
 
+  // Credential exfiltration is a first-class classification (v4.47.2): credential
+  // material access COMBINED WITH external outbound movement. When it fires it
+  // OWNS the verdict — it must NOT also be reported as generic privilege_escalation
+  // (fleet finding, Edith case e). Either half alone stays on the normal paths.
+  if (credentialExfil.detected) {
+    threatIndicators.push('credential_exfil');
+  }
+
   if (privilege.detected) {
     if (privilege.indicators.includes('credential_reference')) {
       threatIndicators.push('credential_leak');
@@ -103,9 +114,10 @@ export function analyzeFirewall(
     if (privilege.indicators.includes('external_url')) {
       threatIndicators.push('external_url');
     }
-    if (privilege.indicators.includes('system_access') ||
+    if (!credentialExfil.detected &&
+        (privilege.indicators.includes('system_access') ||
         privilege.indicators.includes('destructive_filesystem') ||
-        privilege.indicators.includes('network_exfiltration')) {
+        privilege.indicators.includes('network_exfiltration'))) {
       threatIndicators.push('privilege_escalation');
     }
   }
@@ -194,6 +206,17 @@ function determineResult(
   }
 
   // ── Balanced mode ──
+
+  // Credential exfiltration (dangerous tier) → BLOCK. Credential material bound
+  // for an external host is never recoverable once it leaves; unlike a quarantine
+  // there is nothing safe to review later, so it hard-blocks in enforce regardless
+  // of trust. This is the v4.47.2 first-class `credential_exfil` verdict.
+  if (threatIndicators.includes('credential_exfil')) {
+    return {
+      result: 'BLOCK',
+      reason: 'Credential exfiltration: credential material bound for an external host',
+    };
+  }
 
   // Instruction injection → quarantine
   if (instructions.detected) {

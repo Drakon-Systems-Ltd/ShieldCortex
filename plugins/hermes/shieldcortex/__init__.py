@@ -7,9 +7,10 @@ lives in `sc_client` (REST call to `POST /api/v1/scan`) and `policy` (verdict �
 decision) and is unit-tested standalone; this module is thin glue around
 `register(ctx)`, the Hermes plugin entrypoint.
 
-Posture: advisory-first. `enforce` defaults False (warn) — surface what WOULD be
-blocked first, then turn enforcement on, exactly as ShieldCortex's Environment
-Firewall rolled out. Set env `SHIELDCORTEX_ENFORCE=1` to block.
+Posture: ENFORCE by default (v4.47.2). The gate blocks BLOCK/QUARANTINE verdicts
+out of the box; set env `SHIELDCORTEX_ENFORCE=0` (or false/no/off/advisory) to
+drop back to advisory (warn-only). Fail-open on an unreachable scanner is
+unchanged — a down scanner never wedges the agent.
 
 Phase 1 (this): pre_tool_call gate. Phase 2: transform_tool_result/terminal
 scrubbing, pre_llm_call recall context, pre_approval_request → Overseer Guard,
@@ -21,16 +22,19 @@ import os
 
 try:
     from .sc_client import scan
-    from .policy import tool_call_decision
+    from .policy import tool_call_decision, resolve_enforce
 except ImportError:  # pragma: no cover - standalone import
     from sc_client import scan
-    from policy import tool_call_decision
+    from policy import tool_call_decision, resolve_enforce
 
 log = logging.getLogger("shieldcortex.hermes")
 
 
 def _enforce_default() -> bool:
-    return os.environ.get("SHIELDCORTEX_ENFORCE", "").strip().lower() in ("1", "true", "yes", "on")
+    # v4.47.2: ENFORCE by default. Opt out with SHIELDCORTEX_ENFORCE=0
+    # (or false/no/off/advisory). Fail-open on an unreachable scanner is
+    # unchanged and lives in policy.tool_call_decision.
+    return resolve_enforce(os.environ.get("SHIELDCORTEX_ENFORCE"))
 
 
 def _tool_content(tool_name, args) -> str:

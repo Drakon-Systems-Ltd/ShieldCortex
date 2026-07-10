@@ -7,15 +7,18 @@ OpenClaw, so this is a Hermes-native plugin, not a shim.
 ## Phase 1 (this)
 
 `register(ctx)` registers a **`pre_tool_call`** gate. Before every Hermes tool
-execution it scans the tool + args through ShieldCortex (`POST /api/v1/scan`) and,
-in enforce mode, **hard-blocks** by returning `{"action": "block", "message": …}`
-(Hermes honours first-block-wins). Advisory by default.
+execution it scans the tool + args through ShieldCortex (`POST /api/v1/scan`) and
+**hard-blocks** a BLOCK/QUARANTINE verdict by returning
+`{"action": "block", "message": …}` (Hermes honours first-block-wins).
 
-- **Advisory-first.** `enforce=False` by default — it logs what *would* be blocked
-  so you can watch before turning enforcement on (same rollout as the Environment
-  Firewall). Enable with `SHIELDCORTEX_ENFORCE=1`.
+- **Enforce by default (v4.47.2).** The gate blocks out of the box. To watch what
+  *would* be blocked without blocking (advisory / warn-only), opt out explicitly
+  with `SHIELDCORTEX_ENFORCE=0` (also accepts `false` / `no` / `off` / `advisory`).
+  Earlier releases defaulted to advisory and required `SHIELDCORTEX_ENFORCE=1` to
+  block — that opt-in is no longer needed.
 - **Fail-open.** If the ShieldCortex API is unreachable, the gate never blocks —
-  a down scanner must not wedge the agent. Every fail-open is logged.
+  a down scanner must not wedge the agent. Every fail-open is logged. (Unchanged
+  by the enforce-default flip.)
 
 ## Requires
 

@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.2] - 2026-07-10
+
+**A first-class `credential_exfil` classification, the Hermes gate defaults to enforce, and a fleet regression pack from the Athena/Edith dogfood.**
+
+### Added
+
+- **`credential_exfil` — a dedicated threat classification.** Real credential exfiltration used to fall through to `privilege_escalation` (a credential read piped into an outbound POST only scored as a generic `network_exfiltration`/`external_url` signal). The firewall now recognises the dangerous conjunction directly: credential-material **access** (`~/.aws/credentials`, `~/.npmrc` tokens, ssh private keys, `.env` secrets, `op`/1Password vault reads, AWS `AKIA…` ids) combined with **external outbound movement** (curl/wget POST, `nc`, `scp`/`rsync`/`ssh`, base64+HTTP) to a genuinely off-host destination. Either half alone stays clean — `op item get` piped into a local command, reading `.env` for a local run, and a loopback health check are all routine. External-ness reuses the v4.47.1 loopback/RFC1918/tailnet rules, so a credential read moving to `127.0.0.1`, an RFC1918 host, or a `*.ts.net` tailnet target is **not** exfiltration. When it fires it owns the verdict (not `privilege_escalation`) and **BLOCKs** — credential material bound off-host is unrecoverable, so it hard-blocks in enforce regardless of trust.
+- **Fleet regression fixture pack.** Locks in the Athena/Edith Hermes-enforce dogfood false-positives (must-ALLOW) and true-positives (must-BLOCK): curl-piped loopback diagnostics, message/email bodies quoting dangerous commands (field discipline), LAN/tailnet URLs in commands, `subprocess`/`sqlite3` in skill files, docs prose mentioning a backticked `sudo` line, security docs discussing injection concepts, and a genuine credential-exfil block. Athena Hermes-window audits with no verbatim payload on disk (475/476/563 FPs; 559/565/567 keep-blocks) are included as `PENDING-ATHENA-EXPORT` skipped stubs pending a JSON export — payloads are not invented.
+
+### Changed
+
+- **Hermes plugin defaults to enforce.** The `pre_tool_call` gate (PR #57) now **blocks** BLOCK/QUARANTINE verdicts out of the box. Drop back to advisory (warn-only) with `SHIELDCORTEX_ENFORCE=0` (also accepts `false`/`no`/`off`/`advisory`); the previous `SHIELDCORTEX_ENFORCE=1` opt-in is no longer needed. Fail-open on an unreachable scanner is unchanged — a down scanner never wedges the agent. (Scope: Hermes-plugin default only; the core-wide default flip remains pending.)
+
+### Fixed
+
+- **False-positive precision (no true-positive weakened).** The natural-language `command_injection` detector no longer fires on bare code tokens (`import os`, `subprocess`) that appear legitimately in skill/tool code — the root cause of the Athena checkpoint-query quarantines (audit ids 475/476); genuine call-shapes (`eval(`, `exec(`, `system(`, `__import__(`, `os.system(`, a `subprocess` call spawning a shell) and English imperatives still fire. The privilege detector applies use/mention discipline to command-shaped signals (`system_access`, `destructive_filesystem`): a quoted/backticked command in prose (e.g. a runbook mentioning `` `sudo systemctl restart` ``) is documentation, while an unquoted live `sudo`/`rm -rf` still flags — mirroring the Action Guard's `commandScanText` principle.
+
 ## [4.47.0] - 2026-07-04
 
 **Pricing model change: public tiers are now Free + Enterprise. Every local feature is free — the self-serve Pro (£29/mo) and Team (£99/mo) tiers are retired, the auto 14-day Pro trial is removed, and cloud signup is open to everyone.**
