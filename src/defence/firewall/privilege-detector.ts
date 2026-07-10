@@ -131,16 +131,37 @@ const INDICATOR_GROUPS: IndicatorGroup[] = [
   },
 ];
 
+/**
+ * Use/mention discipline for command-shaped signals. A policy/runbook doc that
+ * MENTIONS a privileged command inside a quoted / backticked example span
+ * (`` `sudo systemctl restart` ``) is documentation, not an executed action
+ * (Edith docs FP). For these groups we evaluate the "use surface" — content with
+ * quoted/backticked spans removed — so a live, unquoted `sudo rm -rf /` in prose
+ * still flags while a quoted example does not. Mirrors the action-guard's
+ * commandScanText discipline. Credential/URL/exfil groups are NOT stripped: a
+ * leaked secret or an exfil link is a threat whether it is quoted or not.
+ */
+const USE_MENTION_GROUPS = new Set(['system_access', 'destructive_filesystem']);
+
+function stripQuotedSpans(content: string): string {
+  return content
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/"[^"]*"/g, ' ')
+    .replace(/'[^']*'/g, ' ');
+}
+
 const SEVERITY_ORDER: Record<string, number> = { low: 0, medium: 1, high: 2 };
 
 export function detectPrivilegeEscalation(content: string): PrivilegeDetectionResult {
   const indicators: string[] = [];
   let highestSeverity: 'low' | 'medium' | 'high' = 'low';
+  const useSurface = stripQuotedSpans(content);
 
   for (const group of INDICATOR_GROUPS) {
+    const target = USE_MENTION_GROUPS.has(group.name) ? useSurface : content;
     const matched = group.match
       ? group.match(content)
-      : group.patterns.some((pattern) => pattern.test(content));
+      : group.patterns.some((pattern) => pattern.test(target));
     if (matched) {
       indicators.push(group.name);
       if (SEVERITY_ORDER[group.severity] > SEVERITY_ORDER[highestSeverity]) {

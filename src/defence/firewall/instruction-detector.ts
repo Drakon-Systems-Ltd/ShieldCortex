@@ -75,17 +75,24 @@ const PATTERN_GROUPS: PatternGroup[] = [
     ],
   },
   {
+    // Natural-language directives to run code/commands. This is the NL
+    // instruction detector — bare CODE tokens (`import os`, `subprocess`,
+    // `sqlite3`, `conn.execute(...)`) are legitimate in skill/tool files and
+    // MUST NOT trip this (Athena checkpoint FP, audit ids 475/476). Actual
+    // malicious code in code files is caught by detectCodeThreats() instead.
+    // We keep the strongly injection-shaped calls (eval/exec/system/__import__
+    // with a call paren) and the imperative English forms.
     name: 'command_injection',
     weight: 0.85,
     patterns: [
       /\beval\s*\(/i,
       /\bexec\s*\(/i,
       /\bsystem\s*\(/i,
-      /\bimport\s+os\b/i,
       /\brun\s+command\b/i,
       /\bexecute\s+(this\s+)?(command|code|script)/i,
       /\b__import__\s*\(/i,
-      /\bsubprocess\b/i,
+      /\bos\.system\s*\(/i,
+      /\bsubprocess\.(?:run|call|popen|check_output|check_call)\s*\(\s*['"`]?(?:sh|bash|zsh|-c|curl|wget|nc|rm|eval|sudo)\b/i,
     ],
   },
   {

