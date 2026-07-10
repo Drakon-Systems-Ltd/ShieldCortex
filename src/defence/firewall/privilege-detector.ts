@@ -27,7 +27,7 @@ interface IndicatorGroup {
 const URL_AUTHORITY_RE = /\bhttps?:\/\/([^\s"'<>/]+)/gi;
 
 /** Extract the bare host from a URL authority (`host`, `host:port`, `[ipv6]:port`). */
-function hostFromAuthority(authority: string): string {
+export function hostFromAuthority(authority: string): string {
   const h = authority.toLowerCase();
   if (h.startsWith('[')) {
     const end = h.indexOf(']');
@@ -41,7 +41,7 @@ function hostFromAuthority(authority: string): string {
  * RFC1918, CGNAT/tailscale (100.64/10), link-local, and *.local / *.internal /
  * *.ts.net names. These are diagnostics, not off-host exfiltration.
  */
-function isLocalHost(host: string): boolean {
+export function isLocalHost(host: string): boolean {
   const h = host.replace(/\.$/, '');
   if (!h) return false;
   if (h === 'localhost' || h.endsWith('.localhost')) return true;
@@ -63,7 +63,7 @@ function isLocalHost(host: string): boolean {
 }
 
 /** True only if content contains at least one URL pointing at a non-local host. */
-function hasExternalUrl(content: string): boolean {
+export function hasExternalUrl(content: string): boolean {
   for (const m of content.matchAll(URL_AUTHORITY_RE)) {
     if (!isLocalHost(hostFromAuthority(m[1]))) return true;
   }
