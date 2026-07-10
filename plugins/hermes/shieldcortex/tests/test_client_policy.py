@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sc_client import Verdict, scan  # noqa: E402
-from policy import tool_call_decision  # noqa: E402
+from policy import tool_call_decision, resolve_enforce  # noqa: E402
 
 
 def fake_opener(response: dict | None, *, raises: Exception | None = None):
@@ -104,6 +104,30 @@ class TestPolicy(unittest.TestCase):
 
     def test_unavailable_scanner_never_blocks_even_enforcing(self):
         self.assertIsNone(tool_call_decision(Verdict("ERROR", [], "down", available=False), enforce=True))
+
+
+class TestEnforceDefault(unittest.TestCase):
+    """v4.47.2: the Hermes gate defaults to ENFORCE. Opt out explicitly."""
+
+    def test_unset_defaults_to_enforce(self):
+        # The flip: with SHIELDCORTEX_ENFORCE unset the gate now ENFORCES.
+        self.assertTrue(resolve_enforce(None))
+        self.assertTrue(resolve_enforce(""))
+        self.assertTrue(resolve_enforce("   "))
+
+    def test_explicit_optout_disables_enforce(self):
+        for val in ("0", "false", "no", "off", "advisory",
+                    "FALSE", " Advisory ", "Off"):
+            self.assertFalse(resolve_enforce(val), f"{val!r} should disable enforce")
+
+    def test_explicit_optin_still_enforces(self):
+        for val in ("1", "true", "yes", "on", "enforce", "TRUE", " On "):
+            self.assertTrue(resolve_enforce(val), f"{val!r} should enforce")
+
+    def test_unknown_value_stays_enforcing(self):
+        # Unknown/garbage must not silently drop to advisory — only the explicit
+        # opt-out words disable enforcement now that enforce is the default.
+        self.assertTrue(resolve_enforce("banana"))
 
 
 if __name__ == "__main__":

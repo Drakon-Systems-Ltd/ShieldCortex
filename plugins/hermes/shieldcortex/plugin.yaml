@@ -12,8 +12,9 @@ kind: standalone
 version: 0.1.0
 description: >-
   ShieldCortex defence for Hermes. Gates tool calls through ShieldCortex's
-  defence pipeline via pre_tool_call. Advisory by default; set
-  SHIELDCORTEX_ENFORCE=1 to block. Requires a running ShieldCortex API server
+  defence pipeline via pre_tool_call. Enforce by default (v4.47.2); opt out to
+  advisory with SHIELDCORTEX_ENFORCE=0 (or false/no/off/advisory). Fail-open on
+  an unreachable scanner. Requires a running ShieldCortex API server
   (default http://127.0.0.1:3001, override with SHIELDCORTEX_API_URL) and its
   Bearer token (SHIELDCORTEX_API_TOKEN or ~/.shieldcortex/.api-token).
 entrypoint: __init__:register
