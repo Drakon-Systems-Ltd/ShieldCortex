@@ -16,6 +16,7 @@ import {
   findEoverrideRiskPins,
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
+import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
@@ -1765,6 +1766,68 @@ export async function checkOpenClawPluginVersion(
   return { label, status: 'pass', message: `realtime plugin v${installed} (current)` };
 }
 
+/**
+ * The #74 honest-state check: reconcile the realtime plugin's install metadata
+ * across all three authoritative layers (openclaw.json enable flag, legacy
+ * installs.json, the SQLite `installed_plugin_index`) and the on-disk build, and
+ * FAIL LOUD when it is `enabled:true` but absent from the loaded roster — the
+ * security fail-open where protection reports ON while the interceptor is
+ * actually unloaded (aiquant, 2026-07-11). Also fails a version regression and
+ * warns on installs.json↔index conflict or duplicate install dirs.
+ *
+ * Unlike every prior surface (`openclaw plugins list`, config, SC status), this
+ * reads OpenClaw's own loaded roster, so a silent drop cannot hide. `home` /
+ * `expectedVersion` are injectable for tests.
+ */
+export async function checkOpenClawPluginLoadState(
+  home: string = os.homedir(),
+  expectedVersion: string = pkg.version,
+): Promise<CheckResult> {
+  const label = 'OpenClaw plugin loaded';
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
+  const fix = 'Run `shieldcortex repair` to reconcile the plugin install metadata and verify it actually loads.';
+
+  switch (verdict.state) {
+    case 'not-installed':
+      return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
+    case 'enabled-not-loaded':
+      return {
+        label,
+        status: 'fail',
+        message:
+          'realtime plugin is enabled:true in config but NOT loaded (absent from OpenClaw\'s roster) — the host is UNPROTECTED while status reports ON',
+        fix,
+      };
+    case 'version-regressed':
+      return {
+        label,
+        status: 'fail',
+        message: `realtime plugin regressed to v${verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
+        fix,
+      };
+    case 'conflicted-metadata':
+      return {
+        label,
+        status: 'warn',
+        message: `installs.json and the SQLite index disagree on the realtime plugin — a toggle can silently drop it. ${verdict.reasons[verdict.reasons.length - 1] ?? ''}`.trim(),
+        fix,
+      };
+    case 'duplicate-install':
+      return {
+        label,
+        status: 'warn',
+        message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it`,
+        fix,
+      };
+    default:
+      return { label, status: 'pass', message: `realtime plugin loaded + enforcing (v${verdict.onDiskVersion ?? verdict.expectedVersion})` };
+  }
+}
+
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
   const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
@@ -1857,6 +1920,7 @@ export async function runDoctor(args: string[] = []): Promise<void> {
     checkOpenClawResidue,
     checkOpenClawHookFreshness,
     checkOpenClawPluginVersion,
+    checkOpenClawPluginLoadState,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkOpenClawManagedPinDrift,
