@@ -1077,6 +1077,34 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     console.log('');
     console.log('Restart your agent to activate.');
   }
+
+  // Honest-state self-check (#74): after installing + reloading, verify the
+  // plugin ACTUALLY loaded (present in OpenClaw's roster) and — with operator
+  // consent — that it enforces. A security plugin must never report success
+  // while silently dropped. We never print an "active/protected" all-clear
+  // unless both proofs pass; a missing roster entry is a hard error.
+  if (restartRequested && didInstallSomething && pluginInstallMode !== 'skipped') {
+    try {
+      const { runPluginSelfCheck } = await import('./openclaw-selfcheck.js');
+      const home = resolveUserHome();
+      const check = await runPluginSelfCheck(home);
+      console.log('');
+      if (check.ok) {
+        console.log('✓ Honest-state self-check: plugin confirmed loaded (roster) and enforcing (canary).');
+      } else if (!check.rosterProof) {
+        console.warn('✗ Honest-state self-check FAILED: the plugin is NOT in OpenClaw\'s loaded roster after restart.');
+        console.warn('  Protection would report ON while actually OFF (issue #74). Reconcile the install:');
+        console.warn('    SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 shieldcortex repair');
+        process.exitCode = 1;
+      } else {
+        // Loaded, but enforcement not proven (canary needs explicit consent).
+        console.log('• Plugin is loaded in the roster. Enforcement NOT yet verified — confirm the live canary with:');
+        console.log('    SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex repair');
+      }
+    } catch {
+      // Self-check is best-effort on layouts we can't read; never break install.
+    }
+  }
 }
 
 export async function uninstallOpenClawHook(): Promise<void> {
@@ -1353,7 +1381,29 @@ export async function repairOpenClawPlugin(): Promise<void> {
     return;
   }
 
-  // First concern: reconcile managed-pin drift / re-enable a plugin that
+  // #74 first concern: reconcile conflicted install metadata (installs.json ↔
+  // SQLite index ↔ config) and the silent-drop / version-regression states the
+  // managed-pin + duplicate-dir logic below does not cover. Diagnosis is always
+  // safe; execution requires SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 (it reloads
+  // the gateway). Honest-state self-check runs after any remediation.
+  try {
+    const selfVersion = readSelfVersion();
+    if (selfVersion) {
+      const { reconcileOpenClawPluginState, formatReconcileReport } = await import('./openclaw-reconcile.js');
+      const result = await reconcileOpenClawPluginState({ home, expectedVersion: selfVersion });
+      if (result.verdict.state !== 'healthy' || result.applied) {
+        for (const line of formatReconcileReport(result)) console.log(`  ${line}`);
+        console.log('');
+        if (result.applied && !result.ok) process.exitCode = 1;
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`  ✗ metadata reconcile errored — ${msg}`);
+    console.log('');
+  }
+
+  // Next concern: reconcile managed-pin drift / re-enable a plugin that
   // OpenClaw auto-disabled after an EOVERRIDE on update (openclaw#91772).
   try {
     const pinResult = await repairOpenClawManagedPins(home);

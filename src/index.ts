@@ -826,7 +826,7 @@ ${bold}DOCS${reset}
   // better-sqlite3 native binding: rebuild in the install dir + re-verify).
   if (process.argv[2] === 'repair') {
     const { runRepair } = await import('./cli/repair.js');
-    await runRepair();
+    await runRepair(process.argv.slice(3));
     return;
   }
 

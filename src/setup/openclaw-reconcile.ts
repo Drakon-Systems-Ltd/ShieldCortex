@@ -184,6 +184,47 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   return { verdict, plan, applied: true, stepResults, selfCheck: selfCheckResult, ok, messages };
 }
 
+/**
+ * Render an operator-facing report for `shieldcortex repair`. Honest by
+ * construction: it prints the confirmed-success line ONLY when the plan applied
+ * and the self-check passed, and points a dry-run operator at the consent env
+ * needed to actually remediate.
+ */
+export function formatReconcileReport(result: ReconcileExecResult): string[] {
+  const lines: string[] = [];
+  const { verdict } = result;
+  lines.push(`Plugin load state: ${verdict.state} [${verdict.severity}]`);
+  for (const r of verdict.reasons) lines.push(`  • ${r}`);
+
+  if (!result.applied) {
+    if (verdict.state === 'healthy') {
+      lines.push('✓ realtime plugin healthy: enabled, loaded in roster, versions agree.');
+      return lines;
+    }
+    lines.push('');
+    lines.push('Planned remediation (dry-run — nothing was changed):');
+    for (const step of result.plan) lines.push(`  → ${step.kind}: ${step.description}`);
+    lines.push('');
+    lines.push('To apply on a host where a gateway reload is acceptable, re-run with:');
+    lines.push('  SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 shieldcortex repair');
+    return lines;
+  }
+
+  lines.push('');
+  lines.push('Applied remediation:');
+  for (const s of result.stepResults) lines.push(`  ${s.ok ? '✓' : '✗'} ${s.kind}: ${s.detail}`);
+  lines.push('');
+  if (result.ok) {
+    lines.push('✓ reconciled: plugin confirmed loaded (roster) and enforcing (canary).');
+  } else {
+    lines.push('✗ FAILED: could not confirm the plugin is loaded AND enforcing.');
+    for (const m of result.messages) {
+      if (/fail|not confirmed|not run|did not/i.test(m)) lines.push(`  ${m}`);
+    }
+  }
+  return lines;
+}
+
 function scanDuplicateDirs(home: string, pluginId: string, canonical: string | null): string[] {
   try {
     const dirs = fs
