@@ -1,0 +1,39 @@
+{
+  "description": "Two project dirs accumulated on disk from a --force reinstall, but installs.json and the index agree on the canonical one at the expected version and the plugin is loaded. Milder than conflicted-metadata (the authoritative layers do NOT disagree) — just needs the stale duplicate dir pruned so a future toggle cannot re-resolve to it.",
+  "input": {
+    "pluginId": "shieldcortex-realtime",
+    "expectedVersion": "4.47.2",
+    "config": { "enabled": true, "inAllow": true },
+    "installsJson": {
+      "version": "4.47.2",
+      "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+    },
+    "index": {
+      "installRecords": {
+        "shieldcortex-realtime": {
+          "source": "npm",
+          "version": "4.47.2",
+          "resolvedVersion": "4.47.2",
+          "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+        }
+      },
+      "plugins": [
+        { "pluginId": "shieldcortex-realtime", "enabled": true, "origin": "npm" }
+      ],
+      "warning": null,
+      "generatedAtMs": 1752230565000
+    },
+    "onDiskVersion": "4.47.2",
+    "projectDirs": [
+      "drakon-systems-shieldcortex-realtime-6e7e2e7717",
+      "drakon-systems-shieldcortex-realtime-6e7e2e7717__openclaw-generation__1752230000-4.47.2-abc"
+    ]
+  },
+  "expected": {
+    "state": "duplicate-install",
+    "severity": "warn",
+    "recommendedAction": "dedupe-and-reload",
+    "loadedInIndex": true,
+    "enabledInConfig": true
+  }
+}

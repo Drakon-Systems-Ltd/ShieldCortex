@@ -1,0 +1,37 @@
+{
+  "description": "aiquant silent-drop (2026-07-11, #74): config says enabled:true and installs.json/index still hold a 4.47.2 install record, but after a disable->enable->restart cycle the plugin is ABSENT from the loaded roster (plugins_json). Security fail-open — protection reports ON while actually OFF. It is OpenClaw-tracked (npm install record present) so the fix routes through `openclaw plugins update`.",
+  "input": {
+    "pluginId": "shieldcortex-realtime",
+    "expectedVersion": "4.47.2",
+    "config": { "enabled": true, "inAllow": true },
+    "installsJson": {
+      "version": "4.47.2",
+      "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+    },
+    "index": {
+      "installRecords": {
+        "shieldcortex-realtime": {
+          "source": "npm",
+          "version": "4.47.2",
+          "resolvedVersion": "4.47.2",
+          "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+        }
+      },
+      "plugins": [
+        { "pluginId": "brave", "enabled": true, "origin": "npm" },
+        { "pluginId": "codex", "enabled": true, "origin": "npm" }
+      ],
+      "warning": "Left plugin install index in place because shared SQLite state has conflicting plugin install metadata for: brave, codex, shieldcortex-realtime",
+      "generatedAtMs": 1752221565000
+    },
+    "onDiskVersion": "4.47.2",
+    "projectDirs": ["drakon-systems-shieldcortex-realtime-6e7e2e7717"]
+  },
+  "expected": {
+    "state": "enabled-not-loaded",
+    "severity": "fail",
+    "recommendedAction": "update-openclaw-tracked",
+    "loadedInIndex": false,
+    "enabledInConfig": true
+  }
+}

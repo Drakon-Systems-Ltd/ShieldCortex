@@ -1,0 +1,37 @@
+{
+  "description": "jarvis control (2026-07-11): plugin enabled in config, present+enabled in the loaded roster, all layers agree at 4.47.2. Index carries the benign cross-plugin conflict warning (present even on healthy hosts) but shieldcortex-realtime is loaded, so it is not a drop.",
+  "input": {
+    "pluginId": "shieldcortex-realtime",
+    "expectedVersion": "4.47.2",
+    "config": { "enabled": true, "inAllow": true },
+    "installsJson": {
+      "version": "4.47.2",
+      "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+    },
+    "index": {
+      "installRecords": {
+        "shieldcortex-realtime": {
+          "source": "npm",
+          "version": "4.47.2",
+          "resolvedVersion": "4.47.2",
+          "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+        }
+      },
+      "plugins": [
+        { "pluginId": "shieldcortex-realtime", "enabled": true, "origin": "npm" },
+        { "pluginId": "brave", "enabled": true, "origin": "npm" }
+      ],
+      "warning": "Left plugin install index in place because shared SQLite state has conflicting plugin install metadata for: brave, codex, shieldcortex-realtime",
+      "generatedAtMs": 1752230565000
+    },
+    "onDiskVersion": "4.47.2",
+    "projectDirs": ["drakon-systems-shieldcortex-realtime-6e7e2e7717"]
+  },
+  "expected": {
+    "state": "healthy",
+    "severity": "ok",
+    "recommendedAction": "none",
+    "loadedInIndex": true,
+    "enabledInConfig": true
+  }
+}
