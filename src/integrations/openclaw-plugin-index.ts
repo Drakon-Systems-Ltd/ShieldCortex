@@ -1,6 +1,11 @@
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 import semver from 'semver';
+import {
+  resolveRealtimePluginInstallPath,
+  readInstalledRealtimePluginVersion,
+} from './openclaw-plugin-state.js';
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
@@ -358,11 +363,10 @@ function safeParse<T>(json: string | null | undefined, fallback: T): T {
  * best-effort — returns null if the DB, table, or better-sqlite3 is unavailable
  * so callers degrade to the installs.json/on-disk layers rather than throwing.
  *
- * Never opens under a Jest worker: the reconciler analyzer is unit-tested with
- * fixtures; only the on-box repair/self-check path touches the live DB.
+ * Read-only and path-scoped to the supplied `home`, so it is safe to exercise
+ * against a temp fixture DB in tests without ever touching live `~/.openclaw`.
  */
 export function readPluginInstallIndex(home: string): PluginIndexRow | null {
-  if (process.env.JEST_WORKER_ID !== undefined) return null;
   const dbPath = openClawSqlitePath(home);
   if (!fs.existsSync(dbPath)) return null;
 
@@ -400,7 +404,89 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
 }
 
 function createRequireSafe(): NodeRequire {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { createRequire } = require('module') as typeof import('module');
   return createRequire(import.meta.url);
+}
+
+// ── Disk gatherer: assemble a ReconcileInput from a host's ~/.openclaw ───────
+
+export interface GatherOptions {
+  pluginId?: string;
+  expectedVersion: string;
+  /** Injectable index reader (defaults to the live SQLite read). */
+  readIndex?: (home: string) => PluginIndexRow | null;
+}
+
+function readConfigEnable(home: string, pluginId: string): { enabled: boolean | null; inAllow: boolean } {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')) as {
+      plugins?: { entries?: Record<string, { enabled?: unknown }>; allow?: unknown };
+    };
+    const entry = cfg.plugins?.entries?.[pluginId];
+    const enabled = entry && typeof entry.enabled === 'boolean' ? entry.enabled : null;
+    const allow = Array.isArray(cfg.plugins?.allow) ? (cfg.plugins!.allow as unknown[]) : [];
+    const inAllow = allow.some(
+      (e) => typeof e === 'string' && (e === pluginId || e.endsWith(`/${pluginId}`) || e.includes(`/${pluginId}/`)),
+    );
+    return { enabled, inAllow };
+  } catch {
+    return { enabled: null, inAllow: false };
+  }
+}
+
+function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRecord | null {
+  try {
+    const json = JSON.parse(
+      fs.readFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'), 'utf-8'),
+    ) as { installRecords?: Record<string, { version?: unknown; installPath?: unknown }> };
+    const rec = json.installRecords?.[pluginId];
+    if (!rec) return null;
+    return {
+      version: typeof rec.version === 'string' ? rec.version : null,
+      installPath: typeof rec.installPath === 'string' ? rec.installPath : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function scanProjectDirs(home: string, pluginId: string): string[] {
+  try {
+    return fs
+      .readdirSync(path.join(home, '.openclaw', 'npm', 'projects'))
+      .filter((d) => d.includes(pluginId));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read the three authoritative layers off a host's `~/.openclaw` and assemble a
+ * {@link ReconcileInput}. Takes `home` explicitly (never `os.homedir()`) so it
+ * is fully test-isolable. All reads are best-effort; missing layers degrade to
+ * null/empty rather than throwing.
+ */
+export function gatherReconcileInput(home: string, options: GatherOptions): ReconcileInput {
+  const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
+  const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
+  return {
+    pluginId,
+    expectedVersion: options.expectedVersion,
+    config: readConfigEnable(home, pluginId),
+    installsJson: readInstallsJsonRecord(home, pluginId),
+    index: readIndex(home),
+    onDiskVersion: readInstalledRealtimePluginVersion(home),
+    projectDirs: scanProjectDirs(home, pluginId),
+  };
+}
+
+/** The canonical (non-duplicate) project dir, derived from the resolved install
+ * path — used by the reconciler to know which duplicate dirs are prunable. */
+export function canonicalProjectDir(home: string): string | null {
+  const p = resolveRealtimePluginInstallPath(home);
+  if (!p) return null;
+  const marker = `${path.sep}.openclaw${path.sep}npm${path.sep}projects${path.sep}`;
+  const idx = p.indexOf(marker);
+  if (idx === -1) return null;
+  const rest = p.slice(idx + marker.length);
+  return rest.split(path.sep)[0] ?? null;
 }
