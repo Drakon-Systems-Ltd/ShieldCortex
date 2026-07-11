@@ -227,6 +227,116 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   return { ...base, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
 }
 
+// ── Remediation planner (pure) ──────────────────────────────────────────────
+
+export type ReconcileStepKind =
+  | 'openclaw-update'
+  | 'openclaw-install-pinned'
+  | 'openclaw-install'
+  | 'prune-duplicate-dirs'
+  | 'gateway-reload'
+  | 'self-check';
+
+export interface ReconcileStep {
+  kind: ReconcileStepKind;
+  /** argv passed to the `openclaw` binary, when the step shells out. */
+  command?: string[];
+  /** Project dir names to remove, for the prune step. */
+  dirs?: string[];
+  description: string;
+}
+
+export interface PlanOptions {
+  pluginId: string;
+  /** npm package spec, e.g. `@drakon-systems/shieldcortex-realtime`. */
+  packageName: string;
+  expectedVersion: string;
+  /** Stale project dirs to prune (the canonical dir is excluded by the caller). */
+  duplicateDirsToPrune?: string[];
+}
+
+/**
+ * Turn a verdict into an ordered, side-effect-free remediation plan. The
+ * executor runs these behind the gateway-safety guards; keeping the routing
+ * pure lets us prove — in unit tests — that the three aiquant remediation
+ * failures are fixed:
+ *
+ *  - OpenClaw-tracked plugins are refreshed with `plugins update` (the SC
+ *    install path skips them → "source not found").
+ *  - a regressed build is reinstalled PINNED to the expected version (a
+ *    floating spec re-resolved to 4.25.4).
+ *  - every plan ends with a gateway reload + honest-state self-check, so a
+ *    "registered but inactive" outcome cannot be reported as success.
+ */
+export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOptions): ReconcileStep[] {
+  const { packageName, expectedVersion } = opts;
+  const steps: ReconcileStep[] = [];
+  const prune = opts.duplicateDirsToPrune ?? [];
+
+  const pruneStep = (): void => {
+    if (prune.length > 0) {
+      steps.push({
+        kind: 'prune-duplicate-dirs',
+        dirs: prune,
+        description: `prune ${prune.length} stale duplicate project dir(s) so a toggle cannot re-resolve to them`,
+      });
+    }
+  };
+  const reloadThenVerify = (): void => {
+    steps.push({ kind: 'gateway-reload', description: 'reload the OpenClaw gateway so the reconciled plugin loads' });
+    steps.push({ kind: 'self-check', description: 'honest-state self-check: roster proof + live enforcement canary (both required)' });
+  };
+
+  switch (verdict.recommendedAction) {
+    case 'update-openclaw-tracked':
+      pruneStep();
+      steps.push({
+        kind: 'openclaw-update',
+        command: ['plugins', 'update', packageName],
+        description: 'refresh the OpenClaw-tracked plugin via `openclaw plugins update` (the SC install path skips tracked plugins)',
+      });
+      reloadThenVerify();
+      break;
+
+    case 'reinstall-pinned':
+      pruneStep();
+      steps.push({
+        kind: 'openclaw-install-pinned',
+        command: ['plugins', 'install', '--force', `${packageName}@${expectedVersion}`],
+        description: `reinstall pinned to ${expectedVersion} (refuse the downgrade a floating spec re-resolved to)`,
+      });
+      reloadThenVerify();
+      break;
+
+    case 'dedupe-and-reload':
+      pruneStep();
+      steps.push({
+        kind: 'openclaw-update',
+        command: ['plugins', 'update', packageName],
+        description: 'refresh the canonical install after pruning duplicates',
+      });
+      reloadThenVerify();
+      break;
+
+    case 'install':
+      steps.push({
+        kind: 'openclaw-install',
+        command: ['plugins', 'install', `${packageName}@${expectedVersion}`],
+        description: `install the plugin pinned to ${expectedVersion}`,
+      });
+      reloadThenVerify();
+      break;
+
+    case 'none':
+    default:
+      // Healthy: never churn the install — just verify honestly.
+      steps.push({ kind: 'self-check', description: 'verify the healthy state with the honest-state self-check' });
+      break;
+  }
+
+  return steps;
+}
+
 // ── SQLite index reader (best-effort, read-only, never mutates) ─────────────
 
 function openClawSqlitePath(home: string): string {
