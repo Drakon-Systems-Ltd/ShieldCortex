@@ -80,6 +80,7 @@ export type PluginLoadState =
   | 'healthy'
   | 'not-installed'
   | 'enabled-not-loaded'
+  | 'index-unreadable'
   | 'version-regressed'
   | 'conflicted-metadata'
   | 'duplicate-install';
@@ -100,6 +101,9 @@ export interface ReconcileVerdict {
   enabledInConfig: boolean;
   /** plugins_json roster carries an enabled entry for the plugin. */
   loadedInIndex: boolean;
+  /** The SQLite install index was actually readable (false ⇒ we CANNOT know
+   * whether the plugin is loaded — never claim UNPROTECTED off an unreadable index). */
+  indexReadable: boolean;
   /** An npm install record exists in the SQLite index ⇒ OpenClaw-tracked. */
   openClawTracked: boolean;
   /** The index warning string names this plugin (benign on its own). */
@@ -170,9 +174,12 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
 
+  const indexReadable = index != null;
+
   const base = {
     enabledInConfig,
     loadedInIndex,
+    indexReadable,
     openClawTracked,
     indexWarnsConflict,
     metadataConflict,
@@ -190,7 +197,20 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     return { ...base, state: 'not-installed', severity: 'ok', recommendedAction: 'install', reasons };
   }
 
-  // 2. THE #74 silent drop: enabled in config but missing from the loaded roster.
+  // 2. Cannot read the loaded roster (SQLite index unreadable): a broken
+  //    better-sqlite3 binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
+  //    `installed_plugin_index` table all return a null index. We literally
+  //    cannot know whether the plugin is loaded — reporting the #74 fail-open
+  //    here would be a FALSE "UNPROTECTED" on a healthy box (the very binding
+  //    fault repair pass-1 exists to fix). Classify as a diagnostic gap (warn),
+  //    NEVER as a security fail-open. Only reached when enabled + installed but
+  //    the index is unreadable; a genuinely uninstalled plugin fell out at (1).
+  if (enabledInConfig && !loadedInIndex && index == null) {
+    reasons.push('cannot read the loaded roster — the SQLite plugin install index is unreadable (broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw with no installed_plugin_index table); cannot confirm whether the interceptor is loaded');
+    return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+  }
+
+  // 3. THE #74 silent drop: enabled in config but missing from a READABLE roster.
   if (enabledInConfig && !loadedInIndex) {
     reasons.push('enabled:true in config but ABSENT from the loaded roster (plugins_json) — interceptor not loaded, host unprotected while status reports ON');
     if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
@@ -203,13 +223,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     };
   }
 
-  // 3. Version regression (e.g. reinstall regressed 4.47.2 → 4.25.4).
+  // 4. Version regression (e.g. reinstall regressed 4.47.2 → 4.25.4).
   if (regressed) {
     reasons.push(`running version ${effective} is older than expected ${expected} — refuse downgrade, reinstall pinned`);
     return { ...base, state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
   }
 
-  // 4. installs.json ↔ SQLite index disagree (the precondition for a future drop).
+  // 5. installs.json ↔ SQLite index disagree (the precondition for a future drop).
   if (metadataConflict) {
     if (pathConflict) reasons.push(`installs.json install path disagrees with the SQLite index (${installsPath} vs ${indexPath})`);
     if (versionLayerConflict) reasons.push(`installs.json version ${installsJsonVersion} disagrees with index version ${indexVersion}`);
@@ -222,7 +242,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     };
   }
 
-  // 5. Duplicate project dirs accumulated on disk (authoritative layers agree).
+  // 6. Duplicate project dirs accumulated on disk (authoritative layers agree).
   if (projectDirs.length > 1) {
     reasons.push(`${projectDirs.length} plugin project dirs on disk — prune the stale duplicate so a future toggle cannot re-resolve to it`);
     return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
@@ -479,14 +499,46 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   };
 }
 
+/** Extract the `~/.openclaw/npm/projects/<name>` directory name from any path
+ * that traverses it, or null when the path does not point into projects/. */
+export function projectDirNameFromPath(p: string | null | undefined): string | null {
+  if (!p || typeof p !== 'string') return null;
+  // Match on the POSIX and platform separators — index paths recorded on the
+  // host are POSIX even when this runs on another platform's path module.
+  for (const sep of new Set([path.sep, '/'])) {
+    const marker = `${sep}.openclaw${sep}npm${sep}projects${sep}`;
+    const idx = p.indexOf(marker);
+    if (idx === -1) continue;
+    const rest = p.slice(idx + marker.length);
+    const name = rest.split(sep)[0];
+    if (name) return name;
+  }
+  return null;
+}
+
 /** The canonical (non-duplicate) project dir, derived from the resolved install
  * path — used by the reconciler to know which duplicate dirs are prunable. */
 export function canonicalProjectDir(home: string): string | null {
-  const p = resolveRealtimePluginInstallPath(home);
-  if (!p) return null;
-  const marker = `${path.sep}.openclaw${path.sep}npm${path.sep}projects${path.sep}`;
-  const idx = p.indexOf(marker);
-  if (idx === -1) return null;
-  const rest = p.slice(idx + marker.length);
-  return rest.split(path.sep)[0] ?? null;
+  return projectDirNameFromPath(resolveRealtimePluginInstallPath(home));
+}
+
+/**
+ * The LIVE project dir the AUTHORITATIVE SQLite index resolves into — the dir
+ * the loaded gateway is actually running from. Derived from the roster entry's
+ * `rootDir` first, then the index install record's `installPath`. This is the
+ * dir that must NEVER be pruned (#74 finding 4): `canonicalProjectDir` above
+ * resolves via installs.json FIRST, which in a conflicted-metadata state points
+ * at the STALE dir — pruning by that would delete the live install. Returns
+ * null when the index cannot name a live dir (⇒ caller must refuse to prune).
+ */
+export function canonicalProjectDirFromIndex(
+  index: PluginIndexRow | null,
+  pluginId: string,
+): string | null {
+  if (!index) return null;
+  const rosterRootDir = index.plugins?.find((p) => p.pluginId === pluginId)?.rootDir ?? null;
+  const fromRoster = projectDirNameFromPath(rosterRootDir);
+  if (fromRoster) return fromRoster;
+  const recordPath = index.installRecords?.[pluginId]?.installPath ?? null;
+  return projectDirNameFromPath(recordPath);
 }

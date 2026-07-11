@@ -78,4 +78,17 @@ describe('checkOpenClawPluginLoadState', () => {
     expect(r.status).toBe('fail');
     expect(r.message).toMatch(/regress|downgrade|older/i);
   });
+
+  it('#74 finding 2: WARNS (diagnostic-unavailable), never FAILS "UNPROTECTED", when the SQLite index is UNREADABLE', async () => {
+    // Healthy box whose only fault is a broken better-sqlite3 binding / locked DB:
+    // enabled + on-disk present, but the index cannot be read. Reporting a security
+    // fail-open here would be a false alarm — it must be a warn pointing at repair.
+    setup({ enabled: true, roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.47.2', recordVersion: '4.47.2' });
+    fs.writeFileSync(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'), 'not a sqlite database at all');
+    const r = await checkOpenClawPluginLoadState(home, '4.47.2');
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/cannot read|unreadable|roster/i);
+    expect(r.message).not.toMatch(/UNPROTECTED/);
+    expect(r.fix).toMatch(/repair/i);
+  });
 });

@@ -6,7 +6,7 @@ import {
   gatherReconcileInput,
   reconcilePluginState,
   planReconcileActions,
-  canonicalProjectDir,
+  canonicalProjectDirFromIndex,
   REALTIME_PLUGIN_ID,
   type ReconcileVerdict,
   type ReconcileStep,
@@ -111,18 +111,33 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const apply = options.apply ?? defaultApply();
   const runCommand = options.runCommand ?? defaultRunCommand;
   const reloadGateway = options.reloadGateway ?? defaultReloadGateway;
-  const selfCheck = options.selfCheck ?? ((h: string, p: string) => runPluginSelfCheck(h, { pluginId: p }));
+  const selfCheck = options.selfCheck
+    ?? ((h: string, p: string) => runPluginSelfCheck(h, { pluginId: p, expectedVersion: options.expectedVersion }));
   const pruneDir = options.pruneDir ?? defaultPruneDir;
 
   const messages: string[] = [];
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { pluginId, expectedVersion: options.expectedVersion }));
+  const input = gatherReconcileInput(home, { pluginId, expectedVersion: options.expectedVersion });
+  const verdict = reconcilePluginState(input);
   messages.push(`state: ${verdict.state} (${verdict.severity}) — ${verdict.reasons[verdict.reasons.length - 1] ?? ''}`);
 
-  // Determine which duplicate dirs are prunable (all matching dirs except the canonical one).
-  const canonical = canonicalProjectDir(home);
-  const dupDirs = (verdict.state === 'duplicate-install' || verdict.state === 'conflicted-metadata')
-    ? scanDuplicateDirs(home, pluginId, canonical)
-    : [];
+  // Determine which duplicate dirs are prunable. The keep-dir is resolved from
+  // the AUTHORITATIVE SQLite index (never installs.json, which in a conflicted
+  // state points at the STALE dir) so a prune can NEVER delete the live install
+  // (#74 finding 4). enabled-not-loaded is included because aiquant hit the
+  // silent drop WITH a leftover duplicate dir — the drop's precondition — and
+  // the old code never pruned it (#74 finding 5). When the index cannot name a
+  // live dir we REFUSE to prune and say so, rather than guess by name length.
+  const mayHaveDuplicateDirs =
+    verdict.state === 'duplicate-install' ||
+    verdict.state === 'conflicted-metadata' ||
+    verdict.state === 'enabled-not-loaded';
+  let dupDirs: string[] = [];
+  if (mayHaveDuplicateDirs) {
+    const liveDir = canonicalProjectDirFromIndex(input.index, pluginId);
+    const scan = scanPrunableDirs(home, pluginId, liveDir);
+    dupDirs = scan.prune;
+    if (scan.refused) messages.push(scan.refused);
+  }
 
   const plan = planReconcileActions(verdict, {
     pluginId,
@@ -175,8 +190,16 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const commandsOk = stepResults.filter((s) => s.kind.startsWith('openclaw')).every((s) => s.ok);
   const ok = selfCheckOk && commandsOk;
   if (!ok) {
-    if (!selfCheckResult) messages.push('self-check did not run — cannot confirm the plugin loaded; treating as FAILED');
-    else if (!selfCheckOk) messages.push(`self-check FAILED after remediation — plugin not confirmed loaded + enforcing: ${selfCheckResult.reasons.join('; ')}`);
+    if (!selfCheckResult) {
+      messages.push('self-check did not run — cannot confirm the plugin loaded; treating as FAILED');
+    } else if (selfCheckResult.rosterProof && selfCheckResult.versionProof !== false && !selfCheckResult.canaryProof) {
+      // Roster + version proved; only the LIVE enforcement canary is unproven.
+      // Per #74 finding 1 this is "loaded (enforcement not actively proven)" —
+      // NOT the #74 roster drop, and NOT "UNPROTECTED". Report it as such.
+      messages.push(`self-check: plugin loaded (roster) and version OK, but enforcement NOT actively proven by the live canary — ${selfCheckResult.canary?.detail ?? selfCheckResult.reasons.join('; ')}`);
+    } else {
+      messages.push(`self-check FAILED after remediation — plugin not confirmed loaded + enforcing: ${selfCheckResult.reasons.join('; ')}`);
+    }
   } else {
     messages.push('reconciled: plugin confirmed loaded (roster) and enforcing (canary)');
   }
@@ -205,8 +228,10 @@ export function formatReconcileReport(result: ReconcileExecResult): string[] {
     lines.push('Planned remediation (dry-run — nothing was changed):');
     for (const step of result.plan) lines.push(`  → ${step.kind}: ${step.description}`);
     lines.push('');
-    lines.push('To apply on a host where a gateway reload is acceptable, re-run with:');
-    lines.push('  SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 shieldcortex repair');
+    lines.push('To apply on a host where a gateway reload is acceptable, re-run with BOTH consent envs');
+    lines.push('(RECONCILE gates the plan; the post-remediation reload uses the gateway-restart gate):');
+    lines.push('  SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1 shieldcortex repair');
+    lines.push('  (on an interactive TTY the RESTART gate is satisfied automatically.)');
     return lines;
   }
 
@@ -225,16 +250,45 @@ export function formatReconcileReport(result: ReconcileExecResult): string[] {
   return lines;
 }
 
-function scanDuplicateDirs(home: string, pluginId: string, canonical: string | null): string[] {
+/**
+ * Compute which duplicate project dirs are safe to prune. HOST-SAFETY CRITICAL
+ * (#74 finding 4): the keep-dir (`liveDir`) is the dir the AUTHORITATIVE SQLite
+ * index resolves into — the one the loaded gateway actually runs from. We prune
+ * every OTHER matching dir and NEVER the live one.
+ *
+ * We REFUSE (prune nothing, return a reason) rather than guess when:
+ *   - the index cannot name a live dir (`liveDir == null`) — ambiguous, so a
+ *     prune could delete the real install; or
+ *   - the named live dir is not present on disk — we cannot confirm which of
+ *     the on-disk dirs is real, so pruning any is unsafe.
+ * The old shortest-name heuristic could drop the longer `__openclaw-generation__`
+ * dir even when that was the registered/live one — that path is gone.
+ */
+function scanPrunableDirs(
+  home: string,
+  pluginId: string,
+  liveDir: string | null,
+): { prune: string[]; refused?: string } {
+  let dirs: string[];
   try {
-    const dirs = fs
+    dirs = fs
       .readdirSync(path.join(home, '.openclaw', 'npm', 'projects'))
       .filter((d) => d.includes(pluginId));
-    if (canonical) return dirs.filter((d) => d !== canonical);
-    // No canonical resolvable: keep the shortest (likely the base install), prune the rest.
-    const sorted = [...dirs].sort((a, b) => a.length - b.length);
-    return sorted.slice(1);
   } catch {
-    return [];
+    return { prune: [] };
   }
+  if (dirs.length <= 1) return { prune: [] };
+  if (!liveDir) {
+    return {
+      prune: [],
+      refused: `refusing to prune ${dirs.length} duplicate project dir(s): the authoritative SQLite index does not resolve a live install dir — cannot safely tell which to keep. Resolve manually.`,
+    };
+  }
+  if (!dirs.includes(liveDir)) {
+    return {
+      prune: [],
+      refused: `refusing to prune duplicate project dir(s): the index's live install dir (${liveDir}) is not present on disk — cannot safely tell which to keep. Resolve manually.`,
+    };
+  }
+  return { prune: dirs.filter((d) => d !== liveDir) };
 }

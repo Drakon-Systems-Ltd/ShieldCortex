@@ -1794,6 +1794,20 @@ export async function checkOpenClawPluginLoadState(
   switch (verdict.state) {
     case 'not-installed':
       return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
+    case 'index-unreadable':
+      // DIAGNOSTIC-UNAVAILABLE, not a security fail-open: a broken better-sqlite3
+      // binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
+      // installed_plugin_index table all make the roster unreadable. We CANNOT
+      // confirm the plugin is loaded — but reporting "UNPROTECTED" here would be a
+      // false alarm on a healthy box whose only fault is the DB engine. Warn and
+      // point at repair (whose pass-1 rebuilds the binding), never fail. (#74 finding 2)
+      return {
+        label,
+        status: 'warn',
+        message:
+          'cannot read OpenClaw\'s plugin roster (SQLite index unreadable — broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw) — cannot confirm the realtime plugin is loaded; NOT necessarily unprotected',
+        fix,
+      };
     case 'enabled-not-loaded':
       return {
         label,
@@ -1824,7 +1838,15 @@ export async function checkOpenClawPluginLoadState(
         fix,
       };
     default:
-      return { label, status: 'pass', message: `realtime plugin loaded + enforcing (v${verdict.onDiskVersion ?? verdict.expectedVersion})` };
+      // Roster-confirmed loaded, but doctor does NOT run the live enforcement
+      // canary (that needs gateway consent) — so it must not claim "enforcing"
+      // from roster presence alone (#74 attempt #3 was roster-present-but-not-
+      // enforcing). Say "loaded (roster-confirmed)"; point at repair's canary. (#74 finding 6)
+      return {
+        label,
+        status: 'pass',
+        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — run \`shieldcortex repair\` with SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 to prove it live`,
+      };
   }
 }
 

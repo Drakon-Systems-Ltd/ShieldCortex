@@ -1,10 +1,13 @@
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
+import semver from 'semver';
 import {
   readPluginInstallIndex,
   REALTIME_PLUGIN_ID,
   type PluginIndexRow,
 } from '../integrations/openclaw-plugin-index.js';
+import { readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 
 /**
  * Honest-state post-install/enable self-check (#74 deliverable 2).
@@ -40,6 +43,8 @@ export interface SelfCheckVerdict {
   ok: boolean;
   rosterProof: boolean;
   canaryProof: boolean;
+  /** onDiskVersion >= expectedVersion (inert/true when no expectedVersion given). */
+  versionProof: boolean;
   reasons: string[];
 }
 
@@ -47,11 +52,20 @@ export interface SelfCheckInput {
   pluginId: string;
   index: PluginIndexRow | null;
   canary: CanaryResult | null;
+  /** The build the flow expects to be enforcing; enables the version proof. */
+  expectedVersion?: string;
+  /** Ground-truth on-disk version, for the version proof. */
+  onDiskVersion?: string | null;
 }
 
 /**
- * Pure combiner: success requires BOTH proofs. No disk, no gateway — so the
- * both-proofs-or-fail contract is exhaustively unit-tested.
+ * Pure combiner: success requires ALL proofs. No disk, no gateway — so the
+ * all-proofs-or-fail contract is exhaustively unit-tested.
+ *
+ * The version proof (#3) makes a silent downgrade impossible to report as
+ * success: an unpinned `plugins update` that re-resolves to a lower build (the
+ * 4.25.4 class) leaves onDiskVersion < expectedVersion, which HARD-FAILS here
+ * even when the roster and canary both pass.
  */
 export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
   const { pluginId, index, canary } = input;
@@ -79,13 +93,34 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     reasons.push('canary proof FAILED: canary denied but no audit entry appeared — cannot prove the interceptor fired');
   }
 
-  return { ok: rosterProof && canaryProof, rosterProof, canaryProof, reasons };
+  // Version proof: onDisk must be >= expected. Inert (true) when the caller
+  // supplied no expectedVersion (e.g. pure roster+canary unit tests).
+  let versionProof = true;
+  if (input.expectedVersion) {
+    const onDisk = semver.valid(input.onDiskVersion ?? '') ?? semver.valid(semver.coerce(input.onDiskVersion ?? '') ?? '');
+    const expected = semver.valid(input.expectedVersion) ?? semver.valid(semver.coerce(input.expectedVersion) ?? '');
+    if (!onDisk) {
+      versionProof = false;
+      reasons.push(`version proof FAILED: could not read the on-disk plugin version to compare against expected ${input.expectedVersion}`);
+    } else if (expected && semver.lt(onDisk, expected)) {
+      versionProof = false;
+      reasons.push(`version proof FAILED: on-disk build ${onDisk} is OLDER than expected ${expected} — a silent downgrade (the 4.25.4 class); refuse it`);
+    } else {
+      reasons.push(`version proof: on-disk build ${onDisk} satisfies expected ${expected ?? input.expectedVersion}`);
+    }
+  }
+
+  return { ok: rosterProof && canaryProof && versionProof, rosterProof, canaryProof, versionProof, reasons };
 }
 
 export interface RunSelfCheckOptions {
   pluginId?: string;
+  /** The build the flow expects to be enforcing; enables the version proof (#3). */
+  expectedVersion?: string;
   /** Injectable index reader (defaults to the live SQLite read). */
   readIndex?: (home: string) => PluginIndexRow | null;
+  /** Injectable on-disk version reader (defaults to the live package.json read). */
+  readOnDiskVersion?: (home: string) => string | null;
   /** Injectable live enforcement probe (defaults to the guarded real probe). */
   canaryProbe?: (home: string, pluginId: string) => Promise<CanaryResult>;
 }
@@ -107,59 +142,136 @@ export async function runPluginSelfCheck(
 ): Promise<SelfCheckRunResult> {
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
   const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
+  const readOnDisk = options.readOnDiskVersion ?? ((h: string) => readInstalledRealtimePluginVersion(h));
   const probe = options.canaryProbe ?? defaultCanaryProbe;
 
   const index = readIndex(home);
+  const onDiskVersion = options.expectedVersion ? readOnDisk(home) : null;
   const canary = await probe(home, pluginId);
-  const verdict = evaluateSelfCheck({ pluginId, index, canary });
+  const verdict = evaluateSelfCheck({
+    pluginId,
+    index,
+    canary,
+    expectedVersion: options.expectedVersion,
+    onDiskVersion,
+  });
   return { ...verdict, index, canary };
 }
 
+/** Injectable seams for the live enforcement canary, so the wiring is unit-tested. */
+export interface CanaryProbeDeps {
+  /** Monotonic-ish clock (ms). */
+  now: () => number;
+  /** Generates the unique per-probe nonce the synthetic op is tagged with. */
+  makeNonce: () => string;
+  /**
+   * Drives a synthetic, side-effect-free known-bad operation tagged with
+   * `nonce` through the plugin's own `before_tool_call` interception path.
+   * Returns whether it was actually dispatched (false when guarded/unavailable).
+   */
+  triggerSyntheticOp: (home: string, pluginId: string, nonce: string) => Promise<{ dispatched: boolean; detail?: string }>;
+  /** Looks for a FRESH deny (>= probe start) carrying `nonce` in the audit log. */
+  findFresh: (home: string, query: FreshEnforcementQuery) => { found: boolean; at?: string };
+}
+
 /**
- * The real live enforcement canary. GUARDED: it refuses to run under a Jest
- * worker and without the explicit `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1` consent
- * — mirroring the gateway-restart safety gate — because a live probe drives a
- * real tool call through the running gateway. When it cannot run it returns
- * `ran:false` so the self-check fails loudly instead of silently passing.
+ * The real live enforcement canary (deps default to the guarded live seams).
  *
- * Under consent it corroborates enforcement from the realtime audit log: a
- * recent deny entry proves the interceptor is both loaded and firing. Full
- * active-probe (synthesising a known-bad op) lands on the sacrificial env per
- * the #74 rollout plan; the audit-corroboration path here never fabricates a
- * pass — no recent deny ⇒ `denied:false`.
+ * This is a LIVE PROBE, not an audit-log grep: it stamps a unique nonce, drives
+ * a synthetic known-bad op through the interceptor, then requires an audit entry
+ * that is BOTH newer than probe start AND carries that nonce. A stale pre-break
+ * deny (the aiquant #74 timeline: last real deny at 10:40, interceptor dropped,
+ * probe runs at 10:50) satisfies NEITHER gate ⇒ `denied:false` ⇒ the self-check
+ * fails loudly instead of reporting "enforcing" off a dead interceptor.
  */
-export async function defaultCanaryProbe(home: string, _pluginId: string): Promise<CanaryResult> {
-  if (process.env.JEST_WORKER_ID !== undefined) {
-    return { ran: false, denied: false, auditEntryFound: false, detail: 'skipped under test runner' };
-  }
-  if (process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY !== '1') {
+export async function runCanaryProbe(home: string, pluginId: string, deps: CanaryProbeDeps): Promise<CanaryResult> {
+  const nonce = deps.makeNonce();
+  const sinceMs = deps.now();
+  const trigger = await deps.triggerSyntheticOp(home, pluginId, nonce);
+  if (!trigger.dispatched) {
     return {
       ran: false,
       denied: false,
       auditEntryFound: false,
-      detail: 'live canary requires SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 (drives a real gateway tool call)',
+      detail: trigger.detail ?? 'synthetic canary op was not dispatched — cannot prove the interceptor is live',
     };
   }
-
-  // Consented: corroborate live enforcement from the realtime audit log.
-  const recent = findRecentEnforcementEntry(home);
+  const fresh = deps.findFresh(home, { nonce, sinceMs });
   return {
     ran: true,
-    denied: recent.found,
-    auditEntryFound: recent.found,
-    detail: recent.found
-      ? `most recent realtime audit deny at ${recent.at}`
-      : 'no recent enforcement entry in the realtime audit log',
+    denied: fresh.found,
+    auditEntryFound: fresh.found,
+    detail: fresh.found
+      ? `interceptor denied + audited the synthetic canary (nonce ${nonce}) at ${fresh.at}`
+      : `synthetic canary op dispatched (nonce ${nonce}) but NO fresh matching deny appeared — interceptor loaded-but-not-enforcing or unloaded`,
   };
 }
 
 /**
- * Look for a recent deny/block entry in `~/.shieldcortex/audit/realtime-*.jsonl`.
+ * The default live enforcement canary. Its live seam
+ * ({@link defaultTriggerSyntheticOp}) is GUARDED on `JEST_WORKER_ID` +
+ * `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1` (mirroring the gateway-restart gate), so
+ * under a test runner or without consent the op is never dispatched and the
+ * probe returns `ran:false` — a hard, honest fail rather than a silent pass.
+ */
+export async function defaultCanaryProbe(home: string, pluginId: string): Promise<CanaryResult> {
+  return runCanaryProbe(home, pluginId, {
+    now: () => Date.now(),
+    makeNonce: () => `sc-canary-${randomUUID()}`,
+    triggerSyntheticOp: defaultTriggerSyntheticOp,
+    findFresh: findFreshEnforcementEntry,
+  });
+}
+
+/**
+ * The guarded live dispatch seam. Refuses to drive a real gateway operation
+ * under a Jest worker or without the explicit `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1`
+ * consent env. Returns `dispatched:false` when it cannot run so the probe fails
+ * closed. The actual active synthetic dispatch is performed on the sacrificial
+ * rollout env per the #74 plan; this box (frozen toggle) never dispatches.
+ */
+export async function defaultTriggerSyntheticOp(
+  _home: string,
+  _pluginId: string,
+  _nonce: string,
+): Promise<{ dispatched: boolean; detail?: string }> {
+  if (process.env.JEST_WORKER_ID !== undefined) {
+    return { dispatched: false, detail: 'skipped under test runner' };
+  }
+  if (process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY !== '1') {
+    return {
+      dispatched: false,
+      detail: 'live canary requires SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 (drives a real gateway tool call)',
+    };
+  }
+  // Consent given: the active synthetic dispatch is wired on the sacrificial
+  // rollout env, not here — never fabricate a dispatch on an unproven path.
+  return {
+    dispatched: false,
+    detail: 'active synthetic-op dispatch is not wired in this build — roster proof stands; enforcement not actively proven',
+  };
+}
+
+export interface FreshEnforcementQuery {
+  /** Unique per-probe marker the synthetic op carried; the audit entry must include it. */
+  nonce: string;
+  /** Probe start (ms). The matching deny must be at/after this instant. */
+  sinceMs: number;
+}
+
+/**
+ * Look for a FRESH, nonce-matched deny/block in `~/.shieldcortex/audit/realtime-*.jsonl`.
+ *
+ * Both gates are required and each independently kills the #74 false-positive:
+ *   - timestamp >= probe start  ⇒ a stale pre-break deny cannot count, and
+ *   - the raw entry contains the unique probe nonce ⇒ unrelated live traffic
+ *     cannot count.
+ *
  * Best-effort and read-only; returns { found:false } on any error.
  */
-export function findRecentEnforcementEntry(
+export function findFreshEnforcementEntry(
   home: string,
-  withinMs = 10 * 60 * 1000,
+  query: FreshEnforcementQuery,
 ): { found: boolean; at?: string } {
   try {
     const auditDir = path.join(home, '.shieldcortex', 'audit');
@@ -168,12 +280,13 @@ export function findRecentEnforcementEntry(
       .filter((f) => f.startsWith('realtime-') && f.endsWith('.jsonl'))
       .sort()
       .reverse();
-    const cutoff = Date.now() - withinMs;
     for (const file of files.slice(0, 2)) {
       const lines = fs.readFileSync(path.join(auditDir, file), 'utf-8').trim().split('\n');
       for (let i = lines.length - 1; i >= 0; i--) {
         const line = lines[i].trim();
         if (!line) continue;
+        // Nonce gate first: the unique marker must appear in the raw entry.
+        if (!line.includes(query.nonce)) continue;
         let ev: { ts?: string; timestamp?: string; decision?: string; action?: string };
         try {
           ev = JSON.parse(line);
@@ -184,7 +297,8 @@ export function findRecentEnforcementEntry(
         if (!/deny|block/.test(decision)) continue;
         const tsStr = ev.ts ?? ev.timestamp;
         const ts = tsStr ? Date.parse(tsStr) : NaN;
-        if (!Number.isNaN(ts) && ts >= cutoff) return { found: true, at: tsStr };
+        // Freshness gate: strictly at/after probe start.
+        if (!Number.isNaN(ts) && ts >= query.sinceMs) return { found: true, at: tsStr };
       }
     }
   } catch {

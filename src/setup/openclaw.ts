@@ -1087,18 +1087,24 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     try {
       const { runPluginSelfCheck } = await import('./openclaw-selfcheck.js');
       const home = resolveUserHome();
-      const check = await runPluginSelfCheck(home);
+      const check = await runPluginSelfCheck(home, { expectedVersion: readSelfVersion() ?? undefined });
       console.log('');
       if (check.ok) {
-        console.log('✓ Honest-state self-check: plugin confirmed loaded (roster) and enforcing (canary).');
+        console.log('✓ Honest-state self-check: plugin confirmed loaded (roster), enforcing (live canary), version ≥ expected.');
       } else if (!check.rosterProof) {
         console.warn('✗ Honest-state self-check FAILED: the plugin is NOT in OpenClaw\'s loaded roster after restart.');
         console.warn('  Protection would report ON while actually OFF (issue #74). Reconcile the install:');
         console.warn('    SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 shieldcortex repair');
         process.exitCode = 1;
+      } else if (!check.versionProof) {
+        console.warn('✗ Honest-state self-check FAILED: the loaded plugin version is OLDER than expected (silent downgrade, #74).');
+        console.warn('  Reinstall pinned to the expected version:');
+        console.warn('    SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1 shieldcortex repair');
+        process.exitCode = 1;
       } else {
-        // Loaded, but enforcement not proven (canary needs explicit consent).
-        console.log('• Plugin is loaded in the roster. Enforcement NOT yet verified — confirm the live canary with:');
+        // Loaded + version OK, but enforcement not actively proven (the live
+        // canary needs explicit consent to drive a real gateway tool call).
+        console.log('• Plugin is loaded in the roster. Enforcement NOT actively proven — confirm the live canary with:');
         console.log('    SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex repair');
       }
     } catch {

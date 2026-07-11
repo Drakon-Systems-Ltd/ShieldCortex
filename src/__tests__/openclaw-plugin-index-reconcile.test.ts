@@ -89,6 +89,38 @@ describe('reconcilePluginState — #74 field fixtures', () => {
     expect(verdict.metadataConflict).toBe(true);
   });
 
+  it('#74 finding 5: enabled-but-not-loaded WITH two project dirs is still a hard fail (aiquant)', () => {
+    const fx = loadFixture('enabled-not-loaded-two-dirs');
+    const verdict = reconcilePluginState(fx.input);
+    expect(verdict.state).toBe('enabled-not-loaded');
+    expect(verdict.severity).toBe('fail');
+    // The pure classifier is unchanged by the extra dir; the ORCHESTRATOR prunes
+    // the stale one (see openclaw-reconcile-prune.test.ts) — this fixture is the
+    // input that masked finding 5 (the old enabled-not-loaded fixture had 1 dir).
+    expect((fx.input.projectDirs ?? []).length).toBe(2);
+  });
+
+  it('#74 finding 2: an UNREADABLE index (null) with enabled+installed is index-unreadable (warn), NOT a false UNPROTECTED', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    // Simulate a broken better-sqlite3 binding / locked DB / pre-2026.6.1 layout:
+    // readPluginInstallIndex returns null. On-disk build is still present.
+    const verdict = reconcilePluginState({ ...fx.input, index: null });
+    expect(verdict.state).toBe('index-unreadable');
+    expect(verdict.severity).toBe('warn');
+    expect(verdict.indexReadable).toBe(false);
+    // Must NOT be misreported as the security fail-open.
+    expect(verdict.state).not.toBe('enabled-not-loaded');
+    expect(verdict.reasons.join(' ')).toMatch(/unreadable|cannot read|sqlite/i);
+  });
+
+  it('#74 finding 2: a READABLE index that omits the plugin from the roster IS the hard fail', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    const verdict = reconcilePluginState(fx.input);
+    expect(verdict.indexReadable).toBe(true);
+    expect(verdict.state).toBe('enabled-not-loaded');
+    expect(verdict.severity).toBe('fail');
+  });
+
   it('is pure: does not mutate its input', () => {
     const fx = loadFixture('enabled-not-loaded');
     const snapshot = JSON.stringify(fx.input);
