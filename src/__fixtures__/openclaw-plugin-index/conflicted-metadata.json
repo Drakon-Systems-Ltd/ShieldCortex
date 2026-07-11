@@ -1,0 +1,39 @@
+{
+  "description": "Latent conflict before it becomes a drop: legacy installs.json still records 4.47.2 at the canonical dir, but the SQLite index resolved a DIFFERENT install path (a duplicate __openclaw-generation__ dir from a --force install) at the same version. The plugin is still loaded, but installs.json and the index disagree on the source of truth — the exact precondition that silently drops the plugin on the next toggle. Reconcile to the index (authoritative) via update.",
+  "input": {
+    "pluginId": "shieldcortex-realtime",
+    "expectedVersion": "4.47.2",
+    "config": { "enabled": true, "inAllow": true },
+    "installsJson": {
+      "version": "4.47.2",
+      "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+    },
+    "index": {
+      "installRecords": {
+        "shieldcortex-realtime": {
+          "source": "npm",
+          "version": "4.47.2",
+          "resolvedVersion": "4.47.2",
+          "installPath": "/home/case/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717__openclaw-generation__1752230000-4.47.2-abc/node_modules/@drakon-systems/shieldcortex-realtime"
+        }
+      },
+      "plugins": [
+        { "pluginId": "shieldcortex-realtime", "enabled": true, "origin": "npm" }
+      ],
+      "warning": "Left plugin install index in place because shared SQLite state has conflicting plugin install metadata for: brave, codex, shieldcortex-realtime",
+      "generatedAtMs": 1752230999000
+    },
+    "onDiskVersion": "4.47.2",
+    "projectDirs": [
+      "drakon-systems-shieldcortex-realtime-6e7e2e7717",
+      "drakon-systems-shieldcortex-realtime-6e7e2e7717__openclaw-generation__1752230000-4.47.2-abc"
+    ]
+  },
+  "expected": {
+    "state": "conflicted-metadata",
+    "severity": "warn",
+    "recommendedAction": "update-openclaw-tracked",
+    "loadedInIndex": true,
+    "enabledInConfig": true
+  }
+}

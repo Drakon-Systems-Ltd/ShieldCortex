@@ -1,0 +1,26 @@
+{
+  "description": "Clean host with no realtime plugin anywhere: no config entry, no installs.json record, no index record, no on-disk build. The reconciler must treat this as not-installed (info), never as a fail — absent OpenClaw/plugin is a legitimate state, not a drop.",
+  "input": {
+    "pluginId": "shieldcortex-realtime",
+    "expectedVersion": "4.47.2",
+    "config": { "enabled": null, "inAllow": false },
+    "installsJson": null,
+    "index": {
+      "installRecords": {},
+      "plugins": [
+        { "pluginId": "brave", "enabled": true, "origin": "npm" }
+      ],
+      "warning": null,
+      "generatedAtMs": 1752230565000
+    },
+    "onDiskVersion": null,
+    "projectDirs": []
+  },
+  "expected": {
+    "state": "not-installed",
+    "severity": "ok",
+    "recommendedAction": "install",
+    "loadedInIndex": false,
+    "enabledInConfig": false
+  }
+}

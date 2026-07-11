@@ -1,0 +1,40 @@
+{
+  "description": "aiquant silent-drop WITH the leftover duplicate dir (2026-07-11, #74 finding 5). Same fail-open as enabled-not-loaded — config enabled:true but ABSENT from the loaded roster — but TWO project dirs are on disk: the base install the index records, plus a stale `__openclaw-generation__` dir left by a prior --force install. The leftover dup is the silent-drop precondition; the reconciler must prune the STALE one (never the index/live one) so a future toggle cannot re-resolve to it. The index install record still points at the base dir, so THAT is the live dir to keep.",
+  "input": {
+    "pluginId": "shieldcortex-realtime",
+    "expectedVersion": "4.47.2",
+    "config": { "enabled": true, "inAllow": true },
+    "installsJson": {
+      "version": "4.47.2",
+      "installPath": "/home/aiquant/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+    },
+    "index": {
+      "installRecords": {
+        "shieldcortex-realtime": {
+          "source": "npm",
+          "version": "4.47.2",
+          "resolvedVersion": "4.47.2",
+          "installPath": "/home/aiquant/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-6e7e2e7717/node_modules/@drakon-systems/shieldcortex-realtime"
+        }
+      },
+      "plugins": [
+        { "pluginId": "brave", "enabled": true, "origin": "npm" },
+        { "pluginId": "codex", "enabled": true, "origin": "npm" }
+      ],
+      "warning": "Left plugin install index in place because shared SQLite state has conflicting plugin install metadata for: brave, codex, shieldcortex-realtime",
+      "generatedAtMs": 1752221565000
+    },
+    "onDiskVersion": "4.47.2",
+    "projectDirs": [
+      "drakon-systems-shieldcortex-realtime-6e7e2e7717",
+      "drakon-systems-shieldcortex-realtime-6e7e2e7717__openclaw-generation__1752230000-4.47.2-abc"
+    ]
+  },
+  "expected": {
+    "state": "enabled-not-loaded",
+    "severity": "fail",
+    "recommendedAction": "update-openclaw-tracked",
+    "loadedInIndex": false,
+    "enabledInConfig": true
+  }
+}

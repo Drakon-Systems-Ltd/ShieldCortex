@@ -1,0 +1,544 @@
+import fs from 'fs';
+import path from 'path';
+import { createRequire } from 'module';
+import semver from 'semver';
+import {
+  resolveRealtimePluginInstallPath,
+  readInstalledRealtimePluginVersion,
+} from './openclaw-plugin-state.js';
+
+/**
+ * Reconciling OpenClaw plugin-install state across its three authoritative
+ * layers, and reading the new SQLite install index that OpenClaw 2026.6.1+
+ * treats as ground truth.
+ *
+ * Field incident #74 (aiquant, 2026-07-11): after a disable→enable→restart
+ * cycle the realtime interceptor was `enabled:true` in config yet ABSENT from
+ * the loaded roster — a security fail-open (protection reports ON while OFF).
+ * The root cause was a conflict between the legacy
+ * `~/.openclaw/plugins/installs.json` and the shared SQLite
+ * `installed_plugin_index`; a toggled plugin re-resolves its install record
+ * from the conflicted index and gets silently dropped.
+ *
+ * This module adds the missing SQLite read + a PURE reconciler that classifies
+ * the state and recommends the correct remediation — crucially, routing
+ * OpenClaw-tracked plugins through `openclaw plugins update` (not the SC install
+ * path, which skips them) and refusing version downgrades.
+ */
+
+export const REALTIME_PLUGIN_ID = 'shieldcortex-realtime';
+
+// ── Parsed shapes of the three layers ──────────────────────────────────────
+
+/** One entry from `installed_plugin_index.install_records_json`. */
+export interface IndexInstallRecord {
+  source?: string;
+  version?: string;
+  resolvedVersion?: string;
+  installPath?: string;
+}
+
+/** One entry from `installed_plugin_index.plugins_json` — the LOADED roster. */
+export interface IndexPluginEntry {
+  pluginId: string;
+  enabled?: boolean;
+  origin?: string;
+  rootDir?: string;
+}
+
+/** The latest `installed_plugin_index` row, parsed. */
+export interface PluginIndexRow {
+  installRecords: Record<string, IndexInstallRecord>;
+  plugins: IndexPluginEntry[];
+  warning?: string | null;
+  generatedAtMs?: number;
+}
+
+/** The legacy `installs.json` record for a plugin. */
+export interface InstallsJsonRecord {
+  version?: string | null;
+  installPath?: string | null;
+}
+
+export interface ReconcileInput {
+  pluginId: string;
+  /** The version the package expects to be enforcing (pkg.version). */
+  expectedVersion: string;
+  /** `~/.openclaw/openclaw.json` → plugins.entries[id].enabled + plugins.allow. */
+  config: { enabled: boolean | null; inAllow: boolean };
+  /** Legacy installs.json record, or null when absent. */
+  installsJson: InstallsJsonRecord | null;
+  /** Parsed latest SQLite index row, or null when the index is unreadable. */
+  index: PluginIndexRow | null;
+  /** Ground-truth version from the plugin's on-disk package.json, or null. */
+  onDiskVersion: string | null;
+  /** `~/.openclaw/npm/projects/*` dir names matching the plugin. */
+  projectDirs?: string[];
+}
+
+export type PluginLoadState =
+  | 'healthy'
+  | 'not-installed'
+  | 'enabled-not-loaded'
+  | 'index-unreadable'
+  | 'version-regressed'
+  | 'conflicted-metadata'
+  | 'duplicate-install';
+
+export type ReconcileSeverity = 'ok' | 'warn' | 'fail';
+
+export type RecommendedAction =
+  | 'none'
+  | 'install'
+  | 'update-openclaw-tracked'
+  | 'reinstall-pinned'
+  | 'dedupe-and-reload';
+
+export interface ReconcileVerdict {
+  state: PluginLoadState;
+  severity: ReconcileSeverity;
+  recommendedAction: RecommendedAction;
+  enabledInConfig: boolean;
+  /** plugins_json roster carries an enabled entry for the plugin. */
+  loadedInIndex: boolean;
+  /** The SQLite install index was actually readable (false ⇒ we CANNOT know
+   * whether the plugin is loaded — never claim UNPROTECTED off an unreadable index). */
+  indexReadable: boolean;
+  /** An npm install record exists in the SQLite index ⇒ OpenClaw-tracked. */
+  openClawTracked: boolean;
+  /** The index warning string names this plugin (benign on its own). */
+  indexWarnsConflict: boolean;
+  /** installs.json and the SQLite index disagree on path or version. */
+  metadataConflict: boolean;
+  indexVersion: string | null;
+  installsJsonVersion: string | null;
+  onDiskVersion: string | null;
+  expectedVersion: string;
+  reasons: string[];
+}
+
+function coerce(v: string | null | undefined): string | null {
+  if (!v || typeof v !== 'string') return null;
+  const c = semver.valid(v) ?? semver.valid(semver.coerce(v) ?? '');
+  return c ?? null;
+}
+
+/**
+ * Classify a plugin's install state from the three authoritative layers and
+ * recommend the correct remediation. PURE — no disk, no SQLite, no mutation —
+ * so the #74 field states can be replayed as fixtures.
+ */
+export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
+  const { pluginId, expectedVersion, config } = input;
+  const index = input.index ?? null;
+  const projectDirs = input.projectDirs ?? [];
+  const reasons: string[] = [];
+
+  const indexRecord = index?.installRecords?.[pluginId] ?? null;
+  const openClawTracked = Boolean(indexRecord && indexRecord.source === 'npm');
+
+  const enabledInConfig =
+    config.enabled === true || (config.enabled == null && config.inAllow === true);
+
+  const loadedInIndex = Boolean(
+    index?.plugins?.some((p) => p.pluginId === pluginId && p.enabled === true),
+  );
+
+  const installsJsonVersion = input.installsJson?.version ?? null;
+  const indexVersion = indexRecord?.version ?? indexRecord?.resolvedVersion ?? null;
+  const onDiskVersion = input.onDiskVersion ?? null;
+
+  const installed = Boolean(
+    input.installsJson || onDiskVersion || indexRecord || projectDirs.length > 0,
+  );
+
+  // The index warning is present even on healthy hosts (it names every plugin
+  // whose legacy/SQLite metadata differs), so it is a signal, not a verdict.
+  const warning = index?.warning ?? '';
+  const indexWarnsConflict =
+    typeof warning === 'string' &&
+    /conflicting plugin install metadata/i.test(warning) &&
+    warning.includes(pluginId);
+
+  // Actionable disagreement between the two install layers.
+  const installsPath = input.installsJson?.installPath ?? null;
+  const indexPath = indexRecord?.installPath ?? null;
+  const pathConflict = Boolean(installsPath && indexPath && installsPath !== indexPath);
+  const versionLayerConflict = Boolean(
+    installsJsonVersion && indexVersion && installsJsonVersion !== indexVersion,
+  );
+  const metadataConflict = pathConflict || versionLayerConflict;
+
+  // Effective running version: on-disk is ground truth, else the index record.
+  const effective = coerce(onDiskVersion) ?? coerce(indexVersion);
+  const expected = coerce(expectedVersion);
+  const regressed = Boolean(effective && expected && semver.lt(effective, expected));
+
+  const indexReadable = index != null;
+
+  const base = {
+    enabledInConfig,
+    loadedInIndex,
+    indexReadable,
+    openClawTracked,
+    indexWarnsConflict,
+    metadataConflict,
+    indexVersion,
+    installsJsonVersion,
+    onDiskVersion,
+    expectedVersion,
+  };
+
+  // ── Priority order: most severe first ────────────────────────────────────
+
+  // 1. Nothing installed anywhere.
+  if (!installed) {
+    reasons.push('plugin not installed on this host (no config, installs.json, index record, or on-disk build)');
+    return { ...base, state: 'not-installed', severity: 'ok', recommendedAction: 'install', reasons };
+  }
+
+  // 2. Cannot read the loaded roster (SQLite index unreadable): a broken
+  //    better-sqlite3 binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
+  //    `installed_plugin_index` table all return a null index. We literally
+  //    cannot know whether the plugin is loaded — reporting the #74 fail-open
+  //    here would be a FALSE "UNPROTECTED" on a healthy box (the very binding
+  //    fault repair pass-1 exists to fix). Classify as a diagnostic gap (warn),
+  //    NEVER as a security fail-open. Only reached when enabled + installed but
+  //    the index is unreadable; a genuinely uninstalled plugin fell out at (1).
+  if (enabledInConfig && !loadedInIndex && index == null) {
+    reasons.push('cannot read the loaded roster — the SQLite plugin install index is unreadable (broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw with no installed_plugin_index table); cannot confirm whether the interceptor is loaded');
+    return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+  }
+
+  // 3. THE #74 silent drop: enabled in config but missing from a READABLE roster.
+  if (enabledInConfig && !loadedInIndex) {
+    reasons.push('enabled:true in config but ABSENT from the loaded roster (plugins_json) — interceptor not loaded, host unprotected while status reports ON');
+    if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
+    return {
+      ...base,
+      state: 'enabled-not-loaded',
+      severity: 'fail',
+      recommendedAction: openClawTracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
+      reasons,
+    };
+  }
+
+  // 4. Version regression (e.g. reinstall regressed 4.47.2 → 4.25.4).
+  if (regressed) {
+    reasons.push(`running version ${effective} is older than expected ${expected} — refuse downgrade, reinstall pinned`);
+    return { ...base, state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
+  }
+
+  // 5. installs.json ↔ SQLite index disagree (the precondition for a future drop).
+  if (metadataConflict) {
+    if (pathConflict) reasons.push(`installs.json install path disagrees with the SQLite index (${installsPath} vs ${indexPath})`);
+    if (versionLayerConflict) reasons.push(`installs.json version ${installsJsonVersion} disagrees with index version ${indexVersion}`);
+    return {
+      ...base,
+      state: 'conflicted-metadata',
+      severity: 'warn',
+      recommendedAction: openClawTracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
+      reasons,
+    };
+  }
+
+  // 6. Duplicate project dirs accumulated on disk (authoritative layers agree).
+  if (projectDirs.length > 1) {
+    reasons.push(`${projectDirs.length} plugin project dirs on disk — prune the stale duplicate so a future toggle cannot re-resolve to it`);
+    return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
+  }
+
+  reasons.push('enabled, loaded in roster, versions agree at the expected build');
+  return { ...base, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
+}
+
+// ── Remediation planner (pure) ──────────────────────────────────────────────
+
+export type ReconcileStepKind =
+  | 'openclaw-update'
+  | 'openclaw-install-pinned'
+  | 'openclaw-install'
+  | 'prune-duplicate-dirs'
+  | 'gateway-reload'
+  | 'self-check';
+
+export interface ReconcileStep {
+  kind: ReconcileStepKind;
+  /** argv passed to the `openclaw` binary, when the step shells out. */
+  command?: string[];
+  /** Project dir names to remove, for the prune step. */
+  dirs?: string[];
+  description: string;
+}
+
+export interface PlanOptions {
+  pluginId: string;
+  /** npm package spec, e.g. `@drakon-systems/shieldcortex-realtime`. */
+  packageName: string;
+  expectedVersion: string;
+  /** Stale project dirs to prune (the canonical dir is excluded by the caller). */
+  duplicateDirsToPrune?: string[];
+}
+
+/**
+ * Turn a verdict into an ordered, side-effect-free remediation plan. The
+ * executor runs these behind the gateway-safety guards; keeping the routing
+ * pure lets us prove — in unit tests — that the three aiquant remediation
+ * failures are fixed:
+ *
+ *  - OpenClaw-tracked plugins are refreshed with `plugins update` (the SC
+ *    install path skips them → "source not found").
+ *  - a regressed build is reinstalled PINNED to the expected version (a
+ *    floating spec re-resolved to 4.25.4).
+ *  - every plan ends with a gateway reload + honest-state self-check, so a
+ *    "registered but inactive" outcome cannot be reported as success.
+ */
+export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOptions): ReconcileStep[] {
+  const { packageName, expectedVersion } = opts;
+  const steps: ReconcileStep[] = [];
+  const prune = opts.duplicateDirsToPrune ?? [];
+
+  const pruneStep = (): void => {
+    if (prune.length > 0) {
+      steps.push({
+        kind: 'prune-duplicate-dirs',
+        dirs: prune,
+        description: `prune ${prune.length} stale duplicate project dir(s) so a toggle cannot re-resolve to them`,
+      });
+    }
+  };
+  const reloadThenVerify = (): void => {
+    steps.push({ kind: 'gateway-reload', description: 'reload the OpenClaw gateway so the reconciled plugin loads' });
+    steps.push({ kind: 'self-check', description: 'honest-state self-check: roster proof + live enforcement canary (both required)' });
+  };
+
+  switch (verdict.recommendedAction) {
+    case 'update-openclaw-tracked':
+      pruneStep();
+      steps.push({
+        kind: 'openclaw-update',
+        command: ['plugins', 'update', packageName],
+        description: 'refresh the OpenClaw-tracked plugin via `openclaw plugins update` (the SC install path skips tracked plugins)',
+      });
+      reloadThenVerify();
+      break;
+
+    case 'reinstall-pinned':
+      pruneStep();
+      steps.push({
+        kind: 'openclaw-install-pinned',
+        command: ['plugins', 'install', '--force', `${packageName}@${expectedVersion}`],
+        description: `reinstall pinned to ${expectedVersion} (refuse the downgrade a floating spec re-resolved to)`,
+      });
+      reloadThenVerify();
+      break;
+
+    case 'dedupe-and-reload':
+      pruneStep();
+      steps.push({
+        kind: 'openclaw-update',
+        command: ['plugins', 'update', packageName],
+        description: 'refresh the canonical install after pruning duplicates',
+      });
+      reloadThenVerify();
+      break;
+
+    case 'install':
+      steps.push({
+        kind: 'openclaw-install',
+        command: ['plugins', 'install', `${packageName}@${expectedVersion}`],
+        description: `install the plugin pinned to ${expectedVersion}`,
+      });
+      reloadThenVerify();
+      break;
+
+    case 'none':
+    default:
+      // Healthy: never churn the install — just verify honestly.
+      steps.push({ kind: 'self-check', description: 'verify the healthy state with the honest-state self-check' });
+      break;
+  }
+
+  return steps;
+}
+
+// ── SQLite index reader (best-effort, read-only, never mutates) ─────────────
+
+function openClawSqlitePath(home: string): string {
+  return path.join(home, '.openclaw', 'state', 'openclaw.sqlite');
+}
+
+function safeParse<T>(json: string | null | undefined, fallback: T): T {
+  if (!json || typeof json !== 'string') return fallback;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Read the latest `installed_plugin_index` row from OpenClaw's shared SQLite
+ * state and parse the JSON columns we reconcile against. Opens READ-ONLY and
+ * best-effort — returns null if the DB, table, or better-sqlite3 is unavailable
+ * so callers degrade to the installs.json/on-disk layers rather than throwing.
+ *
+ * Read-only and path-scoped to the supplied `home`, so it is safe to exercise
+ * against a temp fixture DB in tests without ever touching live `~/.openclaw`.
+ */
+export function readPluginInstallIndex(home: string): PluginIndexRow | null {
+  const dbPath = openClawSqlitePath(home);
+  if (!fs.existsSync(dbPath)) return null;
+
+  let db: import('better-sqlite3').Database | null = null;
+  try {
+    // Lazy require so environments without the native binding still load this
+    // module (the pure reconciler above must remain usable everywhere).
+    const require = createRequireSafe();
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const row = db
+      .prepare(
+        'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
+          'FROM installed_plugin_index ORDER BY generated_at_ms DESC LIMIT 1',
+      )
+      .get() as
+      | { install_records_json: string; plugins_json: string; warning: string | null; generated_at_ms: number }
+      | undefined;
+    if (!row) return null;
+    return {
+      installRecords: safeParse<Record<string, IndexInstallRecord>>(row.install_records_json, {}),
+      plugins: safeParse<IndexPluginEntry[]>(row.plugins_json, []),
+      warning: row.warning ?? null,
+      generatedAtMs: row.generated_at_ms,
+    };
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function createRequireSafe(): NodeRequire {
+  return createRequire(import.meta.url);
+}
+
+// ── Disk gatherer: assemble a ReconcileInput from a host's ~/.openclaw ───────
+
+export interface GatherOptions {
+  pluginId?: string;
+  expectedVersion: string;
+  /** Injectable index reader (defaults to the live SQLite read). */
+  readIndex?: (home: string) => PluginIndexRow | null;
+}
+
+function readConfigEnable(home: string, pluginId: string): { enabled: boolean | null; inAllow: boolean } {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')) as {
+      plugins?: { entries?: Record<string, { enabled?: unknown }>; allow?: unknown };
+    };
+    const entry = cfg.plugins?.entries?.[pluginId];
+    const enabled = entry && typeof entry.enabled === 'boolean' ? entry.enabled : null;
+    const allow = Array.isArray(cfg.plugins?.allow) ? (cfg.plugins!.allow as unknown[]) : [];
+    const inAllow = allow.some(
+      (e) => typeof e === 'string' && (e === pluginId || e.endsWith(`/${pluginId}`) || e.includes(`/${pluginId}/`)),
+    );
+    return { enabled, inAllow };
+  } catch {
+    return { enabled: null, inAllow: false };
+  }
+}
+
+function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRecord | null {
+  try {
+    const json = JSON.parse(
+      fs.readFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'), 'utf-8'),
+    ) as { installRecords?: Record<string, { version?: unknown; installPath?: unknown }> };
+    const rec = json.installRecords?.[pluginId];
+    if (!rec) return null;
+    return {
+      version: typeof rec.version === 'string' ? rec.version : null,
+      installPath: typeof rec.installPath === 'string' ? rec.installPath : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function scanProjectDirs(home: string, pluginId: string): string[] {
+  try {
+    return fs
+      .readdirSync(path.join(home, '.openclaw', 'npm', 'projects'))
+      .filter((d) => d.includes(pluginId));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read the three authoritative layers off a host's `~/.openclaw` and assemble a
+ * {@link ReconcileInput}. Takes `home` explicitly (never `os.homedir()`) so it
+ * is fully test-isolable. All reads are best-effort; missing layers degrade to
+ * null/empty rather than throwing.
+ */
+export function gatherReconcileInput(home: string, options: GatherOptions): ReconcileInput {
+  const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
+  const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
+  return {
+    pluginId,
+    expectedVersion: options.expectedVersion,
+    config: readConfigEnable(home, pluginId),
+    installsJson: readInstallsJsonRecord(home, pluginId),
+    index: readIndex(home),
+    onDiskVersion: readInstalledRealtimePluginVersion(home),
+    projectDirs: scanProjectDirs(home, pluginId),
+  };
+}
+
+/** Extract the `~/.openclaw/npm/projects/<name>` directory name from any path
+ * that traverses it, or null when the path does not point into projects/. */
+export function projectDirNameFromPath(p: string | null | undefined): string | null {
+  if (!p || typeof p !== 'string') return null;
+  // Match on the POSIX and platform separators — index paths recorded on the
+  // host are POSIX even when this runs on another platform's path module.
+  for (const sep of new Set([path.sep, '/'])) {
+    const marker = `${sep}.openclaw${sep}npm${sep}projects${sep}`;
+    const idx = p.indexOf(marker);
+    if (idx === -1) continue;
+    const rest = p.slice(idx + marker.length);
+    const name = rest.split(sep)[0];
+    if (name) return name;
+  }
+  return null;
+}
+
+/** The canonical (non-duplicate) project dir, derived from the resolved install
+ * path — used by the reconciler to know which duplicate dirs are prunable. */
+export function canonicalProjectDir(home: string): string | null {
+  return projectDirNameFromPath(resolveRealtimePluginInstallPath(home));
+}
+
+/**
+ * The LIVE project dir the AUTHORITATIVE SQLite index resolves into — the dir
+ * the loaded gateway is actually running from. Derived from the roster entry's
+ * `rootDir` first, then the index install record's `installPath`. This is the
+ * dir that must NEVER be pruned (#74 finding 4): `canonicalProjectDir` above
+ * resolves via installs.json FIRST, which in a conflicted-metadata state points
+ * at the STALE dir — pruning by that would delete the live install. Returns
+ * null when the index cannot name a live dir (⇒ caller must refuse to prune).
+ */
+export function canonicalProjectDirFromIndex(
+  index: PluginIndexRow | null,
+  pluginId: string,
+): string | null {
+  if (!index) return null;
+  const rosterRootDir = index.plugins?.find((p) => p.pluginId === pluginId)?.rootDir ?? null;
+  const fromRoster = projectDirNameFromPath(rosterRootDir);
+  if (fromRoster) return fromRoster;
+  const recordPath = index.installRecords?.[pluginId]?.installPath ?? null;
+  return projectDirNameFromPath(recordPath);
+}
