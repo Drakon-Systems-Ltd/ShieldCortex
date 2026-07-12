@@ -132,28 +132,19 @@ export interface McpServerCommand {
 }
 
 /**
- * Resolve the stdio command an editor (Codex / VS Code Copilot / Cursor) should
- * launch to start the ShieldCortex MCP server.
+ * Resolve the ABSOLUTE `dist/index.js` the MCP server should run. Prefers the
+ * globally-installed package's entry (so an editor points at the user's real
+ * install, not a transient npx/local checkout), falling back to the caller's
+ * bundled entry.
  *
- * Mirrors `claude-md.ts setupGlobalMcp`'s v4.11.1 fix: prefer the installed
- * GLOBAL binary, resolved to an ABSOLUTE path via `which`/`where`, and invoke
- * it directly. The hazard being avoided is `npx -y shieldcortex` as the MCP
- * command — `npx` re-resolves dynamically on every spawn, so a cache shift
- * (version drift / fresh publish / cache miss) silently changes the effective
- * command. Editors hash their MCP config; a changed command changes the hash
- * and resets the active session, wiping context (the 2026-04-22 fleet "fresh
- * session" bug). An absolute path never drifts.
+ * The global `shieldcortex` bin IS `dist/index.js` (package.json `bin` maps it
+ * directly), so `realpath`-ing the resolved bin yields that install's absolute
+ * entry file — no layout guessing.
  *
- * Fallback when no global binary is on PATH: `node <absoluteDistEntry>` — the
- * bundled `dist/index.js` resolved to an absolute path from this module's
- * location. That is ALSO stable (a fixed absolute path, not `npx`), so a
- * single-shot install without a global binary still gets a hash-stable command
- * rather than re-introducing the npx hash-thrash class.
- *
- * @param distEntry Absolute path to the package's `dist/index.js` (the caller
- *   resolves it from its own `__dirname` so we don't guess the layout).
+ * @param distEntry Absolute path to this package's `dist/index.js` (the caller
+ *   resolves it from its own `__dirname`), used when no global install resolves.
  */
-export function resolveMcpServerCommand(distEntry: string): McpServerCommand {
+export function resolveMcpEntryPath(distEntry: string): string {
   try {
     const whichCmd = process.platform === 'win32' ? 'where' : 'which';
     const resolved = execSync(`${whichCmd} shieldcortex`, {
@@ -164,10 +155,41 @@ export function resolveMcpServerCommand(distEntry: string): McpServerCommand {
       .split('\n')[0]
       .trim();
     if (resolved && fs.existsSync(resolved)) {
-      return { command: resolved, args: [] };
+      // The bin is a symlink/wrapper to the install's dist/index.js — follow it
+      // to the real absolute entry file.
+      const real = fs.realpathSync(resolved);
+      if (real && path.basename(real) === 'index.js' && fs.existsSync(real)) {
+        return real;
+      }
     }
   } catch {
     // No global install on PATH — fall through to the bundled entry.
   }
-  return { command: 'node', args: [distEntry] };
+  return distEntry;
+}
+
+/**
+ * Resolve the stdio command an editor (Codex / VS Code Copilot / Cursor) should
+ * launch to start the ShieldCortex MCP server.
+ *
+ * PATH-IMMUNE by construction (issue #76): emits the ABSOLUTE node binary
+ * (`process.execPath`) plus the ABSOLUTE `dist/index.js`. It never emits the
+ * `shieldcortex` shebang bin as the command — that relies on `#!/usr/bin/env
+ * node` finding `node` on PATH, and GUI/launchd spawn environments (VS Code,
+ * Claude Code's own launcher) frequently lack the node prefix, so the process
+ * dies before the MCP handshake and the operator sees only a bare JSON-RPC
+ * `-32000` with no explanation. An absolute-node + absolute-script argv has no
+ * PATH dependency at all.
+ *
+ * Also never `npx -y shieldcortex`: `npx` re-resolves dynamically on every
+ * spawn, so a cache shift (version drift / fresh publish / cache miss) silently
+ * changes the effective command. Editors hash their MCP config; a changed
+ * command changes the hash and resets the active session, wiping context (the
+ * 2026-04-22 fleet "fresh session" bug). Two absolute paths never drift.
+ *
+ * @param distEntry Absolute path to this package's `dist/index.js` (the caller
+ *   resolves it from its own `__dirname` so we don't guess the layout).
+ */
+export function resolveMcpServerCommand(distEntry: string): McpServerCommand {
+  return { command: process.execPath, args: [resolveMcpEntryPath(distEntry)] };
 }
