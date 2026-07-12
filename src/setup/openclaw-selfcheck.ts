@@ -1,13 +1,18 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { pathToFileURL } from 'url';
 import semver from 'semver';
 import {
   readPluginInstallIndex,
   REALTIME_PLUGIN_ID,
   type PluginIndexRow,
 } from '../integrations/openclaw-plugin-index.js';
-import { readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
+import {
+  readInstalledRealtimePluginVersion,
+  resolveRealtimePluginInstallPath,
+} from '../integrations/openclaw-plugin-state.js';
+import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
 
 /**
  * Honest-state post-install/enable self-check (#74 deliverable 2).
@@ -223,17 +228,171 @@ export async function defaultCanaryProbe(home: string, pluginId: string): Promis
   });
 }
 
+/** Marker embedded in the synthetic op so its audit entry is unmistakably a
+ * canary probe (not a real agent action) to anyone tailing the audit log. */
+export const CANARY_MARKER = 'SHIELDCORTEX-CANARY';
+
+/** The synthetic operation the active canary drives through the interceptor. */
+export interface SyntheticCanaryOp {
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
 /**
- * The guarded live dispatch seam. Refuses to drive a real gateway operation
- * under a Jest worker or without the explicit `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1`
- * consent env. Returns `dispatched:false` when it cannot run so the probe fails
- * closed. The actual active synthetic dispatch is performed on the sacrificial
- * rollout env per the #74 plan; this box (frozen toggle) never dispatches.
+ * Build the synthetic canary operation, tagged with the probe `nonce`.
+ *
+ * It is a known-bad SHAPE — a recursive-force-delete, which the Action Guard
+ * hard-blocks as `catastrophic` — so a live interceptor MUST deny it. Yet it is
+ * PROVABLY HARMLESS: the delete surface is a synthetic, non-existent `/tmp`
+ * path, so even in the failure mode this canary exists to detect (enforcement
+ * OFF, the op actually executes) `rm -rf` on a missing path is a no-op. The
+ * nonce uniquely identifies this probe's audit entry; {@link CANARY_MARKER}
+ * makes its purpose unmistakable to an operator reading the log.
+ */
+export function buildSyntheticCanaryOp(nonce: string): SyntheticCanaryOp {
+  return {
+    toolName: 'Bash',
+    arguments: {
+      command: `rm -rf /tmp/${nonce}`,
+      description: `${CANARY_MARKER} synthetic enforcement probe ${nonce} — never executed`,
+    },
+  };
+}
+
+/** The subset of the plugin's compiled interceptor module the canary needs. */
+export interface InterceptorLikeModule {
+  createInterceptor: (
+    config: unknown,
+    pipeline: unknown,
+    options?: { evaluateToolCall?: unknown },
+  ) => { handleToolCall: (ctx: SyntheticCanaryOp) => Promise<void>; resetSession?: () => void };
+  DEFAULT_CONFIG: unknown;
+}
+
+/** Injectable seams for the active synthetic dispatch, so the wiring is unit-
+ * tested without a live gateway or a real ABI/install on disk. */
+export interface ActiveDispatchDeps {
+  /** Resolve the installed realtime plugin dir (the live interceptor code). */
+  resolveInstallPath: (home: string) => string | null;
+  /** Load the installed plugin's compiled interceptor module, or null. */
+  loadInterceptorModule: (installPath: string) => Promise<InterceptorLikeModule | null>;
+  /** The real Tool Action Guard evaluator (`shieldcortex/defence`). */
+  evaluator: (toolName: string, args: Record<string, unknown>) => unknown;
+}
+
+/** A benign pipeline stub for the memory path — never invoked for the Bash
+ * canary op (non-memory tools route to the Action Guard), but createInterceptor
+ * requires one. */
+const benignPipeline = () => ({
+  allowed: true,
+  firewall: { result: 'ALLOW' as const, reason: 'canary', threatIndicators: [], anomalyScore: 0, blockedPatterns: [] },
+  trust: { score: 1 },
+  sensitivity: { level: 'INTERNAL' },
+  fragmentation: null,
+  auditId: 0,
+});
+
+/**
+ * Drive the synthetic canary op through the INSTALLED plugin's real interceptor
+ * — the same code the gateway loads — so the deny + audit entry are produced by
+ * the genuine enforcement path, not a stub. Reuses the installed interceptor
+ * (no forked implementation) and the real defence evaluator.
+ *
+ * Fail-closed at every step: a missing install, an unloadable module, or a
+ * construction failure returns `dispatched:false` with a loud, honest detail —
+ * never a fabricated pass. `dispatched:true` means only that the op passed
+ * through the interceptor; whether it was actually DENIED + AUDITED is confirmed
+ * separately by {@link findFreshEnforcementEntry} (the fresh nonce gate).
+ *
+ * Harmless by construction: the interceptor evaluates + audits BEFORE any
+ * execution, and the op itself is a no-op even if it ran (see
+ * {@link buildSyntheticCanaryOp}). Nothing here touches the running gateway.
+ */
+export async function dispatchCanaryThroughInstalledInterceptor(
+  home: string,
+  _pluginId: string,
+  nonce: string,
+  deps: ActiveDispatchDeps,
+): Promise<{ dispatched: boolean; detail?: string }> {
+  const installPath = deps.resolveInstallPath(home);
+  if (!installPath) {
+    return { dispatched: false, detail: 'realtime plugin not found on disk — cannot dispatch through the live interceptor' };
+  }
+
+  let mod: InterceptorLikeModule | null;
+  try {
+    mod = await deps.loadInterceptorModule(installPath);
+  } catch (err) {
+    return { dispatched: false, detail: `could not load the installed interceptor module: ${errMsg(err)}` };
+  }
+  if (!mod || typeof mod.createInterceptor !== 'function' || mod.DEFAULT_CONFIG == null) {
+    return { dispatched: false, detail: 'installed interceptor module missing createInterceptor/DEFAULT_CONFIG — cannot actively probe' };
+  }
+
+  let interceptor: ReturnType<InterceptorLikeModule['createInterceptor']>;
+  try {
+    interceptor = mod.createInterceptor(mod.DEFAULT_CONFIG, benignPipeline, { evaluateToolCall: deps.evaluator });
+  } catch (err) {
+    return { dispatched: false, detail: `failed to construct the installed interceptor: ${errMsg(err)}` };
+  }
+
+  const op = buildSyntheticCanaryOp(nonce);
+  try {
+    await interceptor.handleToolCall(op);
+    // No throw ⇒ the interceptor did NOT block. The op WAS dispatched, but the
+    // absence of a deny is surfaced by findFresh (denied:false → loud fail).
+  } catch {
+    // A block throws AFTER writing the audit entry — the enforcement firing IS
+    // the success signal here; swallow it and let findFresh confirm the deny.
+  }
+  return { dispatched: true, detail: `synthetic canary (nonce ${nonce}) dispatched through the installed interceptor at ${installPath}` };
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Default active-dispatch seams: the installed-plugin discovery helper (#77),
+ * a filesystem import of the installed interceptor, and the real evaluator. */
+const defaultActiveDispatchDeps: ActiveDispatchDeps = {
+  resolveInstallPath: (home) => resolveRealtimePluginInstallPath(home),
+  loadInterceptorModule: defaultLoadInterceptorModule,
+  evaluator: (toolName, args) => evaluateToolCall(toolName, args),
+};
+
+/** Import the installed plugin's compiled interceptor from its package dir.
+ * Best-effort across the shipped layouts (`dist/interceptor.js`, root
+ * `interceptor.js`); returns null when none resolves so dispatch fails closed. */
+async function defaultLoadInterceptorModule(installPath: string): Promise<InterceptorLikeModule | null> {
+  const candidates = [
+    path.join(installPath, 'dist', 'interceptor.js'),
+    path.join(installPath, 'interceptor.js'),
+  ];
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue;
+    const mod = (await import(pathToFileURL(candidate).href)) as Partial<InterceptorLikeModule>;
+    if (typeof mod.createInterceptor === 'function' && mod.DEFAULT_CONFIG != null) {
+      return mod as InterceptorLikeModule;
+    }
+  }
+  return null;
+}
+
+/**
+ * The guarded live dispatch seam. Fail-closed by design:
+ *   - Under a Jest worker → never dispatches (`ran:false` upstream).
+ *   - Without the explicit `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1` consent env →
+ *     identical to the 4.47.3 behaviour: honest "roster proof stands;
+ *     enforcement not actively proven".
+ *   - With consent → drives the harmless synthetic op through the INSTALLED
+ *     interceptor (the real enforcement path) and reports whether it dispatched;
+ *     the deny/audit is then confirmed by the fresh nonce gate. A dispatch that
+ *     fails or is unobservable is reported loudly as NOT proven — never faked.
  */
 export async function defaultTriggerSyntheticOp(
-  _home: string,
-  _pluginId: string,
-  _nonce: string,
+  home: string,
+  pluginId: string,
+  nonce: string,
 ): Promise<{ dispatched: boolean; detail?: string }> {
   if (process.env.JEST_WORKER_ID !== undefined) {
     return { dispatched: false, detail: 'skipped under test runner' };
@@ -241,15 +400,12 @@ export async function defaultTriggerSyntheticOp(
   if (process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY !== '1') {
     return {
       dispatched: false,
-      detail: 'live canary requires SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 (drives a real gateway tool call)',
+      detail: 'live canary requires SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 (drives a synthetic op through the live interceptor) — roster proof stands; enforcement not actively proven',
     };
   }
-  // Consent given: the active synthetic dispatch is wired on the sacrificial
-  // rollout env, not here — never fabricate a dispatch on an unproven path.
-  return {
-    dispatched: false,
-    detail: 'active synthetic-op dispatch is not wired in this build — roster proof stands; enforcement not actively proven',
-  };
+  // Consent given: perform the real active dispatch through the installed
+  // interceptor. Never fabricate — on any failure this returns dispatched:false.
+  return dispatchCanaryThroughInstalledInterceptor(home, pluginId, nonce, defaultActiveDispatchDeps);
 }
 
 export interface FreshEnforcementQuery {
