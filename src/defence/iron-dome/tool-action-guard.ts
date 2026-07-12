@@ -122,8 +122,14 @@ const CATASTROPHIC: Pattern[] = [
   { re: /\bdd\b[^|\n]*\bof=\/dev\/(sd|nvme|hd|disk|mmcblk|vd)/i, signal: 'raw-disk-write' },
   { re: /[>|]\s*\/dev\/(sd|nvme|hd|disk|mmcblk|vd)\w/i, signal: 'redirect-to-block-device' },
   { re: /\b(fdisk|parted|sgdisk|wipefs|blkdiscard)\b/i, signal: 'disk-partition-tool' },
-  // pipe a download straight into an interpreter (remote code execution)
-  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b/i, signal: 'pipe-download-to-shell' },
+  // pipe a download straight into an interpreter (remote code execution).
+  // The danger is a BARE interpreter reading the fetched bytes as its PROGRAM
+  // (`curl … | sh`, `curl … | python3`, `curl … | sh -s`). When the interpreter
+  // is given its own program via an inline-script flag (`-c`/`-e`/`-m`), the
+  // piped bytes are stdin DATA, not code — e.g. `curl … | python3 -c '<parse>'`
+  // parses JSON and is not RCE (issue #73.6). The negative lookahead exempts an
+  // interpreter whose next flag (allowing intervening short flags) is -c/-e/-m.
+  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i, signal: 'pipe-download-to-shell' },
   // recursive permission/ownership change at the root
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i, signal: 'recursive-perms-on-root' },
   // overwrite the whole disk with zeros/urandom
@@ -142,7 +148,13 @@ const DANGEROUS: Pattern[] = [
   { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
   { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|\b(kill|pkill|killall)\b/i, signal: 'stop-process-or-service' },
   { re: /\b(iptables|ufw|nft|netplan|firewall-cmd)\b/i, signal: 'modify-network-firewall' },
-  { re: /\b(apt|apt-get|yum|dnf|brew|npm|pip|pip3|gem|cargo)\b[^|\n]*\b(install|add|i)\b/i, signal: 'install-package' },
+  // Package installs split by blast radius (issue #73.3). System package managers
+  // and language *global* installs mutate the host → approval. A workspace-local
+  // `npm/yarn/pnpm/bun install` (no -g/--global) is routine operator-directed dev
+  // work and is handled as a sensitive-but-allowed op (SENSITIVE.local-package-install
+  // below) so it is never a hard gate.
+  { re: /\b(?:apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo)\b[^|\n]*\b(?:install|add)\b/i, signal: 'install-package' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b[^|\n]*(?:\s-g\b|--global\b|\bglobal\s+add\b)/i, signal: 'install-package-global' },
   { re: /\bcrontab\b|\/etc\/cron|\bat\s+now\b/i, signal: 'modify-scheduler' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
@@ -153,10 +165,35 @@ const SENSITIVE: Pattern[] = [
   { re: /\bchmod\b|\bchown\b/i, signal: 'change-permissions' },
   { re: /\b(mv|move|rename|cp|copy)\b/i, signal: 'move-or-copy' },
   { re: /\bgit\b[^|\n]*\b(push|commit|reset|rebase|merge|checkout)\b/i, signal: 'git-mutate' },
+  // Workspace-local package install (issue #73.3): operator-directed, into the
+  // project (node_modules / vendor). Global installs matched install-package-global
+  // in DANGEROUS above and are checked first, so this only tags the local case.
+  { re: /\b(?:npm|yarn|pnpm|bun)\b[^|\n]*\b(?:install|add|ci|i)\b/i, signal: 'local-package-install' },
 ];
 
 const SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|password\s*[=:]\s*\S{6,}|secret\s*[=:]\s*\S{6,})/i;
 const EXTERNAL_EGRESS = /\b(curl|wget|fetch|nc|netcat|scp|rsync|http\.post|requests\.post|fetch\()/i;
+
+// Outbound DATA on a network call (issue #73.2): a read-only GET carries nothing
+// off-host, so a docs / releases fetch is not egress. Egress requires an actual
+// payload — a non-GET method or a body/data/upload flag. This is what separates
+// `web_fetch https://docs.openclaw.ai` (allow) from `curl -X POST … -d @dump`
+// (approval). URL text is deliberately NOT scanned for the words post/put so a
+// path like `/output` or `/put-item` cannot be mistaken for a write.
+const OUTBOUND_DATA_FLAGS =
+  /(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b|(?:^|\s)-d\b|--data(?:-\w+)?\b|--json\b|--form\b|(?:^|\s)-F\b|--upload-file\b|(?:^|\s)-T\b|\bupload\s+to\b/i;
+
+function hasOutboundData(args: Record<string, unknown>, execSurface: string): boolean {
+  if (OUTBOUND_DATA_FLAGS.test(execSurface)) return true;
+  const method = String((args?.method ?? args?.httpMethod ?? args?.verb) ?? '').toUpperCase();
+  if (method && method !== 'GET' && method !== 'HEAD') return true;
+  for (const k of ['body', 'data', 'json', 'form', 'payload', 'formData', 'files']) {
+    const v = args?.[k];
+    if (typeof v === 'string' && v.length > 0) return true;
+    if (v && typeof v === 'object') return true;
+  }
+  return false;
+}
 
 function firstMatch(patterns: Pattern[], text: string): string | null {
   for (const p of patterns) if (p.re.test(text)) return p.signal;
@@ -164,6 +201,38 @@ function firstMatch(patterns: Pattern[], text: string): string | null {
 }
 function allMatches(patterns: Pattern[], text: string): string[] {
   return patterns.filter(p => p.re.test(text)).map(p => p.signal);
+}
+
+/** Like allMatches, but also captures the matched span for actionable reason codes. */
+function matchSpans(patterns: Pattern[], text: string): Array<{ signal: string; span: string }> {
+  const out: Array<{ signal: string; span: string }> = [];
+  for (const p of patterns) {
+    const m = text.match(p.re);
+    if (m) out.push({ signal: p.signal, span: m[0].trim().replace(/\s+/g, ' ').slice(0, 80) });
+  }
+  return out;
+}
+
+// Remediation hints keyed by signal — turn an opaque "failure policy: deny" into
+// an actionable message that names the rule, the matched span, and the fix
+// (issue #73 item 5).
+const REMEDIATION: Record<string, string> = {
+  'pipe-download-to-shell': 'download to a file and inspect it before running (curl -o get.sh URL; less get.sh; sh get.sh)',
+  'install-package-global': 'review the package + source, then install it explicitly if intended (a workspace-local install needs no global flag)',
+  'install-package': 'review the package + source, then run the install yourself if intended',
+  'privilege-escalation': 'run the specific privileged step yourself, or approve this exact command',
+  'external-egress': 'confirm the destination and payload before data leaves the host',
+  'git-force-push': 'confirm the branch and remote; a force-push can overwrite others’ work',
+  'file-delete': 'confirm the target path before deleting',
+};
+
+/** Compose a reason string that names the rule, the matched span, and a fix hint. */
+function buildReason(prefix: string, signals: string[], span?: string): string {
+  const parts = [`rule: ${signals.join(', ')}`];
+  if (span) parts.push(`matched: "${span}"`);
+  const hint = REMEDIATION[signals[0]];
+  if (hint) parts.push(`fix: ${hint}`);
+  return `${prefix} [${parts.join('; ')}]`;
 }
 
 /** A path whose deletion is catastrophic: root, home, a top-level system dir, or a wildcard. */
@@ -210,15 +279,48 @@ function stripComments(cmd: string): string {
   return cmd.replace(/(^|\s)#[^\n]*/g, '$1 ');
 }
 
+// Interpreters that EXECUTE a heredoc body they read. If one of these introduces
+// a heredoc, the body is code and must stay scanned (see stripQuotedHeredocs).
+const HEREDOC_INTERPRETER = /\b(?:bash|sh|zsh|ksh|dash|python\d?|perl|ruby|node|php)\b/i;
+
+/**
+ * Neutralise the bodies of QUOTED heredocs (`<<'EOF'` / `<<"EOF"`).
+ *
+ * A quoted delimiter means the body is passed literally, unexpanded — it is a
+ * data payload for its consumer (documentation for `gh issue create`, JSON for
+ * `cat`/`jq`), never executed. Scanning that body for command patterns is a
+ * mention-not-intent false positive: the jarvis `gh issue create` incident quoted
+ * a `curl … | bash` example in the issue body via a heredoc (issue #71).
+ *
+ * Fail-safe by construction — the body stays scanned for the two re-activation
+ * vectors, so this can never become a bypass:
+ *   - an interpreter that itself reads the heredoc (`bash <<'EOF' … EOF`)
+ *   - `eval` anywhere in the command (it can re-run captured heredoc text)
+ */
+function stripQuotedHeredocs(cmd: string): string {
+  if (!/<<-?\s*['"]/.test(cmd)) return cmd;      // no quoted heredoc → nothing to do
+  if (/\beval\b/.test(cmd)) return cmd;          // re-activation risk → keep the body
+  return cmd.replace(
+    /(<<-?\s*(['"])([A-Za-z_]\w*)\2[^\n]*\n)([\s\S]*?)(\n[ \t]*\3\b)/g,
+    (match: string, opener: string, _q: string, _delim: string, _body: string, closer: string, offset: number, whole: string) => {
+      const lineStart = whole.lastIndexOf('\n', offset) + 1;
+      const introLine = whole.slice(lineStart, offset);
+      if (HEREDOC_INTERPRETER.test(introLine)) return match; // interpreter consumes it → keep
+      return opener + closer;                                 // drop the inert body
+    },
+  );
+}
+
 /**
  * The text of a shell command that is actually *executed*, for danger scanning.
- * Returns '' for a pure print; strips comments otherwise; never trusts quote
- * removal (see note above) so it cannot be evaded by quoting a command name.
+ * Returns '' for a pure print; neutralises quoted-heredoc bodies and comments
+ * otherwise; never trusts quote removal (see note above) so it cannot be evaded
+ * by quoting a command name.
  */
 export function commandScanText(cmd: string): string {
   if (!cmd) return '';
   if (isPurePrint(cmd)) return '';
-  return stripComments(cmd);
+  return stripComments(stripQuotedHeredocs(cmd));
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────────
@@ -269,10 +371,12 @@ export function evaluateToolCall(
   const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
 
   // 1) Catastrophic — hard block, cannot fail open, ignores config.
-  const catastrophicSignals = allMatches(CATASTROPHIC, execSurface);
-  if (catastrophicSignals.length > 0) {
+  const catastrophicMatches = matchSpans(CATASTROPHIC, execSurface);
+  if (catastrophicMatches.length > 0) {
+    const catastrophicSignals = catastrophicMatches.map(m => m.signal);
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
-      `catastrophic operation blocked (${catastrophicSignals.join(', ')})`, catastrophicSignals);
+      buildReason('catastrophic operation blocked', catastrophicSignals, catastrophicMatches[0].span),
+      catastrophicSignals);
   }
 
   // 1a) A structured delete tool carries its target as a path, not a command —
@@ -296,17 +400,24 @@ export function evaluateToolCall(
   }
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
-  const dangerSignals = allMatches(DANGEROUS, execSurface);
-  // External egress (even without a detected secret) is a potential exfil vector.
-  if (egress && looksExternal(url, execSurface) && (family === 'network' || /\bpost\b|\bput\b|upload|-d\s|--data/i.test(execSurface))) {
+  const dangerMatches = matchSpans(DANGEROUS, execSurface);
+  const dangerSignals = dangerMatches.map(m => m.signal);
+  let dangerSpan = dangerMatches[0]?.span;
+  // External egress is a potential exfil vector — but only when the call carries
+  // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
+  // behind and is not egress (issue #73.2). Secret-bearing egress already hard
+  // blocked at step 1b above regardless of method.
+  if (egress && looksExternal(url, execSurface) && hasOutboundData(args, execSurface)) {
     dangerSignals.push('external-egress');
+    dangerSpan = dangerSpan ?? (url || 'external host');
   }
   // A structured delete tool is inherently a delete, even with no "rm" in any arg.
   if (family === 'delete' && !dangerSignals.includes('file-delete')) dangerSignals.push('file-delete');
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
     return verdict('require_approval', 'dangerous', family, action,
-      `recognised dangerous operation requires approval (${dangerSignals.join(', ')})`, dangerSignals);
+      buildReason('recognised dangerous operation requires approval', dangerSignals, dangerSpan),
+      dangerSignals);
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
@@ -328,7 +439,7 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   if (signals.includes('privilege-escalation')) return 'sudo_command';
   if (signals.includes('stop-process-or-service')) return 'stop_service';
   if (signals.includes('modify-network-firewall')) return 'modify_firewall';
-  if (signals.includes('install-package')) return 'install_package';
+  if (signals.includes('install-package') || signals.includes('install-package-global')) return 'install_package';
   if (signals.includes('modify-scheduler')) return 'modify_cron';
   if (signals.includes('external-egress')) return 'network_egress';
   if (signals.includes('touch-sensitive-path')) return 'access_secret_path';
