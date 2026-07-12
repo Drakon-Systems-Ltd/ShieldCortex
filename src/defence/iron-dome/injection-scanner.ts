@@ -19,7 +19,8 @@ export type InjectionCategory =
   | 'encoding_trick'
   | 'role_manipulation'
   | 'context_escape'
-  | 'canary';
+  | 'canary'
+  | 'host_runtime_notice';
 
 export interface InjectionDetection {
   category: InjectionCategory | string;
@@ -353,6 +354,59 @@ export function getExternalPatternCount(): number {
   return externalPatterns.length;
 }
 
+// ── Host runtime notices (classify, don't silence) ──
+//
+// OpenClaw injects its own framing into the model turn — gateway-restart recovery
+// notices and inbound-metadata envelopes. These trip the fake-system-message rule
+// and were scoring CRITICAL every session, burying real detections (issue #72).
+//
+// We do NOT stop scanning them (a "starts with [System]" allowlist would hand an
+// attacker a prefix that suppresses detection). Instead, when the WHOLE content
+// matches a known host-envelope SHAPE — anchored start AND end, so nothing can be
+// appended — the fake-system-message detections it produced are reclassified to a
+// distinct low-severity `host_runtime_notice`. The event survives (filterable in
+// audit); only its severity drops. Any injection payload appended to the notice
+// breaks the full-shape match, so it stays CRITICAL (anti-bypass).
+//
+// Shapes are non-global (stateless `.test`) and single-line-bounded on their
+// variable tail so a smuggled newline + payload cannot ride inside the match.
+const HOST_RUNTIME_NOTICE_SHAPES: RegExp[] = [
+  // Gateway-restart recovery notice, fleet-wide.
+  /^\[System\]\s+Your previous turn was interrupted by a gateway restart\b[^\n]{0,240}$/i,
+  // Inbound conversation-metadata envelope (untrusted metadata JSON).
+  /^Conversation info \(untrusted metadata\):\s*```json\s*\n[\s\S]{0,600}\n```\s*$/i,
+];
+
+function matchesHostRuntimeNotice(text: string): boolean {
+  const t = text.trim();
+  return HOST_RUNTIME_NOTICE_SHAPES.some(re => re.test(t));
+}
+
+/**
+ * When the whole content is a known host-runtime notice, downgrade the
+ * fake-system-message markers it produced to a low-severity host_runtime_notice.
+ * Non-envelope detections (there should be none for a genuine notice, but if the
+ * content smuggled one it would fail the full-shape gate above) are left intact.
+ */
+function reclassifyHostRuntimeNotices(
+  text: string,
+  detections: InjectionDetection[],
+): InjectionDetection[] {
+  if (detections.length === 0 || !matchesHostRuntimeNotice(text)) return detections;
+  return detections.map(d =>
+    d.category === 'fake_system_message'
+      ? {
+          ...d,
+          category: 'host_runtime_notice',
+          severity: 'low',
+          description:
+            `OpenClaw host runtime notice (full-shape match) — reclassified from ${d.pattern}; ` +
+            'scanned, not silenced. An injection payload embedded in or appended to this framing still scores CRITICAL.',
+        }
+      : d,
+  );
+}
+
 // ── Scanner ──
 
 /**
@@ -394,14 +448,19 @@ export function scanForInjection(text: string): InjectionScanResult {
 
   // Deduplicate: same category + pattern + overlapping matched text
   const seen = new Set<string>();
-  const unique: InjectionDetection[] = [];
+  const deduped: InjectionDetection[] = [];
   for (const d of detections) {
     const key = `${d.category}:${d.pattern}:${d.match.slice(0, 80)}`;
     if (!seen.has(key)) {
       seen.add(key);
-      unique.push(d);
+      deduped.push(d);
     }
   }
+
+  // Classify (don't silence) host-runtime notices: full-shape OpenClaw framing
+  // has its fake-system-message markers downgraded to host_runtime_notice/low so
+  // it stops scoring CRITICAL while staying in the audit (issue #72).
+  const unique = reclassifyHostRuntimeNotices(text, deduped);
 
   // Determine overall risk level
   let riskLevel: InjectionScanResult['riskLevel'] = 'NONE';
