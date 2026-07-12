@@ -1,35 +1,18 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execSync } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { installCopilot } from '../setup/copilot.js';
 
 /**
- * copilot install resolves the MCP command via `which shieldcortex` (the
- * v4.11.1 stable-binary fix). Under `npm test` a shieldcortex binary usually
- * exists on PATH; use that as the expected command. Fallback is
- * `node <dist/index.js>`. Either way it must NEVER be `npx -y` (hash-thrash).
+ * copilot install resolves the MCP command as an ABSOLUTE node interpreter +
+ * absolute `dist/index.js` (the #76 PATH-immune fix). It must never emit a bare
+ * `shieldcortex` shebang bin (dies with -32000 when a GUI/launchd spawn lacks
+ * `node` on PATH) nor `npx -y` (hash-thrash). `process.execPath` is the node
+ * running these tests — an absolute path — so that is the expected command.
  */
-function resolvedShieldCortexBinary(): string | null {
-  try {
-    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-    const out = execSync(`${whichCmd} shieldcortex`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
-      .trim()
-      .split('\n')[0]
-      .trim();
-    return out && fs.existsSync(out) ? out : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Expected command/args the resolver should produce in this environment. */
 function expectedCommand(): { command: string; argsLengthAtLeast: number } {
-  const ambient = resolvedShieldCortexBinary();
-  return ambient
-    ? { command: ambient, argsLengthAtLeast: 0 }
-    : { command: 'node', argsLengthAtLeast: 1 };
+  return { command: process.execPath, argsLengthAtLeast: 1 };
 }
 
 // VS Code (darwin) lives under ~/Library/Application Support/Code/User; Cursor

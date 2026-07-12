@@ -214,9 +214,23 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   const { createServer } = await import('./server.js');
   const { disposeModel, preloadModel } = await import('./embeddings/index.js');
   const { startDefaultWorker, stopDefaultWorker } = await import('./worker/brain-worker.js');
+  const { bootWithNativeSelfHeal, McpSpawnError } = await import('./setup/mcp-self-heal.js');
 
-  // Create the MCP server
-  const server = createServer(dbPath);
+  // Create the MCP server. If the native DB engine (better-sqlite3) is ABI-
+  // mismatched (the classic post-version-bump breakage), self-heal in place and
+  // retry once; on unrecoverable failure die LOUDLY with a stderr line + a
+  // breadcrumb file, never a bare JSON-RPC -32000 (#76).
+  let server: ReturnType<typeof createServer>;
+  try {
+    server = await bootWithNativeSelfHeal(() => createServer(dbPath));
+  } catch (err) {
+    if (err instanceof McpSpawnError) {
+      // The loud stderr line + breadcrumb are already written; exit non-zero so
+      // the client stops cleanly with an actionable log on disk.
+      process.exit(1);
+    }
+    throw err;
+  }
   const transport = new StdioServerTransport();
 
   // Register signal handlers BEFORE connect so cleanup runs even if connect() throws

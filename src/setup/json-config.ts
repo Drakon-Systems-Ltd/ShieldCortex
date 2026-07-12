@@ -16,7 +16,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
 
 /** Suffix for the safety copy written before any mutating write. */
 export const BACKUP_SUFFIX = '.bak-shieldcortex';
@@ -132,42 +131,39 @@ export interface McpServerCommand {
 }
 
 /**
+ * Resolve an ABSOLUTE node interpreter for spawning the MCP server. Prefers
+ * `process.execPath` — the node binary running this installer, which is always
+ * an absolute path and is guaranteed to exist at setup time. Falls back to the
+ * bare string `node` only in the (practically impossible) case that execPath is
+ * empty or relative.
+ */
+export function resolveNodeBinary(): string {
+  const exe = process.execPath;
+  return exe && path.isAbsolute(exe) ? exe : 'node';
+}
+
+/**
  * Resolve the stdio command an editor (Codex / VS Code Copilot / Cursor) should
  * launch to start the ShieldCortex MCP server.
  *
- * Mirrors `claude-md.ts setupGlobalMcp`'s v4.11.1 fix: prefer the installed
- * GLOBAL binary, resolved to an ABSOLUTE path via `which`/`where`, and invoke
- * it directly. The hazard being avoided is `npx -y shieldcortex` as the MCP
- * command — `npx` re-resolves dynamically on every spawn, so a cache shift
- * (version drift / fresh publish / cache miss) silently changes the effective
- * command. Editors hash their MCP config; a changed command changes the hash
- * and resets the active session, wiping context (the 2026-04-22 fleet "fresh
- * session" bug). An absolute path never drifts.
+ * PATH-immune by construction (#76): emit an ABSOLUTE node interpreter plus the
+ * ABSOLUTE bundled `dist/index.js`, both resolved at setup time. We deliberately
+ * do NOT emit a bare `shieldcortex` bin (whose shebang is `#!/usr/bin/env node`)
+ * even when one is on PATH: GUI / launchd / login-shell spawn environments
+ * frequently lack the `node` prefix on PATH, so the shebang dies instantly and
+ * the MCP client sees only a bare JSON-RPC `-32000` with no explanation (the
+ * Friday-Mac field failure). Embedding the interpreter removes the PATH
+ * dependency entirely.
  *
- * Fallback when no global binary is on PATH: `node <absoluteDistEntry>` — the
- * bundled `dist/index.js` resolved to an absolute path from this module's
- * location. That is ALSO stable (a fixed absolute path, not `npx`), so a
- * single-shot install without a global binary still gets a hash-stable command
- * rather than re-introducing the npx hash-thrash class.
+ * This still avoids the `npx -y shieldcortex` hash-thrash the v4.11.1 fix
+ * targeted — `npx` re-resolves on every spawn, so a cache shift changes the
+ * effective command, changes the editor's config hash, and resets the active
+ * session, wiping context (the 2026-04-22 fleet "fresh session" bug). Two fixed
+ * absolute paths never drift.
  *
  * @param distEntry Absolute path to the package's `dist/index.js` (the caller
  *   resolves it from its own `__dirname` so we don't guess the layout).
  */
 export function resolveMcpServerCommand(distEntry: string): McpServerCommand {
-  try {
-    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-    const resolved = execSync(`${whichCmd} shieldcortex`, {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .trim()
-      .split('\n')[0]
-      .trim();
-    if (resolved && fs.existsSync(resolved)) {
-      return { command: resolved, args: [] };
-    }
-  } catch {
-    // No global install on PATH — fall through to the bundled entry.
-  }
-  return { command: 'node', args: [distEntry] };
+  return { command: resolveNodeBinary(), args: [distEntry] };
 }

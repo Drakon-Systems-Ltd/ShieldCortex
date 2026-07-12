@@ -1,29 +1,16 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execSync } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { installCodex, uninstallCodex } from '../setup/codex.js';
 
 /**
- * codex install resolves the MCP command via `which shieldcortex` (the v4.11.1
- * stable-binary fix). Under `npm test` a shieldcortex binary usually exists on
- * PATH; use that resolved path as the expected command rather than fighting to
- * mock execSync across jest workers (same approach as mcp-registration.test.ts).
- * If nothing is on PATH the resolver falls back to `node <dist/index.js>`.
+ * codex install resolves the MCP command as an ABSOLUTE node interpreter +
+ * absolute `dist/index.js` (the #76 PATH-immune fix) — never a bare shebang bin
+ * (dies with -32000 when a GUI/launchd spawn lacks `node` on PATH) nor `npx -y`
+ * (hash-thrash). `process.execPath` is the node running these tests, so that is
+ * the expected command string in the TOML block.
  */
-function resolvedShieldCortexBinary(): string | null {
-  try {
-    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-    const out = execSync(`${whichCmd} shieldcortex`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
-      .trim()
-      .split('\n')[0]
-      .trim();
-    return out && fs.existsSync(out) ? out : null;
-  } catch {
-    return null;
-  }
-}
 
 describe('Codex setup', () => {
   const originalHome = process.env.HOME;
@@ -110,16 +97,9 @@ describe('Codex setup', () => {
     // The resolved command is either the absolute global binary or
     // `node <dist/index.js>` — never `npx -y` (the hash-thrash class).
     expect(content).not.toContain('npx');
-    const ambient = resolvedShieldCortexBinary();
-    if (ambient) {
-      // v4.11.1: prefer the absolute global binary, invoked directly (no args).
-      expect(content).toContain(`command = "${ambient}"`);
-      expect(content).toContain('args = []');
-    } else {
-      // Fallback: node + the absolute bundled dist entry.
-      expect(content).toContain('command = "node"');
-      expect(content).toContain('index.js');
-    }
+    // #76: absolute node interpreter + absolute bundled dist entry.
+    expect(content).toContain(`command = "${process.execPath}"`);
+    expect(content).toContain('index.js');
     expect(content).not.toContain('/tmp/dev.js');
     expect(content).not.toContain('/tmp/global.js');
   });
@@ -144,15 +124,10 @@ describe('Codex setup', () => {
     const content = readConfig();
     const matches = content.match(/\[mcp_servers\.shieldcortex-memory\]/g) ?? [];
     expect(matches).toHaveLength(1);
-    // Stale npx form must be gone; replaced by an absolute resolved command.
+    // Stale npx form must be gone; replaced by an absolute node + dist command.
     expect(content).not.toContain('command = "npx"');
-    const ambient = resolvedShieldCortexBinary();
-    if (ambient) {
-      expect(content).toContain(`command = "${ambient}"`);
-    } else {
-      expect(content).toContain('command = "node"');
-      expect(content).toContain('index.js');
-    }
+    expect(content).toContain(`command = "${process.execPath}"`);
+    expect(content).toContain('index.js');
   });
 
   it('removes only the shieldcortex MCP block on uninstall', async () => {

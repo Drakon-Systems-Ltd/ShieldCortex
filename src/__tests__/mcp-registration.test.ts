@@ -1,30 +1,15 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execSync } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 /**
- * The resolver under test shells out to `which shieldcortex` (or `where` on
- * Windows). When these tests run under `npm test`, a shieldcortex binary
- * usually exists on PATH — we use *that* resolved path as the expected value
- * instead of fighting to mock exec calls across jest workers.
- *
- * If no shieldcortex binary exists on PATH at all, the "global install"
- * tests are skipped with a clear reason; the fallback test still runs via
- * a PATH override that we know clears the lookup.
+ * The resolver under test (#76) is now deterministic and PATH-immune: it always
+ * emits an ABSOLUTE node interpreter (`process.execPath`) + the absolute bundled
+ * `dist/index.js`, regardless of whether a `shieldcortex` bin is on PATH. No
+ * `which` shell-out, no `npx -y` fallback — so these assertions no longer depend
+ * on the ambient environment.
  */
-function resolvedShieldCortexBinary(): string | null {
-  try {
-    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-    const out = execSync(`${whichCmd} shieldcortex`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
-      .trim()
-      .split('\n')[0];
-    return out && fs.existsSync(out) ? out : null;
-  } catch {
-    return null;
-  }
-}
 
 describe('MCP global server registration (guards against npx-y hash thrash)', () => {
   const originalHome = process.env.HOME;
@@ -69,22 +54,25 @@ describe('MCP global server registration (guards against npx-y hash thrash)', ()
     setupGlobalMcp();
   }
 
-  const ambientBinary = resolvedShieldCortexBinary();
-  const describeIfBinary = ambientBinary ? describe : describe.skip;
-
-  describeIfBinary('when shieldcortex is on PATH', () => {
-    it('prefers resolved binary path over npx -y', async () => {
+  describe('emits an absolute node + dist entry (PATH-immune, #76)', () => {
+    it('writes { command: <absolute node>, args: [<absolute index.js>] }', async () => {
       await runSetup();
 
       const written = JSON.parse(fs.readFileSync(mcpPath(), 'utf-8'));
-      expect(written.mcpServers.memory).toEqual({
-        type: 'stdio',
-        command: ambientBinary,
-        args: [],
-      });
+      const entry = written.mcpServers.memory;
+      expect(entry.type).toBe('stdio');
+      expect(entry.command).toBe(process.execPath);
+      expect(path.isAbsolute(entry.command)).toBe(true);
+      expect(Array.isArray(entry.args)).toBe(true);
+      expect(entry.args).toHaveLength(1);
+      expect(path.isAbsolute(entry.args[0])).toBe(true);
+      expect(entry.args[0].endsWith('index.js')).toBe(true);
+      // Never the fragile forms it replaces.
+      expect(entry.command).not.toBe('npx');
+      expect(JSON.stringify(entry.args)).not.toContain('npx');
     });
 
-    it('upgrades a stale `npx -y shieldcortex` registration to the stable binary path', async () => {
+    it('upgrades a stale `npx -y shieldcortex` registration to the stable node+dist path', async () => {
       fs.writeFileSync(
         mcpPath(),
         JSON.stringify({
@@ -98,8 +86,9 @@ describe('MCP global server registration (guards against npx-y hash thrash)', ()
       await runSetup();
 
       const written = JSON.parse(fs.readFileSync(mcpPath(), 'utf-8'));
-      expect(written.mcpServers.memory.command).toBe(ambientBinary);
-      expect(written.mcpServers.memory.args).toEqual([]);
+      expect(written.mcpServers.memory.command).toBe(process.execPath);
+      expect(written.mcpServers.memory.args).toHaveLength(1);
+      expect(written.mcpServers.memory.command).not.toBe('npx');
       expect(written.otherUserField).toBe('preserve-me');
     });
 
@@ -117,13 +106,4 @@ describe('MCP global server registration (guards against npx-y hash thrash)', ()
       expect(secondMtime).toBe(firstMtime);
     });
   });
-
-  // Note: the "falls back to npx -y when no global binary is on PATH" scenario
-  // is not covered by a jest test because `npm test` injects its own PATH into
-  // the child process at a level below `process.env.PATH = …`, making it
-  // impossible to stage a "nothing on PATH" environment here. The fallback
-  // branch in resolveMcpCommand() is covered by inspection: three lines, an
-  // execSync-in-try/catch that on any throw returns {command: 'npx', args:
-  // ['-y', 'shieldcortex']}. If that branch ever grows non-trivial, move it
-  // into a unit-testable helper with explicit env injection.
 });

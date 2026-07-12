@@ -13,8 +13,16 @@
  *     gateway.
  */
 
-import { ensureNativeBinding } from '../setup/native-binding.js';
+import {
+  ensureNativeBinding,
+  rebuildNativeBinding,
+  verifyNativeBindingInDir,
+  nativeBindingRemediation,
+  resolveSelfInstallDir,
+} from '../setup/native-binding.js';
+import { discoverShieldcortexInstalls } from '../setup/install-discovery.js';
 import { createRequire } from 'module';
+import fs from 'fs';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json') as { version: string };
@@ -57,7 +65,64 @@ export async function runRepair(_args: string[] = []): Promise<void> {
     return; // A broken engine blocks the reconciler (it needs to read the index).
   }
 
+  await repairOtherInstalls();
+
   await runPluginReconcilePass();
+}
+
+/**
+ * Repair every OTHER discovered ShieldCortex install (#76, requirement 4).
+ *
+ * The engine check above heals only the RUNNING install. On a multi-install
+ * host, an MCP client may spawn a different install whose binding is still
+ * broken — the "layer split" that made `repair` report a false all-clear.
+ * Discover all installs, warn if there's a split, and rebuild + verify each
+ * other one in its own dir (verify runs in a subprocess so it checks THAT
+ * install's binding, not this process's).
+ */
+async function repairOtherInstalls(): Promise<void> {
+  let installs;
+  try {
+    installs = discoverShieldcortexInstalls();
+  } catch {
+    return; // Discovery is best-effort; never let it break the primary repair.
+  }
+
+  let self = resolveSelfInstallDir();
+  try { self = fs.realpathSync(self); } catch { /* use raw */ }
+  const others = installs.filter((i) => i.path !== self);
+
+  if (others.length === 0) return;
+
+  process.stdout.write(
+    `\n  ${c('33', '⚠')}  Multi-install layer-split: ${installs.length} ShieldCortex installs found — ` +
+    `healing the ${others.length} not running this command too.\n`,
+  );
+  for (const inst of installs) {
+    const tag = inst.path === self ? ' (this command)' : '';
+    process.stdout.write(`     ${c('90', `• ${inst.path} [${inst.sources.join(', ')}]${tag}`)}\n`);
+  }
+
+  for (const inst of others) {
+    process.stdout.write(`\n  ${c('90', `Rebuilding ${inst.path}…`)}\n`);
+    // A plain rebuild first, then verify in-dir; escalate to a source build if needed.
+    await rebuildNativeBinding(inst.path);
+    let v = await verifyNativeBindingInDir(inst.path);
+    if (!v.ok) {
+      await rebuildNativeBinding(inst.path, { fromSource: true });
+      v = await verifyNativeBindingInDir(inst.path);
+    }
+    if (v.ok) {
+      process.stdout.write(`  ${c('32', '✓')}  ${inst.path}: rebuilt and verified\n`);
+    } else {
+      process.stdout.write(`  ${c('31', '✗')}  ${inst.path}: still cannot load after a rebuild\n`);
+      if (v.error) process.stdout.write(`     ${c('90', v.error.split('\n')[0])}\n`);
+      for (const line of nativeBindingRemediation(inst.path).split('\n')) {
+        process.stdout.write(`     ${c('33', line)}\n`);
+      }
+      process.exitCode = 1;
+    }
+  }
 }
 
 /**

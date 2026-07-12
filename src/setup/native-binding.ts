@@ -88,6 +88,45 @@ export function verifyNativeBinding(): VerifyResult {
 }
 
 /**
+ * Smoke-test the native binding of ANOTHER install (not the running process's).
+ *
+ * `verifyNativeBinding` can only check the binding this process resolved; to
+ * honestly verify a *different* install after rebuilding it (multi-install
+ * repair, #76), spawn a short-lived node in that install dir so `require`
+ * resolves ITS `node_modules/better-sqlite3`. Never throws; never touches the
+ * gateway. Async — the subprocess load is out-of-process.
+ */
+export function verifyNativeBindingInDir(installDir: string): Promise<VerifyResult> {
+  const code =
+    "const D=require('better-sqlite3');const db=new D(':memory:');db.exec('CREATE TABLE _sc_probe(x)');db.close();";
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(process.execPath, ['-e', code], {
+        cwd: installDir,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        shell: false,
+      });
+    } catch (err) {
+      return resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    let stderr = '';
+    child.stderr?.setEncoding('utf-8');
+    child.stderr?.on('data', (c: string) => { stderr += c; });
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch { /* already dead */ }
+      resolve({ ok: false, error: 'verify timed out after 30s' });
+    }, 30_000);
+    timer.unref();
+    child.on('error', (err) => { clearTimeout(timer); resolve({ ok: false, error: String(err?.message ?? err) }); });
+    child.on('close', (exitCode) => {
+      clearTimeout(timer);
+      resolve(exitCode === 0 ? { ok: true } : { ok: false, error: stderr.trim() || `exited ${exitCode}` });
+    });
+  });
+}
+
+/**
  * The command used to (re)build the binding — split out so the choice is
  * unit-testable without actually spawning npm.
  *
