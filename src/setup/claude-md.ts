@@ -12,10 +12,13 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync } from 'child_process';
+import { fileURLToPath } from 'url';
 import { installOpenClawHook, findAllHooksDirs } from './openclaw.js';
 import { setupHooks } from './settings-hooks.js';
-import { readJsonConfigOrAbort, writeJsonConfigWithBackup, looksLikeShieldcortex } from './json-config.js';
+import { readJsonConfigOrAbort, writeJsonConfigWithBackup, looksLikeShieldcortex, resolveMcpServerCommand } from './json-config.js';
+
+// MCP entry point: dist/index.js — one level up from dist/setup/ (this module).
+const MCP_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.js');
 
 const MARKER = '# ShieldCortex — Memory System';
 
@@ -97,36 +100,22 @@ interface McpCommand {
 }
 
 /**
- * Resolve the best shieldcortex command for the MCP stdio registration.
+ * Resolve the shieldcortex command for the MCP stdio registration.
  *
- * Prefers an installed global binary over `npx -y shieldcortex`. Reason:
- * Claude Code / OpenClaw hash the effective MCP config to decide whether
- * to reset the active CLI session. `npx -y` resolves dynamically on every
- * invocation — when the npm cache shifts (version drift, fresh publish,
- * cache miss), the resolved command changes, the hash changes, and the
- * active CLI session is silently reset. Every reset wipes conversation
- * context mid-flight. On TARS (v4.10.x install on Oracle ARM) this fired
- * every ~30 minutes and surfaced as the fleet "Fresh session, no prior
- * context" bug on 2026-04-22.
+ * PATH-immune (issue #76): delegates to the shared resolver so the entry is an
+ * ABSOLUTE node binary (`process.execPath`) + the ABSOLUTE `dist/index.js` — it
+ * never emits the `shieldcortex` shebang bin (which relies on `#!/usr/bin/env
+ * node` finding node on PATH; GUI/launchd spawns often lack it, killing the
+ * server before the MCP handshake with a bare -32000).
  *
- * If no global binary exists (single-shot `npx shieldcortex setup`),
- * falls back to `npx -y shieldcortex` — which still works, just trades
- * stability for availability in ephemeral installs.
+ * Also never `npx -y shieldcortex`: `npx` re-resolves on every spawn, so a cache
+ * shift changes the effective command; Claude Code / OpenClaw hash the MCP
+ * config and reset the active CLI session on any change, wiping conversation
+ * context mid-flight (TARS, 2026-04-22 fleet "Fresh session" bug). Two absolute
+ * paths never drift.
  */
-function resolveMcpCommand(): McpCommand {
-  try {
-    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-    const resolved = execSync(`${whichCmd} shieldcortex`, {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim().split('\n')[0];
-    if (resolved && fs.existsSync(resolved)) {
-      return { command: resolved, args: [] };
-    }
-  } catch {
-    // No global install on PATH.
-  }
-  return { command: 'npx', args: ['-y', 'shieldcortex'] };
+export function resolveMcpCommand(): McpCommand {
+  return resolveMcpServerCommand(MCP_ENTRY);
 }
 
 function isIdealMcpEntry(entry: unknown, ideal: McpCommand): boolean {
