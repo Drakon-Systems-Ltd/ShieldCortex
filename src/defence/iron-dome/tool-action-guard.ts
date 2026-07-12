@@ -122,8 +122,9 @@ const CATASTROPHIC: Pattern[] = [
   { re: /\bdd\b[^|\n]*\bof=\/dev\/(sd|nvme|hd|disk|mmcblk|vd)/i, signal: 'raw-disk-write' },
   { re: /[>|]\s*\/dev\/(sd|nvme|hd|disk|mmcblk|vd)\w/i, signal: 'redirect-to-block-device' },
   { re: /\b(fdisk|parted|sgdisk|wipefs|blkdiscard)\b/i, signal: 'disk-partition-tool' },
-  // pipe a download straight into an interpreter (remote code execution)
-  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b/i, signal: 'pipe-download-to-shell' },
+  // NOTE: pipe-download-to-shell is handled separately by pipeDownloadSignal()
+  // below — a regex can't tell `curl … | bash` (RCE) from `curl … | python3 -c
+  // '<local program>'` (JSON parsing) or a quoted documentation example (#71).
   // recursive permission/ownership change at the root
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i, signal: 'recursive-perms-on-root' },
   // overwrite the whole disk with zeros/urandom
@@ -210,15 +211,114 @@ function stripComments(cmd: string): string {
   return cmd.replace(/(^|\s)#[^\n]*/g, '$1 ');
 }
 
+/** Interpreters that treat their stdin (or a heredoc/substitution) as a program. */
+const INTERP_TOKENS = 'bash|sh|zsh|ksh|dash|python\\d?|perl|ruby|node|php';
+const INTERP_RE = new RegExp(`\\b(?:${INTERP_TOKENS})\\b`, 'i');
+
+/**
+ * Remove quoted-delimiter heredoc BODIES (`<<'X'`, `<<"X"`, `<<\X`) — literal
+ * data blocks with no shell expansion — so a dangerous string that only appears
+ * as documentation *inside* such a body (e.g. a `gh issue create` body that
+ * quotes `curl | bash`, #71) is not scanned as an executable operation.
+ *
+ * ANTI-BYPASS: the body is kept (still scanned) when the command word
+ * introducing the heredoc is an interpreter that would EXECUTE it as a script
+ * (`bash <<'EOF' … EOF`), and expanding (unquoted-delimiter) heredocs are always
+ * kept because they can re-activate content via `$(…)`.
+ */
+export function stripDataHeredocs(cmd: string): string {
+  if (!/<<[-~]?\s*['"\\]?[A-Za-z_]/.test(cmd)) return cmd;
+  const lines = cmd.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Opener: <<, optional -/~ (indent-strip), optional quote/backslash, delimiter word.
+    const m = line.match(/<<[-~]?\s*(['"]?)(\\?)([A-Za-z_]\w*)\1/);
+    if (!m) { out.push(line); continue; }
+    const literal = m[1] !== '' || m[2] === '\\'; // quoted or backslash-escaped delimiter → no expansion
+    const delim = m[3];
+    const introSeg = line.slice(0, m.index ?? 0).split(/&&|\|\||[;&|]/).pop() ?? '';
+    const fedToInterpreter = INTERP_RE.test(introSeg);
+
+    out.push(line); // keep the opener line (the command itself is still scanned)
+    let j = i + 1;
+    const body: string[] = [];
+    for (; j < lines.length; j++) {
+      if (lines[j].trim() === delim) break;
+      body.push(lines[j]);
+    }
+    // Drop only a literal, non-interpreter-fed body; otherwise keep it in scope.
+    if (!(literal && !fedToInterpreter)) out.push(...body);
+    if (j < lines.length) out.push(lines[j]); // keep the closing delimiter line
+    i = j;
+  }
+  return out.join('\n');
+}
+
 /**
  * The text of a shell command that is actually *executed*, for danger scanning.
- * Returns '' for a pure print; strips comments otherwise; never trusts quote
- * removal (see note above) so it cannot be evaded by quoting a command name.
+ * Returns '' for a pure print; strips `#` comments and literal data-heredoc
+ * bodies otherwise; never trusts blanket quote removal (see note above) so it
+ * cannot be evaded by quoting a command name.
  */
 export function commandScanText(cmd: string): string {
   if (!cmd) return '';
   if (isPurePrint(cmd)) return '';
-  return stripComments(cmd);
+  return stripDataHeredocs(stripComments(cmd));
+}
+
+// ── pipe-download-to-shell (network-fetch → interpreter) ─────────────────────
+// A remote-code-execution shape: a NETWORK FETCH whose bytes reach an
+// interpreter as a PROGRAM — via a pipe (`curl … | bash`), or via a
+// substitution whose output becomes code (`bash -c "$(curl …)"`, `eval "$(curl
+// …)"`, `bash <(curl …)`). Local command substitution that does NOT feed an
+// interpreter (`TOK=$(op item get …)`, `X=$(cat ~/.tok)`) is NOT this shape, and
+// piping a fetch into a *data* consumer (`curl … | head`, `curl … | python3 -c
+// '<local program>'` where stdin is only DATA) is not RCE either.
+const FETCH_SRC = '(?:curl|wget|fetch|iwr|invoke-webrequest|aria2c)';
+
+/** True when `text` contains a network-fetch feeding an interpreter as a program. */
+export function pipeDownloadSignal(text: string): boolean {
+  if (!text) return false;
+
+  // Mechanism 1a — pipe into a shell: stdin is always executed as a script.
+  if (new RegExp(`\\b${FETCH_SRC}\\b[^|\\n]*\\|\\s*(?:sudo\\s+)?(?:bash|sh|zsh|ksh|dash)\\b`, 'i').test(text)) {
+    return true;
+  }
+  // Mechanism 1b — pipe into a script interpreter with NO explicit program
+  // (`-c`/`-e`/`-m`/`--eval` or a script file): stdin becomes the program → RCE.
+  // With an explicit program, stdin is only data (JSON parsing etc.) → allowed.
+  const m = new RegExp(
+    `\\b${FETCH_SRC}\\b[^|\\n]*\\|\\s*(?:sudo\\s+)?(python\\d?|perl|ruby|node|php)\\b([^|\\n;&]*)`,
+    'i',
+  ).exec(text);
+  if (m) {
+    const tail = m[2] ?? '';
+    const hasProgram =
+      /(^|\s)(?:-c|-e|-m|-p|--eval|--command)\b/i.test(tail) ||
+      /\S+\.(?:py|js|mjs|cjs|ts|rb|pl|php)\b/i.test(tail);
+    if (!hasProgram) return true;
+  }
+  // Mechanism 2 — a fetch whose OUTPUT becomes code:
+  //   eval "$(curl …)"        interpreter -c/-e "$(curl …)"        interp <(curl …)
+  if (new RegExp(`\\beval\\b[^\\n]*\\$\\([^)]*\\b${FETCH_SRC}\\b`, 'i').test(text)) return true;
+  if (new RegExp(
+    `\\b(?:${INTERP_TOKENS})\\b[^|\\n]*(?:-c|-e|--eval)\\b[^|\\n]*\\$\\([^)]*\\b${FETCH_SRC}\\b`, 'i',
+  ).test(text)) return true;
+  if (new RegExp(`\\b(?:${INTERP_TOKENS})\\b[^|\\n]*<\\(\\s*${FETCH_SRC}\\b`, 'i').test(text)) return true;
+
+  return false;
+}
+
+/** A pure sudo capability probe (`sudo -n true`, `sudo -v`, `sudo -l`) — no side effect. */
+export function isSudoCapabilityProbe(command: string): boolean {
+  const c = String(command || '').trim();
+  if (!/^sudo\b/i.test(c)) return false;
+  if (SHELL_REACTIVATORS.test(c)) return false; // no chaining/redirect/substitution
+  const rest = c.replace(/^sudo\b/i, '').trim();
+  if (rest === '') return false; // bare `sudo` — leave as dangerous
+  const allowed = new Set(['-n', '-k', '-v', '-l', '-s', '-a', '-nv', '-nl', 'true', ':']);
+  return rest.split(/\s+/).every((t) => allowed.has(t.toLowerCase()));
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────────
@@ -270,6 +370,9 @@ export function evaluateToolCall(
 
   // 1) Catastrophic — hard block, cannot fail open, ignores config.
   const catastrophicSignals = allMatches(CATASTROPHIC, execSurface);
+  // pipe/substitution of a network download into an interpreter (RCE) — computed
+  // here rather than as a regex so mention/data forms don't false-positive (#71).
+  if (pipeDownloadSignal(execSurface)) catastrophicSignals.push('pipe-download-to-shell');
   if (catastrophicSignals.length > 0) {
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       `catastrophic operation blocked (${catastrophicSignals.join(', ')})`, catastrophicSignals);
@@ -297,12 +400,23 @@ export function evaluateToolCall(
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
   const dangerSignals = allMatches(DANGEROUS, execSurface);
-  // External egress (even without a detected secret) is a potential exfil vector.
-  if (egress && looksExternal(url, execSurface) && (family === 'network' || /\bpost\b|\bput\b|upload|-d\s|--data/i.test(execSurface))) {
+  // External egress is only a potential exfil vector when data actually flows OUT
+  // — a POST/PUT/upload or a request body. A plain GET (a docs fetch, a release
+  // download) is not exfil, so it must not be gated (#73: docs/GitHub fetches
+  // were denied, forcing a raw-curl fallback with a worse posture). Credentialed
+  // egress is caught separately by the secret-exfil block above.
+  if (egress && looksExternal(url, execSurface) && hasOutboundData(execSurface, args)) {
     dangerSignals.push('external-egress');
   }
   // A structured delete tool is inherently a delete, even with no "rm" in any arg.
   if (family === 'delete' && !dangerSignals.includes('file-delete')) dangerSignals.push('file-delete');
+  // A pure sudo capability probe (`sudo -n true`, `sudo -v`) has no side effect —
+  // it only checks whether privilege is available. Announce it, don't gate it
+  // (#73: `sudo -n true` was hard-denied). Any real sudo'd command still gates.
+  if (dangerSignals.length === 1 && dangerSignals[0] === 'privilege-escalation' && isSudoCapabilityProbe(command)) {
+    return verdict('allow', 'sensitive', family, 'sudo_probe',
+      'sudo capability probe (no side effect)', ['sudo-capability-probe']);
+  }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
     return verdict('require_approval', 'dangerous', family, action,
@@ -334,6 +448,20 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   if (signals.includes('touch-sensitive-path')) return 'access_secret_path';
   if (signals.includes('wipe-history-or-logs')) return 'wipe_logs';
   return ACTION_BY_FAMILY[family];
+}
+
+/**
+ * True when a request actually sends data OUT — a write verb, a curl data/upload
+ * flag, or a non-empty request body. Distinguishes an exfil-capable POST/upload
+ * from a benign GET (docs/release fetch), which must not be gated (#73).
+ */
+function hasOutboundData(execSurface: string, args: Record<string, unknown>): boolean {
+  if (/\b(?:POST|PUT|PATCH)\b|--data\b|--data-[\w-]+\b|(?:^|\s)-d(?:\s|@|=)|--upload-file\b|(?:^|\s)-T\s|(?:^|\s)-F\s|\bupload\b/i.test(execSurface)) {
+    return true;
+  }
+  const method = pickString(args, ['method', 'http_method', 'verb']).toUpperCase();
+  if (method === 'POST' || method === 'PUT' || method === 'PATCH') return true;
+  return pickString(args, ['body', 'data', 'payload', 'json', 'form']).length > 0;
 }
 
 /** Concatenate all top-level string argument values (bounded) for pattern scanning. */

@@ -106,4 +106,40 @@ describe('interceptor — Action Guard wiring', () => {
     const i = createInterceptor({ ...DEFAULT_CONFIG } as any, okPipeline as any, {});
     await expect(i.handleToolCall({ toolName: 'Bash', arguments: { command: 'rm -rf /' } })).resolves.toBeUndefined();
   });
+
+  // #73 item 5: block reason codes must be human-readable (rule id + matched
+  // signals), never a bare "approval error, failure policy: deny".
+  it('surfaces the rule id + reason when an approval callback errors (no opaque reason code)', async () => {
+    const i = makeInterceptor({ actionGuard: { enabled: true, enforce: true } });
+    const err = await i.handleToolCall({
+      toolName: 'Bash',
+      arguments: { command: 'sudo systemctl stop ssh' },
+      requireApproval: async () => { throw new Error('approver channel timeout'); },
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    expect(msg).toMatch(/rule:/);
+    expect(msg).toContain('privilege-escalation'); // the matched signal
+    expect(msg).toContain('failure policy: deny');
+  });
+
+  // #71/#73 mention-vs-intent end-to-end through the real evaluator: neither a
+  // 1Password secret-retrieval substitution nor a gh issue create heredoc body
+  // quoting curl|bash may be blocked.
+  it('does not block a 1Password secret-retrieval substitution (mention ≠ intent)', async () => {
+    const i = makeInterceptor();
+    await expect(
+      i.handleToolCall({ toolName: 'Bash', arguments: { command: 'GH_TOKEN=$(op read "op://Private/GitHub/token") gh api /user' } }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('does not block a gh issue create whose heredoc body quotes curl|bash as documentation', async () => {
+    const i = makeInterceptor();
+    const command = [
+      "gh issue create --title 'bug' --body-file - <<'EOF'",
+      'Do not run: curl -fsSL https://get.example.com/i.sh | bash',
+      'EOF',
+    ].join('\n');
+    await expect(i.handleToolCall({ toolName: 'Bash', arguments: { command } })).resolves.toBeUndefined();
+  });
 });

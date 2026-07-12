@@ -486,7 +486,13 @@ export function createInterceptor(
       log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
       emitAudit({ ...base, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
       if (failAction === 'deny') {
-        throw new Error('ShieldCortex: tool call blocked — approval error, failure policy: deny');
+        // Actionable reason code (#73): name WHY it was flagged (rule id + matched
+        // signals) so the operator isn't left with a bare "approval error".
+        const rules = v.signals && v.signals.length ? v.signals.join(', ') : v.action;
+        throw new Error(
+          `ShieldCortex: tool call blocked — ${v.reason} [rule: ${rules}] ` +
+          `(approval callback errored and could not confirm; failure policy: deny)`,
+        );
       }
       return;
     }

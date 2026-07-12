@@ -19,7 +19,9 @@ export type InjectionCategory =
   | 'encoding_trick'
   | 'role_manipulation'
   | 'context_escape'
-  | 'canary';
+  | 'canary'
+  // Host runtime framing (OpenClaw's own notices) — classified, not a threat (#72).
+  | 'host-runtime-notice';
 
 export interface InjectionDetection {
   category: InjectionCategory | string;
@@ -353,6 +355,55 @@ export function getExternalPatternCount(): number {
   return externalPatterns.length;
 }
 
+// ── Host runtime notices (#72) ──
+//
+// OpenClaw injects its OWN framing into the turn every session — a gateway-restart
+// recovery notice and an inbound-metadata envelope. These trip the
+// `system_message_tag` CRITICAL pattern on `[System]`, burying real detections in
+// fleet-wide noise. We classify (not silence): when the content matches a known
+// host notice by its SPECIFIC full wording anchored at the start (NOT a bare
+// `[System]` prefix an attacker could forge), the framing MARKER detection is
+// reclassified to a low-severity `host-runtime-notice`. Crucially, ANY other
+// detection — a real injection appended to or embedded around the framing — keeps
+// its severity, so the classification can never be used as a suppression prefix.
+interface HostRuntimeNotice { name: string; regex: RegExp; marker: RegExp; }
+
+const HOST_RUNTIME_NOTICES: HostRuntimeNotice[] = [
+  {
+    name: 'gateway-restart-notice',
+    regex: /^\s*\[System\]\s+Your previous turn was interrupted by a gateway restart\b/i,
+    marker: /^\[\s*system\s*\]$/i, // the system_message_tag match on `[System]`
+  },
+  {
+    name: 'inbound-metadata-envelope',
+    regex: /^\s*Conversation info \(untrusted metadata\):/i,
+    marker: /^(?:\[\s*system\s*\]|Conversation info \(untrusted metadata\):)$/i,
+  },
+];
+
+/**
+ * Reclassify host-runtime framing markers to a low-severity, filterable category
+ * in place. Only the framing marker itself is downgraded; co-occurring
+ * detections (real injections) are untouched. Returns the matched notice name,
+ * or null when the content is not a recognised host notice.
+ */
+function classifyHostRuntimeNotice(text: string, detections: InjectionDetection[]): string | null {
+  const notice = HOST_RUNTIME_NOTICES.find((n) => n.regex.test(text));
+  if (!notice) return null;
+  for (const d of detections) {
+    if (
+      d.category === 'fake_system_message' &&
+      d.pattern === 'system_message_tag' &&
+      notice.marker.test(d.match)
+    ) {
+      d.category = 'host-runtime-notice';
+      d.severity = 'low';
+      d.description = `OpenClaw host runtime framing (${notice.name}) — classified, not a threat`;
+    }
+  }
+  return notice.name;
+}
+
 // ── Scanner ──
 
 /**
@@ -402,6 +453,12 @@ export function scanForInjection(text: string): InjectionScanResult {
       unique.push(d);
     }
   }
+
+  // Host-runtime-notice classification (#72): downgrade OpenClaw's own framing
+  // markers to a low-severity, filterable category BEFORE rolling up risk — so a
+  // gateway-restart notice no longer reads as CRITICAL, while any real injection
+  // riding alongside it keeps full severity.
+  classifyHostRuntimeNotice(text, unique);
 
   // Determine overall risk level
   let riskLevel: InjectionScanResult['riskLevel'] = 'NONE';
