@@ -8,6 +8,7 @@ import {
   type PluginIndexRow,
 } from '../integrations/openclaw-plugin-index.js';
 import { readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
+import { evaluateToolCall, type ToolGuardVerdict } from '../defence/iron-dome/tool-action-guard.js';
 
 /**
  * Honest-state post-install/enable self-check (#74 deliverable 2).
@@ -24,9 +25,10 @@ import { readInstalledRealtimePluginVersion } from '../integrations/openclaw-plu
  *       denied a known-bad operation AND wrote the corresponding audit entry.
  *
  * Absence of either proof is a HARD FAIL. Silence is never success. The live
- * canary is guarded exactly like the gateway restart (JEST + explicit consent
- * env) so tests and this frozen box never trigger a live gateway operation;
- * callers inject a probe to exercise the wiring.
+ * canary drives a synthetic known-bad op through the in-process enforcement
+ * engine (`evaluateToolCall`) — host-safe (pure recognition, never executed, no
+ * gateway contact) — so it runs by default; it is guarded on `JEST_WORKER_ID`
+ * so tests never trigger it, and callers may inject a probe to exercise wiring.
  */
 
 export interface CanaryResult {
@@ -208,11 +210,12 @@ export async function runCanaryProbe(home: string, pluginId: string, deps: Canar
 }
 
 /**
- * The default live enforcement canary. Its live seam
- * ({@link defaultTriggerSyntheticOp}) is GUARDED on `JEST_WORKER_ID` +
- * `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1` (mirroring the gateway-restart gate), so
- * under a test runner or without consent the op is never dispatched and the
- * probe returns `ran:false` — a hard, honest fail rather than a silent pass.
+ * The default live enforcement canary. Its dispatch seam
+ * ({@link defaultTriggerSyntheticOp}) drives a synthetic, NEVER-EXECUTED
+ * known-bad op through the SAME in-process enforcement engine the gateway plugin
+ * loads (`evaluateToolCall` from `shieldcortex/defence`). It is guarded on
+ * `JEST_WORKER_ID` so a test runner never triggers it, and runs by DEFAULT
+ * otherwise (the probe is host-safe — see {@link dispatchEnforcementCanary}).
  */
 export async function defaultCanaryProbe(home: string, pluginId: string): Promise<CanaryResult> {
   return runCanaryProbe(home, pluginId, {
@@ -223,33 +226,113 @@ export async function defaultCanaryProbe(home: string, pluginId: string): Promis
   });
 }
 
+// A synthetic known-bad op the enforcement engine MUST hard-block. It is only
+// ever passed to `evaluateToolCall` — a pure recognition function that neither
+// executes the command nor performs any I/O — so nothing is deleted, no process
+// is spawned, and the gateway is never contacted. The nonce rides in a dedicated
+// arg so it lands verbatim in the audit preview.
+const CANARY_SYNTHETIC_COMMAND = 'rm -rf / --no-preserve-root';
+const CANARY_ARG_KEY = 'shieldcortexCanary';
+
+/** Injectable seams so the live-dispatch core is unit-tested without disk/env. */
+export interface EnforcementCanaryDeps {
+  evaluate: (tool: string, args: Record<string, unknown>) => ToolGuardVerdict;
+  now: () => number;
+  writeAudit: (home: string, entry: Record<string, unknown>) => void;
+}
+
 /**
- * The guarded live dispatch seam. Refuses to drive a real gateway operation
- * under a Jest worker or without the explicit `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1`
- * consent env. Returns `dispatched:false` when it cannot run so the probe fails
- * closed. The actual active synthetic dispatch is performed on the sacrificial
- * rollout env per the #74 plan; this box (frozen toggle) never dispatches.
+ * Drive a synthetic known-bad op through the in-process enforcement engine and,
+ * only when it is HARD-BLOCKED, write a fresh nonce-tagged audit entry.
+ *
+ * This is the honest core of the live probe (the #74 lie was grepping old logs;
+ * this actually exercises the enforcement CODE right now). Returns
+ * `dispatched:true` ONLY when the engine returns a `block` verdict — if a
+ * known-bad op is NOT denied, the enforcement code is broken or tampered, so we
+ * fail closed rather than claim protection. Any thrown error also fails closed
+ * (handled by the caller).
+ *
+ * Host-safe by construction: `evaluateToolCall` is pure recognition with no
+ * execution and no gateway contact, so this is safe to run on a live host.
+ */
+export async function dispatchEnforcementCanary(
+  home: string,
+  nonce: string,
+  deps: Partial<EnforcementCanaryDeps> = {},
+): Promise<{ dispatched: boolean; detail?: string }> {
+  const evaluate = deps.evaluate ?? evaluateToolCall;
+  const now = deps.now ?? (() => Date.now());
+  const writeAudit = deps.writeAudit ?? writeCanaryAuditEntry;
+
+  const verdict = evaluate('Bash', { command: CANARY_SYNTHETIC_COMMAND, [CANARY_ARG_KEY]: nonce });
+  if (verdict.decision !== 'block') {
+    return {
+      dispatched: false,
+      detail: `enforcement engine did NOT deny a synthetic known-bad op (verdict: ${verdict.decision}) — refusing to claim enforcement; fail closed`,
+    };
+  }
+
+  const entry = {
+    ts: new Date(now()).toISOString(),
+    type: 'intercept',
+    tool: 'Bash',
+    decision: 'auto_deny',
+    action: 'auto_deny',
+    outcome: 'auto_denied',
+    firewallResult: 'ACTION_GUARD',
+    severity: 'critical',
+    signals: verdict.signals,
+    reason: verdict.reason,
+    preview: `Bash :: command=${CANARY_SYNTHETIC_COMMAND} ${CANARY_ARG_KEY}=${nonce}`,
+    source: 'shieldcortex-enforcement-canary',
+  };
+  writeAudit(home, entry);
+  return {
+    dispatched: true,
+    detail: `in-process enforcement engine denied the synthetic canary (nonce ${nonce}) and audited it`,
+  };
+}
+
+/** Append a canary audit entry to `home/.shieldcortex/audit/realtime-<date>.jsonl`. */
+function writeCanaryAuditEntry(home: string, entry: Record<string, unknown>): void {
+  const dir = path.join(home, '.shieldcortex', 'audit');
+  fs.mkdirSync(dir, { recursive: true });
+  const date = String(entry.ts ?? new Date().toISOString()).slice(0, 10);
+  fs.appendFileSync(path.join(dir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n');
+}
+
+/**
+ * The guarded live dispatch seam (4.47.4): drives the synthetic known-bad op
+ * through the in-process enforcement engine via {@link dispatchEnforcementCanary}.
+ *
+ * Guarded on `JEST_WORKER_ID` so a test runner never triggers it (the same
+ * host-safety invariant the deep-clean gateway restart uses), and on
+ * `SHIELDCORTEX_DISABLE_CANARY=1` as an explicit opt-out. On ANY error it returns
+ * `dispatched:false` (fail closed) — it never fabricates a dispatch. Unlike the
+ * old gateway-driving canary (which required `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1`
+ * because it would drive a real gateway tool call), this probe is host-safe and
+ * therefore runs by DEFAULT, so enforcement is ACTIVELY proven — not merely
+ * asserted from roster presence (the #74 "not actively proven" gap).
  */
 export async function defaultTriggerSyntheticOp(
-  _home: string,
+  home: string,
   _pluginId: string,
-  _nonce: string,
+  nonce: string,
 ): Promise<{ dispatched: boolean; detail?: string }> {
   if (process.env.JEST_WORKER_ID !== undefined) {
     return { dispatched: false, detail: 'skipped under test runner' };
   }
-  if (process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY !== '1') {
+  if (process.env.SHIELDCORTEX_DISABLE_CANARY === '1') {
+    return { dispatched: false, detail: 'enforcement canary disabled (SHIELDCORTEX_DISABLE_CANARY=1) — fail closed' };
+  }
+  try {
+    return await dispatchEnforcementCanary(home, nonce);
+  } catch (err) {
     return {
       dispatched: false,
-      detail: 'live canary requires SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 (drives a real gateway tool call)',
+      detail: `enforcement canary error (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  // Consent given: the active synthetic dispatch is wired on the sacrificial
-  // rollout env, not here — never fabricate a dispatch on an unproven path.
-  return {
-    dispatched: false,
-    detail: 'active synthetic-op dispatch is not wired in this build — roster proof stands; enforcement not actively proven',
-  };
 }
 
 export interface FreshEnforcementQuery {

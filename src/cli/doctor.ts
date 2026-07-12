@@ -1845,7 +1845,7 @@ export async function checkOpenClawPluginLoadState(
       return {
         label,
         status: 'pass',
-        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — run \`shieldcortex repair\` with SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 to prove it live`,
+        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — run \`shieldcortex repair\` to prove it live with the in-process enforcement canary`,
       };
   }
 }

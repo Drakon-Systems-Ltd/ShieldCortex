@@ -1118,10 +1118,14 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
         console.warn('    SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1 shieldcortex repair');
         process.exitCode = 1;
       } else {
-        // Loaded + version OK, but enforcement not actively proven (the live
-        // canary needs explicit consent to drive a real gateway tool call).
-        console.log('• Plugin is loaded in the roster. Enforcement NOT actively proven — confirm the live canary with:');
-        console.log('    SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex repair');
+        // Loaded + version OK, but the live enforcement canary did NOT confirm.
+        // The in-process canary runs by default, so reaching here means the
+        // enforcement engine failed to deny a synthetic known-bad op (or the
+        // audit path is unwritable) — a real problem, not a missing consent env.
+        console.warn('✗ Honest-state self-check: plugin is loaded (roster + version OK) but the enforcement canary did NOT confirm.');
+        console.warn(`  ${check.canary.detail ?? 'the in-process enforcement probe could not prove a known-bad op is denied + audited'}`);
+        console.warn('  Investigate before trusting protection — run `shieldcortex repair`.');
+        process.exitCode = 1;
       }
     } catch {
       // Self-check is best-effort on layouts we can't read; never break install.

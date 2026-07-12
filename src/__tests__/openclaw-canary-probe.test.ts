@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import {
   findFreshEnforcementEntry,
   runCanaryProbe,
+  dispatchEnforcementCanary,
+  defaultTriggerSyntheticOp,
   evaluateSelfCheck,
   runPluginSelfCheck,
   type CanaryResult,
@@ -136,6 +138,56 @@ describe('runCanaryProbe — active synthetic op + fresh nonce gate', () => {
     });
     expect(dead.denied).toBe(false);
     fs.rmSync(home2, { recursive: true, force: true });
+  });
+});
+
+describe('dispatchEnforcementCanary — live in-process enforcement probe (4.47.4)', () => {
+  let home: string;
+  beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-canary-')); });
+  afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); });
+
+  it('END-TO-END: the REAL enforcement engine denies a synthetic known-bad op and writes a fresh nonce-tagged audit entry', async () => {
+    // No injected evaluator — this exercises the actual `evaluateToolCall` engine
+    // (the same recognition code the gateway plugin loads), in-process, and the
+    // real audit-write + findFresh read. Nothing is executed; no gateway contact.
+    const sinceMs = Date.now();
+    const r = await dispatchEnforcementCanary(home, 'sc-canary-REAL');
+    expect(r.dispatched).toBe(true);
+    const fresh = findFreshEnforcementEntry(home, { nonce: 'sc-canary-REAL', sinceMs });
+    expect(fresh.found).toBe(true);
+  });
+
+  it('FAILS CLOSED when the engine does NOT deny the known-bad op (broken/tampered enforcement)', async () => {
+    let wrote = false;
+    const r = await dispatchEnforcementCanary(home, 'sc-canary-X', {
+      evaluate: () => ({ decision: 'allow', severity: 'benign', family: 'exec', action: 'execute_command', reason: 'stub allows everything', signals: [] }),
+      writeAudit: () => { wrote = true; },
+    });
+    expect(r.dispatched).toBe(false);
+    expect(r.detail).toMatch(/did NOT deny|fail closed/i);
+    expect(wrote).toBe(false); // never audit a deny that did not happen
+  });
+
+  it('writes an auto_deny entry carrying the nonce when the engine blocks', async () => {
+    const entries: Record<string, unknown>[] = [];
+    const r = await dispatchEnforcementCanary(home, 'sc-canary-Y', {
+      evaluate: () => ({ decision: 'block', severity: 'catastrophic', family: 'exec', action: 'execute_command', reason: 'catastrophic operation blocked (recursive-force-delete)', signals: ['recursive-force-delete'] }),
+      now: () => Date.parse('2026-07-12T09:00:00.000Z'),
+      writeAudit: (_h, e) => { entries.push(e); },
+    });
+    expect(r.dispatched).toBe(true);
+    expect(entries).toHaveLength(1);
+    expect(JSON.stringify(entries[0])).toContain('sc-canary-Y');
+    expect(String(entries[0].action)).toMatch(/deny/);
+  });
+});
+
+describe('defaultTriggerSyntheticOp — host-safety guard stays effective under Jest', () => {
+  it('never dispatches under a Jest worker (the guard the deep-clean gateway restart uses)', async () => {
+    expect(process.env.JEST_WORKER_ID).toBeDefined();
+    const r = await defaultTriggerSyntheticOp('/tmp/whatever', 'shieldcortex-realtime', 'sc-canary-JEST');
+    expect(r.dispatched).toBe(false);
+    expect(r.detail).toMatch(/test runner/i);
   });
 });
 

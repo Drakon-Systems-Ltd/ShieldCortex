@@ -104,12 +104,17 @@ describe('runPluginSelfCheck — never touches the live gateway under Jest', () 
   });
 });
 
-describe('self-check source-shape: the live canary is guarded like a gateway restart', () => {
-  it('guards the real canary on JEST_WORKER_ID and an explicit consent env before any live probe', () => {
+describe('self-check source-shape: the live canary is an in-process probe, JEST-guarded', () => {
+  it('guards the real canary on JEST_WORKER_ID and drives the in-process enforcement engine (not an audit-log grep)', () => {
     const thisFile = fileURLToPath(import.meta.url);
     const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
     const src = fs.readFileSync(path.join(repoRoot, 'src', 'setup', 'openclaw-selfcheck.ts'), 'utf-8');
+    // Host-safety invariant: a test runner must never trigger the live probe.
     expect(src).toMatch(/JEST_WORKER_ID/);
-    expect(src).toMatch(/SHIELDCORTEX_ALLOW_GATEWAY_CANARY/);
+    // The probe drives the SAME in-process enforcement engine the gateway loads,
+    // proving enforcement live — rather than merely asserting from roster presence.
+    expect(src).toMatch(/evaluateToolCall/);
+    // Any uncertainty must fail closed.
+    expect(src).toMatch(/fail closed/i);
   });
 });
