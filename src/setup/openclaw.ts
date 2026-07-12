@@ -12,6 +12,7 @@ import os from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import {
+  resolveRealtimePluginInstallPath,
   resolveRealtimeProjectDir,
   readRealtimeProjectManifest,
   findEoverrideRiskPins,
@@ -827,19 +828,33 @@ function uninstallPlugin(): boolean {
  * caused `status` to report "not installed" immediately after a successful
  * `openclaw plugins install`.
  */
-function pluginStatus(): { installed: boolean; path?: string; entry?: 'index.ts' | 'index.js' } {
+function pluginStatus(): { installed: boolean; path?: string; entry?: 'index.ts' | 'index.js'; source?: 'extensions' | 'managed-project' } {
   const extensionsDir = findExtensionsDir();
-  if (!extensionsDir) return { installed: false };
+  if (extensionsDir) {
+    const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
+    const manifestPath = path.join(destDir, 'openclaw.plugin.json');
+    if (fs.existsSync(manifestPath)) {
+      const jsEntry = path.join(destDir, 'index.js');
+      const tsEntry = path.join(destDir, 'index.ts');
+      if (fs.existsSync(jsEntry)) return { installed: true, path: destDir, entry: 'index.js', source: 'extensions' };
+      if (fs.existsSync(tsEntry)) return { installed: true, path: destDir, entry: 'index.ts', source: 'extensions' };
+      // Manifest present but no recognised entry — treat as broken install, not hidden.
+    }
+  }
 
-  const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
-  const manifestPath = path.join(destDir, 'openclaw.plugin.json');
-  if (!fs.existsSync(manifestPath)) return { installed: false };
+  // Managed npm project install (OpenClaw >= 2026.6.x): the package lives under
+  // ~/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-*/ rather than
+  // extensions/. Reuse the canonical install-discovery helper the #74/#75
+  // reconciler work introduced so status agrees with the roster/plugins-list
+  // view instead of inventing a second path heuristic (issue #77).
+  const managedPath = resolveRealtimePluginInstallPath(resolveUserHome());
+  if (managedPath) {
+    const jsEntry = path.join(managedPath, 'index.js');
+    const tsEntry = path.join(managedPath, 'index.ts');
+    const entry = fs.existsSync(jsEntry) ? 'index.js' : fs.existsSync(tsEntry) ? 'index.ts' : undefined;
+    return { installed: true, path: managedPath, entry, source: 'managed-project' };
+  }
 
-  const jsEntry = path.join(destDir, 'index.js');
-  const tsEntry = path.join(destDir, 'index.ts');
-  if (fs.existsSync(jsEntry)) return { installed: true, path: destDir, entry: 'index.js' };
-  if (fs.existsSync(tsEntry)) return { installed: true, path: destDir, entry: 'index.ts' };
-  // Manifest present but no recognised entry — treat as broken install, not hidden.
   return { installed: false };
 }
 
@@ -1203,7 +1218,8 @@ export async function openClawHookStatus(): Promise<void> {
         ? 'local install not yet trusted'
         : 'native or unknown trust source';
   const entrySuffix = plugin.entry ? ` [${plugin.entry}]` : '';
-  console.log(`  Real-time plugin: installed (${plugin.path})${entrySuffix} — ${trustSuffix}`);
+  const sourceSuffix = plugin.source === 'managed-project' ? ' (managed npm project)' : '';
+  console.log(`  Real-time plugin: installed (${plugin.path})${sourceSuffix}${entrySuffix} — ${trustSuffix}`);
 
   // Surface any config/disk drift even when installed. A legacy `installs`
   // entry alone is not sufficient for OpenClaw to load the plugin — it needs

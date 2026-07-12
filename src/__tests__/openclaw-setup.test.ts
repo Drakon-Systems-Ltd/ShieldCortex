@@ -268,4 +268,96 @@ describe('OpenClaw setup', () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('config references'));
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('no files on disk'));
   });
+
+  // Issue #77: `pluginStatus()` only path-probed the legacy
+  // ~/.openclaw/extensions/shieldcortex-realtime dir, so managed npm project
+  // installs (~/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-*/)
+  // reported "config references ... but no files on disk" while the runtime was
+  // demonstrably loaded (field evidence from aiquant, 2026-07-12).
+  function writeManagedProjectInstall(version: string): string {
+    const installPath = path.join(
+      tempHome, '.openclaw', 'npm', 'projects',
+      'drakon-systems-shieldcortex-realtime-abc123',
+      'node_modules', '@drakon-systems', 'shieldcortex-realtime',
+    );
+    fs.mkdirSync(installPath, { recursive: true });
+    fs.writeFileSync(
+      path.join(installPath, 'package.json'),
+      JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version }, null, 2),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(installPath, 'openclaw.plugin.json'),
+      JSON.stringify({ id: 'shieldcortex-realtime', version }, null, 2),
+      'utf-8',
+    );
+    const pluginsDir = path.join(tempHome, '.openclaw', 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginsDir, 'installs.json'),
+      JSON.stringify({
+        installRecords: {
+          'shieldcortex-realtime': { source: 'npm', version, installPath },
+        },
+      }, null, 2),
+      'utf-8',
+    );
+    return installPath;
+  }
+
+  it('reports plugin as installed for a managed npm project install with no extensions/ dir (#77)', async () => {
+    const { openClawHookStatus } = await loadOpenClawModule();
+    // The field case: OpenClaw's `plugins install` put the package under a
+    // managed npm project (not extensions/), the roster shows it loaded, and
+    // openclaw.json references it — but the legacy extensions/ dir is empty.
+    const installPath = writeManagedProjectInstall('4.47.3');
+    fs.writeFileSync(openClawConfigPath(), JSON.stringify({
+      plugins: {
+        allow: ['shieldcortex-realtime'],
+        installs: { 'shieldcortex-realtime': { source: 'npm', version: '4.47.3' } },
+        entries: { 'shieldcortex-realtime': { enabled: true } },
+      },
+    }, null, 2), 'utf-8');
+
+    await openClawHookStatus();
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Real-time plugin: installed'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining(installPath));
+    // Must NOT emit the false-negative drift line when files are present.
+    expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('no files on disk'));
+  });
+
+  it('does not false-positive: reports "no files on disk" when the managed install record points at a missing path (#77)', async () => {
+    const { openClawHookStatus } = await loadOpenClawModule();
+    // Registry references a managed install, but the package dir is gone —
+    // genuinely absent, must still report truthfully.
+    const ghostPath = path.join(
+      tempHome, '.openclaw', 'npm', 'projects',
+      'drakon-systems-shieldcortex-realtime-ghost',
+      'node_modules', '@drakon-systems', 'shieldcortex-realtime',
+    );
+    const pluginsDir = path.join(tempHome, '.openclaw', 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginsDir, 'installs.json'),
+      JSON.stringify({
+        installRecords: {
+          'shieldcortex-realtime': { source: 'npm', version: '4.47.3', installPath: ghostPath },
+        },
+      }, null, 2),
+      'utf-8',
+    );
+    fs.writeFileSync(openClawConfigPath(), JSON.stringify({
+      plugins: {
+        allow: ['shieldcortex-realtime'],
+        installs: { 'shieldcortex-realtime': { source: 'npm', version: '4.47.3' } },
+        entries: { 'shieldcortex-realtime': { enabled: true } },
+      },
+    }, null, 2), 'utf-8');
+
+    await openClawHookStatus();
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('config references'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('no files on disk'));
+  });
 });
