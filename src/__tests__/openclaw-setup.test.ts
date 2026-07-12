@@ -268,4 +268,37 @@ describe('OpenClaw setup', () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('config references'));
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('no files on disk'));
   });
+
+  it('reports a managed npm-project install as installed, not "no files on disk" (#77)', async () => {
+    const { openClawHookStatus } = await loadOpenClawModule();
+    // OpenClaw 2026.6.x installs the realtime plugin as a managed npm project under
+    // ~/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-<hash>/, NOT under
+    // extensions/. The legacy path-probe was blind to this and reported "no files on
+    // disk" on healthy boxes (issue #77).
+    const projectRoot = path.join(
+      tempHome, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-a1b2c3',
+    );
+    const pkgDir = path.join(projectRoot, 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    fs.mkdirSync(pkgDir, { recursive: true });
+    fs.writeFileSync(path.join(pkgDir, 'package.json'), '{"name":"@drakon-systems/shieldcortex-realtime","version":"4.47.3"}\n', 'utf-8');
+    // The managed-project root carries its own generated package.json (managed deps).
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), '{"name":"drakon-systems-shieldcortex-realtime-a1b2c3","version":"0.0.0"}\n', 'utf-8');
+    // Config references the plugin (loaded + enforcing), but nothing lives under extensions/.
+    fs.writeFileSync(openClawConfigPath(), JSON.stringify({
+      plugins: {
+        allow: ['shieldcortex-realtime'],
+        entries: { 'shieldcortex-realtime': { enabled: true } },
+      },
+    }, null, 2), 'utf-8');
+
+    await openClawHookStatus();
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Real-time plugin: installed'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[managed]'));
+    // The false-negative message must NOT appear for a healthy managed install.
+    const emittedNoFiles = logSpy.mock.calls.some(
+      (call) => typeof call[0] === 'string' && call[0].includes('no files on disk'),
+    );
+    expect(emittedNoFiles).toBe(false);
+  });
 });

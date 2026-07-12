@@ -13,6 +13,7 @@ import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import {
   resolveRealtimeProjectDir,
+  resolveRealtimePluginInstallPath,
   readRealtimeProjectManifest,
   findEoverrideRiskPins,
   findLatentEoverridePins,
@@ -827,19 +828,34 @@ function uninstallPlugin(): boolean {
  * caused `status` to report "not installed" immediately after a successful
  * `openclaw plugins install`.
  */
-function pluginStatus(): { installed: boolean; path?: string; entry?: 'index.ts' | 'index.js' } {
+function pluginStatus(): { installed: boolean; path?: string; entry?: 'index.ts' | 'index.js' | 'managed' } {
   const extensionsDir = findExtensionsDir();
-  if (!extensionsDir) return { installed: false };
+  if (extensionsDir) {
+    const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
+    const manifestPath = path.join(destDir, 'openclaw.plugin.json');
+    if (fs.existsSync(manifestPath)) {
+      const jsEntry = path.join(destDir, 'index.js');
+      const tsEntry = path.join(destDir, 'index.ts');
+      if (fs.existsSync(jsEntry)) return { installed: true, path: destDir, entry: 'index.js' };
+      if (fs.existsSync(tsEntry)) return { installed: true, path: destDir, entry: 'index.ts' };
+      // Manifest present but no recognised entry — treat as broken install, not hidden.
+      // Fall through to the managed-project probe below rather than declaring absent:
+      // the same box may carry a healthy managed install even with a broken legacy dir.
+    }
+  }
 
-  const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
-  const manifestPath = path.join(destDir, 'openclaw.plugin.json');
-  if (!fs.existsSync(manifestPath)) return { installed: false };
+  // Managed npm project install (~/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-<hash>/).
+  // OpenClaw 2026.6.x installs the realtime plugin here, NOT under extensions/, so the
+  // legacy path-probe above reports "no files on disk" on healthy managed boxes (#77).
+  // Reuse the #74 reconciler's resolution (installs.json + npm/projects scan) — the same
+  // resolution doctor/repair/selfcheck already trust — before declaring the plugin missing.
+  const home = resolveUserHome();
+  const installPath = resolveRealtimePluginInstallPath(home);
+  if (installPath) {
+    const projectDir = resolveRealtimeProjectDir(home) ?? installPath;
+    return { installed: true, path: projectDir, entry: 'managed' };
+  }
 
-  const jsEntry = path.join(destDir, 'index.js');
-  const tsEntry = path.join(destDir, 'index.ts');
-  if (fs.existsSync(jsEntry)) return { installed: true, path: destDir, entry: 'index.js' };
-  if (fs.existsSync(tsEntry)) return { installed: true, path: destDir, entry: 'index.ts' };
-  // Manifest present but no recognised entry — treat as broken install, not hidden.
   return { installed: false };
 }
 
