@@ -130,6 +130,13 @@ const CATASTROPHIC: Pattern[] = [
   // parses JSON and is not RCE (issue #73.6). The negative lookahead exempts an
   // interpreter whose next flag (allowing intervening short flags) is -c/-e/-m.
   { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i, signal: 'pipe-download-to-shell' },
+  // ANTI-BYPASS for the exemption above: an inline `-c`/`-e` program that itself
+  // EXECUTES its stdin (`python3 -c "exec(sys.stdin.read())"`, `node -e
+  // "eval(...readFileSync(0)...)"`, `bash -c 'source /dev/stdin'`) re-opens the
+  // fetched bytes as code — still RCE, not data consumption. Single-line bounded;
+  // `\b(exec|eval)\b` deliberately does not match `literal_eval` or
+  // `json.load(sys.stdin)`, so the #73.6 data-parsing exemption stands.
+  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\b(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b[^\n]*(?:\b(?:exec|eval)\b|\bsource\s+\/dev\/stdin\b)/i, signal: 'pipe-download-stdin-exec' },
   // recursive permission/ownership change at the root
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i, signal: 'recursive-perms-on-root' },
   // overwrite the whole disk with zeros/urandom
@@ -218,6 +225,7 @@ function matchSpans(patterns: Pattern[], text: string): Array<{ signal: string; 
 // (issue #73 item 5).
 const REMEDIATION: Record<string, string> = {
   'pipe-download-to-shell': 'download to a file and inspect it before running (curl -o get.sh URL; less get.sh; sh get.sh)',
+  'pipe-download-stdin-exec': 'the inline program executes its stdin, so the fetched bytes still run as code — download to a file and inspect it first',
   'install-package-global': 'review the package + source, then install it explicitly if intended (a workspace-local install needs no global flag)',
   'install-package': 'review the package + source, then run the install yourself if intended',
   'privilege-escalation': 'run the specific privileged step yourself, or approve this exact command',
