@@ -298,6 +298,15 @@ export function pipeDownloadSignal(text: string): boolean {
       /(^|\s)(?:-c|-e|-m|-p|--eval|--command)\b/i.test(tail) ||
       /\S+\.(?:py|js|mjs|cjs|ts|rb|pl|php)\b/i.test(tail);
     if (!hasProgram) return true;
+    // ANTI-BYPASS: an explicit `-c`/`-e` program that itself EXECUTES its stdin
+    // (`python3 -c "exec(sys.stdin.read())"`, `node -e "eval(...readFileSync(0)...)"`)
+    // re-opens the fetched bytes as code — that is still RCE, not data
+    // consumption. Checked against the whole rest of the LINE (not the
+    // `;`-truncated tail — the `;` may sit inside the quoted program, invisible
+    // to a regex). `\b(exec|eval)\b` deliberately does not match `literal_eval`
+    // or `json.load(sys.stdin)`, so the #71 data-parsing cases stay allowed.
+    const restOfLine = text.slice(m.index).split('\n', 1)[0];
+    if (/\b(?:exec|eval)\b/i.test(restOfLine)) return true;
   }
   // Mechanism 2 — a fetch whose OUTPUT becomes code:
   //   eval "$(curl …)"        interpreter -c/-e "$(curl …)"        interp <(curl …)
@@ -317,7 +326,9 @@ export function isSudoCapabilityProbe(command: string): boolean {
   if (SHELL_REACTIVATORS.test(c)) return false; // no chaining/redirect/substitution
   const rest = c.replace(/^sudo\b/i, '').trim();
   if (rest === '') return false; // bare `sudo` — leave as dangerous
-  const allowed = new Set(['-n', '-k', '-v', '-l', '-s', '-a', '-nv', '-nl', 'true', ':']);
+  // NOTE: `-s` is deliberately absent — `sudo -s` spawns a root SHELL, which is
+  // an escalation, not a probe.
+  const allowed = new Set(['-n', '-k', '-v', '-l', '-nv', '-nl', 'true', ':']);
   return rest.split(/\s+/).every((t) => allowed.has(t.toLowerCase()));
 }
 
