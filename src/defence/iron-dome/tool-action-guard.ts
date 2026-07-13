@@ -156,7 +156,14 @@ const CATASTROPHIC: Pattern[] = [
   // fetched bytes as code — still RCE, not data consumption. Single-line bounded;
   // `\b(exec|eval)\b` deliberately does not match `literal_eval` or
   // `json.load(sys.stdin)`, so the #73.6 data-parsing exemption stands.
-  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\b(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b[^\n]*(?:\b(?:exec|eval)\b|\bsource\s+\/dev\/stdin\b)/i, signal: 'pipe-download-stdin-exec' },
+  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\b(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b[^\n]*(?:\b(?:exec|eval)\b|(?:\bsource\b|(?<![\w./])\.)\s+\/dev\/stdin\b)/i, signal: 'pipe-download-stdin-exec' },
+  // ANTI-BYPASS (issue #86.1): the `-m` inline-program exemption also covers a
+  // deny-list of stdlib MODULES that execute their stdin — `python -m code` drops
+  // into the interactive interpreter and runs the piped bytes as code, `pty`
+  // spawns a shell, `pdb` reads debugger commands — none carry an exec/eval token
+  // on the line. `-m json.tool`/`-m pip` (stdin as DATA, or no stdin) do NOT match,
+  // so the #73.6 data-parsing exemption stands. `(?![\w.])` keeps `codecs` ≠ `code`.
+  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\bpython\d?\b[^\n]*\s-m\s*(?:code|pty|pdb)(?![\w.])/i, signal: 'pipe-download-module-exec' },
   // recursive permission/ownership change at the root (bare `/`, `/ `, or
   // trailing-slash `/ ` variants — the system-dir sibling below handles
   // /etc, /var, /home, etc. with the SAME trailing-slash discipline).
@@ -317,6 +324,7 @@ const REMEDIATION: Record<string, string> = {
   'pipe-download-to-shell': 'download to a file and inspect it before running (curl -o get.sh URL; less get.sh; sh get.sh)',
   'pipe-download-stdin-exec': 'the inline program executes its stdin, so the fetched bytes still run as code — download to a file and inspect it first',
   'decode-pipe-to-shell': 'the decoded/fetched bytes are executed as code by a bare interpreter — download to a file and inspect it first',
+  'pipe-download-module-exec': 'the interpreter module (code/pty/pdb) runs its stdin as code, so the fetched bytes still execute — download to a file and inspect it first',
   'install-package-global': 'review the package + source, then install it explicitly if intended (a workspace-local install needs no global flag)',
   'install-package': 'review the package + source, then run the install yourself if intended',
   'registry-code-exec': 'review the package + source on the registry before running (npx/bunx/uvx/dlx fetch and execute immediately)',
@@ -466,6 +474,36 @@ function stripComments(cmd: string): string {
 const HEREDOC_INTERPRETER = /\b(?:bash|sh|zsh|ksh|dash|python\d?|perl|ruby|node|php)\b/i;
 
 /**
+ * The file a heredoc intro/opener writes its body to, if any: `> file`, `>> file`,
+ * or `tee [-a] file`. Returns the bare target token (quotes stripped) or null.
+ * Ignores fd redirects (`2>`, `>&2`) and process substitution (`>(`).
+ */
+function heredocOutputFile(text: string): string | null {
+  const redir = text.match(/(?<![>&\d])>>?\s*(['"]?)([^\s'"|;&()<>]+)\1/);
+  if (redir) return redir[2];
+  const tee = text.match(/\btee\b\s+(?:-\w+\s+)*(['"]?)([^\s'"|;&()<>]+)\1/);
+  if (tee) return tee[2];
+  return null;
+}
+
+/**
+ * True when `cmd` invokes an interpreter (or the `source`/`.` builtin) on `file`
+ * in command position — `sh x.sh`, `bash ./run`, `. p.sh`, `python3 /tmp/p.py`.
+ * The command-position anchor (start / `;` / `|` / `&` / `(` / newline) stops the
+ * `.sh` in a filename from reading as the `sh` interpreter, and `(?![\w.])` keeps
+ * the match to the whole filename token (`x.sh` ≠ `x.shrc`).
+ */
+function interpreterRunsFile(cmd: string, file: string): boolean {
+  const f = file.replace(/^['"]/, '').replace(/['"]$/, '');
+  if (f.length < 2) return false;
+  const esc = f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(
+    `(?:^|[\\n;|&(])\\s*(?:sudo\\s+)?(?:bash|sh|zsh|ksh|dash|python\\d?|perl|ruby|node|php|source|\\.)\\s+[^\\n;|&]*${esc}(?![\\w.])`,
+  );
+  return re.test(cmd);
+}
+
+/**
  * Neutralise the bodies of QUOTED heredocs (`<<'EOF'` / `<<"EOF"`).
  *
  * A quoted delimiter means the body is passed literally, unexpanded — it is a
@@ -488,6 +526,12 @@ function stripQuotedHeredocs(cmd: string): string {
       const lineStart = whole.lastIndexOf('\n', offset) + 1;
       const introLine = whole.slice(lineStart, offset);
       if (HEREDOC_INTERPRETER.test(introLine)) return match; // interpreter consumes it → keep
+      // Two-step write-then-execute (issue #86.2): the body is redirected/tee'd to
+      // a file that a LATER segment of the same compound command executes. The body
+      // is code again, not inert data — keep it scanned. File-linked so a doc
+      // heredoc written then `git add`/`cat`'d (no interpreter on it) still strips.
+      const outFile = heredocOutputFile(introLine + opener);
+      if (outFile && interpreterRunsFile(whole, outFile)) return match;
       return opener + closer;                                 // drop the inert body
     },
   );
