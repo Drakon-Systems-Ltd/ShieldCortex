@@ -165,11 +165,18 @@ const DANGEROUS: Pattern[] = [
   // below) so it is never a hard gate.
   { re: /\b(?:apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo)\b[^|\n]*\b(?:install|add)\b/i, signal: 'install-package' },
   // A GLOBAL install mutates the host → approval. It must carry BOTH an install
-  // verb (install/add/ci, or the `npm i` shorthand) AND a global flag in the SAME
-  // statement. A read-only global QUERY — `npm ls -g`, `npm root -g`,
+  // verb AND a global flag in the SAME statement. The verb is `install`/`add`,
+  // or npm's own `i`/`in`/`ins`/`inst`/`insta`/`instal`/`install`/`isnt`/`isntall`
+  // abbreviation family (npm's alias resolver accepts all of these as `install` —
+  // the old regex only caught the bare `i` shorthand, so `npm inst -g x` etc.
+  // bypassed the gate entirely; issue #90). `ci` is excluded — there is no global
+  // `npm ci`. The verb must land as its own whitespace-delimited argv token, not
+  // a `\b`-only substring, so a package name that merely contains the word —
+  // `npm ls -g social-add-on`, `npm outdated -g @scope/add` — does not over-gate
+  // (issue #90). A read-only global QUERY — `npm ls -g`, `npm root -g`,
   // `npm outdated -g`, `npm list --global` — mutates nothing and is not gated
   // (issue #88). Order-independent (`npm install -g` and `npm -g install` both hit).
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s-g\b|--global\b|\bglobal\s+add\b))(?=[^|;&\n]*\b(?:install|add|ci)\b)|\b(?:npm|pnpm|bun)\s+i\b[^|;&\n]*(?:\s-g\b|--global\b)/i, signal: 'install-package-global' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s-g\b|--global\b|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s-g\b|--global\b)/i, signal: 'install-package-global' },
   // Scheduler MUTATION only: `crontab` in command position that edits/installs
   // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
   // never the bare word mentioned inside an echo/string (issue #89). Env-var and

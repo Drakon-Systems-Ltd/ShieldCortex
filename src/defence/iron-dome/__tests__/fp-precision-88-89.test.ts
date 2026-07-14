@@ -113,6 +113,50 @@ describe('#89 — modify-scheduler must not fire on read-only crontab -l', () =>
   });
 });
 
+describe('#90 — install-package-global must gate npm install-verb abbreviations', () => {
+  // Review follow-up on #88/#89: the narrowed regex only rescued the exact `i`
+  // shorthand, so npm's own alias resolver (which accepts the whole
+  // i/in/ins/inst/insta/instal/install/isnt/isntall family as `install`) let
+  // every abbreviation OTHER than `i` bypass the gate entirely.
+  const approve: Array<[string, string]> = [
+    ['npm inst -g', 'npm inst -g evil'],
+    ['npm in -g', 'npm in -g evil'],
+    ['npm isntall -g', 'npm isntall -g evil'],
+    ['npm ins -g', 'npm ins -g evil'],
+    ['npm insta -g', 'npm insta -g evil'],
+    ['npm instal -g', 'npm instal -g evil'],
+    ['npm isnt -g', 'npm isnt -g evil'],
+    // must-still-fire siblings — the pre-existing denies this patch must not weaken.
+    ['npm i -g', 'npm i -g evil'],
+    ['npm install -g', 'npm install -g evil'],
+    ['sudo npm install -g', 'sudo npm install -g evil'],
+    ['npm -g install', 'npm -g install evil'],
+    ['pnpm add -g', 'pnpm add -g evil'],
+    ['bun add -g', 'bun add -g evil'],
+    ['yarn global add', 'yarn global add evil'],
+  ];
+  it.each(approve)('still requires approval: %s', (_l, command) => {
+    const v = verdict({ command });
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('install-package-global');
+  });
+
+  // NOT install aliases — must not start denying just because they share the
+  // `i`/`in` prefix or a hyphenated/scoped package name contains a verb word.
+  const allow: Array<[string, string]> = [
+    ['npm init', 'npm init'],
+    ['npm info', 'npm info left-pad'],
+    ['npm ls -g package name contains "ci"', 'npm ls -g some-ci-tool'],
+    ['npm ls -g package name contains "add"', 'npm ls -g social-add-on'],
+    ['npm outdated -g scoped package ends in "add"', 'npm outdated -g @scope/add'],
+    // Fix 2: there is no global `npm ci` — dropped from the verb set entirely.
+    ['npm ci -g (no such thing as global ci)', 'npm ci -g'],
+  ];
+  it.each(allow)('allows: %s', (_l, command) => {
+    expect(decision({ command })).toBe('allow');
+  });
+});
+
 describe('#89 — external-egress must not fire on read-only GET fetches', () => {
   const allow: Array<[string, Record<string, unknown>]> = [
     ['web_fetch wikipedia', { url: 'https://en.wikipedia.org/wiki/2026_FIFA_World_Cup' }],
