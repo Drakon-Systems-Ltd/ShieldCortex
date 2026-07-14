@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.4] - 2026-07-14
+
+**A false-positive precision pass, an honest plugin-status probe, MCP self-heal on ABI mismatch, and consent-gated canary auto-dispatch — the field-hardening batch on top of 4.47.3's loader reconciler.**
+
+### Fixed
+
+- **False-positive precision (#71/#72/#73) — no true-positive weakened.** Five over-blocking classes from the fleet dogfood are narrowed, each shipping with a must-BLOCK sibling fixture proving the real attack still blocks (35 new failing-first cases): pipe-to-shell now exempts an interpreter running its own inline program while `curl … | sh` still blocks; quoted/heredoc command text in documentation is treated as mention-not-intent; the egress detector requires an actual outbound payload; a workspace-local `npm install` is allowed while global `-g` installs stay gated; and OpenClaw runtime notices are reclassified from CRITICAL to a low-severity `host_runtime_notice` (classified, not silenced). Block reasons are now human-readable reason codes (#73).
+- **`pluginStatus` false-negative (#77).** `shieldcortex openclaw status` reported "no files on disk" on the new managed install path while the runtime was demonstrably enforcing. It now reuses the canonical install-path resolver instead of only probing the legacy `~/.openclaw/extensions/` location. Runtime was never affected — this makes the status line honest.
+- **stdin-exec bypass closed (#85).** The new inline-program exemption is prevented from being abused by piping a download into `python3 -c "exec(stdin)"`, and `sudo -s` is dropped from the probe allowlist.
+
+### Added
+
+- **MCP self-heal on ABI mismatch (#76).** A `better-sqlite3`/Node ABI mismatch at startup is now repaired via `ensureNativeBinding` with a loud failure and a breadcrumb log instead of a bare `-32000`, and MCP config entries are written PATH-immune (absolute paths).
+- **Canary auto-dispatch (#81).** Optional, consent-gated synthetic catastrophic operation dispatched through the actually-installed interceptor to actively prove enforcement. The 4.47.3 fail-closed contract is intact: no consent, or an unobservable result, reports "not proven" — never a fabricated pass.
+
+## [4.47.3] - 2026-07-12
+
+**Plugin-loader metadata reconciler and honest-state self-check — closes a fail-open loader hole found in the field.**
+
+### Fixed
+
+- **Fail-open plugin-loader hole.** A stale or duplicate managed-install directory could shadow the canonical install and leave the loader reporting healthy while enforcement was not actually wired. A metadata reconciler now prunes stale duplicate install dirs, keeps only the canonical install, and re-verifies. Found, fixed and field-verified on the very box that surfaced it.
+- **Honest-state self-check.** The plugin self-check refuses to claim proof it does not have: on an unproven path it reports "roster proof stands, enforcement not actively proven" rather than faking a live dispatch. The dangerous directions (plugin not loaded, silent downgrade) still hard-fail loudly.
+
 ## [4.47.2] - 2026-07-10
 
 **A first-class `credential_exfil` classification, the Hermes gate defaults to enforce, and a fleet regression pack from the Athena/Edith dogfood.**
