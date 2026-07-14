@@ -119,7 +119,7 @@ const CATASTROPHIC: Pattern[] = [
   { re: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:/, signal: 'fork-bomb' },
   // filesystem creation / raw disk writes
   { re: /\bmkfs(\.\w+)?\b/i, signal: 'format-filesystem' },
-  { re: /\bdd\b[^|\n]*\bof=\/dev\/(sd|nvme|hd|disk|mmcblk|vd)/i, signal: 'raw-disk-write' },
+  { re: /\bdd\b[^|;&\n]*\bof=\/dev\/(sd|nvme|hd|disk|mmcblk|vd)/i, signal: 'raw-disk-write' },
   { re: /[>|]\s*\/dev\/(sd|nvme|hd|disk|mmcblk|vd)\w/i, signal: 'redirect-to-block-device' },
   { re: /\b(fdisk|parted|sgdisk|wipefs|blkdiscard)\b/i, signal: 'disk-partition-tool' },
   // pipe a download straight into an interpreter (remote code execution).
@@ -139,8 +139,11 @@ const CATASTROPHIC: Pattern[] = [
   { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\b(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b[^\n]*(?:\b(?:exec|eval)\b|\bsource\s+\/dev\/stdin\b)/i, signal: 'pipe-download-stdin-exec' },
   // recursive permission/ownership change at the root
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i, signal: 'recursive-perms-on-root' },
-  // overwrite the whole disk with zeros/urandom
-  { re: /\b(?:shred|wipe)\b[^|\n]*\/dev\//i, signal: 'shred-device' },
+  // overwrite the whole disk with zeros/urandom. The [^|;&\n]* bridge keeps the
+  // verb and the /dev/ target in ONE statement — mirroring recursive-force-delete
+  // above — so `export PATH=/opt/wipe/bin; echo /dev/null` no longer collides two
+  // unrelated statements into a false catastrophic block (issue #89).
+  { re: /\b(?:shred|wipe)\b[^|;&\n]*\/dev\//i, signal: 'shred-device' },
 ];
 
 /**
@@ -161,8 +164,17 @@ const DANGEROUS: Pattern[] = [
   // work and is handled as a sensitive-but-allowed op (SENSITIVE.local-package-install
   // below) so it is never a hard gate.
   { re: /\b(?:apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo)\b[^|\n]*\b(?:install|add)\b/i, signal: 'install-package' },
-  { re: /\b(?:npm|yarn|pnpm|bun)\b[^|\n]*(?:\s-g\b|--global\b|\bglobal\s+add\b)/i, signal: 'install-package-global' },
-  { re: /\bcrontab\b|\/etc\/cron|\bat\s+now\b/i, signal: 'modify-scheduler' },
+  // A GLOBAL install mutates the host → approval. It must carry BOTH an install
+  // verb (install/add/ci, or the `npm i` shorthand) AND a global flag in the SAME
+  // statement. A read-only global QUERY — `npm ls -g`, `npm root -g`,
+  // `npm outdated -g`, `npm list --global` — mutates nothing and is not gated
+  // (issue #88). Order-independent (`npm install -g` and `npm -g install` both hit).
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s-g\b|--global\b|\bglobal\s+add\b))(?=[^|;&\n]*\b(?:install|add|ci)\b)|\b(?:npm|pnpm|bun)\s+i\b[^|;&\n]*(?:\s-g\b|--global\b)/i, signal: 'install-package-global' },
+  // Scheduler MUTATION only: `crontab` in command position that edits/installs
+  // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
+  // never the bare word mentioned inside an echo/string (issue #89). Env-var and
+  // sudo prefixes allowed. `/etc/cron*` writes and `at now` scheduling still gate.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?crontab\b(?!\s+-l\b)|\/etc\/cron|\bat\s+now\b/i, signal: 'modify-scheduler' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
 ];
