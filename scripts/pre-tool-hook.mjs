@@ -19,9 +19,19 @@
  *     narrows or stays neutral, it never WIDENS what the user's settings allow.
  *   - benign / read-only / pure-print → no output at all.
  *
- * Failure posture (v1): a guard that cannot load or evaluate fails OPEN with a
- * stderr note, matching the plugin ("a guard error must never break the
- * agent"). WS2 (fail-closed) revisits this across both surfaces.
+ * Failure posture (WS2): a guard that cannot load or evaluate no longer fails
+ * OPEN unconditionally. A small, dependency-free FALLBACK_CATASTROPHIC scan
+ * (duplicated inline, not imported from dist — it must survive the exact
+ * failure it guards against) runs against the same command/path/url surface.
+ * If it recognises one of the handful of unambiguous, essentially-never-benign
+ * catastrophic shapes (rm -rf /, a raw-disk dd/mkfs/wipefs, a fork bomb,
+ * curl|bash), the call is denied — fail CLOSED for the catastrophic tier even
+ * with a broken/missing guard. Anything the fallback does NOT recognise still
+ * fails OPEN with a stderr note, exactly as before: turning every tool call
+ * into a denial whenever the guard is merely unavailable (e.g. a stale dist
+ * after an upgrade) would itself break unattended agents/cron — the outcome
+ * ShieldCortex exists to prevent. See plugins/openclaw/interceptor.ts for the
+ * mirrored fallback on the OpenClaw runtime surface.
  *
  * The hook always exits 0 — denial travels in hookSpecificOutput JSON, never
  * exit codes, so a crash can't masquerade as a verdict.
@@ -74,6 +84,50 @@ async function loadGuard() {
   } catch {
     return null;
   }
+}
+
+// ==================== FALLBACK (guard load/eval failure — WS2) ====================
+// Deliberately DUPLICATED from tool-action-guard.ts's CATASTROPHIC list, not
+// imported — it must keep working when the dist build is the thing that's
+// broken. Narrow by design: only the unambiguous, essentially-never-benign
+// catastrophic shapes, so a broken/stale guard still fails closed on
+// "rm -rf /"-class commands without turning every tool call into a denial
+// whenever the guard is merely unavailable. Anything not recognised here
+// still falls through to the pre-existing fail-open behaviour below.
+const FALLBACK_CATASTROPHIC_PATTERNS = [
+  /\brm\b[^|;&\n]*?(?:-\w*r\w*f\w*|-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i,
+  /\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:\/|~|\$HOME|\/\*|\*|\.\/\*)(?:\s|$)/i,
+  /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:/,
+  /\bmkfs(\.\w+)?\b/i,
+  /\bdd\b[^|;&\n]*\bof=\/dev\/(sd|nvme|hd|disk|mmcblk|vd)/i,
+  /\b(fdisk|parted|sgdisk|wipefs|blkdiscard)\b/i,
+  // Leading `[^\n|]*` (not `[^\n]*`, issue #92 must-fix 1: ReDoS) + `env <assign>
+  // <interp>` admitted (issue #92 must-fix 3) — mirrors tool-action-guard.ts's
+  // pipe-download-to-shell pattern exactly; kept in sync there.
+  /\b(?:curl|wget|fetch)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:env\s+)?(?:\w+=\S*\s+)*(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i,
+  /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i,
+];
+
+/** Same command/path/url field set tool-action-guard.ts extracts — narrow, not the whole args object. */
+const FALLBACK_SURFACE_KEYS = [
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'url', 'uri', 'endpoint', 'href', 'host', 'to',
+];
+
+function fallbackExecSurface(toolInput) {
+  const parts = [];
+  for (const k of FALLBACK_SURFACE_KEYS) {
+    const v = toolInput?.[k];
+    if (typeof v === 'string' && v.length > 0) parts.push(v);
+  }
+  return parts.join('   ');
+}
+
+function fallbackCatastrophicMatch(toolInput) {
+  const text = fallbackExecSurface(toolInput);
+  if (!text) return false;
+  return FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(text));
 }
 
 // ==================== AUDIT (local JSONL) ====================
@@ -132,6 +186,33 @@ function emitDecision(permissionDecision, reason) {
   );
 }
 
+/**
+ * WS2 fail-closed path: when the real guard cannot load or evaluate, run the
+ * narrow fallback scan and deny a catastrophic-looking command instead of
+ * silently allowing it. Exits the process (denying) when the fallback
+ * matches; otherwise returns so the caller falls through to its existing
+ * fail-OPEN logging — the fallback recognising nothing is not evidence the
+ * command is safe, only that it isn't one of the handful of unambiguous shapes.
+ */
+function denyIfFallbackCatastrophic(toolName, toolInput, failureNote) {
+  if (!fallbackCatastrophicMatch(toolInput)) return;
+  writeAuditEntry(
+    toolName,
+    { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'] },
+    toolInput,
+    'auto_deny',
+    'auto_denied',
+  );
+  console.error(
+    `[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) and fallback scan matched a catastrophic pattern — DENYING ${toolName} (fail-closed, WS2)`,
+  );
+  emitDecision(
+    'deny',
+    `ShieldCortex Action Guard: ${failureNote}, fallback catastrophic scan matched — denying to fail closed`,
+  );
+  process.exit(0);
+}
+
 // ==================== MAIN ====================
 
 let input = '';
@@ -159,6 +240,7 @@ process.stdin.on('end', async () => {
 
     const guard = await loadGuard();
     if (!guard) {
+      denyIfFallbackCatastrophic(toolName, toolInput, 'missing dist build');
       console.error('[shieldcortex] action-guard unavailable (missing dist build) — allowing tool call');
       process.exit(0);
     }
@@ -167,6 +249,7 @@ process.stdin.on('end', async () => {
     try {
       verdict = guard.evaluateToolCall(toolName, toolInput);
     } catch (err) {
+      denyIfFallbackCatastrophic(toolName, toolInput, `evaluation error: ${err?.message ?? err}`);
       console.error(`[shieldcortex] ⚠️ action-guard error (allowing ${toolName}): ${err?.message ?? err}`);
       process.exit(0);
     }

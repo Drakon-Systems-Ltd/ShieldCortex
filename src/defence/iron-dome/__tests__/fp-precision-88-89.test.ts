@@ -57,10 +57,21 @@ describe('#89 — catastrophic device patterns must not bridge across statements
   const allow: Array<[string, string]> = [
     ['wipe in PATH, /dev/null in echo', 'export PATH="/opt/wipe/bin:$PATH"; echo "logs at /dev/null"'],
     ['WIPE var then ls /dev/null', 'WIPE_TMP=/tmp/wipe && ls -la /dev/null'],
-    ['dd word then of=/dev in echo', 'dd if=in.img of=out.img status=progress; echo "restore with of=/dev/sdX"'],
   ];
   it.each(allow)('allows: %s', (_l, command) => {
     expect(decision({ command })).toBe('allow');
+  });
+
+  // Issue #4475.7b (post-#89) intentionally gates ANY same-statement
+  // `dd … of=<target>` to require_approval, not just a raw /dev/ target — so
+  // this case is no longer a bare allow. What it still proves, unchanged, is
+  // the #89 bridge fix itself: the /dev/sdX mention is in a SEPARATE statement
+  // after `;`, so it must never escalate this to CATASTROPHIC.
+  it('a same-statement dd of=<file> requires approval (#4475.7b), but the SEPARATE-statement /dev/ mention does not escalate it to catastrophic (#89 bridge fix holds)', () => {
+    const v = verdict({ command: 'dd if=in.img of=out.img status=progress; echo "restore with of=/dev/sdX"' });
+    expect(v.decision).toBe('require_approval');
+    expect(v.severity).not.toBe('catastrophic');
+    expect(v.signals).toContain('dd-overwrite');
   });
 
   // The word "shred" in a grep pattern still trips the DANGEROUS file-delete rule

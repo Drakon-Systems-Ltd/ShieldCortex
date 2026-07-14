@@ -129,7 +129,27 @@ const CATASTROPHIC: Pattern[] = [
   // piped bytes are stdin DATA, not code — e.g. `curl … | python3 -c '<parse>'`
   // parses JSON and is not RCE (issue #73.6). The negative lookahead exempts an
   // interpreter whose next flag (allowing intervening short flags) is -c/-e/-m.
-  { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i, signal: 'pipe-download-to-shell' },
+  // The interpreter no longer needs to sit immediately after the FIRST pipe —
+  // an env-assignment prefix (`LC_ALL=C bash`) or an intermediate pipe stage
+  // (`curl … | tee /tmp/x | bash`) must not exempt the terminal interpreter
+  // that actually executes the fetched bytes (issue #4475.2). `[^\n]*` (not
+  // `[^|\n]*`) lets the bridge cross earlier pipe stages; the `(?:sudo\s+)?`
+  // exemption becomes a general env-assignment prefix, same technique as
+  // modify-scheduler below.
+  // Leading span is `[^\n|]*` (NOT `[^\n]*`) — issue #92 must-fix 1: a leading
+  // class that can also swallow `|` overlaps the following `(?:[^\n|]*\|)*`
+  // bridge group, so the engine can choose ANY pipe in the string as "the
+  // first one" and re-tries the whole group per choice — quadratic on a long,
+  // pipe-dense string (measured 20k→5.3s, 30k→12s). Excluding `|` from the
+  // leading class makes "the first pipe" unambiguous — one deterministic
+  // scan, no backtracking blowup — while the explicit `(?:[^\n|]*\|)*` group
+  // still crosses every later pipe stage exactly as before.
+  // Also widened (issue #92 must-fix 3): `env <assign>… <interpreter>` (e.g.
+  // `curl … | env LC_ALL=C bash`) evaded the env-assignment-prefix exemption
+  // because `env` itself isn't a `word=value` token — `(?:env\s+)?` admits the
+  // `env` command itself, and a second `(?:\w+=\S*\s+)*` after it still
+  // consumes any assignments `env` is given before the real interpreter.
+  { re: /\b(?:curl|wget|fetch)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:env\s+)?(?:\w+=\S*\s+)*(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i, signal: 'pipe-download-to-shell' },
   // ANTI-BYPASS for the exemption above: an inline `-c`/`-e` program that itself
   // EXECUTES its stdin (`python3 -c "exec(sys.stdin.read())"`, `node -e
   // "eval(...readFileSync(0)...)"`, `bash -c 'source /dev/stdin'`) re-opens the
@@ -137,7 +157,9 @@ const CATASTROPHIC: Pattern[] = [
   // `\b(exec|eval)\b` deliberately does not match `literal_eval` or
   // `json.load(sys.stdin)`, so the #73.6 data-parsing exemption stands.
   { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\b(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b[^\n]*(?:\b(?:exec|eval)\b|\bsource\s+\/dev\/stdin\b)/i, signal: 'pipe-download-stdin-exec' },
-  // recursive permission/ownership change at the root
+  // recursive permission/ownership change at the root (bare `/`, `/ `, or
+  // trailing-slash `/ ` variants — the system-dir sibling below handles
+  // /etc, /var, /home, etc. with the SAME trailing-slash discipline).
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i, signal: 'recursive-perms-on-root' },
   // overwrite the whole disk with zeros/urandom. The [^|;&\n]* bridge keeps the
   // verb and the /dev/ target in ONE statement — mirroring recursive-force-delete
@@ -180,10 +202,59 @@ const DANGEROUS: Pattern[] = [
   // Scheduler MUTATION only: `crontab` in command position that edits/installs
   // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
   // never the bare word mentioned inside an echo/string (issue #89). Env-var and
-  // sudo prefixes allowed. `/etc/cron*` writes and `at now` scheduling still gate.
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?crontab\b(?!\s+-l\b)|\/etc\/cron|\bat\s+now\b/i, signal: 'modify-scheduler' },
+  // sudo prefixes allowed. `/etc/cron*` writes still gate. Extended (issue
+  // #4475.7c) to cover `at <time-spec>` generally — not just the literal phrase
+  // "at now" — and `systemd-run --on-calendar=…` (systemd's cron-equivalent
+  // one-shot/timer scheduling). `at -l` (list pending jobs, the crontab -l
+  // equivalent) stays read-only/allowed, same discipline as crontab.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  // Zero out a file's contents (issue #4475.7a): the pre-existing rule below
+  // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
+  // regardless of the target file, so it is gated on its own.
+  { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
+  // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
+  // is one tier down — it can silently overwrite/zero arbitrary file content.
+  { re: /\bdd\b[^|;&\n]*\bof=/i, signal: 'dd-overwrite' },
+  // Recursive chmod/chown on a top-level system dir (issue #4475.6): bare `/`
+  // is already CATASTROPHIC above (recursive-perms-on-root); /etc /usr /var
+  // /home /bin /sbin /boot /lib /opt /root are one tier down. Bare-dir-or-
+  // wildcard only (mirrors isCriticalPath) so `chown -R user /home/ubuntu/proj`
+  // — an operator fixing permissions on their OWN tree — is not caught.
+  // `(?:\/\*?)?` (not `(?:\/\*)?`, issue #92 must-fix 2): a BARE trailing
+  // slash (`/etc/`, `/var/`, `/home/`) is the same directory as `/etc` and
+  // must gate too — the old suffix only admitted nothing or the literal `/*`
+  // wildcard, so `chmod -R 777 /etc/` slipped through as allow.
+  { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*?)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
+  // Registry fetch-and-execute (issue #4475.4): uvx always creates a fresh
+  // ephemeral env (no local-bin reuse), and `pnpm dlx` / `yarn dlx` are an
+  // explicit fetch-and-run subcommand — both stay gated unconditionally.
+  // Anchored to COMMAND POSITION (same technique as modify-scheduler above)
+  // so a package merely NAMED "uvx" in an unrelated read-only query
+  // (`npm ls uvx`) is not mistaken for invoking it.
+  //
+  // npx/bunx are handled separately (isGatedNpxBunx, below isCriticalPath) —
+  // issue #92 must-fix (ALSO item): they resolve node_modules/.bin locally
+  // FIRST, so gating every bare invocation (`npx tsc`, `npx jest`, `npx
+  // eslint`, `npx prettier`) was pure approval-noise. Only an explicit
+  // remote-fetch shape (auto-confirm flag, version/tag pin, URL/git/path ref)
+  // is gated for those two.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
+  // A non-curl fetch/decode (base64/openssl/xxd/cat/http) piped into a BARE
+  // interpreter is the same RCE shape as curl|bash (CATASTROPHIC above), one
+  // tier down (issue #4475.3): the interpreter must be reading the piped bytes
+  // AS ITS PROGRAM, which only happens with no trailing script-file argument
+  // (or the explicit stdin marker `-`). `cat data.json | python3 analyze.py`
+  // keeps a script argument — stdin is DATA for that script, not the program —
+  // so it must stay allowed; only a bare/`-`-terminated interpreter is gated.
+  // Leading span is `[^\n|]*` (NOT `[^\n]*`) — same quadratic-ReDoS fix as
+  // pipe-download-to-shell above (issue #92 must-fix 1): excluding `|` from
+  // the leading class makes "the first pipe" unambiguous, so the engine can't
+  // re-try the whole `(?:[^\n|]*\|)*` bridge once per candidate pipe position.
+  { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
 ];
 
 /** Sensitive-but-routine writes/edits: announced, default-allow (interceptor may warn). */
@@ -245,12 +316,18 @@ function matchSpans(patterns: Pattern[], text: string): Array<{ signal: string; 
 const REMEDIATION: Record<string, string> = {
   'pipe-download-to-shell': 'download to a file and inspect it before running (curl -o get.sh URL; less get.sh; sh get.sh)',
   'pipe-download-stdin-exec': 'the inline program executes its stdin, so the fetched bytes still run as code — download to a file and inspect it first',
+  'decode-pipe-to-shell': 'the decoded/fetched bytes are executed as code by a bare interpreter — download to a file and inspect it first',
   'install-package-global': 'review the package + source, then install it explicitly if intended (a workspace-local install needs no global flag)',
   'install-package': 'review the package + source, then run the install yourself if intended',
+  'registry-code-exec': 'review the package + source on the registry before running (npx/bunx/uvx/dlx fetch and execute immediately)',
   'privilege-escalation': 'run the specific privileged step yourself, or approve this exact command',
   'external-egress': 'confirm the destination and payload before data leaves the host',
   'git-force-push': 'confirm the branch and remote; a force-push can overwrite others’ work',
   'file-delete': 'confirm the target path before deleting',
+  'recursive-find-delete': 'confirm the target path before deleting — this recursively removes every match under it',
+  'recursive-perms-system-dir': 'confirm this is intentional — recursive permission changes on a system directory can break the host',
+  'truncate-to-zero': 'confirm the target file before truncating — this discards its contents',
+  'dd-overwrite': 'confirm the destination before running dd — it overwrites the target without confirmation',
 };
 
 /** Compose a reason string that names the rule, the matched span, and a fix hint. */
@@ -262,6 +339,43 @@ function buildReason(prefix: string, signals: string[], span?: string): string {
   return `${prefix} [${parts.join('; ')}]`;
 }
 
+// `find <path> -delete` / `find <path> -exec rm …` recursively deletes every
+// match under <path> (issue #4475.5). Captures the search root so the caller
+// can grade severity with isCriticalPath — the SAME root/home/system-dir/
+// wildcard rule used for a structured delete tool's path (see 1a below).
+//
+// Issue #92 must-fix 1: this used to be ONE regex with a lazy bridge —
+// `\bfind\b\s+(\S+)[^|;&\n]*?(?:-delete\b|-exec\s+(?:\/bin\/)?rm\b)/i` — but
+// `(\S+)` and the following `[^|;&\n]*?` overlap almost completely (nearly
+// every `\S` char is also `[^|;&\n]`), so a long separator-free string with
+// no matching action forces the engine to retry the trailing scan at every
+// possible split point of `(\S+)` — quadratic (measured 40k chars → 2.1s).
+// Replaced with two cheap, non-overlapping boolean checks (find token
+// present, delete action present) before ever extracting a path — no shared
+// backtracking surface, so there is nothing to blow up.
+const FIND_TOKEN_RE = /\bfind\b/i;
+const FIND_DELETE_ACTION_RE = /-delete\b|-exec\s+(?:\/bin\/)?rm\b/i;
+const FIND_PATH_RE = /\bfind\b\s+(\S+)/i;
+
+/**
+ * Cheap replacement for the old single lazy-bridged FIND_DELETE_RE. Scoped
+ * per-statement (split on the same `|;&\n` boundaries the rest of this file
+ * uses) so an unrelated `find` and `-delete` mention in two different
+ * statements don't collide into a false match; the path is only extracted
+ * from a statement that already carries both signals, and `\S+` in
+ * FIND_PATH_RE has nothing conflicting after it, so it can't backtrack.
+ */
+function matchFindDelete(text: string): { 0: string; 1: string } | null {
+  if (!FIND_TOKEN_RE.test(text) || !FIND_DELETE_ACTION_RE.test(text)) return null;
+  for (const stmt of text.split(/[|;&\n]/)) {
+    if (FIND_TOKEN_RE.test(stmt) && FIND_DELETE_ACTION_RE.test(stmt)) {
+      const pathMatch = stmt.match(FIND_PATH_RE);
+      if (pathMatch) return { 0: stmt.trim(), 1: pathMatch[1] };
+    }
+  }
+  return null;
+}
+
 /** A path whose deletion is catastrophic: root, home, a top-level system dir, or a wildcard. */
 export function isCriticalPath(path: string): boolean {
   const p = String(path || '').trim();
@@ -271,6 +385,41 @@ export function isCriticalPath(path: string): boolean {
   if (/\*/.test(p) && p.length <= 3) return true;                // bare wildcard-ish
   if (/^\/(etc|usr|bin|sbin|boot|var|lib|lib64|sys|proc|root|dev|home|opt|srv)(\/?$|\/\*)/.test(p)) return true;
   if (/^~\/?$/.test(p) || /^\$HOME\/?$/.test(p)) return true;
+  return false;
+}
+
+// npx/bunx narrowing (issue #92 must-fix, ALSO item — advisor-reviewed
+// boundary, see PR #92 must-fix notes). npx/bunx resolve node_modules/.bin
+// locally FIRST, so `npx tsc`, `npx jest`, `npx eslint`, `npx prettier` — and
+// any other bare (or bare-scoped, unversioned) package name — overwhelmingly
+// run an already-installed dev tool, not a live registry fetch. Gating every
+// invocation was pure approval-noise. Only gate the shapes that are an
+// EXPLICIT remote fetch:
+//   - an auto-confirm / explicit-install flag: -y/--yes/-p/--package/-c/
+//     --call/--registry/--ignore-existing;
+//   - a version/tag pin: any `@` NOT at the start of its token is a version
+//     delimiter (`tsc@5.4.0`, `@scope/pkg@next`) — the leading `@` of a
+//     scoped package (`@angular/cli`) is the only "safe" `@` and is not a pin
+//     by itself;
+//   - an explicit URL / git ref / relative path / tarball.
+// uvx (always creates a fresh ephemeral env — no local-bin reuse) and
+// `pnpm/yarn dlx` (an explicit fetch-and-run subcommand) get no such pass;
+// they are matched unconditionally by the DANGEROUS patterns above.
+const NPX_BUNX_COMMAND_RE = /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:npx|bunx)\b/i;
+const NPX_GATE_FLAG_RE = /(?:^|\s)(?:-y\b|--yes\b|-p\b|--package\b|-c\b|--call\b|--registry\b|--ignore-existing\b)/i;
+// A non-whitespace char immediately followed by `@` is a version/tag pin —
+// the leading `@` of a scope marker is always preceded by whitespace/start-
+// of-string, so it never matches here.
+const NPX_VERSION_PIN_RE = /\S@[\w.-]/;
+const NPX_REMOTE_REF_RE = /(?:^|\s)(?:github:|git\+|https?:\/\/|file:|\.{1,2}\/)\S|\.tgz\b/i;
+
+/** Same command-position + per-statement scoping discipline as matchFindDelete. */
+function isGatedNpxBunx(text: string): boolean {
+  if (!NPX_BUNX_COMMAND_RE.test(text)) return false;
+  for (const stmt of text.split(/[|;&\n]/)) {
+    if (!NPX_BUNX_COMMAND_RE.test(stmt)) continue;
+    if (NPX_GATE_FLAG_RE.test(stmt) || NPX_VERSION_PIN_RE.test(stmt) || NPX_REMOTE_REF_RE.test(stmt)) return true;
+  }
   return false;
 }
 
@@ -291,7 +440,13 @@ function looksExternal(url: string, text: string): boolean {
 // We deliberately DON'T strip quoted spans wholesale: `"rm" -rf /` quotes the
 // command name yet still executes, so blanket quote-removal would be a bypass.
 // Fail-safe by construction — when in doubt, the original command text is scanned.
-const SHELL_REACTIVATORS = /[;&|><`]|\$\(|\$\{|\$\w|\beval\b/;
+//
+// \n and \r are statement separators too (issue #4475.1): a literal newline in
+// the command string acts exactly like `;` in a real shell (`echo x\nrm -rf /`
+// runs `echo x` THEN `rm -rf /`), but isPurePrint only ever checked the FIRST
+// token. Without \n\r here, that second, real statement was silently treated as
+// part of a "pure print" and never scanned at all.
+const SHELL_REACTIVATORS = /[;&|><`\n\r]|\$\(|\$\{|\$\w|\beval\b/;
 
 /** A command whose sole effect is to print its arguments (cannot execute them). */
 function isPurePrint(cmd: string): boolean {
@@ -413,7 +568,18 @@ export function evaluateToolCall(
       `catastrophic delete of a critical path (${path})`, ['delete-critical-path']);
   }
 
-  // 1b) Secret exfiltration: external egress carrying a credential/secret.
+  // 1b) `find <path> -delete` / `find <path> -exec rm …` (issue #4475.5) is
+  // catastrophic when <path> is root/home/a system dir/a wildcard — same rule
+  // as 1a. A non-critical path still recursively deletes everything under it,
+  // so it is folded into the DANGEROUS signals below (dangerSignals) instead.
+  const findDeleteMatch = matchFindDelete(execSurface);
+  if (findDeleteMatch && isCriticalPath(findDeleteMatch[1])) {
+    return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
+      buildReason('catastrophic operation blocked', ['recursive-find-delete'], findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80)),
+      ['recursive-find-delete']);
+  }
+
+  // 1c) Secret exfiltration: external egress carrying a credential/secret.
   const egress = family === 'network' || EXTERNAL_EGRESS.test(execCommand) || EXTERNAL_EGRESS.test(url);
   if (egress && SECRET_HINT.test(`${execSurface}   ${rawStringArgs(args)}`) && looksExternal(url, execSurface)) {
     return verdict('block', 'catastrophic', family, 'data_exfiltration',
@@ -440,6 +606,20 @@ export function evaluateToolCall(
   }
   // A structured delete tool is inherently a delete, even with no "rm" in any arg.
   if (family === 'delete' && !dangerSignals.includes('file-delete')) dangerSignals.push('file-delete');
+  // A `find -delete` / `find -exec rm` on a non-critical path (1b already
+  // returned catastrophic for a critical one) is still a recognised recursive delete.
+  if (findDeleteMatch && !dangerSignals.includes('recursive-find-delete')) {
+    dangerSignals.push('recursive-find-delete');
+    dangerSpan = dangerSpan ?? findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80);
+  }
+  // npx/bunx (issue #92 must-fix, ALSO item): only an explicit remote-fetch
+  // shape counts as registry-code-exec — see isGatedNpxBunx for the boundary.
+  // uvx / pnpm-yarn dlx are unconditional matches already captured by the
+  // DANGEROUS patterns above.
+  if (isGatedNpxBunx(execSurface) && !dangerSignals.includes('registry-code-exec')) {
+    dangerSignals.push('registry-code-exec');
+    dangerSpan = dangerSpan ?? (execSurface.match(NPX_BUNX_COMMAND_RE)?.[0]?.trim() ?? 'npx/bunx');
+  }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
     return verdict('require_approval', 'dangerous', family, action,
@@ -467,10 +647,16 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   if (signals.includes('stop-process-or-service')) return 'stop_service';
   if (signals.includes('modify-network-firewall')) return 'modify_firewall';
   if (signals.includes('install-package') || signals.includes('install-package-global')) return 'install_package';
+  if (signals.includes('registry-code-exec')) return 'run_registry_package';
   if (signals.includes('modify-scheduler')) return 'modify_cron';
   if (signals.includes('external-egress')) return 'network_egress';
   if (signals.includes('touch-sensitive-path')) return 'access_secret_path';
   if (signals.includes('wipe-history-or-logs')) return 'wipe_logs';
+  if (signals.includes('decode-pipe-to-shell')) return 'execute_command';
+  if (signals.includes('recursive-find-delete')) return 'delete_file';
+  if (signals.includes('recursive-perms-system-dir')) return 'change_permissions';
+  if (signals.includes('truncate-to-zero')) return 'delete_file';
+  if (signals.includes('dd-overwrite')) return 'delete_file';
   return ACTION_BY_FAMILY[family];
 }
 
