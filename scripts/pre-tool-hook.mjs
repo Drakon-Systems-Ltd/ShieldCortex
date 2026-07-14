@@ -101,7 +101,10 @@ const FALLBACK_CATASTROPHIC_PATTERNS = [
   /\bmkfs(\.\w+)?\b/i,
   /\bdd\b[^|;&\n]*\bof=\/dev\/(sd|nvme|hd|disk|mmcblk|vd)/i,
   /\b(fdisk|parted|sgdisk|wipefs|blkdiscard)\b/i,
-  /\b(?:curl|wget|fetch)\b[^\n]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i,
+  // Leading `[^\n|]*` (not `[^\n]*`, issue #92 must-fix 1: ReDoS) + `env <assign>
+  // <interp>` admitted (issue #92 must-fix 3) — mirrors tool-action-guard.ts's
+  // pipe-download-to-shell pattern exactly; kept in sync there.
+  /\b(?:curl|wget|fetch)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:env\s+)?(?:\w+=\S*\s+)*(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i,
   /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i,
 ];
 

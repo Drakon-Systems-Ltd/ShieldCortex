@@ -136,7 +136,20 @@ const CATASTROPHIC: Pattern[] = [
   // `[^|\n]*`) lets the bridge cross earlier pipe stages; the `(?:sudo\s+)?`
   // exemption becomes a general env-assignment prefix, same technique as
   // modify-scheduler below.
-  { re: /\b(?:curl|wget|fetch)\b[^\n]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i, signal: 'pipe-download-to-shell' },
+  // Leading span is `[^\n|]*` (NOT `[^\n]*`) — issue #92 must-fix 1: a leading
+  // class that can also swallow `|` overlaps the following `(?:[^\n|]*\|)*`
+  // bridge group, so the engine can choose ANY pipe in the string as "the
+  // first one" and re-tries the whole group per choice — quadratic on a long,
+  // pipe-dense string (measured 20k→5.3s, 30k→12s). Excluding `|` from the
+  // leading class makes "the first pipe" unambiguous — one deterministic
+  // scan, no backtracking blowup — while the explicit `(?:[^\n|]*\|)*` group
+  // still crosses every later pipe stage exactly as before.
+  // Also widened (issue #92 must-fix 3): `env <assign>… <interpreter>` (e.g.
+  // `curl … | env LC_ALL=C bash`) evaded the env-assignment-prefix exemption
+  // because `env` itself isn't a `word=value` token — `(?:env\s+)?` admits the
+  // `env` command itself, and a second `(?:\w+=\S*\s+)*` after it still
+  // consumes any assignments `env` is given before the real interpreter.
+  { re: /\b(?:curl|wget|fetch)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:env\s+)?(?:\w+=\S*\s+)*(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i, signal: 'pipe-download-to-shell' },
   // ANTI-BYPASS for the exemption above: an inline `-c`/`-e` program that itself
   // EXECUTES its stdin (`python3 -c "exec(sys.stdin.read())"`, `node -e
   // "eval(...readFileSync(0)...)"`, `bash -c 'source /dev/stdin'`) re-opens the
@@ -144,7 +157,9 @@ const CATASTROPHIC: Pattern[] = [
   // `\b(exec|eval)\b` deliberately does not match `literal_eval` or
   // `json.load(sys.stdin)`, so the #73.6 data-parsing exemption stands.
   { re: /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\b(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b[^\n]*(?:\b(?:exec|eval)\b|\bsource\s+\/dev\/stdin\b)/i, signal: 'pipe-download-stdin-exec' },
-  // recursive permission/ownership change at the root
+  // recursive permission/ownership change at the root (bare `/`, `/ `, or
+  // trailing-slash `/ ` variants — the system-dir sibling below handles
+  // /etc, /var, /home, etc. with the SAME trailing-slash discipline).
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i, signal: 'recursive-perms-on-root' },
   // overwrite the whole disk with zeros/urandom. The [^|;&\n]* bridge keeps the
   // verb and the /dev/ target in ONE statement — mirroring recursive-force-delete
@@ -208,13 +223,25 @@ const DANGEROUS: Pattern[] = [
   // /home /bin /sbin /boot /lib /opt /root are one tier down. Bare-dir-or-
   // wildcard only (mirrors isCriticalPath) so `chown -R user /home/ubuntu/proj`
   // — an operator fixing permissions on their OWN tree — is not caught.
-  { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
-  // Registry fetch-and-execute (issue #4475.4): npx/bunx/uvx immediately run a
-  // package pulled live from a registry, and `pnpm dlx` / `yarn dlx` are their
-  // explicit fetch-and-run subcommands. Anchored to COMMAND POSITION (same
-  // technique as modify-scheduler above) so a package merely NAMED "npx" in an
-  // unrelated read-only query (`npm ls npx`) is not mistaken for invoking it.
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:npx|bunx|uvx)\b/i, signal: 'registry-code-exec' },
+  // `(?:\/\*?)?` (not `(?:\/\*)?`, issue #92 must-fix 2): a BARE trailing
+  // slash (`/etc/`, `/var/`, `/home/`) is the same directory as `/etc` and
+  // must gate too — the old suffix only admitted nothing or the literal `/*`
+  // wildcard, so `chmod -R 777 /etc/` slipped through as allow.
+  { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*?)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
+  // Registry fetch-and-execute (issue #4475.4): uvx always creates a fresh
+  // ephemeral env (no local-bin reuse), and `pnpm dlx` / `yarn dlx` are an
+  // explicit fetch-and-run subcommand — both stay gated unconditionally.
+  // Anchored to COMMAND POSITION (same technique as modify-scheduler above)
+  // so a package merely NAMED "uvx" in an unrelated read-only query
+  // (`npm ls uvx`) is not mistaken for invoking it.
+  //
+  // npx/bunx are handled separately (isGatedNpxBunx, below isCriticalPath) —
+  // issue #92 must-fix (ALSO item): they resolve node_modules/.bin locally
+  // FIRST, so gating every bare invocation (`npx tsc`, `npx jest`, `npx
+  // eslint`, `npx prettier`) was pure approval-noise. Only an explicit
+  // remote-fetch shape (auto-confirm flag, version/tag pin, URL/git/path ref)
+  // is gated for those two.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   // A non-curl fetch/decode (base64/openssl/xxd/cat/http) piped into a BARE
   // interpreter is the same RCE shape as curl|bash (CATASTROPHIC above), one
@@ -223,7 +250,11 @@ const DANGEROUS: Pattern[] = [
   // (or the explicit stdin marker `-`). `cat data.json | python3 analyze.py`
   // keeps a script argument — stdin is DATA for that script, not the program —
   // so it must stay allowed; only a bare/`-`-terminated interpreter is gated.
-  { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
+  // Leading span is `[^\n|]*` (NOT `[^\n]*`) — same quadratic-ReDoS fix as
+  // pipe-download-to-shell above (issue #92 must-fix 1): excluding `|` from
+  // the leading class makes "the first pipe" unambiguous, so the engine can't
+  // re-try the whole `(?:[^\n|]*\|)*` bridge once per candidate pipe position.
+  { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
 ];
 
 /** Sensitive-but-routine writes/edits: announced, default-allow (interceptor may warn). */
@@ -312,7 +343,38 @@ function buildReason(prefix: string, signals: string[], span?: string): string {
 // match under <path> (issue #4475.5). Captures the search root so the caller
 // can grade severity with isCriticalPath — the SAME root/home/system-dir/
 // wildcard rule used for a structured delete tool's path (see 1a below).
-const FIND_DELETE_RE = /\bfind\b\s+(\S+)[^|;&\n]*?(?:-delete\b|-exec\s+(?:\/bin\/)?rm\b)/i;
+//
+// Issue #92 must-fix 1: this used to be ONE regex with a lazy bridge —
+// `\bfind\b\s+(\S+)[^|;&\n]*?(?:-delete\b|-exec\s+(?:\/bin\/)?rm\b)/i` — but
+// `(\S+)` and the following `[^|;&\n]*?` overlap almost completely (nearly
+// every `\S` char is also `[^|;&\n]`), so a long separator-free string with
+// no matching action forces the engine to retry the trailing scan at every
+// possible split point of `(\S+)` — quadratic (measured 40k chars → 2.1s).
+// Replaced with two cheap, non-overlapping boolean checks (find token
+// present, delete action present) before ever extracting a path — no shared
+// backtracking surface, so there is nothing to blow up.
+const FIND_TOKEN_RE = /\bfind\b/i;
+const FIND_DELETE_ACTION_RE = /-delete\b|-exec\s+(?:\/bin\/)?rm\b/i;
+const FIND_PATH_RE = /\bfind\b\s+(\S+)/i;
+
+/**
+ * Cheap replacement for the old single lazy-bridged FIND_DELETE_RE. Scoped
+ * per-statement (split on the same `|;&\n` boundaries the rest of this file
+ * uses) so an unrelated `find` and `-delete` mention in two different
+ * statements don't collide into a false match; the path is only extracted
+ * from a statement that already carries both signals, and `\S+` in
+ * FIND_PATH_RE has nothing conflicting after it, so it can't backtrack.
+ */
+function matchFindDelete(text: string): { 0: string; 1: string } | null {
+  if (!FIND_TOKEN_RE.test(text) || !FIND_DELETE_ACTION_RE.test(text)) return null;
+  for (const stmt of text.split(/[|;&\n]/)) {
+    if (FIND_TOKEN_RE.test(stmt) && FIND_DELETE_ACTION_RE.test(stmt)) {
+      const pathMatch = stmt.match(FIND_PATH_RE);
+      if (pathMatch) return { 0: stmt.trim(), 1: pathMatch[1] };
+    }
+  }
+  return null;
+}
 
 /** A path whose deletion is catastrophic: root, home, a top-level system dir, or a wildcard. */
 export function isCriticalPath(path: string): boolean {
@@ -323,6 +385,41 @@ export function isCriticalPath(path: string): boolean {
   if (/\*/.test(p) && p.length <= 3) return true;                // bare wildcard-ish
   if (/^\/(etc|usr|bin|sbin|boot|var|lib|lib64|sys|proc|root|dev|home|opt|srv)(\/?$|\/\*)/.test(p)) return true;
   if (/^~\/?$/.test(p) || /^\$HOME\/?$/.test(p)) return true;
+  return false;
+}
+
+// npx/bunx narrowing (issue #92 must-fix, ALSO item — advisor-reviewed
+// boundary, see PR #92 must-fix notes). npx/bunx resolve node_modules/.bin
+// locally FIRST, so `npx tsc`, `npx jest`, `npx eslint`, `npx prettier` — and
+// any other bare (or bare-scoped, unversioned) package name — overwhelmingly
+// run an already-installed dev tool, not a live registry fetch. Gating every
+// invocation was pure approval-noise. Only gate the shapes that are an
+// EXPLICIT remote fetch:
+//   - an auto-confirm / explicit-install flag: -y/--yes/-p/--package/-c/
+//     --call/--registry/--ignore-existing;
+//   - a version/tag pin: any `@` NOT at the start of its token is a version
+//     delimiter (`tsc@5.4.0`, `@scope/pkg@next`) — the leading `@` of a
+//     scoped package (`@angular/cli`) is the only "safe" `@` and is not a pin
+//     by itself;
+//   - an explicit URL / git ref / relative path / tarball.
+// uvx (always creates a fresh ephemeral env — no local-bin reuse) and
+// `pnpm/yarn dlx` (an explicit fetch-and-run subcommand) get no such pass;
+// they are matched unconditionally by the DANGEROUS patterns above.
+const NPX_BUNX_COMMAND_RE = /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:npx|bunx)\b/i;
+const NPX_GATE_FLAG_RE = /(?:^|\s)(?:-y\b|--yes\b|-p\b|--package\b|-c\b|--call\b|--registry\b|--ignore-existing\b)/i;
+// A non-whitespace char immediately followed by `@` is a version/tag pin —
+// the leading `@` of a scope marker is always preceded by whitespace/start-
+// of-string, so it never matches here.
+const NPX_VERSION_PIN_RE = /\S@[\w.-]/;
+const NPX_REMOTE_REF_RE = /(?:^|\s)(?:github:|git\+|https?:\/\/|file:|\.{1,2}\/)\S|\.tgz\b/i;
+
+/** Same command-position + per-statement scoping discipline as matchFindDelete. */
+function isGatedNpxBunx(text: string): boolean {
+  if (!NPX_BUNX_COMMAND_RE.test(text)) return false;
+  for (const stmt of text.split(/[|;&\n]/)) {
+    if (!NPX_BUNX_COMMAND_RE.test(stmt)) continue;
+    if (NPX_GATE_FLAG_RE.test(stmt) || NPX_VERSION_PIN_RE.test(stmt) || NPX_REMOTE_REF_RE.test(stmt)) return true;
+  }
   return false;
 }
 
@@ -475,7 +572,7 @@ export function evaluateToolCall(
   // catastrophic when <path> is root/home/a system dir/a wildcard — same rule
   // as 1a. A non-critical path still recursively deletes everything under it,
   // so it is folded into the DANGEROUS signals below (dangerSignals) instead.
-  const findDeleteMatch = execSurface.match(FIND_DELETE_RE);
+  const findDeleteMatch = matchFindDelete(execSurface);
   if (findDeleteMatch && isCriticalPath(findDeleteMatch[1])) {
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', ['recursive-find-delete'], findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80)),
@@ -514,6 +611,14 @@ export function evaluateToolCall(
   if (findDeleteMatch && !dangerSignals.includes('recursive-find-delete')) {
     dangerSignals.push('recursive-find-delete');
     dangerSpan = dangerSpan ?? findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80);
+  }
+  // npx/bunx (issue #92 must-fix, ALSO item): only an explicit remote-fetch
+  // shape counts as registry-code-exec — see isGatedNpxBunx for the boundary.
+  // uvx / pnpm-yarn dlx are unconditional matches already captured by the
+  // DANGEROUS patterns above.
+  if (isGatedNpxBunx(execSurface) && !dangerSignals.includes('registry-code-exec')) {
+    dangerSignals.push('registry-code-exec');
+    dangerSpan = dangerSpan ?? (execSurface.match(NPX_BUNX_COMMAND_RE)?.[0]?.trim() ?? 'npx/bunx');
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
