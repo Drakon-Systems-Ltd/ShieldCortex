@@ -247,6 +247,50 @@ export function formatApprovalPrompt(input: ApprovalPromptInput): string {
   ].join('\n');
 }
 
+// --- WS2 fail-closed fallback (guard load/eval failure) ---
+// Deliberately DUPLICATED from tool-action-guard.ts's CATASTROPHIC list, not
+// imported — this file already avoids a compile-time dependency on the main
+// package across the plugin build boundary (see ToolGuardVerdictLike above),
+// and the fallback specifically must keep working when THAT dependency is
+// what's broken. Narrow by design: only the unambiguous, essentially-never-
+// benign catastrophic shapes, so a broken/unwired guard still fails closed on
+// "rm -rf /"-class commands without turning every tool call into a denial
+// whenever the guard is merely unavailable (e.g. mid-upgrade) — that would
+// itself break unattended agents/cron, the outcome ShieldCortex exists to
+// prevent. Mirrored in scripts/pre-tool-hook.mjs for the Claude Code surface.
+const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
+  /\brm\b[^|;&\n]*?(?:-\w*r\w*f\w*|-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i,
+  /\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:\/|~|\$HOME|\/\*|\*|\.\/\*)(?:\s|$)/i,
+  /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:/,
+  /\bmkfs(\.\w+)?\b/i,
+  /\bdd\b[^|;&\n]*\bof=\/dev\/(sd|nvme|hd|disk|mmcblk|vd)/i,
+  /\b(fdisk|parted|sgdisk|wipefs|blkdiscard)\b/i,
+  /\b(?:curl|wget|fetch)\b[^\n]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i,
+  /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i,
+];
+
+const FALLBACK_SURFACE_KEYS = [
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'url', 'uri', 'endpoint', 'href', 'host', 'to',
+];
+
+/** Same command/path/url field set tool-action-guard.ts extracts — narrow, not the whole args object. */
+function fallbackExecSurface(args: Record<string, unknown> | undefined): string {
+  const parts: string[] = [];
+  for (const k of FALLBACK_SURFACE_KEYS) {
+    const v = args?.[k];
+    if (typeof v === 'string' && v.length > 0) parts.push(v);
+  }
+  return parts.join('   ');
+}
+
+function fallbackCatastrophicMatch(args: Record<string, unknown> | undefined): boolean {
+  const text = fallbackExecSurface(args);
+  if (!text) return false;
+  return FALLBACK_CATASTROPHIC_PATTERNS.some(re => re.test(text));
+}
+
 /** One-line summary of tool args for audit previews (bounded, no secrets dumped). */
 export function summariseToolArgs(args: Record<string, unknown> | undefined): string {
   if (!args) return '';
@@ -403,18 +447,44 @@ export function createInterceptor(
     };
   }
 
+  // WS2 fail-closed path: when the real guard was never wired in or throws,
+  // run the narrow fallback scan and DENY (throw) a catastrophic-looking
+  // command instead of silently allowing it. The fallback recognising nothing
+  // is not evidence the command is safe, only that it isn't one of the
+  // handful of unambiguous shapes — everything else still falls through to
+  // the pre-existing fail-OPEN log-and-allow.
+  function handleGuardUnavailable(context: ToolCallContext, reason: string): void {
+    if (!fallbackCatastrophicMatch(context.arguments)) {
+      log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — allowing ${context.toolName}`);
+      return;
+    }
+    const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
+    emitAudit({
+      type: 'intercept', tool: context.toolName, severity: 'critical',
+      firewallResult: 'ACTION_GUARD_FALLBACK', threats: ['fallback-scan'],
+      anomalyScore: 1, trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null,
+      pipelineDurationMs: 0, preview: preview.slice(0, 200), ts: new Date().toISOString(),
+      action: 'auto_deny', outcome: 'auto_denied',
+    });
+    log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback scan matched a catastrophic pattern — DENYING ${context.toolName} (fail-closed, WS2)`);
+    throw new Error(`ShieldCortex: tool call blocked — action guard unavailable (${reason}), fallback catastrophic scan matched`);
+  }
+
   // Action Guard: gates non-memory tool calls (shell / file / network / git).
   // This is what makes "Iron Dome protects what the agent DOES" true at runtime.
   async function runActionGuard(context: ToolCallContext): Promise<void> {
-    if (!actionGuardCfg.enabled || typeof evaluateToolCall !== 'function') return;
+    if (!actionGuardCfg.enabled) return;
+
+    if (typeof evaluateToolCall !== 'function') {
+      handleGuardUnavailable(context, 'evaluateToolCall not wired');
+      return;
+    }
 
     let v: ToolGuardVerdictLike;
     try {
       v = evaluateToolCall(context.toolName, context.arguments || {});
     } catch (err) {
-      // A guard error must never break the agent — log and allow. (The memory
-      // pipeline is the hard-fail path; the action guard is best-effort.)
-      log.warn(`[shieldcortex] ⚠️ action-guard error (allowing ${context.toolName}): ${err instanceof Error ? err.message : err}`);
+      handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`);
       return;
     }
     if (v.decision === 'allow') return;
