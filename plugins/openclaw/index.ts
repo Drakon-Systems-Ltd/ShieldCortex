@@ -946,10 +946,23 @@ export default {
         const autoMemory = isAutoMemoryEnabled(cfg) ? "on" : "off";
         const dedupe = isAutoMemoryDedupeEnabled(cfg) ? "on" : "off";
         const cloud = cfg.cloudApiKey ? "configured" : "not configured";
+        // Resolve the Action Guard state the same way initInterceptor() does,
+        // so the status line reflects what before_tool_call will actually do.
+        const rawInterceptor = (cfg as any).interceptor;
+        const guardCfg = {
+          ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] }),
+          ...(rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.actionGuard ?? {} : {}),
+        };
+        const interceptorOn = (rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.enabled : undefined) ?? DEFAULT_INTERCEPTOR_CONFIG.enabled;
+        const autoApproved = Array.isArray(guardCfg.autoApprove) ? guardCfg.autoApprove.length : 0;
+        const guardState = !interceptorOn || !guardCfg.enabled
+          ? "off"
+          : `${guardCfg.enforce ? "enforce" : "warn"}${autoApproved > 0 ? ` (${autoApproved} auto-approved)` : ""}${interceptorReady ? "" : " — not yet initialised this session"}`;
         return {
           text:
             `ShieldCortex v${_version}\n` +
-            `  Hooks: llm_input (scan), llm_output (memory)\n` +
+            `  Hooks: llm_input (scan), llm_output (memory), before_tool_call (action guard), session_end (cache reset)\n` +
+            `  Action guard: ${guardState}\n` +
             `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
             `  Cloud sync: ${cloud}`,
         };

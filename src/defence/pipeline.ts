@@ -143,8 +143,9 @@ export function runDefencePipeline(
     }
 
     // 6b. Apply firewall rules (built-in rules always evaluated; user-added
-    // custom rules require the Pro `custom_firewall_rules` feature). Both
-    // are additive only — can tighten, never weaken.
+    // custom rules pass the `custom_firewall_rules` feature gate, graded free
+    // since 4.47.0 — the check is a dormant licence mechanism, kept intact).
+    // Both are additive only — can tighten, never weaken.
     if (allowed && isDatabaseInitialized()) {
       try {
         const userRulesAllowed = isFeatureEnabled('custom_firewall_rules');
@@ -183,7 +184,7 @@ export function runDefencePipeline(
       }
     }
 
-    // 6c. Apply custom injection patterns (Pro feature, additive)
+    // 6c. Apply custom injection patterns (free since 4.47.0, additive)
     if (allowed && isFeatureEnabled('custom_injection_patterns') && isDatabaseInitialized()) {
       try {
         const customPatterns = getEnabledCustomPatterns();

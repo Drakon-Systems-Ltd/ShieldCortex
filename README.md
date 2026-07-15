@@ -757,7 +757,7 @@ v4.15 fused FTS + vector + graph retrievers through Reciprocal Rank Fusion (Corm
 ```bash
 shieldcortex config --ranker rrf       # default since v4.15
 shieldcortex config --ranker legacy    # one-release safety belt
-SHIELDCORTEX_RANKER=rrf shieldcortex recall "auth bug"
+SHIELDCORTEX_RANKER=legacy npm run bench   # env var overrides config for a single process (works on the MCP server and hooks too)
 ```
 
 `npm run bench` runs the harness against LongMemEval-S and produces `benchmark/longmemeval/SCORECARD.md` with R@5, R@10, MRR, and a per-question diff between RRF and legacy engines. The GitHub workflow uploads the scorecard as a release artifact on every tagged push so the audit trail is public-by-default.

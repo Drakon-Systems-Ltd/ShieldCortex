@@ -77,6 +77,22 @@
       "label": "Critical Severity Action",
       "description": "Action for critical-severity threats (log, warn, require_approval)",
       "type": "string"
+    },
+    "interceptor.actionGuard.enabled": {
+      "label": "Action Guard",
+      "description": "Gate dangerous shell/file/network/git tool calls before they execute. Catastrophic operations are always blocked while enabled.",
+      "type": "boolean"
+    },
+    "interceptor.actionGuard.enforce": {
+      "label": "Enforce Action Guard",
+      "description": "Enforce dangerous-operation gating (attended: approval prompt; unattended: failurePolicy). Off = warn-and-allow (advisory). Catastrophic operations block regardless.",
+      "type": "boolean"
+    },
+    "interceptor.actionGuard.autoApprove": {
+      "label": "Action Guard Auto-approve List",
+      "description": "Family/action/signal names pre-approved for unattended agents that legitimately need specific dangerous operations (case-insensitive substring match). Never applies to catastrophic operations.",
+      "type": "array",
+      "advanced": true
     }
   },
   "configSchema": {
@@ -195,6 +211,27 @@
                   "deny"
                 ],
                 "default": "deny"
+              }
+            }
+          },
+          "actionGuard": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              },
+              "enforce": {
+                "type": "boolean",
+                "default": true
+              },
+              "autoApprove": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
               }
             }
           }

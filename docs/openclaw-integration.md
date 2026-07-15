@@ -2,8 +2,12 @@
 
 ShieldCortex integrates with [OpenClaw](https://openclaw.dev) in complement mode by default:
 - Real-time defence scanning is on
-- Context recall at session start is on
+- The before-tool-call Action Guard is on (catastrophic operations blocked; dangerous operations enforced by default)
 - Automatic memory writes are opt-in (off by default)
+
+Context recall at session start is handled by OpenClaw's native Memory Search —
+ShieldCortex stopped injecting bootstrap context in v2026.2.26 (it duplicated
+what OpenClaw already recalls and ate context window).
 
 This lets OpenClaw keep its native memory behavior while ShieldCortex adds security, auditability, and lower-noise memory extraction when enabled.
 
@@ -59,18 +63,23 @@ wrapper also installs both components:
 
 1. `cortex-memory` hook
 - Path: `~/.openclaw/hooks/cortex-memory/`
-- Handles session bootstrap context injection + explicit keyword saves
+- Handles lifecycle wiring on `agent:bootstrap` (security-warning handoff — no
+  system-prompt injection since v2026.2.26) + explicit keyword saves
 
 2. `shieldcortex-realtime` plugin
-- Path: `~/.openclaw/extensions/shieldcortex-realtime/`
-- Hooks into `llm_input` and `llm_output`
+- Native `openclaw plugins install` puts it in OpenClaw's managed npm project
+  tree (`~/.openclaw/npm/projects/…/node_modules/@drakon-systems/shieldcortex-realtime`,
+  registered in `plugins/installs.json`); the wrapper's compatibility path
+  copies it to `~/.openclaw/extensions/shieldcortex-realtime/`
+- Hooks into `llm_input`, `llm_output`, `before_tool_call`, and `session_end`
 
 ## Default behavior (safe complement mode)
 
 Enabled by default:
-- `agent:bootstrap`: inject relevant prior context (`CORTEX_MEMORY.md`)
 - Keyword triggers: saves when user explicitly says phrases like `remember this:`
 - `llm_input` scanning: real-time threat detection + audit logging
+- `before_tool_call` Action Guard: catastrophic operations blocked, dangerous operations enforced (see the [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
+- `agent:bootstrap` lifecycle wiring: security-warning file handoff only — no context injection (removed v2026.2.26; OpenClaw's native Memory Search recalls context at session start)
 
 Disabled by default:
 - Auto-extract on `/new`, `/stop`, `/clear`, `/exit`

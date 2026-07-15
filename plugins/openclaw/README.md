@@ -4,9 +4,9 @@ OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory 
 
 ## Compatibility
 
-- **Node.js** — ≥ 18 required
+- **Node.js** — ≥ 20 required (the `shieldcortex` peer ships `better-sqlite3` ^12, which needs Node 20+)
 - **OpenClaw** — ≥ 2026.3.22 required, **≥ 2026.4.23 recommended** — 2026.4.23 added host-package linking for plugins that declare `openclaw` as a peer dependency ([#70462](https://github.com/openclaw/openclaw/pull/70462)), which lets any future `openclaw/plugin-sdk/*` imports resolve without a duplicate runtime bundle
-- **ShieldCortex** — ≥ 4.11.1 required
+- **ShieldCortex** — ≥ 4.18.3 required (matches the declared peer dependency; ship both packages at the same version)
 
 OpenClaw is declared as an **optional** peer dependency, so installs on older OpenClaw keep working but miss the linking benefit.
 
@@ -29,9 +29,11 @@ The defensive root `openclaw.plugin.json` is kept for one release on the main pa
 |------|--------|
 | `llm_input` | Scans prompts and history through the ShieldCortex defence pipeline. Threats are logged to audit and can forward to ShieldCortex Cloud. |
 | `llm_output` | Extracts high-signal memories from assistant replies and writes them into ShieldCortex with novelty filtering and dedupe. |
-| `before_tool_call` | Runs the Action Guard before tools execute. Catastrophic shell/file/network/git actions are blocked; dangerous actions warn by default or request approval when enforcement is enabled. |
+| `before_tool_call` | Runs the Action Guard before tools execute. Catastrophic shell/file/network/git actions are always blocked. Recognised-dangerous actions are **enforced by default**: attended sessions get an approval prompt, unattended sessions fail closed per `failurePolicy`. Set `actionGuard.enforce: false` to opt down to warn-and-allow, or pre-approve specific operations with `actionGuard.autoApprove`. |
+| `session_end` | Resets the interceptor's per-session caches. |
+| `/shieldcortex-status` | Slash command reporting the plugin's runtime state. |
 
-The plugin is intentionally fire-and-forget: it should not stall the OpenClaw turn loop if ShieldCortex is unavailable.
+The scanning and memory paths are fire-and-forget: they do not stall the OpenClaw turn loop if ShieldCortex is unavailable. The Action Guard is the deliberate exception — it gates tool calls inline, and since 4.47.5 a guard that fails to load falls back to a dependency-free scanner that still denies unambiguous catastrophic operations (fail-closed) rather than allowing everything.
 
 ## Installation
 
@@ -108,6 +110,10 @@ Supported plugin config keys:
 - `openclawAutoMemoryDedupe`: enable or disable duplicate suppression
 - `openclawAutoMemoryNoveltyThreshold`: dedupe similarity threshold, `0.6` to `0.99`
 - `openclawAutoMemoryMaxRecent`: dedupe cache size, `50` to `1000`
+- `actionGuard.enabled`: turn the before-tool-call Action Guard on or off (default `true`)
+- `actionGuard.enforce`: enforce dangerous-operation gating (default `true`); `false` opts down to warn-and-allow. Catastrophic operations are blocked regardless.
+- `actionGuard.autoApprove`: array of operation allowlist entries for unattended agents that legitimately need specific dangerous operations
+- `failurePolicy`: per-severity verdict when a decision can't be obtained unattended (defaults: `low`/`medium` allow, `high`/`critical` deny)
 
 ## Auto-memory
 

@@ -15,7 +15,7 @@ metadata:
   publisher_github: https://github.com/Drakon-Systems-Ltd
   npm_audit: clean
   snyk: no-known-vulnerabilities
-  downloads: 9700+
+  downloads: 11K+/month
 install:
   command: shieldcortex quickstart
   runtime: node
@@ -75,20 +75,20 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 |--------|-------|
 | **Publisher** | [Drakon Systems Ltd](https://github.com/Drakon-Systems-Ltd) (UK company) |
 | **Source code** | [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) — fully open, MIT-0 licence |
-| **npm package** | [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) — published via GitHub Actions CI |
+| **npm package** | [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) — every release git-tagged with a matching GitHub release |
 | **npm audit** | Clean — `npm audit` returns 0 vulnerabilities |
-| **Downloads** | 9,700+ total (April 2026) |
-| **CI/CD** | Automated: push to main → CI lint/test → version tag → npm publish |
-| **No postinstall scripts** | Package has no lifecycle scripts that auto-execute on install |
-| **Dependencies** | 3 runtime deps: `better-sqlite3`, `zod`, `hono`. No transitive network libs. |
+| **Downloads** | 11,000+/month (July 2026) |
+| **CI/CD** | CI lint/test on every push; releases are version-tagged and published to npm manually by the maintainer |
+| **Postinstall script** | Declared and bounded: prints setup instructions; on **global** installs it also smoke-tests the native SQLite binding, seeds default config on first install, and refreshes an OpenClaw hook/plugin that a previous setup already installed. It never adds integrations to a machine that had none, and it is a no-op for CI and local dependency installs. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` skips the refresh. |
+| **Dependencies** | 8 runtime deps: `better-sqlite3`, `zod`, `@modelcontextprotocol/sdk`, `express`, `ws`, `cors`, `safe-regex2`, `semver`. `express`/`ws`/`cors` serve the bundled localhost-only dashboard/API; nothing dials out unless Cloud sync is explicitly enabled. |
 
 ## Safety & Scope
 
 This section explains every privileged operation the tool performs and why.
 
 - **Active interception, not scan-only.** Beyond read-only scans, ShieldCortex *enforces* at the boundary: writes failing the pipeline are quarantined/blocked; recalled memory is trust/ACL-filtered before the agent sees it; in enforce mode the tool-output firewall redacts/withholds malicious tool results; and the OpenClaw `before_tool_call` interceptor + Iron Dome kill-switch can block operations. Surprising enforcement is opt-in (tool-output firewall defaults to advisory). `shieldcortex status` and `iron-dome status` report which controls are active.
-- **User-initiated only.** Setup is a manual step the user runs in their terminal. Nothing auto-executes on install. The `quickstart` command asks before each action.
-- **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (no lifecycle scripts).
+- **Setup is user-initiated.** Installing hooks, registering the MCP server, and migrating data are manual steps the user runs in their terminal, and `quickstart` asks before each action. The npm postinstall script (disclosed in the trust table above) never adds integrations that weren't already present — on global installs it only prints instructions, checks the native binding, seeds default config on first install, and refreshes an existing OpenClaw hook/plugin install.
+- **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (the postinstall script does not touch memory or config data beyond seeding defaults on a first-ever global install).
 - **Destructive `forget` is bounded and gated.** Per-memory and filtered bulk deletes go through a delete ACL (own-only) and are recorded in the audit ledger. Revoke-by-source (`forget --fromSource`, bulk-delete every memory from one source — for purging a poisoned agent) is **disabled by default** and only enabled by an out-of-band human action (`shieldcortex config --allow-revoke-by-source`); even then it is bounded by a trust-hierarchy ACL (you must own the source or out-rank it) and a per-call row cap. A compromised agent cannot mass-delete your memory.
 - **The bundled dashboard never renders RESTRICTED content.** The local visualization API and its WebSocket feed redact credential-class (`RESTRICTED`) memory content before it reaches the browser — the row stays visible (title/metadata) so you can manage it, but the secret is withheld (view full content via the CLI). Credential patterns in titles/metadata are masked too. This is a display-surface safeguard on top of the on-disk store; it does not weaken the firewall.
 - **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync is opt-in and requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.

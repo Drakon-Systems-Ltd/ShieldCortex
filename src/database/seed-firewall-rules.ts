@@ -8,9 +8,9 @@
  * a place to disable, edit, or extend them.
  *
  * Built-in rows are marked `built_in=1` and excluded from the user
- * `MAX_RULES=25` cap (see custom-rules/store.ts). They are evaluated
- * regardless of license tier — the Pro `custom_firewall_rules` gate
- * applies only to user-added rules with `built_in=0`.
+ * `MAX_RULES=25` cap (see custom-rules/store.ts). They are always
+ * evaluated — the `custom_firewall_rules` feature gate (graded free
+ * since 4.47.0) applies only to user-added rules with `built_in=0`.
  *
  * Idempotent: running the seeder again is a no-op when built-in rules
  * are already present. Operators wanting to re-seed after a built-in

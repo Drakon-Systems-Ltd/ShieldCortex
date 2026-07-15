@@ -84,8 +84,8 @@ Built-in firewall rules covering instruction injection, hidden
 instruction, imperative tool-call directives ("call X tool now"), command
 injection, and credential leaks (AWS / JWT / private keys) are seeded
 into `firewall_rules` on first run with `built_in = 1`. They are
-evaluated on every tier (the Pro `custom_firewall_rules` gate applies
-only to user-added rules) and excluded from the user-facing 25-rule cap.
+always evaluated (user-added custom rules are free too, behind a dormant
+feature gate) and excluded from the user-facing 25-rule cap.
 
 The chunker also rejects malformed candidates *before* they reach the
 write path: imperative tool-calls, bare-imperative starts ("commit
