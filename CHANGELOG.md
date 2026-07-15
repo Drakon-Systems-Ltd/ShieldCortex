@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.6] - 2026-07-15
+
+**Docs-and-disclosure alignment release — the published trust claims now match the shipped package. No pipeline or guard behaviour changes.**
+
+### Fixed
+
+- **SKILL.md trust table told two lies (cross-surface alignment audit, 2026-07-15).** The ClawHub-published skill claimed "no postinstall scripts" while the package ships one, and "3 runtime deps (better-sqlite3, zod, hono), no transitive network libs" while the actual set is 8 including `express`/`ws`/`cors` (and no hono). The table now discloses the postinstall script honestly (global-install-only: prints instructions, smoke-tests the native binding, seeds first-install defaults, refreshes an *existing* OpenClaw install; `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` opts out) and lists the real dependencies. The CI/CD row now matches the manual-publish release process, and the downloads metric is a dated monthly figure (11K+/month, July 2026).
+- **Plugin README understated its own requirements and its own defaults.** Compatibility floors corrected (ShieldCortex ≥ 4.18.3 to match the peer range; Node ≥ 20 to match the `better-sqlite3` ^12 floor — plugin `engines.node` bumped to match). The `before_tool_call` row no longer describes the Action Guard as warn-by-default/fire-and-forget: it documents enforce-by-default (4.46.0), the fail-closed catastrophic fallback (4.47.5), and the `actionGuard.{enabled,enforce,autoApprove}` + `failurePolicy` config keys — which are now also declared in the plugin manifest's `uiHints`/`configSchema`.
+- **`/shieldcortex-status` was blind to the plugin's own enforcement surface.** The status command now reports the Action Guard state (enforce/warn/off, auto-approve count) and lists `before_tool_call` + `session_end` in its hook line.
+- **Stale docs unwound.** `docs/openclaw-integration.md` no longer claims session-start context injection (removed v2026.2.26 — OpenClaw's native Memory Search handles recall) and documents the managed npm project tree as the native plugin install location; the README's hybrid-ranker example invoked a nonexistent `shieldcortex recall` command (replaced with a real surface); HOOK.md and two code comments stopped describing the free `custom_firewall_rules` gate as a "Pro" gate.
+
 ## [4.47.5] - 2026-07-14
 
 **Seven confirmed command-guard bypasses closed by an adversarial pass, plus a fail-closed catastrophic path for when the guard itself can't load — the false-negative counterpart to 4.47.4's false-positive tune.**

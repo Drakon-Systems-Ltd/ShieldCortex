@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.47.5
+  version: 4.47.6
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -48,7 +48,7 @@ permissions:
     - $CWD/.env (env-scanner checks for leaked secrets — reads, never writes)
   paths_write:
     - ~/.shieldcortex/ (memory DB, config, cortex log, licence, audit cache)
-    - ~/.openclaw/extensions/shieldcortex-realtime/ (OpenClaw plugin, when user opts in)
+    - ~/.openclaw/extensions/shieldcortex-realtime/ (OpenClaw plugin via the wrapper install only; native `openclaw plugins install` uses OpenClaw's managed npm tree instead)
     - ~/.claude/mcp.json, ~/.cursor/mcp.json (MCP server registration, when user runs setup)
   network_endpoints:
     - https://api.shieldcortex.ai (Cloud sync, licence validation — only when Cloud is enabled by user)
