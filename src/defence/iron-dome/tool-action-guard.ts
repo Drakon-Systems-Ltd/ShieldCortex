@@ -181,7 +181,14 @@ const CATASTROPHIC: Pattern[] = [
  * `require_approval`.
  */
 const DANGEROUS: Pattern[] = [
-  { re: /\brm\b|\bunlink\b|\brmdir\b|\bshred\b/i, signal: 'file-delete' },
+  // `shred` is anchored to command position (issue #89 remainder): start of
+  // statement, after a separator/subshell, after sudo/env-assignment prefixes,
+  // or as the command run by `xargs` / `find -exec`. A grep whose *search
+  // pattern* mentions the word (`grep -rn "shred" src/`) is a mention, not an
+  // intent, and no longer gates. `rm`/`unlink`/`rmdir` stay unanchored — their
+  // mention-FP class is the #84 span-classifier's scope, and anchoring the
+  // highest-traffic delete verb needs that design, not a drive-by.
+  { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
   { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
@@ -205,7 +212,12 @@ const DANGEROUS: Pattern[] = [
   // (issue #90). A read-only global QUERY — `npm ls -g`, `npm root -g`,
   // `npm outdated -g`, `npm list --global` — mutates nothing and is not gated
   // (issue #88). Order-independent (`npm install -g` and `npm -g install` both hit).
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s-g\b|--global\b|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s-g\b|--global\b)/i, signal: 'install-package-global' },
+  // Quote-tolerant on the global flag (issue #91.2): `npm install "-g" foo` is the
+  // same host mutation — argv quoting is stripped by the shell — so an optional
+  // quote is admitted on either side of `-g`. `--global` gets a `(?![\w-])` tail
+  // so npm's real `--global-style` layout flag (workspace-local install) does not
+  // over-gate.
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-]))/i, signal: 'install-package-global' },
   // Scheduler MUTATION only: `crontab` in command position that edits/installs
   // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
   // never the bare word mentioned inside an echo/string (issue #89). Env-var and
@@ -214,7 +226,15 @@ const DANGEROUS: Pattern[] = [
   // "at now" — and `systemd-run --on-calendar=…` (systemd's cron-equivalent
   // one-shot/timer scheduling). `at -l` (list pending jobs, the crontab -l
   // equivalent) stays read-only/allowed, same discipline as crontab.
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  // Wrapper commands admitted at command position (issue #91.1): `env`, `nohup`,
+  // `time`, `stdbuf`, `nice` are transparent process wrappers — `nohup crontab -e`
+  // is the same mutation. Each wrapper may carry dash-flags, assignments, or a
+  // bare numeric arg (`nice -n 10`); the loop is deterministic because every
+  // token class is disjoint by first character from the scheduler verbs, so a
+  // non-matching tail exits without re-partitioning (same ReDoS discipline as
+  // issue #92 must-fix 1). The read-only `-l` exemption applies unchanged
+  // through wrappers (`time crontab -l` stays allowed).
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|time|stdbuf|nice)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
   // Zero out a file's contents (issue #4475.7a): the pre-existing rule below
   // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
   // regardless of the target file, so it is gated on its own.

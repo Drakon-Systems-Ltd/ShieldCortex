@@ -269,6 +269,9 @@ const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
   // <interp>` admitted (issue #92 must-fix 3) — mirrors tool-action-guard.ts's
   // pipe-download-to-shell pattern exactly; kept in sync there.
   /\b(?:curl|wget|fetch)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:env\s+)?(?:\w+=\S*\s+)*(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)/i,
+  // Stdin-executing python MODULES defeat the -m exemption above (issue #86.1) —
+  // mirrors tool-action-guard.ts's pipe-download-module-exec; kept in sync there.
+  /\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\bpython\d?\b[^\n]*\s-m\s*(?:code|pty|pdb)(?![\w.])/i,
   /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i,
 ];
 
