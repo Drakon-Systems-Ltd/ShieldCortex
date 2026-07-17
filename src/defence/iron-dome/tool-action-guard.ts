@@ -487,20 +487,49 @@ function heredocOutputFile(text: string): string | null {
 }
 
 /**
- * True when `cmd` invokes an interpreter (or the `source`/`.` builtin) on `file`
- * in command position — `sh x.sh`, `bash ./run`, `. p.sh`, `python3 /tmp/p.py`.
- * The command-position anchor (start / `;` / `|` / `&` / `(` / newline) stops the
- * `.sh` in a filename from reading as the `sh` interpreter, and `(?![\w.])` keeps
- * the match to the whole filename token (`x.sh` ≠ `x.shrc`).
+ * Which of `files` are invoked as an interpreter/`source` target somewhere in
+ * `cmd` — `sh x.sh`, `bash ./run`, `. p.sh`, `python3 /tmp/p.py` — in command
+ * position. The command-position anchor (start / `;` / `|` / `&` / `(` /
+ * newline) stops the `.sh` in a filename from reading as the `sh` interpreter,
+ * and `(?![\w.])` keeps the match to the whole filename token (`x.sh` ≠
+ * `x.shrc`).
+ *
+ * All candidates are resolved in ONE pass over `cmd` via a combined
+ * alternation, rather than one `new RegExp` + full rescan of `cmd` per file.
+ * The latter made a command with k heredocs cost O(k × length(cmd)) — issue
+ * #86-redos measured 125-236ms for 789 heredocs over a 50k-char command
+ * (2ms pre-#86), and evaluateToolCall is synchronous on every tool call, so
+ * that stalled the event loop. This is O(length(cmd)) regardless of k.
  */
-function interpreterRunsFile(cmd: string, file: string): boolean {
-  const f = file.replace(/^['"]/, '').replace(/['"]$/, '');
-  if (f.length < 2) return false;
-  const esc = f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function findInterpreterRunFiles(cmd: string, files: readonly string[]): Set<string> {
+  const found = new Set<string>();
+  const candidates = [...new Set(
+    files
+      .map(f => f.replace(/^['"]/, '').replace(/['"]$/, ''))
+      .filter(f => f.length >= 2),
+  )];
+  if (candidates.length === 0) return found;
+
+  const alternation = candidates
+    .map((f, i) => `(?<f${i}>${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`)
+    .join('|');
   const re = new RegExp(
-    `(?:^|[\\n;|&(])\\s*(?:sudo\\s+)?(?:bash|sh|zsh|ksh|dash|python\\d?|perl|ruby|node|php|source|\\.)\\s+[^\\n;|&]*${esc}(?![\\w.])`,
+    `(?:^|[\\n;|&(])\\s*(?:sudo\\s+)?(?:bash|sh|zsh|ksh|dash|python\\d?|perl|ruby|node|php|source|\\.)\\s+[^\\n;|&]*(?:${alternation})(?![\\w.])`,
+    'g',
   );
-  return re.test(cmd);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cmd)) !== null) {
+    if (m.groups) {
+      for (let i = 0; i < candidates.length; i++) {
+        if (m.groups[`f${i}`] !== undefined) {
+          found.add(candidates[i]);
+          break;
+        }
+      }
+    }
+    if (m[0].length === 0) re.lastIndex++; // never spin forever on a zero-length match
+  }
+  return found;
 }
 
 /**
@@ -517,11 +546,29 @@ function interpreterRunsFile(cmd: string, file: string): boolean {
  *   - an interpreter that itself reads the heredoc (`bash <<'EOF' … EOF`)
  *   - `eval` anywhere in the command (it can re-run captured heredoc text)
  */
+const QUOTED_HEREDOC_RE = /(<<-?\s*(['"])([A-Za-z_]\w*)\2[^\n]*\n)([\s\S]*?)(\n[ \t]*\3\b)/g;
+
 function stripQuotedHeredocs(cmd: string): string {
   if (!/<<-?\s*['"]/.test(cmd)) return cmd;      // no quoted heredoc → nothing to do
   if (/\beval\b/.test(cmd)) return cmd;          // re-activation risk → keep the body
+
+  // Pass 1 (cheap, single scan): collect every file each heredoc's opener
+  // redirects to (issue #86.2), so pass 2 below can resolve "does anything
+  // else in this command execute that file" ONCE for all of them together —
+  // see findInterpreterRunFiles for why that matters.
+  const candidateFiles: string[] = [];
+  for (const m of cmd.matchAll(QUOTED_HEREDOC_RE)) {
+    const offset = m.index ?? 0;
+    const lineStart = cmd.lastIndexOf('\n', offset) + 1;
+    const introLine = cmd.slice(lineStart, offset);
+    if (HEREDOC_INTERPRETER.test(introLine)) continue; // interpreter consumes it → not a candidate
+    const outFile = heredocOutputFile(introLine + m[1]);
+    if (outFile) candidateFiles.push(outFile);
+  }
+  const executedFiles = findInterpreterRunFiles(cmd, candidateFiles);
+
   return cmd.replace(
-    /(<<-?\s*(['"])([A-Za-z_]\w*)\2[^\n]*\n)([\s\S]*?)(\n[ \t]*\3\b)/g,
+    QUOTED_HEREDOC_RE,
     (match: string, opener: string, _q: string, _delim: string, _body: string, closer: string, offset: number, whole: string) => {
       const lineStart = whole.lastIndexOf('\n', offset) + 1;
       const introLine = whole.slice(lineStart, offset);
@@ -531,7 +578,8 @@ function stripQuotedHeredocs(cmd: string): string {
       // is code again, not inert data — keep it scanned. File-linked so a doc
       // heredoc written then `git add`/`cat`'d (no interpreter on it) still strips.
       const outFile = heredocOutputFile(introLine + opener);
-      if (outFile && interpreterRunsFile(whole, outFile)) return match;
+      const cleanOutFile = outFile && outFile.replace(/^['"]/, '').replace(/['"]$/, '');
+      if (cleanOutFile && executedFiles.has(cleanOutFile)) return match;
       return opener + closer;                                 // drop the inert body
     },
   );
@@ -550,6 +598,15 @@ export function commandScanText(cmd: string): string {
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────────
+
+// A command this long is already anomalous for an interactive tool call — cap
+// it as a hardening backstop (issue #86-redos), independent of whatever makes
+// commandScanText fast for any *particular* shape today. Over-cap is flagged
+// as a dangerous signal (worth a human nod) rather than silently truncated —
+// truncating first would risk scanning past a real danger signal that sits
+// beyond the cut point, the same bypass scan-windows.ts's windowing exists to
+// avoid for the (much larger, file-content) scanners elsewhere in the guard.
+const OVERSIZED_COMMAND_LENGTH = 50_000;
 
 const ACTION_BY_FAMILY: Record<ToolFamily, string> = {
   read: 'read_file',
@@ -663,6 +720,14 @@ export function evaluateToolCall(
   if (isGatedNpxBunx(execSurface) && !dangerSignals.includes('registry-code-exec')) {
     dangerSignals.push('registry-code-exec');
     dangerSpan = dangerSpan ?? (execSurface.match(NPX_BUNX_COMMAND_RE)?.[0]?.trim() ?? 'npx/bunx');
+  }
+  // An anomalously long command is worth a human nod on its own (issue
+  // #86-redos) — flagged here, after every catastrophic check above has
+  // already had first refusal, so this can only ever ADD an approval gate,
+  // never soften a block.
+  if (command.length > OVERSIZED_COMMAND_LENGTH) {
+    dangerSignals.push('oversized-command');
+    dangerSpan = dangerSpan ?? `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`;
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);

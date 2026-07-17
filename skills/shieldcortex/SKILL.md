@@ -78,7 +78,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 | **npm package** | [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) — every release git-tagged with a matching GitHub release |
 | **npm audit** | Clean — `npm audit` returns 0 vulnerabilities |
 | **Downloads** | 11,000+/month (July 2026) |
-| **CI/CD** | CI lint/test on every push; releases are version-tagged and published to npm manually by the maintainer |
+| **CI/CD** | CI lint/test on every push; the maintainer manually tags each release, and the tag push triggers an automated CI publish to npm |
 | **Postinstall script** | Declared and bounded: prints setup instructions; on **global** installs it also smoke-tests the native SQLite binding, seeds default config on first install, and refreshes an OpenClaw hook/plugin that a previous setup already installed. It never adds integrations to a machine that had none, and it is a no-op for CI and local dependency installs. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` skips the refresh. |
 | **Dependencies** | 8 runtime deps: `better-sqlite3`, `zod`, `@modelcontextprotocol/sdk`, `express`, `ws`, `cors`, `safe-regex2`, `semver`. `express`/`ws`/`cors` serve the bundled localhost-only dashboard/API; nothing dials out unless Cloud sync is explicitly enabled. |
 

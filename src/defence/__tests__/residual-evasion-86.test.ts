@@ -171,3 +171,64 @@ describe('#86.3 dot word-boundary correctness — must ALLOW the siblings', () =
     expect(v.decision).toBe('allow');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #86-redos — perf regression guard for the write-then-execute linking (#86.2).
+//
+// The shipped #86.2 fix called interpreterRunsFile() — which built a fresh
+// RegExp and rescanned the ENTIRE command — once per quoted heredoc whose
+// opener redirected to a file. A command with k such heredocs cost
+// O(k × length(cmd)): 789 heredocs over a ~50k-char command measured
+// 125-236ms (2ms on base main, pre-#86). evaluateToolCall runs synchronously
+// on every tool call, so this stalled the event loop. Fixed by resolving all
+// candidate output files in ONE combined-alternation pass (findInterpreterRunFiles)
+// instead of one full rescan per file, plus a length cap that flags an
+// anomalously large command for approval instead of scanning it unbounded —
+// same discipline as the #92 ReDoS timing pack above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#86-redos — heredoc-linking stays fast under load', () => {
+  const TIME_BUDGET_MS = 50;
+
+  function manyHeredocs(count: number, evilAt?: number): string {
+    const parts: string[] = [];
+    for (let i = 0; i < count; i++) {
+      if (i === evilAt) {
+        parts.push(`cat <<'EOF' > /tmp/evil${i}.sh\nrm -rf /\nEOF\nsh /tmp/evil${i}.sh`);
+      } else {
+        parts.push(`cat <<'EOF' > /tmp/decoy${i}.txt\nbenign payload data xxxxxxxxx ${i}\nEOF`);
+      }
+    }
+    return parts.join('\n');
+  }
+
+  function timed(command: string) {
+    const start = Date.now();
+    const v = evaluateToolCall('Bash', { command });
+    return { v, elapsedMs: Date.now() - start };
+  }
+
+  it('stays fast on a ~50k-char, 789-quoted-heredoc pathological command (each redirected to a distinct file)', () => {
+    const command = manyHeredocs(789);
+    expect(command.length).toBeGreaterThan(50_000);
+    const { v, elapsedMs } = timed(command);
+    expect(elapsedMs).toBeLessThan(TIME_BUDGET_MS);
+    // Anomalously large for a tool call — the #86-redos length-cap hardening
+    // flags it for a human nod rather than silently scanning it unbounded.
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('oversized-command');
+  });
+
+  it('stays fast AND still BLOCKs a genuine write-then-execute buried among hundreds of decoy heredocs', () => {
+    // Kept under the oversized-command cap so this isolates the algorithmic
+    // fix's correctness (not the length-cap hardening above) under load: the
+    // real #86.2 danger must still be found via findInterpreterRunFiles's
+    // combined pass even with hundreds of unrelated candidate files in play.
+    const command = manyHeredocs(400, 200);
+    expect(command.length).toBeLessThan(50_000);
+    const { v, elapsedMs } = timed(command);
+    expect(elapsedMs).toBeLessThan(TIME_BUDGET_MS);
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('catastrophic');
+  });
+});
