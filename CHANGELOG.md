@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.8] - 2026-07-18
+
+**Guard observability release: doctor gets a real Action Guard check, the audit trail's silent gaps close, and the Hermes gate stops failing open (PRs #98 + #99).**
+
+### Added
+
+- **Doctor: Action Guard check (#94).** Doctor previously had no Action Guard coverage at all — its "Defence canary" probes the firewall's instruction detector, a different layer. `checkActionGuard` now runs three in-process verdict probes through the real `evaluateToolCall` (catastrophic→block, dangerous→require_approval, benign→allow; a wrong verdict is a hard fail with a repair hint), resolves the box's config for **both** guard surfaces — the Claude Code hook reads `actionGuard`, the OpenClaw plugin reads `interceptor.actionGuard` — and warns when either is opted down or when the two diverge (the split-key gotcha this work surfaced). Honestly labelled in-process: wiring proof stays with the consent-gated live canary.
+- **Allow-decisions are auditable (#95).** A recognised allow (the guard evaluated a known operation family — severity above benign — and let it through) now writes an audit entry (`action: 'allow'`, `outcome: 'allowed'`, severity `low`) on both the OpenClaw interceptor and the Claude Code hook, so forensics can distinguish "scanned & allowed" from "never scanned". Benign allows are never audited — volume discipline. `actionGuard.auditAllows: false` opts off (README + manifest document it).
+- **`gate_degraded` audit entries on Hermes (#59).** Every scanner-unreachable decision on the Hermes surface now writes a `gate_degraded` entry (`failure_denied`/`failure_allowed`) to the shared `realtime-*.jsonl` stream.
+
+### Fixed
+
+- **Hermes gate no longer fails open on scanner errors (#59/WS2, PR #99).** `sc_client` returned allow on any network/HTTP/parse error — the exact bug class WS2 targets. A dependency-free fallback scan (the shared catastrophic pattern set ported to Python, kept in sync with the hook + interceptor, incl. the 4.47.x module-exec shape) now denies unambiguous catastrophic shapes when the scanner is unreachable, and this hard-block tier ignores advisory mode (`SHIELDCORTEX_ENFORCE=0`), mirroring the OpenClaw posture. Unrecognised content still fails open — a down scanner must not wedge an agent doing normal work.
+- **Live canary false-green (#94).** The consent-gated live canary probed the interceptor with `DEFAULT_CONFIG`; it now resolves the box's actual `~/.shieldcortex/config.json → interceptor` overrides the same way the plugin runtime does (`resolveBoxInterceptorConfig`), so a box that opted enforcement down can no longer be "proven" with settings it doesn't run.
+- **Silent audit-sink failure (#95).** An unwritable audit directory was swallowed by a bare catch — entries dropped with zero signal. The interceptor now warns loudly once per process (path + error + drop count); the per-call Claude Code hook warns per failure. Enforcement still never blocks on audit failure.
+
 ## [4.47.7] - 2026-07-18
 
 **Guard-tune release: the three residual #86 evasion shapes land (PR #87), plus the #91 wrapper/quote evasions and the shred use/mention FP (PR #97).**
