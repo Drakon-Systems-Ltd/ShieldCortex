@@ -21,13 +21,52 @@ import logging
 import os
 
 try:
-    from .sc_client import scan
+    from .sc_client import scan, fallback_catastrophic_match
     from .policy import tool_call_decision, resolve_enforce
 except ImportError:  # pragma: no cover - standalone import
-    from sc_client import scan
+    from sc_client import scan, fallback_catastrophic_match
     from policy import tool_call_decision, resolve_enforce
 
 log = logging.getLogger("shieldcortex.hermes")
+
+
+def _audit_gate_degraded(tool_name: str, reason: str, denied: bool) -> None:
+    """Best-effort `gate_degraded` audit breadcrumb (issue #59).
+
+    Appends to the same ~/.shieldcortex/audit/realtime-*.jsonl stream the
+    OpenClaw plugin and Claude Code hook write, so "could not scan" is
+    distinguishable from "scanned & allowed" in one unified trail. Never
+    raises — an unwritable sink must not affect the gate decision (it is
+    logged loudly by the caller's warning either way).
+    """
+    try:
+        from datetime import datetime, timezone
+
+        audit_dir = os.path.expanduser("~/.shieldcortex/audit")
+        os.makedirs(audit_dir, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        entry = {
+            "type": "intercept",
+            "origin": "hermes-plugin",
+            "tool": tool_name,
+            "severity": "critical" if denied else "medium",
+            "firewallResult": "ACTION_GUARD",
+            "threats": ["fallback-scan"] if denied else [],
+            "anomalyScore": 1 if denied else 0.5,
+            "trustScore": 0,
+            "sensitivityLevel": "INTERNAL",
+            "fragmentationScore": None,
+            "pipelineDurationMs": 0,
+            "preview": f"gate_degraded: {reason}"[:200],
+            "ts": now.isoformat(),
+            "action": "gate_degraded",
+            "outcome": "failure_denied" if denied else "failure_allowed",
+        }
+        path = os.path.join(audit_dir, f"realtime-{now.date().isoformat()}.jsonl")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("[shieldcortex] audit sink unwritable, gate_degraded entry DROPPED: %s", exc)
 
 
 def _enforce_default() -> bool:
@@ -49,26 +88,38 @@ def register(ctx):
     enforce = _enforce_default()
 
     def pre_tool_call(tool_name, args, task_id=None, **_kw):
+        content = _tool_content(tool_name, args)
         verdict = scan(
-            _tool_content(tool_name, args),
+            content,
             title=f"tool:{tool_name}",
             source_type="tool",
             source_id="hermes",
         )
+        # Issue #59/WS2: scanner unreachable no longer means blanket fail-open.
+        # The dependency-free fallback scan denies the unambiguous catastrophic
+        # shapes; everything else still fails open — loudly, as gate_degraded.
+        fallback_blocked = False
+        if not verdict.available:
+            fallback_blocked = fallback_catastrophic_match(content)
+            _audit_gate_degraded(tool_name, verdict.reason, fallback_blocked)
         # Observability: every decision leaves a log line so advisory mode is
         # actually visible (a silent gate is indistinguishable from a no-op —
         # see the missing-auth fail-open caught in the ATHENA dogfood).
-        if verdict.blocked:
+        if verdict.blocked or fallback_blocked:
             log.warning(
                 "[shieldcortex] %s on tool %r: %s",
-                verdict.result, tool_name, verdict.reason or verdict.threats,
+                "FALLBACK_BLOCK (fail-closed)" if fallback_blocked else verdict.result,
+                tool_name, verdict.reason or verdict.threats,
             )
         elif not verdict.available:
-            log.warning("[shieldcortex] fail-open on tool %r (scanner unavailable): %s", tool_name, verdict.reason)
+            log.warning(
+                "[shieldcortex] gate_degraded on tool %r — scanner unavailable, fallback "
+                "scan matched nothing, allowing (fail-open): %s", tool_name, verdict.reason,
+            )
         else:
             log.info("[shieldcortex] %s on tool %r", verdict.result, tool_name)
         # None -> allow ; {"action":"block","message":...} -> block (first block wins)
-        return tool_call_decision(verdict, enforce=enforce)
+        return tool_call_decision(verdict, enforce=enforce, fallback_blocked=fallback_blocked)
 
     ctx.register_hook("pre_tool_call", pre_tool_call)
     log.info("[shieldcortex] Hermes plugin registered (pre_tool_call, enforce=%s)", enforce)
