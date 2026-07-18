@@ -26,6 +26,9 @@ export interface ActionGuardConfig {
   enabled: boolean;
   enforce: boolean;
   autoApprove?: string[];
+  /** Audit recognised (severity 'sensitive'+) allow-decisions. Default true (issue #95).
+   *  Benign allows are never audited — on a busy agent every `ls` would drown the stream. */
+  auditAllows?: boolean;
 }
 
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
@@ -66,8 +69,8 @@ export interface InterceptAuditEntry {
   sensitivityLevel: string;           // from the pipeline result's sensitivity level
   fragmentationScore: number | null;  // from the pipeline result's fragmentation score, or null
   pipelineDurationMs: number;         // wall-clock ms around the runDefencePipeline call
-  action: InterceptAction | 'auto_deny' | 'rate_limit';
-  outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied';
+  action: InterceptAction | 'auto_deny' | 'rate_limit' | 'allow';
+  outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied' | 'allowed';
   preview: string;
   ts: string;
 }
@@ -107,6 +110,7 @@ const DEFAULT_CONFIG: InterceptorConfig = {
     enabled: true,
     enforce: true,
     autoApprove: [],
+    auditAllows: true,
   },
 };
 
@@ -327,14 +331,32 @@ export function formatActionGuardPrompt(toolName: string, v: ToolGuardVerdictLik
 
 const AUDIT_DIR = join(homedir(), '.shieldcortex', 'audit');
 
+// Issue #95: an unwritable audit sink used to be swallowed by this bare catch —
+// entries silently dropped forever. Still best-effort (an audit failure must
+// never block the agent), but the FIRST failure now warns loudly with the sink
+// path and the error, and later failures keep a drop count for the breadcrumb.
+let auditSinkFailures = 0;
+export function noteAuditSinkFailure(err: unknown): void {
+  auditSinkFailures++;
+  if (auditSinkFailures === 1) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[shieldcortex] ⚠️ audit sink UNWRITABLE (${AUDIT_DIR}): ${detail} — audit entries are being DROPPED. ` +
+      `Fix the directory permissions/disk; enforcement continues but leaves no trail until this is resolved.`,
+    );
+  }
+}
+export function __resetAuditSinkFailuresForTest(): void { auditSinkFailures = 0; }
+
 function writeAuditEntry(entry: InterceptAuditEntry): void {
   try {
     mkdirSync(AUDIT_DIR, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
     const file = join(AUDIT_DIR, `realtime-${date}.jsonl`);
     appendFileSync(file, JSON.stringify(entry) + '\n');
-  } catch {
-    // Best-effort — never block on audit failure
+  } catch (err) {
+    // Best-effort — never block on audit failure, but never silent either (#95).
+    noteAuditSinkFailure(err);
   }
 }
 
@@ -445,9 +467,9 @@ export function createInterceptor(
   function guardAuditBase(toolName: string, v: ToolGuardVerdictLike, preview: string): Omit<InterceptAuditEntry, 'action' | 'outcome'> {
     return {
       type: 'intercept', tool: toolName,
-      severity: v.severity === 'catastrophic' ? 'critical' : 'high',
+      severity: v.severity === 'catastrophic' ? 'critical' : v.decision === 'allow' ? 'low' : 'high',
       firewallResult: 'ACTION_GUARD', threats: v.signals,
-      anomalyScore: v.decision === 'block' ? 1 : 0.6,
+      anomalyScore: v.decision === 'block' ? 1 : v.decision === 'allow' ? 0.1 : 0.6,
       trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
       preview: preview.slice(0, 200), ts: new Date().toISOString(),
     };
@@ -493,7 +515,18 @@ export function createInterceptor(
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`);
       return;
     }
-    if (v.decision === 'allow') return;
+    if (v.decision === 'allow') {
+      // Issue #95: a RECOGNISED allow (the guard evaluated a known operation
+      // family and let it through — severity above benign) leaves an audit
+      // entry, so forensics can distinguish "scanned & allowed" from "never
+      // scanned". Benign allows stay unaudited by design (volume discipline);
+      // `actionGuard.auditAllows: false` opts the recognised entries off too.
+      if (v.severity !== 'benign' && actionGuardCfg.auditAllows !== false) {
+        const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
+        emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), action: 'allow', outcome: 'allowed' });
+      }
+      return;
+    }
 
     const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
     const base = guardAuditBase(context.toolName, v, preview);

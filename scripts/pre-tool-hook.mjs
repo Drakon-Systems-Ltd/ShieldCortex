@@ -46,7 +46,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // ==================== CONFIG ====================
 
-const DEFAULT_ACTION_GUARD = { enabled: true, enforce: true, autoApprove: [] };
+const DEFAULT_ACTION_GUARD = { enabled: true, enforce: true, autoApprove: [], auditAllows: true };
 
 function loadActionGuardConfig() {
   try {
@@ -59,6 +59,7 @@ function loadActionGuardConfig() {
       enabled: raw.enabled !== false,
       enforce: raw.enforce !== false,
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
+      auditAllows: raw.auditAllows !== false,
     };
   } catch {
     // Unreadable config → guard on with defaults. Enforce-by-default means a
@@ -156,10 +157,10 @@ function writeAuditEntry(toolName, verdict, args, action, outcome) {
       type: 'intercept',
       origin: 'claude-code-hook',
       tool: toolName,
-      severity: verdict.severity === 'catastrophic' ? 'critical' : 'high',
+      severity: verdict.severity === 'catastrophic' ? 'critical' : verdict.decision === 'allow' ? 'low' : 'high',
       firewallResult: 'ACTION_GUARD',
       threats: verdict.signals,
-      anomalyScore: verdict.decision === 'block' ? 1 : 0.6,
+      anomalyScore: verdict.decision === 'block' ? 1 : verdict.decision === 'allow' ? 0.1 : 0.6,
       trustScore: 0,
       sensitivityLevel: 'INTERNAL',
       fragmentationScore: null,
@@ -170,8 +171,14 @@ function writeAuditEntry(toolName, verdict, args, action, outcome) {
       outcome,
     };
     appendFileSync(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n');
-  } catch {
-    // Best-effort — never block on audit failure.
+  } catch (err) {
+    // Best-effort — never block on audit failure, but never silent either
+    // (issue #95). This hook is one process per tool call, so a per-failure
+    // stderr note IS the once-per-process warning; kept in sync with the
+    // plugin interceptor's noteAuditSinkFailure.
+    console.error(
+      `[shieldcortex] ⚠️ audit sink UNWRITABLE (~/.shieldcortex/audit): ${err?.message ?? err} — this audit entry was DROPPED.`,
+    );
   }
 }
 
@@ -257,7 +264,15 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    if (verdict.decision === 'allow') process.exit(0);
+    if (verdict.decision === 'allow') {
+      // Issue #95: audit RECOGNISED allows (severity above benign) so forensics
+      // can tell "scanned & allowed" from "never scanned". Benign allows stay
+      // unaudited — volume discipline, mirrored with the plugin interceptor.
+      if (verdict.severity !== 'benign' && cfg.auditAllows !== false) {
+        writeAuditEntry(toolName, verdict, toolInput, 'allow', 'allowed');
+      }
+      process.exit(0);
+    }
 
     // Catastrophic — hard deny, always enforced while the guard is enabled.
     if (verdict.decision === 'block') {

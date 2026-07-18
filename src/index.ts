@@ -401,7 +401,7 @@ function startDashboard(): DashboardController {
       return spawn(process.execPath, ['server.js'], {
         cwd: dashboardPath.cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, PORT: '3030', HOSTNAME: '0.0.0.0' },
+        env: { ...process.env, PORT: '3030', HOSTNAME: '127.0.0.1' },
       });
     }
     const npmPath = process.platform === 'win32' ? 'npm.cmd' : 'npm';

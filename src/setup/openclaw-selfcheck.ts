@@ -308,6 +308,33 @@ const benignPipeline = () => ({
  * execution, and the op itself is a no-op even if it ran (see
  * {@link buildSyntheticCanaryOp}). Nothing here touches the running gateway.
  */
+/**
+ * Resolve the interceptor config the way the plugin itself does at runtime
+ * (index.ts's initInterceptor): the module's DEFAULT_CONFIG with this box's
+ * `~/.shieldcortex/config.json` → `interceptor` overrides merged over it.
+ * Issue #94: probing with bare DEFAULT_CONFIG was a false-green — a box whose
+ * config had opted enforcement down (or re-tuned failurePolicy) was "proven"
+ * with settings it doesn't actually run. Any read/parse failure falls back to
+ * the defaults, which is exactly what the runtime does with a corrupt config.
+ */
+export function resolveBoxInterceptorConfig(home: string, defaults: unknown): unknown {
+  const base = (defaults && typeof defaults === 'object' ? defaults : {}) as Record<string, unknown>;
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8'));
+    const overrides = raw?.interceptor;
+    if (!overrides || typeof overrides !== 'object') return { ...base };
+    return {
+      ...base,
+      enabled: overrides.enabled ?? (base.enabled as boolean | undefined),
+      severityActions: { ...(base.severityActions as object | undefined), ...(overrides.severityActions ?? {}) },
+      failurePolicy: { ...(base.failurePolicy as object | undefined), ...(overrides.failurePolicy ?? {}) },
+      actionGuard: { ...(base.actionGuard as object | undefined ?? { enabled: true, enforce: true, autoApprove: [] }), ...(overrides.actionGuard ?? {}) },
+    };
+  } catch {
+    return { ...base };
+  }
+}
+
 export async function dispatchCanaryThroughInstalledInterceptor(
   home: string,
   _pluginId: string,
@@ -331,7 +358,7 @@ export async function dispatchCanaryThroughInstalledInterceptor(
 
   let interceptor: ReturnType<InterceptorLikeModule['createInterceptor']>;
   try {
-    interceptor = mod.createInterceptor(mod.DEFAULT_CONFIG, benignPipeline, { evaluateToolCall: deps.evaluator });
+    interceptor = mod.createInterceptor(resolveBoxInterceptorConfig(home, mod.DEFAULT_CONFIG), benignPipeline, { evaluateToolCall: deps.evaluator });
   } catch (err) {
     return { dispatched: false, detail: `failed to construct the installed interceptor: ${errMsg(err)}` };
   }

@@ -1246,6 +1246,123 @@ export async function checkDefenceCanary(): Promise<CheckResult> {
   }
 }
 
+/**
+ * Action Guard check (issue #94). Doctor previously had NO Action Guard check
+ * at all — the "Defence canary" above probes the firewall's instruction
+ * detector, a different layer entirely. This check:
+ *
+ *   1. Runs the REAL `evaluateToolCall` against three in-process verdict
+ *      probes: a catastrophic shape must block, a dangerous shape must gate,
+ *      a benign shape must allow. A wrong verdict is a hard fail — the guard
+ *      logic itself is broken on this box's build.
+ *   2. Resolves the box's ACTUAL config for BOTH guard surfaces — the Claude
+ *      Code hook reads top-level `actionGuard`, the OpenClaw plugin reads
+ *      `interceptor.actionGuard` — and warns when either surface is opted
+ *      down, or when the two resolve differently (the split-key gotcha: an
+ *      operator setting one key may believe it governs both surfaces).
+ *
+ * Honest labelling: this is an in-process check of guard logic + config. It
+ * does NOT prove the OpenClaw interceptor or the PreToolUse hook is actually
+ * wired into a live agent loop — that proof stays with the consent-gated live
+ * canary (`SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1` + the openclaw self-check).
+ */
+export async function checkActionGuard(): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const label = 'Action guard';
+
+  // 1. Verdict probes through the real evaluator.
+  try {
+    const { evaluateToolCall } = await import('../defence/iron-dome/tool-action-guard.js');
+    const nonce = Math.random().toString(36).slice(2, 10);
+    const probes: Array<{ name: string; command: string; expect: string }> = [
+      { name: 'catastrophic→block', command: `rm -rf /tmp/sc-doctor-${nonce}`, expect: 'block' },
+      { name: 'dangerous→approval', command: 'crontab -e', expect: 'require_approval' },
+      { name: 'benign→allow', command: 'ls -la', expect: 'allow' },
+    ];
+    const start = Date.now();
+    const wrong: string[] = [];
+    for (const p of probes) {
+      const v = evaluateToolCall('Bash', { command: p.command });
+      if (v.decision !== p.expect) wrong.push(`${p.name} got '${v.decision}'`);
+    }
+    const elapsed = Date.now() - start;
+    if (wrong.length === 0) {
+      results.push({
+        label,
+        status: 'pass',
+        message:
+          `verdict probes 3/3 (catastrophic→block, dangerous→approval, benign→allow) in ${elapsed}ms — ` +
+          `in-process check of guard logic + this box's config; wiring proof needs the consent-gated live canary ` +
+          `(SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex openclaw status)`,
+      });
+    } else {
+      results.push({
+        label,
+        status: 'fail',
+        message:
+          `verdict probes FAILED: ${wrong.join('; ')} — the guard evaluator on this build returns wrong ` +
+          `decisions for canonical shapes. This is a positive failure: these probes must always verdict correctly.`,
+        fix: 'Rebuild with `npm run build:ts`; if probes still fail, the installed dist is corrupt — run `shieldcortex repair`.',
+      });
+    }
+  } catch (err) {
+    results.push({
+      label,
+      status: 'fail',
+      message: `guard evaluator could not load (${(err as Error).message}) — Action Guard status unknown`,
+      fix: 'Run `shieldcortex repair` to rebuild the installed dist.',
+    });
+    return results;
+  }
+
+  // 2. Config-surface resolution (hook: `actionGuard`; plugin: `interceptor.actionGuard`).
+  try {
+    const configPath = path.join(getShieldCortexDir(), 'config.json');
+    const raw = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+    const resolve = (r: unknown) => {
+      const o = r && typeof r === 'object' ? (r as Record<string, unknown>) : {};
+      return { enabled: o.enabled !== false, enforce: o.enforce !== false };
+    };
+    const hook = resolve(raw?.actionGuard);
+    const plugin = resolve(raw?.interceptor?.actionGuard);
+
+    for (const [surface, cfg, key] of [
+      ['Claude Code hook', hook, 'actionGuard'],
+      ['OpenClaw plugin', plugin, 'interceptor.actionGuard'],
+    ] as const) {
+      if (!cfg.enabled) {
+        results.push({
+          label: `${label} config`,
+          status: 'warn',
+          message: `${surface} surface is disabled in config (\`${key}.enabled: false\`) — tool calls on that surface are not gated`,
+          fix: `Remove \`${key}.enabled: false\` from ~/.shieldcortex/config.json to restore gating.`,
+        });
+      } else if (!cfg.enforce) {
+        results.push({
+          label: `${label} config`,
+          status: 'warn',
+          message: `${surface} surface runs in warn-mode (\`${key}.enforce: false\`) — dangerous ops log but are not gated (catastrophic still blocks)`,
+        });
+      }
+    }
+    if (hook.enabled !== plugin.enabled || hook.enforce !== plugin.enforce) {
+      results.push({
+        label: `${label} config`,
+        status: 'warn',
+        message:
+          `the two guard surfaces DIVERGE: Claude Code hook reads \`actionGuard\` ` +
+          `(enabled=${hook.enabled}, enforce=${hook.enforce}) while the OpenClaw plugin reads ` +
+          `\`interceptor.actionGuard\` (enabled=${plugin.enabled}, enforce=${plugin.enforce}) — ` +
+          `an operator setting one key may believe it governs both`,
+      });
+    }
+  } catch {
+    // Unreadable config resolves to defaults on both runtime surfaces — nothing to warn about here.
+  }
+
+  return results;
+}
+
 /** Read a package's `version` field; returns null on any failure. */
 function readPkgVersion(pkgJson: string): string | null {
   try {
@@ -1948,6 +2065,7 @@ export async function runDoctor(args: string[] = []): Promise<void> {
     checkOpenClawManagedPinDrift,
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
+    checkActionGuard,
     checkModelCache,
   ];
 
