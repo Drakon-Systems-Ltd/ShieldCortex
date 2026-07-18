@@ -13,15 +13,53 @@ and — being fail-open — the gate silently degrades to a no-op. That exact ga
 (no auth header → invisible 401 → never actually scans) was caught in the
 ATHENA Hermes dogfood, 2026-06-29; wiring the token closes it.
 
-Fail-OPEN by design: if the scanner is unreachable or errors, we return an
-`available=False` verdict and the policy layer never blocks on it — a down
-scanner must not wedge the agent. Every fail-open is logged by the caller.
+Failure posture (issue #59 / WS2): if the scanner is unreachable or errors, we
+return an `available=False` verdict — and the caller runs the dependency-free
+`fallback_catastrophic_match` below. A match fails CLOSED (blocked); anything
+else still fails open with a loud `gate_degraded` log, because the fallback
+recognising nothing is not evidence the call is safe, only that it isn't one
+of the handful of unambiguous shapes. A down scanner still never wedges an
+agent doing normal work.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
+
+# Unambiguous catastrophic shapes for the fail-closed fallback (issue #59/WS2).
+# Ported from — and kept in sync with — FALLBACK_CATASTROPHIC_PATTERNS in
+# scripts/pre-tool-hook.mjs and plugins/openclaw/interceptor.ts. Narrow by
+# design: essentially-never-benign shapes only, so a broken scanner fails
+# closed on "rm -rf /"-class commands without turning every tool call into a
+# denial. The content scanned here is the tool name + JSON-encoded args (see
+# _tool_content in __init__.py) — JSON escaping keeps spaces/pipes/slashes
+# literal, so the shapes survive encoding.
+_FALLBACK_CATASTROPHIC = [
+    re.compile(r"\brm\b[^|;&\n]*?(?:-\w*r\w*f\w*|-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))", re.I),
+    re.compile(r"\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:/|~|\$HOME|/\*|\*|\./\*)(?:\s|$)", re.I),
+    re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:"),
+    re.compile(r"\bmkfs(\.\w+)?\b", re.I),
+    re.compile(r"\bdd\b[^|;&\n]*\bof=/dev/(sd|nvme|hd|disk|mmcblk|vd)", re.I),
+    re.compile(r"\b(fdisk|parted|sgdisk|wipefs|blkdiscard)\b", re.I),
+    re.compile(
+        r"\b(?:curl|wget|fetch)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:env\s+)?(?:\w+=\S*\s+)*"
+        r"(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?!(?:\s+-[a-z]+)*\s+-[cem]\b)",
+        re.I,
+    ),
+    re.compile(r"\b(?:curl|wget|fetch)\b[^|\n]*\|[^\n]*\bpython\d?\b[^\n]*\s-m\s*(?:code|pty|pdb)(?![\w.])", re.I),
+    re.compile(r"\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s/(?:\s|$)", re.I),
+]
+
+
+def fallback_catastrophic_match(content: str) -> bool:
+    """True when `content` matches an unambiguous catastrophic shape (fail-closed tier)."""
+    if not content:
+        return False
+    return any(p.search(content) for p in _FALLBACK_CATASTROPHIC)
+
+
 
 DEFAULT_BASE_URL = os.environ.get("SHIELDCORTEX_API_URL", "http://127.0.0.1:3001")
 TOKEN_FILE = os.path.expanduser("~/.shieldcortex/.api-token")

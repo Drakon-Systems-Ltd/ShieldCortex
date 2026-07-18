@@ -16,9 +16,16 @@ execution it scans the tool + args through ShieldCortex (`POST /api/v1/scan`) an
   with `SHIELDCORTEX_ENFORCE=0` (also accepts `false` / `no` / `off` / `advisory`).
   Earlier releases defaulted to advisory and required `SHIELDCORTEX_ENFORCE=1` to
   block — that opt-in is no longer needed.
-- **Fail-open.** If the ShieldCortex API is unreachable, the gate never blocks —
-  a down scanner must not wedge the agent. Every fail-open is logged. (Unchanged
-  by the enforce-default flip.)
+- **Fail-closed on catastrophic shapes (issue #59/WS2).** If the ShieldCortex
+  API is unreachable, a dependency-free fallback scan (ported from — and kept
+  in sync with — the OpenClaw interceptor and Claude Code hook) still denies
+  the unambiguous catastrophic shapes (recursive root deletes, pipe-download
+  to shell, raw-disk writes, fork bombs, …). This hard-block tier ignores
+  advisory mode, mirroring the OpenClaw posture. Anything the fallback does
+  not recognise still fails open — a down scanner must not wedge an agent
+  doing normal work. Every degraded decision is logged AND leaves a
+  `gate_degraded` entry in the shared `~/.shieldcortex/audit/realtime-*.jsonl`
+  stream, so "could not scan" is distinguishable from "scanned & allowed".
 
 ## Requires
 

@@ -39,15 +39,30 @@ def tool_call_decision(
     *,
     enforce: bool = False,
     quarantine_blocks: bool = True,
+    fallback_blocked: bool = False,
 ):
     """Return a Hermes block dict, or ``None`` to allow.
 
-    - Fail-open: an unavailable scanner never blocks.
-    - Advisory: ``enforce=False`` never blocks (warn mode).
+    - Scanner down (issue #59/WS2): fails CLOSED when the caller's
+      dependency-free fallback scan matched a catastrophic shape
+      (``fallback_blocked=True``) — this mirrors the OpenClaw posture where
+      the hard-block tier ignores advisory mode. Anything the fallback does
+      not recognise still fails open — a down scanner must not wedge an
+      agent doing normal work.
+    - Advisory: ``enforce=False`` never blocks (warn mode) — except the
+      catastrophic fallback above.
     - BLOCK always blocks (when enforcing); QUARANTINE blocks iff ``quarantine_blocks``.
     """
     if not verdict.available:
-        return None  # scanner down -> never wedge the agent
+        if fallback_blocked:
+            return {
+                "action": "block",
+                "message": (
+                    "ShieldCortex blocked this action — scanner unreachable and the "
+                    "fallback scan matched a catastrophic pattern (failing closed)"
+                ),
+            }
+        return None  # scanner down, no catastrophic shape -> never wedge the agent
     if not enforce:
         return None  # warn mode: caller logs, action proceeds
     should_block = verdict.result == "BLOCK" or (quarantine_blocks and verdict.result == "QUARANTINE")
