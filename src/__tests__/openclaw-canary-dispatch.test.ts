@@ -154,3 +154,64 @@ describe('defaultTriggerSyntheticOp — fail-closed guards preserved', () => {
     expect(r.detail).toMatch(/test runner/i);
   });
 });
+
+describe('#94 — the live canary honours the BOX config, not DEFAULT_CONFIG', () => {
+  const evaluator2 = evaluateToolCall as unknown as ActiveDispatchDeps['evaluator'];
+
+  it('merges ~/.shieldcortex/config.json interceptor overrides over the module defaults', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-canary-cfg-'));
+    fs.mkdirSync(path.join(home, '.shieldcortex'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.shieldcortex', 'config.json'),
+      JSON.stringify({ interceptor: { failurePolicy: { high: 'allow' }, actionGuard: { enforce: false } } }),
+    );
+    let receivedCfg: any;
+    await dispatchCanaryThroughInstalledInterceptor(home, 'p', 'sc-canary-CFG', {
+      resolveInstallPath: () => '/opt/plugin',
+      loadInterceptorModule: async () => ({
+        createInterceptor: (cfg: unknown) => {
+          receivedCfg = cfg;
+          return { handleToolCall: async () => { throw new Error('blocked — canary'); }, resetSession: () => {} };
+        },
+        DEFAULT_CONFIG: {
+          enabled: true,
+          severityActions: { low: 'log', medium: 'log', high: 'warn', critical: 'log' },
+          failurePolicy: { low: 'allow', medium: 'allow', high: 'deny', critical: 'deny' },
+          actionGuard: { enabled: true, enforce: true, autoApprove: [] },
+        },
+      }),
+      evaluator: evaluator2,
+    });
+    fs.rmSync(home, { recursive: true, force: true });
+    // Box overrides applied…
+    expect(receivedCfg.failurePolicy.high).toBe('allow');
+    expect(receivedCfg.actionGuard.enforce).toBe(false);
+    // …while untouched defaults survive the merge.
+    expect(receivedCfg.failurePolicy.critical).toBe('deny');
+    expect(receivedCfg.actionGuard.enabled).toBe(true);
+    expect(receivedCfg.severityActions.high).toBe('warn');
+  });
+
+  it('falls back to the module defaults when the config file is absent or unreadable', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-canary-nocfg-'));
+    let receivedCfg: any;
+    await dispatchCanaryThroughInstalledInterceptor(home, 'p', 'sc-canary-NOCFG', {
+      resolveInstallPath: () => '/opt/plugin',
+      loadInterceptorModule: async () => ({
+        createInterceptor: (cfg: unknown) => {
+          receivedCfg = cfg;
+          return { handleToolCall: async () => { throw new Error('blocked — canary'); }, resetSession: () => {} };
+        },
+        DEFAULT_CONFIG: {
+          enabled: true,
+          failurePolicy: { low: 'allow', medium: 'allow', high: 'deny', critical: 'deny' },
+          actionGuard: { enabled: true, enforce: true, autoApprove: [] },
+        },
+      }),
+      evaluator: evaluator2,
+    });
+    fs.rmSync(home, { recursive: true, force: true });
+    expect(receivedCfg.failurePolicy.high).toBe('deny');
+    expect(receivedCfg.actionGuard.enforce).toBe(true);
+  });
+});

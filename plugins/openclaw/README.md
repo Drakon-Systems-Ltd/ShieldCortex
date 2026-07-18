@@ -113,6 +113,7 @@ Supported plugin config keys:
 - `actionGuard.enabled`: turn the before-tool-call Action Guard on or off (default `true`)
 - `actionGuard.enforce`: enforce dangerous-operation gating (default `true`); `false` opts down to warn-and-allow. Catastrophic operations are blocked regardless.
 - `actionGuard.autoApprove`: array of operation allowlist entries for unattended agents that legitimately need specific dangerous operations
+- `actionGuard.auditAllows`: audit recognised (sensitive-tier) allow-decisions so "scanned & allowed" is distinguishable from "never scanned" (default `true`; benign allows are never audited)
 - `failurePolicy`: per-severity verdict when a decision can't be obtained unattended (defaults: `low`/`medium` allow, `high`/`critical` deny)
 
 ## Auto-memory

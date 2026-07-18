@@ -93,6 +93,12 @@
       "description": "Family/action/signal names pre-approved for unattended agents that legitimately need specific dangerous operations (case-insensitive substring match). Never applies to catastrophic operations.",
       "type": "array",
       "advanced": true
+    },
+    "interceptor.actionGuard.auditAllows": {
+      "label": "Audit Recognised Allows",
+      "description": "Write an audit entry when the guard evaluates a recognised (sensitive-tier) operation and allows it, so forensics can distinguish scanned-and-allowed from never-scanned. Benign allows are never audited.",
+      "type": "boolean",
+      "advanced": true
     }
   },
   "configSchema": {
@@ -232,6 +238,10 @@
                   "type": "string"
                 },
                 "default": []
+              },
+              "auditAllows": {
+                "type": "boolean",
+                "default": true
               }
             }
           }
