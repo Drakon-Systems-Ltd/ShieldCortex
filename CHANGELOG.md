@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.7] - 2026-07-18
+
+**Guard-tune release: the three residual #86 evasion shapes land (PR #87), plus the #91 wrapper/quote evasions and the shred use/mention FP (PR #97).**
+
+### Fixed
+
+- **Three residual pipe/heredoc evasion shapes closed (PR #87, issue #86).** The `-m` inline-program exemption no longer exempts stdin-executing python modules (`code`/`pty`/`pdb`) — a new catastrophic `pipe-download-module-exec` signal covers them while `-m json.tool`-style data consumers stay exempt; the dot-spelling of the shell `source` builtin no longer evades `pipe-download-stdin-exec`; and an unquoted-heredoc body written to a file that a later statement executes is linked and kept scanned (write-then-execute), with an O(k×n) ReDoS in the linking pass eliminated in review follow-up. 21-case fixture pack with must-ALLOW siblings guarding the #71/#73.6 exemptions.
+- **Scheduler-mutation wrappers gate (PR #97, issue #91.1).** `env`/`nohup`/`time`/`stdbuf`/`nice` at command position are transparent process wrappers — a wrapped `crontab -e`/`at` now requires approval. The wrapper loop's token classes are disjoint by first character (deterministic, #92 ReDoS discipline; adversarial 30k-char timing test) and the read-only `-l` exemption applies unchanged through wrappers.
+- **Global-install gate is quote-tolerant (PR #97, issue #91.2).** A quoted `-g` flag (`npm install "-g" pkg`) is the same host mutation after shell quote-stripping and now gates on both the verb-lookahead and abbreviation branches. Bonus FP fix caught by a test sibling: npm's real `--global-style` layout flag (a *workspace-local* install) no longer over-gates.
+- **`shred` anchored to command position (PR #97, #89 remainder).** The standalone token fired anywhere in a string, gating a grep whose *search pattern* merely mentioned it. Now anchored to start/separator/sudo/env-assignment prefixes plus `xargs` and `find -exec`, with must-still-fire siblings for every legitimate invocation shape. `rm`/`unlink`/`rmdir` stay unanchored — that mention-FP class is #84's span-classifier scope.
+- **Fallback-scanner parity.** Both fail-closed fallback lists (`scripts/pre-tool-hook.mjs`, `plugins/openclaw/interceptor.ts`) learn the stdin-executing python-module shape, so the guard-unavailable path covers it too.
+
+### Docs
+
+- The shape-based npx/bunx gating tradeoff (issue #96) is now recorded in-repo at `docs/design/2026-07-17-npx-gating-shape-based.md` with explicit revisit triggers.
+
 ## [4.47.6] - 2026-07-15
 
 **Docs-and-disclosure alignment release — the published trust claims now match the shipped package. No pipeline or guard behaviour changes.**
