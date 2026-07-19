@@ -94,6 +94,14 @@ function pickString(args: Record<string, unknown>, keys: string[]): string {
 export function extractCommand(args: Record<string, unknown>): string {
   return pickString(args, ['command', 'cmd', 'script', 'code', 'input', 'shell', 'run']);
 }
+
+// `${IFS}`, `${IFS:0:1}`, `$IFS` all expand to whitespace at runtime and are used
+// purely to strip the literal spaces that several danger patterns anchor on
+// (`\s/` in recursive-perms, the fork-bomb shape). Normalise them to a space
+// before scanning so those patterns see the real command shape. Fail-closed:
+// this can only ever REVEAL a danger the raw string hid, never mask one.
+const IFS_OBFUSCATION = /\$\{IFS[^}]*\}|\$IFS\b/gi;
+export function deobfuscateIfs(s: string): string { return s.replace(IFS_OBFUSCATION, ' '); }
 export function extractPath(args: Record<string, unknown>): string {
   return pickString(args, ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory']);
 }
@@ -778,7 +786,7 @@ export function evaluateToolCall(
   config?: IronDomeConfig,
 ): ToolGuardVerdict {
   const family = classifyFamily(toolName);
-  const command = extractCommand(args);
+  const command = deobfuscateIfs(extractCommand(args));
   const path = extractPath(args);
   const url = extractUrl(args);
 
