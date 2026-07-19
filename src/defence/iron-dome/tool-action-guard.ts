@@ -332,12 +332,133 @@ function allMatches(patterns: Pattern[], text: string): string[] {
   return patterns.filter(p => p.re.test(text)).map(p => p.signal);
 }
 
+function fmtSpan(s: string): string { return s.trim().replace(/\s+/g, ' ').slice(0, 80); }
+
 /** Like allMatches, but also captures the matched span for actionable reason codes. */
 function matchSpans(patterns: Pattern[], text: string): Array<{ signal: string; span: string }> {
   const out: Array<{ signal: string; span: string }> = [];
   for (const p of patterns) {
     const m = text.match(p.re);
-    if (m) out.push({ signal: p.signal, span: m[0].trim().replace(/\s+/g, ' ').slice(0, 80) });
+    if (m) out.push({ signal: p.signal, span: fmtSpan(m[0]) });
+  }
+  return out;
+}
+
+// ── Span classification (issue #84): mention-vs-intent, generalised ──────────
+// The general mechanism that replaces the per-incident FP carve-outs (#71-73):
+// before block-vs-warn, classify WHERE a dangerous pattern sits — executed shell
+// code vs a quoted DATA argument vs a URL/mention — and drop matches that are
+// confidently mentions. Fail-closed by construction: a match is downgraded ONLY
+// when it is unambiguously a mention; anything uncertain stays 'executed'. This
+// composes with (does not replace) commandScanText's comment/heredoc stripping.
+const SPAN_CLASSIFY_CAP = 8192;
+// A URL token ends at a shell WORD/STATEMENT boundary, not just whitespace —
+// `\S+` would swallow a `;`/`&`/`|`-chained executed command straight into the
+// "URL" (adversarial review: `curl https://x/a;rm${IFS}-rf${IFS}/`). Excluding
+// the shell-active metacharacters keeps the token to the actual URL.
+const RE_URL_TOKEN = /https?:\/\/[^\s;&|<>()`'"\\]+/gi;
+// If the command can re-run quoted/assigned content — command substitution,
+// backticks, variable/param expansion, or eval — NO quoted span may be
+// downgraded (fail-closed). This is what keeps `echo "$(rm -rf /)"`,
+// `x="rm -rf /"; eval $x`, and `VAR=… && $VAR` blocked.
+const CMD_REACTIVATOR = /\$\(|`|\$\{|\$\w|\beval\b/;
+// Commands whose QUOTED arguments are pure DATA — they cannot execute the quote.
+// This is an ALLOWLIST, deliberately, not a denylist of interpreters: a quote is
+// downgraded ONLY when its statement's command word is a recognised data command,
+// so a novel/unknown executable defaults to EXECUTED and can never fail open on
+// an unrecognised quoted-content runner (`ssh host "…"`, `docker run … sh -c "…"`,
+// `su - u -c "…"`, `flock -c "…"`, `chroot … sh -c "…"` all stay executed). Matched
+// against the statement prefix after stripping env-assignments/sudo. Extensible —
+// the follow-on audit-mined allowlist (#84 rec #5) would feed this set.
+const DATA_COMMAND = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|git\s+(?:commit|tag|stash)\b)/i;
+
+// Precomputed mention regions for one `text`, built ONCE (O(n)) so per-match
+// classification is a cheap range lookup — matchAll over a backtracking-prone
+// pattern would otherwise re-scan the whole string per match (O(n³), a ReDoS).
+interface SpanCtx {
+  urls: Array<[number, number]>;        // [start,end) of each http(s) URL token
+  dataQuotes: Array<[number, number]>;  // CONTENT ranges (open+1..close) of quotes that are pure data args
+}
+// Per-pattern iteration cap: after this many mention-only occurrences with no
+// executed one, fail CLOSED (keep the signal). Bounds worst-case work.
+const MAX_CLASSIFY_ITERS = 64;
+
+function buildSpanCtx(text: string): SpanCtx {
+  const urls: Array<[number, number]> = [];
+  RE_URL_TOKEN.lastIndex = 0;
+  let u: RegExpExecArray | null;
+  while ((u = RE_URL_TOKEN.exec(text)) !== null) urls.push([u.index, u.index + u[0].length]);
+
+  const dataQuotes: Array<[number, number]> = [];
+  // If the command can re-run quoted/assigned content, NO quote is data.
+  if (!CMD_REACTIVATOR.test(text)) {
+    let q: string | null = null;
+    let open = -1;
+    let stmtStart = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      // Bash escaping (adversarial review): a `\` OUTSIDE quotes, or inside a
+      // DOUBLE quote, escapes the next char — so `\"` opens/closes nothing.
+      // (Single quotes take no escapes in bash.) Without this, `echo \"; rm -rf
+      // /\"` opened a fake data-quote around the executed `; rm -rf /`.
+      if (c === '\\' && (q === null || q === '"')) { i++; continue; }
+      if (q) {
+        if (c === q) {                    // quote closes at i
+          const prefix = text.slice(stmtStart, open);
+          const bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+          // data quote ⇔ the statement's command word is a recognised data
+          // command (allowlist). A quote in command position, or after any
+          // non-allowlisted command, is left executed (fail-closed).
+          if (DATA_COMMAND.test(bare)) dataQuotes.push([open + 1, i]);
+          q = null;
+        }
+        continue;
+      }
+      if (c === '"' || c === "'") { q = c; open = i; continue; }
+      if (c === ';' || c === '\n' || c === '|' || c === '&' || c === '(') stmtStart = i + 1;
+    }
+  }
+  return { urls, dataQuotes };
+}
+
+type SpanClass = 'executed' | 'url' | 'quoted-data';
+function classifyWithCtx(ctx: SpanCtx, start: number, end: number): SpanClass {
+  // 1) URL — inert data being fetched; only becomes code via `curl … | bash`,
+  //    whose pipe-to-shell pattern's span CROSSES the URL (not contained in it).
+  for (const [s, e] of ctx.urls) if (start >= s && end <= e) return 'url';
+  // 2) Quoted DATA — the span sits fully inside a data-argument quote. A span
+  //    crossing a quote boundary (`"rm" -rf /`) is contained in no quote range.
+  for (const [s, e] of ctx.dataQuotes) if (start >= s && end <= e) return 'quoted-data';
+  return 'executed';
+}
+
+/** Like matchSpans, but a pattern's signal survives only if at least one of its
+ *  occurrences is classified 'executed' — mention-only matches (URL / quoted
+ *  data) are dropped (#84). Fail-closed: over the length cap, or if none of the
+ *  first MAX_CLASSIFY_ITERS occurrences is a clear mention, the signal is kept. */
+function matchSpansClassified(patterns: Pattern[], text: string): Array<{ signal: string; span: string }> {
+  const out: Array<{ signal: string; span: string }> = [];
+  if (text.length > SPAN_CLASSIFY_CAP) return matchSpans(patterns, text);  // fail-closed on huge input
+  const ctx = buildSpanCtx(text);
+  for (const p of patterns) {
+    const m0 = text.match(p.re);
+    if (!m0) continue;
+    // Fast path: the first occurrence is executed → keep immediately (the common
+    // case for a real command). Only search further when it's a mention.
+    const s0 = m0.index ?? 0;
+    if (classifyWithCtx(ctx, s0, s0 + m0[0].length) === 'executed') {
+      out.push({ signal: p.signal, span: fmtSpan(m0[0]) });
+      continue;
+    }
+    const g = p.re.global ? p.re : new RegExp(p.re.source, p.re.flags + 'g');
+    let executed: string | null = null;
+    let iters = 0;
+    for (const m of text.matchAll(g)) {
+      const s = m.index ?? 0;
+      if (classifyWithCtx(ctx, s, s + m[0].length) === 'executed') { executed = m[0]; break; }
+      if (++iters >= MAX_CLASSIFY_ITERS) { executed = m[0]; break; }  // fail-closed
+    }
+    if (executed !== null) out.push({ signal: p.signal, span: fmtSpan(executed) });
   }
   return out;
 }
@@ -679,7 +800,10 @@ export function evaluateToolCall(
   const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
 
   // 1) Catastrophic — hard block, cannot fail open, ignores config.
-  const catastrophicMatches = matchSpans(CATASTROPHIC, execSurface);
+  // Span-classified (#84): a catastrophic token inside a URL or a quoted DATA
+  // argument is a mention, not intent (`grep "rm -rf /" log`, a fetched URL
+  // whose path contains "rm-rf") — but any executed occurrence still hard-blocks.
+  const catastrophicMatches = matchSpansClassified(CATASTROPHIC, execSurface);
   if (catastrophicMatches.length > 0) {
     const catastrophicSignals = catastrophicMatches.map(m => m.signal);
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
@@ -719,7 +843,8 @@ export function evaluateToolCall(
   }
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
-  const dangerMatches = matchSpans(DANGEROUS, execSurface);
+  // Span-classified (#84): same mention-vs-intent filter as catastrophic above.
+  const dangerMatches = matchSpansClassified(DANGEROUS, execSurface);
   const dangerSignals = dangerMatches.map(m => m.signal);
   let dangerSpan = dangerMatches[0]?.span;
   // External egress is a potential exfil vector — but only when the call carries
