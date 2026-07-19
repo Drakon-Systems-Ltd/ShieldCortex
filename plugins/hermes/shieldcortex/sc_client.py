@@ -37,7 +37,7 @@ import urllib.request
 # _tool_content in __init__.py) — JSON escaping keeps spaces/pipes/slashes
 # literal, so the shapes survive encoding.
 _FALLBACK_CATASTROPHIC = [
-    re.compile(r"\brm\b[^|;&\n]*?(?:-\w*r\w*f\w*|-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))", re.I),
+    re.compile(r"\brm\b[^|;&\n]*?(?:(?<![\w./-])-\w*r\w*f\w*|(?<![\w./-])-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))", re.I),
     re.compile(r"\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:/|~|\$HOME|/\*|\*|\./\*)(?:\s|$)", re.I),
     re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:"),
     re.compile(r"\bmkfs(\.\w+)?\b", re.I),
@@ -59,6 +59,72 @@ def fallback_catastrophic_match(content: str) -> bool:
         return False
     return any(p.search(content) for p in _FALLBACK_CATASTROPHIC)
 
+
+# Dangerous tier of the fail-closed fallback (issue #59) — ported from
+# tool-action-guard.ts's DANGEROUS list, kept in sync with the OpenClaw
+# interceptor + Claude Code hook. Blocked (enforcing) when the scanner is
+# unreachable, instead of the pre-#59 fail-open. Mirrors the real (narrowed)
+# patterns so read-only forms (crontab -l, npm ls -g, git status) still pass.
+_FALLBACK_DANGEROUS = [
+    re.compile(r"\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b", re.I),
+    re.compile(r"\bsudo\b|\bdoas\b|\bsu\s", re.I),
+    re.compile(r"\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)", re.I),
+    re.compile(r"\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)", re.I),
+    re.compile(r"\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|\b(kill|pkill|killall)\b", re.I),
+    re.compile(r"\b(iptables|ufw|nft|netplan|firewall-cmd)\b", re.I),
+    re.compile(r"\b(?:apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo)\b[^|\n]*\b(?:install|add)\b", re.I),
+    re.compile(
+        r"\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['\"]?-g\b['\"]?|--global(?![\w-])|\bglobal\s+add\b))"
+        r"(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|"
+        r"\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['\"]?-g\b['\"]?|--global(?![\w-]))",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?"
+        r"(?:(?:env|nohup|time|stdbuf|nice)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+))*\s+)*(?:sudo\s+)?"
+        r"(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*$))|/etc/cron|"
+        r"\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b",
+        re.I,
+    ),
+    re.compile(r"\bdd\b[^|;&\n]*\bof=", re.I),
+    re.compile(r"\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:/\*?)?(?:\s|$)", re.I),
+    re.compile(r"\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)", re.I),
+    re.compile(r"\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log", re.I),
+    re.compile(r"/etc/(passwd|shadow|sudoers)|~/\.ssh|id_rsa|\.aws/credentials|\.env\b", re.I),
+    re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b", re.I),
+    re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b", re.I),
+    re.compile(r"\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)", re.I),
+]
+
+# Same command/path/url field set the guard extracts — narrow, not the whole
+# args object (a benign `description` must never gate).
+_FALLBACK_SURFACE_KEYS = (
+    "command", "cmd", "script", "code", "input", "shell", "run",
+    "path", "file_path", "filePath", "file", "target", "destination", "dir", "directory",
+    "url", "uri", "endpoint", "href", "host", "to",
+)
+
+
+def fallback_surface(args: dict) -> str:
+    """Join the raw exec-surface values (command/path/url) from a tool's args.
+
+    The fallback scans this, not the JSON-wrapped tool blob, so command-position
+    anchors in the dangerous patterns fire the same way they do on the other
+    two runtime surfaces. Capped at 4 KB (kept in sync with the interceptor +
+    hook FALLBACK_SCAN_CAP) — an unbounded scan over crafted input is a ReDoS
+    vector; dangerous shapes appear early in any real command.
+    """
+    if not isinstance(args, dict):
+        return ""
+    parts = [args[k] for k in _FALLBACK_SURFACE_KEYS if isinstance(args.get(k), str) and args[k]]
+    return "   ".join(parts)[:4096]
+
+
+def fallback_dangerous_match(content: str) -> bool:
+    """True when `content` matches a recognised-dangerous shape (fail-closed when enforcing)."""
+    if not content:
+        return False
+    return any(p.search(content) for p in _FALLBACK_DANGEROUS)
 
 
 DEFAULT_BASE_URL = os.environ.get("SHIELDCORTEX_API_URL", "http://127.0.0.1:3001")

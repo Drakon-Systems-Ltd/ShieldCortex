@@ -96,7 +96,7 @@ async function loadGuard() {
 // whenever the guard is merely unavailable. Anything not recognised here
 // still falls through to the pre-existing fail-open behaviour below.
 const FALLBACK_CATASTROPHIC_PATTERNS = [
-  /\brm\b[^|;&\n]*?(?:-\w*r\w*f\w*|-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i,
+  /\brm\b[^|;&\n]*?(?:(?<![\w.\/-])-\w*r\w*f\w*|(?<![\w.\/-])-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i,
   /\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:\/|~|\$HOME|\/\*|\*|\.\/\*)(?:\s|$)/i,
   /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:/,
   /\bmkfs(\.\w+)?\b/i,
@@ -112,6 +112,33 @@ const FALLBACK_CATASTROPHIC_PATTERNS = [
   /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i,
 ];
 
+// WS2 dangerous-tier fallback (issue #59). Ported from — and kept in sync with
+// — tool-action-guard.ts's DANGEROUS list and plugins/openclaw/interceptor.ts.
+// Used ONLY when the real guard can't scan: a recognised-dangerous shape is
+// gated to Claude Code's permission dialog (ask; headless blocks) instead of
+// the pre-#59 fail-OPEN. Mirrors the real (already-narrowed) patterns so a
+// benign op during an outage — `crontab -l`, `npm ls -g`, `git status` — still
+// passes.
+const FALLBACK_DANGEROUS_PATTERNS = [
+  { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
+  { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
+  { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
+  { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
+  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|\b(kill|pkill|killall)\b/i, signal: 'stop-process-or-service' },
+  { re: /\b(iptables|ufw|nft|netplan|firewall-cmd)\b/i, signal: 'modify-network-firewall' },
+  { re: /\b(?:apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo)\b[^|\n]*\b(?:install|add)\b/i, signal: 'install-package' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-]))/i, signal: 'install-package-global' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|time|stdbuf|nice)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  { re: /\bdd\b[^|;&\n]*\bof=/i, signal: 'dd-overwrite' },
+  { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*?)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
+  { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
+  { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
+  { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
+  { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
+];
+
 /** Same command/path/url field set tool-action-guard.ts extracts — narrow, not the whole args object. */
 const FALLBACK_SURFACE_KEYS = [
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
@@ -119,19 +146,35 @@ const FALLBACK_SURFACE_KEYS = [
   'url', 'uri', 'endpoint', 'href', 'host', 'to',
 ];
 
+// Outage-only blunt scanner: cap the scanned surface to bound worst-case regex
+// time (some ported guard patterns are O(n²) on crafted token runs). 4 KB is
+// far beyond a real shell command; dangerous shapes appear early. Kept in sync
+// with plugins/openclaw/interceptor.ts (FALLBACK_SCAN_CAP).
+const FALLBACK_SCAN_CAP = 4096;
+
 function fallbackExecSurface(toolInput) {
   const parts = [];
   for (const k of FALLBACK_SURFACE_KEYS) {
     const v = toolInput?.[k];
     if (typeof v === 'string' && v.length > 0) parts.push(v);
   }
-  return parts.join('   ');
+  return parts.join('   ').slice(0, FALLBACK_SCAN_CAP);
 }
 
 function fallbackCatastrophicMatch(toolInput) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return false;
   return FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(text));
+}
+
+/** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
+function fallbackDangerousMatch(toolInput) {
+  const text = fallbackExecSurface(toolInput);
+  if (!text) return null;
+  for (const { re, signal } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (re.test(text)) return signal;
+  }
+  return null;
 }
 
 // ==================== AUDIT (local JSONL) ====================
@@ -197,29 +240,60 @@ function emitDecision(permissionDecision, reason) {
 }
 
 /**
- * WS2 fail-closed path: when the real guard cannot load or evaluate, run the
- * narrow fallback scan and deny a catastrophic-looking command instead of
- * silently allowing it. Exits the process (denying) when the fallback
- * matches; otherwise returns so the caller falls through to its existing
- * fail-OPEN logging — the fallback recognising nothing is not evidence the
- * command is safe, only that it isn't one of the handful of unambiguous shapes.
+ * WS2 fail-closed path (issue #59): when the real guard cannot load or
+ * evaluate, run the dependency-free fallback scan. Three tiers, so no
+ * dangerous op is ever silently allowed on a scan failure — and every
+ * could-not-scan decision leaves a `gate_degraded` audit row so forensics can
+ * tell "scanned & allowed" from "could not scan":
+ *   1. catastrophic → deny, always.
+ *   2. dangerous    → gate to Claude Code's permission dialog (ask; headless
+ *                     runs cannot answer → blocked). enforce:false → advisory.
+ *   3. no match     → benign/unknown: fail OPEN (a degraded guard must not
+ *                     wedge normal work) but leave a visible breadcrumb.
+ * ALWAYS terminates the process — the caller need do nothing after.
  */
-function denyIfFallbackCatastrophic(toolName, toolInput, failureNote) {
-  if (!fallbackCatastrophicMatch(toolInput)) return;
+function handleDegradedGuard(toolName, toolInput, cfg, failureNote) {
+  // 1. Catastrophic — hard deny, always.
+  if (fallbackCatastrophicMatch(toolInput)) {
+    writeAuditEntry(
+      toolName,
+      { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'] },
+      toolInput, 'auto_deny', 'auto_denied',
+    );
+    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) and fallback scan matched a catastrophic pattern — DENYING ${toolName} (fail-closed, WS2)`);
+    emitDecision('deny', `ShieldCortex Action Guard: ${failureNote}, fallback catastrophic scan matched — denying to fail closed`);
+    process.exit(0);
+  }
+
+  // 2. Dangerous — gate to the permission dialog; enforce:false opts to advisory.
+  const dangerousSignal = fallbackDangerousMatch(toolInput);
+  if (dangerousSignal) {
+    if (!cfg.enforce) {
+      writeAuditEntry(
+        toolName,
+        { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal] },
+        toolInput, 'gate_degraded', 'failure_allowed',
+      );
+      console.error(`[shieldcortex] ⚠️ action-guard unavailable (${failureNote}) — advisory (enforce:false), allowing dangerous ${toolName} [${dangerousSignal}]`);
+      process.exit(0);
+    }
+    writeAuditEntry(
+      toolName,
+      { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal] },
+      toolInput, 'gate_degraded', 'asked',
+    );
+    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) — gating DANGEROUS ${toolName} [${dangerousSignal}] to the permission dialog (fail-closed; headless runs block)`);
+    emitDecision('ask', `ShieldCortex Action Guard: guard could not scan (${failureNote}); dangerous operation [${dangerousSignal}] gated — approve only if you trust it`);
+    process.exit(0);
+  }
+
+  // 3. No match — benign/unknown. Fail open, but never silently.
   writeAuditEntry(
     toolName,
-    { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'] },
-    toolInput,
-    'auto_deny',
-    'auto_denied',
+    { severity: 'benign', decision: 'allow', signals: ['fallback-scan'] },
+    toolInput, 'gate_degraded', 'failure_allowed',
   );
-  console.error(
-    `[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) and fallback scan matched a catastrophic pattern — DENYING ${toolName} (fail-closed, WS2)`,
-  );
-  emitDecision(
-    'deny',
-    `ShieldCortex Action Guard: ${failureNote}, fallback catastrophic scan matched — denying to fail closed`,
-  );
+  console.error(`[shieldcortex] action-guard unavailable (${failureNote}) — allowing ${toolName} (fallback matched nothing; fail-open)`);
   process.exit(0);
 }
 
@@ -250,18 +324,16 @@ process.stdin.on('end', async () => {
 
     const guard = await loadGuard();
     if (!guard) {
-      denyIfFallbackCatastrophic(toolName, toolInput, 'missing dist build');
-      console.error('[shieldcortex] action-guard unavailable (missing dist build) — allowing tool call');
-      process.exit(0);
+      handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build'); // always exits
+      return;
     }
 
     let verdict;
     try {
       verdict = guard.evaluateToolCall(toolName, toolInput);
     } catch (err) {
-      denyIfFallbackCatastrophic(toolName, toolInput, `evaluation error: ${err?.message ?? err}`);
-      console.error(`[shieldcortex] ⚠️ action-guard error (allowing ${toolName}): ${err?.message ?? err}`);
-      process.exit(0);
+      handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`); // always exits
+      return;
     }
 
     if (verdict.decision === 'allow') {

@@ -200,3 +200,84 @@ class FailClosedPolicyTests(unittest.TestCase):
         self.assertIsNone(tool_call_decision(ok, enforce=True, fallback_blocked=True))
         blocked = Verdict("BLOCK", ["injection"], "bad", available=True)
         self.assertIsNotNone(tool_call_decision(blocked, enforce=True))
+
+
+class FallbackDangerousScanTests(unittest.TestCase):
+    """
+    Issue #59 (WS2) — the dangerous tier of the fail-closed fallback. When the
+    scanner is unreachable, a recognised-dangerous shape blocks (enforcing)
+    instead of failing open, mirroring the OpenClaw interceptor + Claude Code
+    hook. Ported from tool-action-guard.ts's DANGEROUS list; the raw exec
+    surface is extracted (not the JSON-wrapped tool blob) so command-position
+    anchors fire.
+    """
+
+    def test_matches_dangerous_shapes(self):
+        from sc_client import fallback_dangerous_match
+        dangerous = [
+            "sudo systemctl stop nginx",
+            "git push --force origin main",
+            "npm install -g some-pkg",
+            "crontab -e",
+            "rm important.txt",
+            "pkill -9 node",
+            "ufw disable",
+            "apt-get install nginx",
+            # the 7 shapes added after adversarial review (issue #59)
+            "dd if=/dev/zero of=/home/u/x.bin",
+            "chmod -R 777 /etc",
+            "truncate -s 0 /var/log/app.log",
+            "history -c",
+            "cat ~/.ssh/id_rsa",
+            "uvx some-package",
+            "pnpm dlx cowsay hi",
+            "base64 -d payload.b64 | bash",
+        ]
+        for cmd in dangerous:
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+
+    def test_does_not_match_benign_or_readonly(self):
+        from sc_client import fallback_dangerous_match
+        benign = [
+            "ls -la",
+            "git status",
+            "git log --oneline -5",
+            "npm test",
+            "npm ls -g",
+            "crontab -l",
+            "cat notes.md",
+        ]
+        for cmd in benign:
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+
+    def test_fallback_surface_extracts_command_value(self):
+        from sc_client import fallback_surface
+        s = fallback_surface({"command": "sudo rm x", "description": "harmless words"})
+        self.assertIn("sudo rm x", s)
+        # non-exec-surface keys are not scanned (a description must not gate)
+        self.assertNotIn("harmless words", s)
+
+
+class DangerousFailClosedPolicyTests(unittest.TestCase):
+    """Scanner-unreachable now fails CLOSED on dangerous shapes when enforcing."""
+
+    def _unavailable(self):
+        return Verdict("ERROR", [], "down", available=False)
+
+    def test_dangerous_blocks_when_enforcing(self):
+        d = tool_call_decision(self._unavailable(), enforce=True, fallback_dangerous=True)
+        self.assertIsNotNone(d)
+        self.assertEqual(d["action"], "block")
+
+    def test_dangerous_allows_in_advisory_mode(self):
+        # enforce=False → advisory: dangerous degraded op is allowed (catastrophic
+        # would still block; that path is fallback_blocked=True, tested elsewhere).
+        self.assertIsNone(tool_call_decision(self._unavailable(), enforce=False, fallback_dangerous=True))
+
+    def test_catastrophic_outranks_dangerous_and_ignores_advisory(self):
+        d = tool_call_decision(self._unavailable(), enforce=False, fallback_blocked=True, fallback_dangerous=True)
+        self.assertIsNotNone(d)
+        self.assertEqual(d["action"], "block")
+
+    def test_neither_match_still_allows(self):
+        self.assertIsNone(tool_call_decision(self._unavailable(), enforce=True, fallback_blocked=False, fallback_dangerous=False))

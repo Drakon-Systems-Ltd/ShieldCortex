@@ -69,7 +69,7 @@ export interface InterceptAuditEntry {
   sensitivityLevel: string;           // from the pipeline result's sensitivity level
   fragmentationScore: number | null;  // from the pipeline result's fragmentation score, or null
   pipelineDurationMs: number;         // wall-clock ms around the runDefencePipeline call
-  action: InterceptAction | 'auto_deny' | 'rate_limit' | 'allow';
+  action: InterceptAction | 'auto_deny' | 'rate_limit' | 'allow' | 'gate_degraded';
   outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied' | 'allowed';
   preview: string;
   ts: string;
@@ -263,7 +263,7 @@ export function formatApprovalPrompt(input: ApprovalPromptInput): string {
 // itself break unattended agents/cron, the outcome ShieldCortex exists to
 // prevent. Mirrored in scripts/pre-tool-hook.mjs for the Claude Code surface.
 const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
-  /\brm\b[^|;&\n]*?(?:-\w*r\w*f\w*|-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i,
+  /\brm\b[^|;&\n]*?(?:(?<![\w.\/-])-\w*r\w*f\w*|(?<![\w.\/-])-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i,
   /\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:\/|~|\$HOME|\/\*|\*|\.\/\*)(?:\s|$)/i,
   /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:/,
   /\bmkfs(\.\w+)?\b/i,
@@ -279,11 +279,51 @@ const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
   /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i,
 ];
 
+// WS2 dangerous-tier fallback (issue #59). Ports EVERY signal in
+// tool-action-guard.ts's DANGEROUS array — a drift test
+// (ws2-gate-degraded-integration-59) fails if the guard gains a DANGEROUS
+// signal this list doesn't cover, so "kept in sync" is enforced, not just
+// claimed. Used ONLY when the real guard can't scan: a recognised-dangerous
+// shape routes through `failurePolicy` exactly as an unattended real verdict
+// would, instead of the pre-#59 fail-OPEN. Copies the real (already anti-ReDoS,
+// FP-narrowed) patterns verbatim, so read-only forms — `crontab -l`, `npm ls
+// -g`, `--global-style`, shred use/mention — still pass. The one guard shape
+// NOT here is bare `npx`/`bunx`: those are gated CONDITIONALLY by
+// `isGatedNpxBunx` (shape-based, #96), not by a DANGEROUS pattern, and a blunt
+// fallback matching them would over-gate `npx tsc`; `uvx`/`dlx` (unconditional)
+// ARE covered. Mirrored in scripts/pre-tool-hook.mjs + hermes/sc_client.py.
+const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string }> = [
+  { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
+  { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
+  { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
+  { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
+  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|\b(kill|pkill|killall)\b/i, signal: 'stop-process-or-service' },
+  { re: /\b(iptables|ufw|nft|netplan|firewall-cmd)\b/i, signal: 'modify-network-firewall' },
+  { re: /\b(?:apt|apt-get|yum|dnf|brew|pip|pip3|gem|cargo)\b[^|\n]*\b(?:install|add)\b/i, signal: 'install-package' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-]))/i, signal: 'install-package-global' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|time|stdbuf|nice)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  { re: /\bdd\b[^|;&\n]*\bof=/i, signal: 'dd-overwrite' },
+  { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*?)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
+  { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
+  { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
+  { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
+  { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
+];
+
 const FALLBACK_SURFACE_KEYS = [
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
   'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
   'url', 'uri', 'endpoint', 'href', 'host', 'to',
 ];
+
+// The fallback is an outage-only blunt scanner; an UNBOUNDED scan over crafted
+// input is a ReDoS vector (some ported guard patterns are O(n²) on pathological
+// token runs like `git push push push …`). Dangerous/catastrophic shapes appear
+// early in any real command, so cap the scanned surface — 4 KB is far beyond a
+// real shell command. The real guard (no cap) still scans in full when it works.
+const FALLBACK_SCAN_CAP = 4096;
 
 /** Same command/path/url field set tool-action-guard.ts extracts — narrow, not the whole args object. */
 function fallbackExecSurface(args: Record<string, unknown> | undefined): string {
@@ -292,13 +332,23 @@ function fallbackExecSurface(args: Record<string, unknown> | undefined): string 
     const v = args?.[k];
     if (typeof v === 'string' && v.length > 0) parts.push(v);
   }
-  return parts.join('   ');
+  return parts.join('   ').slice(0, FALLBACK_SCAN_CAP);
 }
 
 function fallbackCatastrophicMatch(args: Record<string, unknown> | undefined): boolean {
   const text = fallbackExecSurface(args);
   if (!text) return false;
   return FALLBACK_CATASTROPHIC_PATTERNS.some(re => re.test(text));
+}
+
+/** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
+function fallbackDangerousMatch(args: Record<string, unknown> | undefined): string | null {
+  const text = fallbackExecSurface(args);
+  if (!text) return null;
+  for (const { re, signal } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (re.test(text)) return signal;
+  }
+  return null;
 }
 
 /** One-line summary of tool args for audit previews (bounded, no secrets dumped). */
@@ -475,27 +525,58 @@ export function createInterceptor(
     };
   }
 
-  // WS2 fail-closed path: when the real guard was never wired in or throws,
-  // run the narrow fallback scan and DENY (throw) a catastrophic-looking
-  // command instead of silently allowing it. The fallback recognising nothing
-  // is not evidence the command is safe, only that it isn't one of the
-  // handful of unambiguous shapes — everything else still falls through to
-  // the pre-existing fail-OPEN log-and-allow.
+  // WS2 fail-closed path (issue #59): when the real guard was never wired in or
+  // throws, run the dependency-free fallback scan. Three tiers, so no dangerous
+  // op is ever silently allowed on a scan failure — and every could-not-scan
+  // decision leaves a `gate_degraded` audit row (ACTION_GUARD_FALLBACK marker),
+  // so forensics can distinguish "scanned & allowed" from "could not scan":
+  //   1. catastrophic → hard deny, always (ignores enforce:false).
+  //   2. dangerous    → route through `failurePolicy` exactly as an unattended
+  //                     real verdict would (deny by default); enforce:false
+  //                     opts down to advisory.
+  //   3. no match     → benign/unknown: fail OPEN (a degraded guard must not
+  //                     wedge normal work) but leave a visible breadcrumb.
   function handleGuardUnavailable(context: ToolCallContext, reason: string): void {
-    if (!fallbackCatastrophicMatch(context.arguments)) {
-      log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — allowing ${context.toolName}`);
+    const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`.slice(0, 200);
+    const degradedBase = {
+      type: 'intercept' as const, tool: context.toolName,
+      firewallResult: 'ACTION_GUARD_FALLBACK', trustScore: 0, sensitivityLevel: 'INTERNAL',
+      fragmentationScore: null, pipelineDurationMs: 0, preview, ts: new Date().toISOString(),
+    };
+
+    // 1. Catastrophic — hard deny, always.
+    if (fallbackCatastrophicMatch(context.arguments)) {
+      emitAudit({
+        ...degradedBase, severity: 'critical', threats: ['fallback-scan'], anomalyScore: 1,
+        action: 'auto_deny', outcome: 'auto_denied',
+      });
+      log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback scan matched a catastrophic pattern — DENYING ${context.toolName} (fail-closed, WS2)`);
+      throw new Error(`ShieldCortex: tool call blocked — action guard unavailable (${reason}), fallback catastrophic scan matched`);
+    }
+
+    // 2. Dangerous — route through failurePolicy (the "can't obtain a verdict"
+    //    policy; a degraded guard is precisely that). enforce:false → advisory.
+    const dangerousSignal = fallbackDangerousMatch(context.arguments);
+    if (dangerousSignal) {
+      const dBase = { ...degradedBase, severity: 'high' as Severity, threats: ['fallback-scan', dangerousSignal], anomalyScore: 0.6 };
+      if (!actionGuardCfg.enforce) {
+        emitAudit({ ...dBase, action: 'gate_degraded', outcome: 'failure_allowed' });
+        log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — advisory (enforce:false), allowing dangerous ${context.toolName} [${dangerousSignal}]`);
+        return;
+      }
+      const failAction = config.failurePolicy.high;
+      emitAudit({ ...dBase, action: 'gate_degraded', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
+      if (failAction === 'deny') {
+        log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback matched a DANGEROUS op [${dangerousSignal}] — DENYING ${context.toolName} (fail-closed, failure policy: deny)`);
+        throw new Error(`ShieldCortex: tool call blocked — action guard unavailable (${reason}), dangerous fallback match [${dangerousSignal}], failure policy: deny`);
+      }
       return;
     }
-    const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-    emitAudit({
-      type: 'intercept', tool: context.toolName, severity: 'critical',
-      firewallResult: 'ACTION_GUARD_FALLBACK', threats: ['fallback-scan'],
-      anomalyScore: 1, trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null,
-      pipelineDurationMs: 0, preview: preview.slice(0, 200), ts: new Date().toISOString(),
-      action: 'auto_deny', outcome: 'auto_denied',
-    });
-    log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback scan matched a catastrophic pattern — DENYING ${context.toolName} (fail-closed, WS2)`);
-    throw new Error(`ShieldCortex: tool call blocked — action guard unavailable (${reason}), fallback catastrophic scan matched`);
+
+    // 3. No match — benign/unknown. Fail open, but never silently: the
+    //    gate_degraded breadcrumb makes the outage window auditable.
+    emitAudit({ ...degradedBase, severity: 'low', threats: ['fallback-scan'], anomalyScore: 0.1, action: 'gate_degraded', outcome: 'failure_allowed' });
+    log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — allowing ${context.toolName} (fallback matched nothing; fail-open)`);
   }
 
   // Action Guard: gates non-memory tool calls (shell / file / network / git).
