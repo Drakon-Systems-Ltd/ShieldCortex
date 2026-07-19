@@ -21,10 +21,14 @@ import logging
 import os
 
 try:
-    from .sc_client import scan, fallback_catastrophic_match
+    from .sc_client import (
+        scan, fallback_catastrophic_match, fallback_dangerous_match, fallback_surface,
+    )
     from .policy import tool_call_decision, resolve_enforce
 except ImportError:  # pragma: no cover - standalone import
-    from sc_client import scan, fallback_catastrophic_match
+    from sc_client import (
+        scan, fallback_catastrophic_match, fallback_dangerous_match, fallback_surface,
+    )
     from policy import tool_call_decision, resolve_enforce
 
 log = logging.getLogger("shieldcortex.hermes")
@@ -96,30 +100,44 @@ def register(ctx):
             source_id="hermes",
         )
         # Issue #59/WS2: scanner unreachable no longer means blanket fail-open.
-        # The dependency-free fallback scan denies the unambiguous catastrophic
-        # shapes; everything else still fails open — loudly, as gate_degraded.
+        # The dependency-free fallback scan (raw exec surface, not the JSON blob)
+        # denies catastrophic shapes always and dangerous shapes when enforcing;
+        # everything else still fails open — loudly, as gate_degraded.
         fallback_blocked = False
+        fallback_dangerous = False
         if not verdict.available:
-            fallback_blocked = fallback_catastrophic_match(content)
-            _audit_gate_degraded(tool_name, verdict.reason, fallback_blocked)
+            surface = fallback_surface(args)
+            fallback_blocked = fallback_catastrophic_match(surface)
+            fallback_dangerous = fallback_dangerous_match(surface)
+            denied = fallback_blocked or (fallback_dangerous and enforce)
+            _audit_gate_degraded(tool_name, verdict.reason, denied)
         # Observability: every decision leaves a log line so advisory mode is
         # actually visible (a silent gate is indistinguishable from a no-op —
         # see the missing-auth fail-open caught in the ATHENA dogfood).
-        if verdict.blocked or fallback_blocked:
+        fallback_denies = fallback_blocked or (fallback_dangerous and enforce)
+        if verdict.blocked or fallback_denies:
+            tier = "FALLBACK_BLOCK (catastrophic)" if fallback_blocked else (
+                "FALLBACK_BLOCK (dangerous)" if fallback_denies else verdict.result)
             log.warning(
                 "[shieldcortex] %s on tool %r: %s",
-                "FALLBACK_BLOCK (fail-closed)" if fallback_blocked else verdict.result,
-                tool_name, verdict.reason or verdict.threats,
+                tier, tool_name, verdict.reason or verdict.threats,
             )
         elif not verdict.available:
             log.warning(
                 "[shieldcortex] gate_degraded on tool %r — scanner unavailable, fallback "
-                "scan matched nothing, allowing (fail-open): %s", tool_name, verdict.reason,
+                "%s, allowing (fail-open): %s",
+                tool_name,
+                "matched a dangerous shape but advisory mode is on" if fallback_dangerous
+                else "matched nothing",
+                verdict.reason,
             )
         else:
             log.info("[shieldcortex] %s on tool %r", verdict.result, tool_name)
         # None -> allow ; {"action":"block","message":...} -> block (first block wins)
-        return tool_call_decision(verdict, enforce=enforce, fallback_blocked=fallback_blocked)
+        return tool_call_decision(
+            verdict, enforce=enforce,
+            fallback_blocked=fallback_blocked, fallback_dangerous=fallback_dangerous,
+        )
 
     ctx.register_hook("pre_tool_call", pre_tool_call)
     log.info("[shieldcortex] Hermes plugin registered (pre_tool_call, enforce=%s)", enforce)

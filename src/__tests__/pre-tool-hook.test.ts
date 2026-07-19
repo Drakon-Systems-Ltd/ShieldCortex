@@ -258,4 +258,71 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
       fs.rmSync(brokenDist, { recursive: true, force: true });
     }
   });
+
+  // ── #59 (P1/WS2): dangerous-tier fail-closed + gate_degraded on the degraded path ──
+  function lastAudit(): Record<string, unknown> {
+    const auditDir = path.join(tempHome, '.shieldcortex', 'audit');
+    const files = fs.readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
+    const lines = fs.readFileSync(path.join(auditDir, files[0]), 'utf-8').trim().split('\n');
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  it('#59: degraded guard gates a DANGEROUS op to the permission dialog (ask), not fail-open', async () => {
+    const emptyDist = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-emptydist-'));
+    try {
+      const result = await runHook(bashCall('sudo systemctl stop nginx'), { SHIELDCORTEX_DIST_ROOT: emptyDist });
+      expect(result.code).toBe(0);
+      const decision = decisionOf(result.stdout);
+      expect(decision.permissionDecision).toBe('ask');
+      expect(decision.permissionDecisionReason).toMatch(/degraded|unavailable|could not scan/i);
+      const entry = lastAudit();
+      expect(entry.action).toBe('gate_degraded');
+      expect(entry.outcome).toBe('asked');
+      expect(entry.threats).toContain('fallback-scan');
+    } finally {
+      fs.rmSync(emptyDist, { recursive: true, force: true });
+    }
+  });
+
+  it('#59: degraded dangerous op under enforce:false is advisory (no decision) but still audited', async () => {
+    writeActionGuardConfig({ enforce: false });
+    const emptyDist = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-emptydist-'));
+    try {
+      const result = await runHook(bashCall('git push --force origin main'), { SHIELDCORTEX_DIST_ROOT: emptyDist });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe('');
+      const entry = lastAudit();
+      expect(entry.action).toBe('gate_degraded');
+      expect(entry.outcome).toBe('failure_allowed');
+    } finally {
+      fs.rmSync(emptyDist, { recursive: true, force: true });
+    }
+  });
+
+  it('#59: degraded BENIGN op fails open (no decision) but leaves a gate_degraded breadcrumb', async () => {
+    const emptyDist = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-emptydist-'));
+    try {
+      const result = await runHook(bashCall('ls -la'), { SHIELDCORTEX_DIST_ROOT: emptyDist });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe('');
+      const entry = lastAudit();
+      expect(entry.action).toBe('gate_degraded');
+      expect(entry.outcome).toBe('failure_allowed');
+    } finally {
+      fs.rmSync(emptyDist, { recursive: true, force: true });
+    }
+  });
+
+  it('#59: a read-only op that merely mentions a dangerous verb is not gated (crontab -l)', async () => {
+    const emptyDist = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-emptydist-'));
+    try {
+      const result = await runHook(bashCall('crontab -l'), { SHIELDCORTEX_DIST_ROOT: emptyDist });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe('');
+      const entry = lastAudit();
+      expect(entry.outcome).toBe('failure_allowed');
+    } finally {
+      fs.rmSync(emptyDist, { recursive: true, force: true });
+    }
+  });
 });

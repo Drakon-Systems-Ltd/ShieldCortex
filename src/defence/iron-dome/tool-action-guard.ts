@@ -112,7 +112,12 @@ interface Pattern { re: RegExp; signal: string; }
  */
 const CATASTROPHIC: Pattern[] = [
   // rm with both -r and -f (any flag order/cluster), e.g. rm -rf, rm -fr, rm -Rf, rm --recursive --force
-  { re: /\brm\b[^|;&\n]*?(?:-\w*r\w*f\w*|-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i, signal: 'recursive-force-delete' },
+  // The `-rf`/`-fr` short-flag cluster must begin at an argv boundary — the
+  // `(?<![\w.\/-])` before the leading `-` rejects a hyphen embedded in a
+  // FILENAME token (`.write-verify-test`, `my-perf-report`), which otherwise
+  // matched `-\w*r\w*f\w*` as if `-verify`/`-perf` were an `-rf` flag and
+  // hard-blocked a plain single-file `rm` as catastrophic (field FP report).
+  { re: /\brm\b[^|;&\n]*?(?:(?<![\w.\/-])-\w*r\w*f\w*|(?<![\w.\/-])-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i, signal: 'recursive-force-delete' },
   // rm targeting a root-ish / home / wildcard path
   { re: /\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:\/|~|\$HOME|\/\*|\*|\.\/\*)(?:\s|$)/i, signal: 'delete-root-or-home' },
   // fork bomb  :(){ :|:& };:
