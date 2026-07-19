@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.9] - 2026-07-18
+
+**WS2 completes: the Action Guard fails closed on the DANGEROUS tier (not just catastrophic) when it can't scan, across all three runtimes — plus a catastrophic false-positive fix for plain single-file deletes (PR #100, closes #59).**
+
+### Fixed
+
+- **Dangerous-tier fail-closed on a scan failure (#59/WS2).** When the guard can't scan (module-load failure, evaluator throw, or an unreachable scanner), recognised-dangerous operations previously fell through to fail-open — only catastrophic shapes failed closed. Now every surface gates the dangerous tier too, in its native idiom: the OpenClaw interceptor routes through `failurePolicy` (deny by default; `enforce:false` → advisory), the Claude Code hook emits an `ask` (attended prompts, headless runs block), and the Hermes gate blocks when enforcing. Benign operations still fail open — a degraded guard must not wedge normal work — but every could-not-scan decision now leaves a `gate_degraded` audit row, so "scanned & allowed" is distinguishable from "could not scan". The dependency-free fallback ports every signal in the guard's `DANGEROUS` set (a drift test fails the build if it ever falls behind) and is ReDoS-bounded by a 4 KB scan cap.
+- **Catastrophic false-positive on plain `rm` (field report).** The recursive-force-delete pattern treated a hyphenated *filename* token (e.g. a name containing `-verify` or `-perf`) as if it were a recursive-force flag, hard-blocking a plain single-file delete as catastrophic — with no override, since the catastrophic tier ignores `enforce`. The flag cluster is now anchored to an argv boundary, in the guard and all fallback copies; genuine recursive-force deletes still block (regression-tested), while the misclassified single-file delete now routes to the dangerous tier (gated, approvable).
+
 ## [4.47.8] - 2026-07-18
 
 **Guard observability release: doctor gets a real Action Guard check, the audit trail's silent gaps close, and the Hermes gate stops failing open (PRs #98 + #99).**
