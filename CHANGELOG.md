@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.10] - 2026-07-19
+
+**The Action Guard gains a general mention-vs-intent span classifier — a dangerous token quoted as data, or sitting inside a fetched URL, is no longer mistaken for an executed command — plus a `${IFS}` de-obfuscation hardening (PRs #101, #102, closes #84).**
+
+### Added
+
+- **Span-classification model (#84).** Before deciding, the guard now classifies WHERE each dangerous-pattern match sits — executed shell code vs a quoted DATA argument vs a URL/mention — and drops matches that are confident mentions, replacing the per-incident false-positive carve-outs with one general mechanism. A dangerous token is treated as a mention only when (a) it sits fully inside an `https://…` token being fetched, or (b) it is inside a balanced quote whose statement command word is on a fail-closed allowlist of data commands (`grep`/`egrep`/`fgrep`/`rg`/`echo`/`printf`/`git commit|tag|stash`) with no command reactivator (`$()`/backtick/`${}`/`$var`/`eval`). This is an **allowlist, not a denylist of interpreters** — a novel quoted-content runner (`ssh host "…"`, `docker run … sh -c "…"`, `su -c`, `flock -c`, `chroot`) defaults to *executed* and cannot fail open. Everything ambiguous stays executed. This fixes real over-blocks — `grep "rm -rf" log`, `git commit -m "remove the rm call"`, a `web_fetch` of a repo path whose name contains a dangerous token — while every executed danger (`bash -c "…"`, `eval`, `python -c`, `xargs`, command substitution, second-statement chains, assignment-then-eval) still gates or blocks. Precomputed span regions + iteration/length caps keep it ReDoS-bounded; it composes with (does not replace) the existing comment/heredoc stripping. Hardened against two fail-opens caught in adversarial review (backslash-escaped fake quotes; a URL token that ran past a `;`/`&`-chained command).
+
+### Fixed
+
+- **`${IFS}` / `$IFS` de-obfuscation (#102, adversarial-review follow-up).** `${IFS}`, `${IFS:0:1}`, and `$IFS` expand to whitespace at runtime and were used to strip the literal spaces that some danger patterns anchor on (`\s/` in recursive-perms, the fork-bomb shape) — so `chmod${IFS}-R${IFS}777${IFS}/` and an IFS-spaced fork bomb slipped through (a pre-existing evasion, present before #84). They are now normalised to a space before scanning. Fail-closed: normalisation can only reveal a hidden danger, never mask one.
+
 ## [4.47.9] - 2026-07-18
 
 **WS2 completes: the Action Guard fails closed on the DANGEROUS tier (not just catastrophic) when it can't scan, across all three runtimes — plus a catastrophic false-positive fix for plain single-file deletes (PR #100, closes #59).**
