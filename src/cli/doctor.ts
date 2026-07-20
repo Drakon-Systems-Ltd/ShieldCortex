@@ -280,9 +280,11 @@ export function runWritePathProbe(dbPath: string): CheckResult {
     // INSERT — exercises NOT NULL columns + CHECK constraints. The schema
     // adds these silently across versions; an INSERT against a stale schema
     // is the exact failure mode v4.12.5 had.
+    // P1/WS3: stamp explicit provenance (verdict + low trust + source_kind) so
+    // the probe is honestly attributed, not defaulted to trust 1.0 / unverified.
     db.prepare(`
-      INSERT INTO memories (uuid, type, category, title, content, salience, source, capture_method)
-      VALUES (?, 'short_term', 'note', ?, 'doctor probe — safe to delete', 0.01, 'cli:doctor', 'doctor-probe')
+      INSERT INTO memories (uuid, type, category, title, content, salience, source, source_kind, capture_method, trust_score, defence_verdict)
+      VALUES (?, 'short_term', 'note', ?, 'doctor probe — safe to delete', 0.01, 'cli:doctor', 'cli', 'doctor-probe', 0.01, 'probe')
     `).run(probeUuid, probeTitle);
 
     // SELECT — exercises the FTS5 + index path

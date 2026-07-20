@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS memories (
   reviewed_by TEXT,
   source_kind TEXT DEFAULT 'user',
   capture_method TEXT DEFAULT 'manual',
+  -- P1/WS3 provenance invariant: the defence pipeline's disposition for this
+  -- row. The sanctioned funnel (store.ts:addMemory) stamps the real verdict;
+  -- a write that never went through a provenance-aware path is honestly
+  -- labelled 'unverified' (never silently trusted), and the BEFORE INSERT
+  -- trigger below rejects any attempt to NULL provenance out entirely.
+  defence_verdict TEXT DEFAULT 'unverified',
   cloud_excluded INTEGER DEFAULT 0,
   graph_extraction_version INTEGER DEFAULT 0,
   memory_purpose TEXT DEFAULT 'project',
@@ -54,6 +60,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   content_rowid='id',
   tokenize='porter unicode61'
 );
+
+-- P1/WS3 provenance invariant (issue #60): a durable memory write must carry
+-- provenance. Every column here has a permissive DEFAULT, so an omitting insert
+-- is stamped (source='user:direct', trust=1.0, verdict='unverified') rather than
+-- admitted null — but an insert that deliberately NULLs any of source, trust, or
+-- the defence verdict is REJECTED. This is the DB-level backstop; the primary
+-- guarantee is that store.ts:addMemory is the only sanctioned write funnel and
+-- stamps the pipeline's real verdict + scanned trust.
+CREATE TRIGGER IF NOT EXISTS trg_memories_provenance BEFORE INSERT ON memories
+WHEN NEW.source IS NULL OR NEW.trust_score IS NULL OR NEW.defence_verdict IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'provenance invariant: a memory write must carry source, trust, and a defence verdict');
+END;
 
 -- Triggers to keep FTS index in sync
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN

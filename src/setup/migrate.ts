@@ -262,8 +262,13 @@ export function migrateDatabase(): { copied: boolean; merged: boolean; mergedCou
     const oldCols = db.prepare("PRAGMA old.table_info(memories)").all().map((r: any) => r.name);
     const sharedCols = newCols.filter((c: string) => c !== 'id' && oldCols.includes(c));
 
+    // P1/WS3: legacy-DB rows are the user's own prior memories, unscanned by the
+    // current pipeline — copy them with an explicit 'legacy' defence_verdict
+    // (old DBs predate the column) so every migrated row carries a verdict.
     const colList = sharedCols.join(', ');
-    db.exec(`INSERT OR IGNORE INTO memories (${colList}) SELECT ${colList} FROM old.memories`);
+    const verdictCol = sharedCols.includes('defence_verdict') ? '' : ', defence_verdict';
+    const verdictSel = sharedCols.includes('defence_verdict') ? '' : ", 'legacy'";
+    db.exec(`INSERT OR IGNORE INTO memories (${colList}${verdictCol}) SELECT ${colList}${verdictSel} FROM old.memories`);
 
     db.exec('DETACH old');
 
