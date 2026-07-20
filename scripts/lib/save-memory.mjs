@@ -73,9 +73,19 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     return;
   }
 
-  const decision = result.firewall.result;
+  // P1/WS4: route through the ONE shared verdict→disposition mapping so this
+  // hook path can't drift from store.ts:addMemory. This is what gives the hook
+  // the sub-agent trust-band hold (0.5–0.7) it previously lacked, and makes a
+  // BLOCK be HELD in quarantine (forensically preserved, auto-rejected at
+  // review) rather than silently dropped.
+  const disposition = defence.resolveDisposition({
+    allowed: result.allowed,
+    firewallResult: result.firewall.result,
+    trustScore: result.trust?.score ?? 0,
+    reason: result.firewall.reason,
+  });
 
-  if (decision === 'ALLOW') {
+  if (disposition.action === 'store') {
     // Persist the COMPUTED trust + sensitivity from the scan — not the schema
     // DEFAULT (trust 1.0 / INTERNAL). The INSERT used to omit these columns, so
     // every hook-captured memory was over-trusted at 1.0, undercutting the
@@ -84,21 +94,17 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     return;
   }
 
-  if (decision === 'QUARANTINE') {
-    // Route quarantine writes through the singleton's connection so the
-    // audit_id FK reference resolves against the same connection that
-    // wrote the audit row a few lines up in pipeline.ts.
-    const quarantineDb = (typeof _getDatabase === 'function' && defence.isDatabaseInitialized && defence.isDatabaseInitialized())
-      ? _getDatabase()
-      : db;
-    insertQuarantineRow(quarantineDb, memory, project, source, result);
-    process.stderr.write(`[shieldcortex save-memory] quarantined: ${memory.title} — ${result.firewall.reason}\n`);
-    return;
-  }
-
-  // BLOCK — defence_audit row already written by the pipeline. Drop with
-  // a single stderr line for operator visibility.
-  process.stderr.write(`[shieldcortex save-memory] blocked: ${memory.title} — ${result.firewall.reason}\n`);
+  // action === 'quarantine' — reflect the resolved verdict onto the result the
+  // quarantine INSERT records, then hold. Route through the singleton's
+  // connection so the audit_id FK resolves against the connection pipeline.ts
+  // wrote the audit row on.
+  result.firewall.result = disposition.firewallResult;
+  result.firewall.reason = disposition.reason;
+  const quarantineDb = (typeof _getDatabase === 'function' && defence.isDatabaseInitialized && defence.isDatabaseInitialized())
+    ? _getDatabase()
+    : db;
+  insertQuarantineRow(quarantineDb, memory, project, source, result);
+  process.stderr.write(`[shieldcortex save-memory] ${disposition.firewallResult.toLowerCase()} (held): ${memory.title} — ${disposition.reason}\n`);
 }
 
 // ==================== Internal: writes ====================
@@ -256,17 +262,21 @@ async function loadDefenceModules(db) {
   try {
     const pipelineUrl = pathToFileURL(resolve(distRoot, 'defence', 'pipeline.js')).href;
     const initUrl = pathToFileURL(resolve(distRoot, 'database', 'init.js')).href;
+    const dispositionUrl = pathToFileURL(resolve(distRoot, 'defence', 'disposition.js')).href;
 
-    const [pipelineMod, initMod] = await Promise.all([
+    const [pipelineMod, initMod, dispositionMod] = await Promise.all([
       import(pipelineUrl),
       import(initUrl),
+      import(dispositionUrl),
     ]);
 
     if (typeof pipelineMod.runDefencePipeline !== 'function') return null;
     if (typeof initMod.initDatabase !== 'function') return null;
+    if (typeof dispositionMod.resolveDisposition !== 'function') return null;
 
     _defenceCache = {
       runDefencePipeline: pipelineMod.runDefencePipeline,
+      resolveDisposition: dispositionMod.resolveDisposition,
       initDatabase: initMod.initDatabase,
       isDatabaseInitialized: initMod.isDatabaseInitialized,
       getDatabase: initMod.getDatabase,

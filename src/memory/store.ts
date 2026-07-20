@@ -40,6 +40,7 @@ import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
+import { resolveDisposition } from '../defence/disposition.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { syncGraphDeleteForMemoryToCloud, syncGraphForMemoryToCloud } from '../cloud/graph-sync.js';
 import { syncMemoryDeleteToCloud, syncMemoryUpsertToCloud } from '../cloud/memory-sync.js';
@@ -483,16 +484,26 @@ export function addMemory(
     input.content, input.title, effectiveSource, undefined, input.project,
   );
 
-  // Auto-quarantine sub-agent writes (trust 0.5–0.7)
-  const trust = defenceResult.trust.score;
-  if (defenceResult.allowed && trust >= 0.5 && trust < 0.7) {
-    defenceResult.allowed = false;
-    defenceResult.firewall.result = 'QUARANTINE';
-    defenceResult.firewall.reason = `Sub-agent write (trust=${trust.toFixed(3)}) requires parent approval`;
+  // P1/WS4: the ONE verdict→disposition mapping, shared with the hook path
+  // (save-memory.mjs) so the runtimes cannot drift. It folds in the sub-agent
+  // trust-band hold (0.5–0.7) and the block/quarantine hold policy.
+  const disposition = resolveDisposition({
+    allowed: defenceResult.allowed,
+    firewallResult: defenceResult.firewall.result,
+    trustScore: defenceResult.trust.score,
+    reason: defenceResult.firewall.reason,
+  });
 
-    // Pipeline returned ALLOW so pipeline.ts didn't sync quarantine content.
-    // Sync it now since we've overridden to QUARANTINE post-pipeline.
-    if (isFeatureEnabled('cloud_sync')) try {
+  if (disposition.action === 'quarantine') {
+    // Reflect the resolved verdict/reason back so quarantineMemory + audit record it.
+    defenceResult.allowed = false;
+    defenceResult.firewall.result = disposition.firewallResult;
+    defenceResult.firewall.reason = disposition.reason;
+
+    // A sub-agent-band hold was an ALLOW at the pipeline, so pipeline.ts did NOT
+    // sync it — sync the now-held content here (genuine BLOCK/QUARANTINE were
+    // already synced inside the pipeline).
+    if (disposition.subAgentHold && isFeatureEnabled('cloud_sync')) try {
       const indicators = defenceResult.firewall.threatIndicators.map(t =>
         typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
       );
@@ -511,10 +522,7 @@ export function addMemory(
     } catch {
       // Cloud sync must never affect local quarantine flow
     }
-  }
 
-  if (!defenceResult.allowed) {
-    // Store in quarantine instead of memory
     quarantineMemory(input, effectiveSource, defenceResult);
     throw new MemoryBlockedError(defenceResult.firewall.reason);
   }
