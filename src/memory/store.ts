@@ -542,12 +542,16 @@ export function addMemory(
   const pinned = input.pinned ? 1 : 0;
   const cloudExcluded = input.cloudExcluded ? 1 : 0;
 
+  // P1/WS3: stamp the pipeline's disposition. A row only reaches this INSERT
+  // when the write was accepted (block/quarantine threw above), so this is the
+  // real ALLOW verdict — never the schema's 'unverified' funnel-bypass default.
+  const defenceVerdict = defenceResult.firewall.result.toLowerCase();
   const stmt = db.prepare(`
     INSERT INTO memories (
       uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable,
-      status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, cloud_excluded, memory_purpose, memory_scope, updated_at
+      status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, defence_verdict, cloud_excluded, memory_purpose, memory_scope, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -581,6 +585,7 @@ export function addMemory(
       input.reviewedBy ?? null,
       sourceDetails.sourceKind,
       sourceDetails.captureMethod,
+      defenceVerdict,
       cloudExcluded,
       input.memoryPurpose || 'project',
       input.memoryScope || 'private'

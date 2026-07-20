@@ -426,6 +426,29 @@ export function runMigrations(database: Database.Database): void {
   if (!columnNames.has('last_downvoted_at')) {
     database.exec('ALTER TABLE memories ADD COLUMN last_downvoted_at TIMESTAMP');
   }
+
+  // Migration: P1/WS3 (issue #60) — defence_verdict provenance column.
+  // ADD COLUMN with the 'unverified' default; then a one-time backfill labels
+  // every PRE-invariant row 'legacy' (they predate provenance enforcement), so
+  // 'unverified' is reserved for post-migration writes that bypassed the funnel.
+  // Non-destructive (a brand-new column), so it needs no file snapshot; guarded
+  // run-once by a sentinel table (the .dump-survivable guard the salience
+  // backfill uses, not user_version). The BEFORE INSERT provenance trigger and
+  // the fresh-schema column both come from schema.sql (CREATE ... IF NOT EXISTS),
+  // which runs after this on both fresh and existing DBs.
+  if (!columnNames.has('defence_verdict')) {
+    database.exec("ALTER TABLE memories ADD COLUMN defence_verdict TEXT DEFAULT 'unverified'");
+    const backfilled = database.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='memories_provenance_backfilled'",
+    ).get();
+    if (!backfilled) {
+      const tx = database.transaction(() => {
+        database.exec("UPDATE memories SET defence_verdict = 'legacy' WHERE defence_verdict IS NULL OR defence_verdict = 'unverified'");
+        database.exec('CREATE TABLE IF NOT EXISTS memories_provenance_backfilled (done INTEGER)');
+      });
+      tx.immediate();
+    }
+  }
   // Sparse partial index — only indexes rows that have been downvoted.
   // Cheap to maintain (most rows never downvoted) and lets the CLI list
   // downvoted memories without a full scan.

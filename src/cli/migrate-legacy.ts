@@ -109,15 +109,22 @@ function migrateOne(
 
     if (dryRun) return report;
 
+    // P1/WS3: legacy imports are the user's own prior memories, but they were
+    // never scanned by the current pipeline — so they carry an explicit
+    // 'legacy' defence_verdict and preserve their original trust rather than
+    // defaulting to a fresh trust 1.0. Honestly labelled, never masquerading as
+    // a scanned write.
     const insertMemory = target.prepare(`
       INSERT INTO memories (
         uuid, type, category, title, content, project, tags, salience,
         decayed_score, access_count, last_accessed, created_at, updated_at,
-        metadata, embedding, scope, transferable, source, source_kind, capture_method
+        metadata, embedding, scope, transferable, source, source_kind, capture_method,
+        trust_score, defence_verdict
       ) VALUES (
         @uuid, @type, @category, @title, @content, @project, @tags, @salience,
         @decayed_score, @access_count, @last_accessed, @created_at, @updated_at,
-        @metadata, @embedding, @scope, @transferable, @source, @source_kind, @capture_method
+        @metadata, @embedding, @scope, @transferable, @source, @source_kind, @capture_method,
+        @trust_score, 'legacy'
       )
     `);
 
@@ -152,6 +159,7 @@ function migrateOne(
           source: `legacy:${sourceLabel}`,
           source_kind: 'legacy-import',
           capture_method: 'legacy-migrate',
+          trust_score: (row as { trust_score?: number }).trust_score ?? 0.7,
         });
         idMap.set(row.id, Number(result.lastInsertRowid));
         report.memoriesImported++;
