@@ -851,4 +851,23 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'provenance ledger indexes (audit operation, memories content_hash/source)');
   }
+
+  // Migration: issue #110 — bare-ts index on session_events for the retention
+  // purge (src/sessions/retention.ts, DELETE ... WHERE ts < ?). The existing
+  // composite (session_id, ts) / (project, ts) indexes can't serve a bare ts
+  // range predicate, so without this the daily age purge would full-scan a
+  // table that live incidents have shown reaching ~30k rows / ~63 MB. Fresh
+  // installs get the index from schema.sql / inline-schema.ts; this block
+  // upgrades existing DBs. Guarded on table existence like the other
+  // session_events migrations above.
+  try {
+    const sessionEventsTable = database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_events'")
+      .get();
+    if (sessionEventsTable) {
+      database.exec('CREATE INDEX IF NOT EXISTS idx_session_events_ts ON session_events(ts)');
+    }
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'session_events bare-ts retention index');
+  }
 }

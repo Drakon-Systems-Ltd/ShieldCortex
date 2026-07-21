@@ -152,6 +152,10 @@ CREATE TABLE IF NOT EXISTS session_events (
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_session_events_project ON session_events(project, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_session_events_sensitivity ON session_events(sensitivity_level);
+-- #110: bare-ts index for the retention purge (DELETE ... WHERE ts < ?).
+-- The composite (session_id, ts)/(project, ts) indexes can't serve a bare
+-- ts range predicate, so without this the age purge would full-scan.
+CREATE INDEX IF NOT EXISTS idx_session_events_ts ON session_events(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_dedupe
   ON session_events(session_id, ts, kind, content_hash);
 

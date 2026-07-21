@@ -615,6 +615,47 @@ async function checkProcesses(): Promise<CheckResult[]> {
  * under `~/.shieldcortex/`, producing a false `Disk: at limit!` for any
  * user with a local AI model cached.
  */
+/**
+ * Best-effort read-only peek at what actually fills the live DB (#110):
+ * row counts + stored byte totals for the memories and session_events
+ * tables. Returns null on ANY failure (missing file, corrupt/locked DB,
+ * missing tables, unreadable engine) — the caller then falls back to the
+ * generic remedy text, so this can never break the disk check itself.
+ */
+interface DbRowConsumers {
+  memoriesCount: number;
+  memoriesBytes: number;
+  sessionEventCount: number;
+  sessionEventBytes: number;
+}
+
+function readDbRowConsumers(dbPath: string): DbRowConsumers | null {
+  if (!fs.existsSync(dbPath)) return null;
+  let db: any = null;
+  try {
+    const Database = require('better-sqlite3');
+    db = new Database(dbPath, { readonly: true });
+    const mem = db.prepare(
+      'SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(content)), 0) AS b FROM memories',
+    ).get() as { c: number; b: number };
+    const se = db.prepare(
+      'SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(payload)), 0) AS b FROM session_events',
+    ).get() as { c: number; b: number };
+    return {
+      memoriesCount: mem.c,
+      memoriesBytes: mem.b,
+      sessionEventCount: se.c,
+      sessionEventBytes: se.b,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (db) {
+      try { db.close(); } catch { /* ignore */ }
+    }
+  }
+}
+
 export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = 100 * 1024 * 1024): Promise<CheckResult> {
   if (!fs.existsSync(scDir)) {
     return { label: 'Disk', status: 'pass', message: '0 B / 100 MB limit (directory not yet created)' };
@@ -695,7 +736,17 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         return `${formatBytes(backupsSize)} is stale DB backups (memories.db.* migration snapshots). Clear them — \`rm ~/.shieldcortex/memories.db.{pre-backfill,empty-live,stub,bak}*\` keeps the live DB; v4.45.1+ also auto-prunes them on start.`;
       }
       if (liveDbSize > limit * 0.5) {
-        return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
+        // #110 signature: a big DB whose memories table is tiny — the bulk is
+        // session-capture rows. Live incident (Edith, 2026-07-21): 79.6 MB DB,
+        // 117 memories, session_events 62.8 MB; both previously suggested
+        // fixes (vacuum — 0.0 MB free pages — and memories prune) were no-ops.
+        // Best-effort peek inside the DB to name the actual consumer; falls
+        // through to the generic remedy when the DB can't be read.
+        const consumers = readDbRowConsumers(path.join(scDir, 'memories.db'));
+        if (consumers && consumers.sessionEventCount > 0 && consumers.sessionEventBytes > consumers.memoriesBytes) {
+          return `The database is ${formatBytes(liveDbSize)} but the memories table holds only ${consumers.memoriesCount} memor${consumers.memoriesCount === 1 ? 'y' : 'ies'} — the bulk is session-capture rows (session_events: ${consumers.sessionEventCount} rows, ${formatBytes(consumers.sessionEventBytes)} of payload), which memories prune/dedupe and vacuum alone can't shrink. Run \`shieldcortex sessions prune --execute\` (deletes events older than 30 days; --days N to adjust), then \`shieldcortex vacuum\` to reclaim the freed pages on disk.`;
+        }
+        return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. If it is session capture, \`shieldcortex sessions prune --execute\` deletes events older than 30 days. Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
       }
       if (logsSize > limit * 0.2) {
         return `${formatBytes(logsSize)} is audit/log files — safe to rotate or clear under ~/.shieldcortex/{logs,audit}/.`;

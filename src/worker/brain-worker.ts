@@ -38,6 +38,11 @@ import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 import { sendHeartbeat } from '../cloud/sync.js';
 import { refreshCloudIronDome, applyCachedCloudPatterns } from '../cloud/iron-dome-sync.js';
 import { purgeOldAuditEntries, purgeAuditUnderSizePressure } from '../defence/audit/retention.js';
+import {
+  purgeOldSessionEvents,
+  purgeSessionEventsUnderSizePressure,
+  resolveSessionRetentionDays,
+} from '../sessions/retention.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -51,7 +56,17 @@ const WORKER_STATE_FILE = join(WORKER_STATE_DIR, 'worker.json');
 // bounded, and running it every tick would be wasteful.
 const AUDIT_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-function persistWorkerState(profile: string, lastLightTick: Date, lastAuditPurge: Date | null): void {
+// Session-capture retention (#110) shares the same daily cadence rationale:
+// the pressure valve is a cheap size check every tick, the age purge is
+// plenty at once per day.
+const SESSION_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+function persistWorkerState(
+  profile: string,
+  lastLightTick: Date,
+  lastAuditPurge: Date | null,
+  lastSessionPurge: Date | null,
+): void {
   try {
     if (!existsSync(WORKER_STATE_DIR)) mkdirSync(WORKER_STATE_DIR, { recursive: true });
     writeFileSync(
@@ -62,6 +77,7 @@ function persistWorkerState(profile: string, lastLightTick: Date, lastAuditPurge
           profile,
           lastLightTick: lastLightTick.toISOString(),
           lastAuditPurge: lastAuditPurge ? lastAuditPurge.toISOString() : null,
+          lastSessionPurge: lastSessionPurge ? lastSessionPurge.toISOString() : null,
         },
         null,
         2,
@@ -74,15 +90,16 @@ function persistWorkerState(profile: string, lastLightTick: Date, lastAuditPurge
 }
 
 /**
- * Read the persisted lastAuditPurge timestamp so the 24h throttle survives
- * process restarts — MCP servers restart frequently (one per Claude Code
- * window), and without this every restart would trigger a fresh purge.
+ * Read a persisted purge timestamp so the 24h throttles survive process
+ * restarts — MCP servers restart frequently (one per Claude Code window),
+ * and without this every restart would trigger a fresh purge.
  */
-function readPersistedAuditPurge(): Date | null {
+function readPersistedPurgeDate(key: 'lastAuditPurge' | 'lastSessionPurge'): Date | null {
   try {
-    const raw = JSON.parse(readFileSync(WORKER_STATE_FILE, 'utf-8')) as { lastAuditPurge?: string | null };
-    if (raw.lastAuditPurge) {
-      const d = new Date(raw.lastAuditPurge);
+    const raw = JSON.parse(readFileSync(WORKER_STATE_FILE, 'utf-8')) as Record<string, string | null | undefined>;
+    const value = raw[key];
+    if (value) {
+      const d = new Date(value);
       if (!Number.isNaN(d.getTime())) return d;
     }
   } catch {
@@ -115,9 +132,10 @@ export class BrainWorker {
   private lastLightTick: Date | null = null;
   private lastMediumTick: Date | null = null;
   private lastConsolidation: Date | null = null;
-  // Seeded from persisted state so the 24h audit-purge throttle survives
+  // Seeded from persisted state so the 24h purge throttles survive
   // frequent MCP-server restarts.
-  private lastAuditPurge: Date | null = readPersistedAuditPurge();
+  private lastAuditPurge: Date | null = readPersistedPurgeDate('lastAuditPurge');
+  private lastSessionPurge: Date | null = readPersistedPurgeDate('lastSessionPurge');
 
   /**
    * Create a new BrainWorker
@@ -290,6 +308,38 @@ export class BrainWorker {
         console.error('[BrainWorker] Audit retention failed:', auditErr);
       }
 
+      // 3b. Session-capture retention (#110) — same shape as the audit valve
+      // above, for the other unbounded table: session_events grows on every
+      // captured turn with (pre-#110) no DELETE anywhere; a live incident put
+      // it at 62.8 MB of a 79.6 MB DB that held only 117 memories. The
+      // pressure valve is a cheap size check, so it runs every tick; the
+      // age-based purge (30d default, SHIELDCORTEX_SESSION_RETENTION_DAYS to
+      // override) is throttled to ~once per 24h. Unlike audit retention, no
+      // aggregate rollup is needed — nothing computes lifetime stats from
+      // session_events; old rows only feed on-demand replay, so deletion is
+      // lossy-but-safe (see src/sessions/retention.ts).
+      try {
+        const sessionPressurePurged = purgeSessionEventsUnderSizePressure();
+        if (sessionPressurePurged > 0) {
+          console.error(`[BrainWorker] Session-capture size-pressure valve purged ${sessionPressurePurged} rows`);
+        }
+
+        const sessionNow = result.timestamp.getTime();
+        const dueForSessionPurge =
+          this.lastSessionPurge === null ||
+          sessionNow - this.lastSessionPurge.getTime() >= SESSION_PURGE_INTERVAL_MS;
+        if (dueForSessionPurge) {
+          const retentionDays = resolveSessionRetentionDays();
+          const purged = purgeOldSessionEvents(retentionDays);
+          this.lastSessionPurge = result.timestamp;
+          if (purged > 0) {
+            console.error(`[BrainWorker] Session-capture retention purged ${purged} events older than ${retentionDays}d`);
+          }
+        }
+      } catch (sessionErr) {
+        console.error('[BrainWorker] Session-capture retention failed:', sessionErr);
+      }
+
       // 4. Sync retry queue — drains on BOTH profiles. MCP-only installs have
       // no full worker, so if this stayed full-only their queued audits/
       // memories would age out unsent (the same gap we closed for audit
@@ -337,7 +387,7 @@ export class BrainWorker {
       this.stats.lightTicks++;
 
       // Persist worker freshness for `shieldcortex doctor` to detect stalls.
-      persistWorkerState(this.config.profile, result.timestamp, this.lastAuditPurge);
+      persistWorkerState(this.config.profile, result.timestamp, this.lastAuditPurge, this.lastSessionPurge);
 
       // Emit light tick event
       emitWorkerLightTick(result);
