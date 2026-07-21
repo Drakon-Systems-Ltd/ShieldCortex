@@ -43,6 +43,7 @@ export function getInlineSchema(): string {
       reviewed_by TEXT,
       source_kind TEXT DEFAULT 'user',
       capture_method TEXT DEFAULT 'manual',
+      defence_verdict TEXT DEFAULT 'unverified',
       cloud_excluded INTEGER DEFAULT 0,
       graph_extraction_version INTEGER DEFAULT 0,
       memory_purpose TEXT DEFAULT 'project',
@@ -59,6 +60,12 @@ export function getInlineSchema(): string {
       content_rowid='id',
       tokenize='porter unicode61'
     );
+
+    CREATE TRIGGER IF NOT EXISTS trg_memories_provenance BEFORE INSERT ON memories
+    WHEN NEW.source IS NULL OR NEW.trust_score IS NULL OR NEW.defence_verdict IS NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'provenance invariant: a memory write must carry source, trust, and a defence verdict');
+    END;
 
     CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
       INSERT INTO memories_fts(rowid, title, content, tags)
@@ -87,6 +94,10 @@ export function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
     CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
+    CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+    CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned DESC);
+    CREATE INDEX IF NOT EXISTS idx_memories_source_kind ON memories(source_kind);
 
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +120,9 @@ export function getInlineSchema(): string {
       FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE,
       UNIQUE(source_id, target_id)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
+    CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
 
     -- Events table for cross-process IPC (MCP → Dashboard)
     CREATE TABLE IF NOT EXISTS events (

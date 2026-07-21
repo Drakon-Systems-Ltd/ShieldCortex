@@ -481,6 +481,21 @@ export const __databaseTestUtils = {
 };
 
 /**
+ * The canonical DDL every code path must agree on: prefer the schema.sql
+ * shipped alongside this module, fall back to the inline copy for bundled
+ * deployments where loose files don't survive. Exported so consumers that
+ * need a reference schema (e.g. the doctor's drift check) compare against
+ * exactly what initDatabase() applies — never a separately maintained list.
+ */
+export function getCanonicalSchema(): string {
+  const schemaPath = join(_currentDir, 'schema.sql');
+  if (existsSync(schemaPath)) {
+    return readFileSync(schemaPath, 'utf-8');
+  }
+  return getInlineSchema();
+}
+
+/**
  * Initialize the database connection
  */
 export function initDatabase(dbPath?: string): Database.Database {
@@ -699,14 +714,7 @@ export function initDatabase(dbPath?: string): Database.Database {
   runMigrations(db);
 
   // Run schema (uses IF NOT EXISTS, safe for existing tables and indexes)
-  const schemaPath = join(_currentDir, 'schema.sql');
-  if (existsSync(schemaPath)) {
-    const schema = readFileSync(schemaPath, 'utf-8');
-    db.exec(schema);
-  } else {
-    // Inline schema if file not found (for bundled deployment)
-    db.exec(getInlineSchema());
-  }
+  db.exec(getCanonicalSchema());
 
   // Seed built-in firewall rules. This runs AFTER the schema so the
   // firewall_rules table is guaranteed to exist — `runMigrations()` returns
@@ -864,13 +872,7 @@ export function repairDatabase(): { status: 'ok' | 'repaired' | 'recreated'; mes
   db.pragma('wal_autocheckpoint = 100');
 
   // Re-apply schema
-  const schemaPath = join(_currentDir, 'schema.sql');
-  if (existsSync(schemaPath)) {
-    const schema = readFileSync(schemaPath, 'utf-8');
-    db.exec(schema);
-  } else {
-    db.exec(getInlineSchema());
-  }
+  db.exec(getCanonicalSchema());
 
   return {
     status: 'recreated',

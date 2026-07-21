@@ -18,6 +18,7 @@ import {
 } from '../integrations/openclaw-plugin-state.js';
 import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
+import { getCanonicalSchema } from '../database/init.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 
@@ -165,21 +166,43 @@ async function checkDatabase(): Promise<CheckResult> {
 }
 
 // ── Check 2: Schema version ──────────────────────────────
-async function checkSchema(): Promise<CheckResult> {
-  const dbPath = getDbPath();
+/**
+ * Diff the live memories table against the canonical schema instead of a
+ * hand-maintained column list. The old list froze at three ~v4.0 columns,
+ * so v4.47.13 shipped a doctor that said "Schema: up to date" on a DB
+ * missing defence_verdict while the write probe failed on it (21 Jul 2026
+ * field incident). Deriving the expected set from getCanonicalSchema() —
+ * the same source initDatabase() applies to fresh DBs — means a new
+ * migration column is covered the day it lands in schema.sql, with no list
+ * to forget.
+ *
+ * Only MISSING columns are drift: live extras (renamed/retired columns on
+ * long-lived DBs) are harmless and stay silent.
+ */
+export function runSchemaDriftCheck(dbPath: string): CheckResult {
   if (!fs.existsSync(dbPath)) {
     return { label: 'Schema', status: 'warn', message: 'skipped (no database)' };
   }
 
   try {
     const Database = require('better-sqlite3');
+
+    const reference = new Database(':memory:');
+    let expected: string[];
+    try {
+      reference.exec(getCanonicalSchema());
+      expected = (reference.pragma('table_info(memories)') as Array<{ name: string }>)
+        .map((c) => c.name);
+    } finally {
+      reference.close();
+    }
+
     const db = new Database(dbPath, { readonly: true });
     try {
       const columns = db.pragma('table_info(memories)') as Array<{ name: string }>;
       const columnNames = new Set(columns.map((c: { name: string }) => c.name));
 
-      const required = ['decayed_score', 'graph_extraction_version', 'sensitivity_level'];
-      const missing = required.filter(col => !columnNames.has(col));
+      const missing = expected.filter(col => !columnNames.has(col));
 
       if (missing.length === 0) {
         return { label: 'Schema', status: 'pass', message: 'up to date' };
@@ -188,7 +211,7 @@ async function checkSchema(): Promise<CheckResult> {
           label: 'Schema',
           status: 'warn',
           message: `missing columns: ${missing.join(', ')}`,
-          fix: 'Restart the MCP server to auto-migrate',
+          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex install',
         };
       }
     } finally {
@@ -198,6 +221,10 @@ async function checkSchema(): Promise<CheckResult> {
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Schema', status: 'warn', message: `check failed — ${msg}` };
   }
+}
+
+async function checkSchema(): Promise<CheckResult> {
+  return runSchemaDriftCheck(getDbPath());
 }
 
 // ── Check 3: Memory stats ─────────────────────────────────
