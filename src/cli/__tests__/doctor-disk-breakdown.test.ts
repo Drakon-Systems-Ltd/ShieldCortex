@@ -80,7 +80,14 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
   // When session_events payload dominates the memories table, the remedy must
   // name `shieldcortex sessions prune` (and vacuum AFTER, to reclaim the pages
   // the prune frees).
-  function buildRealDb(opts: { memories: number; memoryBytes: number; events: number; eventBytes: number }): void {
+  function buildRealDb(opts: {
+    memories: number;
+    memoryBytes: number;
+    events: number;
+    eventBytes: number;
+    auditRows?: number;
+    auditBytes?: number;
+  }): void {
     const db = new Database(path.join(tmpDir, 'memories.db'));
     db.exec(`
       CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL);
@@ -91,6 +98,14 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
         kind TEXT NOT NULL,
         payload TEXT NOT NULL
       );
+      CREATE TABLE defence_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reason TEXT,
+        threat_indicators TEXT DEFAULT '[]',
+        blocked_patterns TEXT DEFAULT '[]',
+        source_type TEXT NOT NULL DEFAULT 'test',
+        source_identifier TEXT NOT NULL DEFAULT 'test'
+      );
     `);
     const insMem = db.prepare('INSERT INTO memories (content) VALUES (?)');
     for (let i = 0; i < opts.memories; i++) insMem.run('m'.repeat(opts.memoryBytes));
@@ -99,6 +114,10 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     );
     for (let i = 0; i < opts.events; i++) {
       insEvt.run(new Date(Date.now() - i * 60_000).toISOString(), 'p'.repeat(opts.eventBytes));
+    }
+    const insAudit = db.prepare('INSERT INTO defence_audit (reason) VALUES (?)');
+    for (let i = 0; i < (opts.auditRows ?? 0); i++) {
+      insAudit.run('a'.repeat(opts.auditBytes ?? 0));
     }
     db.close();
   }
@@ -116,6 +135,30 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.fix).toMatch(/shieldcortex vacuum/);
     // And it must NOT lead with the no-op remedies the incident hit.
     expect(result.fix).not.toMatch(/^Run `shieldcortex memories prune/);
+  });
+
+  it('does NOT recommend sessions prune on an audit-dominated DB (#111 review repro)', async () => {
+    // Reviewer repro: 1 memory + ~600 B of session events + ~200 KB of
+    // defence_audit. The pre-review condition (sessionEventBytes >
+    // memoriesBytes) blamed session capture and recommended `sessions prune`
+    // — a no-op. Session capture may only be named when it genuinely
+    // dominates (> 40% of the live DB AND > audit bytes).
+    buildRealDb({
+      memories: 1,
+      memoryBytes: 100,
+      events: 3,
+      eventBytes: 200,
+      auditRows: 100,
+      auditBytes: 2048,
+    });
+
+    const result = await checkDiskUsage(tmpDir, 128 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).not.toMatch(/sessions prune/);
+    expect(result.fix).not.toMatch(/bulk is session-capture/);
+    // Vacuum guidance is retained for the audit-dominated case.
+    expect(result.fix).toMatch(/shieldcortex vacuum/);
   });
 
   it('does not claim session capture is the bulk when the memories table dominates', async () => {

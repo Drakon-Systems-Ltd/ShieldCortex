@@ -627,6 +627,8 @@ interface DbRowConsumers {
   memoriesBytes: number;
   sessionEventCount: number;
   sessionEventBytes: number;
+  auditCount: number;
+  auditBytes: number;
 }
 
 function readDbRowConsumers(dbPath: string): DbRowConsumers | null {
@@ -641,11 +643,35 @@ function readDbRowConsumers(dbPath: string): DbRowConsumers | null {
     const se = db.prepare(
       'SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(payload)), 0) AS b FROM session_events',
     ).get() as { c: number; b: number };
+
+    // defence_audit is the OTHER unbounded-growth table (bounded since Phase
+    // 8a, but pre-valve DBs can still be audit-dominated). Approximate its
+    // stored bytes by summing the text-bearing columns. Guarded separately:
+    // a DB without the table (older install, partial fixture) just reports 0
+    // rather than nulling out the whole peek.
+    let auditCount = 0;
+    let auditBytes = 0;
+    try {
+      const audit = db.prepare(`
+        SELECT COUNT(*) AS c, COALESCE(SUM(
+          LENGTH(COALESCE(reason, '')) +
+          LENGTH(COALESCE(threat_indicators, '')) +
+          LENGTH(COALESCE(blocked_patterns, '')) +
+          LENGTH(COALESCE(source_type, '')) +
+          LENGTH(COALESCE(source_identifier, ''))
+        ), 0) AS b FROM defence_audit
+      `).get() as { c: number; b: number };
+      auditCount = audit.c;
+      auditBytes = audit.b;
+    } catch { /* table absent — keep zeros */ }
+
     return {
       memoriesCount: mem.c,
       memoriesBytes: mem.b,
       sessionEventCount: se.c,
       sessionEventBytes: se.b,
+      auditCount,
+      auditBytes,
     };
   } catch {
     return null;
@@ -738,13 +764,31 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       if (liveDbSize > limit * 0.5) {
         // #110 signature: a big DB whose memories table is tiny — the bulk is
         // session-capture rows. Live incident (Edith, 2026-07-21): 79.6 MB DB,
-        // 117 memories, session_events 62.8 MB; both previously suggested
-        // fixes (vacuum — 0.0 MB free pages — and memories prune) were no-ops.
-        // Best-effort peek inside the DB to name the actual consumer; falls
-        // through to the generic remedy when the DB can't be read.
+        // 117 memories, session_events 62.8 MB (79% of the file); both
+        // previously suggested fixes (vacuum — 0.0 MB free pages — and
+        // memories prune) were no-ops. Best-effort peek inside the DB to name
+        // the actual consumer; falls through to the generic remedy when the
+        // DB can't be read.
+        //
+        // Review hardening: only blame session capture when its payload
+        // GENUINELY dominates — more than 40% of the live DB file (Edith's
+        // signature was 79%) AND more than the defence_audit bytes. A merely
+        // "bigger than the memories table" comparison misattributed
+        // audit-dominated DBs and recommended a no-op sessions prune.
         const consumers = readDbRowConsumers(path.join(scDir, 'memories.db'));
-        if (consumers && consumers.sessionEventCount > 0 && consumers.sessionEventBytes > consumers.memoriesBytes) {
+        if (
+          consumers &&
+          consumers.sessionEventCount > 0 &&
+          consumers.sessionEventBytes > liveDbSize * 0.4 &&
+          consumers.sessionEventBytes > consumers.auditBytes
+        ) {
           return `The database is ${formatBytes(liveDbSize)} but the memories table holds only ${consumers.memoriesCount} memor${consumers.memoriesCount === 1 ? 'y' : 'ies'} — the bulk is session-capture rows (session_events: ${consumers.sessionEventCount} rows, ${formatBytes(consumers.sessionEventBytes)} of payload), which memories prune/dedupe and vacuum alone can't shrink. Run \`shieldcortex sessions prune --execute\` (deletes events older than 30 days; --days N to adjust), then \`shieldcortex vacuum\` to reclaim the freed pages on disk.`;
+        }
+        if (consumers && consumers.auditBytes > consumers.sessionEventBytes) {
+          // Audit-dominated: the worker's Phase 8a audit retention (90d + row
+          // cap) bounds this over time; don't send the user to a sessions
+          // prune that would be a no-op.
+          return `The database is ${formatBytes(liveDbSize)} — the bulk is defence-audit rows (defence_audit: ${consumers.auditCount} rows, ~${formatBytes(consumers.auditBytes)}), which the background worker's audit retention trims over time (90-day window + row cap). Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
         }
         return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. If it is session capture, \`shieldcortex sessions prune --execute\` deletes events older than 30 days. Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
       }
