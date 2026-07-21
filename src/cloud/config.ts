@@ -963,6 +963,28 @@ export function setProactiveRecall(enabled: boolean): void {
 }
 
 /**
+ * Is the cortex-memory hook's bootstrap self-heal allowed to write? (#108)
+ *
+ * Default is true — the hook may delete the legacy ~/.clawdbot hook dirs and
+ * copy itself into ~/.openclaw/hooks. Set false to downgrade both mutations to
+ * warn-only log lines. Mirrors `isSelfHealEnabled` in the hook's runtime.mjs,
+ * which reads the same key (the hook can't import this module).
+ */
+export function isSelfHealEnabled(): boolean {
+  const raw = readRawConfig();
+  return raw.selfHeal !== false;
+}
+
+/**
+ * Persists the self-heal preference to ~/.shieldcortex/config.json.
+ */
+export function setSelfHeal(enabled: boolean): void {
+  mutateRawConfig((raw) => {
+    raw.selfHeal = enabled;
+  });
+}
+
+/**
  * Restores the v4.10.x defaults for users who preferred the old behaviour.
  * Writes explicit overrides for every default the v4.11.0 release flipped,
  * so the flip is a one-command undo.

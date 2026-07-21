@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.12] - 2026-07-21
+
+**The cortex-memory hook's bootstrap self-heal gets the opt-out the 4.47.11 disclosure promised — and stops migrating a hook that can't load (closes #108, #109).**
+
+> Version note: 4.47.11 was a docs-only ClawHub skill republish, so this is the next code release on npm.
+
+### Added
+
+- **Opt-out gate for the bootstrap self-heal (#108).** The cortex-memory hook's `agent:bootstrap` self-check mutates without asking: it recursively deletes the two legacy `~/.clawdbot` hook directories (no backup) and copies itself into `~/.openclaw/hooks/internal`. Both mutations are now gated. Set `SHIELDCORTEX_SKIP_SELF_HEAL=1` or run `shieldcortex config --self-heal false` (persists `"selfHeal": false` to `~/.shieldcortex/config.json`) and the hook switches to **warn-only**: it logs exactly which directory it would have deleted and which files it would have copied where, and touches nothing. **The default is unchanged** — absent, empty, or unreadable config leaves the self-heal enabled, so existing installs behave exactly as before. The decision is a pure predicate (`isSelfHealEnabled(config, env)`) in the hook's `runtime.mjs`, unit-tested against the full truth table rather than inferred from source. The read-only staleness check still runs in either mode, and `shieldcortex openclaw install` performs the same migration on demand. SKILL.md's disclosure section is updated from "will ship in an upcoming release" to the actual flags.
+- **The legacy-directory deletion is announced before it happens, not after.** No backup is taken, so the log line is the only record of what was removed — it now precedes the `rm` so it survives the process dying mid-delete.
+
+### Fixed
+
+- **Self-heal migrated an incomplete file set, installing a hook that couldn't load (#109).** The self-copy path wrote only `HOOK.md` and `handler.ts`, omitting the `runtime.mjs` that `handler.ts` imports at module load — so a "successful" migration could leave `~/.openclaw/hooks/internal/cortex-memory` throwing on the next gateway start, with a reassuring `SHIELDCORTEX_HOOK_MIGRATED.md` notice claiming no action was needed. Both the copy and the staleness comparison now iterate one `HOOK_FILES` manifest covering every file the hook needs, and a partial copy is reported as an **incomplete migration** (pointing at `shieldcortex openclaw install`) instead of as success, with the misleading bootstrap notice suppressed. A new test derives the expected set from the hook directory's *actual contents* and asserts the hook, the bundled skill copy, and `src/setup/openclaw.ts` all agree — adding a file to the hook without teaching every consumer to copy it now fails the build rather than shipping another partial migration.
+- **The bundled skill copy of the hook received both fixes.** It is the copy most likely to be running from an unexpected path (a skills-only install runs it straight out of `bundled/`), i.e. the one that actually performs migrations.
+
 ## [4.47.10] - 2026-07-19
 
 **The Action Guard gains a general mention-vs-intent span classifier — a dangerous token quoted as data, or sitting inside a fetched URL, is no longer mistaken for an executed command — plus a `${IFS}` de-obfuscation hardening (PRs #101, #102, closes #84).**

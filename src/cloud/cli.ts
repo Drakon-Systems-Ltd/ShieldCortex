@@ -12,6 +12,7 @@ import {
   setOpenClawAutoMemory,
   isProactiveRecallEnabled,
   setProactiveRecall,
+  setSelfHeal,
   restore410Defaults,
   getRankerConfig,
   setRankerConfig,
@@ -236,6 +237,29 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  const selfHealIdx = args.indexOf('--self-heal');
+  if (selfHealIdx !== -1) {
+    const value = args[selfHealIdx + 1];
+    if (!value) {
+      console.error('Missing value for --self-heal. Use true or false.');
+      process.exit(1);
+    }
+    const normalized = value.toLowerCase();
+    if (normalized !== 'true' && normalized !== 'false') {
+      console.error(`Invalid value for --self-heal: ${value}. Use true or false.`);
+      process.exit(1);
+    }
+    const enabled = normalized === 'true';
+    setSelfHeal(enabled);
+    console.log(
+      enabled
+        ? 'Hook self-heal enabled (default) — the cortex-memory hook may remove legacy ~/.clawdbot hook dirs and copy itself into ~/.openclaw/hooks at gateway bootstrap.'
+        : 'Hook self-heal disabled — the cortex-memory hook will log what it would have done and write nothing. Run `shieldcortex openclaw install` to migrate the hook yourself.',
+    );
+    console.log('Restart the OpenClaw gateway for this to take effect.');
+    changed = true;
+  }
+
   if (args.includes('--tool-firewall-enforce')) {
     setToolResponseScanConfig({ scanToolResponses: true, toolResponseMode: 'enforce' });
     console.log('Tool-output firewall set to ENFORCE — threatening tool output will be redacted/withheld before the agent sees it.');
@@ -299,6 +323,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (default: off)');
     console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (default: off — adds latency)');
     console.log('  --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)');
+    console.log('  --self-heal <true|false>  Let the cortex-memory hook repair its own install at gateway bootstrap');
+    console.log('                            (default: true; false = warn-only. SHIELDCORTEX_SKIP_SELF_HEAL=1 also opts out)');
     console.log('  --tool-firewall-enforce   Redact/withhold threatening tool output before the agent sees it');
     console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
     console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');

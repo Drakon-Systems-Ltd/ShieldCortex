@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.47.10
+  version: 4.47.12
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -59,6 +59,7 @@ permissions:
     - SHIELDCORTEX_API_KEY: Cloud sync API key (optional; only used when Cloud is enabled)
     - SHIELDCORTEX_LICENSE_TIER: Override licence tier (development use)
     - SHIELDCORTEX_SKIP_EMBEDDINGS: Disable embedding generation
+    - SHIELDCORTEX_SKIP_SELF_HEAL: Set to 1 to make the cortex-memory hook's bootstrap self-heal warn-only (writes nothing)
     - SHIELDCORTEX_HOST: Override dashboard/API bind host
     - PORT: Override dashboard/API port
 ---
@@ -118,10 +119,12 @@ disclosure, this is exactly what it does:
 2. **Copies itself to the expected hook path.** If the hook finds itself
    running from anywhere else (for example, from inside this skill's
    `bundled/` folder after a skills-only install), it creates
-   `~/.openclaw/hooks/internal/cortex-memory/` and copies its own `HOOK.md`
-   and `handler.ts` there so the gateway loads it from the canonical location
-   on the next restart, and surfaces a `SHIELDCORTEX_HOOK_MIGRATED.md` notice
-   into the session's bootstrap context.
+   `~/.openclaw/hooks/internal/cortex-memory/` and copies its full file set
+   (`HOOK.md`, `handler.ts`, `runtime.mjs`) there so the gateway loads it from
+   the canonical location on the next restart, and surfaces a
+   `SHIELDCORTEX_HOOK_MIGRATED.md` notice into the session's bootstrap context.
+   If any file in that set fails to copy, the migration is reported as
+   incomplete rather than as a success — a partially-copied hook cannot load.
 3. **Checks for staleness (read-only).** It compares the running hook files
    against the installed npm package's copies and warns if they differ. This
    step never writes.
@@ -132,10 +135,19 @@ modify `openclaw.json`, `~/.claude/settings.json`, MCP config, shell configs,
 or any other file; it makes no network calls; failures are swallowed so it can
 never block agent startup.
 
-**Opting out today:** disabling the cortex-memory hook in your hooks config
-disables the self-heal entirely (it only runs inside the hook). A dedicated
-opt-out flag that downgrades the mutating steps to warnings is tracked in the
-project issue queue and will ship in an upcoming release.
+**Opting out (since v4.47.12):** either of these downgrades steps 1 and 2 to
+warn-only — the hook logs exactly what it would have deleted or copied and
+touches nothing:
+
+```bash
+shieldcortex config --self-heal false     # writes "selfHeal": false to ~/.shieldcortex/config.json
+export SHIELDCORTEX_SKIP_SELF_HEAL=1      # or set the env var for the gateway process
+```
+
+Restart the gateway for either to take effect. Step 3 (the read-only staleness
+check) still runs, and `shieldcortex openclaw install` performs the same
+migration on demand. Disabling the cortex-memory hook in your hooks config also
+disables the self-heal entirely, since it only runs inside the hook.
 
 ## Data handling, privacy & consent
 

@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createOpenClawRuntime } from "./runtime.mjs";
+import { createOpenClawRuntime, SELF_HEAL_SKIP_ENV } from "./runtime.mjs";
 
 // ==================== SERVER COMMAND RESOLUTION ====================
 
@@ -812,13 +812,41 @@ async function onKeywordTrigger(event) {
 
 // ==================== SELF-CHECK & SELF-HEAL ====================
 
+// Every file the installed hook needs to run — the manifest for BOTH the
+// staleness comparison and the self-heal copy below. runtime.mjs is not
+// optional: handler.ts imports it at module load, so a migration that omits it
+// installs a hook that throws on the next gateway start (#109). Kept aligned
+// with HOOK_FILES in src/setup/openclaw.ts and with the hook directory's actual
+// contents by src/__tests__/openclaw-hook-selfheal.test.ts.
+const HOOK_FILES = ["HOOK.md", "handler.ts", "runtime.mjs"];
+
+// Opt-out for the mutating half of the self-check (#108). Default is ON, so
+// existing installs keep the behaviour they have today; either the env flag or
+// `"selfHeal": false` in ~/.shieldcortex/config.json downgrades every mutating
+// branch to a warn-only line. The decision itself lives in runtime.mjs as a
+// pure predicate so it can be unit-tested; see runtime.isSelfHealEnabled.
+const SELF_HEAL_REPAIR_HINT = "Run `shieldcortex openclaw install` to do it yourself.";
+
+/**
+ * Is the mutating self-heal allowed to write?
+ *
+ * An unreadable config resolves to `{}` inside loadShieldConfig, which the
+ * predicate treats as enabled — the default preserves current behaviour. The
+ * read-only staleness check runs either way; it never writes.
+ */
+async function isSelfHealEnabled() {
+  const config = await loadShieldConfig();
+  return runtime.isSelfHealEnabled(config);
+}
+
 /**
  * One-shot self-check that runs on first bootstrap per process.
  * Detects legacy hook paths and attempts self-heal by copying files.
- * 
- * Safety: 
+ *
+ * Safety:
  * - _selfCheckDone flag prevents re-runs (no loops)
  * - All fs ops are sync-safe copies (no recursive watchers, no intervals)
+ * - Every mutating branch is gated by isSelfHealEnabled() (#108)
  * - Fails silently on any error — never blocks bootstrap
  */
 let _selfCheckDone = false;
@@ -828,6 +856,11 @@ async function selfCheckAndHeal(event) {
   _selfCheckDone = true; // Set immediately to prevent re-entry
 
   try {
+    // Resolved once, before anything is touched, so the warn-only mode below
+    // can describe what it WOULD have done rather than doing it. Inside the
+    // try: this must never be the thing that breaks bootstrap.
+    const healEnabled = await isSelfHealEnabled();
+
     const path = await import("node:path");
     const { homedir } = await import("node:os");
     const home = homedir();
@@ -865,10 +898,24 @@ async function selfCheckAndHeal(event) {
         for (const legacyDir of legacyDirs) {
           try {
             await fs.access(legacyDir);
-            // Legacy dir exists and isn't a symlink — clean it up
+          } catch { continue; /* doesn't exist — good */ }
+
+          // Legacy dir exists and isn't a symlink. Announce BEFORE the rm, not
+          // after: no backup is taken, so the log line is the only record of
+          // what went — and it has to survive the process dying mid-delete.
+          if (!healEnabled) {
+            console.warn(
+              `[cortex-memory] Self-heal disabled (${SELF_HEAL_SKIP_ENV}=1 or config selfHeal:false) — ` +
+              `would have recursively removed the stale legacy hook at ${legacyDir}. ` +
+              `Nothing was deleted. ${SELF_HEAL_REPAIR_HINT}`
+            );
+            continue;
+          }
+
+          console.log(`[cortex-memory] Self-heal: removing stale legacy hook at ${legacyDir}`);
+          try {
             await fs.rm(legacyDir, { recursive: true });
-            console.log(`[cortex-memory] Self-heal: removed stale legacy hook at ${legacyDir}`);
-          } catch { /* doesn't exist — good */ }
+          } catch { /* best-effort — a failed cleanup must not block bootstrap */ }
         }
       }
 
@@ -888,9 +935,8 @@ async function selfCheckAndHeal(event) {
         const root = await resolvePackageRoot();
         if (root) {
           const sourceDir = path.join(root, "hooks", "openclaw", "cortex-memory");
-          const hookFiles = ["HOOK.md", "handler.ts", "runtime.mjs"];
           let stale = false;
-          for (const file of hookFiles) {
+          for (const file of HOOK_FILES) {
             const srcPath = path.join(sourceDir, file);
             const minePath = path.join(myDir, file);
             try {
@@ -924,26 +970,47 @@ async function selfCheckAndHeal(event) {
     const targetDir = expectedDirs[0]; // prefer hooks/internal/cortex-memory
     const targetParent = path.dirname(targetDir);
 
+    if (!healEnabled) {
+      console.warn(
+        `[cortex-memory] Self-heal disabled (${SELF_HEAL_SKIP_ENV}=1 or config selfHeal:false) — ` +
+        `the hook is running from ${myDir}, not ${targetDir}. Would have created that ` +
+        `directory and copied ${HOOK_FILES.join(", ")} into it. Nothing was written. ` +
+        SELF_HEAL_REPAIR_HINT
+      );
+      return;
+    }
+
     // Ensure parent exists
     await fs.mkdir(targetParent, { recursive: true });
     await fs.mkdir(targetDir, { recursive: true });
 
-    // Copy our files to the expected location
-    const filesToCopy = ["HOOK.md", "handler.ts"];
-    let copiedCount = 0;
+    // Copy the WHOLE file set (#109). Copying a subset — handler.ts without the
+    // runtime.mjs it imports — installs a hook that can't load at all.
+    const copied = [];
+    const failed = [];
 
-    for (const file of filesToCopy) {
+    for (const file of HOOK_FILES) {
       const src = path.join(myDir, file);
       const dest = path.join(targetDir, file);
       try {
-        await fs.access(src);
         await fs.copyFile(src, dest);
-        copiedCount++;
-      } catch { /* source file missing — skip */ }
+        copied.push(file);
+      } catch {
+        failed.push(file);
+      }
     }
 
-    if (copiedCount > 0) {
-      console.log(`[cortex-memory] Self-heal: copied ${copiedCount} file(s) to ${targetDir}`);
+    if (failed.length > 0) {
+      // A partial migration is worse than none: it looks installed and then
+      // throws on the next gateway start. Don't claim success, and don't inject
+      // the reassuring "no action needed" notice below.
+      console.warn(
+        `[cortex-memory] Self-heal: INCOMPLETE migration to ${targetDir} — could not copy ` +
+        `${failed.join(", ")}. The hook there would fail to load, so treat it as broken. ` +
+        SELF_HEAL_REPAIR_HINT
+      );
+    } else if (copied.length > 0) {
+      console.log(`[cortex-memory] Self-heal: copied ${copied.length} file(s) to ${targetDir}`);
       console.log(`[cortex-memory] Hook will load from correct path on next restart`);
 
       // Inject a warning into bootstrap context so the agent knows

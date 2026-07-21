@@ -4,6 +4,25 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+// Opt-out for the cortex-memory hook's mutating self-heal (#108). Exported so
+// the hook, the docs test, and the unit tests all name the flag once.
+export const SELF_HEAL_SKIP_ENV = "SHIELDCORTEX_SKIP_SELF_HEAL";
+
+/**
+ * Is the hook's self-heal allowed to write? (#108)
+ *
+ * Pure predicate over the loaded config plus the environment, so the gate is
+ * unit-testable without touching a filesystem. Disabled by
+ * SHIELDCORTEX_SKIP_SELF_HEAL=1 or `"selfHeal": false` in
+ * ~/.shieldcortex/config.json. Every other input — including a missing,
+ * empty, or unreadable config — leaves it ENABLED, so the default preserves
+ * the behaviour installs had before 4.47.12.
+ */
+export function isSelfHealEnabled(config, env = process.env) {
+  if (env?.[SELF_HEAL_SKIP_ENV] === "1") return false;
+  return config?.selfHeal !== false;
+}
+
 export function createOpenClawRuntime({
   logPrefix = "[shieldcortex]",
   configPath = path.join(homedir(), ".shieldcortex", "config.json"),
@@ -205,6 +224,7 @@ export function createOpenClawRuntime({
   return {
     callCortex,
     isOpenClawAutoMemoryEnabled,
+    isSelfHealEnabled,
     loadShieldConfig,
     resolveServerCmd,
     resolvePackageRoot,
