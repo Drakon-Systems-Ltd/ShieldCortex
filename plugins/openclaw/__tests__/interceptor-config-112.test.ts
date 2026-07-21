@@ -157,18 +157,20 @@ describe('#112 — end-to-end: plugin config controls the before_tool_call gate'
     expect(intercepted(result)).toBe(true);
   });
 
-  it('interceptor.enabled:false → the gate never arms; dangerous op passes with NO approval request', async () => {
+  it('interceptor.enabled:false → the before_tool_call hook is not registered at all (stronger contract post-#112-follow-up)', () => {
     const { api, hooks } = makeApi(rootConfigWith({ interceptor: { enabled: false } }));
     plugin.register(api);
-    const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });
-    expect(result).toBeUndefined();
+    // Not a no-op handler — the hook must be ABSENT so the host's approval
+    // pipeline can never route a tool call (or an approval wait) through us.
+    expect(hooks['before_tool_call']).toBeUndefined();
   });
 
-  it('interceptor.enabled:false → fully off, not partially: even catastrophic ops are not intercepted', async () => {
+  it('interceptor.enabled:false → scanning hooks still register; only the tool-call gate is gone', () => {
     const { api, hooks } = makeApi(rootConfigWith({ interceptor: { enabled: false } }));
     plugin.register(api);
-    const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'rm -rf /' } });
-    expect(result).toBeUndefined();
+    expect(hooks['before_tool_call']).toBeUndefined();
+    expect(typeof hooks['llm_input']).toBe('function');
+    expect(typeof hooks['llm_output']).toBe('function');
   });
 
   it('actionGuard.enforce:false → advisory mode: dangerous op allowed without approval', async () => {
