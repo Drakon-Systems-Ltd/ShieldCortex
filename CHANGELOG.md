@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [Unreleased]
+
+**The OpenClaw plugin honours nested `interceptor` config instead of silently dropping it (closes #112).**
+
+### Fixed
+
+- **`normaliseConfig()` dropped the entire nested `interceptor` block (#112).** The config normaliser was an allowlist rebuild that never included `interceptor`, so an explicit `interceptor.enabled: false` (or any nested `actionGuard`/severity/failure/`autoApprove` setting) was silently ignored and `DEFAULT_INTERCEPTOR_CONFIG` re-armed the `before_tool_call` approval gate from defaults. On approval surfaces with no card rendering (observed live: Codex + Telegram on Edith, realtime plugin 4.47.12 + OpenClaw 2026.7.1-2) every tool call waited out the 120 s gate timeout, making the agent unresponsive. The normaliser now validates and preserves the `interceptor` block (deep-partial: explicit values survive, defaults only fill gaps, malformed values are dropped fail-safe so the gate stays armed), config-source merging is per-key instead of wholesale block replacement, and the plugin JSON schema/uiHints advertise the block instead of rejecting it.
+
+### ⚠️ Upgrade note
+
+- **Previously-ignored `interceptor` blocks take effect on upgrade.** If an existing `openclaw.json` plugin entry or shield config ever gained an `interceptor` block that "did nothing" (because it was being dropped), those values — including ones that disable or soften the Action Guard, such as `interceptor.enabled: false`, `actionGuard.enforce: false`, or `autoApprove` lists — will now be honoured. Audit any `interceptor` config you carry **before** upgrading so your enforcement posture changes only if you mean it to.
+
 ## [4.47.12] - 2026-07-21
 
 **The cortex-memory hook's bootstrap self-heal gets the opt-out the 4.47.11 disclosure promised — and stops migrating a hook that can't load (closes #108, #109).**
