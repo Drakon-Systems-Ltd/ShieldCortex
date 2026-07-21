@@ -82,23 +82,70 @@ export function parseTranscriptLine(line: unknown): SessionEventInput[] {
   if (typeof l.sessionId !== 'string' || l.sessionId.length === 0) return [];
   if (typeof l.timestamp !== 'string' || l.timestamp.length === 0) return [];
 
+  // #110 review: NORMALISE the timestamp to canonical ISO-8601 UTC
+  // ('YYYY-MM-DDTHH:MM:SS.sssZ') instead of passing it through verbatim.
+  // The retention purge (src/sessions/retention.ts) compares `ts` strings
+  // LEXICALLY, which is only chronological when every row shares that exact
+  // format. Verbatim passthrough let two proven misorderings in:
+  //   - epoch-millis strings ('1784640743169') sort before any '2026-…' row,
+  //     so the 30-day purge classified them as infinitely old and deleted
+  //     them immediately;
+  //   - offset-bearing ISO ('2026-07-21T01:00:00+09:00') misorders against
+  //     Z-format rows at boundaries.
+  // Plain ISO-Z round-trips unchanged. An unparseable timestamp rejects the
+  // line, which the importer counts in the `malformed` tally.
+  const parsedMs = parseTimestampMs(l.timestamp);
+  if (Number.isNaN(parsedMs)) return [];
+  const ts = new Date(parsedMs).toISOString();
+
   const content = l.message?.content;
   if (!Array.isArray(content) || content.length === 0) return [];
 
   const events: SessionEventInput[] = [];
   for (const block of content) {
-    const event = blockToEvent(block, l);
+    const event = blockToEvent(block, l, ts);
     if (event) events.push(event);
   }
   return events;
 }
 
+/**
+ * Timestamp string → epoch milliseconds (NaN when unparseable).
+ *
+ * Date.parse alone does NOT cover the epoch-numeric vector: in V8,
+ * Date.parse('1784640743169') is NaN (a 13-digit string is not a valid date
+ * literal), so the reviewer's proven-bad input would be dropped as malformed
+ * instead of recovered to its real instant. All-digit strings are therefore
+ * recognised explicitly first — 13 digits as epoch milliseconds, 10 digits
+ * as epoch seconds — and everything else goes through Date.parse (which
+ * handles ISO with or without offsets/milliseconds).
+ */
+function parseTimestampMs(raw: string): number {
+  if (/^\d{13}$/.test(raw)) return Number(raw); // epoch milliseconds
+  if (/^\d{10}$/.test(raw)) return Number(raw) * 1000; // epoch seconds
+  return Date.parse(raw);
+}
+
+/**
+ * True when a conversation line carries a timestamp string that cannot be
+ * parsed at all — the case `parseTranscriptLine` rejects and the importer
+ * must count as `malformed` (not merely `skipped`).
+ */
+function hasUnparseableTimestamp(line: unknown): boolean {
+  if (!line || typeof line !== 'object') return false;
+  const l = line as TranscriptLine;
+  if (l.type !== 'user' && l.type !== 'assistant') return false;
+  if (typeof l.timestamp !== 'string' || l.timestamp.length === 0) return false;
+  return Number.isNaN(parseTimestampMs(l.timestamp));
+}
+
 function blockToEvent(
   block: ContentBlock,
   line: TranscriptLine,
+  /** Normalised ISO-8601 UTC timestamp (see parseTranscriptLine). */
+  ts: string,
 ): SessionEventInput | null {
   const session_id = line.sessionId as string;
-  const ts = line.timestamp as string;
 
   if (block.type === 'thinking') return null;
 
@@ -240,6 +287,10 @@ export function importJsonlTranscript(path: string): ImportResult {
     }
     const events = parseTranscriptLine(parsed);
     if (events.length === 0) {
+      // A conversation line rejected for an unparseable timestamp is bad
+      // DATA, not merely an uninteresting line type — count it malformed
+      // (matching the ImportResult.malformed contract) as well as skipped.
+      if (hasUnparseableTimestamp(parsed)) malformed++;
       skipped++;
       return;
     }

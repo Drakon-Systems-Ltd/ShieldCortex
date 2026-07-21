@@ -639,6 +639,7 @@ ${bold}COMMANDS${reset}
   ${cyan}status${reset}                Show current protection status
   ${cyan}doctor${reset}                Diagnose installation issues
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
+  ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
@@ -817,6 +818,14 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'import-jsonl') {
     const { handleImportJsonlCommand } = await import('./cli/import-jsonl.js');
     await handleImportJsonlCommand(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "sessions" subcommand (#110) — session-capture maintenance
+  // (currently `sessions prune`, the retention valve for session_events).
+  if (process.argv[2] === 'sessions') {
+    const { handleSessionsCommand } = await import('./cli/sessions.js');
+    await handleSessionsCommand(process.argv.slice(3));
     return;
   }
 
@@ -1194,7 +1203,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
