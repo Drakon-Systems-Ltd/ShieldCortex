@@ -47,7 +47,9 @@ describe('parseTranscriptLine — pure mapper', () => {
     expect(events).toHaveLength(1);
     expect(events[0].kind).toBe('prompt');
     expect(events[0].session_id).toBe('s1');
-    expect(events[0].ts).toBe('2026-05-10T10:00:00Z');
+    // #110 review: timestamps are normalised to canonical ISO-8601 UTC with
+    // milliseconds ('…T10:00:00.000Z'), no longer passed through verbatim.
+    expect(events[0].ts).toBe('2026-05-10T10:00:00.000Z');
     expect(events[0].payload).toEqual({ text: 'hi' });
   });
 
@@ -235,6 +237,74 @@ describe('importJsonlTranscript — end-to-end against fixture', () => {
       expect(result.eventCount).toBe(2);
       // 1 malformed JSON line counts as skipped; blank lines do not.
       expect(result.skipped).toBe(1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('timestamp normalisation (#110 review) — importer ENFORCES ISO-Z', () => {
+  // The retention purge compares `ts` LEXICALLY; verbatim passthrough let an
+  // epoch-millis string sort before every '2026-…' row (→ purged as
+  // "infinitely old" immediately) and offset-bearing ISO misorder at
+  // boundaries. Every accepted timestamp must round-trip through
+  // Date.parse → toISOString().
+
+  it('normalises an epoch-millis timestamp to the correct ISO instant — NOT purged as ancient', async () => {
+    // A recent instant (1 day ago) expressed as epoch millis.
+    const recentMs = Date.now() - 24 * 60 * 60 * 1000;
+    const events = parseTranscriptLine({
+      type: 'user',
+      sessionId: 's-epoch',
+      timestamp: String(recentMs),
+      message: { role: 'user', content: [{ type: 'text', text: 'epoch line' }] },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0].ts).toBe(new Date(recentMs).toISOString());
+
+    // End-to-end: insert it and prove the 30-day purge does NOT delete it.
+    const { recordEvent } = await import('../sessions/capture.js');
+    const { purgeOldSessionEvents } = await import('../sessions/retention.js');
+    recordEvent(events[0]);
+    const deleted = purgeOldSessionEvents(30);
+    expect(deleted).toBe(0);
+    const count = (
+      getDatabase().prepare('SELECT COUNT(*) AS c FROM session_events').get() as { c: number }
+    ).c;
+    expect(count).toBe(1);
+  });
+
+  it('normalises offset-bearing ISO to the equivalent Z instant', () => {
+    const events = parseTranscriptLine({
+      type: 'user',
+      sessionId: 's-offset',
+      timestamp: '2026-07-21T01:00:00+09:00',
+      message: { role: 'user', content: [{ type: 'text', text: 'offset line' }] },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0].ts).toBe('2026-07-20T16:00:00.000Z');
+  });
+
+  it('rejects a garbage timestamp: counted malformed, nothing inserted', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'sc-import-badts-'));
+    const path = join(tmp, 'bad-ts.jsonl');
+    writeFileSync(
+      path,
+      [
+        '{"type":"user","sessionId":"s3","timestamp":"soon-ish","message":{"role":"user","content":[{"type":"text","text":"bad ts"}]}}',
+        '{"type":"user","sessionId":"s3","timestamp":"2026-05-10T12:00:00Z","message":{"role":"user","content":[{"type":"text","text":"good ts"}]}}',
+      ].join('\n'),
+    );
+    try {
+      const result = importJsonlTranscript(path);
+      expect(result.eventCount).toBe(1); // only the good line
+      expect(result.malformed).toBe(1); // the garbage-timestamp line
+      const rows = getDatabase()
+        .prepare('SELECT ts, payload FROM session_events')
+        .all() as Array<{ ts: string; payload: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].ts).toBe('2026-05-10T12:00:00.000Z'); // normalised on insert
+      expect(rows[0].payload).toContain('good ts');
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

@@ -30,6 +30,16 @@
  * use `datetime(current_timestamp, '-N days')` — SQLite's datetime() renders
  * 'YYYY-MM-DD HH:MM:SS' (space, no ms, no Z), which does NOT collate cleanly
  * against the stored 'T'/'Z' format at the boundary.
+ *
+ * Since the #110 review, the JSONL importer ENFORCES this (it previously
+ * only assumed it): import-jsonl.ts normalises every transcript timestamp
+ * through Date.parse → toISOString(), so epoch-millis strings can no longer
+ * lexically sort as "infinitely old" and offset-bearing ISO can no longer
+ * misorder at the boundary. Dedupe implication: `ts` is part of the
+ * idx_session_events_dedupe UNIQUE key, so rows imported BEFORE the
+ * normalisation under an offset/epoch format keep their old key — re-running
+ * the same transcript now inserts normalised-ts rows alongside them rather
+ * than deduping (a one-time duplication for affected legacy rows only).
  */
 
 import { getDatabase, checkDatabaseSize } from '../database/init.js';
