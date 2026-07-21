@@ -464,9 +464,19 @@ export function pluginInstallNeedsWrite(
  * Also actively cleans any legacy `plugins.installs[shieldcortex-realtime]`
  * entry left over from older ShieldCortex versions, so customers upgrading
  * through us never trip OpenClaw's migration-block.
+ *
+ * Exported for direct unit testing (see
+ * trust-local-plugin-preserves-entries.test.ts — pins that other plugins'
+ * entries, e.g. `plugins.entries.codex` and its `appServer.networkProxy`
+ * settings, pass through byte-for-byte untouched; issue #112 follow-up).
+ * `homeArg` injects the home dir for those tests — same seam as
+ * repairOpenClawManagedPins(); jest's process.env copy never reaches the
+ * native os.homedir() binding, so a HOME override can't work there.
  */
-function trustLocalPlugin(_installDir: string, _version: string): boolean {
-  const configPath = openClawConfigPath();
+export function trustLocalPlugin(_installDir: string, _version: string, homeArg?: string): boolean {
+  const configPath = homeArg
+    ? path.join(homeArg, '.openclaw', 'openclaw.json')
+    : openClawConfigPath();
   const configDir = path.dirname(configPath);
   const pluginId = PLUGIN_DIR_NAME; // "shieldcortex-realtime"
 
