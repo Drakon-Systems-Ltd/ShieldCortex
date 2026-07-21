@@ -178,6 +178,12 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
   _runtimeOverride = runtime;
   if (runtime) runtimePromise = null;
 }
+export function __resetConfigStateForTest(): void {
+  _config = null;
+  _configOverride = null;
+  _lastShieldConfigRef = null;
+  _registered = false;
+}
 
 type LlmInputEvent = {
   runId: string; sessionId: string; provider: string; model: string;
@@ -217,6 +223,27 @@ type PluginApi = {
 
 // ==================== CONFIG ====================
 
+// User-facing interceptor config: a deep-partial of InterceptorConfig. Every
+// key is optional — DEFAULT_INTERCEPTOR_CONFIG fills the gaps in
+// initInterceptor(), never here, so explicit values (including `false`) always
+// win over defaults.
+type InterceptSeverity = 'low' | 'medium' | 'high' | 'critical';
+const INTERCEPT_SEVERITIES: readonly InterceptSeverity[] = ['low', 'medium', 'high', 'critical'];
+const INTERCEPT_ACTIONS = ['log', 'warn', 'require_approval'] as const;
+const FAILURE_ACTIONS = ['allow', 'deny'] as const;
+
+interface InterceptorUserConfig {
+  enabled?: boolean;
+  severityActions?: Partial<Record<InterceptSeverity, (typeof INTERCEPT_ACTIONS)[number]>>;
+  failurePolicy?: Partial<Record<InterceptSeverity, (typeof FAILURE_ACTIONS)[number]>>;
+  actionGuard?: {
+    enabled?: boolean;
+    enforce?: boolean;
+    autoApprove?: string[];
+    auditAllows?: boolean;
+  };
+}
+
 interface SCConfig {
   cloudEnabled?: boolean;
   cloudApiKey?: string;
@@ -226,6 +253,7 @@ interface SCConfig {
   openclawAutoMemoryDedupe?: boolean;
   openclawAutoMemoryNoveltyThreshold?: number;
   openclawAutoMemoryMaxRecent?: number;
+  interceptor?: InterceptorUserConfig;
 }
 
 const PLUGIN_ID = "shieldcortex-realtime";
@@ -268,7 +296,65 @@ const PLUGIN_CONFIG_UI_HINTS = {
     help: "How many recent extracted memories to keep in the dedupe cache.",
     advanced: true,
   },
+  "interceptor.enabled": {
+    label: "Enable Tool Call Interceptor",
+    help: "Scan memory-write tool calls and gate suspicious content behind user approval.",
+  },
+  "interceptor.actionGuard.enabled": {
+    label: "Action Guard",
+    help: "Gate dangerous shell/file/network/git tool calls before they execute. Catastrophic operations are always blocked while enabled.",
+  },
+  "interceptor.actionGuard.enforce": {
+    label: "Enforce Action Guard",
+    help: "Enforce dangerous-operation gating (attended: approval prompt; unattended: failurePolicy). Off = warn-and-allow (advisory). Catastrophic operations block regardless.",
+  },
+  "interceptor.actionGuard.autoApprove": {
+    label: "Action Guard Auto-approve List",
+    help: "Family/action/signal names pre-approved for unattended agents that legitimately need specific dangerous operations.",
+    advanced: true,
+  },
+  "interceptor.actionGuard.auditAllows": {
+    label: "Audit Recognised Allows",
+    help: "Write an audit entry when the guard evaluates a recognised operation and allows it.",
+    advanced: true,
+  },
 } as const;
+
+const SEVERITY_ACTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: Object.fromEntries(
+    INTERCEPT_SEVERITIES.map((severity) => [severity, { type: "string", enum: [...INTERCEPT_ACTIONS] }]),
+  ),
+};
+
+const FAILURE_POLICY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: Object.fromEntries(
+    INTERCEPT_SEVERITIES.map((severity) => [severity, { type: "string", enum: [...FAILURE_ACTIONS] }]),
+  ),
+};
+
+const INTERCEPTOR_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    enabled: { type: "boolean" },
+    severityActions: SEVERITY_ACTION_SCHEMA,
+    failurePolicy: FAILURE_POLICY_SCHEMA,
+    actionGuard: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        enforce: { type: "boolean" },
+        autoApprove: { type: "array", items: { type: "string" } },
+        auditAllows: { type: "boolean" },
+      },
+    },
+  },
+};
 
 const PLUGIN_CONFIG_JSON_SCHEMA = {
   type: "object",
@@ -282,6 +368,9 @@ const PLUGIN_CONFIG_JSON_SCHEMA = {
     openclawAutoMemoryDedupe: { type: "boolean" },
     openclawAutoMemoryNoveltyThreshold: { type: "number", minimum: 0.6, maximum: 0.99 },
     openclawAutoMemoryMaxRecent: { type: "integer", minimum: 50, maximum: 1000 },
+    // #112: without this, `additionalProperties: false` declared the whole
+    // interceptor block invalid — mirror openclaw.plugin.json's configSchema.
+    interceptor: INTERCEPTOR_JSON_SCHEMA,
   },
 };
 
@@ -345,7 +434,90 @@ function normaliseConfig(raw: unknown): SCConfig {
     config.openclawAutoMemoryMaxRecent = Math.floor(clamp(value.openclawAutoMemoryMaxRecent, 50, 1000));
   }
 
+  // #112: the allowlist above predates the interceptor and silently dropped
+  // the entire nested `interceptor` object — `interceptor.enabled: false` was
+  // ignored and DEFAULT_INTERCEPTOR_CONFIG re-armed the before_tool_call gate.
+  // Validate-and-preserve every nested interceptor key the manifest schema
+  // accepts; invalid values are dropped individually, valid siblings survive.
+  const interceptor = normaliseInterceptorConfig(value.interceptor);
+  if (interceptor) config.interceptor = interceptor;
+
   return config;
+}
+
+function normaliseSeverityMap<A extends string>(
+  raw: unknown,
+  allowed: readonly A[],
+): Partial<Record<InterceptSeverity, A>> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const out: Partial<Record<InterceptSeverity, A>> = {};
+  for (const severity of INTERCEPT_SEVERITIES) {
+    const entry = value[severity];
+    if (typeof entry === "string" && (allowed as readonly string[]).includes(entry)) {
+      out[severity] = entry as A;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normaliseInterceptorConfig(raw: unknown): InterceptorUserConfig | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const out: InterceptorUserConfig = {};
+
+  if (typeof value.enabled === "boolean") out.enabled = value.enabled;
+
+  const severityActions = normaliseSeverityMap(value.severityActions, INTERCEPT_ACTIONS);
+  if (severityActions) out.severityActions = severityActions;
+
+  const failurePolicy = normaliseSeverityMap(value.failurePolicy, FAILURE_ACTIONS);
+  if (failurePolicy) out.failurePolicy = failurePolicy;
+
+  if (value.actionGuard && typeof value.actionGuard === "object" && !Array.isArray(value.actionGuard)) {
+    const rawGuard = value.actionGuard as Record<string, unknown>;
+    const guard: NonNullable<InterceptorUserConfig["actionGuard"]> = {};
+    if (typeof rawGuard.enabled === "boolean") guard.enabled = rawGuard.enabled;
+    if (typeof rawGuard.enforce === "boolean") guard.enforce = rawGuard.enforce;
+    if (typeof rawGuard.auditAllows === "boolean") guard.auditAllows = rawGuard.auditAllows;
+    if (Array.isArray(rawGuard.autoApprove) && rawGuard.autoApprove.every((entry) => typeof entry === "string")) {
+      guard.autoApprove = rawGuard.autoApprove as string[];
+    }
+    if (Object.keys(guard).length > 0) out.actionGuard = guard;
+  }
+
+  return out;
+}
+
+/**
+ * Merge two normalised configs (#112). Semantics:
+ *  - Top-level scalar keys: override wins when present.
+ *  - `interceptor` deep-merges PER KEY — per severity entry, per guard flag —
+ *    so an override that sets one nested key does not wholesale-discard the
+ *    base's other interceptor settings.
+ *  - Explicit values, including `false`, always win over base values; absent
+ *    keys fall through to the base.
+ *  - Defaults are NOT applied here: DEFAULT_INTERCEPTOR_CONFIG only fills the
+ *    remaining gaps in initInterceptor(), so it can never override an explicit
+ *    user value.
+ */
+function mergeConfigs(base: SCConfig, override: SCConfig): SCConfig {
+  const merged: SCConfig = { ...base, ...override };
+  if (base.interceptor || override.interceptor) {
+    const b = base.interceptor ?? {};
+    const o = override.interceptor ?? {};
+    merged.interceptor = { ...b, ...o };
+    if (b.severityActions || o.severityActions) {
+      merged.interceptor.severityActions = { ...b.severityActions, ...o.severityActions };
+    }
+    if (b.failurePolicy || o.failurePolicy) {
+      merged.interceptor.failurePolicy = { ...b.failurePolicy, ...o.failurePolicy };
+    }
+    if (b.actionGuard || o.actionGuard) {
+      merged.interceptor.actionGuard = { ...b.actionGuard, ...o.actionGuard };
+    }
+  }
+  return merged;
 }
 
 function extractPluginConfig(rootConfig: unknown): SCConfig {
@@ -372,10 +544,7 @@ function applyPluginConfigOverride(api: PluginApi): void {
       : api.config;
   const pluginConfig = extractPluginConfig(runtimeConfig);
   if (Object.keys(pluginConfig).length === 0) return;
-  _configOverride = {
-    ...(_configOverride ?? {}),
-    ...pluginConfig,
-  };
+  _configOverride = mergeConfigs(_configOverride ?? {}, pluginConfig);
   // Override changed — invalidate so loadConfig() re-merges with new override.
   _config = null;
   _lastShieldConfigRef = null;
@@ -385,10 +554,9 @@ async function loadConfig(): Promise<SCConfig> {
   const shieldConfigRaw = await (await getRuntime()).loadShieldConfig();
   if (_config && shieldConfigRaw === _lastShieldConfigRef) return _config;
   _lastShieldConfigRef = shieldConfigRaw;
-  _config = {
-    ...normaliseConfig(shieldConfigRaw),
-    ...(_configOverride ?? {}),
-  };
+  // Plugin config (openclaw.json) deep-merges over the shield config file —
+  // see mergeConfigs() for the per-key semantics.
+  _config = mergeConfigs(normaliseConfig(shieldConfigRaw), _configOverride ?? {});
   return _config;
 }
 
@@ -873,7 +1041,9 @@ export default {
 
       try {
         const scConfig = await loadConfig();
-        const rawInterceptorConfig = (scConfig as any).interceptor;
+        // Normalised user config (deep-partial); DEFAULT_INTERCEPTOR_CONFIG
+        // fills the gaps below — defaults never override explicit values.
+        const rawInterceptorConfig = scConfig.interceptor;
         const interceptorConfig: InterceptorConfig = {
           ...DEFAULT_INTERCEPTOR_CONFIG,
           ...(rawInterceptorConfig && typeof rawInterceptorConfig === 'object' ? {
@@ -948,7 +1118,7 @@ export default {
         const cloud = cfg.cloudApiKey ? "configured" : "not configured";
         // Resolve the Action Guard state the same way initInterceptor() does,
         // so the status line reflects what before_tool_call will actually do.
-        const rawInterceptor = (cfg as any).interceptor;
+        const rawInterceptor = cfg.interceptor;
         const guardCfg = {
           ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] }),
           ...(rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.actionGuard ?? {} : {}),
