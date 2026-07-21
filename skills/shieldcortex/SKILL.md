@@ -87,7 +87,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 This section explains every privileged operation the tool performs and why.
 
 - **Active interception, not scan-only.** Beyond read-only scans, ShieldCortex *enforces* at the boundary: writes failing the pipeline are quarantined/blocked; recalled memory is trust/ACL-filtered before the agent sees it; in enforce mode the tool-output firewall redacts/withholds malicious tool results; and the OpenClaw `before_tool_call` interceptor + Iron Dome kill-switch can block operations. Surprising enforcement is opt-in (tool-output firewall defaults to advisory). `shieldcortex status` and `iron-dome status` report which controls are active.
-- **Setup is user-initiated.** Installing hooks, registering the MCP server, and migrating data are manual steps the user runs in their terminal, and `quickstart` asks before each action. The npm postinstall script (disclosed in the trust table above) never adds integrations that weren't already present — on global installs it only prints instructions, checks the native binding, seeds default config on first install, and refreshes an existing OpenClaw hook/plugin install.
+- **Setup is user-initiated, with one bounded exception.** Installing hooks, registering the MCP server, and migrating data are manual steps the user runs in their terminal, and `quickstart` asks before each action. The npm postinstall script (disclosed in the trust table above) never adds integrations that weren't already present — on global installs it only prints instructions, checks the native binding, seeds default config on first install, and refreshes an existing OpenClaw hook/plugin install. The exception: the bundled cortex-memory hook performs a small automatic self-heal at gateway bootstrap, documented in full under **"Automatic self-heal at gateway bootstrap"** below.
 - **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (the postinstall script does not touch memory or config data beyond seeding defaults on a first-ever global install).
 - **Destructive `forget` is bounded and gated.** Per-memory and filtered bulk deletes go through a delete ACL (own-only) and are recorded in the audit ledger. Revoke-by-source (`forget --fromSource`, bulk-delete every memory from one source — for purging a poisoned agent) is **disabled by default** and only enabled by an out-of-band human action (`shieldcortex config --allow-revoke-by-source`); even then it is bounded by a trust-hierarchy ACL (you must own the source or out-rank it) and a per-call row cap. A compromised agent cannot mass-delete your memory.
 - **The bundled dashboard never renders RESTRICTED content.** The local visualization API and its WebSocket feed redact credential-class (`RESTRICTED`) memory content before it reaches the browser — the row stays visible (title/metadata) so you can manage it, but the secret is withheld (view full content via the CLI). Credential patterns in titles/metadata are masked too. This is a display-surface safeguard on top of the on-disk store; it does not weaken the firewall.
@@ -99,6 +99,44 @@ This section explains every privileged operation the tool performs and why.
 - **Lifecycle event handlers.** ShieldCortex registers lifecycle handlers that auto-extract important context from conversations. These are registered in `~/.claude/settings.json` during setup and can be removed at any time. They run locally, never phone home.
 - **Proactive recall.** The UserPromptSubmit handler queries local memory on each prompt (<100ms) and surfaces relevant context. Fully local, configurable: `shieldcortex config --proactive-recall false`.
 
+### Automatic self-heal at gateway bootstrap
+
+The cortex-memory hook registers for the `agent:bootstrap` event. On the first
+bootstrap after each OpenClaw gateway start (once per gateway process), it runs
+a self-check that can write without a prompt. In the interest of full
+disclosure, this is exactly what it does:
+
+1. **Removes stale legacy hook copies.** If the hook is running from its
+   expected home (`~/.openclaw/hooks/internal/cortex-memory` or
+   `~/.openclaw/hooks/cortex-memory`), it recursively deletes the pre-rename
+   leftovers `~/.clawdbot/hooks/cortex-memory` and
+   `~/.clawdbot/hooks/internal/cortex-memory` — and only those two
+   directories. It skips this entirely when `~/.clawdbot` is a symlink (i.e.
+   still pointing at a live install). No backup is taken before deletion;
+   these directories are assumed to be dead copies of this hook's own files,
+   not your data.
+2. **Copies itself to the expected hook path.** If the hook finds itself
+   running from anywhere else (for example, from inside this skill's
+   `bundled/` folder after a skills-only install), it creates
+   `~/.openclaw/hooks/internal/cortex-memory/` and copies its own `HOOK.md`
+   and `handler.ts` there so the gateway loads it from the canonical location
+   on the next restart, and surfaces a `SHIELDCORTEX_HOOK_MIGRATED.md` notice
+   into the session's bootstrap context.
+3. **Checks for staleness (read-only).** It compares the running hook files
+   against the installed npm package's copies and warns if they differ. This
+   step never writes.
+
+**Scope limits:** the self-heal writes only inside `~/.openclaw/hooks/**` and
+deletes only the two `~/.clawdbot` hook directories named above. It does not
+modify `openclaw.json`, `~/.claude/settings.json`, MCP config, shell configs,
+or any other file; it makes no network calls; failures are swallowed so it can
+never block agent startup.
+
+**Opting out today:** disabling the cortex-memory hook in your hooks config
+disables the self-heal entirely (it only runs inside the hook). A dedicated
+opt-out flag that downgrades the mutating steps to warnings is tracked in the
+project issue queue and will ship in an upcoming release.
+
 ## Data handling, privacy & consent
 
 ShieldCortex is **local-first**: memory, scanning, and audit run entirely on your machine — no account, no network, no telemetry by default. Because the tool can auto-capture conversation content, here is exactly what it reads, stores, and (only if you opt in) transmits.
@@ -107,7 +145,7 @@ ShieldCortex is **local-first**: memory, scanning, and audit run entirely on you
 - **What it stores, and for how long.** Saved and auto-extracted memories are written to a **local SQLite database at `~/.shieldcortex/memories.db`** — title and content verbatim — and **persist across sessions** until you remove them (decay/consolidation prune low-value entries over time). Nothing is stored remotely unless you enable Cloud sync. Delete a memory with the `forget` tool, or remove the database to wipe everything.
 - **Secrets & credentials.** Every write — manual or auto-extracted — passes the defence pipeline first; high-confidence credential patterns (keys/tokens across 11+ providers) and content classified RESTRICTED are **blocked or quarantined before storage**, not saved as live memory. This is a strong filter, not a guarantee: low-confidence or low-entropy secrets can still be stored. On sensitive work, **review what auto-memory captures** and disable auto-extraction (`shieldcortex config --openclaw-auto-memory false`; the Claude Code handlers can be removed from `~/.claude/settings.json`).
 - **Triggers capture surrounding context.** Keyword auto-save triggers (e.g. "remember this", "don't forget") capture the *nearby* text, which may include more than you intend — treat them as "save the recent context," not "save exactly this line." They're capped (auto-extracts never outrank explicit saves) and run through the same credential/injection scan.
-- **Subprocess execution.** The OpenClaw integration spawns short-lived `npx mcporter` subprocesses (via `execFile`, no shell) to talk to your **local** ShieldCortex MCP server over stdio. No remote code is fetched or executed.
+- **Subprocess execution.** The OpenClaw integration spawns short-lived `npx mcporter` subprocesses (via `execFile`, argv-array, no shell) to talk to your **local** ShieldCortex MCP server over stdio. One caveat for completeness: when ShieldCortex is not installed locally, the hook's fallback server command is `npx -y shieldcortex`, and `npx -y` will download the package from the npm registry on first use before executing it. Install `shieldcortex` globally (or set `binaryPath` in `~/.shieldcortex/config.json`) to guarantee no network fetch on that path.
 - **Cloud sync — off by default, opt-in, explicit.** No data leaves your machine unless you run `shieldcortex config --cloud-enable --cloud-api-key <key>`. When enabled:
   - **Audit telemetry** (`/v1/audit/ingest`): scan **metadata only** — trust scores, threat indicators, categories, timings, device name. **No memory content.**
   - **Memory sync** (`/v1/sync/memories`, Enterprise licence — grandfathered Team keys also unlock it): transmits **full memory title + content** of PUBLIC/INTERNAL memories so they sync across your team. CONFIDENTIAL/RESTRICTED memories are **excluded by default**; switch to metadata-only with the `contentMode` control.
