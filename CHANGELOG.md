@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.14] - 2026-07-22
+
+**Doctor's schema check now derives from the canonical schema instead of a hand-maintained column list frozen at ~v4.0 — and the inline schema fallback is re-synced after silently drifting.**
+
+### Fixed
+
+- **Doctor schema drift check rebuilt on the canonical schema.** Field incident 21 Jul 2026: after upgrading to 4.47.13, `shieldcortex doctor` reported "Schema: up to date" while the write probe failed on the missing `defence_verdict` column. The check compared the live database against a hand-maintained three-column list frozen at ~v4.0, so every migration since was invisible to it. `checkSchema` is now an exported `runSchemaDriftCheck(dbPath)` whose expected columns come from `getCanonicalSchema()` applied to a throwaway in-memory database — new migration columns are covered the day they land in `schema.sql`. Only missing columns warn; live extras stay silent.
+- **Inline schema fallback re-synced with `schema.sql`.** The bundled inline copy had drifted: it was missing `defence_verdict`, the `trg_memories_provenance` provenance trigger, and six indexes (`idx_memories_created/status/pinned/source_kind`, `idx_links_source/target`) — so bundled deployments creating fresh databases got no provenance enforcement. Both schema-apply sites now go through the shared `getCanonicalSchema()` (schema.sql with inline fallback), and a new sync-guard test materialises both schema sources and diffs tables/columns/triggers/indexes so the inline copy can never silently drift again. The incident shape itself is pinned by a regression test (drift check warns on a DB missing `defence_verdict`).
+
 ## [4.47.13] - 2026-07-21
 
 **session_events gets the retention valve it never had (closes #110), and the OpenClaw plugin honours nested `interceptor` config instead of silently dropping it (closes #112).**
