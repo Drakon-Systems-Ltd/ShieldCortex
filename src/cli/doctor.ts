@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import semver from 'semver';
+import { execFileSync } from 'child_process';
 import { createRequire } from 'module';
 import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
 import {
@@ -19,6 +20,7 @@ import {
 import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import { getCanonicalSchema } from '../database/init.js';
+import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 
@@ -291,7 +293,7 @@ async function checkMemoryStats(): Promise<CheckResult> {
  * exercise it against any database path (in-memory or temp file)
  * without going through doctor's homedir-derived getDbPath().
  */
-export function runWritePathProbe(dbPath: string): CheckResult {
+export function runWritePathProbe(dbPath: string, env: Environment = detectEnvironment()): CheckResult {
   if (!fs.existsSync(dbPath)) {
     return { label: 'Write path', status: 'warn', message: 'skipped (no database)' };
   }
@@ -300,9 +302,29 @@ export function runWritePathProbe(dbPath: string): CheckResult {
   const probeUuid = `doctor-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const probeTitle = '__shieldcortex_doctor_probe__';
 
+  // On an OpenClaw-only / headless box there is no MCP server to "restart" —
+  // telling the user to do so is a dead end. The reliable heal is any command
+  // that opens the DB through the init/migration path; `shieldcortex repair`
+  // does that (and rebuilds a broken engine too). (#116)
+  const isOpenClawOnly = env.hasOpenClaw && !env.hasClaude;
+  const failFix = isOpenClawOnly
+    ? 'Run `shieldcortex repair` — it opens the database through the full init/migration path (and rebuilds the DB engine if that is the fault). This box has no MCP server to restart.'
+    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex install';
+
   try {
     const Database = require('better-sqlite3');
     db = new Database(dbPath);
+
+    // Bring the schema current before probing — the same migration path
+    // initDatabase() runs on every open (runMigrations → canonical schema).
+    // Without this the probe opened the DB raw and INSERTed against whatever
+    // was on disk, so a healthy pre-restart DB that is merely missing a
+    // freshly-added column (e.g. 4.47.13's defence_verdict) failed here and
+    // doctor cried "migration drift" on an install one open away from healthy.
+    // Pending migrations apply on the next real init anyway; applying them here
+    // makes the probe test the schema the runtime will actually use. (#116)
+    runMigrations(db);
+    db.exec(getCanonicalSchema());
 
     // INSERT — exercises NOT NULL columns + CHECK constraints. The schema
     // adds these silently across versions; an INSERT against a stale schema
@@ -347,7 +369,7 @@ export function runWritePathProbe(dbPath: string): CheckResult {
       label: 'Write path',
       status: 'fail',
       message: `round-trip failed — ${msg}`,
-      fix: 'This is the smoking gun for a stale schema or migration drift. Try restarting the MCP server (auto-migrates), or re-install: shieldcortex install',
+      fix: failFix,
     };
   } finally {
     if (db) {
@@ -2091,6 +2113,152 @@ export async function checkOpenClawPluginLoadState(
   }
 }
 
+/**
+ * The #94-class false green: every prior "plugin loaded" surface reads the
+ * version on DISK and green-ticks it, so a gateway that registered an older
+ * build hours/days ago hides behind a "current" tick (live 21 Jul 2026: box
+ * ran v4.47.8 under a "v4.47.13 loaded" green tick). The realtime plugin logs
+ * `[shieldcortex] vX.Y.Z registered` on every (re)start, so the most recent
+ * such line in the gateway journal is the version actually running. This check
+ * reads that line and compares it to the on-disk install:
+ *
+ *   - running == disk            → PASS (the loaded build matches disk).
+ *   - running != disk            → WARN "stale plugin loaded (vX running, vY
+ *                                  on disk) — gateway restart needed" (the
+ *                                  upgrade is on disk but not yet live).
+ *   - journal unreadable / no
+ *     registration line found    → INFO "cannot verify running version" — we
+ *                                  never emit a green claiming "current" when
+ *                                  we could not actually read the running one.
+ *
+ * The journal reader is injected (see `realRunningPluginVersionDeps`) so the
+ * check has no hard dependency on systemd being present or readable.
+ */
+export interface RunningPluginVersionDeps {
+  /** Returns the gateway journal/log text, or null when it can't be read. */
+  readGatewayJournal: () => string | null;
+}
+
+/**
+ * Extract the running realtime-plugin version from a gateway journal by taking
+ * the LAST `[shieldcortex] vX.Y.Z registered` line — journald/log output is
+ * chronological (oldest → newest), so the final match is the current start's
+ * registration. Returns null when no registration line is present.
+ */
+export function parseRunningPluginVersion(journal: string): string | null {
+  // Matches "[shieldcortex] v4.47.8 registered (...)" including semver
+  // pre-release/build suffixes. Global so we can walk to the final match.
+  const re = /\[shieldcortex\]\s+v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s+registered/g;
+  let match: RegExpExecArray | null;
+  let last: string | null = null;
+  while ((match = re.exec(journal)) !== null) {
+    last = match[1];
+  }
+  return last;
+}
+
+/**
+ * Real journal reader: prefer the user gateway service journal, fall back to
+ * OpenClaw's on-disk gateway log. Returns null on ANY failure (no systemd, no
+ * perms, no log file) so the check downgrades to "cannot verify" rather than a
+ * false green. Follows the execFileSync-with-stderr-swallowed pattern used by
+ * the dashboard-staleness probe.
+ */
+export function realRunningPluginVersionDeps(home: string = os.homedir()): RunningPluginVersionDeps {
+  return {
+    readGatewayJournal: (): string | null => {
+      // 1. systemd user journal for the gateway unit (the supported layout).
+      try {
+        const out = execFileSync(
+          'journalctl',
+          ['--user', '-u', 'openclaw-gateway', '--no-pager', '-n', '2000'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        );
+        if (typeof out === 'string' && out.trim().length > 0) return out;
+      } catch {
+        // no systemd / unit unknown / no perms — fall through to the log file
+      }
+
+      // 2. On-disk gateway log fallback for non-systemd installs.
+      const candidates = [
+        path.join(home, '.openclaw', 'logs', 'gateway.log'),
+        path.join(home, '.openclaw', 'logs', 'openclaw-gateway.log'),
+        path.join(home, '.openclaw', 'gateway.log'),
+      ];
+      for (const file of candidates) {
+        try {
+          if (fs.existsSync(file)) {
+            const text = fs.readFileSync(file, 'utf8');
+            if (text.trim().length > 0) return text;
+          }
+        } catch {
+          // unreadable — try the next candidate
+        }
+      }
+
+      return null;
+    },
+  };
+}
+
+export async function checkOpenClawRunningPluginVersion(
+  home: string = os.homedir(),
+  deps: RunningPluginVersionDeps = realRunningPluginVersionDeps(home),
+): Promise<CheckResult> {
+  const label = 'OpenClaw plugin running version';
+
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  const diskVersion = readInstalledRealtimePluginVersion(home);
+  if (!diskVersion) {
+    return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
+  }
+
+  const journal = deps.readGatewayJournal();
+  if (journal === null) {
+    return {
+      label,
+      status: 'info',
+      message:
+        `cannot verify running version (gateway journal unreadable — no systemd/journald access, ` +
+        `unknown unit, or no gateway log); on-disk v${diskVersion}`,
+    };
+  }
+
+  const running = parseRunningPluginVersion(journal);
+  if (!running) {
+    return {
+      label,
+      status: 'info',
+      message:
+        `cannot verify running version (no \`[shieldcortex] … registered\` line in the gateway journal — ` +
+        `gateway not started since logs rotated, or plugin never loaded); on-disk v${diskVersion}`,
+    };
+  }
+
+  if (running === diskVersion) {
+    return {
+      label,
+      status: 'pass',
+      message: `running v${running} matches on-disk v${diskVersion} (gateway loaded the current build)`,
+    };
+  }
+
+  return {
+    label,
+    status: 'warn',
+    message:
+      `stale plugin loaded (v${running} running, v${diskVersion} on disk) — the gateway is still ` +
+      `enforcing the older build; a gateway restart is needed to pick up the on-disk upgrade`,
+    fix:
+      'Restart the OpenClaw gateway so it re-registers the on-disk plugin ' +
+      '(`systemctl --user restart openclaw-gateway`, or restart the OpenClaw process). ' +
+      'Until then the live interceptor is the version shown as "running", not the one on disk.',
+  };
+}
+
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
   const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
@@ -2184,6 +2352,7 @@ export async function runDoctor(args: string[] = []): Promise<void> {
     checkOpenClawHookFreshness,
     checkOpenClawPluginVersion,
     checkOpenClawPluginLoadState,
+    checkOpenClawRunningPluginVersion,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkOpenClawManagedPinDrift,
