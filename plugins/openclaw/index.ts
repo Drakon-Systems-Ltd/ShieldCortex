@@ -183,6 +183,7 @@ export function __resetConfigStateForTest(): void {
   _configOverride = null;
   _lastShieldConfigRef = null;
   _registered = false;
+  _beforeToolCallRegistered = false;
 }
 
 type LlmInputEvent = {
@@ -402,6 +403,13 @@ try {
 } catch { /* fallback */ }
 
 let _registered = false;
+// Whether register() actually attached the before_tool_call hook this session.
+// False when the host config explicitly disables the interceptor — in that
+// case the hook must not exist at all, so the host's approval pipeline can
+// never route a tool call through this plugin (issue #112 follow-up: on
+// unattended Codex agents even a no-op registered hook changes how OpenClaw
+// resolves approvals).
+let _beforeToolCallRegistered = false;
 
 function normaliseConfig(raw: unknown): SCConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
@@ -1089,19 +1097,41 @@ export default {
       }
     }
 
-    // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
-    // can block or require approval before the selected tool executes.
-    api.on('before_tool_call', async (event: TypedBeforeToolCallEvent) => {
-      const interceptor = await initInterceptor();
-      if (!interceptor) return;
-      return handleTypedBeforeToolCall(event, interceptor, api.logger);
-    }, { priority: 80, timeoutMs: 30_000 });
+    // #112 follow-up: when the host config (openclaw.json plugin entry)
+    // explicitly disables the interceptor, do NOT register before_tool_call at
+    // all. A registered-but-no-op hook still appears in the host's hook roster
+    // and changes how OpenClaw resolves tool-call approvals for unattended
+    // Codex agents (plugin.approval.waitDecision waits on a decision no one
+    // can give, times out after 120s, and the turn emits no reply). Absent
+    // hook = the host's native approval path is untouched.
+    //
+    // Only the synchronously-available plugin config can gate registration
+    // (the shield config file loads async via the runtime); a shield-file-only
+    // `enabled:false` keeps the lazy no-op behaviour, which returns
+    // immediately and never requests approval — covered by regression tests.
+    // Note: re-enabling the interceptor from openclaw.json requires a gateway
+    // restart, since registration happens once at plugin load.
+    const interceptorDisabledInHostConfig = _configOverride?.interceptor?.enabled === false;
 
-    // Try to register session_end for cache cleanup
-    try {
-      api.on('session_end', () => { interceptorReady?.resetSession(); });
-    } catch {
-      // session_end may not be a supported hook — TTL safety net handles this
+    if (!interceptorDisabledInHostConfig) {
+      // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
+      // can block or require approval before the selected tool executes.
+      api.on('before_tool_call', async (event: TypedBeforeToolCallEvent) => {
+        const interceptor = await initInterceptor();
+        if (!interceptor) return;
+        return handleTypedBeforeToolCall(event, interceptor, api.logger);
+      }, { priority: 80, timeoutMs: 30_000 });
+      _beforeToolCallRegistered = true;
+
+      // Try to register session_end for cache cleanup (only meaningful while
+      // an interceptor can exist)
+      try {
+        api.on('session_end', () => { interceptorReady?.resetSession(); });
+      } catch {
+        // session_end may not be a supported hook — TTL safety net handles this
+      }
+    } else {
+      api.logger?.info?.('[shieldcortex] interceptor.enabled:false in plugin config — before_tool_call hook not registered');
     }
 
     api.on("llm_input", handleLlmInput, { timeoutMs: 30_000 });
@@ -1125,13 +1155,18 @@ export default {
         };
         const interceptorOn = (rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.enabled : undefined) ?? DEFAULT_INTERCEPTOR_CONFIG.enabled;
         const autoApproved = Array.isArray(guardCfg.autoApprove) ? guardCfg.autoApprove.length : 0;
-        const guardState = !interceptorOn || !guardCfg.enabled
-          ? "off"
-          : `${guardCfg.enforce ? "enforce" : "warn"}${autoApproved > 0 ? ` (${autoApproved} auto-approved)` : ""}${interceptorReady ? "" : " — not yet initialised this session"}`;
+        const guardState = !_beforeToolCallRegistered
+          ? "off (before_tool_call not registered — interceptor disabled in plugin config)"
+          : !interceptorOn || !guardCfg.enabled
+            ? "off"
+            : `${guardCfg.enforce ? "enforce" : "warn"}${autoApproved > 0 ? ` (${autoApproved} auto-approved)` : ""}${interceptorReady ? "" : " — not yet initialised this session"}`;
+        const hooksLine = _beforeToolCallRegistered
+          ? "llm_input (scan), llm_output (memory), before_tool_call (action guard), session_end (cache reset)"
+          : "llm_input (scan), llm_output (memory)";
         return {
           text:
             `ShieldCortex v${_version}\n` +
-            `  Hooks: llm_input (scan), llm_output (memory), before_tool_call (action guard), session_end (cache reset)\n` +
+            `  Hooks: ${hooksLine}\n` +
             `  Action guard: ${guardState}\n` +
             `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
             `  Cloud sync: ${cloud}`,
@@ -1139,7 +1174,7 @@ export default {
       },
     });
 
-    api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output + before_tool_call + /shieldcortex-status)`);
+    api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output${_beforeToolCallRegistered ? " + before_tool_call" : ""} + /shieldcortex-status)`);
     } catch (err) {
       // Plugin must never block channel startup — warn and bail gracefully
       const msg = err instanceof Error ? err.message : String(err);
