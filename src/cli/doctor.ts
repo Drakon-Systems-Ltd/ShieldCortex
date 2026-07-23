@@ -19,6 +19,7 @@ import {
 import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import { getCanonicalSchema } from '../database/init.js';
+import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 
@@ -291,7 +292,7 @@ async function checkMemoryStats(): Promise<CheckResult> {
  * exercise it against any database path (in-memory or temp file)
  * without going through doctor's homedir-derived getDbPath().
  */
-export function runWritePathProbe(dbPath: string): CheckResult {
+export function runWritePathProbe(dbPath: string, env: Environment = detectEnvironment()): CheckResult {
   if (!fs.existsSync(dbPath)) {
     return { label: 'Write path', status: 'warn', message: 'skipped (no database)' };
   }
@@ -300,9 +301,29 @@ export function runWritePathProbe(dbPath: string): CheckResult {
   const probeUuid = `doctor-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const probeTitle = '__shieldcortex_doctor_probe__';
 
+  // On an OpenClaw-only / headless box there is no MCP server to "restart" —
+  // telling the user to do so is a dead end. The reliable heal is any command
+  // that opens the DB through the init/migration path; `shieldcortex repair`
+  // does that (and rebuilds a broken engine too). (#116)
+  const isOpenClawOnly = env.hasOpenClaw && !env.hasClaude;
+  const failFix = isOpenClawOnly
+    ? 'Run `shieldcortex repair` — it opens the database through the full init/migration path (and rebuilds the DB engine if that is the fault). This box has no MCP server to restart.'
+    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex install';
+
   try {
     const Database = require('better-sqlite3');
     db = new Database(dbPath);
+
+    // Bring the schema current before probing — the same migration path
+    // initDatabase() runs on every open (runMigrations → canonical schema).
+    // Without this the probe opened the DB raw and INSERTed against whatever
+    // was on disk, so a healthy pre-restart DB that is merely missing a
+    // freshly-added column (e.g. 4.47.13's defence_verdict) failed here and
+    // doctor cried "migration drift" on an install one open away from healthy.
+    // Pending migrations apply on the next real init anyway; applying them here
+    // makes the probe test the schema the runtime will actually use. (#116)
+    runMigrations(db);
+    db.exec(getCanonicalSchema());
 
     // INSERT — exercises NOT NULL columns + CHECK constraints. The schema
     // adds these silently across versions; an INSERT against a stale schema
@@ -347,7 +368,7 @@ export function runWritePathProbe(dbPath: string): CheckResult {
       label: 'Write path',
       status: 'fail',
       message: `round-trip failed — ${msg}`,
-      fix: 'This is the smoking gun for a stale schema or migration drift. Try restarting the MCP server (auto-migrates), or re-install: shieldcortex install',
+      fix: failFix,
     };
   } finally {
     if (db) {
