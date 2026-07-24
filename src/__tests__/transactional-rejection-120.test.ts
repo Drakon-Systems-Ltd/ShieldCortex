@@ -54,6 +54,10 @@ describe('Issue #120 — must-not-emit the three injection specimens', () => {
       'The ClassDojo join-request sentinel fires every 30 minutes and pings on pending joins.',
       'We decided to retry failed operations 3 times with exponential backoff.',
       'Root cause: the OAuth token was cached past its 3600s TTL, so refresh never fired.',
+      // Ops doctrine that MENTIONS a gateway restart is not a status line —
+      // review catch: a bare "gateway restart" tell rejected these at capture.
+      'Background claude workers die on gateway restart — commit early and check on-disk state, not stdout.',
+      'Cron runtime-plugins stall: the fix is a gateway restart; the nightly restart is a backstop, not a fix.',
     ];
     for (const content of benign) {
       expect(mod.shouldRejectCandidate({ title: 'x', content }).rejected).toBe(false);

@@ -48,7 +48,11 @@ const TRANSACTIONAL_PATTERNS = [
   /\b(?:successfully\s+(?:sent|delivered|synced|posted|completed)|(?:sent|delivered|posted|synced)\s+successfully|(?:sync|job|run|backup|briefing|cron)\s+(?:completed|finished|succeeded|interrupted|failed|skipped))\b/i,
   /\bcron:\s/i,
   /\bjob\s+interrupted\b/i,
-  /\bgateway\s+restart\b/i,
+  // NOTE: a bare "gateway restart" tell was removed here in review — the phrase
+  // appears in genuine ops doctrine ("background workers die on gateway
+  // restart — commit early"), which capture-time rejection would silently
+  // discard. Actual restart STATUS lines are still caught by the compound
+  // confirmation pattern above and the cron:/job-interrupted tells.
   // Retry / escalation logs.
   /\bre-?escalat/i,
   /\blast\s+run\s+(?:as|was|=)\b/i,

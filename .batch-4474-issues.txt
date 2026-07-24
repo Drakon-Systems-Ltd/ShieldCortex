@@ -1,0 +1,130 @@
+===== ISSUE #71 =====
+False positive: pipe-download-to-shell fires on 1Password CLI command substitution and on quoted documentation content
+---
+## Summary
+Action Guard's `pipe-download-to-shell` rule auto-denies legitimate secret-retrieval commands that use shell command substitution with the 1Password CLI. No download and no pipe-to-interpreter is present.
+
+## Evidence (realtime audit, 10–11 Jul 2026)
+Four `auto_deny` events on commands of this shape:
+
+```bash
+export OP_SERVICE_ACCOUNT_TOKEN=$(cat ~/.op-token) && KEY=$(op item get "<item>" --fields <field> --reveal) some-tool ...
+TOK=$(op item get <item-id> --vault=<vault> --fields <field> --reveal) ...
+GH_TOKEN=$(op read "op://<vault>/<item>/<field>") gh api ...
+```
+
+All four are secret *retrieval* into env vars — not a download piped to a shell.
+
+## Second trigger class: quoted documentation content
+While filing this very issue, the guard blocked the `gh issue create` command itself (`catastrophic operation blocked (pipe-download-to-shell)`) because the issue **body text**, passed inline via a quoted heredoc, contained a `curl`-pipe-`bash` string as a *documentation example*. Quoted content inside a Bash command string is scanned as if it were executable — same class as the v4.44.0 rawStringArgs field-discipline fix, but at the Bash-command layer. Workaround was `--body-file`.
+
+## Inconsistency
+A near-identical `op item get` substitution ran clean minutes later (11 Jul 10:39Z), so the matcher is pattern-sensitive in a way that needs pinning down — fixtures should cover both the flagged and unflagged shapes.
+
+## Expected behaviour
+`pipe-download-to-shell` should require a **network-fetch source** (curl/wget/fetch/iwr) feeding an **interpreter** (bash/sh/python/node), via pipe or substitution. Local command substitution (`$(op ...)`, `$(cat ...)`) assigning env vars must not match. Content in quoted/heredoc positions that is never executed should be weighted accordingly (hard in general shell parsing — at minimum, single-quoted heredoc bodies).
+
+## Acceptance
+- [ ] The four flagged shapes above pass clean (regression fixtures)
+- [ ] A genuine download-piped-to-interpreter still denies (fixtures for pipe and substitution forms)
+- [ ] `gh issue create` with a heredoc body quoting dangerous patterns as documentation passes clean
+
+===== ISSUE #72 =====
+llm_input injection detector flags OpenClaw runtime notices and metadata envelopes as CRITICAL
+---
+## Summary
+The llm_input injection detector raises CRITICAL threat events on OpenClaw's own runtime notices and inbound-metadata envelopes. Advisory-only today (no block), but it pollutes the audit signal and would gate wrongly if llm_input ever enforces.
+
+## Evidence (realtime audit)
+Repeated `type: "threat", hook: "llm_input", reason: "CRITICAL (1 detections)"` on:
+
+1. Gateway-restart recovery notices — fleet-wide (seen on two boxes, 11 Jul 2026):
+```
+[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/...
+```
+2. Inbound metadata envelopes (3 Jul + 11 Jul):
+```
+Conversation info (untrusted metadata): ```json { "chat_id": ... }
+```
+
+These are the host runtime's own framing, injected every session by OpenClaw itself — flagging them as CRITICAL every time buries real detections.
+
+## Bypass risk — design carefully
+A naive string allowlist ("starts with `[System]`") would hand attackers a prefix that suppresses detection. The fix should NOT stop scanning this content. Options, in preference order:
+
+1. Classify, don't silence: keep the detection but emit as a distinct low-severity category (e.g. `host-runtime-notice`) when the content matches known host-envelope *structure* (position in turn, full-shape match), so dashboards/audit can filter without losing the event.
+2. Verify provenance where the hook interface exposes it (e.g. content injected by the OpenClaw plugin itself vs. arriving inside user/channel content). `[System]`-style text embedded *inside* a user message should still score CRITICAL.
+
+## Acceptance
+- [ ] Known OpenClaw runtime notices no longer emit CRITICAL (downgraded/classified, not dropped)
+- [ ] The same strings embedded inside user-supplied content STILL emit CRITICAL (anti-bypass fixture)
+- [ ] Audit entries carry the new category so noise is filterable
+
+===== ISSUE #73 =====
+Field report (aiquant): realtime plugin over-blocking legitimate operator-directed ops — mention-vs-intent, localhost CDP, docs fetch, local npm, sudo probe, opaque reason codes
+---
+Field report from fleet host **aiquant (Case)** during the 4.47.2 rollout, 2026-07-11. Measured false-positive / ops data from a live operator-authorised task (headless Playwright automation, requested by Michael). Plugin `shieldcortex-realtime` enabled, failure policy **deny**, mode balanced.
+
+## Observed hard-denies on legitimate operations
+
+1. **Mention ≠ intent** — outbound Telegram message *text* containing install-command strings (`npm i -g ...`, plugin reinstall) was blocked; rewording the same alert without command syntax passed. Content-scan is treating *quoted/discussed* commands as attempted installs. (Same class as the 2026-06-29 rawStringArgs field-discipline fix — a surface remains.)
+2. **`web_fetch` to docs.openclaw.ai / openclaw.ai / GitHub releases** — blocked with "approval error, failure policy: deny"; agent fell back to raw `curl` (worse security posture).
+3. **Workspace-local `npm install playwright`** (pinned, operator-requested, not global) — blocked.
+4. **Headless Chromium launch + CDP probe on 127.0.0.1** (`--headless=new --remote-debugging-port` + curl of the localhost JSON version endpoint) — treated as catastrophic.
+5. **Any exec containing `sudo`** — including a non-destructive `sudo -n true` capability probe.
+6. **Piping curl output into a python3 one-liner to parse GitHub API JSON** — caught by the pipe-download-to-shell rule (fair for piping downloads into `bash`/`sh`, over-broad for JSON parsing).
+
+**Live confirmation of item 1/6:** while filing THIS issue on host jarvis, the action guard denied a `gh issue create` whose *body text* quoted the pipe pattern (heredoc), rule id `pipe-download-to-shell`. The guard scanned quoted prose in an issue body as an attempted operation.
+
+Net effect on aiquant: operator had to instruct temporary plugin disable to complete authorised work — the exact anti-pattern a host-security product must avoid (forces disable-to-work, trains workaround behaviour).
+
+## Suggested fixes (from field report)
+
+1. **Intent vs mention:** scan the operation, not the prose — never deny a tool call solely because message/body text discusses commands.
+2. **Localhost/docs allowlist:** 127.0.0.1 CDP + known docs domains → advisory by default; reserve deny for egress/exfil/supply-chain.
+3. **Operator-approved local npm:** workspace-local installs after explicit human request → prompt/advisory, not hard deny.
+4. **Graduated failure policy:** advisory/ask on ambiguous local-dev ops; hard deny only for credential exfil, remote pipe-to-shell, unsolicited global installs from untrusted content.
+5. **Reason codes in block messages** (rule id + matched pattern) — "approval error, failure policy: deny" is opaque and un-actionable.
+6. **Doctor metadata conflict** for `shieldcortex-realtime` (also brave/codex) needs a clean repair path; seen on aiquant and prior hosts.
+7. **Status UX:** `shieldcortex iron-dome status` shows INACTIVE while the realtime interceptor is actively denying — surface both layers so "inactive" never reads as "unprotected".
+
+## Regression fixture material
+Items 1–6 are each reproducible patterns suitable for fixtures alongside the existing fleet regression set (ids 289/303/321/325/337), plus the jarvis `gh issue create` heredoc case above.
+
+===== ISSUE #76 =====
+MCP server dies with bare -32000 on native-module ABI mismatch; setup writers emit PATH-fragile entries — add startup self-heal + loud failure + PATH-immune config
+---
+## Summary
+Field failure (Friday's Mac, 2026-07-11, during the 4.47.2 fleet bump): Claude Code's memory MCP server entry (`mcpServers.memory` → the shieldcortex binary, stdio mode) fails with JSON-RPC `-32000` — the process spawns and dies before the MCP handshake. The entry shape is correct (bare binary auto-enters MCP mode; verified healthy on a control host).
+
+Two known causes, both product-hardenable:
+
+1. **better-sqlite3 ABI mismatch after an npm version bump without `shieldcortex repair`.** The long-standing gotcha ("always repair after install") — but when the dying process is an MCP server spawned by a GUI app, the operator sees only `-32000`, no explanation, and thinks memory is broken/lost. Compounded by multi-install layer-split: a rollout may repair install A while the MCP entry spawns install B.
+2. **PATH-fragile MCP entries.** Setup writers emit `command: <shieldcortex bin>` which relies on `#!/usr/bin/env node` — GUI/launchd spawn environments often lack the node prefix on PATH, so the shebang dies instantly (also presents as `-32000`).
+
+## Proposed fixes (4.47.3 scope — same installer-honesty theme as #74/PR #75)
+1. **Startup self-heal:** at MCP/CLI entry, catch the native-module load error (`NODE_MODULE_VERSION` / better-sqlite3 mismatch) and attempt an automatic in-place rebuild (same op as `repair`, scoped to the running install). Precedent: doctor auto-heal shipped in v4.46.0.
+2. **Die loudly, not silently:** if self-heal fails or is not possible, write a one-line actionable error to stderr *and* a breadcrumb file (e.g. `~/.shieldcortex/logs/mcp-spawn-error.log`) naming the exact install path and the repair command — so `-32000` is diagnosable in seconds.
+3. **PATH-immune config writers:** `copilot`/`codex`/Claude Code setup actions should write MCP entries as absolute `node` + absolute `dist/index.js` (resolved at setup time), not a shebang-dependent binary path.
+4. **Repair targets the spawning install:** `shieldcortex repair` should list all discovered installs (which -a semantics + known prefixes + MCP config references) and repair each, or at least warn on multi-install layer-split.
+
+## Acceptance
+- [ ] Simulated ABI mismatch on the MCP entry self-heals or fails with the actionable message + breadcrumb (no bare -32000)
+- [ ] Setup writers emit absolute-node entries; existing fragile entries migrated by doctor/repair
+- [ ] Multi-install hosts: repair covers/reports every install referenced by an MCP config
+- [ ] Regression fixture from the Friday-Mac field case once her confirm identifies the exact cause (pending)
+
+===== ISSUE #77 =====
+pluginStatus() false-negative: 'shieldcortex openclaw status' reports 'no files on disk' for managed npm project installs
+---
+Found by Case on aiquant during the 4.47.3 rc→release verification (2026-07-12).
+
+**Symptom:** `shieldcortex openclaw status` says `config references ... but no files on disk` even though the plugin is loaded and enforcing. 
+
+**Cause:** legacy `pluginStatus()` only checks the old `~/.openclaw/extensions/shieldcortex-realtime` path and is blind to the new canonical managed npm project path (`drakon-systems-shieldcortex-realtime-*`).
+
+**Evidence it's status-only:** OpenClaw roster (`plugins list --json`), `plugins info`, doctor, and the reconciler all agree loaded/v4.47.3, and Action Guard blocked a live recursive-force-delete post-restart. Runtime is healthy; only the status command lies.
+
+**Impact:** false 'not installed' reads during rollout verification — exactly the config-vs-disk-vs-loaded trap our fleet doctrine warns about, so this WILL mislead someone. Not a release blocker for 4.47.3.
+
+**Fix target:** 4.47.4 — teach `pluginStatus()` the managed-project path (or better: derive state from the OpenClaw roster instead of path-probing).

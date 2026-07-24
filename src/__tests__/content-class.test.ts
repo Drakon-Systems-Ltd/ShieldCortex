@@ -38,6 +38,9 @@ const NEUTRAL_FACTS = [
   'npm run build-release rebuilds the native binding in the install dir.',
   '`email_reply.send_reply(message_id, body)` is the canonical reply path.',
   'PostgreSQL chosen for JSONB support.',
+  // Mentions a gateway restart without being a status line (review catch —
+  // doctrine-class ops facts must never classify as transactional).
+  'Background claude workers die on gateway restart, so commit early and read on-disk state.',
 ];
 
 describe('classifyContentClass', () => {
