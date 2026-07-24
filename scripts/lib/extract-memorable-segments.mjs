@@ -11,6 +11,8 @@
  * one place.
  */
 
+import { classifyContentClass } from './content-class.mjs';
+
 // ==================== CONSTANTS ====================
 
 export const MAX_AUTO_MEMORIES = 5;
@@ -670,6 +672,17 @@ function looksLikeEmailBody(content) {
   return EMAIL_BODY_TELLS.some(rx => rx.test(content));
 }
 
+// Issue #120: transactional/status content — cron run tallies ("0, reran 0,
+// blocked 2"), counters, delivery confirmations ("12 delivered, 0 bounced"),
+// retry / escalation logs ("re-escalated … every ~6h") — has zero forward value
+// as a durable memory. Reject it at capture so it never competes for a slot or
+// floats to the top of the SessionStart preamble. classifyContentClass is the
+// shared vocabulary (scripts/lib/content-class.mjs), also driving the read-time
+// salience penalty so the two paths agree on what "housekeeping noise" is.
+function looksLikeTransactionalStatus(content) {
+  return classifyContentClass(content) === 'transactional';
+}
+
 function looksLikeImperativeToolCall(content) {
   return IMPERATIVE_TOOL_CALL_PATTERNS.some(rx => rx.test(content));
 }
@@ -713,6 +726,9 @@ export function shouldRejectCandidate(segment, conversationText) {
   }
   if (looksLikePathLabel(content)) {
     return { rejected: true, reason: 'path_label_fragment' };
+  }
+  if (looksLikeTransactionalStatus(content)) {
+    return { rejected: true, reason: 'transactional_status' };
   }
   if (hasUnbalancedClosingParen(content)) {
     return { rejected: true, reason: 'unbalanced_close_paren' };
