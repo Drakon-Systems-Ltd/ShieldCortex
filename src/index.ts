@@ -633,6 +633,7 @@ ${bold}COMMANDS${reset}
                         --content <text> or pipe via stdin; --importance, --tags
   ${cyan}scan${reset} <text>           Scan text through the defence pipeline
   ${cyan}scan-skill${reset} <path>     Scan an agent instruction file for threats
+                        (--accept to suppress a reviewed file; --forget to undo)
   ${cyan}scan-skills${reset}           Scan all installed skills/hooks
   ${cyan}dashboard${reset}             Open the local security dashboard
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
@@ -997,15 +998,64 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'scan-skill') {
     const filePath = process.argv[3];
     if (!filePath) {
-      console.error('Usage: shieldcortex scan-skill <path>');
+      console.error('Usage: shieldcortex scan-skill <path> [--accept | --clear | --forget]');
       console.error('  Scans an agent instruction file for threats.');
       console.error('  Supports: SKILL.md, HOOK.md, handler.js, .cursorrules,');
       console.error('  .windsurfrules, .clinerules, CLAUDE.md, copilot-instructions.md,');
       console.error('  .aider.conf.yml, .continue/config.json');
+      console.error('');
+      console.error('  --accept / --clear   Mark this file (by content hash) as reviewed &');
+      console.error('                       acceptable — suppresses re-flagging until it changes.');
+      console.error('  --forget             Remove a previously recorded acceptance.');
       process.exit(1);
     }
-    const { scanSkill } = await import('./defence/skill-scanner/index.js');
+    const { scanSkill, contentHash, recordVerdict, removeVerdict, getVerdict } =
+      await import('./defence/skill-scanner/index.js');
+    const { readFileSync } = await import('fs');
+
+    const wantAccept = process.argv.includes('--accept') || process.argv.includes('--clear');
+    const wantForget = process.argv.includes('--forget');
+
     const result = scanSkill(filePath);
+
+    // Operator verdict management (issue #121) — stored by content hash so any
+    // change to the file invalidates the acceptance and re-flags it.
+    if (wantForget) {
+      try {
+        const hash = contentHash(readFileSync(filePath, 'utf-8'));
+        const removed = removeVerdict(hash);
+        console.log(removed
+          ? `\nForgot the stored acceptance for ${result.skillName} (${filePath}).`
+          : `\nNo stored acceptance found for the current content of ${filePath}.`);
+        process.exit(0);
+      } catch {
+        console.error(`\nCould not read ${filePath} to forget its verdict.`);
+        process.exit(1);
+      }
+    }
+    if (wantAccept) {
+      try {
+        const hash = contentHash(readFileSync(filePath, 'utf-8'));
+        recordVerdict(hash, {
+          path: filePath,
+          skillName: result.skillName,
+          riskLevel: result.riskLevel,
+          acceptedAt: new Date().toISOString(),
+        });
+        console.log(`\nAccepted ${result.skillName} (${filePath}).`);
+        console.log('It will be suppressed in future scans until its content changes.');
+        process.exit(0);
+      } catch {
+        console.error(`\nCould not read ${filePath} to accept it.`);
+        process.exit(1);
+      }
+    }
+
+    // Plain scan — note if the operator has already accepted this exact content.
+    let accepted = false;
+    try {
+      accepted = !!getVerdict(contentHash(readFileSync(filePath, 'utf-8')));
+    } catch { /* unreadable — handled by scan result */ }
 
     // Coloured output
     const severityColor: Record<string, string> = {
@@ -1023,6 +1073,9 @@ ${bold}DOCS${reset}
     console.log(`  Format:  ${result.format}`);
     console.log(`  Risk:    ${result.safe ? '\x1b[32mSAFE\x1b[0m' : `${severityColor[result.riskLevel] ?? ''}${result.riskLevel.toUpperCase()}${reset}`}`);
     console.log(`  Time:    ${result.scanDurationMs}ms`);
+    if (accepted && !result.safe) {
+      console.log(`  Status:  \x1b[32maccepted by operator\x1b[0m (suppressed — re-flags if the file changes)`);
+    }
 
     if (result.findings.length > 0) {
       console.log(`\n${bold}Findings (${result.findings.length}):${reset}`);
@@ -1044,7 +1097,8 @@ ${bold}DOCS${reset}
     const { flushPendingCloudSync } = await import('./cloud/sync.js');
     await flushPendingCloudSync(8000);
 
-    process.exit(result.safe ? 0 : 1);
+    // An operator-accepted file exits clean even if findings remain.
+    process.exit(result.safe || accepted ? 0 : 1);
   }
 
   // Handle "env" subcommand — Environment Firewall (Phase 1: scan a URL)
@@ -1082,7 +1136,14 @@ ${bold}DOCS${reset}
 
   // Handle "scan-skills" subcommand — scan all installed skills/hooks
   if (process.argv[2] === 'scan-skills') {
-    const { scanSkill, discoverSkillFiles } = await import('./defence/skill-scanner/index.js');
+    const { scanSkill, discoverSkillFiles, getFileVerdict, writeWarningsFile } =
+      await import('./defence/skill-scanner/index.js');
+    type FlaggedSkill = {
+      skillName: string;
+      path: string;
+      riskLevel: string;
+      summary: string;
+    };
 
     const customDir = process.argv.indexOf('--dir') !== -1
       ? process.argv[process.argv.indexOf('--dir') + 1]
@@ -1094,6 +1155,8 @@ ${bold}DOCS${reset}
       console.log('\nNo agent instruction files found to scan.');
       console.log('Checked: Claude Code skills, OpenClaw hooks, .cursorrules, CLAUDE.md, and more.');
       console.log('Use --dir <path> to scan a custom directory.\n');
+      // Nothing to scan → the workspace warnings file must not linger.
+      writeWarningsFile(process.cwd(), []);
       process.exit(0);
     }
 
@@ -1102,17 +1165,36 @@ ${bold}DOCS${reset}
     console.log(`\n${bold}Scanning ${filesToScan.length} file(s)...${reset}\n`);
 
     let threatCount = 0;
-    const results: Array<{ path: string; safe: boolean; riskLevel: string; summary: string }> = [];
+    let acceptedCount = 0;
+    const flagged: FlaggedSkill[] = [];
 
     for (const fp of filesToScan) {
       const result = scanSkill(fp);
-      results.push({ path: fp, safe: result.safe, riskLevel: result.riskLevel, summary: result.summary });
-      if (!result.safe) threatCount++;
 
-      const icon = result.safe ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
-      const risk = result.safe ? '\x1b[32msafe\x1b[0m' : `\x1b[31m${result.riskLevel}\x1b[0m`;
+      // Operator acceptance (issue #121): a reviewed file with unchanged content
+      // is suppressed — it is not counted as a live threat.
+      const accepted = !result.safe && !!getFileVerdict(fp);
+      if (accepted) acceptedCount++;
+
+      const flag = !result.safe && !accepted;
+      if (flag) {
+        threatCount++;
+        flagged.push({
+          skillName: result.skillName,
+          path: fp,
+          riskLevel: result.riskLevel,
+          summary: result.summary,
+        });
+      }
+
+      const icon = flag ? '\x1b[31m✗\x1b[0m' : '\x1b[32m✓\x1b[0m';
+      const risk = flag
+        ? `\x1b[31m${result.riskLevel}\x1b[0m`
+        : accepted
+          ? '\x1b[32maccepted\x1b[0m'
+          : '\x1b[32msafe\x1b[0m';
       console.log(`  ${icon} ${risk.padEnd(20)} ${fp}`);
-      if (!result.safe) {
+      if (flag) {
         for (const f of result.findings) {
           if (f.severity === 'high' || f.severity === 'critical') {
             console.log(`    \x1b[31m[${f.severity}]\x1b[0m ${f.description}`);
@@ -1121,7 +1203,14 @@ ${bold}DOCS${reset}
       }
     }
 
-    console.log(`\n${bold}Summary:${reset} ${filesToScan.length} scanned, ${threatCount} with threats\n`);
+    // Regenerate the workspace warnings file so it always matches this scan.
+    const action = writeWarningsFile(process.cwd(), flagged);
+
+    const acceptedNote = acceptedCount > 0 ? `, ${acceptedCount} accepted` : '';
+    console.log(`\n${bold}Summary:${reset} ${filesToScan.length} scanned, ${threatCount} with threats${acceptedNote}\n`);
+    if (action === 'written') {
+      console.log(`Wrote SHIELDCORTEX_WARNINGS.md to ${process.cwd()}\n`);
+    }
     process.exit(threatCount > 0 ? 1 : 0);
   }
 

@@ -25,3 +25,27 @@ export { parseSkillFile, readSkillFile, detectFormat, detectFormatFromContent } 
 export type { ParsedSkill, SkillFormat } from './parser.js';
 
 export { discoverSkillFiles } from './discover.js';
+
+export {
+  applyDensityCap,
+  hasHardSignal,
+  isInstructionDensityFormat,
+  HARD_SIGNAL_PATTERNS,
+} from './scan-profile.js';
+
+export {
+  contentHash,
+  loadVerdicts,
+  getVerdict,
+  recordVerdict,
+  removeVerdict,
+  getFileVerdict,
+} from './verdict-store.js';
+export type { ScanVerdict } from './verdict-store.js';
+
+export {
+  generateWarningsMarkdown,
+  writeWarningsFile,
+  WARNINGS_FILENAME,
+} from './report.js';
+export type { FlaggedSkill } from './report.js';
