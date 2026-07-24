@@ -26,6 +26,7 @@ import { detectSkillThreats, detectCodeThreats } from './patterns.js';
 import type { SkillThreatResult } from './patterns.js';
 import { readSkillFile, parseSkillFile } from './parser.js';
 import type { SkillFormat, ParsedSkill } from './parser.js';
+import { applyDensityCap } from './scan-profile.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,12 @@ export interface SkillScanResult {
   summary: string;
   /** Time taken to scan in milliseconds. */
   scanDurationMs: number;
+  /**
+   * True when the format-aware profile (issue #121) capped one or more findings
+   * to 'medium' because the file is a skill/hook doc carrying only imperative-
+   * instruction density with no hard exfil/credential/config-mutation signal.
+   */
+  densityCapped: boolean;
   /** Full firewall analysis result. */
   firewall: FirewallAnalysis;
   /** Sensitivity classification result. */
@@ -276,23 +283,32 @@ function scanParsed(
   // 8. Deduplicate findings by pattern name (keep highest severity)
   const deduped = deduplicateFindings(findings);
 
-  // 9. Derive overall risk level and safety
-  const riskLevel = highestSeverity(deduped);
-  const safe = !deduped.some(
+  // 9. Format-aware profile (issue #121): for skill/hook docs, imperative-
+  //    instruction density alone cannot carry high/critical — cap to 'medium'
+  //    unless a hard exfil/credential/config-mutation signal corroborates it.
+  const { findings: profiled, capped: densityCapped } = applyDensityCap(
+    deduped,
+    parsed.format,
+  );
+
+  // 10. Derive overall risk level and safety from the profiled findings
+  const riskLevel = highestSeverity(profiled);
+  const safe = !profiled.some(
     (f) => f.severity === 'high' || f.severity === 'critical',
   );
 
-  // 10. Generate summary
-  const summary = generateSummary(parsed.name, deduped, riskLevel, safe);
+  // 11. Generate summary
+  const summary = generateSummary(parsed.name, profiled, riskLevel, safe);
 
   return {
     safe,
     skillName: parsed.name,
     format: parsed.format,
-    findings: deduped,
+    findings: profiled,
     riskLevel,
     summary,
     scanDurationMs: Date.now() - startTime,
+    densityCapped,
     firewall,
     sensitivity,
   };
@@ -448,6 +464,7 @@ export function scanSkill(
       riskLevel: 'safe',
       summary: `${filePath}: scan failed — could not read file`,
       scanDurationMs: Date.now() - startTime,
+      densityCapped: false,
       firewall: {
         result: 'ALLOW',
         reason: 'Scan failed — file unreadable',
@@ -505,6 +522,7 @@ export function scanSkillContent(
       riskLevel: 'safe',
       summary: `${effectiveName}: scan failed — unexpected error`,
       scanDurationMs: Date.now() - startTime,
+      densityCapped: false,
       firewall: {
         result: 'ALLOW',
         reason: 'Scan failed — unexpected error',
