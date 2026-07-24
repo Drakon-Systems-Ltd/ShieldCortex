@@ -15,6 +15,14 @@
  *   pin               = pinned ? pinBoost : 1
  *   downvote_penalty  = max(0.1, 1 - downvoteDecay × downvote_count)
  *
+ * v4.47.x (issue #120): a CONTENT-CLASS factor is folded in on top —
+ * transactional/status noise (cron run tallies, retry logs, delivery
+ * confirmations) is penalised and consequence content (decision, root-cause,
+ * preference, doctrine) is boosted. Frequency (the raw-salience ratchet) and
+ * recency are load-independent of consequence, so without this a re-extracted
+ * status line out-ranks a three-week-old root-cause finding. See
+ * scripts/lib/content-class.mjs.
+ *
  * All constants are env-var-tunable (no recompile needed for field tuning).
  *
  * The function returns the *multiplier-adjusted* salience. The base salience
@@ -37,6 +45,8 @@
  * }} [opts]
  * @returns {number}
  */
+import { contentClassFactor } from './content-class.mjs';
+
 // Resolve a numeric tuning constant from opts (explicit override), then
 // SHIELDCORTEX_* env var, then the documented default. Returns the default
 // if either of the first two is NaN — we never want a typo'd env var to
@@ -117,6 +127,12 @@ export function computeEffectiveSalience(memory, opts = {}) {
   // /access. Default 0.5 halves them — enough to sink below complete facts in
   // the candidate pool without excluding a genuinely-relevant one outright.
   const fragmentFactor = pickNumber(opts.fragmentFactor, 'SHIELDCORTEX_SALIENCE_FRAGMENT_FACTOR', 0.5);
+  // Content-class weights (issue #120): transactional/status content is
+  // penalised, consequence content (decision/root-cause/preference/doctrine) is
+  // boosted. Kept < the completeness swing individually but multiplicative with
+  // it, so a complete consequence fact dominates a fragmentary status line.
+  const classBoost = pickNumber(opts.classBoost, 'SHIELDCORTEX_SALIENCE_CLASS_BOOST', 1.3);
+  const classPenalty = pickNumber(opts.classPenalty, 'SHIELDCORTEX_SALIENCE_CLASS_PENALTY', 0.35);
   const now = opts.now ?? Date.now();
 
   const base = typeof memory.salience === 'number' ? memory.salience : 0;
@@ -152,5 +168,13 @@ export function computeEffectiveSalience(memory, opts = {}) {
   // preserving v4.25 caller behaviour.
   const completeness = contentCompletenessFactor(memory.content, fragmentFactor);
 
-  return base * recency * access * pin * downvotePenalty * completeness;
+  // Content class: derived fresh from content each call (ratchet-proof, like
+  // completeness). Neutral (1) when no content is supplied, preserving v4.25
+  // caller behaviour.
+  const contentClass =
+    typeof memory.content === 'string'
+      ? contentClassFactor(memory.content, { boost: classBoost, penalty: classPenalty })
+      : 1;
+
+  return base * recency * access * pin * downvotePenalty * completeness * contentClass;
 }
