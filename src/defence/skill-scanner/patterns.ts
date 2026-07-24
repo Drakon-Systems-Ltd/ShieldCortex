@@ -146,8 +146,13 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       /write\s+[\s\S]{0,50}\.windsurfrules/i,
       /write\s+[\s\S]{0,50}\.clinerules/i,
       /modify\s+[\s\S]{0,50}\.claude\/commands/i,
-      /add\s+[\s\S]{0,50}hook/i,
-      /install\s+[\s\S]{0,50}hook/i,
+      // add/install/register a hook — tight adjacency only. The old
+      // /add[\s\S]{0,50}hook/ bridged up to 50 chars of unrelated markdown
+      // (issue #121: cortex-memory's "…skills install shieldcortex ``` … "hooks"
+      // config block" matched across a code fence → spurious `persistence`).
+      // Require the hook to be the direct object of the verb, allowing only
+      // short benign qualifiers (a / the / new / git / pre-commit / shell …).
+      /\b(add|install|register)\s+(a\s+|an\s+|the\s+|new\s+|custom\s+|git\s+|pre-commit\s+|post-commit\s+|shell\s+)*hooks?\b/i,
       /modify\s+[\s\S]{0,50}\.claude\/plugins/i,
       /\bcrontab\b/i,
       /\blaunchd\b/i,
