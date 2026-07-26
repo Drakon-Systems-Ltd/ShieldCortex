@@ -221,7 +221,12 @@ export function formatReconcileReport(result: ReconcileExecResult): string[] {
 
   if (!result.applied) {
     if (verdict.state === 'healthy') {
-      lines.push('✓ realtime plugin healthy: enabled, loaded in roster, versions agree.');
+      // #103: only claim "loaded" when the RUNNING gateway roster proves it.
+      lines.push(
+        verdict.loadedInLiveRoster === true
+          ? '✓ realtime plugin healthy: enabled, loaded on the running gateway roster, versions agree.'
+          : '⚠ realtime plugin installed and enabled, versions agree — NOT proven loaded: the running gateway boot roster could not be read. Restart the gateway, then re-run, or check `journalctl --user -u openclaw-gateway | grep "http server listening"` yourself.',
+      );
       return lines;
     }
     lines.push('');

@@ -6,6 +6,7 @@ import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
 } from './openclaw-plugin-state.js';
+import { readLatestBootRoster } from './openclaw-gateway-roster.js';
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
@@ -74,6 +75,13 @@ export interface ReconcileInput {
   onDiskVersion: string | null;
   /** `~/.openclaw/npm/projects/*` dir names matching the plugin. */
   projectDirs?: string[];
+  /**
+   * Plugin ids named on the RUNNING gateway's boot roster line, or null when
+   * that line could not be read (#103). This is the only ground truth for what
+   * the gateway actually loaded; `index.plugins` merely records what is
+   * installed and enabled. Null means "cannot prove", never "healthy".
+   */
+  liveRoster?: string[] | null;
 }
 
 export type PluginLoadState =
@@ -99,8 +107,17 @@ export interface ReconcileVerdict {
   severity: ReconcileSeverity;
   recommendedAction: RecommendedAction;
   enabledInConfig: boolean;
-  /** plugins_json roster carries an enabled entry for the plugin. */
+  /**
+   * plugins_json carries an enabled entry for the plugin. NOTE: this is the
+   * INSTALL index, not the live gateway roster — it says the plugin is
+   * installed and enabled, not that the running gateway loaded it (#103).
+   */
   loadedInIndex: boolean;
+  /**
+   * The running gateway's boot roster names the plugin. `null` when that line
+   * could not be read — absence of evidence, not evidence of absence.
+   */
+  loadedInLiveRoster: boolean | null;
   /** The SQLite install index was actually readable (false ⇒ we CANNOT know
    * whether the plugin is loaded — never claim UNPROTECTED off an unreadable index). */
   indexReadable: boolean;
@@ -144,6 +161,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     index?.plugins?.some((p) => p.pluginId === pluginId && p.enabled === true),
   );
 
+  // #103: the live gateway roster overrides the install index. Null = unread.
+  const liveRoster = input.liveRoster ?? null;
+  const loadedInLiveRoster = liveRoster == null ? null : liveRoster.includes(pluginId);
+
   const installsJsonVersion = input.installsJson?.version ?? null;
   const indexVersion = indexRecord?.version ?? indexRecord?.resolvedVersion ?? null;
   const onDiskVersion = input.onDiskVersion ?? null;
@@ -179,6 +200,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const base = {
     enabledInConfig,
     loadedInIndex,
+    loadedInLiveRoster,
     indexReadable,
     openClawTracked,
     indexWarnsConflict,
@@ -197,7 +219,24 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     return { ...base, state: 'not-installed', severity: 'ok', recommendedAction: 'install', reasons };
   }
 
-  // 2. Cannot read the loaded roster (SQLite index unreadable): a broken
+  // 2. THE #103 silent drop: the RUNNING gateway's boot roster does not name
+  //    the plugin. This outranks every index-derived signal — on veronica the
+  //    plugin was installed, enabled, allow-listed and present in plugins_json
+  //    (so the checks below all read "healthy") while the gateway had booted
+  //    without it six days earlier. Install state is not load state.
+  if (enabledInConfig && loadedInLiveRoster === false) {
+    reasons.push('enabled:true in config but ABSENT from the RUNNING gateway boot roster — interceptor not loaded, host unprotected while status reports ON');
+    if (loadedInIndex) reasons.push('the SQLite install index lists it as enabled — install state, not load state; the live roster is authoritative');
+    return {
+      ...base,
+      state: 'enabled-not-loaded',
+      severity: 'fail',
+      recommendedAction: openClawTracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
+      reasons,
+    };
+  }
+
+  // 3. Cannot read the loaded roster (SQLite index unreadable): a broken
   //    better-sqlite3 binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
   //    `installed_plugin_index` table all return a null index. We literally
   //    cannot know whether the plugin is loaded — reporting the #74 fail-open
@@ -205,12 +244,12 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   //    fault repair pass-1 exists to fix). Classify as a diagnostic gap (warn),
   //    NEVER as a security fail-open. Only reached when enabled + installed but
   //    the index is unreadable; a genuinely uninstalled plugin fell out at (1).
-  if (enabledInConfig && !loadedInIndex && index == null) {
+  if (enabledInConfig && !loadedInIndex && index == null && loadedInLiveRoster !== true) {
     reasons.push('cannot read the loaded roster — the SQLite plugin install index is unreadable (broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw with no installed_plugin_index table); cannot confirm whether the interceptor is loaded');
     return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
-  // 3. THE #74 silent drop: enabled in config but missing from a READABLE roster.
+  // 4. THE #74 silent drop: enabled in config but missing from a READABLE index.
   if (enabledInConfig && !loadedInIndex) {
     reasons.push('enabled:true in config but ABSENT from the loaded roster (plugins_json) — interceptor not loaded, host unprotected while status reports ON');
     if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
@@ -248,7 +287,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
   }
 
-  reasons.push('enabled, loaded in roster, versions agree at the expected build');
+  // Say exactly which evidence we have. Claiming "loaded in roster" off the
+  // install index alone is what made #103 a false positive.
+  reasons.push(
+    loadedInLiveRoster === true
+      ? 'enabled, present on the running gateway boot roster, versions agree at the expected build'
+      : 'enabled and installed, versions agree at the expected build — but the running gateway boot roster could NOT be read, so the plugin is not proven loaded',
+  );
   return { ...base, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
 }
 
@@ -434,6 +479,11 @@ export interface GatherOptions {
   expectedVersion: string;
   /** Injectable index reader (defaults to the live SQLite read). */
   readIndex?: (home: string) => PluginIndexRow | null;
+  /**
+   * Injectable live-roster reader (defaults to reading the gateway's newest
+   * `http server listening` boot line). Returns null when it cannot be proven.
+   */
+  readLiveRoster?: () => string[] | null;
 }
 
 function readConfigEnable(home: string, pluginId: string): { enabled: boolean | null; inAllow: boolean } {
@@ -488,6 +538,12 @@ function scanProjectDirs(home: string, pluginId: string): string[] {
 export function gatherReconcileInput(home: string, options: GatherOptions): ReconcileInput {
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
   const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
+  // The default roster read touches the host's real gateway log dir (/tmp/openclaw),
+  // which no `home` override can redirect — so it must never fire under Jest, or a
+  // test would silently inherit THIS box's roster. Tests inject readLiveRoster.
+  const readRoster =
+    options.readLiveRoster ??
+    (() => (process.env.JEST_WORKER_ID !== undefined ? null : (readLatestBootRoster()?.plugins ?? null)));
   return {
     pluginId,
     expectedVersion: options.expectedVersion,
@@ -496,6 +552,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     index: readIndex(home),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     projectDirs: scanProjectDirs(home, pluginId),
+    liveRoster: readRoster(),
   };
 }
 
