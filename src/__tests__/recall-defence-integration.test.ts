@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import { execFileSync, execSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,8 +24,21 @@ describe('recall-defence integration — prompt-recall withholds a poisoned row'
   let dbPath: string;
 
   beforeAll(() => {
-    // The hook dynamic-imports built dist modules; make sure they're current.
-    execSync('npm run build:ts', { cwd: repoRoot, stdio: 'ignore' });
+    // The hook dynamic-imports built dist modules, so dist has to exist. Build
+    // ONLY when it doesn't: `npm run build:ts` starts by rm -rf'ing dist, and
+    // Jest runs suites in parallel — wiping dist mid-run races every other
+    // suite that asserts on a dist artefact (action-guard-hook-install's
+    // `existsSync(dist/index.js)` lost that race in CI on 27 Jul). CI builds
+    // before it runs tests, so this is a local-convenience path only.
+    const distProbes = [
+      join(repoRoot, 'dist', 'index.js'),
+      join(repoRoot, 'dist', 'defence', 'trust', 'recall-filter.js'),
+      join(repoRoot, 'dist', 'defence', 'audit', 'logger.js'),
+      join(repoRoot, 'dist', 'database', 'init.js'),
+    ];
+    if (!distProbes.every((p) => existsSync(p))) {
+      execSync('npm run build:ts', { cwd: repoRoot, stdio: 'ignore' });
+    }
 
     home = mkdtempSync(join(tmpdir(), 'recall-defence-it-'));
     mkdirSync(join(home, '.shieldcortex'), { recursive: true });
@@ -52,10 +65,18 @@ describe('recall-defence integration — prompt-recall withholds a poisoned row'
 
   it('drops the injection row (access_count stays 0) and keeps the benign one', () => {
     const input = JSON.stringify({ prompt: 'how do I deploy this project', cwd: '/tmp/recall-it', session_id: null });
-    // Redirect homedir() (DB + config) at the temp dir; drop the per-worker
-    // config sandbox so the spawned hook reads our config.json.
+    // Redirect homedir() (DB + config) at the temp dir, then strip EVERY
+    // inherited SHIELDCORTEX_* var so the spawned hook runs against this
+    // fixture alone. Dropping only SHIELDCORTEX_CONFIG_DIR was not enough:
+    // on any box that actually runs the hooks, SHIELDCORTEX_PROJECT_KEY is
+    // exported in the shell, and deriveProjectKey() honours it ahead of the
+    // cwd basename — so the hook queried project "clawd" instead of
+    // "recall-it", matched nothing, injected nothing, and the benign row's
+    // access_count stayed 0 (issue #125).
     const env = { ...process.env, HOME: home, USERPROFILE: home };
-    delete (env as Record<string, string | undefined>).SHIELDCORTEX_CONFIG_DIR;
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('SHIELDCORTEX_')) delete (env as Record<string, string | undefined>)[key];
+    }
 
     try {
       execFileSync('node', [HOOK], { input, env, timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] });
