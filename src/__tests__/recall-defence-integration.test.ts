@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import { execFileSync, execSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,8 +24,21 @@ describe('recall-defence integration — prompt-recall withholds a poisoned row'
   let dbPath: string;
 
   beforeAll(() => {
-    // The hook dynamic-imports built dist modules; make sure they're current.
-    execSync('npm run build:ts', { cwd: repoRoot, stdio: 'ignore' });
+    // The hook dynamic-imports built dist modules, so dist has to exist. Build
+    // ONLY when it doesn't: `npm run build:ts` starts by rm -rf'ing dist, and
+    // Jest runs suites in parallel — wiping dist mid-run races every other
+    // suite that asserts on a dist artefact (action-guard-hook-install's
+    // `existsSync(dist/index.js)` lost that race in CI on 27 Jul). CI builds
+    // before it runs tests, so this is a local-convenience path only.
+    const distProbes = [
+      join(repoRoot, 'dist', 'index.js'),
+      join(repoRoot, 'dist', 'defence', 'trust', 'recall-filter.js'),
+      join(repoRoot, 'dist', 'defence', 'audit', 'logger.js'),
+      join(repoRoot, 'dist', 'database', 'init.js'),
+    ];
+    if (!distProbes.every((p) => existsSync(p))) {
+      execSync('npm run build:ts', { cwd: repoRoot, stdio: 'ignore' });
+    }
 
     home = mkdtempSync(join(tmpdir(), 'recall-defence-it-'));
     mkdirSync(join(home, '.shieldcortex'), { recursive: true });
