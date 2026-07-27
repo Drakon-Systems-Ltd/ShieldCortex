@@ -52,10 +52,18 @@ describe('recall-defence integration — prompt-recall withholds a poisoned row'
 
   it('drops the injection row (access_count stays 0) and keeps the benign one', () => {
     const input = JSON.stringify({ prompt: 'how do I deploy this project', cwd: '/tmp/recall-it', session_id: null });
-    // Redirect homedir() (DB + config) at the temp dir; drop the per-worker
-    // config sandbox so the spawned hook reads our config.json.
+    // Redirect homedir() (DB + config) at the temp dir, then strip EVERY
+    // inherited SHIELDCORTEX_* var so the spawned hook runs against this
+    // fixture alone. Dropping only SHIELDCORTEX_CONFIG_DIR was not enough:
+    // on any box that actually runs the hooks, SHIELDCORTEX_PROJECT_KEY is
+    // exported in the shell, and deriveProjectKey() honours it ahead of the
+    // cwd basename — so the hook queried project "clawd" instead of
+    // "recall-it", matched nothing, injected nothing, and the benign row's
+    // access_count stayed 0 (issue #125).
     const env = { ...process.env, HOME: home, USERPROFILE: home };
-    delete (env as Record<string, string | undefined>).SHIELDCORTEX_CONFIG_DIR;
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('SHIELDCORTEX_')) delete (env as Record<string, string | undefined>)[key];
+    }
 
     try {
       execFileSync('node', [HOOK], { input, env, timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] });
