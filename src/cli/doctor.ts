@@ -43,6 +43,24 @@ export interface CheckResult {
   status: CheckStatus;
   message: string;
   fix?: string;
+  /**
+   * Set when the check did not run because a prerequisite simply does not
+   * exist yet on a fresh install. runDoctor() collapses these into a single
+   * dim note instead of printing a line per dependent check — the cascade of
+   * "skipped (no database)" warnings read as four separate faults on a
+   * perfectly healthy first run (#129).
+   */
+  skipped?: 'db-uninitialised';
+}
+
+/**
+ * Uniform "the database hasn't been created yet" result for the checks that
+ * need a database to say anything at all. Informational, never a warning:
+ * the DB is created lazily on first use, so its absence on a fresh install
+ * is the expected state, not a fault.
+ */
+function skippedNoDatabase(label: string): CheckResult {
+  return { label, status: 'info', message: 'skipped — database not created yet', skipped: 'db-uninitialised' };
 }
 
 function icon(status: CheckStatus): string {
@@ -103,23 +121,29 @@ function getDbPath(): string {
 }
 
 // ── Check 1: Database health ──────────────────────────────
-async function checkDatabase(): Promise<CheckResult> {
-  const dbPath = getDbPath();
-
+/**
+ * Pure helper for the database health check. Exported so tests can drive it
+ * against any path/environment without going through doctor's homedir-derived
+ * getDbPath().
+ */
+export function runDatabaseCheck(dbPath: string, env: Environment = detectEnvironment()): CheckResult {
   if (!fs.existsSync(dbPath)) {
-    // The database is created lazily on the first memory operation.
+    // Not a failure. The database is created lazily on the first memory
+    // operation, so "no database yet" is the normal state of a fresh install —
+    // and doctor is exactly the command a new user runs to check the install
+    // worked. Reporting ❌ there told healthy installs they were broken (#129).
+    //
     // `quickstart` only configures hooks/MCP — it does NOT touch the DB.
     // The reliable one-shot init paths are: `shieldcortex scan "..."`
     // (works on every install shape) or starting an MCP-bound session
     // (Claude Code) which lazy-inits via the MCP server.
-    const env = detectEnvironment();
     const fix = env.hasClaude
       ? 'Run `shieldcortex scan "init"` to create the database now, or start a Claude Code session — the MCP server will lazy-init on first memory call'
       : 'Run `shieldcortex scan "init"` to create the database now (OpenClaw-only / headless install)';
     return {
       label: 'Database',
-      status: 'fail',
-      message: 'not found',
+      status: 'info',
+      message: 'not initialised yet — created automatically on first use',
       fix,
     };
   }
@@ -167,6 +191,10 @@ async function checkDatabase(): Promise<CheckResult> {
   }
 }
 
+async function checkDatabase(): Promise<CheckResult> {
+  return runDatabaseCheck(getDbPath());
+}
+
 // ── Check 2: Schema version ──────────────────────────────
 /**
  * Diff the live memories table against the canonical schema instead of a
@@ -183,7 +211,7 @@ async function checkDatabase(): Promise<CheckResult> {
  */
 export function runSchemaDriftCheck(dbPath: string): CheckResult {
   if (!fs.existsSync(dbPath)) {
-    return { label: 'Schema', status: 'warn', message: 'skipped (no database)' };
+    return skippedNoDatabase('Schema');
   }
 
   try {
@@ -230,10 +258,13 @@ async function checkSchema(): Promise<CheckResult> {
 }
 
 // ── Check 3: Memory stats ─────────────────────────────────
-async function checkMemoryStats(): Promise<CheckResult> {
-  const dbPath = getDbPath();
+/**
+ * Pure helper for the memory-count check. Exported so tests can drive it
+ * against a temp database instead of the homedir install.
+ */
+export function runMemoryStatsCheck(dbPath: string): CheckResult {
   if (!fs.existsSync(dbPath)) {
-    return { label: 'Memories', status: 'warn', message: 'skipped (no database)' };
+    return skippedNoDatabase('Memories');
   }
 
   try {
@@ -273,6 +304,10 @@ async function checkMemoryStats(): Promise<CheckResult> {
   }
 }
 
+async function checkMemoryStats(): Promise<CheckResult> {
+  return runMemoryStatsCheck(getDbPath());
+}
+
 // ── Check 3b: Write-path smoke test ───────────────────────
 /**
  * The honest "is it working?" check.
@@ -295,7 +330,7 @@ async function checkMemoryStats(): Promise<CheckResult> {
  */
 export function runWritePathProbe(dbPath: string, env: Environment = detectEnvironment()): CheckResult {
   if (!fs.existsSync(dbPath)) {
-    return { label: 'Write path', status: 'warn', message: 'skipped (no database)' };
+    return skippedNoDatabase('Write path');
   }
 
   let db: any = null;
@@ -383,16 +418,29 @@ async function checkWritePath(): Promise<CheckResult> {
 }
 
 // ── Check 4: Hook installation ────────────────────────────
-async function checkHooks(): Promise<CheckResult> {
-  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-
+/**
+ * Pure helper for the hook-installation check. Exported so tests can point it
+ * at a temp settings.json (or a deliberately absent one) without touching the
+ * real homedir.
+ */
+export function runHooksCheck(settingsPath: string, env: Environment = detectEnvironment()): CheckResult {
   if (!fs.existsSync(settingsPath)) {
-    return {
-      label: 'Hooks',
-      status: 'warn',
-      message: 'settings.json not found',
-      fix: 'Run `shieldcortex install` to configure hooks',
-    };
+    // No settings.json is not a fault. Either Claude Code isn't on this box at
+    // all (OpenClaw-only / headless installs never grow one), or it is and the
+    // user hasn't run `shieldcortex install` yet — the exact state of every
+    // fresh install. A ⚠️ here told healthy boxes something was wrong (#129).
+    return env.hasClaude
+      ? {
+          label: 'Hooks',
+          status: 'info',
+          message: 'not configured yet — no ~/.claude/settings.json',
+          fix: 'Run `shieldcortex install` to configure hooks',
+        }
+      : {
+          label: 'Hooks',
+          status: 'info',
+          message: 'not applicable — Claude Code not detected on this host',
+        };
   }
 
   try {
@@ -441,6 +489,10 @@ async function checkHooks(): Promise<CheckResult> {
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Hooks', status: 'warn', message: `check failed — ${msg}` };
   }
+}
+
+async function checkHooks(): Promise<CheckResult> {
+  return runHooksCheck(path.join(os.homedir(), '.claude', 'settings.json'));
 }
 
 // ── Check 4b: Auto-memory hook gates ──────────────────────
@@ -2327,6 +2379,22 @@ export async function checkDashboardFreshness(): Promise<CheckResult> {
   }
 }
 
+/**
+ * Split the report into lines worth printing and the dependent checks that
+ * were skipped only because the database has not been created yet.
+ *
+ * Exported for tests: the first-run contract is that a clean box shows no ❌
+ * and no ⚠️, and that the cascade of dependent skips collapses to one note.
+ */
+export function partitionUninitialisedSkips(
+  results: CheckResult[],
+): { visible: CheckResult[]; suppressed: CheckResult[] } {
+  return {
+    visible: results.filter(r => r.skipped !== 'db-uninitialised'),
+    suppressed: results.filter(r => r.skipped === 'db-uninitialised'),
+  };
+}
+
 export async function runDoctor(args: string[] = []): Promise<void> {
   console.log(`\n${bold}ShieldCortex Doctor${reset} v${pkg.version}\n`);
 
@@ -2398,17 +2466,25 @@ export async function runDoctor(args: string[] = []): Promise<void> {
     }
   }
 
+  // Collapse the dependent "no database yet" checks into one dim note. On a
+  // fresh install they added Schema/Write path/Memories lines that all restate
+  // the same single fact already reported by the Database line (#129).
+  const { visible, suppressed } = partitionUninitialisedSkips(results);
+
   // Print results
-  for (const r of results) {
+  for (const r of visible) {
     console.log(`  ${icon(r.status)} ${bold}${r.label}:${reset} ${r.message}`);
+  }
+  if (suppressed.length > 0) {
+    console.log(`  ${dim}(${suppressed.map(r => r.label).join(', ')} checked once the database exists)${reset}`);
   }
 
   // Summary
-  const passed = results.filter(r => r.status === 'pass').length;
-  const warnings = results.filter(r => r.status === 'warn').length;
-  const failures = results.filter(r => r.status === 'fail').length;
-  const infos = results.filter(r => r.status === 'info').length;
-  const total = results.length;
+  const passed = visible.filter(r => r.status === 'pass').length;
+  const warnings = visible.filter(r => r.status === 'warn').length;
+  const failures = visible.filter(r => r.status === 'fail').length;
+  const infos = visible.filter(r => r.status === 'info').length;
+  const total = visible.length;
 
   console.log('');
   const parts: string[] = [];
@@ -2419,7 +2495,7 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   console.log(`  ${parts.join(', ')}`);
 
   // Suggested fixes
-  const fixes = results.filter(r => r.fix);
+  const fixes = visible.filter(r => r.fix);
   if (fixes.length > 0) {
     console.log(`\n  ${bold}Suggested fixes:${reset}`);
     for (const f of fixes) {
