@@ -39,9 +39,16 @@ let extractor: any = null;
 async function loadModel(): Promise<void> {
   if (extractor) return;
   await initTransformers();
+  // dtype is pinned explicitly. Omitting it makes transformers.js print
+  //   dtype not specified for "model". Using the default dtype (fp32) ...
+  // to the console on every model load — a dependency warning that surfaced in
+  // user-facing `remember`/`scan` output on a healthy install (#129). fp32 is
+  // exactly what it was defaulting to on CPU, so behaviour is unchanged; the
+  // defence judge worker pins its dtype the same way.
   extractor = await pipelineFn(
     'feature-extraction',
     'Xenova/all-MiniLM-L6-v2',
+    { dtype: 'fp32' },
   );
 }
 
