@@ -1675,6 +1675,34 @@ function workerRecoveryFix(): string {
 // not a failure.
 const WORKER_TAKEOVER_GRACE_MS = MCP_LIGHT_TICK_INTERVAL_MS + 5 * 60 * 1000;
 
+/**
+ * "No worker.json" means two different things depending on whether the product
+ * has ever run on this box.
+ *
+ * With no database either, nothing has run yet — the worker starts with the
+ * first ShieldCortex session, so its absence is the normal state of a fresh
+ * install and a ⚠️ there is the same false alarm as ❌ Database (#129).
+ *
+ * With a database present, something HAS run and the worker still never
+ * recorded a tick — that is a real gap, and still warns.
+ */
+export function missingWorkerStateResult(databaseExists: boolean): CheckResult {
+  if (!databaseExists) {
+    return {
+      label: 'Brain worker',
+      status: 'info',
+      message: 'not started yet — starts with your first ShieldCortex session',
+      fix: workerRecoveryFix(),
+    };
+  }
+  return {
+    label: 'Brain worker',
+    status: 'warn',
+    message: 'no worker.json — worker has not run yet',
+    fix: workerRecoveryFix(),
+  };
+}
+
 export async function checkBrainWorker(): Promise<CheckResult> {
   if (process.env.SHIELDCORTEX_DISABLE_WORKER === '1') {
     return {
@@ -1685,12 +1713,7 @@ export async function checkBrainWorker(): Promise<CheckResult> {
   }
   const statePath = path.join(getShieldCortexDir(), 'state', 'worker.json');
   if (!fs.existsSync(statePath)) {
-    return {
-      label: 'Brain worker',
-      status: 'warn',
-      message: 'no worker.json — worker has not run yet',
-      fix: workerRecoveryFix(),
-    };
+    return missingWorkerStateResult(fs.existsSync(getDbPath()));
   }
   try {
     const raw = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as {

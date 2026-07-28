@@ -5,6 +5,7 @@ import { createRequire } from 'module';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 
 import {
+  missingWorkerStateResult,
   partitionUninitialisedSkips,
   runDatabaseCheck,
   runHooksCheck,
@@ -151,6 +152,20 @@ describe('doctor — fresh-install states are informational, not failures', () =
     });
   });
 
+  describe('Brain worker check', () => {
+    it('is info when nothing has run on this box yet', () => {
+      const result = missingWorkerStateResult(false);
+      expect(result.status).toBe('info');
+      expect(result.message).toMatch(/not started yet/i);
+    });
+
+    it('STILL warns when a database exists but the worker never recorded a tick', () => {
+      const result = missingWorkerStateResult(true);
+      expect(result.status).toBe('warn');
+      expect(result.fix).toBeDefined();
+    });
+  });
+
   it('produces a clean-box report with no ❌ and no ⚠️', () => {
     // The acceptance criterion from #129, assembled from the checks that were
     // red/yellow on the observed clean-box run.
@@ -160,6 +175,7 @@ describe('doctor — fresh-install states are informational, not failures', () =
       runWritePathProbe(missingDb),
       runMemoryStatsCheck(missingDb),
       runHooksCheck(path.join(tmpDir, 'settings.json'), openClawEnv),
+      missingWorkerStateResult(false),
     ];
 
     expect(results.filter(r => r.status === 'fail')).toEqual([]);
