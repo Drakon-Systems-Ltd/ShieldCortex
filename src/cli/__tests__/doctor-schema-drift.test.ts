@@ -31,10 +31,14 @@ describe('doctor schema drift check', () => {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it('returns "warn / skipped" when the database file does not exist', () => {
+  // Skipped, not warned: "no database yet" is the normal state of a fresh
+  // install (the DB is created lazily on first use), so this is reported as
+  // info and collapsed out of doctor's printed report (#129).
+  it('skips cleanly, without crashing or warning, when the database file does not exist', () => {
     const result = runSchemaDriftCheck(dbPath);
-    expect(result.status).toBe('warn');
-    expect(result.message).toMatch(/no database/i);
+    expect(result.status).toBe('info');
+    expect(result.skipped).toBe('db-uninitialised');
+    expect(result.message).toMatch(/database not created yet/i);
   });
 
   it('passes on a freshly initialised (fully migrated) database', () => {

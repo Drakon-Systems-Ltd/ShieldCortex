@@ -1,7 +1,9 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+
+import { runDatabaseCheck } from '../cli/doctor.js';
 
 /**
  * Lock in the corrected DB-init hint. v4.12.1 doctor pointed users at
@@ -11,27 +13,37 @@ import { describe, expect, it } from '@jest/globals';
  *
  * The reliable one-shot init paths are `shieldcortex scan "..."` (any
  * install shape) or starting an MCP-bound session (Claude Code).
+ *
+ * Asserted against the check's actual output rather than doctor's source, so
+ * the guard survives refactors of how the check is wired up.
  */
-describe('doctor — database-not-found hint', () => {
-  const thisFile = fileURLToPath(import.meta.url);
-  const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
-  const doctorSource = fs.readFileSync(path.join(repoRoot, 'src', 'cli', 'doctor.ts'), 'utf-8');
+describe('doctor — database-not-initialised hint', () => {
+  const claudeEnv = { hasClaude: true, hasOpenClaw: false, hasVSCode: false, hasCodex: false, isHeadless: false };
+  let tmpDir: string;
+  let missingDb: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-db-hint-'));
+    missingDb = path.join(tmpDir, 'memories.db');
+  });
+
+  afterEach(() => {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
 
   it('does not suggest `shieldcortex quickstart` as a way to initialise the database', () => {
-    const checkDatabaseFn = doctorSource.match(/async function checkDatabase\(\)[\s\S]*?\n\}/);
-    expect(checkDatabaseFn).not.toBeNull();
-    expect(checkDatabaseFn![0]).not.toMatch(/quickstart.*?initialise the database/i);
-    expect(checkDatabaseFn![0]).not.toMatch(/run `shieldcortex quickstart`/);
+    const { fix } = runDatabaseCheck(missingDb, claudeEnv);
+    expect(fix).not.toMatch(/quickstart/i);
   });
 
   it('suggests `shieldcortex scan` as the explicit init command', () => {
-    const checkDatabaseFn = doctorSource.match(/async function checkDatabase\(\)[\s\S]*?\n\}/);
-    expect(checkDatabaseFn![0]).toMatch(/shieldcortex scan ["']init["']/);
+    const { fix } = runDatabaseCheck(missingDb, claudeEnv);
+    expect(fix).toMatch(/shieldcortex scan ["']init["']/);
   });
 
   it('still mentions the Claude Code MCP-server lazy-init path on Claude+OpenClaw hosts', () => {
-    const checkDatabaseFn = doctorSource.match(/async function checkDatabase\(\)[\s\S]*?\n\}/);
-    expect(checkDatabaseFn![0]).toMatch(/Claude Code session/i);
-    expect(checkDatabaseFn![0]).toMatch(/lazy-init|MCP server/i);
+    const { fix } = runDatabaseCheck(missingDb, claudeEnv);
+    expect(fix).toMatch(/Claude Code session/i);
+    expect(fix).toMatch(/lazy-init|MCP server/i);
   });
 });
