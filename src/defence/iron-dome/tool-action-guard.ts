@@ -247,7 +247,12 @@ const DANGEROUS: Pattern[] = [
   // non-matching tail exits without re-partitioning (same ReDoS discipline as
   // issue #92 must-fix 1). The read-only `-l` exemption applies unchanged
   // through wrappers (`time crontab -l` stays allowed).
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|time|stdbuf|nice)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  // `at` additionally excludes a following `=`: the newline in the
+  // command-position anchor makes every line start a command, so a variable
+  // named `at` (common in embedded script bodies the guard also scans) matched
+  // the scheduler verb. `at(1)` takes `at [options] TIME` — its grammar has no
+  // `=` in that slot, so the carve-out removes the FP without losing a verb.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|time|stdbuf|nice)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*=)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
   // Zero out a file's contents (issue #4475.7a): the pre-existing rule below
   // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
   // regardless of the target file, so it is gated on its own.
