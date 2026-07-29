@@ -638,7 +638,7 @@ ${bold}COMMANDS${reset}
   ${cyan}dashboard${reset}             Open the local security dashboard
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
-  ${cyan}doctor${reset}                Diagnose installation issues
+  ${cyan}doctor${reset}                Diagnose installation issues (exits 1 on a ❌; --strict also fails on ⚠️)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
