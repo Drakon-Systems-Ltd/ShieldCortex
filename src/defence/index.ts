@@ -78,8 +78,8 @@ export {
   DEFAULT_IRON_DOME_CONFIG,
 } from './iron-dome/index.js';
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
-export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName } from './iron-dome/tool-action-guard.js';
-export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily } from './iron-dome/tool-action-guard.js';
+export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
+export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
 export type {
   IronDomeConfig,
   IronDomeProfile,

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, appendFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, appendFileSync, readFileSync, statSync } from 'node:fs';
+import { join, isAbsolute, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
@@ -42,7 +42,19 @@ export interface ToolGuardVerdictLike {
   reason: string;
   signals: string[];
 }
-export type ToolGuardEvaluator = (toolName: string, args: Record<string, unknown>) => ToolGuardVerdictLike;
+/** Optional 4th-parameter seam on the real evaluator (issue #4): the guard core
+ *  stays pure/synchronous and asks the CALLER to resolve an invoked script's
+ *  source, so `bash deploy.sh` is scanned by the same rules as the inline
+ *  command. Structurally typed, like ToolGuardVerdictLike above. */
+export interface ToolGuardEvaluatorOptions {
+  resolveScriptSource?: (scriptPath: string) => string | null;
+}
+export type ToolGuardEvaluator = (
+  toolName: string,
+  args: Record<string, unknown>,
+  config?: unknown,
+  options?: ToolGuardEvaluatorOptions,
+) => ToolGuardVerdictLike;
 
 export interface InterceptorConfig {
   enabled: boolean;
@@ -56,6 +68,10 @@ export interface ToolCallContext {
   toolName: string;
   arguments: Record<string, unknown>;
   requireApproval?: (message: string) => Promise<boolean>;
+  /** Working directory the tool call runs in, when the gateway supplies one —
+   *  used to resolve a relative script path (issue #4). Falls back to the
+   *  call's own `cwd` argument, then `process.cwd()`. */
+  cwd?: string;
 }
 
 export interface InterceptAuditEntry {
@@ -487,6 +503,49 @@ type PipelineRunner = (content: string, title: string, source: { type: string; i
   auditId: number;
 };
 
+// ── Script source resolution (issue #4) ─────────────────────────────────────
+// `bash deploy.sh` used to bypass EVERY Action Guard rule, because the guard
+// only ever scanned the command string and never opened the file it pointed at.
+// The guard core stays pure (doctor/self-check drive it with synthetic commands
+// whose paths do not exist); this is the fs-backed half, wired in here.
+//
+// Zeroth law — this must never hang, block or crash the host gateway:
+//   * `statSync` first: only a REGULAR file is read, so a FIFO/socket/device
+//     (a `read` on which could block forever) is skipped, not opened;
+//   * `/proc`, `/sys`, `/dev` are never touched;
+//   * anything over the size cap is refused (the guard then records it as
+//     `opaque-script-invocation` rather than pretending it was scanned);
+//   * every error returns `null`. Nothing escapes.
+const MAX_SCRIPT_SOURCE_BYTES = 262_144;   // 256KB — matches the guard core's cap
+const UNREADABLE_PATH_PREFIX = /^\/(?:proc|sys|dev)\//;
+
+export function createScriptSourceResolver(cwd?: string): (scriptPath: string) => string | null {
+  const base = cwd && typeof cwd === 'string' ? cwd : process.cwd();
+  return (scriptPath: string): string | null => {
+    try {
+      if (!scriptPath || typeof scriptPath !== 'string') return null;
+      const expanded = scriptPath.startsWith('~/') ? join(homedir(), scriptPath.slice(2)) : scriptPath;
+      const full = isAbsolute(expanded) ? expanded : resolvePath(base, expanded);
+      if (UNREADABLE_PATH_PREFIX.test(full)) return null;
+      const st = statSync(full);
+      if (!st.isFile() || st.size > MAX_SCRIPT_SOURCE_BYTES) return null;
+      return readFileSync(full, 'utf8');
+    } catch {
+      return null;                          // missing, unreadable, anything — stay silent, stay alive
+    }
+  };
+}
+
+/** The cwd a tool call runs in, if the gateway or the call itself names one. */
+function toolCallCwd(context: ToolCallContext): string | undefined {
+  if (typeof context.cwd === 'string' && context.cwd) return context.cwd;
+  for (const k of ['cwd', 'workdir', 'working_directory', 'workingDirectory', 'directory']) {
+    const v = context.arguments?.[k];
+    if (typeof v === 'string' && v) return v;
+  }
+  return undefined;
+}
+
 interface InterceptorOptions {
   maxPromptsPerMinute?: number;
   onAuditEntry?: (entry: InterceptAuditEntry) => void;
@@ -591,7 +650,12 @@ export function createInterceptor(
 
     let v: ToolGuardVerdictLike;
     try {
-      v = evaluateToolCall(context.toolName, context.arguments || {});
+      // 4th arg (issue #4): lets the pure guard core scan the CONTENTS of a
+      // script the command invokes (`bash deploy.sh`) through this fs-backed
+      // resolver. An evaluator that predates the seam simply ignores it.
+      v = evaluateToolCall(context.toolName, context.arguments || {}, undefined, {
+        resolveScriptSource: createScriptSourceResolver(toolCallCwd(context)),
+      });
     } catch (err) {
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`);
       return;
