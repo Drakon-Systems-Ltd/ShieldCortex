@@ -490,6 +490,7 @@ const REMEDIATION: Record<string, string> = {
   'recursive-perms-system-dir': 'confirm this is intentional — recursive permission changes on a system directory can break the host',
   'truncate-to-zero': 'confirm the target file before truncating — this discards its contents',
   'dd-overwrite': 'confirm the destination before running dd — it overwrites the target without confirmation',
+  'opaque-script-invocation': 'the guard could not read the invoked script, so its contents were not scanned — inspect the file before running it',
 };
 
 /** Compose a reason string that names the rule, the matched span, and a fix hint. */
@@ -751,6 +752,279 @@ export function commandScanText(cmd: string): string {
   return stripComments(stripQuotedHeredocs(cmd));
 }
 
+// ── Script-file invocation (issue #4) ────────────────────────────────────────
+//
+// Every rule above scans the EXEC SURFACE — the command string. So moving a
+// dangerous command into a file and running `bash script.sh` bypassed all of
+// them: the guard never read the file. (Confirmed live: a `curl -X DELETE`
+// loop was blocked inline as `external-egress`, then ran ungated from a `.sh`.)
+//
+// The fix is a recognition helper (below) plus an INJECTED source resolver
+// (`ToolGuardOptions.resolveScriptSource`) that the caller supplies. This file
+// stays pure and synchronous — see the evaluateToolCall docblock for why that
+// is load-bearing — and the fs-backed resolver lives at the interceptor / hook
+// boundary. When no resolver is available, the invocation is still RECORDED
+// (`opaque-script-invocation`, lowest surfaced tier) rather than silently
+// unscanned: the gap becomes legible in the audit log instead of invisible.
+
+/** Interpreters that take a SCRIPT FILE argument and execute its contents. */
+const SCRIPT_INTERPRETER = /^(?:bash|sh|zsh|ksh|dash|ash|python\d?(?:\.\d+)?|node|nodejs|ruby|perl|php)$/;
+/** Transparent process wrappers — they don't change WHAT is executed. Same set
+ *  (plus `timeout`/`setsid`) as the modify-scheduler command-position rule. */
+const EXEC_WRAPPER = /^(?:sudo|doas|env|nohup|time|stdbuf|nice|command|exec|setsid|ionice|timeout)$/;
+/** Shell keywords that may sit in front of the real command word. */
+const SHELL_KEYWORD = /^(?:then|else|elif|do|done|fi|in|\{|\}|!)$/;
+/** Flags that consume the FOLLOWING token as their value (so it is not a path). */
+const FLAG_TAKES_VALUE = /^(?:-o|-O|-X|-W|-r|--require|--rcfile|--init-file|--loader|--experimental-loader)$/;
+/** Per-wrapper flags that take a separate value token — without these,
+ *  `sudo -u bob bash run.sh` reads `bob` as the command word and the real
+ *  interpreter is never seen. */
+const WRAPPER_FLAG_TAKES_VALUE: Record<string, RegExp> = {
+  sudo: /^-(?:u|g|p|C|D|R|T|h)$/,
+  doas: /^-(?:u|C)$/,
+  env: /^-(?:u|C|S)$/,
+  timeout: /^-(?:s|k)$/,
+  nice: /^-n$/,
+  ionice: /^-(?:c|n|p)$/,
+  stdbuf: /^-(?:i|o|e)$/,
+};
+
+/** A path token worth resolving: explicitly relative/absolute/home-anchored. */
+function looksLikePathToken(tok: string): boolean {
+  return /^(?:\.{1,2}\/|\/|~\/)/.test(tok) && !/^\/dev\//.test(tok);
+}
+
+/** Does an interpreter flag mean "the program is inline / on stdin", not a file? */
+function isInlineProgramFlag(interp: string, flag: string): boolean {
+  const cluster = /^-[A-Za-z]+$/.test(flag) ? flag.slice(1) : '';
+  if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(interp)) {
+    // Lowercase `c` in a short cluster is always -c (the uppercase -C is
+    // noclobber); `s` is "read the program from stdin".
+    return cluster.includes('c') || cluster.includes('s');
+  }
+  if (/^python/.test(interp)) return cluster.includes('c') || cluster.includes('m');
+  if (/^node/.test(interp)) return /^(?:-e|-p|--eval|--print)$/.test(flag);
+  if (/^(?:perl|ruby)$/.test(interp)) return cluster.toLowerCase().includes('e');
+  if (interp === 'php') return cluster.includes('r');
+  return false;
+}
+
+/** Split shell text into candidate statements. Command substitution, subshells
+ *  and backticks open a new statement, exactly like `;`. */
+function splitCommandStatements(text: string): string[] {
+  return text.replace(/\$\(|[`()]/g, '\n').split(/[;&|\n\r]+/);
+}
+
+/**
+ * Whitespace-split a statement into argv-ish tokens, keeping quoted spans
+ * together. Hand-rolled (not a regex) so it is linear and cannot backtrack —
+ * this runs on every tool call, on strings up to OVERSIZED_COMMAND_LENGTH.
+ */
+function tokeniseStatement(stmt: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: string | null = null;
+  for (let i = 0; i < stmt.length; i++) {
+    const c = stmt[i];
+    if (c === '\\' && quote !== "'" && i + 1 < stmt.length) { cur += stmt[++i]; continue; }
+    if (quote) {
+      if (c === quote) quote = null;
+      else cur += c;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c === ' ' || c === '\t') { if (cur) { out.push(cur); cur = ''; } continue; }
+    cur += c;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** `/usr/bin/python3` → `python3`; quotes already stripped by the tokeniser. */
+function commandBaseName(tok: string): string {
+  const slash = tok.lastIndexOf('/');
+  return slash >= 0 ? tok.slice(slash + 1) : tok;
+}
+
+const MAX_DETECTED_SCRIPTS = 8;
+/** How deep to look inside `sh -c '…'` strings for a nested file invocation. */
+const MAX_INLINE_RECURSION = 2;
+
+/**
+ * Paths of script FILES this command executes — the targets whose contents the
+ * danger rules never saw before.
+ *
+ * Recognised shapes: `bash f.sh` (with intervening short flags, `bash -e f.sh`),
+ * `python3 f.py` / `node f.js` / `ruby f.rb` / `perl f.pl`, `./f.sh` and other
+ * explicit relative/absolute paths in command position, `source f.sh` / `. f.sh`,
+ * and all of the above behind env-assignment / `env` / `sudo` / `nohup`-style
+ * wrapper prefixes.
+ *
+ * Deliberately NOT recognised: `bash -c '<inline>'`. That inline program is
+ * already part of the exec surface and already scanned — treating it as a file
+ * would be both wrong and a resolver dead-end. (A file invocation *nested*
+ * inside the inline string is still recognised, by recursing into it.)
+ */
+export function detectScriptInvocation(execSurface: string, depth = 0): string[] {
+  const found: string[] = [];
+  if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
+
+  const add = (p: string): void => {
+    const clean = p.trim();
+    if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
+    if (!found.includes(clean) && found.length < MAX_DETECTED_SCRIPTS) found.push(clean);
+  };
+
+  for (const stmt of splitCommandStatements(execSurface)) {
+    if (found.length >= MAX_DETECTED_SCRIPTS) break;
+    if (!stmt.trim()) continue;
+    const tokens = tokeniseStatement(stmt);
+
+    // Step over env assignments, transparent wrappers (and their own flags /
+    // assignments / duration args) and shell keywords to reach the command word.
+    let i = 0;
+    while (i < tokens.length) {
+      const t = tokens[i];
+      if (/^\w+=/.test(t) || SHELL_KEYWORD.test(t)) { i++; continue; }
+      const wrapper = commandBaseName(t);
+      if (EXEC_WRAPPER.test(wrapper)) {
+        const takesValue = WRAPPER_FLAG_TAKES_VALUE[wrapper];
+        i++;
+        while (i < tokens.length) {
+          const a = tokens[i];
+          if (/^\w+=/.test(a) || /^\d+[smhd]?$/.test(a)) { i++; continue; }
+          if (a.startsWith('-')) { i++; if (takesValue?.test(a)) i++; continue; }
+          break;
+        }
+        continue;
+      }
+      break;
+    }
+    if (i >= tokens.length) continue;
+
+    const cmd = tokens[i];
+    const base = commandBaseName(cmd);
+
+    // `source f.sh` / `. f.sh`
+    if (base === 'source' || cmd === '.') {
+      const target = tokens[i + 1];
+      if (target && !target.startsWith('-')) add(target);
+      continue;
+    }
+
+    if (SCRIPT_INTERPRETER.test(base)) {
+      for (let j = i + 1; j < tokens.length; j++) {
+        const a = tokens[j];
+        if (a === '-') break;                                   // program on stdin
+        if (a === '<') continue;                                // `bash < f.sh`
+        if (a.startsWith('<')) { add(a.slice(1)); break; }
+        if (a.startsWith('>')) break;                           // redirect target, not a program
+        if (a.startsWith('-')) {
+          if (isInlineProgramFlag(base, a)) {
+            // The inline program itself is already in the exec surface (and
+            // already scanned); only follow a file invocation NESTED in it.
+            if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
+              for (const nested of detectScriptInvocation(tokens[j + 1] ?? '', depth + 1)) add(nested);
+            }
+            break;
+          }
+          if (FLAG_TAKES_VALUE.test(a)) j++;
+          continue;
+        }
+        add(a);
+        break;
+      }
+      continue;
+    }
+
+    // `./f.sh`, `/opt/deploy/run`, `~/bin/task`
+    if (looksLikePathToken(cmd)) add(cmd);
+  }
+  return found;
+}
+
+/** Per-file read cap. Larger than any hand-written script; a file over it is
+ *  treated as opaque rather than truncated — truncating could cut past a danger
+ *  signal, the same reasoning as OVERSIZED_COMMAND_LENGTH below. */
+const MAX_SCRIPT_BYTES = 262_144;
+/** Total folded content per tool call — the global bound on worst-case scan
+ *  work, so the guard can never stall the host gateway (zeroth law). Measured
+ *  on the ARM box: a full 256KB fold costs ~22ms of synchronous scanning; a
+ *  real-world script (a few KB) is sub-millisecond. */
+const MAX_FOLDED_BYTES = 262_144;
+/** A script that invokes a script is followed, bounded. */
+const MAX_SCRIPT_DEPTH = 3;
+/** Backstop on how many files one tool call may fold. */
+const MAX_SCRIPTS_PER_CALL = 12;
+
+export interface ToolGuardOptions {
+  /**
+   * Resolve an invoked script path to its source text, or `null` when it cannot
+   * be read. Supplied by the CALLER (interceptor / hook), never by this module —
+   * that is what keeps `evaluateToolCall` pure and synchronous. Must never throw
+   * and must never block (see the interceptor's fs-backed implementation).
+   */
+  resolveScriptSource?: (scriptPath: string) => string | null;
+}
+
+interface ScriptFold {
+  /** Scan-ready text of every script whose source was resolved. */
+  content: string;
+  /** A script invocation was recognised but its contents could NOT be folded. */
+  opaque: boolean;
+}
+
+/**
+ * Resolve the scripts a command invokes and return their (comment-stripped)
+ * contents for scanning. Bounded on every axis: depth, file count, per-file
+ * size, total size, and a visited set that makes a source-cycle terminate.
+ */
+function foldScriptSources(
+  execCommand: string,
+  resolveScriptSource?: (scriptPath: string) => string | null,
+): ScriptFold {
+  const roots = detectScriptInvocation(execCommand);
+  if (roots.length === 0) return { content: '', opaque: false };
+  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true };
+
+  const visited = new Set<string>();
+  const queue: Array<{ path: string; depth: number }> = roots.map(path => ({ path, depth: 1 }));
+  const parts: string[] = [];
+  let total = 0;
+  let opaque = false;
+
+  while (queue.length > 0) {
+    const next = queue.shift();
+    if (!next) break;
+    if (visited.has(next.path)) continue;              // cycle guard
+    visited.add(next.path);
+    if (visited.size > MAX_SCRIPTS_PER_CALL) { opaque = true; break; }
+
+    let src: string | null = null;
+    try {
+      src = resolveScriptSource(next.path);
+    } catch {
+      src = null;                                       // a resolver must never break the call
+    }
+    if (typeof src !== 'string') { opaque = true; continue; }   // missing / unreadable
+    if (src.length === 0) continue;                     // empty file — nothing to scan, not a gap
+    if (src.includes('\0')) { opaque = true; continue; }        // binary
+    if (src.length > MAX_SCRIPT_BYTES || total + src.length > MAX_FOLDED_BYTES) { opaque = true; continue; }
+
+    const scan = commandScanText(deobfuscateIfs(src));
+    total += src.length;
+    parts.push(scan);
+
+    const nested = detectScriptInvocation(scan);
+    if (nested.length > 0) {
+      if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
+      else for (const p of nested) if (!visited.has(p)) queue.push({ path: p, depth: next.depth + 1 });
+    }
+  }
+
+  return { content: parts.join('\n'), opaque };
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 // A command this long is already anomalous for an interactive tool call — cap
@@ -779,11 +1053,18 @@ const ACTION_BY_FAMILY: Record<ToolFamily, string> = {
  * Pure and synchronous — no I/O. The interceptor decides how to ENFORCE the
  * verdict (block / prompt / warn) based on its own posture; this function only
  * RECOGNISES and recommends.
+ *
+ * Purity is load-bearing and must stay: this runs on EVERY tool call, and
+ * `src/cli/doctor.ts` + `src/setup/openclaw-selfcheck.ts` drive it with
+ * synthetic commands whose paths deliberately do not exist. Reading the script
+ * a command points at (issue #4) therefore comes in through the caller-supplied
+ * `options.resolveScriptSource` seam — no `fs` here, ever.
  */
 export function evaluateToolCall(
   toolName: string,
   args: Record<string, unknown> = {},
   config?: IronDomeConfig,
+  options?: ToolGuardOptions,
 ): ToolGuardVerdict {
   const family = classifyFamily(toolName);
   const command = deobfuscateIfs(extractCommand(args));
@@ -807,16 +1088,33 @@ export function evaluateToolCall(
   const execCommand = commandScanText(command);
   const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
 
+  // Script-file invocation (issue #4): `bash deploy.sh` used to hide EVERY rule
+  // below behind a file the guard never opened. Detection runs on the COMMAND
+  // only — never on a path/url argument — so an `Edit`/`Write` whose target
+  // merely *is* a script is untouched, preserving the field discipline above.
+  // An oversized command is already flagged (and already anomalous); skip the
+  // work rather than tokenise 50k+ chars of it.
+  const fold = command.length > OVERSIZED_COMMAND_LENGTH
+    ? { content: '', opaque: false }
+    : foldScriptSources(execCommand, options?.resolveScriptSource);
+  // Folded script source is appended, never substituted: the command surface is
+  // scanned exactly as before, so no existing verdict can change direction.
+  const scanSurface = fold.content ? `${execSurface}\n${fold.content}` : execSurface;
+  // Recorded at the lowest surfaced tier when a script's contents could not be
+  // read (no resolver, unreadable, oversized, binary, too deep). Never a gate on
+  // its own — the doctor/selfcheck probes and plenty of legitimate calls hit it.
+  const opaqueSignals = fold.opaque ? ['opaque-script-invocation'] : [];
+
   // 1) Catastrophic — hard block, cannot fail open, ignores config.
   // Span-classified (#84): a catastrophic token inside a URL or a quoted DATA
   // argument is a mention, not intent (`grep "rm -rf /" log`, a fetched URL
   // whose path contains "rm-rf") — but any executed occurrence still hard-blocks.
-  const catastrophicMatches = matchSpansClassified(CATASTROPHIC, execSurface);
+  const catastrophicMatches = matchSpansClassified(CATASTROPHIC, scanSurface);
   if (catastrophicMatches.length > 0) {
     const catastrophicSignals = catastrophicMatches.map(m => m.signal);
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', catastrophicSignals, catastrophicMatches[0].span),
-      catastrophicSignals);
+      [...catastrophicSignals, ...opaqueSignals]);
   }
 
   // 1a) A structured delete tool carries its target as a path, not a command —
@@ -830,18 +1128,19 @@ export function evaluateToolCall(
   // catastrophic when <path> is root/home/a system dir/a wildcard — same rule
   // as 1a. A non-critical path still recursively deletes everything under it,
   // so it is folded into the DANGEROUS signals below (dangerSignals) instead.
-  const findDeleteMatch = matchFindDelete(execSurface);
+  const findDeleteMatch = matchFindDelete(scanSurface);
   if (findDeleteMatch && isCriticalPath(findDeleteMatch[1])) {
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', ['recursive-find-delete'], findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80)),
-      ['recursive-find-delete']);
+      ['recursive-find-delete', ...opaqueSignals]);
   }
 
   // 1c) Secret exfiltration: external egress carrying a credential/secret.
-  const egress = family === 'network' || EXTERNAL_EGRESS.test(execCommand) || EXTERNAL_EGRESS.test(url);
-  if (egress && SECRET_HINT.test(`${execSurface}   ${rawStringArgs(args)}`) && looksExternal(url, execSurface)) {
+  const egressCommand = fold.content ? `${execCommand}\n${fold.content}` : execCommand;
+  const egress = family === 'network' || EXTERNAL_EGRESS.test(egressCommand) || EXTERNAL_EGRESS.test(url);
+  if (egress && SECRET_HINT.test(`${scanSurface}   ${rawStringArgs(args)}`) && looksExternal(url, scanSurface)) {
     return verdict('block', 'catastrophic', family, 'data_exfiltration',
-      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress']);
+      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]);
   }
 
   // Config can auto-approve specific actions the operator has whitelisted.
@@ -852,14 +1151,14 @@ export function evaluateToolCall(
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
   // Span-classified (#84): same mention-vs-intent filter as catastrophic above.
-  const dangerMatches = matchSpansClassified(DANGEROUS, execSurface);
+  const dangerMatches = matchSpansClassified(DANGEROUS, scanSurface);
   const dangerSignals = dangerMatches.map(m => m.signal);
   let dangerSpan = dangerMatches[0]?.span;
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
   // behind and is not egress (issue #73.2). Secret-bearing egress already hard
   // blocked at step 1b above regardless of method.
-  if (egress && looksExternal(url, execSurface) && hasOutboundData(args, execSurface)) {
+  if (egress && looksExternal(url, scanSurface) && hasOutboundData(args, scanSurface)) {
     dangerSignals.push('external-egress');
     dangerSpan = dangerSpan ?? (url || 'external host');
   }
@@ -875,9 +1174,9 @@ export function evaluateToolCall(
   // shape counts as registry-code-exec — see isGatedNpxBunx for the boundary.
   // uvx / pnpm-yarn dlx are unconditional matches already captured by the
   // DANGEROUS patterns above.
-  if (isGatedNpxBunx(execSurface) && !dangerSignals.includes('registry-code-exec')) {
+  if (isGatedNpxBunx(scanSurface) && !dangerSignals.includes('registry-code-exec')) {
     dangerSignals.push('registry-code-exec');
-    dangerSpan = dangerSpan ?? (execSurface.match(NPX_BUNX_COMMAND_RE)?.[0]?.trim() ?? 'npx/bunx');
+    dangerSpan = dangerSpan ?? (scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0]?.trim() ?? 'npx/bunx');
   }
   // An anomalously long command is worth a human nod on its own (issue
   // #86-redos) — flagged here, after every catastrophic check above has
@@ -891,13 +1190,24 @@ export function evaluateToolCall(
     const action = dangerActionFor(dangerSignals, family);
     return verdict('require_approval', 'dangerous', family, action,
       buildReason('recognised dangerous operation requires approval', dangerSignals, dangerSpan),
-      dangerSignals);
+      [...dangerSignals, ...opaqueSignals]);
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
-  const sensitiveSignal = firstMatch(SENSITIVE, execSurface);
+  const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
-    return verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`, [sensitiveSignal]);
+    return verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
+      [sensitiveSignal, ...opaqueSignals]);
+  }
+
+  // 3a) A script invocation whose contents could NOT be read (issue #4). Allowed
+  // — this is the normal shape of agent work and must not become a gate — but
+  // recorded at the sensitive tier so the unscanned gap is auditable instead of
+  // invisible. When the source IS resolvable and clean, nothing is added here
+  // and the verdict is bit-for-bit what it was before this change.
+  if (opaqueSignals.length > 0) {
+    return verdict('allow', 'sensitive', family, canonical,
+      buildReason('script contents were not scanned', opaqueSignals), opaqueSignals);
   }
 
   // 4) A bare exec/network/write/git call with no dangerous signal is treated as
