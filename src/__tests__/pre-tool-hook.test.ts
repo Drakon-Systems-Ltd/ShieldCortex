@@ -48,10 +48,14 @@ function runHook(payload: unknown, envOverrides: NodeJS.ProcessEnv = {}): Promis
   });
 }
 
-function bashCall(command: string): Record<string, unknown> {
+// `permission_mode` is explicit because it decides ask-vs-deny on the dangerous
+// tier: these cases describe an interactive session, where a prompt can be
+// raised. The prompt-less modes are covered in prompt-surface-deny.test.ts.
+function bashCall(command: string, permissionMode = 'default'): Record<string, unknown> {
   return {
     session_id: 'test-session',
     cwd: '/tmp',
+    permission_mode: permissionMode,
     hook_event_name: 'PreToolUse',
     tool_name: 'Bash',
     tool_input: { command },
