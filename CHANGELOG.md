@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.19] - 2026-07-31
+
+**The AI-assisted approval broker (#143): a model judges intent between the guard's verdict and the operator, and can only ever move the answer toward caution. Off by default.**
+
+The Action Guard's `require_approval` was a wall with no door on the Claude Code hook path. 4.47.18 gave it a terminal fallback (`shieldcortex approve <hash>`); this release adds the layer that decides whether the operator needs to be asked at all — and, when they are asked and do not answer, what silence means.
+
+### Added
+
+- **Approval broker decision core (`approval-broker.ts`).** Pure and synchronous — no model, no network, no clock — so the part that must never be wrong is exhaustively testable. Six invariants, each pinned by a test: catastrophic is never brokered; the judge may only escalate toward caution; a pre-clear requires ALL of reversible-signals + in-context + confident + injection-free; an absent or malformed judge holds for a human; the timeout is asymmetric; config may tighten but never loosen.
+  - **The reversibility band is the crux.** Everything reaching the broker is already dangerous-tier, so "pre-clear the low-risk ones" needed a real definition. A signal qualifies only if it is BOTH reversible AND stays on the host — five do today (`local-package-install`, `install-package`, `move-or-copy`, `change-permissions`, `git-mutate`). Deletion, privilege escalation, egress, scheduling, service control, registry execution, force-push and the guard's own state are all excluded; data leaving the host is irreversible by definition. An unrecognised signal is never pre-clearable.
+  - **Measured ceiling.** Replayed against 429 real stops from a production box: only 39 (9.1%) are pre-clearable at all, before any model or threshold is involved. The other 90.9% reach a human regardless. `scripts/preclear-ceiling.mts` ships so operators can measure their own.
+- **Judge layer (`approval-judge.ts`), built assuming the request is hostile.** A fresh, tool-less, single-shot classifier that never sees the agent's transcript — a poisoned session cannot argue for its own approval. The request sits inside a delimited block the system prompt names as untrusted, forged delimiters are defanged, and the prompt is length-bounded. Parsing is strict: any malformed field yields null, and null means hold. An out-of-range confidence is distrusted rather than clamped up.
+- **Pool-inherited model access — no new keys, no new bill, no new login.** On OpenClaw, a one-shot completion through the gateway's own model pool via an optional `context.invokeModel` seam; absent on every gateway build today, which correctly yields no judge and a hold. On the Claude Code hook, the already-logged-in CLI with every tool disabled, safe-mode, no session persistence, an allowlisted environment (the operator's Claude auth and basic plumbing only — no repo tokens, no cloud credentials), a scratch working directory and the prompt on stdin rather than argv.
+- **Asymmetric timeout.** Only a pre-cleared request may proceed on silence. Everything else auto-denies and queues for the operator, because an attacker fires when nobody is watching.
+- **Broker audit rows.** Every decision records outcome, judge assessment, confidence, injection flag, in-context flag and reason alongside the existing guard fields, so "was a model consulted, what did it say, and what did that change?" is answerable from the audit stream alone.
+
+### Notes
+
+- **Off by default** (`enabled: false`). Absent or disabled config is byte-for-byte the pre-#143 code path.
+- The judge spends the operator's own rate limit, so it runs only on dangerous-tier calls and is bounded per minute; exhausting the budget yields no judge, which yields a hold.
+- The operator always outranks the model: a live one-shot approval is consumed and the call proceeds *before* the broker runs.
+- Known limits, deliberately shipped visible: the OpenClaw pre-clear path has never run against a real model because no gateway exposes the seam; the Claude Code hook can harden but not pre-clear, since it has no honest session source and the transcript is precisely what the judge must not read; the 0.9 confidence floor is an a-priori default pending calibration.
+
 ## [4.47.18] - 2026-07-31
 
 **The Action Guard precision pass: the guard now asks "is this an action?" — not "does this text look dangerous?" — and the operator finally gets the approval mechanism the refusal text always promised (#118, #89).**
