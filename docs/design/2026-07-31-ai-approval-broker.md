@@ -68,6 +68,16 @@ A model judges the *dangerous-tier* request before it bothers the human. Its job
 
 **Model tiering** (mirrors the fleet's advisor/implementer split): a fast, cheap model (Haiku / Grok) on the hot path for the thousands of benign-looking dangerous-tier ops; escalate to Sonnet/Opus only when the fast model is uncertain or the action is high-tier. The judge model's own calls are **logged to the audit trail and rate-limited** — a compromised or looping judge is a new attack surface and must be observable and bounded.
 
+**Model access — ride the host's existing pool, no second cost layer (decided, Michael 31 Jul 2026).** The broker does not bring its own API keys, billing, or login. It resolves its judge model through whatever the host agent stack already has:
+
+- **OpenClaw path:** a one-shot completion through the gateway's own model pool/aliases — inherits the operator's OAuth/subscription auth and their model-floor policy. ShieldCortex stores no credentials.
+- **Claude Code hook path:** shell out to the already-logged-in CLI (`claude --print`, tools disabled) on the operator's subscription. No new login.
+- **Enterprise option only:** a BYO-key override for customers who want the judge billed/isolated separately. Never required.
+
+The critical distinction: **same credentials, never same context.** The judge is always a fresh, clean invocation that receives the request as *data* — it is not the session asking for approval, or the session's poisoned transcript becomes the judge's prompt. Sharing the pool is a billing decision; sharing the conversation would be a security hole.
+
+Consequences to design for: (a) the judge competes for the operator's own rate limits, so it runs ONLY on dangerous-tier events (rare by construction after the precision pass), caches identical verdicts, and is rate-limited; (b) pool unavailable / CLI logged out → fail closed to human-only, never fail open; (c) the judge call must be tool-less and non-agentic — a classifier, not an actor.
+
 ### Layer 3 — the human broker
 
 The existing OpenClaw Telegram card, generalised to a channel-agnostic transport in front of #118's store:
