@@ -59,7 +59,20 @@ describe('action-guard hook install (PreToolUse)', () => {
     expect(Array.isArray(entries)).toBe(true);
     const entry = entries[0];
     expect(entry.matcher).toBe('*');
-    expect(entry.hooks?.[0]?.command).toBe('shieldcortex hook pre-tool');
+    // #146: the command must target pre-tool AND be runnable. It used to be
+    // asserted as the bare name — which is precisely the bug that left three of
+    // four fleet boxes with a configured-but-dead Action Guard. Where a binary
+    // resolves we now require an absolute path; where none does, degrading to
+    // the bare name is the accepted fallback.
+    const command: string = entry.hooks?.[0]?.command;
+    expect(command.endsWith('hook pre-tool')).toBe(true);
+    const { resolveHookBinary, hookCommandResolves } = await import('../hook-command-resolution.js');
+    if (resolveHookBinary()) {
+      expect(command.startsWith('/')).toBe(true);
+      expect(hookCommandResolves(command)).toBe(true);
+    } else {
+      expect(command).toBe('shieldcortex hook pre-tool');
+    }
     expect(entry.hooks?.[0]?.timeout).toBe(10);
   });
 

@@ -10,6 +10,7 @@ import semver from 'semver';
 import { execFileSync } from 'child_process';
 import { createRequire } from 'module';
 import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
+import { hookCommandResolves } from '../setup/hook-command-resolution.js';
 import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
@@ -454,19 +455,29 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
     let installed = 0;
     const missing: string[] = [];
 
+    // Commands that are configured but do NOT resolve. This is the #146 check:
+    // a hook entry existing in settings.json says nothing about whether it runs.
+    // Three of four fleet boxes on 31 Jul 2026 had every hook configured and
+    // every hook dead, because a bare command name does not resolve in the
+    // non-interactive shell a harness spawns hooks in — and this check used to
+    // report that state as a clean pass.
+    const unresolvable: string[] = [];
+
     for (const name of hookNames) {
       const hookConfig = hooks[name];
       if (hookConfig) {
         // Check if any hook command references shieldcortex.
         // Settings format: [{ hooks: [{ type, command, timeout }] }]
-        const hasShieldCortex = Array.isArray(hookConfig) && hookConfig.some(
-          (entry: { hooks?: Array<{ command?: string }> }) =>
-            Array.isArray(entry?.hooks) && entry.hooks.some(
-              (h) => typeof h?.command === 'string' && h.command.includes('shieldcortex'),
-            ),
-        );
-        if (hasShieldCortex) {
+        const commands: string[] = Array.isArray(hookConfig)
+          ? hookConfig.flatMap((entry: { hooks?: Array<{ command?: string }> }) =>
+              (Array.isArray(entry?.hooks) ? entry.hooks : [])
+                .map(h => h?.command)
+                .filter((c): c is string => typeof c === 'string' && c.includes('shieldcortex')),
+            )
+          : [];
+        if (commands.length > 0) {
           installed++;
+          if (!commands.every(hookCommandResolves)) unresolvable.push(name);
         } else {
           missing.push(name);
         }
@@ -475,8 +486,21 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
       }
     }
 
+    // A configured-but-dead hook is worse than a missing one: the operator
+    // believes they are protected. FAIL, not warn.
+    if (unresolvable.length > 0) {
+      return {
+        label: 'Hooks',
+        status: 'fail',
+        message:
+          `${installed}/${hookNames.length} installed but ${unresolvable.length} DO NOT RESOLVE ` +
+          `(${unresolvable.join(', ')}) — these hooks never run, so the guard is not enforcing here`,
+        fix: 'Run `shieldcortex install` to rewrite them to an absolute path (#146)',
+      };
+    }
+
     if (installed === hookNames.length) {
-      return { label: 'Hooks', status: 'pass', message: `${installed}/${hookNames.length} installed` };
+      return { label: 'Hooks', status: 'pass', message: `${installed}/${hookNames.length} installed and resolving` };
     } else {
       return {
         label: 'Hooks',
