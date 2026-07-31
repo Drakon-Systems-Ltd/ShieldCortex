@@ -80,6 +80,18 @@ export {
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
+// AI-assisted approval broker (#143) — the decision core, the judge layer and
+// their config. Exported so a host transport (the OpenClaw plugin, the Claude
+// Code hook) can reach them at runtime without importing the package at compile
+// time, the same seam `evaluateToolCall` already uses.
+export { brokerDecision, timeoutOutcome, isPreClearable, PRE_CLEARABLE_SIGNALS, DEFAULT_BROKER_POLICY } from './iron-dome/approval-broker.js';
+export type { BrokerInput, BrokerDecision, BrokerOutcome, BrokerAudit, BrokerPolicy, BrokerVerdictLike, JudgeResult } from './iron-dome/approval-broker.js';
+export { runJudge, buildJudgePrompt, parseJudgeResponse, JUDGE_SYSTEM_PROMPT } from './iron-dome/approval-judge.js';
+export type { JudgeRequest, ModelInvoker, RunJudgeOptions } from './iron-dome/approval-judge.js';
+export { normaliseBrokerConfig, normaliseBrokerModel, toBrokerPolicy, approvalTimeoutMs, DEFAULT_BROKER_CONFIG } from './iron-dome/broker-config.js';
+export type { BrokerConfig, BrokerGatedSeverity } from './iron-dome/broker-config.js';
+export { createCliInvoker } from './iron-dome/cli-invoker.js';
+export type { CliInvokerOptions, SpawnLike } from './iron-dome/cli-invoker.js';
 export type {
   IronDomeConfig,
   IronDomeProfile,
