@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.22] - 2026-07-31
+
+**The backup budget is now tested where it is wired, not just where it is defined — and the storage limits live in one place without pretending two different policies are the same number.**
+
+### Fixed
+
+- **A repair no longer accumulates backups on a healthy host (#148 follow-up, PR #151).** 4.47.21 pruned superseded copies only when it was short of room. On a host with headroom, every repair still left another full-size copy behind, so the disk filled anyway — the original failure merely deferred — and `doctor`'s new text promised an unconditional prune the code did not perform. The prune now runs after every successful backup, keeping only the copy just written. One repair, one rollback point.
+
+### Added
+
+- **Wiring tests for the backup budget.** `backup-budget.test.ts` covered the planner in isolation; deleting its call site in `migrate-legacy.ts` left all twelve tests green while the bug was fully restored — the same mechanism-guarded/wiring-not shape as #146 and #94. New tests drive the real `repair-project-keys` path and were verified to fail with the call site removed. They also assert the refusal leaves the data untouched: declining to take a safety copy must decline the destructive rewrite too, or a disk problem is traded for data written with no rollback point.
+
+### Changed
+
+- **Storage limits consolidated into `src/limits.ts`** — previously three separate `100 * 1024 * 1024` literals across `database/init.ts`, `cli/doctor.ts` and the backup planner.
+  - **Deliberately still two constants, not one.** `DIRECTORY_BUDGET_BYTES` bounds everything under `~/.shieldcortex` (what `doctor` reports on, what the backup planner must respect); `MAX_DB_FILE_BYTES` bounds the live database file alone and blocks it when exceeded. They share a number today but are different policies, and collapsing them would have been a bug dressed as a tidy-up. Named apart so a change to one cannot silently move the other.
+  - **Known incoherence, surfaced rather than papered over:** with both at 100 MB, a 99 MB database passes the file cap while already exceeding the whole directory budget on its own — before a byte of WAL, audit log or backup. Separating the two numbers is a policy decision with migration consequences for existing hosts, so it is documented in `limits.ts` rather than quietly changed.
+
+### Notes
+
+- One pre-existing test in this area was vacuous rather than wrong: after its first round there was nothing left to rewrite, so no backup was ever taken and it passed with the wiring removed entirely. It now forces a real rewrite each round and asserts one happened. Worth stating plainly — across this release train, three separate defects were being held up by tests that either asserted the bug or proved nothing.
+
 ## [4.47.21] - 2026-07-31
 
 **A maintenance backup can no longer spend the operator's entire disk budget (#148). The repair `doctor` recommends was the thing pushing large-DB hosts over their own limit.**
