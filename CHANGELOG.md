@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.20] - 2026-07-31
+
+**Hook commands must RESOLVE, not merely exist (#146). A fleet sweep found three of four boxes where every Claude Code hook — including the Action Guard — was configured, reported healthy, and dead.**
+
+### Fixed
+
+- **The installer wrote a bare command name, so enforcement depended on the operator's shell (#146, PR #147).** `shieldcortex hook pre-tool` only resolves if `shieldcortex` is on the PATH *of the non-interactive shell the harness spawns hooks in*. With a user-level npm prefix — the standard sudo-free setup — plus a distro `.bashrc` that extends PATH below its own `if not running interactively, return` guard, every hook fails with `command not found` while the operator's own terminal resolves it perfectly. Measured on four production boxes: three could not resolve it; two were running **zero Claude Code enforcement** for an unknown period.
+  - **Install now writes an absolute path.** The binary is located via the npm prefix and verified executable before use; the path is shell-quoted. If nothing resolves, the command degrades to the historical bare name rather than writing a path that is guaranteed not to exist.
+  - **Doctor now verifies by running.** The hook check asks the question the harness asks — resolve this token the way `sh -c` would — instead of the question it used to ask, which was whether an entry existed in `settings.json`. A configured-but-unresolvable hook is now a **failure**, not a pass: an operator who believes they are protected is worse off than one who knows they are not. Passing hooks now report "installed and resolving".
+  - **Upgrade repairs installs that are already wrong.** Fixing the template alone would leave every previously-installed box silently dead forever, since a bare command that does not resolve fails without a sound. The repair runs on every install and upgrade, is idempotent, and handles the env-var-prefixed form (`VAR=1 shieldcortex hook …`) that a naive prefix match skips.
+
+### Notes
+
+- This is the same false-green family as #94 (a stale plugin behind a current-looking tick) and #145 (`repair` reporting a pre-remediation state after remediating). The recurring defect is checks that verify **configuration** rather than **behaviour**.
+- One pre-existing test asserted the bare command and therefore encoded the bug as expected behaviour. It now asserts the real contract: the command targets the right subcommand, and is absolute and resolvable wherever a binary exists.
+- Operators can check any host directly with `sh -c "shieldcortex --version"` — from a script, not from an interactive prompt, since the interactive prompt is exactly what hides this.
+
 ## [4.47.19] - 2026-07-31
 
 **The AI-assisted approval broker (#143): a model judges intent between the guard's verdict and the operator, and can only ever move the answer toward caution. Off by default.**

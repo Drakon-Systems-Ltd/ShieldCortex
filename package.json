@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "4.47.19",
+  "version": "4.47.20",
   "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
