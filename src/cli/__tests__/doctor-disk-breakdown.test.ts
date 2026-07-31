@@ -33,16 +33,23 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     fs.writeFileSync(fullPath, Buffer.alloc(bytes, 0));
   }
 
-  it('points at clearing backups when stale migration snapshots dominate', async () => {
+  it('points at the backup copies when they dominate the budget', async () => {
     writeBytes('memories.db', 4 * KB);
     writeBytes('memories.db.pre-backfill-1700000000000', 40 * KB);
     writeBytes('memories.db.empty-live.1700000000001', 20 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
     expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/stale DB backups/);
-    expect(result.fix).toMatch(/rm ~\/\.shieldcortex\/memories\.db/);
-    // The whole point: NOT the old blanket "Run memories prune/dedupe" advice.
+    // Names the backup copies and the files to act on.
+    expect(result.fix).toMatch(/backup copies/i);
+    expect(result.fix).toMatch(/memories\.db/);
+    // Still NOT the old blanket "Run memories prune/dedupe" advice.
     expect(result.fix).not.toMatch(/^Run `shieldcortex memories prune/);
+    // #148: it must no longer call these "stale migration snapshots" — on a
+    // large-DB host the dominant file is usually a safety copy written minutes
+    // earlier by a repair doctor itself recommended — nor promise an
+    // auto-prune that was never implemented.
+    expect(result.fix).not.toMatch(/stale DB backups/i);
+    expect(result.fix).not.toMatch(/auto-prune/i);
   });
 
   it('includes a DB / backups / logs breakdown in the message', async () => {
