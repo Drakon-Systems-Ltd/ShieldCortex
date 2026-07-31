@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
-import type { InterceptorConfig } from './interceptor.js';
+import type { InterceptorConfig, BrokerRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 
@@ -242,6 +242,11 @@ interface InterceptorUserConfig {
     enforce?: boolean;
     autoApprove?: string[];
     auditAllows?: boolean;
+    /** AI-assisted approval broker (#143). Passed through RAW: the real
+     *  validation is `normaliseBrokerConfig` in the main package, which is the
+     *  single place that knows which values would loosen an invariant. Off
+     *  unless `enabled: true`. */
+    broker?: Record<string, unknown>;
   };
 }
 
@@ -319,6 +324,16 @@ const PLUGIN_CONFIG_UI_HINTS = {
     help: "Write an audit entry when the guard evaluates a recognised operation and allows it.",
     advanced: true,
   },
+  "interceptor.actionGuard.broker.enabled": {
+    label: "AI Approval Broker",
+    help: "Let a fast model judge dangerous-tier approvals before they reach you: it can deny outright when it sees injection, and release reversible, in-context, high-confidence actions without waiting. Never applies to catastrophic operations. Off by default.",
+    advanced: true,
+  },
+  "interceptor.actionGuard.broker.allowPreClear": {
+    label: "Allow Broker Pre-clear",
+    help: "Off = every dangerous-tier action still waits for you; the broker can then only harden, never release.",
+    advanced: true,
+  },
 } as const;
 
 const SEVERITY_ACTION_SCHEMA = {
@@ -352,6 +367,28 @@ const INTERCEPTOR_JSON_SCHEMA = {
         enforce: { type: "boolean" },
         autoApprove: { type: "array", items: { type: "string" } },
         auditAllows: { type: "boolean" },
+        // #143. Mirrors normaliseBrokerConfig's allowlist; that function still
+        // has the last word, so a value that slips past the schema is still
+        // range-checked (and dropped) before the broker sees it.
+        broker: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            enabled: { type: "boolean" },
+            allowPreClear: { type: "boolean" },
+            preClearConfidence: { type: "number", minimum: 0.9, maximum: 1 },
+            judgeTimeoutMs: { type: "number", minimum: 500, maximum: 60000 },
+            approvalTimeoutMs: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                sensitive: { type: "number", minimum: 1000, maximum: 3600000 },
+                dangerous: { type: "number", minimum: 1000, maximum: 3600000 },
+              },
+            },
+            model: { type: "string" },
+          },
+        },
       },
     },
   },
@@ -490,6 +527,12 @@ function normaliseInterceptorConfig(raw: unknown): InterceptorUserConfig | undef
     if (typeof rawGuard.auditAllows === "boolean") guard.auditAllows = rawGuard.auditAllows;
     if (Array.isArray(rawGuard.autoApprove) && rawGuard.autoApprove.every((entry) => typeof entry === "string")) {
       guard.autoApprove = rawGuard.autoApprove as string[];
+    }
+    // Carried through untouched — normaliseBrokerConfig is the boundary, and
+    // splitting that job across two files is how one of the halves ends up
+    // being the lenient one.
+    if (rawGuard.broker && typeof rawGuard.broker === "object" && !Array.isArray(rawGuard.broker)) {
+      guard.broker = rawGuard.broker as Record<string, unknown>;
     }
     if (Object.keys(guard).length > 0) out.actionGuard = guard;
   }
@@ -1020,6 +1063,55 @@ async function handleTypedBeforeToolCall(
 
 // ==================== PLUGIN EXPORT ====================
 
+/**
+ * Assemble the approval broker (#143) from the main package, or return
+ * undefined.
+ *
+ * Undefined is the normal answer and a safe one: no broker means the guard
+ * behaves exactly as it did before #143 — every dangerous-tier call goes to the
+ * operator. It is returned whenever the broker is not switched on, and whenever
+ * the installed `shieldcortex` build is older than the broker (a version skew
+ * this plugin has to survive, which is why every piece is looked up by name
+ * rather than imported).
+ *
+ * All four pieces are required together. A half-wired broker — a decision core
+ * with no config normaliser, say — would be a policy consuming unvalidated
+ * input, which is the one shape this feature must never take.
+ */
+function resolveBrokerRuntime(
+  defenceMod: any,
+  rawBrokerConfig: Record<string, unknown> | undefined,
+  api: PluginApi,
+): BrokerRuntime | undefined {
+  try {
+    const needed = ['normaliseBrokerConfig', 'brokerDecision', 'runJudge', 'timeoutOutcome'];
+    if (needed.some((fn) => typeof defenceMod?.[fn] !== 'function')) {
+      if (rawBrokerConfig?.enabled === true) {
+        (api.logger as any)?.warn?.('[shieldcortex] approval broker requested but this shieldcortex build does not provide it — every dangerous action still goes to you');
+      }
+      return undefined;
+    }
+    const config = defenceMod.normaliseBrokerConfig(rawBrokerConfig);
+    if (!config?.enabled) return undefined;
+
+    api.logger?.info?.(
+      `[shieldcortex] approval broker ON — judge via the gateway model pool${config.model ? ` (${config.model})` : ''}, pre-clear ${config.allowPreClear ? `at ≥${config.preClearConfidence}` : 'disabled'}`,
+    );
+    return {
+      config,
+      runJudge: defenceMod.runJudge,
+      brokerDecision: defenceMod.brokerDecision,
+      timeoutOutcome: defenceMod.timeoutOutcome,
+      approvalTimeoutMs: typeof defenceMod.approvalTimeoutMs === 'function' ? defenceMod.approvalTimeoutMs : undefined,
+    } as BrokerRuntime;
+  } catch (err) {
+    (api.logger as any)?.warn?.(`[shieldcortex] approval broker unavailable: ${err instanceof Error ? err.message : err} — holding every dangerous action for you`);
+    return undefined;
+  }
+}
+
+export const __testables = { resolveBrokerRuntime };
+
 export default {
   id: PLUGIN_ID,
   name: "ShieldCortex Real-time Scanner",
@@ -1032,6 +1124,7 @@ export default {
     uiHints: PLUGIN_CONFIG_UI_HINTS,
     jsonSchema: PLUGIN_CONFIG_JSON_SCHEMA,
   },
+
 
   register(api: PluginApi) {
     if (_registered) return;
@@ -1080,6 +1173,7 @@ export default {
           evaluateToolCall: typeof (defenceMod as any).evaluateToolCall === 'function'
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
+          broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
           onAuditEntry: (entry) => syncInterceptEvent(entry, {
             cloudApiKey: (scConfig as any).cloudApiKey ?? '',
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',

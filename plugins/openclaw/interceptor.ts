@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, appendFileSync, readFileSync, statSync } from 'node:fs';
 import { join, isAbsolute, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
+import { createGatewayInvoker, type BrokerInvokerContext, type ModelInvokerLike } from './broker-invoker.js';
 
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 export type InterceptAction = 'log' | 'warn' | 'require_approval';
@@ -29,6 +30,11 @@ export interface ActionGuardConfig {
   /** Audit recognised (severity 'sensitive'+) allow-decisions. Default true (issue #95).
    *  Benign allows are never audited — on a busy agent every `ls` would drown the stream. */
   auditAllows?: boolean;
+  /** RAW approval-broker config (#143), passed through untouched. It is
+   *  normalised by `normaliseBrokerConfig` in the main package before it reaches
+   *  the broker — this plugin never interprets it, so a hostile value cannot be
+   *  laundered by travelling through here. Absent/disabled = today's behaviour. */
+  broker?: Record<string, unknown>;
 }
 
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
@@ -56,6 +62,77 @@ export type ToolGuardEvaluator = (
   options?: ToolGuardEvaluatorOptions,
 ) => ToolGuardVerdictLike;
 
+// ── Approval broker (#143) ──────────────────────────────────────────────────
+// Structurally typed, like ToolGuardVerdictLike above: the real implementations
+// live in `shieldcortex/defence` (approval-broker.ts, approval-judge.ts,
+// broker-config.ts) and are injected at runtime, because this plugin is built
+// across a package boundary and must keep working when the main package is a
+// different version — or absent. No injection = no broker = today's behaviour.
+
+export interface JudgeResultLike {
+  assessment: 'benign' | 'uncertain' | 'malicious';
+  confidence: number;
+  inContext: boolean;
+  injectionSuspected: boolean;
+  rationale?: string;
+}
+
+export interface BrokerAuditLike {
+  outcome: string;
+  tool: string;
+  action: string;
+  severity: string;
+  signals: string[];
+  judgeAssessment: string;
+  judgeConfidence: number | null;
+  injectionSuspected: boolean;
+  inContext: boolean | null;
+  reason: string;
+}
+
+export interface BrokerDecisionLike {
+  outcome: 'not_brokerable' | 'harden' | 'hold' | 'pre_clear';
+  reason: string;
+  canAutoApproveOnTimeout: boolean;
+  audit: BrokerAuditLike;
+}
+
+export interface BrokerConfigLike {
+  enabled: boolean;
+  allowPreClear: boolean;
+  preClearConfidence: number;
+  judgeTimeoutMs: number;
+  approvalTimeoutMs: { sensitive: number; dangerous: number };
+  model?: string;
+}
+
+/** Everything the interceptor needs to run a broker pass, injected as one unit
+ *  so a half-wired broker (a decision core with no judge, say) cannot exist. */
+export interface BrokerRuntime {
+  /** ALREADY normalised by `normaliseBrokerConfig`. The interceptor does not
+   *  sanitise config; it consumes a config that was sanitised at the boundary. */
+  config: BrokerConfigLike;
+  runJudge: (
+    req: {
+      tool: string;
+      toolInput: unknown;
+      verdict: { severity: string; action: string; reason: string; signals: string[] };
+      sessionSummary?: string;
+    },
+    invoke: ModelInvokerLike,
+    opts?: { timeoutMs?: number },
+  ) => Promise<JudgeResultLike | null>;
+  brokerDecision: (input: {
+    tool: string;
+    toolInput: unknown;
+    verdict: ToolGuardVerdictLike;
+    judge: JudgeResultLike | null;
+    policy?: { allowPreClear: boolean; preClearConfidence: number };
+  }) => BrokerDecisionLike;
+  timeoutOutcome: (decision: BrokerDecisionLike) => 'approve' | 'deny';
+  approvalTimeoutMs?: (config: BrokerConfigLike, severity: string) => number;
+}
+
 export interface InterceptorConfig {
   enabled: boolean;
   severityActions: Record<Severity, InterceptAction>;
@@ -68,6 +145,11 @@ export interface ToolCallContext {
   toolName: string;
   arguments: Record<string, unknown>;
   requireApproval?: (message: string) => Promise<boolean>;
+  /** Optional one-shot completion through the gateway's OWN model pool (#143).
+   *  ShieldCortex supplies no credentials of its own; when a gateway build does
+   *  not offer this, the broker has no judge and holds for the operator —
+   *  exactly today's behaviour. See broker-invoker.ts. */
+  invokeModel?: BrokerInvokerContext['invokeModel'];
   /** Working directory the tool call runs in, when the gateway supplies one —
    *  used to resolve a relative script path (issue #4). Falls back to the
    *  call's own `cwd` argument, then `process.cwd()`. */
@@ -89,6 +171,10 @@ export interface InterceptAuditEntry {
   outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied' | 'allowed';
   preview: string;
   ts: string;
+  /** The approval broker's record for this call (#143). Present on exactly the
+   *  calls the broker judged, so "was a model consulted, and what did it say?"
+   *  is answerable from the audit stream alone. Absent = the broker never ran. */
+  broker?: BrokerAuditLike;
 }
 
 const WATCHED_TOOLS = ['remember', 'mcp__memory__remember'] as const;
@@ -538,6 +624,39 @@ export function createScriptSourceResolver(cwd?: string): (scriptPath: string) =
   };
 }
 
+/** Raised when the operator never answered the approval card (#143). Distinct
+ *  from a transport error, because the two have opposite handling: an error
+ *  routes to failurePolicy, a timeout routes to the broker's asymmetric rule. */
+export class ApprovalTimeout extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`no approval answer within ${timeoutMs}ms`);
+    this.name = 'ApprovalTimeout';
+  }
+}
+
+/**
+ * Race an approval against a deadline.
+ *
+ * `timeoutMs <= 0` means no deadline at all — the pre-#143 behaviour, where the
+ * gateway's own card owns the waiting. A deadline is only ever applied when the
+ * broker is in play, and it can only turn an unanswered card into the broker's
+ * timeout rule, which for everything but a pre-cleared call is a denial.
+ */
+export function withApprovalDeadline(approval: Promise<boolean>, timeoutMs: number): Promise<boolean> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return approval;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // A card answered after we stopped listening must not surface as an unhandled
+  // rejection in the gateway process.
+  const guarded = approval.catch(err => { throw err; });
+  guarded.catch(() => { /* handled by the race below or deliberately dropped */ });
+  return Promise.race([
+    guarded,
+    new Promise<boolean>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new ApprovalTimeout(timeoutMs)), timeoutMs);
+    }),
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
 /** The cwd a tool call runs in, if the gateway or the call itself names one. */
 function toolCallCwd(context: ToolCallContext): string | undefined {
   if (typeof context.cwd === 'string' && context.cwd) return context.cwd;
@@ -553,7 +672,23 @@ interface InterceptorOptions {
   onAuditEntry?: (entry: InterceptAuditEntry) => void;
   /** Tool Action Guard evaluator, injected from `shieldcortex/defence` at runtime. */
   evaluateToolCall?: ToolGuardEvaluator;
+  /** Approval broker (#143), injected from `shieldcortex/defence` at runtime.
+   *  Absent, or present with `config.enabled: false`, means no model is ever
+   *  consulted and the guard behaves exactly as it did before #143. */
+  broker?: BrokerRuntime;
+  /** Judge calls allowed per minute. The judge spends the OPERATOR's own rate
+   *  limit, so a looping or compromised agent must not be able to spend it
+   *  without bound. Exhausting it yields no judge, which yields a hold. */
+  maxJudgeCallsPerMinute?: number;
 }
+
+/** How many recent tool NAMES the judge is told about. Names only, never
+ *  arguments — see buildSessionSummary. */
+const SESSION_TOOL_MEMORY = 12;
+/** Tool names are registry-supplied, not free text, but an MCP server can name
+ *  a tool anything at all — so they are reduced to an identifier shape before
+ *  being placed anywhere near a prompt. */
+const TOOL_NAME_SAFE = /[^A-Za-z0-9_.:-]/g;
 
 export function createInterceptor(
   config: InterceptorConfig,
@@ -569,6 +704,13 @@ export function createInterceptor(
   const onAuditEntry = options?.onAuditEntry;
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
+  const broker = options?.broker;
+  // The judge rides the operator's own model pool, so its calls are their cost
+  // and their rate limit. Bounded per minute, and running out means "no judge",
+  // which the decision core reads as "hold for the human" — never as an allow.
+  const judgeLimiter = new RateLimiter(options?.maxJudgeCallsPerMinute ?? 20);
+  /** Bare tool names seen this session, newest last. See buildSessionSummary. */
+  const recentTools: string[] = [];
 
   function emitAudit(entry: InterceptAuditEntry): void {
     writeAuditEntry(entry);
@@ -584,6 +726,100 @@ export function createInterceptor(
       trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
       preview: preview.slice(0, 200), ts: new Date().toISOString(),
     };
+  }
+
+  // ── Approval broker (#143) ────────────────────────────────────────────────
+
+  /**
+   * The ONLY thing the judge is told about the session.
+   *
+   * The design's third open question was "what does the broker see of the
+   * session, and how do we stop *that* being the injection vector?" — a
+   * poisoned transcript arguing its own approval is the obvious attack. The
+   * answer here is the narrowest thing that still means anything: a list of
+   * bare tool NAMES, sanitised to an identifier shape. No arguments, no
+   * content, no memory text, no user or assistant turns.
+   *
+   * That is enough for "does this action fit what the session was doing?" —
+   * an `npm install` in a session of Read/Edit/Bash is in pattern; the same
+   * command as the first act of a session is not — and it carries no attacker
+   * prose, because there is nowhere in it for prose to live.
+   */
+  function buildSessionSummary(): string | undefined {
+    if (recentTools.length === 0) return undefined;
+    const names = [...new Set(recentTools)].join(', ');
+    return `tools used in this session so far (names only, no arguments): ${names}`;
+  }
+
+  function noteToolForSession(toolName: string): void {
+    const safe = String(toolName ?? '').replace(TOOL_NAME_SAFE, '').slice(0, 60);
+    if (!safe) return;
+    recentTools.push(safe);
+    if (recentTools.length > SESSION_TOOL_MEMORY) recentTools.shift();
+  }
+
+  /**
+   * One broker pass over a dangerous-tier verdict.
+   *
+   * Returns null when the broker is not in play at all — no runtime injected,
+   * or disabled by config — and the caller then behaves exactly as it did
+   * before #143. Every *failure* inside a pass (no model seam, pool down, junk
+   * reply, budget spent, core throwing) resolves to a decision of `hold` or to
+   * null, both of which route to the operator. There is no path here that
+   * produces an allow the guard would not otherwise have produced.
+   */
+  async function runBroker(context: ToolCallContext, v: ToolGuardVerdictLike): Promise<BrokerDecisionLike | null> {
+    if (!broker || broker.config?.enabled !== true) return null;
+
+    try {
+      // No seam on this gateway build → no invoker → no judge. Not an error:
+      // it is the honest state of every gateway shipping today.
+      const invoke = createGatewayInvoker(context as BrokerInvokerContext, {
+        model: broker.config.model,
+        timeoutMs: broker.config.judgeTimeoutMs,
+      });
+
+      let judge: JudgeResultLike | null = null;
+      if (invoke && judgeLimiter.shouldAllow()) {
+        judge = await broker.runJudge(
+          {
+            tool: context.toolName,
+            toolInput: context.arguments,
+            verdict: { severity: v.severity, action: v.action, reason: v.reason, signals: v.signals },
+            sessionSummary: buildSessionSummary(),
+          },
+          invoke,
+          { timeoutMs: broker.config.judgeTimeoutMs },
+        );
+      } else if (invoke) {
+        log.warn(`[shieldcortex] approval broker: judge budget spent this minute — holding ${context.toolName} for the operator`);
+      }
+
+      const decision = broker.brokerDecision({
+        tool: context.toolName,
+        toolInput: context.arguments,
+        verdict: v,
+        judge,
+        policy: {
+          allowPreClear: broker.config.allowPreClear,
+          preClearConfidence: broker.config.preClearConfidence,
+        },
+      });
+      // A decision we cannot read is not a decision. Falling back to null puts
+      // the call on the pre-#143 path, which asks the human.
+      if (!decision || typeof decision.outcome !== 'string') return null;
+      return decision;
+    } catch (err) {
+      log.warn(`[shieldcortex] ⚠️ approval broker error: ${err instanceof Error ? err.message : err} — holding for the operator`);
+      return null;
+    }
+  }
+
+  /** How long to wait for a human once the broker is in play. */
+  function brokerApprovalTimeoutMs(severity: string): number {
+    if (!broker) return 0;
+    if (typeof broker.approvalTimeoutMs === 'function') return broker.approvalTimeoutMs(broker.config, severity);
+    return Math.min(broker.config.approvalTimeoutMs.sensitive, broker.config.approvalTimeoutMs.dangerous);
   }
 
   // WS2 fail-closed path (issue #59): when the real guard was never wired in or
@@ -715,14 +951,49 @@ export function createInterceptor(
       return;
     }
 
+    // ── AI-assisted approval broker (#143) ──────────────────────────────────
+    // Sits between the guard's verdict and the human, and can only move the
+    // answer toward caution. Off by default; when off, `brokered` is null and
+    // everything below is the pre-#143 code path unchanged.
+    const brokered = await runBroker(context, v);
+    // Every downstream audit row for a brokered call carries the broker's own
+    // record alongside the guard's, so one row answers "was a model consulted,
+    // what did it say, and what did that change?".
+    const auditBase = brokered ? { ...base, broker: brokered.audit } : base;
+
+    if (brokered?.outcome === 'harden') {
+      // The judge found something the rules did not. Deny outright rather than
+      // offer the operator a button to be socially-engineered into tapping.
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'auto_denied' });
+      log.warn(`[shieldcortex] approval broker HARDENED ${context.toolName} to a denial: ${brokered.reason}`);
+      throw new Error(`ShieldCortex: tool call blocked — ${brokered.reason}`);
+    }
+
+    if (brokered?.outcome === 'pre_clear') {
+      // Reversible, on-host, in-context, judge-confident: proceed without
+      // waiting. Loud on purpose — a release nobody approved must never be a
+      // silent one, because the audit row is the only thing that will ever tell
+      // the operator it happened.
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'approved' });
+      log.warn(`[shieldcortex] approval broker PRE-CLEARED ${context.toolName} without waiting for the operator: ${brokered.reason} [${v.signals.join(', ')}]`);
+      return;
+    }
+
     if (typeof context.requireApproval !== 'function') {
       // Unattended (no approver, e.g. cron/heartbeat): fail closed on the failure
       // policy. High-severity dangerous defaults to deny — surfaced loudly to the
       // gateway log so an operator sees it, because a silent no-op is exactly the
       // failure mode we are eliminating.
+      //
+      // With the broker in play this can only get STRICTER: no approver is the
+      // timeout case by definition, and `timeoutOutcome` answers 'approve' only
+      // for a pre-cleared call, which already returned above. So a brokered call
+      // that reaches here denies even where failurePolicy would have allowed.
       const failAction = config.failurePolicy[severity];
-      emitAudit({ ...base, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
-      if (failAction === 'deny') {
+      const brokerDenies = brokered ? broker!.timeoutOutcome(brokered) === 'deny' : false;
+      const deny = failAction === 'deny' || brokerDenies;
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: deny ? 'failure_denied' : 'failure_allowed' });
+      if (deny) {
         log.warn(`[shieldcortex] action-guard DENIED (unattended, no approver) ${context.toolName}: ${v.reason} [${v.signals.join(", ")}]`);
         throw new Error(`ShieldCortex: tool call blocked — ${v.reason} (no approver, failure policy: deny)`);
       }
@@ -730,17 +1001,34 @@ export function createInterceptor(
     }
 
     if (!rateLimiter.shouldAllow()) {
-      emitAudit({ ...base, action: 'rate_limit', outcome: 'auto_denied' });
+      emitAudit({ ...auditBase, action: 'rate_limit', outcome: 'auto_denied' });
       throw new Error('ShieldCortex: tool call auto-denied (approval rate limit exceeded)');
     }
 
     let approved: boolean;
     try {
-      approved = await context.requireApproval(formatActionGuardPrompt(context.toolName, v));
+      approved = await withApprovalDeadline(
+        context.requireApproval(formatActionGuardPrompt(context.toolName, v)),
+        brokered ? brokerApprovalTimeoutMs(v.severity) : 0,
+      );
     } catch (err) {
+      if (brokered && err instanceof ApprovalTimeout) {
+        // The asymmetric path. Silence is only ever a yes for something the
+        // broker already pre-cleared — and that returned long before here — so
+        // in practice this is always a deny. It reads the broker's own derived
+        // flag rather than re-deriving its own idea of what is safe.
+        const outcome = broker!.timeoutOutcome(brokered);
+        emitAudit({ ...auditBase, action: 'require_approval', outcome: outcome === 'approve' ? 'approved' : 'auto_denied' });
+        if (outcome === 'approve') {
+          log.warn(`[shieldcortex] approval broker: no answer in ${err.timeoutMs}ms — auto-approving pre-cleared ${context.toolName}`);
+          return;
+        }
+        log.warn(`[shieldcortex] approval broker: no answer in ${err.timeoutMs}ms — DENYING ${context.toolName} (fail-closed)`);
+        throw new Error(`ShieldCortex: tool call blocked — no answer from the operator within ${err.timeoutMs}ms (fail-closed)`);
+      }
       const failAction = config.failurePolicy[severity];
       log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
-      emitAudit({ ...base, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
       if (failAction === 'deny') {
         throw new Error('ShieldCortex: tool call blocked — approval error, failure policy: deny');
       }
@@ -748,14 +1036,18 @@ export function createInterceptor(
     }
 
     if (approved) {
-      emitAudit({ ...base, action: 'require_approval', outcome: 'approved' });
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'approved' });
       return;
     }
-    emitAudit({ ...base, action: 'require_approval', outcome: 'denied' });
+    emitAudit({ ...auditBase, action: 'require_approval', outcome: 'denied' });
     throw new Error('ShieldCortex: tool call denied by user');
   }
 
   async function handleToolCall(context: ToolCallContext): Promise<void> {
+    // Remember the NAME only. This is the entirety of what the approval broker's
+    // judge will ever learn about the session — see buildSessionSummary.
+    noteToolForSession(context.toolName);
+
     // Non-memory tools go through the Action Guard (what the agent DOES); the
     // memory-write tools continue through the content defence pipeline below.
     if (!(WATCHED_TOOLS as readonly string[]).includes(context.toolName)) {
