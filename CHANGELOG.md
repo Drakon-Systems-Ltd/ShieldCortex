@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.21] - 2026-07-31
+
+**A maintenance backup can no longer spend the operator's entire disk budget (#148). The repair `doctor` recommends was the thing pushing large-DB hosts over their own limit.**
+
+### Fixed
+
+- **`repair-project-keys` sizes its safety backup against the disk budget before writing it (#148, PR #149).** Found on a fleet host: `doctor` warned about a project-key collision and recommended `--fix-project-keys`; that repair copied the whole 48 MB database with no headroom check, taking the host from 51.7 MB to 98.8 MB against its own 100 MB limit. The next `doctor` then reported a disk **failure caused by the fix it had itself recommended**. Clearing the file by hand did not help — the next repair recreated it. An unwinnable loop that left the host one write short of a failing memory system.
+  - The copy is now planned against the accounted limit and reclaims space from superseded backups when that creates room.
+  - When even pruning cannot make room it **refuses rather than overfilling**, naming the sizes and a way forward. An operator told "I can't take a safety copy" can act; one whose disk silently filled cannot.
+  - Superseded backups are pruned on write — the behaviour `doctor`'s own remedy text has been promising since 4.45.1 while nothing implemented it. The prune matches only ShieldCortex's own backup shape and never touches the live database, its WAL/shm siblings, or the lock.
+- **`doctor`'s disk remedy no longer misdescribes what it found.** It called the dominant file a "stale DB backup (migration snapshot)" and asserted "v4.45.1+ also auto-prunes them on start". On the affected host the file was a safety copy written minutes earlier by a recommended repair, the host was on 4.47.20, and no prune had happened. The text now describes what these files actually are and notes that the newest is the rollback point.
+
+### Notes
+
+- `DISK_LIMIT_BYTES` is now exported so the backup path and the check that reports on it agree. `database/init.ts` and `cli/doctor.ts` still carry their own copies of the same number — three copies of a limit is three chances to drift, and folding them together is worth doing.
+- A pre-existing test asserted the old remedy wording, including the false auto-prune claim — the second time this week a test had encoded a defect as expected behaviour. It now asserts the corrected contract and pins that both false claims are gone.
+
 ## [4.47.20] - 2026-07-31
 
 **Hook commands must RESOLVE, not merely exist (#146). A fleet sweep found three of four boxes where every Claude Code hook — including the Action Guard — was configured, reported healthy, and dead.**
