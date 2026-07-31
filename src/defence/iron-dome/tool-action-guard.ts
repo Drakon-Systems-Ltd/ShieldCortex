@@ -254,6 +254,12 @@ const DANGEROUS: Pattern[] = [
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  // The guard's own one-shot approval store (#118). The TTY gate stops the
+  // agent using the CLI; without this rule the agent could instead just edit
+  // approvals.json (a plain 0600 file owned by the same user) and mint its own
+  // approval. Any command that so much as names the store path goes to the
+  // operator — who is the only party with a legitimate reason to touch it.
+  { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
@@ -482,7 +488,7 @@ const REMEDIATION: Record<string, string> = {
   'install-package-global': 'review the package + source, then install it explicitly if intended (a workspace-local install needs no global flag)',
   'install-package': 'review the package + source, then run the install yourself if intended',
   'registry-code-exec': 'review the package + source on the registry before running (npx/bunx/uvx/dlx fetch and execute immediately)',
-  'privilege-escalation': 'run the specific privileged step yourself, or approve this exact command',
+  'privilege-escalation': 'run the specific privileged step yourself, or approve this exact command from your own terminal with `shieldcortex approve`',
   'external-egress': 'confirm the destination and payload before data leaves the host',
   'git-force-push': 'confirm the branch and remote; a force-push can overwrite others’ work',
   'file-delete': 'confirm the target path before deleting',
@@ -1143,11 +1149,14 @@ export function evaluateToolCall(
       'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]);
   }
 
-  // Config can auto-approve specific actions the operator has whitelisted.
   const canonical = ACTION_BY_FAMILY[family];
-  if (config?.enabled && config.autoApprove?.some(a => canonical.includes(a.toLowerCase()) || a.toLowerCase().includes(family))) {
-    // still fall through to catastrophic above; only downgrades the soft tiers.
-  }
+  // NOTE (#118): a family-level `autoApprove` branch used to sit here with an
+  // empty body — dead code that read as if config could soften a verdict. It
+  // never did. `autoApprove` is applied by the CALLERS (scripts/pre-tool-hook.mjs
+  // and plugins/openclaw/interceptor.ts) against the finished verdict, which is
+  // the right layer: this function stays a pure classifier that config cannot
+  // talk out of a verdict. Per-command operator approval lives in
+  // ./action-approvals.ts and is likewise consumed by the callers.
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
   // Span-classified (#84): same mention-vs-intent filter as catastrophic above.

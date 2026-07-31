@@ -87,6 +87,34 @@ async function loadGuard() {
   }
 }
 
+/**
+ * Load the one-shot approval store (#118). Optional by design: when the dist
+ * module is missing the guard behaves exactly as it did before approvals
+ * existed — refuse and say so — rather than failing open.
+ */
+async function loadApprovals() {
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'action-approvals.js')).href
+    );
+    return typeof mod.consumeApproval === 'function' && typeof mod.recordPending === 'function'
+      ? mod
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One-line description of a refused call, for the operator's approve list. */
+function describeToolCall(toolName, toolInput) {
+  const input = toolInput ?? {};
+  const surface =
+    input.command ?? input.file_path ?? input.path ?? input.url ?? input.pattern ?? '';
+  const text = typeof surface === 'string' ? surface : JSON.stringify(surface);
+  return text ? `${toolName}: ${text}` : toolName;
+}
+
 // ==================== FALLBACK (guard load/eval failure — WS2) ====================
 // Deliberately DUPLICATED from tool-action-guard.ts's CATASTROPHIC list, not
 // imported — it must keep working when the dist build is the thing that's
@@ -134,6 +162,8 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  // Guard's own approval store (#118): agent-side writes here mint approvals.
+  { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
@@ -378,8 +408,44 @@ process.stdin.on('end', async () => {
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
+    // One-shot exact-command approval (#118). An operator who ran
+    // `shieldcortex approve <hash>` in a terminal gets exactly one pass for
+    // exactly this call; the approval is spent here. Everything else falls
+    // through to the normal refusal, which now carries the hash to approve.
+    const approvals = await loadApprovals();
+    if (approvals) {
+      try {
+        const spent = approvals.consumeApproval(toolName, toolInput);
+        if (spent) {
+          writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved');
+          console.error(
+            `[shieldcortex] action-guard: consumed operator approval ${spent.hash.slice(0, 12)} for ${toolName} (single use).`,
+          );
+          process.exit(0); // Defer to the harness's own permission system.
+        }
+        approvals.recordPending({
+          tool: toolName,
+          input: toolInput,
+          summary: describeToolCall(toolName, toolInput),
+          signals: verdict.signals,
+        });
+      } catch {
+        // An unusable approvals store must never widen OR wedge the guard —
+        // fall through to the standard refusal below.
+      }
+    }
+
     writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'asked');
-    emitDecision('ask', `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`);
+    let message = `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`;
+    if (approvals) {
+      try {
+        const hash = approvals.hashToolCall(toolName, toolInput).slice(0, 12);
+        message += ` — to allow this exact command once, run in YOUR terminal: shieldcortex approve ${hash}`;
+      } catch {
+        // Hash is a nicety; never let it break the refusal path.
+      }
+    }
+    emitDecision('ask', message);
     process.exit(0);
   } catch (error) {
     console.error(`[shieldcortex] action-guard hook error: ${error?.message ?? error}`);
