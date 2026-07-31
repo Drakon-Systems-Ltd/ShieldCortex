@@ -21,14 +21,10 @@ import { readdirSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 /**
- * The accounted disk limit.
- *
- * Duplicated today in `database/init.ts` (MAX_DB_SIZE) and `cli/doctor.ts`
- * (checkDiskUsage's default). Exported here so at least the backup path and
- * the check that reports on it agree; folding the other two onto this constant
- * is worth doing, because three copies of a limit is three chances to drift.
+ * The accounted disk budget, from the single definition in ../limits.ts.
+ * Re-exported so existing callers keep working; do not redefine it here.
  */
-export const DISK_LIMIT_BYTES = 100 * 1024 * 1024;
+export { DIRECTORY_BUDGET_BYTES as DISK_LIMIT_BYTES } from '../limits.js';
 
 /** Our own backup shape: `<db>.bak.<ISO-with-dashes>`. Deliberately narrow. */
 export const BACKUP_SUFFIX_RE = /\.bak\.\d{4}-\d{2}-\d{2}T[\d-]+Z$/;

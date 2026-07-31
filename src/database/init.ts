@@ -13,6 +13,7 @@ import { runMigrations } from './migrations.js';
 import { getInlineSchema } from './inline-schema.js';
 import { seedDefaultFirewallRules } from './seed-firewall-rules.js';
 import { debugLog } from '../debug-log.js';
+import { MAX_DB_FILE_BYTES, WARN_DB_FILE_BYTES } from '../limits.js';
 
 const _currentFile = fileURLToPath(import.meta.url);
 const _currentDir = dirname(_currentFile);
@@ -24,8 +25,10 @@ let lockFileFd: number | null = null;
 let dbInode: bigint | null = null; // Track file identity for staleness detection
 
 // Anti-bloat: Database size limits
-const MAX_DB_SIZE = 100 * 1024 * 1024; // 100MB hard limit
-const WARN_DB_SIZE = 50 * 1024 * 1024; // 50MB warning threshold
+// Re-exported from the single definition in ../limits.ts (#148 follow-up).
+// This bounds the LIVE DB FILE only — not the whole directory. See limits.ts.
+const MAX_DB_SIZE = MAX_DB_FILE_BYTES;
+const WARN_DB_SIZE = WARN_DB_FILE_BYTES;
 
 /**
  * Expand ~ to home directory

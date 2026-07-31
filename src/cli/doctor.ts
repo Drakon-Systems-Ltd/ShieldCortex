@@ -24,6 +24,7 @@ import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
+import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -807,7 +808,7 @@ function readDbRowConsumers(dbPath: string): DbRowConsumers | null {
   }
 }
 
-export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = 100 * 1024 * 1024): Promise<CheckResult> {
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES): Promise<CheckResult> {
   if (!fs.existsSync(scDir)) {
     return { label: 'Disk', status: 'pass', message: '0 B / 100 MB limit (directory not yet created)' };
   }
