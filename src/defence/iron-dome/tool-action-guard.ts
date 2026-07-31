@@ -638,6 +638,9 @@ interface SpanCtx {
   dataQuotes: Array<[number, number]>;  // CONTENT ranges (open+1..close) of quotes that are pure data args
   substitutions: Array<[number, number]>; // `$(…)` / backtick spans — executed even inside a data quote
   scriptLiterals: Array<[number, number]>; // comment + string-literal ranges in interpreter-source regions
+  /** Literals whose OWN LINE calls a shell-out sink — the argument of an
+   *  `os.system(…)` / `execSync(…)` is a command, not a payload. */
+  sinkArgLiterals: Array<[number, number]>;
   regions: ScanRegion[];                // non-`sh` regions only; `sh` behaves exactly as before
 }
 // Per-pattern iteration cap: after this many mention-only occurrences with no
@@ -663,7 +666,21 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
 
   const scriptRegions = regions.filter(r => r.lang !== 'sh');
   const scriptLiterals: Array<[number, number]> = [];
-  for (const r of scriptRegions) scriptLiterals.push(...scriptDataRanges(text, r));
+  const sinkArgLiterals: Array<[number, number]> = [];
+  for (const r of scriptRegions) {
+    for (const range of scriptDataRanges(text, r)) {
+      // A literal that IS a shell-out call's argument stays a command:
+      // `os.system('rm -rf /')` is the textbook shape and must keep hard-
+      // blocking. Attribution is by line, deliberately — it is the cheap,
+      // conservative half of the problem. When it misses (the call split over
+      // lines, or the string bound to a variable first) the literal falls back
+      // to the payload tier, which still gates; it never becomes an allow.
+      const lineStart = Math.max(r.start, text.lastIndexOf('\n', range[0]) + 1);
+      let lineEnd = text.indexOf('\n', range[1]);
+      if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
+      (SHELL_OUT_SINK.test(text.slice(lineStart, lineEnd)) ? sinkArgLiterals : scriptLiterals).push(range);
+    }
+  }
 
   // Shell quote/substitution scanning runs over the SHELL regions only — an
   // apostrophe in a Python comment must not open a shell quote that swallows
@@ -747,7 +764,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
     // (fail-closed: everything after it is executed, not quoted data).
     while (subStack.length > 0) substitutions.push([subStack.pop() as number, rangeEnd]);
   }
-  return { urls, dataQuotes, substitutions, scriptLiterals, regions: scriptRegions };
+  return { urls, dataQuotes, substitutions, scriptLiterals, sinkArgLiterals, regions: scriptRegions };
 }
 
 /**
@@ -797,6 +814,8 @@ function classifyWithCtx(ctx: SpanCtx, start: number, end: number, text: string)
     // literals, so a span that straddles a literal boundary — the corpus shape
     // `'git-force-push': r'git push --force'`, one match across two adjacent
     // dict-value literals — cannot be a shell command either.
+    // 3a-i) The literal is a shell-out call's own argument — that IS a command.
+    if (intersects(ctx.sinkArgLiterals, start, end)) return 'executed';
     if (intersects(ctx.scriptLiterals, start, end)) {
       if (!r.hasSink) return 'mention';
       return r.folded ? 'payload' : 'executed';
@@ -1730,7 +1749,10 @@ export function evaluateToolCall(
   // span classifier needs to know which is which before it decides whether a
   // match is an action or a payload. A `sh` region behaves exactly as before,
   // so this is a no-op for a plain shell command.
-  const scriptRegions: ScanRegion[] = [
+  // Over the classification cap the span classifier fails closed and never
+  // consults the region map, so building one is pure cost — skip it. This keeps
+  // the pathological 50k-command path (issue #86-redos) at its measured budget.
+  const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : [
     ...interpreterHeredocRegions(execCommand),
     ...inlineProgramRegions(execCommand),
     ...fold.regions.map(r => ({
