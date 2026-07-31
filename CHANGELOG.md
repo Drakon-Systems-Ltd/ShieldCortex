@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.18] - 2026-07-31
+
+**The Action Guard precision pass: the guard now asks "is this an action?" — not "does this text look dangerous?" — and the operator finally gets the approval mechanism the refusal text always promised (#118, #89).**
+
+Measured on a production box before this release: 34% of 1,271 real tool calls over 25 days were gated, most of them benign. Replaying the 429 distinct stops from that log against this release: 312 now pass, 117 still stop, and every attack fixture still blocks at its existing tier.
+
+### Added
+
+- **One-shot exact-command approvals (#118, PR #127).** The dangerous-tier refusal said "approve this exact command" and no code implemented it — in hook mode `require_approval` was operationally a hard denial. Now the refusal names a hash; `shieldcortex approve <hash>` in a terminal grants exactly that (tool, input) pair one pass within 10 minutes (`--ttl` to change), consumed on first use. Granting requires stdin AND stdout to be TTYs so an agent with piped stdio cannot approve its own blocked command, and there is deliberately no env-var escape hatch. The store is 0600, written atomically, self-pruning; a corrupt store reads as empty (nothing approved). Catastrophic tier returns before approvals are ever consulted.
+  - **Review catch, shipped with the feature:** the store file itself is now inside the guard perimeter — any command naming the approvals directory earns `require_approval` (`touch-approval-store`), in the guard and both degraded-mode fallback lists, because a same-user agent editing the JSON directly would otherwise mint its own approval.
+
+### Fixed
+
+- **Payload vs action: typed scan regions (#89, PR #141).** The #138 folding fix closed the script-file bypass but read every byte of a folded script as if it were shell about to execute — so an analysis script that merely *contained* a force-push-shaped string in a regex table was blocked as a force-push. The guard now types each scan region: shell text is scanned exactly as before; inside interpreter source (python/node heredocs and folded files), comments and string literals are payload, not commands — unless the literal is the argument of a shell-out sink, which stays a command. Caller-written `-c`/heredoc bodies get no downgrade, preserving #84's adversarial floor, and the classifier fails closed: over the length cap or out of re-scan budget, a match counts as executed.
+  - **Path targets are not verbs (review catch):** `touch-sensitive-path` and `touch-approval-store` skip the interpreter-source downgrade entirely — a script that names a private key or the approvals store in a literal does so precisely because it is about to open it. URL and quoted-data exemptions still apply.
+- **Two false negatives closed by the same pass (#89, PR #141).** `timeout` was missing from the scheduler and registry-exec wrapper sets, so a crontab edit or a registry-package execution behind `timeout` was not gated at all. Wrapper sets now cover `timeout`, `setsid`, `ionice`, `command` and `exec`.
+- **A variable named `at` is not the at(1) scheduler (#89, PR #135).** The command-position anchor treats every line start as a command boundary, so an `at = token` assignment in an embedded script body fired `modify-scheduler` and blocked a read-only Xero pull. `at` immediately followed by `=` is an assignment in every language the guard scans; at(1)'s grammar has no `=` in that slot, so the carve-out costs no detection. Each allow-case ships a must-still-fire sibling.
+
+### Notes
+
+- FP classes from the same corpus deliberately NOT addressed here, tracked on #89: known-benign `npx` dev binaries read as registry-exec, venv-scoped pip installs read as host installs, recognised-CLI egress (`op`, `gh`, `flyctl`), and messaging CLIs matching service-control verbs. Benign recursive deletes of build dirs remain auto-denied at catastrophic tier — that is a tier decision, not a precision bug, and it is documented with numbers on the issue.
+
 ## [4.47.17] - 2026-07-30
 
 **Security: the Action Guard now scans the script a command invokes, not just the command string. Every rule was previously bypassable by moving the command into a file.**
