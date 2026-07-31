@@ -368,6 +368,55 @@ describe('#89 — attack-corpus floor is unmoved', () => {
     expect(verdictOf(command).decision).toBe('require_approval');
   });
 
+  // Every case here was found by probing the new classifier adversarially; each
+  // was a real fail-open in a working revision of this change.
+  describe('adversarial probes against the region classifier', () => {
+    it('an interpreter heredoc that GENERATES a script the same command runs stays scanned as shell', () => {
+      // `python3 - <<'PY' > gen.sh … PY; bash gen.sh` — the body prints the
+      // shell that later runs, so its text is a command source after all (#86.2).
+      expect(verdictOf("python3 - <<'PY' > /tmp/x.sh\nprint('rm -rf /')\nPY\nbash /tmp/x.sh").decision).toBe('block');
+      expect(verdictOf("python3 - <<'PY' | tee /tmp/y.sh\nprint('rm -rf /')\nPY\nsh /tmp/y.sh").decision).toBe('block');
+    });
+
+    it('an inline -c/-e program that shells out keeps its literals executed', () => {
+      // `folded: false` — an inline program is the exec surface the caller wrote
+      // and is the textbook RCE vector, so it gets no payload downgrade.
+      for (const c of [
+        `python3 -c "import os; os.system('rm -rf /')"`,
+        `python3 -c "import os; getattr(os,'system')('rm -rf /')"`,
+        `perl -e "system('rm -rf /')"`,
+        `php -r "shell_exec('rm -rf /');"`,
+        `node -e "require('child_process').execSync('rm -rf /')"`,
+      ]) {
+        expect([c, verdictOf(c).decision]).toEqual([c, 'block']);
+      }
+    });
+
+    it('a heredoc body an interpreter consumes is still not a free-text pass', () => {
+      expect(verdictOf("python3 - <<'PY'\nx = 1\nPY\nrm -rf /").decision).toBe('block');
+    });
+
+    it('a statement chained after a text-flag value is still executed', () => {
+      expect(verdictOf('mytool --text "hi" && rm -rf /').decision).toBe('block');
+      expect(verdictOf('mytool --text "hi ; rm -rf /').decision).toBe('block');
+    });
+
+    it('classification stays bounded on a large surface', () => {
+      // The realistic shapes. The point of the bound is that folding a big
+      // script (#138) can never stall the host gateway — the zeroth law.
+      const cases: Array<[string, Record<string, string>]> = [
+        ['python3 /tmp/a.py', { '/tmp/a.py': "import json\nD = ['rm -rf /']\n".repeat(9000) }],
+        ['bash /tmp/a.sh', { '/tmp/a.sh': 'echo step\n'.repeat(3000) + 'rm -rf /\n' }],
+        ["python3 - <<'PY'\n" + "x = 'rm -rf /'\n".repeat(2000) + 'PY', {}],
+      ];
+      for (const [command, files] of cases) {
+        const started = Date.now();
+        verdictOf(command, files);
+        expect([command.slice(0, 20), Date.now() - started < 500]).toEqual([command.slice(0, 20), true]);
+      }
+    });
+  });
+
   it('the #138 script-file bypass table still holds', () => {
     expect(verdictOf('bash /tmp/a.sh', { '/tmp/a.sh': 'rm -rf /\n' }).decision).toBe('block');
     expect(verdictOf('sh /tmp/a.sh', { '/tmp/a.sh': 'dd if=/dev/zero of=/dev/sda\n' }).decision).toBe('block');
