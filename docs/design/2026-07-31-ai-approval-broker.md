@@ -106,6 +106,31 @@ Timing out into "allow" is the dangerous direction and is only ever taken for th
 5. **Offline / no-model fallback.** If the judge model is unreachable, the broker must fail closed to layer-3 human-only — never fail open.
 6. **Audit shape.** Every broker decision (verdict, model, confidence, tier, timeout-outcome) needs to be in the audit trail with the same fidelity as a guard verdict.
 
+## Implementation status
+
+Built on `feat/143-approval-broker-core`, off by default:
+
+| Piece | File | Notes |
+|---|---|---|
+| Decision core (pure) | `src/defence/iron-dome/approval-broker.ts` | Outcomes: not_brokerable / harden / hold / pre_clear |
+| Judge layer | `src/defence/iron-dome/approval-judge.ts` | Delimited untrusted block, strict parse, null on any failure |
+| Config | `src/defence/iron-dome/broker-config.ts` | `enabled` defaults FALSE; tighten-only; no path to widen an invariant |
+| CLI transport | `src/defence/iron-dome/cli-invoker.ts` | `claude --print --tools "" --safe-mode --strict-mcp-config`, scratch cwd, allowlisted env |
+| Gateway transport | `plugins/openclaw/broker-invoker.ts` | Narrow optional `context.invokeModel`; absent → no judge → hold |
+| OpenClaw wiring | `plugins/openclaw/interceptor.ts` | At the `require_approval` branch; timeout applies `timeoutOutcome` |
+| Claude Code wiring | `scripts/pre-tool-hook.mjs` | After the #118 approval-consume step |
+
+Open questions 1 (confidence calibration) and 2 (injection detection ANDed with
+the `llm_input` scanner) are **not** closed — the threshold is a conservative
+0.9 chosen a priori and has not been validated against the 429-event corpus, and
+the judge's injection signal is currently used alone.
+
+Question 3 ("in-context" definition) is answered differently per surface, and
+deliberately: the OpenClaw path sends a list of bare tool NAMES from the session
+(sanitised to an identifier shape, no arguments, no content); the Claude Code
+hook is one process per tool call and sends **nothing**, so the judge answers
+`inContext: false` and that surface can harden but will not pre-clear.
+
 ## Test posture (non-negotiable, when built)
 
 - Adversarial corpus: injection-laced dangerous requests must never be pre-cleared or auto-approved-on-timeout.

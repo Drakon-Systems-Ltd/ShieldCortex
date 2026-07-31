@@ -60,6 +60,11 @@ function loadActionGuardConfig() {
       enforce: raw.enforce !== false,
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
       auditAllows: raw.auditAllows !== false,
+      // #143, passed through RAW. normaliseBrokerConfig in dist is the single
+      // place that knows which values would loosen an invariant; re-implementing
+      // half of it here is how the two halves end up disagreeing. Absent or
+      // not-exactly-enabled means the broker never runs.
+      broker: raw.broker && typeof raw.broker === 'object' && !Array.isArray(raw.broker) ? raw.broker : null,
     };
   } catch {
     // Unreadable config → guard on with defaults. Enforce-by-default means a
@@ -102,6 +107,98 @@ async function loadApprovals() {
       ? mod
       : null;
   } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the AI-assisted approval broker (#143). Returns null when the broker is
+ * not switched on, or when the dist build predates it.
+ *
+ * Null is the normal answer and a safe one: no broker means this hook behaves
+ * exactly as it did before #143 — every dangerous-tier call is refused with the
+ * `shieldcortex approve <hash>` fallback. All four pieces are required
+ * together; a decision core without its config normaliser would be a policy
+ * consuming unvalidated input, which is the one shape this must never take.
+ */
+async function loadBroker(rawBrokerConfig) {
+  if (!rawBrokerConfig || rawBrokerConfig.enabled !== true) return null;
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const load = async (file) => {
+    try {
+      return await import(pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', file)).href);
+    } catch {
+      return null;
+    }
+  };
+  try {
+    const [core, judge, config, cli] = await Promise.all([
+      load('approval-broker.js'), load('approval-judge.js'), load('broker-config.js'), load('cli-invoker.js'),
+    ]);
+    if (typeof core?.brokerDecision !== 'function') return null;
+    if (typeof judge?.runJudge !== 'function') return null;
+    if (typeof config?.normaliseBrokerConfig !== 'function') return null;
+    if (typeof cli?.createCliInvoker !== 'function') return null;
+
+    const normalised = config.normaliseBrokerConfig(rawBrokerConfig);
+    if (!normalised?.enabled) return null;
+    return {
+      config: normalised,
+      brokerDecision: core.brokerDecision,
+      runJudge: judge.runJudge,
+      createCliInvoker: cli.createCliInvoker,
+    };
+  } catch {
+    // A broker that cannot be assembled is a broker that does not run. The
+    // operator still gets asked, which is where this hook started.
+    return null;
+  }
+}
+
+/**
+ * One broker pass. Returns a decision, or null to mean "carry on as before".
+ *
+ * NOTE — the judge gets NO sessionSummary here, and that is deliberate. This
+ * hook is one process per tool call: it has no session state, and the only
+ * session-shaped thing within reach is the agent's own transcript, which is
+ * exactly what the judge must never read. With no context the judge is told to
+ * answer inContext:false, so on this surface the broker can HARDEN but will not
+ * pre-clear. That is the fail-closed half of the feature, which is the half
+ * worth having first.
+ */
+async function runBrokerPass(broker, toolName, toolInput, verdict) {
+  try {
+    const invoke = broker.createCliInvoker({
+      model: broker.config.model,
+      timeoutMs: broker.config.judgeTimeoutMs,
+    });
+    const judgeResult = await broker.runJudge(
+      {
+        tool: toolName,
+        toolInput,
+        verdict: {
+          severity: verdict.severity,
+          action: verdict.action,
+          reason: verdict.reason,
+          signals: verdict.signals,
+        },
+      },
+      invoke,
+      { timeoutMs: broker.config.judgeTimeoutMs },
+    );
+    const decision = broker.brokerDecision({
+      tool: toolName,
+      toolInput,
+      verdict,
+      judge: judgeResult,
+      policy: {
+        allowPreClear: broker.config.allowPreClear,
+        preClearConfidence: broker.config.preClearConfidence,
+      },
+    });
+    return decision && typeof decision.outcome === 'string' ? decision : null;
+  } catch (err) {
+    console.error(`[shieldcortex] ⚠️ approval broker error: ${err?.message ?? err} — refusing as usual`);
     return null;
   }
 }
@@ -221,7 +318,7 @@ function summariseToolArgs(args) {
   return parts.join(' ').slice(0, 160);
 }
 
-function writeAuditEntry(toolName, verdict, args, action, outcome) {
+function writeAuditEntry(toolName, verdict, args, action, outcome, brokerAudit) {
   try {
     const auditDir = join(homedir(), '.shieldcortex', 'audit');
     mkdirSync(auditDir, { recursive: true });
@@ -242,6 +339,10 @@ function writeAuditEntry(toolName, verdict, args, action, outcome) {
       ts: new Date().toISOString(),
       action,
       outcome,
+      // #143: present on exactly the calls the broker judged, so "was a model
+      // consulted, and what did it say?" is answerable from the audit stream
+      // alone. Same field, same shape, as the OpenClaw plugin emits.
+      ...(brokerAudit ? { broker: brokerAudit } : {}),
     };
     appendFileSync(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n');
   } catch (err) {
@@ -423,6 +524,42 @@ process.stdin.on('end', async () => {
           );
           process.exit(0); // Defer to the harness's own permission system.
         }
+      } catch {
+        // An unusable approvals store must never widen OR wedge the guard —
+        // fall through to the broker and then to the standard refusal below.
+      }
+    }
+
+    // ── AI-assisted approval broker (#143) ────────────────────────────────
+    // Runs AFTER the one-shot approval is consumed, deliberately: an operator
+    // who typed `shieldcortex approve <hash>` in their own terminal has already
+    // spoken, and the AI never overrules the human. It runs BEFORE the pending
+    // record is written, so a call the judge hardens is not simultaneously
+    // offered up for approval.
+    const broker = await loadBroker(cfg.broker);
+    const brokered = broker ? await runBrokerPass(broker, toolName, toolInput, verdict) : null;
+
+    if (brokered?.outcome === 'harden') {
+      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'auto_denied', brokered.audit);
+      console.error(`[shieldcortex] approval broker HARDENED ${toolName} to a denial: ${brokered.reason}`);
+      // No approve-hash offered. Hardening exists precisely for the case where
+      // the request is trying to talk somebody into saying yes.
+      emitDecision('deny', `ShieldCortex approval broker: ${brokered.reason}`);
+      process.exit(0);
+    }
+
+    if (brokered?.outcome === 'pre_clear') {
+      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved', brokered.audit);
+      console.error(`[shieldcortex] approval broker PRE-CLEARED ${toolName}: ${brokered.reason} [${verdict.signals.join(', ')}]`);
+      // No decision emitted — the guard defers to Claude Code's own permission
+      // system rather than answering "allow". ShieldCortex narrows or stays
+      // neutral; it never WIDENS what the user's own settings permit.
+      process.exit(0);
+    }
+
+    // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact.
+    if (approvals) {
+      try {
         approvals.recordPending({
           tool: toolName,
           input: toolInput,
@@ -430,12 +567,11 @@ process.stdin.on('end', async () => {
           signals: verdict.signals,
         });
       } catch {
-        // An unusable approvals store must never widen OR wedge the guard —
-        // fall through to the standard refusal below.
+        // As above: never widen, never wedge.
       }
     }
 
-    writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'asked');
+    writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'asked', brokered?.audit);
     let message = `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`;
     if (approvals) {
       try {
