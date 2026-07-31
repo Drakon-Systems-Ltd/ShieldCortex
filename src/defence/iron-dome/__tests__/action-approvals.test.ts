@@ -21,6 +21,7 @@ import {
   DEFAULT_APPROVAL_TTL_MS,
 } from '../action-approvals.js';
 import { runApprove, isInteractive } from '../../../cli/approve.js';
+import { evaluateToolCall } from '../tool-action-guard.js';
 
 const SUDO = { command: 'sudo modprobe softdog' };
 const OTHER = { command: 'sudo rmmod softdog' };
@@ -227,5 +228,37 @@ describe('action approvals (#118)', () => {
       expect(isInteractive({ stdin: { isTTY: false }, stdout: { isTTY: true } })).toBe(false);
       expect(isInteractive({})).toBe(false);
     });
+  });
+});
+
+// ── The store must be self-protected (#118 review finding, 31 Jul 2026) ──────
+// The TTY gate stops `shieldcortex approve` running non-interactively, but the
+// store is a plain 0600 JSON file owned by the same user the agent runs as.
+// Without a guard rule, the agent mints its own approval with one benign-looking
+// write. Any command naming the store path must reach the operator.
+describe('approval store is inside the guard perimeter', () => {
+  const gate = (command: string) => evaluateToolCall('Bash', { command });
+
+  it('gates a direct edit of approvals.json', () => {
+    const v = gate(`python3 -c "import json;p='/home/u/.shieldcortex/approvals/approvals.json';d=json.load(open(p));d['records'][0]['approvedAt']=1;json.dump(d,open(p,'w'))"`);
+    expect(v.action).not.toBe('allow');
+    expect(v.signals).toContain('touch-approval-store');
+  });
+
+  it('gates shell redirection into the store', () => {
+    const v = gate(`echo '{"version":1,"records":[]}' > ~/.shieldcortex/approvals/approvals.json`);
+    expect(v.action).not.toBe('allow');
+    expect(v.signals).toContain('touch-approval-store');
+  });
+
+  it('gates deleting the store (wiping pending evidence)', () => {
+    const v = gate('rm ~/.shieldcortex/approvals/approvals.json');
+    expect(v.signals).toContain('touch-approval-store');
+    expect(v.action).not.toBe('allow');
+  });
+
+  it('does not fire on unrelated .shieldcortex reads', () => {
+    const v = gate('cat ~/.shieldcortex/config.json');
+    expect(v.signals).not.toContain('touch-approval-store');
   });
 });

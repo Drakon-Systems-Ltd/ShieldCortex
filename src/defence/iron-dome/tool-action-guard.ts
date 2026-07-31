@@ -254,6 +254,12 @@ const DANGEROUS: Pattern[] = [
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  // The guard's own one-shot approval store (#118). The TTY gate stops the
+  // agent using the CLI; without this rule the agent could instead just edit
+  // approvals.json (a plain 0600 file owned by the same user) and mint its own
+  // approval. Any command that so much as names the store path goes to the
+  // operator — who is the only party with a legitimate reason to touch it.
+  { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
