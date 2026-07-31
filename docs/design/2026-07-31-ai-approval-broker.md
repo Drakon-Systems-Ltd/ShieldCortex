@@ -3,7 +3,7 @@
 **Status:** proposal (no code yet — spec first, per Michael 31 Jul 2026)
 **Author:** Jarvis
 **Depends on:** #118 one-shot approval store (shipped 4.47.18), #139 deny-when-no-prompt-surface
-**Issue:** (filed alongside this doc)
+**Issue:** #143
 
 ## Problem
 
