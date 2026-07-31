@@ -884,7 +884,12 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
 
     const remedy = (): string => {
       if (backupsSize >= liveDbSize || backupsSize > limit * 0.15) {
-        return `${formatBytes(backupsSize)} is stale DB backups (memories.db.* migration snapshots). Clear them — \`rm ~/.shieldcortex/memories.db.{pre-backfill,empty-live,stub,bak}*\` keeps the live DB; v4.45.1+ also auto-prunes them on start.`;
+        // Do not call these "stale migration snapshots" or promise an auto-prune
+        // (#148). On a large-DB host the file filling the budget is typically a
+        // safety copy written minutes earlier by a repair THIS doctor
+        // recommended, and no auto-prune was happening. Describe what they
+        // actually are and let the operator choose.
+        return `${formatBytes(backupsSize)} is DB backup copies (memories.db.*) — safety copies taken before destructive repairs, the newest being your rollback point. Delete the older ones (the \`memories.db.{pre-backfill,empty-live,stub,bak}*\` files; the live DB is just \`memories.db\`), or move them outside ~/.shieldcortex to keep them without spending the budget. From 4.47.21 a repair prunes superseded copies and refuses rather than overfilling the limit.`;
       }
       if (liveDbSize > limit * 0.5) {
         // #110 signature: a big DB whose memories table is tiny — the bulk is
