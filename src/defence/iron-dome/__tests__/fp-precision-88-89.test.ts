@@ -124,6 +124,37 @@ describe('#89 — modify-scheduler must not fire on read-only crontab -l', () =>
   });
 });
 
+describe('#89 (follow-up) — modify-scheduler must not fire on a variable named `at`', () => {
+  // Live FP on the Jarvis box, 2026-07-29: a read-only Xero P&L pull was
+  // blocked because the heredoc body assigned `at = <token>` at the start of a
+  // line. The command-position anchor treats a newline as a command boundary,
+  // so `\nat` matched the scheduler verb — but `at` immediately followed by
+  // `=` is an assignment in every shell and in the embedded-script bodies the
+  // guard also scans. The real `at` command is `at [options] TIME`; its
+  // grammar has no `=` in that position, so excluding it costs no detection.
+  const allow: Array<[string, string]> = [
+    ['bare assignment', 'at=$(cat token.txt)'],
+    ['assignment after newline', "tok=load('creds.json')\nat=tok.get('access_token')"],
+    ['spaced assignment in a heredoc body', "python3 - <<'EOF'\nat = tk.get('access_token')\nEOF"],
+    ['assignment then use', 'at=abc; curl -H "Authorization: Bearer $at" https://api.example.com/v1/ping'],
+  ];
+  it.each(allow)('allows: %s', (_l, command) => {
+    expect(decision({ command })).toBe('allow');
+  });
+
+  // Must-STILL-FIRE siblings: the assignment carve-out must not rescue the verb.
+  const approve: Array<[string, string]> = [
+    ['at after newline', 'echo job > /tmp/j\nat now + 1 minute < /tmp/j'],
+    ['at with time argument', 'at 23:30 -f /tmp/job.sh'],
+    ['at after a semicolon', 'ls; at midnight -f /tmp/job.sh'],
+  ];
+  it.each(approve)('still requires approval: %s', (_l, command) => {
+    const v = verdict({ command });
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('modify-scheduler');
+  });
+});
+
 describe('#90 — install-package-global must gate npm install-verb abbreviations', () => {
   // Review follow-up on #88/#89: the narrowed regex only rescued the exact `i`
   // shorthand, so npm's own alias resolver (which accepts the whole
