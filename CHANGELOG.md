@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.17] - 2026-07-30
+
+**Security: the Action Guard now scans the script a command invokes, not just the command string. Every rule was previously bypassable by moving the command into a file.**
+
+### Fixed
+
+- **Guard rules no longer stop at the command string (security).** Found by dogfooding on 29 Jul 2026: an operation was correctly gated when run inline, then ran with no gate at all when the identical command was moved into a shell script and invoked as `bash script.sh`. Root cause was structural rather than a gap in any one rule — the guard built its match surface from the command, path and url arguments only and never read the file a command pointed at, so **all** tiers were affected: the catastrophic patterns, the dangerous table, `find -delete`, the secret-exfil hard block and the egress predicate alike. Since writing a script and running it is how agents normally work, this was likely being hit routinely in the field, producing audit logs that looked clean because the guard had never looked. The guard now resolves invoked scripts and folds their contents into the scan: interpreter-plus-file (`bash`/`sh`/`zsh`/`python`/`node`/`ruby`/`perl`/`php`), bare `./script`, `source`/`.`, and all of those behind `env`/`sudo`/`nohup`-style wrappers and env assignments. `bash -c '<inline>'` is deliberately not treated as a file invocation — that program is already scanned — though a file invocation nested inside it is followed.
+  - **No new friction.** Resolved content is appended to the existing surface, never substituted, so a verdict can only become more accurate and never flips direction; a clean script returns exactly the pre-fix verdict.
+  - **Bounded on every axis (zeroth law).** Depth 3, 12 files, 256KB per file and in total, a visited-set cycle guard, and binary or oversized content refused rather than truncated past a danger signal. Worst case measured at ~22ms; a real-world script is sub-millisecond.
+  - **`evaluateToolCall` stays pure and synchronous.** The file is read through a caller-injected `resolveScriptSource` seam, so `doctor` and `openclaw-selfcheck` keep driving it with synthetic commands whose paths do not exist. The fs-backed resolver is wired at the interceptor: `statSync` first so a FIFO can never be opened, `/proc`, `/sys` and `/dev` refused, size-capped, every error swallowed to `null`.
+  - **Fails visible, not silent.** When an invocation is recognised but its contents cannot be folded (no resolver, unreadable, oversized, binary, too deep), the verdict carries `opaque-script-invocation` at the lowest surfaced tier — recorded and auditable, never a gate on its own. The previous behaviour was to pass such calls as though they were clean.
+
 ## [4.47.16] - 2026-07-25
 
 **Memory recall stops surfacing housekeeping noise above load-bearing facts (#120), and the skill scanner stops crying wolf on legitimate skills while gaining an operator accept mechanism (#121).**

@@ -12,6 +12,7 @@ import { execSync } from 'child_process';
 import { runMigrations } from './migrations.js';
 import { getInlineSchema } from './inline-schema.js';
 import { seedDefaultFirewallRules } from './seed-firewall-rules.js';
+import { debugLog } from '../debug-log.js';
 
 const _currentFile = fileURLToPath(import.meta.url);
 const _currentDir = dirname(_currentFile);
@@ -519,7 +520,9 @@ export function initDatabase(dbPath?: string): Database.Database {
   currentDbPath = expandedPath;
   acquireStartupLock(expandedPath);
 
-  console.error(`[database] Startup runtime=${resolveRuntimeInfo().kind} db=${expandedPath} wal=${existsSync(expandedPath + '-wal')} shm=${existsSync(expandedPath + '-shm')}`);
+  // Internal startup state — support-thread material, not user output. Silent
+  // unless SHIELDCORTEX_DEBUG / --verbose asks for it (#129).
+  debugLog(`[database] Startup runtime=${resolveRuntimeInfo().kind} db=${expandedPath} wal=${existsSync(expandedPath + '-wal')} shm=${existsSync(expandedPath + '-shm')}`);
 
   // Lazily inspect `.corrupt.*` backups (Phase 17 B4). Each backup inspection
   // opens the file read-only and runs a FULL integrity check, so doing it
@@ -703,7 +706,9 @@ export function initDatabase(dbPath?: string): Database.Database {
       db.pragma('wal_checkpoint(TRUNCATE)');
       const snapshotPath = `${expandedPath}.pre-backfill-${Date.now()}`;
       copyFileSync(expandedPath, snapshotPath);
-      console.error(`[shieldcortex] pre-backfill snapshot saved: ${snapshotPath}`);
+      // Debug-gated: the snapshot is an internal restore point and the line
+      // leaks its on-disk path into user output otherwise (#129).
+      debugLog(`[shieldcortex] pre-backfill snapshot saved: ${snapshotPath}`);
     }
   } catch {
     // Best-effort restore point; never block startup.

@@ -10,7 +10,7 @@ import { closeDatabase, getCanonicalSchema, initDatabase } from '../../database/
  * The doctor's write-path probe is the smoking-gun check for stale
  * schema or migration drift. It has to:
  *   - Pass on a healthy database (round-trip succeeds, leaves no rows).
- *   - Warn cleanly when the database file doesn't exist (don't crash).
+ *   - Skip cleanly when the database file doesn't exist (don't crash).
  *   - Fail with the actual error when the schema is broken.
  *
  * v4.12.4 (path encoding) and v4.12.5 (NOT NULL UUID) both shipped
@@ -32,10 +32,14 @@ describe('doctor write-path probe', () => {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it('returns "warn / skipped" when the database file does not exist', () => {
+  // Skipped, not warned: "no database yet" is the normal state of a fresh
+  // install (the DB is created lazily on first use), so this is reported as
+  // info and collapsed out of doctor's printed report (#129).
+  it('skips cleanly, without crashing or warning, when the database file does not exist', () => {
     const result = runWritePathProbe(dbPath);
-    expect(result.status).toBe('warn');
-    expect(result.message).toMatch(/no database/i);
+    expect(result.status).toBe('info');
+    expect(result.skipped).toBe('db-uninitialised');
+    expect(result.message).toMatch(/database not created yet/i);
   });
 
   it('passes the round-trip on a freshly initialised database and leaves no probe rows behind', () => {
