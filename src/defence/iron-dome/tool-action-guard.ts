@@ -805,7 +805,13 @@ function isShellAnchorChar(text: string, at: number): boolean {
   return c === '$' && text[at + 1] === '(';
 }
 
-function classifyWithCtx(ctx: SpanCtx, start: number, end: number, text: string): SpanClass {
+function classifyWithCtx(
+  ctx: SpanCtx,
+  start: number,
+  end: number,
+  text: string,
+  pathTarget = false,
+): SpanClass {
   // 1) URL — inert data being fetched; only becomes code via `curl … | bash`,
   //    whose pipe-to-shell pattern's span CROSSES the URL (not contained in it).
   if (contains(ctx.urls, start, end)) return 'mention';
@@ -816,6 +822,10 @@ function classifyWithCtx(ctx: SpanCtx, start: number, end: number, text: string)
   if (contains(ctx.dataQuotes, start, end) && !intersects(ctx.substitutions, start, end)) return 'mention';
 
   // 3) Interpreter source (issue #89). Shell regions never reach here.
+  //    Path-target rules stop here: naming the path IS the access, whether the
+  //    naming happens in shell text or in a string literal a script is about to
+  //    hand to open()/json.dump().
+  if (pathTarget) return 'executed';
   for (const r of ctx.regions) {
     if (start < r.start || end > r.end) continue;
     // 3a) A comment, or a string literal: not a command unless the region hands
@@ -857,6 +867,23 @@ interface ClassifiedMatch { signal: string; span: string; tier: MatchTier; }
  *  (URL / quoted data / inert interpreter source) are dropped (#84, #89).
  *  Fail-closed: over the length cap, or if none of the first MAX_CLASSIFY_ITERS
  *  occurrences is a clear mention, the signal is kept as executed. */
+/**
+ * Rules whose match is a TARGET, not a verb (#89 review, 31 Jul 2026).
+ *
+ * The interpreter-source downgrade asks "is this span executed shell text?".
+ * That is the right question for a verb like `rm` or `curl`, which is only
+ * dangerous when it runs. It is the WRONG question for a sensitive path: a
+ * script names its target inside a string literal precisely BECAUSE it is
+ * about to operate on it — `open('~/.ssh/id_rsa')` is the attack, not a
+ * mention of one. Downgrading those to 'mention' reopened the self-approval
+ * hole #127 closed (`python3 -c "…json.dump(…approvals.json…)"`).
+ *
+ * So path-target signals skip the interpreter-source downgrade entirely. They
+ * keep the two purely-textual exemptions above it — a path inside a URL, or in
+ * a quoted data argument — because those genuinely are references, not access.
+ */
+const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store']);
+
 function matchSpansClassified(
   patterns: Pattern[],
   text: string,
@@ -876,10 +903,11 @@ function matchSpansClassified(
   for (const p of patterns) {
     const m0 = text.match(p.re);
     if (!m0) continue;
+    const pathTarget = PATH_TARGET_SIGNALS.has(p.signal);
     // Fast path: the first occurrence is executed → keep immediately (the common
     // case for a real command). Only search further when it's not.
     const s0 = m0.index ?? 0;
-    const c0 = classifyWithCtx(ctx, s0, s0 + m0[0].length, text);
+    const c0 = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget);
     if (c0 === 'executed') {
       out.push({ signal: p.signal, span: fmtSpan(m0[0]), tier: 'executed' });
       continue;
@@ -896,7 +924,7 @@ function matchSpansClassified(
     let iters = 0;
     for (const m of text.matchAll(g)) {
       const s = m.index ?? 0;
-      const c = classifyWithCtx(ctx, s, s + m[0].length, text);
+      const c = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget);
       if (c === 'executed') { best = { span: m[0], tier: 'executed' }; break; }
       if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload' };
       sharedBudget--;
