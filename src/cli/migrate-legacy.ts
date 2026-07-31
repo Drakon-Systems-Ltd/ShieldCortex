@@ -925,15 +925,27 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
       report.aborted = plan.reason;
       return report;
     }
+    // Reclaim first when we are tight, so the new copy has somewhere to go.
     if (plan.prune.length > 0) {
       const removed = pruneOldBackups(path.dirname(dbPath), path.basename(dbPath), 0);
-      if (removed.length > 0) console.log(`Pruned ${removed.length} superseded backup(s) to stay inside the disk budget.`);
+      if (removed.length > 0) console.log(`Pruned ${removed.length} superseded backup(s) to make room.`);
     }
 
     const backupPath = `${dbPath}.bak.${new Date().toISOString().replace(/[:.]/g, '-')}`;
     fs.copyFileSync(dbPath, backupPath);
     report.backupPath = backupPath;
     console.log(`Backup: ${backupPath}`);
+
+    // ...then prune UNCONDITIONALLY, keeping only the copy just written.
+    //
+    // Pruning only when short of room would still let backups accumulate on a
+    // healthy host until it filled — the same failure that took a fleet box to
+    // its limit, merely deferred. It also would not match what doctor now tells
+    // the operator happens. One repair, one rollback point.
+    const superseded = pruneOldBackups(path.dirname(dbPath), path.basename(dbPath), 1);
+    if (superseded.length > 0) {
+      console.log(`Pruned ${superseded.length} superseded backup(s); the newest is your rollback point.`);
+    }
 
     const update = db.prepare(
       `UPDATE memories SET project = ? WHERE project = ? ${typeFilter}`
