@@ -1001,6 +1001,50 @@ interface ClassifiedMatch { signal: string; span: string; tier: MatchTier; }
  */
 const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store']);
 
+
+/**
+ * Byte ranges that came from a folded file in a NON-SHELL language (#165).
+ *
+ * The DANGEROUS/SENSITIVE rules are written in shell vocabulary — `kill`,
+ * `apt-get install`, `sudo`, `.env`. Inside a JavaScript or Python file those
+ * are identifiers, properties and string literals, not commands. #160 wired
+ * script folding into the Claude Code hook, which pointed those shell rules at
+ * arbitrary program source on the surface that gates every Bash call, and the
+ * result was that ordinary work stopped: `npm test` gated on a runner
+ * containing `process.kill(process.pid, sig)`, and `node dist/index.js` gated
+ * because our OWN CLI bundle contains the rule vocabulary in its remedy strings.
+ *
+ * Folded SHELL source is excluded from this — a `.sh` file really is shell, and
+ * `systemctl stop nginx` inside one must still gate. So the distinction is the
+ * language of the region, never "was it folded".
+ *
+ * What is deliberately NOT relaxed: CATASTROPHIC still matches everywhere
+ * (that is the write-then-exec threat #160 exists to catch), and any region
+ * with a shell-out sink is already treated as a command surface upstream.
+ */
+function foldedNonShellRanges(regions: readonly ScanRegion[]): Array<[number, number]> {
+  return regions
+    .filter(r => r.folded && r.lang !== 'sh' && !r.hasSink)
+    .map(r => [r.start, r.end] as [number, number]);
+}
+
+/** True when EVERY occurrence of `re` in `text` sits inside a folded non-shell region. */
+function onlyInFoldedNonShell(re: RegExp, text: string, ranges: Array<[number, number]>): boolean {
+  if (ranges.length === 0) return false;
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+  g.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  let seen = false;
+  let guard = 0;
+  while ((m = g.exec(text)) !== null && guard++ < 200) {
+    seen = true;
+    const at = m.index;
+    if (!ranges.some(([a, b]) => at >= a && at < b)) return false;   // one outside → keep the signal
+    if (m[0].length === 0) g.lastIndex++;
+  }
+  return seen;
+}
+
 function matchSpansClassified(
   patterns: Pattern[],
   text: string,

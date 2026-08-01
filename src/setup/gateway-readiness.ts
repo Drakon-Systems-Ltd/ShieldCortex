@@ -66,6 +66,13 @@ const DEFAULT_POLL_MS = 500;
  * recorded boot whose process has since exited proves nothing about now.
  */
 export async function waitForGatewayReady(options: WaitForGatewayOptions): Promise<GatewayReadiness> {
+  // Never actually wait under a test runner. Same discipline as every other
+  // gateway-touching path here (restart, reconcile, canary): a suite must not
+  // poll a live host, and without this the default waiter blocks each test for
+  // the full timeout. Tests that mean to exercise the loop inject the seams.
+  if (process.env.JEST_WORKER_ID !== undefined && !options.readProcess) {
+    return { ready: false, reason: 'unobservable', waitedMs: 0 };
+  }
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
   const now = options.now ?? (() => Date.now());
