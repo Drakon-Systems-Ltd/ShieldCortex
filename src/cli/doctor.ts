@@ -27,6 +27,12 @@ import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
+import {
+  CLAUDE_CODE_ENFORCEMENT_FLOOR,
+  detectClaudeCode,
+  upgradeCommandFor,
+  type DetectClaudeCodeDeps,
+} from '../integrations/claude-code-version.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -1799,6 +1805,65 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
   return results;
 }
 
+// ── Check 8b: Claude Code enforcement floor ───────────────
+/**
+ * The Action Guard's Claude Code surface is only as strong as the harness that
+ * honours its verdicts, and that harness is versioned independently of us.
+ *
+ * On 2026-07-30 a box running Claude Code 2.1.76 was found discarding hook
+ * `"ask"` decisions under `bypassPermissions` and executing the command — the
+ * audit log recorded the guard firing, the command ran anyway, and this went
+ * unnoticed because nobody tracked the harness version. See
+ * `claude-code-version.ts` for the mechanism and how the floor was set.
+ *
+ * A below-floor build is a `fail`, not a warning: on that box the guard's
+ * dangerous tier is decorative, and the operator has no other signal that it is.
+ */
+export async function checkClaudeCodeVersion(
+  deps: DetectClaudeCodeDeps = {},
+): Promise<CheckResult> {
+  const label = 'Claude Code version';
+
+  const install = detectClaudeCode(deps);
+  if (!install) {
+    return { label, status: 'info', message: 'skipped (Claude Code not detected on PATH)' };
+  }
+
+  const where = `${install.channel} channel`;
+
+  if (!install.version) {
+    return {
+      label,
+      status: 'warn',
+      message:
+        `could not read a version from \`${install.binPath} --version\` ` +
+        `(${install.error ?? `output: ${install.rawVersion ?? 'empty'}`}) — ` +
+        `cannot confirm this build honours the guard's approval verdicts ` +
+        `(floor ${CLAUDE_CODE_ENFORCEMENT_FLOOR})`,
+      fix: `Run \`claude --version\` by hand; if it is below ${CLAUDE_CODE_ENFORCEMENT_FLOOR}, upgrade with \`${upgradeCommandFor(install.channel)}\`.`,
+    };
+  }
+
+  if (semver.lt(install.version, CLAUDE_CODE_ENFORCEMENT_FLOOR)) {
+    return {
+      label,
+      status: 'fail',
+      message:
+        `${install.version} (${where}) is below the enforcement floor ${CLAUDE_CODE_ENFORCEMENT_FLOOR} — ` +
+        `builds this old discard the Action Guard's approval verdicts in promptless modes ` +
+        `(e.g. \`--permission-mode bypassPermissions\`) and run the command anyway. ` +
+        `The audit log will show the guard firing while nothing was actually stopped.`,
+      fix: `Upgrade Claude Code: \`${upgradeCommandFor(install.channel)}\`. Sessions already running keep the old build in memory until they cycle.`,
+    };
+  }
+
+  return {
+    label,
+    status: 'pass',
+    message: `${install.version} (${where}) — at or above the ${CLAUDE_CODE_ENFORCEMENT_FLOOR} enforcement floor`,
+  };
+}
+
 /** Read a package's `version` field; returns null on any failure. */
 function readPkgVersion(pkgJson: string): string | null {
   try {
@@ -2725,6 +2790,7 @@ export async function runDoctor(args: string[] = []): Promise<DoctorSummary> {
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkClaudeCodeVersion,
     checkModelCache,
   ];
 
