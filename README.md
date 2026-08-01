@@ -779,6 +779,30 @@ SHIELDCORTEX_RANKER=legacy npm run bench   # env var overrides config for a sing
 
 <br>
 
+### ESM only
+
+`shieldcortex` ships as ESM only (`"type": "module"`, no CommonJS build) — this is a
+deliberate choice, not an oversight, and it won't change silently. Every entry point
+(`shieldcortex`, `shieldcortex/defence`, `shieldcortex/scan`, `shieldcortex/lib`,
+`shieldcortex/integrations/*`, `shieldcortex/environment`) works with:
+
+```js
+import shieldcortex from 'shieldcortex';
+// or, from CommonJS:
+const shieldcortex = await import('shieldcortex');
+```
+
+A bare `require('shieldcortex')` fails on purpose, with an error that says exactly
+that and how to fix it, instead of Node's opaque default
+`ERR_PACKAGE_PATH_NOT_EXPORTED` (issue [#134](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/134)).
+There is no CJS build to point `require` at — a synchronous `require()` of ESM
+output isn't a working substitute, it just fails a different, more confusing way
+at runtime, so we don't pretend to offer one. If your project is CommonJS, either
+`await import('shieldcortex')` from an async context or add `"type": "module"`
+(or a `.mjs` extension) to the consuming file.
+
+<br>
+
 ## 💻 CLI
 
 <details>

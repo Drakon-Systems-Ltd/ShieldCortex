@@ -7,39 +7,48 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/index.d.ts"
     },
     "./package.json": "./package.json",
     "./integrations/langchain": {
       "import": "./dist/integrations/langchain.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/integrations/langchain.d.ts"
     },
     "./integrations/universal": {
       "import": "./dist/integrations/universal.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/integrations/universal.d.ts"
     },
     "./integrations/openclaw": {
       "import": "./dist/integrations/openclaw.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/integrations/openclaw.d.ts"
     },
     "./integrations": {
       "import": "./dist/integrations/index.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/integrations/index.d.ts"
     },
     "./defence": {
       "import": "./dist/defence/index.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/defence/index.d.ts"
     },
     "./scan": {
       "import": "./dist/scan-only.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/scan-only.d.ts"
     },
     "./environment": {
       "import": "./dist/environment/index.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/environment/index.d.ts"
     },
     "./lib": {
       "import": "./dist/lib.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/lib.d.ts"
     }
   },

@@ -9,6 +9,7 @@ import os from 'os';
 import semver from 'semver';
 import { execFileSync } from 'child_process';
 import { createRequire } from 'module';
+import { pathToFileURL } from 'url';
 import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
 import { hookCommandResolves } from '../setup/hook-command-resolution.js';
 import {
@@ -1942,6 +1943,142 @@ async function checkAutoMemorySampling(): Promise<CheckResult> {
   }
 }
 
+// ── Check 9b: Memory-capture dist completeness (#137) ─────
+/**
+ * `scripts/lib/save-memory.mjs` (the single write path for the session-end,
+ * pre-compact and stop hooks) routes every captured memory through
+ * `loadDefenceModules()`, which dynamically imports three dist/ modules. If
+ * ANY of them is missing — a stale checkout, an interrupted install, a
+ * partial rebuild — `loadDefenceModules()` returns null, the hook writes a
+ * synthetic `defence_audit` row and a stderr line, and returns NORMALLY.
+ * Fail-closed there is correct: an unscanned memory must never be stored.
+ * This check does not touch that decision. What it fixes is that nothing
+ * used to surface the state — hook stderr is usually discarded, and the
+ * fallback audit row is otherwise invisible — so EVERY captured memory was
+ * silently dropped for as long as the condition held, and the only sign was
+ * a user noticing amnesia weeks later (#137).
+ *
+ * Mirrors loadDefenceModules()'s own resolution EXACTLY: same three files,
+ * same distRoot (package root + 'dist' — save-memory.mjs computes this two
+ * directories up from scripts/lib/, which is the same package root
+ * resolveSelfInstallDir() returns for doctor's own dist/cli/doctor.js).
+ */
+const MEMORY_CAPTURE_REQUIRED_MODULES: Array<{ rel: string; symbol: string }> = [
+  { rel: path.join('defence', 'pipeline.js'), symbol: 'runDefencePipeline' },
+  { rel: path.join('database', 'init.js'), symbol: 'initDatabase' },
+  { rel: path.join('defence', 'disposition.js'), symbol: 'resolveDisposition' },
+];
+
+const MEMORY_CAPTURE_FIX =
+  'Run `npm run build:ts` (dev checkout), or on an installed box reinstall + repair: ' +
+  '`npm i -g shieldcortex@latest && shieldcortex repair`.';
+
+/**
+ * Pure helper for the dist-completeness half. Exported so tests can point it
+ * at any temp "package root" instead of the real install.
+ */
+export async function runMemoryCaptureDistCheck(pkgRoot: string): Promise<CheckResult> {
+  const label = 'Memory capture: dist build';
+  const distRoot = path.join(pkgRoot, 'dist');
+
+  const missingFiles = MEMORY_CAPTURE_REQUIRED_MODULES.filter(
+    (m) => !fs.existsSync(path.join(distRoot, m.rel)),
+  );
+  if (missingFiles.length > 0) {
+    return {
+      label,
+      status: 'fail',
+      message:
+        `dist build is missing ${missingFiles.map((m) => m.rel).join(', ')} — the memory-capture ` +
+        `hooks (session-end, pre-compact, stop) fail CLOSED on this and silently drop every ` +
+        `captured memory while it holds.`,
+      fix: MEMORY_CAPTURE_FIX,
+    };
+  }
+
+  const brokenExports: string[] = [];
+  for (const m of MEMORY_CAPTURE_REQUIRED_MODULES) {
+    try {
+      const mod = await import(pathToFileURL(path.join(distRoot, m.rel)).href);
+      if (typeof (mod as Record<string, unknown>)[m.symbol] !== 'function') {
+        brokenExports.push(`${m.rel} is missing export ${m.symbol}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      brokenExports.push(`${m.rel} failed to import — ${msg}`);
+    }
+  }
+
+  if (brokenExports.length > 0) {
+    return {
+      label,
+      status: 'fail',
+      message: `dist build present but partial/corrupt — ${brokenExports.join('; ')} — memory capture is silently dropping every write.`,
+      fix: MEMORY_CAPTURE_FIX,
+    };
+  }
+
+  return {
+    label,
+    status: 'pass',
+    message: 'defence pipeline modules present (pipeline.js, database/init.js, disposition.js)',
+  };
+}
+
+/**
+ * Pure helper for the "did this already happen" half. Exported so tests can
+ * drive it against a temp database. Looks for the synthetic `defence_audit`
+ * rows `writeFallbackAudit()` writes when the pipeline is unavailable — these
+ * are the only trace a drop leaves. A hit here means real memories were lost
+ * even if the dist build has SINCE been fixed (the drops already happened and
+ * cannot be recovered — the content was never stored anywhere).
+ */
+export function runMemoryCaptureDropsCheck(dbPath: string): CheckResult {
+  const label = 'Memory capture: recent drops';
+  const prerequisite = databasePrerequisite(label, dbPath);
+  if (prerequisite) return prerequisite;
+
+  try {
+    const Database = require('better-sqlite3');
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      // 24h window: long enough to catch a stale dist build that has been
+      // silently dropping captures since the last session, short enough that
+      // a FAIL here means "look at this host now" rather than raking up
+      // ancient, already-actioned history.
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const row = db.prepare(
+        `SELECT COUNT(*) as count, MAX(timestamp) as latest FROM defence_audit
+           WHERE reason LIKE 'defence_pipeline_unavailable%' AND timestamp >= ?`,
+      ).get(since) as { count: number; latest: string | null };
+
+      if (row.count > 0) {
+        return {
+          label,
+          status: 'fail',
+          message:
+            `${row.count} memory capture(s) were DROPPED in the last 24h because the defence ` +
+            `pipeline was unavailable at write time (most recent: ${row.latest}). Fail-closed is ` +
+            `correct — nothing unscanned was stored — but the content itself is gone.`,
+          fix: `${MEMORY_CAPTURE_FIX} Historical drops cannot be recovered; check the "Memory capture: dist build" line above for whether the underlying cause is still live.`,
+        };
+      }
+      return { label, status: 'pass', message: 'no defence_pipeline_unavailable drops in the last 24h' };
+    } finally {
+      db.close();
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'warn', message: `check failed — ${msg}` };
+  }
+}
+
+async function checkMemoryCaptureDist(): Promise<CheckResult[]> {
+  const distResult = await runMemoryCaptureDistCheck(resolveSelfInstallDir());
+  const dropsResult = runMemoryCaptureDropsCheck(getDbPath());
+  return [distResult, dropsResult];
+}
+
 // ── Check 10: Brain-worker freshness (#45) ────────────────
 /**
  * The MCP server starts a lite-profile brain worker on connect (v4.14.0).
@@ -2866,6 +3003,7 @@ export async function runDoctor(args: string[] = []): Promise<DoctorSummary> {
     checkHookTimeouts,
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
+    checkMemoryCaptureDist,
     checkBrainWorker,
     checkProjectKeyConsistency,
     checkProcesses,
