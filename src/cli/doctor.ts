@@ -2738,6 +2738,43 @@ export async function checkOpenClawRunningPluginVersion(
   };
 }
 
+/**
+ * State permissions (#163).
+ *
+ * Hardening audit, 1 Aug 2026: on a live default install `memories.db` was 644
+ * (world-readable — the whole data asset of a memory-security product) and
+ * `audit/` was 775 (group-writable — a forensic trail a non-owner can delete or
+ * forge). No code set a mode on either; they inherited the umask.
+ *
+ * Doctor MEASURES and reports; the correction belongs to install/repair, which
+ * the operator invoked deliberately. Reporting a mode we quietly changed behind
+ * their back would be its own dishonesty.
+ */
+export async function checkStatePermissions(stateDir: string = getShieldCortexDir()): Promise<CheckResult> {
+  const label = 'State permissions';
+  let findings: Array<{ path: string; found: string; required: string }>;
+  try {
+    const { auditStatePermissions } = await import('../setup/state-permissions.js');
+    findings = auditStatePermissions(stateDir);
+  } catch (err) {
+    return { label, status: 'warn', message: `could not measure — ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  if (findings.length === 0) {
+    return { label, status: 'pass', message: 'owner-only (0700 dirs, 0600 files)' };
+  }
+
+  const worst = findings.map(f => `${path.basename(f.path)} ${f.found}`).slice(0, 4).join(', ');
+  return {
+    label,
+    status: 'fail',
+    message:
+      `${findings.length} path(s) readable or writable beyond the owner (${worst}${findings.length > 4 ? ', …' : ''}) — ` +
+      `the memory database and the audit trail must be owner-only`,
+    fix: 'Run `shieldcortex install` (it hardens on every run), or by hand: chmod 700 ~/.shieldcortex ~/.shieldcortex/{audit,approvals,logs} && chmod 600 ~/.shieldcortex/memories.db* ~/.shieldcortex/config.json*',
+  };
+}
+
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
   const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
@@ -2871,6 +2908,7 @@ export async function runDoctor(args: string[] = []): Promise<DoctorSummary> {
     checkProcesses,
     checkDashboardFreshness,
     checkDiskUsage,
+    checkStatePermissions,
     checkLockFile,
     checkOpenClawResidue,
     checkOpenClawHookFreshness,
