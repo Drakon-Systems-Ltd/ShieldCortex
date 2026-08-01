@@ -604,25 +604,12 @@ type PipelineRunner = (content: string, title: string, source: { type: string; i
 //   * anything over the size cap is refused (the guard then records it as
 //     `opaque-script-invocation` rather than pretending it was scanned);
 //   * every error returns `null`. Nothing escapes.
-const MAX_SCRIPT_SOURCE_BYTES = 262_144;   // 256KB — matches the guard core's cap
-const UNREADABLE_PATH_PREFIX = /^\/(?:proc|sys|dev)\//;
-
-export function createScriptSourceResolver(cwd?: string): (scriptPath: string) => string | null {
-  const base = cwd && typeof cwd === 'string' ? cwd : process.cwd();
-  return (scriptPath: string): string | null => {
-    try {
-      if (!scriptPath || typeof scriptPath !== 'string') return null;
-      const expanded = scriptPath.startsWith('~/') ? join(homedir(), scriptPath.slice(2)) : scriptPath;
-      const full = isAbsolute(expanded) ? expanded : resolvePath(base, expanded);
-      if (UNREADABLE_PATH_PREFIX.test(full)) return null;
-      const st = statSync(full);
-      if (!st.isFile() || st.size > MAX_SCRIPT_SOURCE_BYTES) return null;
-      return readFileSync(full, 'utf8');
-    } catch {
-      return null;                          // missing, unreadable, anything — stay silent, stay alive
-    }
-  };
-}
+// The resolver lives in one place (#160). It was duplicated here while the
+// Claude Code hook had none at all, which is how the same guard reached
+// opposite verdicts on the two surfaces. Re-exported so this module's public
+// shape is unchanged for existing importers.
+import { createScriptSourceResolver } from '../../src/defence/iron-dome/script-source-resolver.js';
+export { createScriptSourceResolver, MAX_SCRIPT_SOURCE_BYTES, UNREADABLE_PATH_PREFIX } from '../../src/defence/iron-dome/script-source-resolver.js';
 
 /** Raised when the operator never answered the approval card (#143). Distinct
  *  from a transport error, because the two have opposite handling: an error
