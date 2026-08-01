@@ -11,6 +11,7 @@ import path from 'path';
 import os from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { gatewayRestartAdvice } from './gateway-restart-command.js';
 import {
   resolveRealtimePluginInstallPath,
   resolveRealtimeProjectDir,
@@ -1092,9 +1093,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     } else if (result.attempted) {
       console.warn(`OpenClaw gateway restart via ${result.method} failed: ${result.detail ?? 'unknown'}`);
       console.warn('Restart it manually so the new plugin/hook take effect:');
-      console.warn(process.platform === 'linux'
-        ? '  systemctl --user restart openclaw-gateway'
-        : '  launchctl kickstart -k gui/$UID/ai.openclaw.gateway');
+      console.warn(`  ${gatewayRestartAdvice()}`);
     } else {
       console.log('Restart your agent / OpenClaw gateway to activate.');
     }
@@ -1116,10 +1115,17 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
       console.log('');
       if (check.ok) {
         console.log('✓ Honest-state self-check: plugin confirmed loaded (roster), enforcing (live canary), version ≥ expected.');
-      } else if (!check.rosterProof) {
-        console.warn('✗ Honest-state self-check FAILED: the plugin is NOT in OpenClaw\'s loaded roster after restart.');
+      } else if (check.rosterState === 'absent') {
+        console.warn('✗ Honest-state self-check FAILED: the RUNNING gateway booted WITHOUT the plugin.');
         console.warn('  Protection would report ON while actually OFF (issue #74). Reconcile the install:');
         console.warn('    SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 shieldcortex repair');
+        process.exitCode = 1;
+      } else if (check.rosterState === 'unproven') {
+        // Absence of evidence. Accusing a healthy host of being unprotected on
+        // an unreadable log is the #142 false alarm; say what we actually know.
+        console.warn('✗ Honest-state self-check INCONCLUSIVE: could not read the running gateway\'s boot roster,');
+        console.warn('  so the plugin is not PROVEN loaded — this is unproven, not known-broken. Check it yourself with:');
+        console.warn('    journalctl --user -u openclaw-gateway | grep "http server listening"');
         process.exitCode = 1;
       } else if (!check.versionProof) {
         console.warn('✗ Honest-state self-check FAILED: the loaded plugin version is OLDER than expected (silent downgrade, #74).');
@@ -1239,6 +1245,55 @@ export async function openClawHookStatus(): Promise<void> {
   }
   if (configState.inLegacyInstalls) {
     console.log('    note: legacy `plugins.installs` entry detected — will be cleaned on next `shieldcortex openclaw install`');
+  }
+
+  await reportLoadAndEnforcement();
+}
+
+/**
+ * Report LOAD state — and, with consent, enforcement — from `openclaw status`.
+ *
+ * #154: `doctor` used to send operators here for the live canary, but this
+ * command only ever listed install paths and silently ignored
+ * `SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1`. An operator ran it at 07:00, got a
+ * directory listing, and was no better informed about whether the host was
+ * protected — the one question the command's own name promises to answer.
+ *
+ * Everything above this point is install state. This is load state, which is
+ * the thing that actually matters, so `status` now answers it.
+ */
+async function reportLoadAndEnforcement(): Promise<void> {
+  const consented = process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1';
+  console.log('');
+
+  try {
+    const { runPluginSelfCheck } = await import('./openclaw-selfcheck.js');
+    const home = resolveUserHome();
+    const check = await runPluginSelfCheck(home, { expectedVersion: readSelfVersion() ?? undefined });
+
+    if (check.rosterState === 'loaded') {
+      console.log('  Loaded: YES — the running gateway\'s boot roster names the plugin');
+    } else if (check.rosterState === 'absent') {
+      console.log('  Loaded: NO — the running gateway booted WITHOUT the plugin; this host is NOT protected');
+      console.log('    Fix: SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 shieldcortex repair');
+    } else {
+      console.log('  Loaded: UNPROVEN — could not read the running gateway\'s boot roster');
+      console.log('    This is unproven, not known-broken. Check it directly:');
+      console.log('      journalctl --user -u openclaw-gateway | grep "http server listening"');
+    }
+
+    if (check.canaryProof) {
+      console.log('  Enforcing: YES — a live canary was denied by the interceptor and audited');
+    } else if (consented) {
+      // Consent was given and it still did not prove out. Say why, loudly.
+      console.log('  Enforcing: NOT PROVEN — the live canary ran but did not confirm enforcement');
+      console.log(`    ${check.canary.detail ?? 'no further detail'}`);
+    } else {
+      console.log('  Enforcing: not probed — re-run with SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 to drive a live canary');
+    }
+  } catch (err) {
+    // Never let a diagnostic failure masquerade as a healthy status.
+    console.log(`  Loaded: UNPROVEN — the load/enforcement check could not run (${err instanceof Error ? err.message : String(err)})`);
   }
 }
 

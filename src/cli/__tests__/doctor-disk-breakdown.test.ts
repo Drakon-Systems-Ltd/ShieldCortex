@@ -33,23 +33,23 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     fs.writeFileSync(fullPath, Buffer.alloc(bytes, 0));
   }
 
-  it('points at the backup copies when they dominate the budget', async () => {
+  it('backups dominating the directory is NOT a failure — they no longer spend the budget (#153)', async () => {
+    // This test previously asserted `fail` here, which encoded the #153
+    // incoherence as the expected behaviour: the planner was allowed to write
+    // a safety copy up to the limit, and doctor then called being at the limit
+    // broken. An operator could only clear that failure by deleting their own
+    // rollback point. Backups are now measured and reported but exempt from
+    // the budget, so this state is healthy — and the remedy must not blame
+    // them for an overage they can no longer cause.
     writeBytes('memories.db', 4 * KB);
     writeBytes('memories.db.pre-backfill-1700000000000', 40 * KB);
     writeBytes('memories.db.empty-live.1700000000001', 20 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
-    expect(result.status).toBe('fail');
-    // Names the backup copies and the files to act on.
-    expect(result.fix).toMatch(/backup copies/i);
-    expect(result.fix).toMatch(/memories\.db/);
-    // Still NOT the old blanket "Run memories prune/dedupe" advice.
-    expect(result.fix).not.toMatch(/^Run `shieldcortex memories prune/);
-    // #148: it must no longer call these "stale migration snapshots" — on a
-    // large-DB host the dominant file is usually a safety copy written minutes
-    // earlier by a repair doctor itself recommended — nor promise an
-    // auto-prune that was never implemented.
-    expect(result.fix).not.toMatch(/stale DB backups/i);
-    expect(result.fix).not.toMatch(/auto-prune/i);
+    expect(result.status).toBe('pass');
+    // Still visible to the operator, reported alongside the budgeted figure.
+    expect(result.message).toMatch(/backups/i);
+    // #148's language rules still hold wherever backups are described.
+    expect(`${result.fix ?? ''} ${result.message}`).not.toMatch(/stale DB backups/i);
   });
 
   it('includes a DB / backups / logs breakdown in the message', async () => {
