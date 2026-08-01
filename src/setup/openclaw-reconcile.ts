@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import {
+  type ReconcileInput,
   gatherReconcileInput,
   reconcilePluginState,
   planReconcileActions,
@@ -40,7 +41,16 @@ export interface StepResult {
 }
 
 export interface ReconcileExecResult {
+  /** The state BEFORE remediation — what the plan was computed from. */
   verdict: ReconcileVerdict;
+  /**
+   * The state re-read AFTER remediation (#145). The closing report must be
+   * shaped by this, never by `verdict`: echoing the pre-remediation snapshot
+   * produced "FAILED: version-regressed (4.47.16 running)" seconds after a
+   * successful upgrade to 4.47.19 — a false red that sends operators to
+   * re-remediate a healthy box. Absent on dry-runs (nothing changed).
+   */
+  postVerdict?: ReconcileVerdict;
   plan: ReconcileStep[];
   applied: boolean;
   stepResults: StepResult[];
@@ -67,6 +77,13 @@ export interface ReconcileOptions {
   selfCheck?: (home: string, pluginId: string) => Promise<SelfCheckRunResult>;
   /** Injectable duplicate-dir pruner (defaults to rm -rf of the project dir). */
   pruneDir?: (home: string, dirName: string) => void;
+  /**
+   * Injectable state reader, used for the pre-remediation read AND the #145
+   * post-remediation re-read (defaults to gather + reconcile against the
+   * host). One seam for both so a test cannot accidentally pin only the pre
+   * path and leave the re-read unproven.
+   */
+  readState?: () => { input: ReconcileInput; verdict: ReconcileVerdict };
 }
 
 function defaultApply(): boolean {
@@ -116,9 +133,14 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const pruneDir = options.pruneDir ?? defaultPruneDir;
 
   const messages: string[] = [];
-  const input = gatherReconcileInput(home, { pluginId, expectedVersion: options.expectedVersion });
-  const verdict = reconcilePluginState(input);
-  messages.push(`state: ${verdict.state} (${verdict.severity}) — ${verdict.reasons[verdict.reasons.length - 1] ?? ''}`);
+  const readState =
+    options.readState ??
+    (() => {
+      const i = gatherReconcileInput(home, { pluginId, expectedVersion: options.expectedVersion });
+      return { input: i, verdict: reconcilePluginState(i) };
+    });
+  const { input, verdict } = readState();
+  messages.push(`state before remediation: ${verdict.state} (${verdict.severity}) — ${verdict.reasons[verdict.reasons.length - 1] ?? ''}`);
 
   // Determine which duplicate dirs are prunable. The keep-dir is resolved from
   // the AUTHORITATIVE SQLite index (never installs.json, which in a conflicted
@@ -185,6 +207,12 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${r.output.trim().split('\n').slice(-1)[0] ?? ''}`);
   }
 
+  // #145: re-read the state AFTER remediation. The pre-remediation snapshot is
+  // now history — a closing line shaped by it reported "version-regressed
+  // (4.47.16 running)" seconds after the very reload that fixed it.
+  const postVerdict = readState().verdict;
+  messages.push(`state after remediation: ${postVerdict.state} (${postVerdict.severity}) — ${postVerdict.reasons[postVerdict.reasons.length - 1] ?? ''}`);
+
   // Honest-state contract: overall success ONLY if the self-check ran AND passed.
   const selfCheckOk = Boolean(selfCheckResult?.ok);
   const commandsOk = stepResults.filter((s) => s.kind.startsWith('openclaw')).every((s) => s.ok);
@@ -204,7 +232,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     messages.push('reconciled: plugin confirmed loaded (roster) and enforcing (canary)');
   }
 
-  return { verdict, plan, applied: true, stepResults, selfCheck: selfCheckResult, ok, messages };
+  return { verdict, postVerdict, plan, applied: true, stepResults, selfCheck: selfCheckResult, ok, messages };
 }
 
 /**
@@ -244,11 +272,21 @@ export function formatReconcileReport(result: ReconcileExecResult): string[] {
   lines.push('Applied remediation:');
   for (const s of result.stepResults) lines.push(`  ${s.ok ? '✓' : '✗'} ${s.kind}: ${s.detail}`);
   lines.push('');
+  // #145: everything below this line describes the world AFTER remediation.
+  if (result.postVerdict) {
+    lines.push(`Plugin load state after remediation: ${result.postVerdict.state} [${result.postVerdict.severity}]`);
+    for (const r of result.postVerdict.reasons) lines.push(`  • ${r}`);
+    lines.push('');
+  }
   if (result.ok) {
     lines.push('✓ reconciled: plugin confirmed loaded (roster) and enforcing (canary).');
   } else {
     lines.push('✗ FAILED: could not confirm the plugin is loaded AND enforcing.');
     for (const m of result.messages) {
+      // Never echo the PRE-remediation state under the failure banner — that
+      // is the exact false red #145 documents. Post-state and self-check
+      // messages carry the current truth.
+      if (m.startsWith('state before remediation')) continue;
       if (/fail|not confirmed|not run|did not/i.test(m)) lines.push(`  ${m}`);
     }
   }

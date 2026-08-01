@@ -71,14 +71,14 @@ describe('parseRunningPluginVersion', () => {
 
 describe('checkOpenClawRunningPluginVersion', () => {
   it('skips (info) when OpenClaw is not present', async () => {
-    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => journalWith('4.47.13') });
+    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => ({ text: journalWith('4.47.13'), preBounded: true }), readGatewayProcessStartMs: () => 1_700_000_000_000 });
     expect(r.status).toBe('info');
     expect(r.message).toMatch(/not detected|skipped/i);
   });
 
   it('passes when the running version matches the on-disk version', async () => {
     installOnDisk('4.47.13');
-    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => journalWith('4.47.8', '4.47.13') });
+    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => ({ text: journalWith('4.47.8', '4.47.13'), preBounded: true }), readGatewayProcessStartMs: () => 1_700_000_000_000 });
     expect(r.status).toBe('pass');
     expect(r.message).toMatch(/4\.47\.13/);
   });
@@ -87,7 +87,7 @@ describe('checkOpenClawRunningPluginVersion', () => {
     installOnDisk('4.47.13');
     // Gateway registered v4.47.8 at last start; disk was upgraded to v4.47.13 but
     // the gateway was never restarted — the live incident signature.
-    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => journalWith('4.47.8') });
+    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => ({ text: journalWith('4.47.8'), preBounded: true }), readGatewayProcessStartMs: () => 1_700_000_000_000 });
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/stale/i);
     expect(r.message).toMatch(/4\.47\.8 running/i);
@@ -97,7 +97,7 @@ describe('checkOpenClawRunningPluginVersion', () => {
 
   it('reports info (never a green "current") when the gateway journal is unreadable', async () => {
     installOnDisk('4.47.13');
-    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => null });
+    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => null, readGatewayProcessStartMs: () => 1_700_000_000_000 });
     expect(r.status).toBe('info');
     expect(r.message).toMatch(/cannot verify running version/i);
     expect(r.status).not.toBe('pass');
@@ -106,15 +106,16 @@ describe('checkOpenClawRunningPluginVersion', () => {
   it('reports info when the journal is readable but holds no registration line', async () => {
     installOnDisk('4.47.13');
     const r = await checkOpenClawRunningPluginVersion(home, {
-      readGatewayJournal: () => 'Jul 21 09:00:01 host openclaw-gateway[123]: starting gateway\n',
+      readGatewayJournal: () => ({ text: 'Jul 21 09:00:01 host openclaw-gateway[123]: starting gateway\n', preBounded: true }),
+      readGatewayProcessStartMs: () => 1_700_000_000_000,
     });
     expect(r.status).toBe('info');
-    expect(r.message).toMatch(/cannot verify running version/i);
+    expect(r.message).toMatch(/running version UNKNOWN/i);
   });
 
   it('skips (info) when OpenClaw is present but the realtime plugin is not installed', async () => {
     fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
-    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => journalWith('4.47.13') });
+    const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => ({ text: journalWith('4.47.13'), preBounded: true }), readGatewayProcessStartMs: () => 1_700_000_000_000 });
     expect(r.status).toBe('info');
     expect(r.message).toMatch(/not installed|skipped/i);
   });

@@ -177,3 +177,78 @@ export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootR
   }
   return null;
 }
+
+// ── Registration lines (#142) ───────────────────────────────────────────────
+//
+// The boot roster line is a snapshot taken at one instant during boot, and
+// plugin registration RACES it: on a passing box the margin was 169 ms. It is
+// also not a boot-only event — registrations appear mid-life. So absence from
+// the boot line must not be read as "not registered now" when a registration
+// line postdates that boot: the honest verdict there is UNPROVEN, and the
+// consent-gated live canary is the arbiter.
+//
+// Caveat carried deliberately: CLI processes write identical registration
+// lines into the shared log, so a post-boot registration is AMBIGUOUS evidence
+// of gateway state — enough to withhold an UNPROTECTED accusation, never
+// enough to grant a loaded proof.
+
+/** Matches "[shieldcortex] v4.47.8 registered (...)" incl. semver suffixes. */
+const REGISTRATION_RE = /\[shieldcortex\]\s+v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s+registered/;
+
+export interface RegistrationSighting {
+  version: string;
+  atMs: number;
+}
+
+/**
+ * Scan text for plugin registration lines at/after `sinceMs`, newest last.
+ * PURE. Lines without a parseable timestamp are skipped — a line that cannot
+ * be dated cannot be called fresh.
+ */
+export function parseRegistrationsSince(text: string, sinceMs: number): RegistrationSighting[] {
+  const out: RegistrationSighting[] = [];
+  for (const line of text.split('\n')) {
+    const m = REGISTRATION_RE.exec(line);
+    if (!m) continue;
+    const ts = parseTimestamp(line);
+    if (ts == null || ts < sinceMs) continue;
+    out.push({ version: m[1], atMs: ts });
+  }
+  return out;
+}
+
+/**
+ * Newest registration sighting at/after `sinceMs` across the gateway's log
+ * files, or null. Same file discovery as {@link readLatestBootRoster}; same
+ * honesty contract — null means "no dated sighting", never "not registered".
+ */
+export function findRegistrationSince(
+  sinceMs: number,
+  options: ReadBootRosterOptions = {},
+): RegistrationSighting | null {
+  const logDir = options.logDir ?? DEFAULT_LOG_DIR;
+  const readDir = options.readDir ?? ((d: string) => fs.readdirSync(d));
+  const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
+
+  let names: string[];
+  try {
+    names = readDir(logDir);
+  } catch {
+    return null;
+  }
+
+  let newest: RegistrationSighting | null = null;
+  for (const name of names) {
+    if (!name.startsWith('openclaw-') || !name.endsWith('.log')) continue;
+    let text: string;
+    try {
+      text = readFile(path.join(logDir, name));
+    } catch {
+      continue;
+    }
+    for (const sighting of parseRegistrationsSince(text, sinceMs)) {
+      if (!newest || sighting.atMs > newest.atMs) newest = sighting;
+    }
+  }
+  return newest;
+}

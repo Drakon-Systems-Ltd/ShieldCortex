@@ -19,6 +19,8 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
+import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
+import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
@@ -2457,6 +2459,19 @@ export async function checkOpenClawPluginLoadState(
           'cannot read OpenClaw\'s plugin roster (SQLite index unreadable — broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw) — cannot confirm the realtime plugin is loaded; NOT necessarily unprotected',
         fix,
       };
+    case 'load-unproven':
+      // #142: the boot roster snapshot races plugin registration, and a
+      // registration line was sighted after the snapshot. Neither loaded nor
+      // absent can be proven from logs — a confident UNPROTECTED here is the
+      // false alarm that trains operators to ignore the check that caught #74.
+      return {
+        label,
+        status: 'warn',
+        message:
+          'load state UNPROVEN — absent from the boot roster snapshot, but a plugin registration was sighted after it ' +
+          '(registration races the snapshot; CLI activity writes identical lines). Neither protected nor unprotected is proven',
+        fix: `Prove it live: ${LIVE_CANARY_COMMAND}`,
+      };
     case 'enabled-not-loaded':
       return {
         label,
@@ -2520,9 +2535,32 @@ export async function checkOpenClawPluginLoadState(
  * The journal reader is injected (see `realRunningPluginVersionDeps`) so the
  * check has no hard dependency on systemd being present or readable.
  */
+export interface BoundedJournal {
+  text: string;
+  /**
+   * True when the SOURCE already bounded the text at/after the requested
+   * instant (journalctl --since=@epoch). journald's default line format
+   * carries no year, so per-line dating is impossible there — bounding at the
+   * source is what keeps the #150 guarantee on systemd hosts. False means the
+   * text is a raw file read and every line must prove its own freshness.
+   */
+  preBounded: boolean;
+}
+
 export interface RunningPluginVersionDeps {
-  /** Returns the gateway journal/log text, or null when it can't be read. */
-  readGatewayJournal: () => string | null;
+  /**
+   * Returns gateway journal/log text for the window starting at `sinceMs`,
+   * or null when it can't be read.
+   */
+  readGatewayJournal: (sinceMs: number) => BoundedJournal | null;
+  /**
+   * The RUNNING gateway's process start (ms), or null when it cannot be
+   * proven. #150: a Mac reported "v4.14.10 running" off a log line written in
+   * May because nothing bounded the log by the life of the process it was
+   * being quoted about. No line older than this instant may be called
+   * "running".
+   */
+  readGatewayProcessStartMs: () => number | null;
 }
 
 /**
@@ -2544,6 +2582,16 @@ export function parseRunningPluginVersion(journal: string): string | null {
 }
 
 /**
+ * #150: the bounded variant — only registration lines dated at/after `sinceMs`
+ * count, and a line that cannot be dated cannot be called fresh. The unbounded
+ * parser above remains for callers that genuinely want "newest ever".
+ */
+export function parseRunningPluginVersionSince(journal: string, sinceMs: number): string | null {
+  const sightings = parseRegistrationsSince(journal, sinceMs);
+  return sightings.length > 0 ? sightings[sightings.length - 1].version : null;
+}
+
+/**
  * Real journal reader: prefer the user gateway service journal, fall back to
  * OpenClaw's on-disk gateway log. Returns null on ANY failure (no systemd, no
  * perms, no log file) so the check downgrades to "cannot verify" rather than a
@@ -2552,15 +2600,17 @@ export function parseRunningPluginVersion(journal: string): string | null {
  */
 export function realRunningPluginVersionDeps(home: string = os.homedir()): RunningPluginVersionDeps {
   return {
-    readGatewayJournal: (): string | null => {
-      // 1. systemd user journal for the gateway unit (the supported layout).
+    readGatewayJournal: (sinceMs: number): BoundedJournal | null => {
+      // 1. systemd user journal, bounded AT THE SOURCE (#150): journald's
+      //    default format has no year, so per-line dating is impossible —
+      //    --since makes the whole window provably fresh instead.
       try {
         const out = execFileSync(
           'journalctl',
-          ['--user', '-u', 'openclaw-gateway', '--no-pager', '-n', '2000'],
+          ['--user', '-u', 'openclaw-gateway', '--no-pager', '-n', '2000', `--since=@${Math.floor(sinceMs / 1000)}`],
           { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
         );
-        if (typeof out === 'string' && out.trim().length > 0) return out;
+        if (typeof out === 'string' && out.trim().length > 0) return { text: out, preBounded: true };
       } catch {
         // no systemd / unit unknown / no perms — fall through to the log file
       }
@@ -2575,15 +2625,38 @@ export function realRunningPluginVersionDeps(home: string = os.homedir()): Runni
         try {
           if (fs.existsSync(file)) {
             const text = fs.readFileSync(file, 'utf8');
-            if (text.trim().length > 0) return text;
+            if (text.trim().length > 0) return { text, preBounded: false };
           }
         } catch {
           // unreadable — try the next candidate
         }
       }
 
+      // 3. OpenClaw's default log dir (/tmp/openclaw/openclaw-YYYY-MM-DD.log,
+      //    ISO-dated JSON lines — the layout every current install writes).
+      try {
+        const dir = '/tmp/openclaw';
+        const logs = fs
+          .readdirSync(dir)
+          .filter((n) => n.startsWith('openclaw-') && n.endsWith('.log'))
+          .sort();
+        const parts: string[] = [];
+        for (const name of logs.slice(-2)) {
+          try {
+            parts.push(fs.readFileSync(path.join(dir, name), 'utf8'));
+          } catch {
+            // skip unreadable file
+          }
+        }
+        const text = parts.join('\n');
+        if (text.trim().length > 0) return { text, preBounded: false };
+      } catch {
+        // no default log dir either
+      }
+
       return null;
     },
+    readGatewayProcessStartMs: (): number | null => readRunningGatewayProcess(home)?.startedAtMs ?? null,
   };
 }
 
@@ -2602,7 +2675,23 @@ export async function checkOpenClawRunningPluginVersion(
     return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
   }
 
-  const journal = deps.readGatewayJournal();
+  // #150: bound the log by the life of the process it is being quoted about.
+  // A Mac reported "v4.14.10 running" off a line written two months earlier —
+  // a confident, specific claim from an artifact nothing had touched since
+  // May. Without a process-start instant to bound against, the newest line in
+  // a log proves nothing about NOW, so the honest answer is unknown.
+  const processStartMs = deps.readGatewayProcessStartMs();
+  if (processStartMs == null) {
+    return {
+      label,
+      status: 'info',
+      message:
+        `cannot verify running version (the running gateway's start time could not be established, ` +
+        `so no log line can be proven to describe the current process); on-disk v${diskVersion}`,
+    };
+  }
+
+  const journal = deps.readGatewayJournal(processStartMs);
   if (journal === null) {
     return {
       label,
@@ -2613,14 +2702,18 @@ export async function checkOpenClawRunningPluginVersion(
     };
   }
 
-  const running = parseRunningPluginVersion(journal);
+  const running = journal.preBounded
+    ? parseRunningPluginVersion(journal.text)
+    : parseRunningPluginVersionSince(journal.text, processStartMs);
   if (!running) {
+    const historic = journal.preBounded ? null : parseRunningPluginVersion(journal.text);
     return {
       label,
       status: 'info',
       message:
-        `cannot verify running version (no \`[shieldcortex] … registered\` line in the gateway journal — ` +
-        `gateway not started since logs rotated, or plugin never loaded); on-disk v${diskVersion}`,
+        `running version UNKNOWN — no \`[shieldcortex] … registered\` line since the running gateway ` +
+        `started (${new Date(processStartMs).toISOString()}); on-disk v${diskVersion}.` +
+        (historic ? ` An older line exists (v${historic}) but predates this process and proves nothing about it` : ''),
     };
   }
 
