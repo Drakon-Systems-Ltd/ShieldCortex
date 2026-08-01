@@ -218,7 +218,17 @@ const DANGEROUS: Pattern[] = [
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
   { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
-  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|\b(kill|pkill|killall)\b/i, signal: 'stop-process-or-service' },
+  // The process verbs here are the SHELL commands, not a language's process API
+  // (issue #165). `process.kill(process.pid, sig)` in a build script forwards a
+  // signal to ITSELF, and `child.kill()` is a method call — neither stops
+  // somebody else's service. #160 wired script-source folding into the Claude
+  // Code hook, which made every such build script newly scannable on the
+  // busiest surface, and this fired on `npm test` in this very repo. A guard
+  // that blocks `npm test` is a guard people turn off.
+  //
+  // The lookbehind rejects only the member-access form. Every shell shape —
+  // bare, sudo-prefixed, after a separator, via xargs — is untouched.
+  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|(?<![.\w])(kill|pkill|killall)\b/i, signal: 'stop-process-or-service' },
   { re: /\b(iptables|ufw|nft|netplan|firewall-cmd)\b/i, signal: 'modify-network-firewall' },
   // Package installs split by blast radius (issue #73.3). System package managers
   // and language *global* installs mutate the host → approval. A workspace-local
@@ -283,7 +293,13 @@ const DANGEROUS: Pattern[] = [
   // regardless of the target file, so it is gated on its own.
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
-  { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  // The dotfile here means the FILE, never a property access (issue #165).
+  // `process.env`, `import.meta.env` and `env.FOO` are lookups — reading them
+  // touches nothing on disk, yet they matched and helped block this repo's own
+  // test runner once #160 made folded script source scannable on the Claude
+  // Code surface. The lookbehind rejects an identifier immediately before the
+  // dot; a leading `./`, `/app/`, a bare one, and `.env.local` all still match.
+  { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b/i, signal: 'touch-sensitive-path' },
   // The guard's own one-shot approval store (#118). The TTY gate stops the
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own
