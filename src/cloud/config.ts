@@ -26,7 +26,7 @@ export interface ReviewCopilotConfig {
   workerHeapMB: number;
 }
 
-function getConfigDir(): string {
+export function getConfigDir(): string {
   const override = process.env.SHIELDCORTEX_CONFIG_DIR?.trim();
   if (override) return override;
   return join(homedir(), '.shieldcortex');

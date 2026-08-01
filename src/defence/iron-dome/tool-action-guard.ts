@@ -193,6 +193,11 @@ const CATASTROPHIC: Pattern[] = [
  * automatically catastrophic. These map to an Iron Dome action and escalate to
  * `require_approval`.
  */
+// The system package managers whose installs mutate the HOST. Named so the
+// container-confinement check (#128) tests the identical shape rather than a
+// drifting second copy.
+const SYSTEM_INSTALL_RE = /\b(?:apt|apt-get|yum|dnf|brew|gem|cargo)\b[^|;&\n]*\b(?:install|add)\b/i;
+
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
   // statement, after a separator/subshell, after sudo/env-assignment prefixes,
@@ -201,7 +206,15 @@ const DANGEROUS: Pattern[] = [
   // intent, and no longer gates. `rm`/`unlink`/`rmdir` stay unanchored — their
   // mention-FP class is the #84 span-classifier's scope, and anchoring the
   // highest-traffic delete verb needs that design, not a drive-by.
-  { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
+  // The delete verbs are preceded by a not-a-dash-flag guard (issue #128): a
+  // token that begins with `-` is an OPTION, never the command. `docker run
+  // --rm` asks the container runtime to clean up the CONTAINER on exit and
+  // touches nothing on the host, yet it was hard-matching the highest-traffic
+  // delete rule — hit live while setting up a clean-box install test for our
+  // own product. This narrows only the flag form; `rm x`, `sudo rm x`,
+  // `; rm x`, `xargs rm` and every inner `rm` inside a container command are
+  // unchanged, and `rm -rf` remains catastrophic wherever it appears.
+  { re: /(?<![-\w])rm\b|(?<![-\w])unlink\b|(?<![-\w])rmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
   { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
@@ -219,7 +232,7 @@ const DANGEROUS: Pattern[] = [
   //
   // `pip`/`pip3` moved out to `hasUnscopedPipInstall` below — a pip install has
   // to be read as argv to tell a host mutation from a venv-scoped one.
-  { re: /\b(?:apt|apt-get|yum|dnf|brew|gem|cargo)\b[^|;&\n]*\b(?:install|add)\b/i, signal: 'install-package' },
+  { re: SYSTEM_INSTALL_RE, signal: 'install-package' },
   // A GLOBAL install mutates the host → approval. It must carry BOTH an install
   // verb AND a global flag in the SAME statement. The verb is `install`/`add`,
   // or npm's own `i`/`in`/`ins`/`inst`/`insta`/`instal`/`install`/`isnt`/`isntall`
@@ -391,6 +404,94 @@ function hasUnscopedPipInstall(text: string): boolean {
     return true;
   }
   return false;
+}
+
+
+// ── Container-confined host mutation (issue #128) ──────────────────────────
+//
+// A package install inside a throwaway container is not host mutation: the
+// layer is discarded when the container exits. Blocked live while setting up a
+// clean-box install test for our own product — the workflow the rule exists to
+// permit, gated by the rule meant to catch host changes.
+//
+// The downgrade is an ALLOWLIST OF PROOFS, never a denylist of dangers, because
+// a container is only a boundary while it is sealed. Any of the following means
+// it is not, and the gate stays exactly as it was:
+//   --privileged / --cap-add           → host capabilities
+//   -v /:… or /etc, /usr, /var, /boot  → the host filesystem is inside
+//   --pid/--net/--ipc/--uts=host       → a host namespace is shared
+//   chroot / nsenter / mount in the
+//     inner command                    → an explicit escape to the host
+//   --user root with a host mount      → covered by the mount rule above
+// An unrecognised shape is never downgraded.
+const CONTAINER_RUN_RE = /\b(?:docker|podman|nerdctl)\s+(?:compose\s+)?run\b/i;
+const CONTAINER_ESCAPE_RE = new RegExp([
+  '--privileged',
+  '--cap-add',
+  '--pid\\s*=\\s*host', '--net(?:work)?\\s*=\\s*host', '--ipc\\s*=\\s*host', '--uts\\s*=\\s*host',
+  '--userns\\s*=\\s*host',
+  // A host bind-mount: -v/--volume/--mount whose SOURCE is the host root or a
+  // system directory. A project-relative or $PWD mount is not an escape.
+  '(?:^|\\s)(?:-v|--volume)\\s*=?\\s*["\']?/(?:\\s|:|["\']|$)',
+  '(?:^|\\s)(?:-v|--volume)\\s*=?\\s*["\']?/(?:etc|usr|bin|sbin|boot|var|lib|root|home|dev|proc|sys)\\b',
+  '--mount[^\\s]*\\bsource=/(?:etc|usr|bin|sbin|boot|var|lib|root|home|dev|proc|sys)?\\b',
+  // An explicit break-out in the inner command.
+  '\\bchroot\\b', '\\bnsenter\\b', '(?<![-\\w])mount\\b',
+].join('|'), 'i');
+
+/**
+ * True when EVERY statement that carries an install verb is inside a container
+ * run that shows no escape marker. One un-contained install anywhere keeps the
+ * gate for the whole call — a container run in statement 1 must never launder a
+ * host install in statement 2.
+ */
+function installsAreContainerConfined(text: string): boolean {
+  if (!CONTAINER_RUN_RE.test(text)) return false;
+  if (CONTAINER_ESCAPE_RE.test(text)) return false;
+  let sawInstall = false;
+  for (const segment of quoteAwareStatements(text)) {
+    if (!SYSTEM_INSTALL_RE.test(segment)) continue;
+    sawInstall = true;
+    // The install must sit on the SAME containerised command line, not merely
+    // nearby: a quoted mention of a container run in one segment must never
+    // launder a bare host install in the next.
+    if (!CONTAINER_RUN_RE.test(segment)) return false;
+  }
+  return sawInstall;
+}
+
+/**
+ * Split on shell separators that are OUTSIDE quotes.
+ *
+ * The shared `splitCommandStatements` deliberately splits on every separator
+ * regardless of quoting — the fail-safe choice for rules that must not be
+ * evaded by quoting. The question here is the opposite one ("is this install
+ * part of the container's own command line?"), and for that a separator inside
+ * the container runner's quoted program belongs to the CONTAINER, not the host.
+ * Kept local so the fail-safe splitter stays exactly as it is.
+ */
+function quoteAwareStatements(text: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '\\' && quote !== "'" && i + 1 < text.length) { cur += c + text[++i]; continue; }
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; cur += c; continue; }
+    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') {
+      if (cur.trim()) out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
 }
 
 const SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|password\s*[=:]\s*\S{6,}|secret\s*[=:]\s*\S{6,})/i;
@@ -1865,7 +1966,7 @@ export function evaluateToolCall(
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
   // Span-classified (#84): same mention-vs-intent filter as catastrophic above.
   const dangerMatches = [...catastrophicPayload, ...matchSpansClassified(DANGEROUS, scanSurface, regions)];
-  const dangerSignals = dangerMatches.map(m => m.signal);
+  let dangerSignals = dangerMatches.map(m => m.signal);
   let dangerSpan = dangerMatches[0]?.span;
   // A pip install scoped to a venv / an explicit target prefix mutates that
   // prefix, not the host (issue #89 class 4) — it falls through to the
@@ -1873,6 +1974,14 @@ export function evaluateToolCall(
   if (hasUnscopedPipInstall(scanSurface) && !dangerSignals.includes('install-package')) {
     dangerSignals.push('install-package');
     dangerSpan = dangerSpan ?? 'pip install';
+  }
+  // A system install confined to a sealed throwaway container mutates that
+  // container, not the host (issue #128) — drop the host-mutation signal. The
+  // confinement check is an allowlist of proofs: any privilege, host mount,
+  // host namespace or explicit break-out keeps the gate, and an install
+  // outside the container run keeps it for the whole call.
+  if (dangerSignals.includes('install-package') && installsAreContainerConfined(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'install-package');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing

@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import { installOpenClawHook, findAllHooksDirs } from './openclaw.js';
 import { setupHooks } from './settings-hooks.js';
 import { readJsonConfigOrAbort, writeJsonConfigWithBackup, looksLikeShieldcortex, resolveMcpServerCommand } from './json-config.js';
+import { getConfigDir } from '../cloud/config.js';
 
 // MCP entry point: dist/index.js — one level up from dist/setup/ (this module).
 const MCP_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.js');
@@ -207,6 +208,26 @@ export async function setupClaudeMd(options?: { stopHook?: boolean; sessionEnd?:
     }
   } else {
     console.log('- OpenClaw: not detected (skipped)');
+  }
+
+  // 5. Harden the permissions on our own state (#163). Runs on every install
+  //    AND upgrade, deliberately: the audit found every existing box with a
+  //    world-readable memories.db and a group-writable audit/, so fixing only
+  //    fresh installs would leave the whole fleet exactly as measured — the
+  //    #146 lesson. Best-effort and never fatal; reported, never swallowed.
+  try {
+    const { secureStatePermissions } = await import('./state-permissions.js');
+    const findings = secureStatePermissions(getConfigDir());
+    const fixed = findings.filter(f => f.fixed);
+    const failed = findings.filter(f => !f.fixed);
+    if (fixed.length > 0) {
+      console.log(`✓ Permissions: tightened ${fixed.length} path(s) to owner-only (was group/world accessible)`);
+    }
+    for (const f of failed) {
+      console.warn(`⚠️  Permissions: could not tighten ${f.path} (${f.found} → ${f.required}): ${f.error ?? 'unknown'}`);
+    }
+  } catch (err) {
+    console.warn(`⚠️  Permissions: hardening pass skipped — ${err instanceof Error ? err.message : String(err)}`);
   }
 
   console.log('\nSetup complete.');

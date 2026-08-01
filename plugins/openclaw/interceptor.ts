@@ -604,8 +604,21 @@ type PipelineRunner = (content: string, title: string, source: { type: string; i
 //   * anything over the size cap is refused (the guard then records it as
 //     `opaque-script-invocation` rather than pretending it was scanned);
 //   * every error returns `null`. Nothing escapes.
-const MAX_SCRIPT_SOURCE_BYTES = 262_144;   // 256KB — matches the guard core's cap
-const UNREADABLE_PATH_PREFIX = /^\/(?:proc|sys|dev)\//;
+// The resolver is DUPLICATED here, deliberately (#160).
+//
+// This plugin publishes as its own npm package and builds standalone
+// (tsconfig.openclaw-plugin.json pins rootDir to plugins/openclaw), so it
+// genuinely cannot import from src/ — converging by import broke the plugin
+// build outright. A real constraint, then, not a tidiness failure.
+//
+// But two copies of a safety-railed file reader reached from untrusted tool
+// input is two chances to drift, and drift is what #160 was about. So the
+// copies are held together by a BEHAVIOURAL drift test that runs both
+// implementations over one fixture table and requires identical answers
+// (src/__tests__/enforcement-surface-parity.test.ts). Guard the duplication
+// rather than pretend it away.
+export const MAX_SCRIPT_SOURCE_BYTES = 262_144;   // 256KB — matches the guard core's cap
+export const UNREADABLE_PATH_PREFIX = /^\/(?:proc|sys|dev)\//;
 
 export function createScriptSourceResolver(cwd?: string): (scriptPath: string) => string | null {
   const base = cwd && typeof cwd === 'string' ? cwd : process.cwd();

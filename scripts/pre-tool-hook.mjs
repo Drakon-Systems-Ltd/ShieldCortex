@@ -93,6 +93,33 @@ async function loadGuard() {
 }
 
 /**
+ * The invoked-script source resolver (#160).
+ *
+ * Without this, `evaluateToolCall` cannot fold a script's CONTENTS into the
+ * scan, so a payload written in one call and executed by path in the next is
+ * allowed here while the OpenClaw plugin surface — which always passed a
+ * resolver — folds it and blocks. Same guard, same input, opposite verdict,
+ * and this is the surface that gates every Bash call in a Claude Code session.
+ *
+ * Optional by construction: if the module is missing the hook behaves exactly
+ * as it did before, degrading to `opaque-script-invocation` rather than
+ * failing on a partial dist.
+ */
+async function loadScriptResolver() {
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'script-source-resolver.js')).href
+    );
+    return typeof mod.createScriptSourceResolver === 'function'
+      ? mod.createScriptSourceResolver(process.cwd())
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Load the one-shot approval store (#118). Optional by design: when the dist
  * module is missing the guard behaves exactly as it did before approvals
  * existed — refuse and say so — rather than failing open.
@@ -459,9 +486,18 @@ process.stdin.on('end', async () => {
       return;
     }
 
+    const resolveScriptSource = await loadScriptResolver();
     let verdict;
     try {
-      verdict = guard.evaluateToolCall(toolName, toolInput);
+      // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
+      // options object into the config slot type-checks in .mjs and silently
+      // does nothing, which is the same shape of defect as the gap this fixes.
+      verdict = guard.evaluateToolCall(
+        toolName,
+        toolInput,
+        undefined,
+        resolveScriptSource ? { resolveScriptSource } : undefined,
+      );
     } catch (err) {
       handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`); // always exits
       return;
