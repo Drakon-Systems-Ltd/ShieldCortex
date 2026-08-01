@@ -67,6 +67,132 @@ function skippedNoDatabase(label: string): CheckResult {
   return { label, status: 'info', message: 'skipped — database not created yet', skipped: 'db-uninitialised' };
 }
 
+/**
+ * How a path actually failed to be readable.
+ *
+ * `fs.existsSync()` collapses three very different states into one `false`:
+ * "not created yet", "there but I'm not allowed to look at it", and "the
+ * filesystem returned something else entirely". #131 made doctor treat that
+ * `false` as the friendly fresh-install state, so a root-owned
+ * `~/.shieldcortex` — the classic artefact of a single `sudo shieldcortex …`
+ * run — reported a clean bill of health on a genuinely broken install. A
+ * diagnostic going green on the box it exists to diagnose is its worst
+ * possible failure mode (#132).
+ *
+ * probePath() keeps the cases apart. `statSync` is injectable so tests can
+ * drive every branch deterministically, including on hosts where the test
+ * runner is root and chmod cannot deny it anything.
+ */
+export type PathProbe =
+  | { kind: 'present'; stat: fs.Stats }
+  | { kind: 'absent' }
+  | { kind: 'denied'; code: string; message: string }
+  | { kind: 'error'; code: string; message: string };
+
+export function probePath(
+  target: string,
+  statSync: (p: string) => fs.Stats = fs.statSync,
+): PathProbe {
+  try {
+    return { kind: 'present', stat: statSync(target) };
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN';
+    const message = err instanceof Error ? err.message : String(err);
+    // ENOENT is the only code that means "genuinely not there yet".
+    if (code === 'ENOENT') return { kind: 'absent' };
+    if (code === 'EACCES' || code === 'EPERM') return { kind: 'denied', code, message };
+    return { kind: 'error', code, message };
+  }
+}
+
+/** True only for "this path is genuinely not there yet" — never for unreadable. */
+function isAbsent(target: string): boolean {
+  return probePath(target).kind === 'absent';
+}
+
+function tildify(target: string): string {
+  const home = os.homedir();
+  return target.startsWith(home) ? target.replace(home, '~') : target;
+}
+
+/**
+ * The remedy for the only cause worth naming: ShieldCortex state owned by a
+ * different user. Practically always one `sudo shieldcortex …` (or an install
+ * script run under sudo) leaving root-owned files behind.
+ */
+function ownershipFix(): string {
+  return (
+    'Those paths exist but this user cannot read them — almost always ShieldCortex state owned by ' +
+    'another user, typically root, left behind by one `sudo shieldcortex …` run. Restore ownership: ' +
+    '`sudo chown -R "$USER" ~/.shieldcortex` (also `~/.claude-memory` on a legacy install), then ' +
+    're-run `shieldcortex doctor`.'
+  );
+}
+
+/**
+ * Turn a non-present, non-absent probe into an honest ❌. Never swallows the
+ * underlying errno — a code we have no advice for still gets surfaced verbatim
+ * rather than being reported as a healthy or fresh install.
+ *
+ * `opts.fix` overrides the remedy: a string for a path the ownership hint does
+ * not fit, `false` for a dependent check whose root cause is already reported
+ * (repeating one remedy per affected check reads as several problems).
+ */
+function unreadableResult(
+  label: string,
+  target: string,
+  probe: Extract<PathProbe, { kind: 'denied' | 'error' }>,
+  opts: { fix?: string | false } = {},
+): CheckResult {
+  const defaultFix = probe.kind === 'denied'
+    ? ownershipFix()
+    : `Resolve the filesystem error above on ${tildify(target)}, then re-run \`shieldcortex doctor\`.`;
+  const fix = opts.fix === undefined ? defaultFix : opts.fix;
+  return {
+    label,
+    status: 'fail',
+    message: probe.kind === 'denied'
+      ? `permission denied reading ${tildify(target)} (${probe.code})`
+      : `cannot read ${tildify(target)} — ${probe.code}: ${probe.message}`,
+    ...(fix === false ? {} : { fix }),
+  };
+}
+
+/**
+ * Upgrade a caught filesystem error to a permission ❌ when that is what it is.
+ * Returns null for anything else so the caller keeps its own handling.
+ */
+function permissionFailure(
+  label: string,
+  target: string,
+  err: unknown,
+  opts: { fix?: string | false } = {},
+): CheckResult | null {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code === 'EACCES' || code === 'EPERM') {
+    const fix = opts.fix === undefined ? ownershipFix() : opts.fix;
+    return {
+      label,
+      status: 'fail',
+      message: `permission denied reading ${tildify(target)} (${code})`,
+      ...(fix === false ? {} : { fix }),
+    };
+  }
+  return null;
+}
+
+/** better-sqlite3 surfaces a denied open as SQLITE_CANTOPEN, not EACCES. */
+function looksLikePermissionError(err: unknown, msg: string): boolean {
+  const code = (err as NodeJS.ErrnoException)?.code ?? '';
+  return (
+    code === 'EACCES' ||
+    code === 'EPERM' ||
+    code === 'SQLITE_CANTOPEN' ||
+    code === 'SQLITE_READONLY' ||
+    /EACCES|EPERM|permission denied|unable to open database file/i.test(msg)
+  );
+}
+
 function icon(status: CheckStatus): string {
   switch (status) {
     case 'pass': return `${green}\u2705${reset}`;
@@ -119,8 +245,12 @@ function detectEnvironment(): Environment {
 function getDbPath(): string {
   const newPath = path.join(getShieldCortexDir(), 'memories.db');
   const legacyPath = path.join(os.homedir(), '.claude-memory', 'memories.db');
-  if (fs.existsSync(newPath)) return newPath;
-  if (fs.existsSync(legacyPath)) return legacyPath;
+  // Probe rather than existsSync: an unreadable DB at the canonical path must
+  // still resolve to that path, so the checks report the permission fault
+  // against the real install instead of silently falling back to the legacy
+  // location (or to "fresh install") (#132).
+  if (!isAbsent(newPath)) return newPath;
+  if (!isAbsent(legacyPath)) return legacyPath;
   return newPath; // default expected path
 }
 
@@ -131,7 +261,15 @@ function getDbPath(): string {
  * getDbPath().
  */
 export function runDatabaseCheck(dbPath: string, env: Environment = detectEnvironment()): CheckResult {
-  if (!fs.existsSync(dbPath)) {
+  const probe = probePath(dbPath);
+
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    // There IS something at this path, we just cannot read it. Never the
+    // friendly fresh-install line — that is the #131 regression this closes.
+    return unreadableResult('Database', dbPath, probe);
+  }
+
+  if (probe.kind === 'absent') {
     // Not a failure. The database is created lazily on the first memory
     // operation, so "no database yet" is the normal state of a fresh install —
     // and doctor is exactly the command a new user runs to check the install
@@ -184,19 +322,44 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
+    const isNativeBindingFault = /bindings file|napi|abi|MODULE_VERSION|was compiled against/i.test(msg);
+    // A stat'able DB can still be unopenable because the file itself is owned
+    // by another user (mode 600 root:root — the other half of the sudo
+    // artefact). Telling that user to delete their database is bad advice.
+    const fix = isNativeBindingFault
+      ? `Native DB engine failed to load. Run \`shieldcortex repair\` (compiles better-sqlite3 from source + re-verifies), or manually: cd "${path.join(resolveSelfInstallDir(), 'node_modules', 'better-sqlite3')}" && npm run build-release`
+      : looksLikePermissionError(err, msg)
+        ? ownershipFix()
+        : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server';
     return {
       label: 'Database',
       status: 'fail',
       message: `cannot open — ${msg}`,
-      fix: /bindings file|napi|abi|MODULE_VERSION|was compiled against/i.test(msg)
-        ? `Native DB engine failed to load. Run \`shieldcortex repair\` (compiles better-sqlite3 from source + re-verifies), or manually: cd "${path.join(resolveSelfInstallDir(), 'node_modules', 'better-sqlite3')}" && npm run build-release`
-        : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server',
+      fix,
     };
   }
 }
 
 async function checkDatabase(): Promise<CheckResult> {
   return runDatabaseCheck(getDbPath());
+}
+
+/**
+ * Gate for the checks that can say nothing without a readable database.
+ * Returns the result to return early with, or null to carry on.
+ *
+ * The three states are deliberately distinct: absent is the friendly
+ * fresh-install skip, unreadable is a ❌ that must never be collapsed into it
+ * (#132), readable proceeds to the real check.
+ */
+function databasePrerequisite(label: string, dbPath: string): CheckResult | null {
+  const probe = probePath(dbPath);
+  if (probe.kind === 'absent') return skippedNoDatabase(label);
+  if (probe.kind === 'present') return null;
+  // No fix line here on purpose: the Database check already carries the
+  // ownership remedy, and repeating it per dependent check turns "Suggested
+  // fixes" into four copies of one sentence.
+  return unreadableResult(label, dbPath, probe, { fix: false });
 }
 
 // ── Check 2: Schema version ──────────────────────────────
@@ -214,9 +377,8 @@ async function checkDatabase(): Promise<CheckResult> {
  * long-lived DBs) are harmless and stay silent.
  */
 export function runSchemaDriftCheck(dbPath: string): CheckResult {
-  if (!fs.existsSync(dbPath)) {
-    return skippedNoDatabase('Schema');
-  }
+  const prerequisite = databasePrerequisite('Schema', dbPath);
+  if (prerequisite) return prerequisite;
 
   try {
     const Database = require('better-sqlite3');
@@ -267,9 +429,8 @@ async function checkSchema(): Promise<CheckResult> {
  * against a temp database instead of the homedir install.
  */
 export function runMemoryStatsCheck(dbPath: string): CheckResult {
-  if (!fs.existsSync(dbPath)) {
-    return skippedNoDatabase('Memories');
-  }
+  const prerequisite = databasePrerequisite('Memories', dbPath);
+  if (prerequisite) return prerequisite;
 
   try {
     const Database = require('better-sqlite3');
@@ -333,9 +494,8 @@ async function checkMemoryStats(): Promise<CheckResult> {
  * without going through doctor's homedir-derived getDbPath().
  */
 export function runWritePathProbe(dbPath: string, env: Environment = detectEnvironment()): CheckResult {
-  if (!fs.existsSync(dbPath)) {
-    return skippedNoDatabase('Write path');
-  }
+  const prerequisite = databasePrerequisite('Write path', dbPath);
+  if (prerequisite) return prerequisite;
 
   let db: any = null;
   const probeUuid = `doctor-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -428,7 +588,18 @@ async function checkWritePath(): Promise<CheckResult> {
  * real homedir.
  */
 export function runHooksCheck(settingsPath: string, env: Environment = detectEnvironment()): CheckResult {
-  if (!fs.existsSync(settingsPath)) {
+  const probe = probePath(settingsPath);
+
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    // A settings.json we cannot read is not "not configured yet" — doctor
+    // simply cannot tell whether the hooks are wired, and saying so is the
+    // only honest answer (#132).
+    return unreadableResult('Hooks', settingsPath, probe, {
+      fix: `Check ownership and permissions of ${tildify(settingsPath)} — while it is unreadable, doctor cannot tell whether the hooks are wired.`,
+    });
+  }
+
+  if (probe.kind === 'absent') {
     // No settings.json is not a fault. Either Claude Code isn't on this box at
     // all (OpenClaw-only / headless installs never grow one), or it is and the
     // user hasn't run `shieldcortex install` yet — the exact state of every
@@ -513,6 +684,12 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
       };
     }
   } catch (err: unknown) {
+    // A settings.json that stats but will not open (mode 000) is a permission
+    // fault, not an inconclusive check.
+    const denied = permissionFailure('Hooks', settingsPath, err, {
+      fix: `Check ownership and permissions of ${tildify(settingsPath)} — while it is unreadable, doctor cannot tell whether the hooks are wired.`,
+    });
+    if (denied) return denied;
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Hooks', status: 'warn', message: `check failed — ${msg}` };
   }
@@ -811,7 +988,14 @@ function readDbRowConsumers(dbPath: string): DbRowConsumers | null {
 }
 
 export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES): Promise<CheckResult> {
-  if (!fs.existsSync(scDir)) {
+  const dirProbe = probePath(scDir);
+  if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
+    // "Directory not yet created" is a ✅. An unreadable one is not — this is
+    // the same false-clean shape as the Database check, on the same directory
+    // (#132).
+    return unreadableResult('Disk', scDir, dirProbe);
+  }
+  if (dirProbe.kind === 'absent') {
     return { label: 'Disk', status: 'pass', message: '0 B / 100 MB limit (directory not yet created)' };
   }
 
@@ -961,6 +1145,10 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       return { label: 'Disk', status: 'pass', message: `${dataStr}${backupsStr}${modelsStr}` };
     }
   } catch (err: unknown) {
+    // A directory that stats but cannot be listed (mode 700, another owner) is
+    // a permission fault, not an inconclusive check.
+    const denied = permissionFailure('Disk', scDir, err);
+    if (denied) return denied;
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Disk', status: 'warn', message: `check failed — ${msg}` };
   }
@@ -974,7 +1162,11 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
 // to delete a file that is still in active use.
 export async function checkLockFile(scDir: string = getShieldCortexDir()): Promise<CheckResult> {
 
-  if (!fs.existsSync(scDir)) {
+  const dirProbe = probePath(scDir);
+  if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
+    return unreadableResult('Lock', scDir, dirProbe, { fix: false });
+  }
+  if (dirProbe.kind === 'absent') {
     return { label: 'Lock', status: 'pass', message: 'clean' };
   }
 
@@ -1043,6 +1235,8 @@ export async function checkLockFile(scDir: string = getShieldCortexDir()): Promi
 
     return { label: 'Lock', status: 'pass', message: `clean (${active.length} active lock${active.length !== 1 ? 's' : ''})` };
   } catch (err: unknown) {
+    const denied = permissionFailure('Lock', scDir, err, { fix: false });
+    if (denied) return denied;
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Lock', status: 'warn', message: `check failed — ${msg}` };
   }
@@ -1756,8 +1950,16 @@ export async function checkBrainWorker(): Promise<CheckResult> {
     };
   }
   const statePath = path.join(getShieldCortexDir(), 'state', 'worker.json');
-  if (!fs.existsSync(statePath)) {
-    return missingWorkerStateResult(fs.existsSync(getDbPath()));
+  const stateProbe = probePath(statePath);
+  if (stateProbe.kind === 'denied' || stateProbe.kind === 'error') {
+    // Unreadable state is not "the worker has not run yet" (#132).
+    return unreadableResult('Brain worker', statePath, stateProbe);
+  }
+  if (stateProbe.kind === 'absent') {
+    // isAbsent, not existsSync: an unreadable database means something HAS
+    // been installed here, so a missing worker.json is a real gap, not the
+    // fresh-install state.
+    return missingWorkerStateResult(!isAbsent(getDbPath()));
   }
   try {
     const raw = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as {
@@ -2462,7 +2664,36 @@ export function partitionUninitialisedSkips(
   };
 }
 
-export async function runDoctor(args: string[] = []): Promise<void> {
+/**
+ * What `shieldcortex doctor` reports back to its caller — and to the shell.
+ */
+export interface DoctorSummary {
+  passed: number;
+  warnings: number;
+  failures: number;
+  infos: number;
+  total: number;
+  exitCode: number;
+}
+
+/**
+ * Exit-code policy.
+ *
+ * doctor used to always exit 0, so `shieldcortex doctor && …` succeeded on a
+ * broken install and CI could not gate on it (#132). A ❌ now means exit 1.
+ *
+ * Warnings and info stay 0 deliberately: fresh-install states are ℹ️ (#129),
+ * and a first run must not fail anyone's pipeline for being a first run.
+ * `--strict` opts into escalating ⚠️ as well, for callers that want a
+ * zero-tolerance gate.
+ */
+export function doctorExitCode(results: CheckResult[], opts: { strict?: boolean } = {}): number {
+  if (results.some(r => r.status === 'fail')) return 1;
+  if (opts.strict && results.some(r => r.status === 'warn')) return 1;
+  return 0;
+}
+
+export async function runDoctor(args: string[] = []): Promise<DoctorSummary> {
   console.log(`\n${bold}ShieldCortex Doctor${reset} v${pkg.version}\n`);
 
   const results: CheckResult[] = [];
@@ -2561,12 +2792,14 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   if (infos > 0) parts.push(`${infos} info`);
   console.log(`  ${parts.join(', ')}`);
 
-  // Suggested fixes
-  const fixes = visible.filter(r => r.fix);
+  // Suggested fixes. Deduplicated: one root cause can fail several checks at
+  // once (a root-owned ~/.shieldcortex fails Database, Disk and Lock), and
+  // printing the same remedy three times reads as three separate problems.
+  const fixes = [...new Set(visible.filter(r => r.fix).map(r => r.fix as string))];
   if (fixes.length > 0) {
     console.log(`\n  ${bold}Suggested fixes:${reset}`);
     for (const f of fixes) {
-      console.log(`  ${dim}\u2192${reset} ${f.fix}`);
+      console.log(`  ${dim}\u2192${reset} ${f}`);
     }
   }
 
@@ -2574,5 +2807,20 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   // Free + Enterprise repricing \u2014 there is no self-serve tier to nudge
   // towards. `config --upsell-mute/--upsell-unmute` remain accepted no-ops.)
 
+  // Exit code. Set rather than process.exit() so buffered stdout is flushed
+  // in full (doctor's report is long and often piped), and only ever set to
+  // a failure \u2014 never reset to 0 over an exit code someone else set.
+  const strict = args.includes('--strict');
+  const exitCode = doctorExitCode(visible, { strict });
+  if (exitCode !== 0) {
+    process.exitCode = exitCode;
+    const reason = failures > 0
+      ? `${failures} failed check${failures !== 1 ? 's' : ''}`
+      : `${warnings} warning${warnings !== 1 ? 's' : ''} (--strict)`;
+    console.log(`  ${dim}exit ${exitCode} \u2014 ${reason}${reset}`);
+  }
+
   console.log('');
+
+  return { passed, warnings, failures, infos, total, exitCode };
 }
