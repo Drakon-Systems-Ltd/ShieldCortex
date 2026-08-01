@@ -30,6 +30,13 @@ export interface ActionGuardConfig {
   /** Audit recognised (severity 'sensitive'+) allow-decisions. Default true (issue #95).
    *  Benign allows are never audited — on a busy agent every `ls` would drown the stream. */
   auditAllows?: boolean;
+  /** Extra OAuth/OIDC token-endpoint hosts (#177) — a credential POSTed to one
+   *  of these is authentication, not exfiltration, so it is not hard-blocked.
+   *  The well-known providers are built into the guard; this covers self-hosted
+   *  IdPs (Keycloak) and per-tenant SaaS ones (`*.okta.com`). Passed through to
+   *  the evaluator, which normalises entries and ignores any that would switch
+   *  the rule off. Nothing else in the guard is relaxed by it. */
+  oauthTokenEndpoints?: string[];
   /** RAW approval-broker config (#143), passed through untouched. It is
    *  normalised by `normaliseBrokerConfig` in the main package before it reaches
    *  the broker — this plugin never interprets it, so a hostile value cannot be
@@ -54,6 +61,9 @@ export interface ToolGuardVerdictLike {
  *  command. Structurally typed, like ToolGuardVerdictLike above. */
 export interface ToolGuardEvaluatorOptions {
   resolveScriptSource?: (scriptPath: string) => string | null;
+  /** Operator token-endpoint allowlist (issue #177). An evaluator that predates
+   *  the field ignores it, exactly like `resolveScriptSource` above. */
+  oauthTokenEndpoints?: string[];
 }
 export type ToolGuardEvaluator = (
   toolName: string,
@@ -906,6 +916,12 @@ export function createInterceptor(
       // resolver. An evaluator that predates the seam simply ignores it.
       v = evaluateToolCall(context.toolName, context.arguments || {}, undefined, {
         resolveScriptSource: createScriptSourceResolver(toolCallCwd(context)),
+        // #177: operator-declared token endpoints for self-hosted / tenant IdPs.
+        // Filtered to strings here; the evaluator does the security-relevant
+        // normalisation (single place that knows what would loosen the rule).
+        oauthTokenEndpoints: Array.isArray(actionGuardCfg.oauthTokenEndpoints)
+          ? actionGuardCfg.oauthTokenEndpoints.filter((e): e is string => typeof e === 'string')
+          : undefined,
       });
     } catch (err) {
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`);

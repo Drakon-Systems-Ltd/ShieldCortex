@@ -47,6 +47,23 @@ export interface IronDomeConfig {
   confirmationProtocol: IronDomeConfirmationProtocol;
   confirmationOverrides?: ConfirmationOverrides;
   profile?: IronDomeProfile;
+  /**
+   * Extra OAuth/OIDC token-endpoint hosts the Action Guard treats as the
+   * credential's own issuer rather than an exfiltration destination (#177).
+   *
+   * The well-known providers (Entra ID, Google, Xero, GitHub, Apple,
+   * Salesforce) are built in; this is for self-hosted IdPs (Keycloak, an
+   * internal OIDC provider) and per-tenant SaaS ones. Each entry may be a bare
+   * host (`auth.acme.com`), a full token URL (only its host is used — this is a
+   * HOST allowlist, a path can never earn membership), or a `*.okta.com`
+   * wildcard that matches SUBDOMAINS only. Entries that would switch the rule
+   * off (a bare `*`, a single-label host, a whole registry suffix) are ignored.
+   *
+   * Scope it tightly: an allowlisted host is one the guard will let a
+   * credential reach, so it must be an endpoint that authenticates — never one
+   * that stores or relays content someone could read back.
+   */
+  oauthTokenEndpoints?: string[];
 }
 
 // ── Default Configuration ──

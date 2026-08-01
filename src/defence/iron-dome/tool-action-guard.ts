@@ -510,31 +510,95 @@ function quoteAwareStatements(text: string): string[] {
   return out;
 }
 
-const SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|password\s*[=:]\s*\S{6,}|secret\s*[=:]\s*\S{6,})/i;
 /**
- * The secret hint for FOLDED PROGRAM SOURCE (#175) — credential LITERALS only.
- *
- * SECRET_HINT's generic `secret= / password=` arms are written for a command
- * line, where whatever follows the `=` is a real value by construction. Inside
- * program source the same shape is field VOCABULARY: every OAuth client on
- * earth contains `'client_secret': cfg.secret` next to a `requests.post` to
- * its token endpoint — that is a credential doing its job, not leaving home.
- * When #160 pointed the fold at the Claude Code hook, that one reading turned
- * secret-egress into a blanket auto-deny of ordinary business automation:
- * three separate production scripts (inbox cleanup, two Xero syncs) were
- * catastrophic-blocked in a single evening, none of which move a secret
- * anywhere it does not belong. Same defect class as `process.kill` matching
- * the shell `kill` (#165): shell vocabulary applied to program identifiers.
- *
- * So folded non-shell source gates on what a command line cannot fake — a
- * hard credential literal (key material itself), or a QUOTED literal secret
- * assignment (`password = "hunter2abc"`). An identifier / expression on the
- * right-hand side (`'client_secret': cfg['secret']`) is code shape, and code
- * shape alone is not evidence of exfiltration. Folded SHELL scripts keep the
- * full SECRET_HINT — a folded .sh IS command text, and `curl -d
- * secret=$(cat …)` inside one must gate exactly as it would inline.
+ * Hard credential MATERIAL: an API key, token, private key or JWT written out
+ * in full. Unambiguous on any surface — no program *refers to* one of these by
+ * spelling it; if the bytes are here, the credential is here.
  */
-const FOLDED_SOURCE_SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|(?:password|secret)["']?\s*[=:]\s*["'][^"'\n]{6,}["'])/i;
+const CREDENTIAL_LITERAL = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/i;
+
+/**
+ * `secret` / `password` assigned a QUOTED literal — a hardcoded credential.
+ *
+ * The quoted span may not contain `$`, a backtick or `{` (#177): those are
+ * interpolation, i.e. a REFERENCE wearing quotes — `"$CLIENT_SECRET"`, a
+ * Python f-string `"{cfg.secret}"`, a JS template. A reference says where the value lives,
+ * not that it is here. The cost of the exclusion is a hardcoded password that
+ * happens to contain a `$`; the benefit is that the single most common way to
+ * pass a credential correctly stops reading as exfiltration.
+ *
+ * Two spellings, one character apart. Program SOURCE also admits a quoted KEY
+ * (`"client_secret": "…"`, a dict/JSON literal); a command line does not, and
+ * widening it there would newly gate ordinary JSON request bodies.
+ */
+const QUOTED_SECRET_VALUE = /(?:password|secret)\s*[=:]\s*["'][^"'\n$`{]{6,}["']/i;
+const QUOTED_SECRET_VALUE_SOURCE = /(?:password|secret)["']?\s*[=:]\s*["'][^"'\n$`{]{6,}["']/i;
+
+/**
+ * `secret` / `password` assigned a BARE (unquoted) value — command text only.
+ *
+ * On a command line `-d secret=abcdef123456` is a value by construction, and
+ * that arm is what catches a curl exfil that carries no recognisable key
+ * material. But the old arm was `secret\s*[=:]\s*\S{6,}` — "six of anything" —
+ * so it also matched `client_secret=$CLIENT_SECRET`, `secret: os.environ["X"]`,
+ * `client_secret = get_from_1password()`: every correct way to hand a program a
+ * credential at runtime (#177). The rule fired hardest on the practice this
+ * project recommends, while a malicious script assigning to `k` walked past.
+ *
+ * The value must therefore LOOK like a value. `$`, backtick and brackets are
+ * outside the character class, so an expansion, a substitution or a call never
+ * starts one; the trailing lookahead refuses a truncated match whose next
+ * character re-opens a call or a subscript (`get_from_1password(`,
+ * `os.environ[`); `looksLikeLiteralValue` rejects a dotted reference
+ * (`args.password`) and demands the mixed alphabet that separates key material
+ * from an identifier. Matches are collected with `matchAll` because the first
+ * `secret=` in a script is usually the reference and a later one the value.
+ */
+const BARE_SECRET_ASSIGNMENT = /(?:password|secret)\s*[=:]\s*([A-Za-z0-9+/=_.-]{6,})(?![A-Za-z0-9+/=_.-]|[([])/gi;
+
+/** A dotted identifier chain (`args.password`, `cfg.creds.secret`) — the value
+ *  is somewhere else, and this is the road sign, not the destination. */
+const DOTTED_REFERENCE = /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$/;
+
+/**
+ * Does this bare right-hand side look like credential material rather than a
+ * name? Key material mixes alphabets — case, digits, base64 padding. A single
+ * lowercase word (`ms_client_secret`, `settings`) or a SHOUTED constant
+ * (`MY_TOKEN`) is what code calls things, not what a credential looks like.
+ */
+function looksLikeLiteralValue(value: string): boolean {
+  if (DOTTED_REFERENCE.test(value)) return false;
+  const lower = /[a-z]/.test(value);
+  const upper = /[A-Z]/.test(value);
+  const digit = /[0-9]/.test(value);
+  const base64Padding = /[+=]/.test(value);
+  return (lower && upper) || ((lower || upper) && digit) || base64Padding;
+}
+
+function hasBareSecretValue(text: string): boolean {
+  BARE_SECRET_ASSIGNMENT.lastIndex = 0;               // module-level regex, /g — never inherit a cursor
+  for (const m of text.matchAll(BARE_SECRET_ASSIGNMENT)) {
+    if (looksLikeLiteralValue(m[1])) return true;
+  }
+  return false;
+}
+
+/**
+ * Was a credential VALUE sighted in this surface?
+ *
+ * Surface-aware (#175): the command line, the tool args and folded SHELL
+ * scripts are command text, where a bare `secret=…` is a value; folded PROGRAM
+ * source is not, because `'client_secret': cfg.secret` next to a token-endpoint
+ * POST is what an OAuth client IS. The split is by region language, never by
+ * "was it folded" — the same line #165 drew. Both surfaces now agree on the one
+ * thing that matters: a reference to a secret is not a secret (#177).
+ */
+function secretValueSighted(text: string, lang: ScriptLang): boolean {
+  if (CREDENTIAL_LITERAL.test(text)) return true;
+  if (lang === 'sh') return QUOTED_SECRET_VALUE.test(text) || hasBareSecretValue(text);
+  return QUOTED_SECRET_VALUE_SOURCE.test(text);
+}
+
 const EXTERNAL_EGRESS = /\b(curl|wget|fetch|nc|netcat|scp|rsync|http\.post|requests\.post|fetch\()/i;
 
 // Outbound DATA on a network call (issue #73.2): a read-only GET carries nothing
@@ -1301,6 +1365,145 @@ function looksExternal(url: string, text: string): boolean {
   return /https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(hay) || /[a-z0-9.-]+\.[a-z]{2,}\b/i.test(url);
 }
 
+// ── OAuth / OIDC token endpoints are not exfiltration destinations (#177) ────
+//
+// `looksExternal` exempts localhost and RFC1918 and nothing else, so every
+// public identity provider is "external" — which meant the secret-egress rule
+// hard-blocked EVERY OAuth refresh in existence. It blocked this estate's
+// nightly inbox cleanup (a `client_secret` POSTed to login.microsoftonline.com
+// to refresh an Outlook token) at the catastrophic tier: auto-deny, no approval
+// path, job silently did not run.
+//
+// A client secret sent to its OWN ISSUER's token endpoint is not a leak, it is
+// authentication — the one thing the credential exists to do. The load-bearing
+// property is that these hosts are not readable data sinks: an attacker cannot
+// stand up a listener on login.microsoftonline.com, and a token request that
+// the IdP rejects tells them nothing. That is the whole test for membership
+// here, and why hosts that ALSO accept arbitrary content an attacker can read
+// back (slack.com's incoming webhooks, gists, pastebins, storage APIs) are not
+// on this list even though they speak OAuth.
+//
+// Matching is on the HOST, never on the URL path — `evil.example/oauth2/token`
+// dresses its path up as OAuth and must still block. A `path` entry is an
+// ADDITIONAL constraint for a host that does other work too (github.com is a
+// whole website; only /login/oauth/ is its token endpoint), never a way in.
+interface TokenEndpoint {
+  host: string;
+  /** Extra constraint for multi-purpose hosts. Absent = the host is dedicated. */
+  path?: RegExp;
+}
+const OAUTH_TOKEN_ENDPOINTS: readonly TokenEndpoint[] = [
+  { host: 'login.microsoftonline.com' },              // Entra ID / Azure AD (+ sovereign clouds)
+  { host: 'login.microsoftonline.us' },
+  { host: 'login.microsoft.com' },
+  { host: 'login.windows.net' },                      // legacy AAD v1 endpoint, still in the wild
+  { host: 'oauth2.googleapis.com' },                  // Google, current
+  { host: 'accounts.google.com', path: /^\/o\/oauth2\//i },   // Google, legacy — the host also serves sign-in UI
+  { host: 'identity.xero.com' },
+  { host: 'appleid.apple.com', path: /^\/auth\//i },
+  { host: 'login.salesforce.com', path: /^\/services\/oauth2\//i },
+  { host: 'test.salesforce.com', path: /^\/services\/oauth2\//i },   // Salesforce sandbox
+  { host: 'github.com', path: /^\/login\/oauth\//i },
+];
+
+/**
+ * Normalise an operator-supplied endpoint into a host matcher, or reject it.
+ *
+ * Operators run self-hosted IdPs (Keycloak, an internal OIDC provider) and
+ * per-tenant SaaS ones (`dev-1234.okta.com`, `acme.auth0.com`), so the list has
+ * to be extensible or the fix only works for the eleven hosts above. Accepts a
+ * bare host, a full token URL (the host is taken; the path is ignored — this is
+ * a HOST allowlist), or a `*.example.com` wildcard for tenant hosts.
+ *
+ * Refuses anything that would switch the rule off: a bare `*`, a single-label
+ * host, and `*.com`-shaped entries that would hand over a whole registry
+ * suffix. Wildcards match SUBDOMAINS only, so `*.okta.com` never admits
+ * `okta.com.evil.example`.
+ */
+function normaliseOperatorEndpoint(entry: unknown): string | null {
+  if (typeof entry !== 'string') return null;
+  let s = entry.trim().toLowerCase();
+  if (!s) return null;
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');       // scheme
+  s = s.replace(/^[^@/]*@/, '');                      // userinfo
+  s = s.split(/[/?#]/)[0];                            // path / query / fragment
+  s = s.replace(/:\d+$/, '').replace(/\.$/, '');      // port, trailing root dot
+  const wildcard = s.startsWith('*.');
+  const host = wildcard ? s.slice(2) : s;
+  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(host)) return null;   // ≥2 labels, no leftover '*'
+  return wildcard ? `*.${host}` : host;
+}
+
+function operatorEndpointMatches(host: string, entry: string): boolean {
+  if (entry.startsWith('*.')) return host.endsWith(`.${entry.slice(2)}`);
+  return host === entry;
+}
+
+/** Split a URL into host + path without `new URL` (which throws, and this file
+ *  must not). Userinfo is dropped the way a browser drops it: the host is what
+ *  comes AFTER the last `@` — `https://login.microsoftonline.com@evil.example/x`
+ *  connects to evil.example, and anything that reads it by prefix is fooled. */
+function splitUrl(raw: string): { host: string; path: string } | null {
+  const m = /^https?:\/\/([^/?#]*)([^?#]*)/i.exec(raw);
+  if (!m || !m[1]) return null;
+  let authority = m[1];
+  const at = authority.lastIndexOf('@');
+  if (at >= 0) authority = authority.slice(at + 1);
+  const host = authority.replace(/:\d+$/, '').replace(/\.$/, '').toLowerCase();
+  if (!host) return null;
+  return { host, path: m[2] || '/' };
+}
+
+const URL_IN_TEXT = /\bhttps?:\/\/[^\s"'`<>\\)\]},]+/gi;
+
+/**
+ * Raw-socket / file-copy egress at COMMAND POSITION, which withdraws the token-
+ * endpoint exemption outright.
+ *
+ * The destination census below can only see a destination that carries a
+ * scheme — `nc collector.evil.example 443` is invisible to it (and to
+ * `looksExternal`, which is why a scheme-less sink has never been secret-egress
+ * material on its own). That gap becomes exploitable the moment an exemption
+ * exists: name a real token endpoint, exfil over a raw socket in the same call.
+ * No OAuth refresh needs netcat, so the presence of one of these tools is enough
+ * to fall back to the block rather than trust the URL census.
+ *
+ * Anchored at command position and refusing an assignment (`nc = len(rows)`,
+ * the #135 carve-out) so a two-letter identifier in folded program source is
+ * not mistaken for the tool.
+ */
+const NON_HTTP_EGRESS_TOOL = /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:nc|ncat|netcat|socat|scp|rsync|sftp|telnet)\b(?!\s*=)/im;
+const LOCAL_HOST = /^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)$/i;
+
+/**
+ * Is EVERY external destination in this call a recognised token endpoint?
+ *
+ * All-or-nothing, and false when there is no destination to judge: one
+ * un-allowlisted host anywhere in the command or the folded script keeps the
+ * block, so a refresh script that also POSTs the token it just minted to a
+ * collector is not laundered by the legitimate half of its work.
+ */
+function boundOnlyForTokenEndpoints(url: string, surface: string, operatorEntries: readonly string[]): boolean {
+  if (NON_HTTP_EGRESS_TOOL.test(surface)) return false;
+  const destinations: Array<{ host: string; path: string }> = [];
+  URL_IN_TEXT.lastIndex = 0;
+  for (const m of `${url}\n${surface}`.matchAll(URL_IN_TEXT)) {
+    const parsed = splitUrl(m[0]);
+    if (parsed) destinations.push(parsed);
+  }
+  // A structured tool may carry a scheme-less host (`{ url: 'api.example.com' }`),
+  // which `looksExternal` counts as external — so it counts as a destination.
+  if (url && !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    const parsed = splitUrl(`https://${url.trim()}`);
+    if (parsed) destinations.push(parsed);
+  }
+  const external = destinations.filter(d => !LOCAL_HOST.test(d.host));
+  if (external.length === 0) return false;
+  return external.every(d =>
+    OAUTH_TOKEN_ENDPOINTS.some(e => d.host === e.host && (!e.path || e.path.test(d.path)))
+    || operatorEntries.some(entry => operatorEndpointMatches(d.host, entry)));
+}
+
 // ── Use/mention discipline for shell commands ────────────────────────────────
 // A dangerous token inside a real shell command is only an *action* if it sits
 // in command position. If it is merely printed (`echo "rm -rf /"`) or commented
@@ -1702,6 +1905,15 @@ export interface ToolGuardOptions {
    * and must never block (see the interceptor's fs-backed implementation).
    */
   resolveScriptSource?: (scriptPath: string) => string | null;
+  /**
+   * Additional OAuth/OIDC token-endpoint hosts for self-hosted or per-tenant
+   * IdPs (#177) — a bare host, a full token URL, or a `*.tenant-host` wildcard.
+   * Same list as `IronDomeConfig.oauthTokenEndpoints`, on the seam the two real
+   * callers (hook, plugin interceptor) already build; both lists are honoured.
+   * Entries that would switch the rule off are refused, and this NEVER relaxes
+   * anything but the secret-egress destination test.
+   */
+  oauthTokenEndpoints?: string[];
 }
 
 interface ScriptFold {
@@ -2033,25 +2245,33 @@ export function evaluateToolCall(
   // 1c) Secret exfiltration: external egress carrying a credential/secret.
   const egressCommand = fold.content ? `${execCommand}\n${fold.content}` : execCommand;
   const egress = family === 'network' || EXTERNAL_EGRESS.test(egressCommand) || EXTERNAL_EGRESS.test(url);
-  // #175: the secret hint is surface-aware. The command line, the tool args and
-  // folded SHELL scripts take the full SECRET_HINT (they are command text);
-  // folded PROGRAM source takes the literals-only hint, because `client_secret:`
-  // next to a token-endpoint POST is what an OAuth client IS, and matching it
-  // catastrophic-blocked three production scripts in one evening. The split is
-  // by region language, never by "was it folded" — the same line #165 drew.
-  let secretSighted = SECRET_HINT.test(`${execSurface}   ${rawStringArgs(args)}`);
+  // #175/#177: the secret sighting is surface-aware (command text vs program
+  // source) and, on both surfaces, requires a credential VALUE — a reference to
+  // one (`$CLIENT_SECRET`, `os.environ["X"]`, `get_from_1password()`) is how a
+  // correct program reaches its credential, not evidence of a leak. See
+  // `secretValueSighted`.
+  let secretSighted = secretValueSighted(`${execSurface}   ${rawStringArgs(args)}`, 'sh');
   if (!secretSighted && fold.content) {
     for (const r of fold.regions) {
       const slice = fold.content.slice(r.start, r.end);
-      if ((r.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT).test(slice)) {
+      if (secretValueSighted(slice, r.lang)) {
         secretSighted = true;
         break;
       }
     }
   }
   if (egress && secretSighted && looksExternal(url, scanSurface)) {
-    return verdict('block', 'catastrophic', family, 'data_exfiltration',
-      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]);
+    // …unless every destination is a recognised OAuth/OIDC token endpoint
+    // (#177). Sending a client secret to its own issuer is authentication, and
+    // hard-blocking it took out a nightly job that had done nothing wrong.
+    // Host-matched, all-or-nothing, fail-closed — see boundOnlyForTokenEndpoints.
+    const operatorEndpoints = [...(config?.oauthTokenEndpoints ?? []), ...(options?.oauthTokenEndpoints ?? [])]
+      .map(normaliseOperatorEndpoint)
+      .filter((e): e is string => e !== null);
+    if (!boundOnlyForTokenEndpoints(url, scanSurface, operatorEndpoints)) {
+      return verdict('block', 'catastrophic', family, 'data_exfiltration',
+        'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]);
+    }
   }
 
   const canonical = ACTION_BY_FAMILY[family];

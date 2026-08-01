@@ -114,6 +114,7 @@ Supported plugin config keys:
 - `actionGuard.enforce`: enforce dangerous-operation gating (default `true`); `false` opts down to warn-and-allow. Catastrophic operations are blocked regardless.
 - `actionGuard.autoApprove`: array of operation allowlist entries for unattended agents that legitimately need specific dangerous operations
 - `actionGuard.auditAllows`: audit recognised (sensitive-tier) allow-decisions so "scanned & allowed" is distinguishable from "never scanned" (default `true`; benign allows are never audited)
+- `actionGuard.oauthTokenEndpoints`: extra OAuth/OIDC **token-endpoint hosts** treated as the credential's own issuer rather than an exfiltration destination. Entra ID, Google, Xero, GitHub, Apple and Salesforce are built in; add self-hosted IdPs (`auth.example.com`, or a full token URL — only its host is used) and per-tenant SaaS ones (`*.okta.com`, matching subdomains only). Matching is on the host, never the URL path, so `evil.example/oauth2/token` is still blocked. Entries that would switch the rule off (a bare `*`, a single-label host, a whole registry suffix) are ignored. Only add endpoints that *authenticate* — never one that stores or relays content someone could read back.
 - `failurePolicy`: per-severity verdict when a decision can't be obtained unattended (defaults: `low`/`medium` allow, `high`/`critical` deny)
 
 ## Auto-memory

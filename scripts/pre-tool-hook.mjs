@@ -57,7 +57,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // ==================== CONFIG ====================
 
-const DEFAULT_ACTION_GUARD = { enabled: true, enforce: true, autoApprove: [], auditAllows: true };
+const DEFAULT_ACTION_GUARD = { enabled: true, enforce: true, autoApprove: [], auditAllows: true, oauthTokenEndpoints: [] };
 
 function loadActionGuardConfig() {
   try {
@@ -71,6 +71,13 @@ function loadActionGuardConfig() {
       enforce: raw.enforce !== false,
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
       auditAllows: raw.auditAllows !== false,
+      // #177: extra OAuth/OIDC token-endpoint hosts (self-hosted Keycloak, an
+      // Okta/Auth0 tenant). Only the type is checked here — dist's evaluator
+      // does the normalisation, so the rule about which entries would loosen
+      // the guard lives in exactly one place.
+      oauthTokenEndpoints: Array.isArray(raw.oauthTokenEndpoints)
+        ? raw.oauthTokenEndpoints.filter((e) => typeof e === 'string')
+        : [],
       // #143, passed through RAW. normaliseBrokerConfig in dist is the single
       // place that knows which values would loosen an invariant; re-implementing
       // half of it here is how the two halves end up disagreeing. Absent or
@@ -664,11 +671,19 @@ process.stdin.on('end', async () => {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
       // options object into the config slot type-checks in .mjs and silently
       // does nothing, which is the same shape of defect as the gap this fixes.
+      // #177 — a client secret POSTed to its own issuer's token endpoint is
+      // authentication, not exfiltration. The well-known IdPs are built into the
+      // guard; this carries the operator's additions (self-hosted Keycloak, an
+      // Okta/Auth0 tenant) so both enforcement surfaces can ask for the same
+      // thing. The guard normalises them and ignores any that would loosen it.
+      const guardEndpoints = cfg.oauthTokenEndpoints?.length
+        ? { oauthTokenEndpoints: cfg.oauthTokenEndpoints }
+        : {};
       verdict = guard.evaluateToolCall(
         toolName,
         toolInput,
         undefined,
-        resolveScriptSource ? { resolveScriptSource } : undefined,
+        resolveScriptSource ? { resolveScriptSource, ...guardEndpoints } : guardEndpoints,
       );
     } catch (err) {
       handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode); // always exits
