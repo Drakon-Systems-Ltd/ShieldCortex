@@ -140,7 +140,7 @@ describe('runCanaryProbe — active synthetic op + fresh nonce gate', () => {
 });
 
 describe('evaluateSelfCheck — version proof (onDiskVersion >= expectedVersion)', () => {
-  const loadedRoster: PluginIndexRow = {
+  const indexEnabled: PluginIndexRow = {
     installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2' } },
     plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'npm' }],
     warning: null,
@@ -149,7 +149,7 @@ describe('evaluateSelfCheck — version proof (onDiskVersion >= expectedVersion)
 
   it('HARD FAILS when the on-disk version regressed below expected (silent-downgrade guard)', () => {
     const v = evaluateSelfCheck({
-      pluginId: PLUGIN, index: loadedRoster, canary: passingCanary,
+      pluginId: PLUGIN, index: indexEnabled, liveRoster: [PLUGIN], canary: passingCanary,
       expectedVersion: '4.47.2', onDiskVersion: '4.25.4',
     });
     expect(v.ok).toBe(false);
@@ -159,7 +159,7 @@ describe('evaluateSelfCheck — version proof (onDiskVersion >= expectedVersion)
 
   it('passes the version proof when on-disk == expected', () => {
     const v = evaluateSelfCheck({
-      pluginId: PLUGIN, index: loadedRoster, canary: passingCanary,
+      pluginId: PLUGIN, index: indexEnabled, liveRoster: [PLUGIN], canary: passingCanary,
       expectedVersion: '4.47.2', onDiskVersion: '4.47.2',
     });
     expect(v.versionProof).toBe(true);
@@ -168,7 +168,7 @@ describe('evaluateSelfCheck — version proof (onDiskVersion >= expectedVersion)
 
   it('passes the version proof when on-disk is newer than expected', () => {
     const v = evaluateSelfCheck({
-      pluginId: PLUGIN, index: loadedRoster, canary: passingCanary,
+      pluginId: PLUGIN, index: indexEnabled, liveRoster: [PLUGIN], canary: passingCanary,
       expectedVersion: '4.47.2', onDiskVersion: '4.47.3',
     });
     expect(v.versionProof).toBe(true);
@@ -176,7 +176,7 @@ describe('evaluateSelfCheck — version proof (onDiskVersion >= expectedVersion)
   });
 
   it('version proof is inert (true) when no expectedVersion is supplied', () => {
-    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: loadedRoster, canary: passingCanary });
+    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: indexEnabled, liveRoster: [PLUGIN], canary: passingCanary });
     expect(v.versionProof).toBe(true);
     expect(v.ok).toBe(true);
   });
@@ -200,7 +200,7 @@ describe('runPluginSelfCheck — reads the on-disk version and enforces the vers
     );
   }
 
-  const loadedRoster: PluginIndexRow = {
+  const indexEnabled: PluginIndexRow = {
     installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2' } },
     plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'npm' }],
     warning: null,
@@ -212,7 +212,8 @@ describe('runPluginSelfCheck — reads the on-disk version and enforces the vers
     const v = await runPluginSelfCheck(home, {
       pluginId: PLUGIN,
       expectedVersion: '4.47.2',
-      readIndex: () => loadedRoster,
+      readIndex: () => indexEnabled,
+      readLiveRoster: () => [PLUGIN],
       canaryProbe: async () => passingCanary,
     });
     expect(v.ok).toBe(false);
@@ -224,7 +225,8 @@ describe('runPluginSelfCheck — reads the on-disk version and enforces the vers
     const v = await runPluginSelfCheck(home, {
       pluginId: PLUGIN,
       expectedVersion: '4.47.2',
-      readIndex: () => loadedRoster,
+      readIndex: () => indexEnabled,
+      readLiveRoster: () => [PLUGIN],
       canaryProbe: async () => passingCanary,
     });
     expect(v.ok).toBe(true);

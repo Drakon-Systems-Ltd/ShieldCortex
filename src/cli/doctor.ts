@@ -25,6 +25,8 @@ import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
+import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
+import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -876,22 +878,34 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += sizeOf(fp);
     }
 
+    // #153: a safety backup does NOT spend the memory-system budget.
+    //
+    // The budget answers "is the memory system's footprint under control?".
+    // A rollback copy taken before a destructive repair, pruned to at most one,
+    // is under control by construction — counting it produced a FAILURE an
+    // operator could only clear by deleting their own rollback point, caused by
+    // an operation this same tool had just recommended (Edith, 1 Aug 2026:
+    // 48.9 MB DB + one 48.9 MB copy = 98.8/100, "at limit!").
+    //
+    // Cached models are already exempted and reported separately for exactly
+    // this reason. Backups now follow that precedent: still measured, still
+    // shown, no longer able to deadlock the thing that creates them.
+    dataSize -= backupsSize;
+
     const limit = limitBytes; // 100 MB by default; applies to the data portion only
     const limitMb = Math.round(limit / (1024 * 1024));
     const pct = (dataSize / limit) * 100;
     const dataStr = `${formatBytes(dataSize)} / ${limitMb} MB limit`;
     const modelsStr = modelsSize > 0 ? ` + ${formatBytes(modelsSize)} models` : '';
+    const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
     const breakdown = `DB ${formatBytes(liveDbSize)} · backups ${formatBytes(backupsSize)} · logs ${formatBytes(logsSize)}`;
 
     const remedy = (): string => {
-      if (backupsSize >= liveDbSize || backupsSize > limit * 0.15) {
-        // Do not call these "stale migration snapshots" or promise an auto-prune
-        // (#148). On a large-DB host the file filling the budget is typically a
-        // safety copy written minutes earlier by a repair THIS doctor
-        // recommended, and no auto-prune was happening. Describe what they
-        // actually are and let the operator choose.
-        return `${formatBytes(backupsSize)} is DB backup copies (memories.db.*) — safety copies taken before destructive repairs, the newest being your rollback point. Delete the older ones (the \`memories.db.{pre-backfill,empty-live,stub,bak}*\` files; the live DB is just \`memories.db\`), or move them outside ~/.shieldcortex to keep them without spending the budget. From 4.47.21 a repair prunes superseded copies and refuses rather than overfilling the limit.`;
-      }
+      // NOTE: backups no longer count toward the budget (#153), so they can no
+      // longer be the cause of an overage and must not be blamed for one. The
+      // old first branch here sent operators to delete their own rollback point
+      // — and, when that did not help, to move our files out of our own
+      // directory. Both were treating a symptom of the accounting being wrong.
       if (liveDbSize > limit * 0.5) {
         // #110 signature: a big DB whose memories table is tiny — the bulk is
         // session-capture rows. Live incident (Edith, 2026-07-21): 79.6 MB DB,
@@ -933,18 +947,18 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       return {
         label: 'Disk',
         status: 'fail',
-        message: `${dataStr}${modelsStr} — at limit! (${breakdown})`,
+        message: `${dataStr}${backupsStr}${modelsStr} — at limit! (${breakdown})`,
         fix: remedy(),
       };
     } else if (pct >= 80) {
       return {
         label: 'Disk',
         status: 'warn',
-        message: `${dataStr}${modelsStr} — approaching limit (${breakdown})`,
+        message: `${dataStr}${backupsStr}${modelsStr} — approaching limit (${breakdown})`,
         fix: remedy(),
       };
     } else {
-      return { label: 'Disk', status: 'pass', message: `${dataStr}${modelsStr}` };
+      return { label: 'Disk', status: 'pass', message: `${dataStr}${backupsStr}${modelsStr}` };
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1521,7 +1535,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         message:
           `verdict probes 3/3 (catastrophic→block, dangerous→approval, benign→allow) in ${elapsed}ms — ` +
           `in-process check of guard logic + this box's config; wiring proof needs the consent-gated live canary ` +
-          `(SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex openclaw status)`,
+          `(${LIVE_CANARY_COMMAND})`,
       });
     } else {
       results.push({
@@ -2213,7 +2227,7 @@ export async function checkOpenClawPluginLoadState(
       return {
         label,
         status: 'pass',
-        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — run \`shieldcortex repair\` with SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 to prove it live`,
+        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
   }
 }
@@ -2358,8 +2372,8 @@ export async function checkOpenClawRunningPluginVersion(
       `stale plugin loaded (v${running} running, v${diskVersion} on disk) — the gateway is still ` +
       `enforcing the older build; a gateway restart is needed to pick up the on-disk upgrade`,
     fix:
-      'Restart the OpenClaw gateway so it re-registers the on-disk plugin ' +
-      '(`systemctl --user restart openclaw-gateway`, or restart the OpenClaw process). ' +
+      'Restart the OpenClaw gateway so it re-registers the on-disk plugin:\n' +
+      `  ${gatewayRestartAdvice()}\n` +
       'Until then the live interceptor is the version shown as "running", not the one on disk.',
   };
 }

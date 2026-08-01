@@ -19,6 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
+import { gatewayRestartCommand } from './gateway-restart-command.js';
 
 const PLUGIN_ID = 'shieldcortex-realtime';
 const HOOK_NAME = 'cortex-memory';
@@ -519,10 +520,14 @@ export async function restartOpenClawGateway(): Promise<{
   }
 
   const platform = process.platform;
+  // The command strings themselves live in gateway-restart-command.ts, so the
+  // advice `doctor` PRINTS and the command this EXECUTES cannot drift apart —
+  // they did, and a Mac was told to run systemctl (#154 sibling).
+  const resolved = gatewayRestartCommand(platform);
 
   if (platform === 'linux') {
     try {
-      execSync('systemctl --user restart openclaw-gateway', {
+      execSync(resolved.command!, {
         encoding: 'utf-8',
         timeout: 10000,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -540,8 +545,7 @@ export async function restartOpenClawGateway(): Promise<{
 
   if (platform === 'darwin') {
     try {
-      const uid = process.getuid ? process.getuid() : 0;
-      execSync(`launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`, {
+      execSync(resolved.command!, {
         encoding: 'utf-8',
         timeout: 10000,
         stdio: ['ignore', 'pipe', 'pipe'],

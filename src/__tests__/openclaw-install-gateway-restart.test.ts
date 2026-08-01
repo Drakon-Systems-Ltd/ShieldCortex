@@ -64,11 +64,37 @@ describe('openclaw install — auto gateway restart (v4.12.6)', () => {
     expect(openclawSource).toMatch(/restartOpenClawGateway/);
   });
 
-  it('on restart failure, prints platform-specific manual restart instructions', () => {
-    // Linux hosts get systemctl, macOS gets launchctl. Edith would have
-    // benefited from this clear next-step.
-    expect(openclawSource).toMatch(/systemctl --user restart openclaw-gateway/);
-    expect(openclawSource).toMatch(/launchctl kickstart -k gui\/\$UID\/ai\.openclaw\.gateway/);
+  it('on restart failure, prints platform-specific manual restart instructions', async () => {
+    // Asserted against the shared resolver rather than by grepping this file
+    // for literals: the literals moved once already, and a test that only knows
+    // where the string USED to live proves nothing about what an operator sees.
+    const { gatewayRestartCommand } = await import('../setup/gateway-restart-command.js');
+
+    expect(gatewayRestartCommand('linux').command).toBe('systemctl --user restart openclaw-gateway');
+    expect(gatewayRestartCommand('darwin', 501).command)
+      .toBe('launchctl kickstart -k gui/501/ai.openclaw.gateway');
+    // A Mac must never be handed the Linux command — the live #154 failure.
+    expect(gatewayRestartCommand('darwin', 501).advice).not.toMatch(/systemctl/);
+    expect(gatewayRestartCommand('linux').advice).not.toMatch(/launchctl/);
+
+    // And the install path must route through it rather than reintroducing a
+    // hardcoded branch of its own.
+    expect(openclawSource).toMatch(/gatewayRestartAdvice\(\)/);
+    expect(openclawSource).not.toMatch(/'\s*systemctl --user restart openclaw-gateway\s*'/);
+  });
+
+  it('refuses to invent a command for a platform it has not verified', async () => {
+    // Guessing is how a Mac got told to run systemctl. Unknown means unknown.
+    const { gatewayRestartCommand } = await import('../setup/gateway-restart-command.js');
+    const win = gatewayRestartCommand('win32');
+    expect(win.command).toBeNull();
+    expect(win.advice).not.toMatch(/systemctl|launchctl/);
+  });
+
+  it('prints a copy-pasteable darwin command even when the uid is unreadable', async () => {
+    const { gatewayRestartCommand } = await import('../setup/gateway-restart-command.js');
+    expect(gatewayRestartCommand('darwin', null).command)
+      .toBe('launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway');
   });
 });
 
