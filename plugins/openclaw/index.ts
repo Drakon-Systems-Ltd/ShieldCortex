@@ -398,7 +398,14 @@ const PLUGIN_CONFIG_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    enabled: { type: "boolean" },
+    // #115: accepted for schema/UI compatibility but not read — plugin
+    // enablement lives host-side at plugins.entries[id].enabled (see
+    // rootConfigWith() shape in extractPluginConfig), one level up from this
+    // nested `config` object. normaliseConfig() has never populated
+    // SCConfig.enabled (no such field exists); documented rather than
+    // removed so an existing config.enabled:true/false written by a host UI
+    // doesn't fail `additionalProperties:false` validation.
+    enabled: { type: "boolean", description: "Unused — plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value." },
     binaryPath: { type: "string" },
     cloudApiKey: { type: "string" },
     cloudBaseUrl: { type: "string" },
@@ -448,7 +455,7 @@ let _registered = false;
 // resolves approvals).
 let _beforeToolCallRegistered = false;
 
-function normaliseConfig(raw: unknown): SCConfig {
+function normaliseConfig(raw: unknown, dropped?: string[]): SCConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
 
   const value = raw as Record<string, unknown>;
@@ -484,60 +491,102 @@ function normaliseConfig(raw: unknown): SCConfig {
   // ignored and DEFAULT_INTERCEPTOR_CONFIG re-armed the before_tool_call gate.
   // Validate-and-preserve every nested interceptor key the manifest schema
   // accepts; invalid values are dropped individually, valid siblings survive.
-  const interceptor = normaliseInterceptorConfig(value.interceptor);
+  // #115: `dropped` collects the exact key paths any invalid value was
+  // dropped from — undefined here (the configSchema.parse() public contract
+  // stays a single return value); applyPluginConfigOverride is the one
+  // caller that both has a logger AND matters for this (it ingests the
+  // openclaw.json plugin entry a human hand-edits — the Edith #112 incident's
+  // `enabled:"false"` was exactly this shape of typo).
+  const interceptor = normaliseInterceptorConfig(value.interceptor, dropped);
   if (interceptor) config.interceptor = interceptor;
 
   return config;
 }
 
+// #115: returns undefined (not {}) when nothing valid was found, matching
+// normaliseInterceptorConfig's contract below — an empty/all-invalid map
+// must read as "absent" so mergeConfigs/applyPluginConfigOverride treat it
+// as no override rather than a truthy-but-empty one.
 function normaliseSeverityMap<A extends string>(
   raw: unknown,
   allowed: readonly A[],
+  dropped?: string[],
+  pathPrefix?: string,
 ): Partial<Record<InterceptSeverity, A>> | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
   const out: Partial<Record<InterceptSeverity, A>> = {};
   for (const severity of INTERCEPT_SEVERITIES) {
     const entry = value[severity];
+    if (entry === undefined) continue; // absent, not invalid — nothing to warn about
     if (typeof entry === "string" && (allowed as readonly string[]).includes(entry)) {
       out[severity] = entry as A;
+    } else if (pathPrefix) {
+      dropped?.push(`${pathPrefix}.${severity}`);
     }
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function normaliseInterceptorConfig(raw: unknown): InterceptorUserConfig | undefined {
+function normaliseInterceptorConfig(raw: unknown, dropped?: string[]): InterceptorUserConfig | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
   const out: InterceptorUserConfig = {};
 
-  if (typeof value.enabled === "boolean") out.enabled = value.enabled;
-
-  const severityActions = normaliseSeverityMap(value.severityActions, INTERCEPT_ACTIONS);
-  if (severityActions) out.severityActions = severityActions;
-
-  const failurePolicy = normaliseSeverityMap(value.failurePolicy, FAILURE_ACTIONS);
-  if (failurePolicy) out.failurePolicy = failurePolicy;
-
-  if (value.actionGuard && typeof value.actionGuard === "object" && !Array.isArray(value.actionGuard)) {
-    const rawGuard = value.actionGuard as Record<string, unknown>;
-    const guard: NonNullable<InterceptorUserConfig["actionGuard"]> = {};
-    if (typeof rawGuard.enabled === "boolean") guard.enabled = rawGuard.enabled;
-    if (typeof rawGuard.enforce === "boolean") guard.enforce = rawGuard.enforce;
-    if (typeof rawGuard.auditAllows === "boolean") guard.auditAllows = rawGuard.auditAllows;
-    if (Array.isArray(rawGuard.autoApprove) && rawGuard.autoApprove.every((entry) => typeof entry === "string")) {
-      guard.autoApprove = rawGuard.autoApprove as string[];
-    }
-    // Carried through untouched — normaliseBrokerConfig is the boundary, and
-    // splitting that job across two files is how one of the halves ends up
-    // being the lenient one.
-    if (rawGuard.broker && typeof rawGuard.broker === "object" && !Array.isArray(rawGuard.broker)) {
-      guard.broker = rawGuard.broker as Record<string, unknown>;
-    }
-    if (Object.keys(guard).length > 0) out.actionGuard = guard;
+  if (value.enabled !== undefined) {
+    if (typeof value.enabled === "boolean") out.enabled = value.enabled;
+    else dropped?.push("interceptor.enabled");
   }
 
-  return out;
+  const severityActions = normaliseSeverityMap(value.severityActions, INTERCEPT_ACTIONS, dropped, "interceptor.severityActions");
+  if (severityActions) out.severityActions = severityActions;
+
+  const failurePolicy = normaliseSeverityMap(value.failurePolicy, FAILURE_ACTIONS, dropped, "interceptor.failurePolicy");
+  if (failurePolicy) out.failurePolicy = failurePolicy;
+
+  if (value.actionGuard !== undefined) {
+    if (value.actionGuard && typeof value.actionGuard === "object" && !Array.isArray(value.actionGuard)) {
+      const rawGuard = value.actionGuard as Record<string, unknown>;
+      const guard: NonNullable<InterceptorUserConfig["actionGuard"]> = {};
+      if (rawGuard.enabled !== undefined) {
+        if (typeof rawGuard.enabled === "boolean") guard.enabled = rawGuard.enabled;
+        else dropped?.push("interceptor.actionGuard.enabled");
+      }
+      if (rawGuard.enforce !== undefined) {
+        if (typeof rawGuard.enforce === "boolean") guard.enforce = rawGuard.enforce;
+        else dropped?.push("interceptor.actionGuard.enforce");
+      }
+      if (rawGuard.auditAllows !== undefined) {
+        if (typeof rawGuard.auditAllows === "boolean") guard.auditAllows = rawGuard.auditAllows;
+        else dropped?.push("interceptor.actionGuard.auditAllows");
+      }
+      if (rawGuard.autoApprove !== undefined) {
+        if (Array.isArray(rawGuard.autoApprove) && rawGuard.autoApprove.every((entry) => typeof entry === "string")) {
+          // #115: defensive copy — downstream (initInterceptor's spread into
+          // InterceptorConfig) is read-only today, but aliasing the caller's
+          // array means a future in-place mutation of the host config object
+          // would silently corrupt the normalised config too.
+          guard.autoApprove = [...(rawGuard.autoApprove as string[])];
+        } else {
+          dropped?.push("interceptor.actionGuard.autoApprove");
+        }
+      }
+      // Carried through untouched — normaliseBrokerConfig is the boundary, and
+      // splitting that job across two files is how one of the halves ends up
+      // being the lenient one.
+      if (rawGuard.broker && typeof rawGuard.broker === "object" && !Array.isArray(rawGuard.broker)) {
+        guard.broker = rawGuard.broker as Record<string, unknown>;
+      }
+      if (Object.keys(guard).length > 0) out.actionGuard = guard;
+    } else {
+      dropped?.push("interceptor.actionGuard");
+    }
+  }
+
+  // #115: empty/all-invalid normalises to undefined, not {} — {} is truthy
+  // and made applyPluginConfigOverride treat a no-op interceptor block as a
+  // real override, inconsistent with normaliseSeverityMap's own contract.
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -571,7 +620,7 @@ function mergeConfigs(base: SCConfig, override: SCConfig): SCConfig {
   return merged;
 }
 
-function extractPluginConfig(rootConfig: unknown): SCConfig {
+function extractPluginConfig(rootConfig: unknown, dropped?: string[]): SCConfig {
   if (!rootConfig || typeof rootConfig !== "object" || Array.isArray(rootConfig)) return {};
   const entries = (rootConfig as {
     plugins?: {
@@ -583,7 +632,7 @@ function extractPluginConfig(rootConfig: unknown): SCConfig {
     entries?.[PLUGIN_ID]?.config ??
     entries?.[PLUGIN_PACKAGE_NAME]?.config;
 
-  return normaliseConfig(pluginConfig);
+  return normaliseConfig(pluginConfig, dropped);
 }
 
 function applyPluginConfigOverride(api: PluginApi): void {
@@ -593,7 +642,18 @@ function applyPluginConfigOverride(api: PluginApi): void {
     : typeof runtimeConfigApi?.loadConfig === "function"
       ? runtimeConfigApi.loadConfig()
       : api.config;
-  const pluginConfig = extractPluginConfig(runtimeConfig);
+  // #115: name the exact dropped interceptor key(s) in a warn log. Edith's
+  // #112 incident (interceptor.enabled:"false", a string not a boolean) took
+  // longer to diagnose than it should have because the drop was silent —
+  // this is the one normaliseConfig() call site that both parses the
+  // human-edited openclaw.json plugin entry AND has a logger to hand.
+  const dropped: string[] = [];
+  const pluginConfig = extractPluginConfig(runtimeConfig, dropped);
+  if (dropped.length > 0) {
+    (api.logger as any)?.warn?.(
+      `[shieldcortex] plugin config: dropped invalid interceptor key(s), check type/value: ${dropped.join(', ')}`,
+    );
+  }
   if (Object.keys(pluginConfig).length === 0) return;
   _configOverride = mergeConfigs(_configOverride ?? {}, pluginConfig);
   // Override changed — invalidate so loadConfig() re-merges with new override.

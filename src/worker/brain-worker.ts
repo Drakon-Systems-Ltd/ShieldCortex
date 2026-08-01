@@ -93,14 +93,22 @@ function persistWorkerState(
  * Read a persisted purge timestamp so the 24h throttles survive process
  * restarts — MCP servers restart frequently (one per Claude Code window),
  * and without this every restart would trigger a fresh purge.
+ *
+ * #114: clamp a future-dated timestamp to null (never-purged) rather than
+ * trusting it. A corrupt worker.json (clock skew, manual edit, bad write)
+ * with a future lastAuditPurge/lastSessionPurge would otherwise suppress the
+ * daily age purge until that future date + 24h — silently, since the
+ * size-pressure valve still runs every tick and masks the age purge being
+ * wedged. Applies to BOTH keys; this function is the single read path for
+ * each.
  */
-function readPersistedPurgeDate(key: 'lastAuditPurge' | 'lastSessionPurge'): Date | null {
+export function readPersistedPurgeDate(key: 'lastAuditPurge' | 'lastSessionPurge'): Date | null {
   try {
     const raw = JSON.parse(readFileSync(WORKER_STATE_FILE, 'utf-8')) as Record<string, string | null | undefined>;
     const value = raw[key];
     if (value) {
       const d = new Date(value);
-      if (!Number.isNaN(d.getTime())) return d;
+      if (!Number.isNaN(d.getTime()) && d.getTime() <= Date.now()) return d;
     }
   } catch {
     // No prior state — treat as never purged.
