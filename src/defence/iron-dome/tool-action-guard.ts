@@ -511,6 +511,30 @@ function quoteAwareStatements(text: string): string[] {
 }
 
 const SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|password\s*[=:]\s*\S{6,}|secret\s*[=:]\s*\S{6,})/i;
+/**
+ * The secret hint for FOLDED PROGRAM SOURCE (#175) — credential LITERALS only.
+ *
+ * SECRET_HINT's generic `secret= / password=` arms are written for a command
+ * line, where whatever follows the `=` is a real value by construction. Inside
+ * program source the same shape is field VOCABULARY: every OAuth client on
+ * earth contains `'client_secret': cfg.secret` next to a `requests.post` to
+ * its token endpoint — that is a credential doing its job, not leaving home.
+ * When #160 pointed the fold at the Claude Code hook, that one reading turned
+ * secret-egress into a blanket auto-deny of ordinary business automation:
+ * three separate production scripts (inbox cleanup, two Xero syncs) were
+ * catastrophic-blocked in a single evening, none of which move a secret
+ * anywhere it does not belong. Same defect class as `process.kill` matching
+ * the shell `kill` (#165): shell vocabulary applied to program identifiers.
+ *
+ * So folded non-shell source gates on what a command line cannot fake — a
+ * hard credential literal (key material itself), or a QUOTED literal secret
+ * assignment (`password = "hunter2abc"`). An identifier / expression on the
+ * right-hand side (`'client_secret': cfg['secret']`) is code shape, and code
+ * shape alone is not evidence of exfiltration. Folded SHELL scripts keep the
+ * full SECRET_HINT — a folded .sh IS command text, and `curl -d
+ * secret=$(cat …)` inside one must gate exactly as it would inline.
+ */
+const FOLDED_SOURCE_SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|(?:password|secret)["']?\s*[=:]\s*["'][^"'\n]{6,}["'])/i;
 const EXTERNAL_EGRESS = /\b(curl|wget|fetch|nc|netcat|scp|rsync|http\.post|requests\.post|fetch\()/i;
 
 // Outbound DATA on a network call (issue #73.2): a read-only GET carries nothing
@@ -2009,7 +2033,23 @@ export function evaluateToolCall(
   // 1c) Secret exfiltration: external egress carrying a credential/secret.
   const egressCommand = fold.content ? `${execCommand}\n${fold.content}` : execCommand;
   const egress = family === 'network' || EXTERNAL_EGRESS.test(egressCommand) || EXTERNAL_EGRESS.test(url);
-  if (egress && SECRET_HINT.test(`${scanSurface}   ${rawStringArgs(args)}`) && looksExternal(url, scanSurface)) {
+  // #175: the secret hint is surface-aware. The command line, the tool args and
+  // folded SHELL scripts take the full SECRET_HINT (they are command text);
+  // folded PROGRAM source takes the literals-only hint, because `client_secret:`
+  // next to a token-endpoint POST is what an OAuth client IS, and matching it
+  // catastrophic-blocked three production scripts in one evening. The split is
+  // by region language, never by "was it folded" — the same line #165 drew.
+  let secretSighted = SECRET_HINT.test(`${execSurface}   ${rawStringArgs(args)}`);
+  if (!secretSighted && fold.content) {
+    for (const r of fold.regions) {
+      const slice = fold.content.slice(r.start, r.end);
+      if ((r.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT).test(slice)) {
+        secretSighted = true;
+        break;
+      }
+    }
+  }
+  if (egress && secretSighted && looksExternal(url, scanSurface)) {
     return verdict('block', 'catastrophic', family, 'data_exfiltration',
       'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]);
   }
