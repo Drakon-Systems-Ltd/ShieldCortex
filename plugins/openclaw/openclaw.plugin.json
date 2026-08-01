@@ -109,7 +109,8 @@
     "additionalProperties": false,
     "properties": {
       "enabled": {
-        "type": "boolean"
+        "type": "boolean",
+        "description": "Unused — plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
       },
       "binaryPath": {
         "type": "string"
@@ -138,6 +139,7 @@
       },
       "interceptor": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "enabled": {
             "type": "boolean",

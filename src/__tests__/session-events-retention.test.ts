@@ -21,6 +21,7 @@ import { recordEvent } from '../sessions/capture.js';
 import {
   DEFAULT_SESSION_RETENTION_DAYS,
   SESSION_PRESSURE_ROW_CAP,
+  SESSION_PRESSURE_BATCH_ROWS,
   resolveSessionRetentionDays,
   purgeOldSessionEvents,
   purgeSessionEventsOlderThan,
@@ -187,6 +188,51 @@ describe('session_events retention (#110)', () => {
       // 100MB hard block even alongside the audit valve's own 100k-row cap.
       expect(SESSION_PRESSURE_ROW_CAP).toBeGreaterThan(0);
       expect(SESSION_PRESSURE_ROW_CAP * 2.4 * 1024).toBeLessThan(50 * 1024 * 1024);
+    });
+
+    // #114: a single valve call trimming the full over-cap gap in one
+    // transaction measured ~246ms on 40k rows. These pin the batching that
+    // bounds a single call's transaction time.
+    describe('batched deletes (#114)', () => {
+      it('a single call deletes at most batchRows, even when far over the cap', () => {
+        const db = getDatabase();
+        for (let i = 0; i < 100; i++) insertEvent(daysAgo(100 - i));
+        expect(eventCount(db)).toBe(100);
+
+        const deleted = purgeSessionEventsUnderSizePressure({ warnBytes: 0, maxRows: 10, batchRows: 5 });
+
+        expect(deleted).toBe(5); // capped, NOT the full 90-row gap
+        expect(eventCount(db)).toBe(95);
+      });
+
+      it('repeated calls converge to the row cap across multiple invocations (simulating successive light ticks)', () => {
+        const db = getDatabase();
+        for (let i = 0; i < 100; i++) insertEvent(daysAgo(100 - i));
+
+        let totalDeleted = 0;
+        for (let i = 0; i < 20; i++) {
+          totalDeleted += purgeSessionEventsUnderSizePressure({ warnBytes: 0, maxRows: 10, batchRows: 5 });
+          if (eventCount(db) <= 10) break;
+        }
+
+        expect(totalDeleted).toBe(90);
+        expect(eventCount(db)).toBe(10);
+      });
+
+      it('does not batch when already under the batch size — single call still fully converges', () => {
+        const db = getDatabase();
+        for (let i = 0; i < 45; i++) insertEvent(daysAgo(45 - i));
+
+        const deleted = purgeSessionEventsUnderSizePressure({ warnBytes: 0, maxRows: 40, batchRows: 2000 });
+
+        expect(deleted).toBe(5);
+        expect(eventCount(db)).toBe(40);
+      });
+
+      it('exposes a default batch size smaller than the row cap, so batching actually engages under sustained pressure', () => {
+        expect(SESSION_PRESSURE_BATCH_ROWS).toBeGreaterThan(0);
+        expect(SESSION_PRESSURE_BATCH_ROWS).toBeLessThan(SESSION_PRESSURE_ROW_CAP);
+      });
     });
   });
 

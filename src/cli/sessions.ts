@@ -44,6 +44,13 @@ export async function runSessionsPrune(args: string[], dbPathOverride?: string):
     days = resolveSessionRetentionDays();
   } else {
     days = Number(rawDays);
+    // #114: `--days 0` is DELIBERATELY allowed here even though
+    // resolveSessionRetentionDays()'s SHIELDCORTEX_SESSION_RETENTION_DAYS
+    // floor is 1 (MIN_RETENTION_DAYS in retention.ts) — this is a manual,
+    // operator-invoked escape hatch for "purge everything now" (e.g.
+    // clearing a poisoned/oversized table), not an unattended background
+    // knob. Dry-run-by-default is the mitigation: `--days 0 --execute` still
+    // requires an explicit second flag to actually delete.
     if (!Number.isInteger(days) || days < 0) {
       throw new Error(`--days expects a non-negative integer, got '${rawDays}'`);
     }
@@ -81,7 +88,9 @@ function printUsage(): void {
   console.log('      DRY-RUN BY DEFAULT — prints matched count + payload MB; pass');
   console.log('      --execute to actually delete, then run `shieldcortex vacuum` to');
   console.log('      reclaim the file space. Default window: 30 days, overridable via');
-  console.log('      the SHIELDCORTEX_SESSION_RETENTION_DAYS env var (1-3650).');
+  console.log('      the SHIELDCORTEX_SESSION_RETENTION_DAYS env var (1-3650). --days 0 is');
+  console.log('      allowed as a manual "purge everything now" escape hatch, even though');
+  console.log('      the env var floor is 1 — dry-run-by-default is the guard rail.');
 }
 
 export async function handleSessionsCommand(args: string[]): Promise<void> {

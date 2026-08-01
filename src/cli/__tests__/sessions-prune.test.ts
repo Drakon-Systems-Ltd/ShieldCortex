@@ -98,4 +98,21 @@ describe('shieldcortex sessions prune (#110)', () => {
     const count = (db.prepare('SELECT COUNT(*) AS c FROM session_events').get() as { c: number }).c;
     expect(count).toBe(3); // nothing deleted on bad input
   });
+
+  // #114: `--days 0` is a deliberate manual escape hatch — deletes everything
+  // (ts < now matches every already-inserted row) — even though the
+  // SHIELDCORTEX_SESSION_RETENTION_DAYS env knob floors at 1
+  // (MIN_RETENTION_DAYS in retention.ts). This pins that `0` stays accepted
+  // by the CLI's own validation (not silently rejected or coerced to the
+  // env floor), with dry-run-by-default as the safety net.
+  it('accepts --days 0 as a "purge everything now" escape hatch, distinct from the env floor of 1', async () => {
+    await seed();
+    await runSessionsPrune(['--days', '0'], dbPath); // dry-run, no --execute
+    expect(logged()).toMatch(/Matched: 3/); // every seeded row is older than "now"
+
+    await runSessionsPrune(['--days', '0', '--execute'], dbPath);
+    const db = getDatabase();
+    const count = (db.prepare('SELECT COUNT(*) AS c FROM session_events').get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
 });

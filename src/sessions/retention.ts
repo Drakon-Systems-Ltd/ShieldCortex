@@ -61,6 +61,18 @@ export const DEFAULT_SESSION_RETENTION_DAYS = 30;
  */
 export const SESSION_PRESSURE_ROW_CAP = 10_000;
 
+/**
+ * Cap on rows deleted per `purgeSessionEventsUnderSizePressure()` call
+ * (#114). A single call trimming the full 40k→10k gap measured ~246ms in one
+ * transaction — fine for a manual CLI run, but the light tick (every 5-15
+ * min) shares its budget with cache pruning and predictive-consolidation
+ * checks, so a single call should not hold a write transaction open that
+ * long. Batching to 2,000 rows/call keeps each transaction cheap; the valve
+ * still runs every tick, so an over-cap table converges to the row cap
+ * within a handful of ticks instead of one big stall.
+ */
+export const SESSION_PRESSURE_BATCH_ROWS = 2_000;
+
 /** Bounds for the env override — anything outside is treated as invalid. */
 const MIN_RETENTION_DAYS = 1;
 const MAX_RETENTION_DAYS = 3650;
@@ -167,12 +179,18 @@ export function purgeOldSessionEvents(
  * entirely and drives the row-cap trim directly; `maxRows` sets the cap. In
  * production neither is passed and the gate uses the live file size vs
  * WARN_DB_SIZE.
+ *
+ * #114: the actual delete is capped at `batchRows` per call (see
+ * SESSION_PRESSURE_BATCH_ROWS) so one call can never hold the write
+ * transaction open for the full over-cap gap — a caller far over the row cap
+ * converges to it over several light ticks instead of one long transaction.
  */
 export function purgeSessionEventsUnderSizePressure(
-  options: { warnBytes?: number; maxRows?: number } = {},
+  options: { warnBytes?: number; maxRows?: number; batchRows?: number } = {},
 ): number {
   const db = getDatabase();
   const maxRows = options.maxRows ?? SESSION_PRESSURE_ROW_CAP;
+  const batchRows = options.batchRows ?? SESSION_PRESSURE_BATCH_ROWS;
 
   if (options.warnBytes === undefined) {
     if (!checkDatabaseSize().warning) return 0;
@@ -182,7 +200,7 @@ export function purgeSessionEventsUnderSizePressure(
     const total = (db.prepare('SELECT COUNT(*) AS c FROM session_events').get() as { c: number }).c;
     if (total <= maxRows) return 0;
 
-    const over = total - maxRows;
+    const over = Math.min(total - maxRows, batchRows);
     const res = db.prepare(`
       DELETE FROM session_events
       WHERE id IN (
