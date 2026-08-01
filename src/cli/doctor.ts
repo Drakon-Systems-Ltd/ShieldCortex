@@ -36,6 +36,13 @@ import {
   upgradeCommandFor,
   type DetectClaudeCodeDeps,
 } from '../integrations/claude-code-version.js';
+// #157 (`doctor --ai`): type-only imports, erased at build time — pulling in
+// these types costs nothing when `--ai` is never passed. The actual model
+// transport (cli-invoker.js) and the explainer (doctor-explainer.js) are
+// loaded with a runtime `import()` inside runDoctorAiSection() below, so a
+// plain `shieldcortex doctor` never touches either module.
+import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
+import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -3006,6 +3013,87 @@ export interface DoctorSummary {
   infos: number;
   total: number;
   exitCode: number;
+  /**
+   * Present only when `--ai` was passed (#157). Computed strictly AFTER
+   * passed/warnings/failures/exitCode above — those are already final by the
+   * time runDoctorAiSection() is ever called and are never revisited, so an
+   * AI outcome (however confident) cannot feed back into doctor's own
+   * verdicts. See doctor-explainer.ts's file header for the structural half
+   * of this guarantee (DoctorExplainerResult has no verdict-shaped field).
+   */
+  ai?: DoctorExplainerOutcome;
+}
+
+/**
+ * Render a `DoctorExplainerOutcome` as the lines doctor prints for `--ai`.
+ * Pure — no I/O — so the three shapes (nothing to explain / no analysis
+ * available / a grounded hypothesis) can be tested without a model or a
+ * console. Exported for src/cli/__tests__/doctor-ai-section.test.ts.
+ *
+ * Every branch that shows a result also shows the disclaimer: this is the
+ * operator-facing half of requirement #2 ("explains, never decides") — not
+ * just enforced in the types, but said out loud where the operator reads it.
+ */
+export function formatAiSection(outcome: DoctorExplainerOutcome): string[] {
+  const lines: string[] = [];
+  lines.push(`\n  ${bold}AI analysis (--ai):${reset}`);
+
+  if (!outcome.attempted) {
+    // Requirement #1: the flag alone is not sufficient. Nothing was sent
+    // anywhere, no model was billed, and that is the whole point of this line.
+    lines.push(`  ${dim}${outcome.reason ?? 'nothing to explain'}${reset}`);
+    return lines;
+  }
+
+  if (!outcome.result) {
+    lines.push(`  ${dim}${outcome.reason ?? 'no AI analysis available'}${reset}`);
+    return lines;
+  }
+
+  const r = outcome.result;
+  lines.push(`  ${yellow}Hypothesis${reset} (${r.confidence} confidence — based on: ${r.citedLabels.join(', ')}):`);
+  lines.push(`  ${r.hypothesis}`);
+  lines.push(`  ${dim}→ suggested next command:${reset} ${r.suggestedCommand}`);
+  lines.push(
+    `  ${dim}This is a hypothesis, not a diagnosis — nothing above changed a check's status. ` +
+      `Verify before running anything.${reset}`,
+  );
+  return lines;
+}
+
+/**
+ * Resolve a judge-model transport and run the explainer over `visible`'s
+ * findings, returning both the printable lines and the raw outcome (for
+ * DoctorSummary.ai).
+ *
+ * `deps.invoke` is the test seam: `undefined` (the production default) means
+ * "resolve the real, pool-inherited transport" — the same `createCliInvoker`
+ * the approval broker's judge uses (#143's cli-invoker.ts), so `doctor --ai`
+ * brings no new keys, no new login, no second bill. `null` means "there is
+ * definitively no model available" without spawning anything, which is how
+ * tests exercise the fail-closed path and how a future "the pool told us it's
+ * absent" caller could short-circuit this resolution.
+ */
+export async function runDoctorAiSection(
+  visible: CheckResult[],
+  deps: { invoke?: ModelInvoker | null } = {},
+): Promise<{ lines: string[]; outcome: DoctorExplainerOutcome }> {
+  const { runDoctorAiExplainer } = await import('../defence/iron-dome/doctor-explainer.js');
+
+  let invoke = deps.invoke;
+  if (invoke === undefined) {
+    try {
+      const { createCliInvoker } = await import('../defence/iron-dome/cli-invoker.js');
+      invoke = createCliInvoker();
+    } catch {
+      // No CLI on PATH, or the module could not be loaded — fail closed to
+      // "no AI analysis available" rather than throwing doctor's whole run.
+      invoke = null;
+    }
+  }
+
+  const outcome = await runDoctorAiExplainer(visible, invoke ?? null);
+  return { lines: formatAiSection(outcome), outcome };
 }
 
 /**
@@ -3025,7 +3113,13 @@ export function doctorExitCode(results: CheckResult[], opts: { strict?: boolean 
   return 0;
 }
 
-export async function runDoctor(args: string[] = []): Promise<DoctorSummary> {
+export async function runDoctor(
+  args: string[] = [],
+  // #157: test seam only. Production's one call site (src/index.ts) never
+  // passes a second argument, so `deps.aiInvoke` is `undefined` there and
+  // runDoctorAiSection() resolves the real pool-inherited CLI transport.
+  deps: { aiInvoke?: ModelInvoker | null } = {},
+): Promise<DoctorSummary> {
   console.log(`\n${bold}ShieldCortex Doctor${reset} v${pkg.version}\n`);
 
   const results: CheckResult[] = [];
@@ -3142,6 +3236,19 @@ export async function runDoctor(args: string[] = []): Promise<DoctorSummary> {
   // Free + Enterprise repricing \u2014 there is no self-serve tier to nudge
   // towards. `config --upsell-mute/--upsell-unmute` remain accepted no-ops.)
 
+  // \u2500\u2500 doctor --ai (#157) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Opt-in, explanation-only, and deliberately the LAST thing computed:
+  // passed/warnings/failures/exitCode above are already final. The AI never
+  // sees them as anything but read-only history and cannot feed back into
+  // them \u2014 see DoctorSummary.ai's doc comment and doctor-explainer.ts's
+  // header for the structural half of "explains, never decides".
+  let ai: DoctorExplainerOutcome | undefined;
+  if (args.includes('--ai')) {
+    const section = await runDoctorAiSection(visible, { invoke: deps.aiInvoke });
+    for (const line of section.lines) console.log(line);
+    ai = section.outcome;
+  }
+
   // Exit code. Set rather than process.exit() so buffered stdout is flushed
   // in full (doctor's report is long and often piped), and only ever set to
   // a failure \u2014 never reset to 0 over an exit code someone else set.
@@ -3157,5 +3264,5 @@ export async function runDoctor(args: string[] = []): Promise<DoctorSummary> {
 
   console.log('');
 
-  return { passed, warnings, failures, infos, total, exitCode };
+  return { passed, warnings, failures, infos, total, exitCode, ai };
 }
