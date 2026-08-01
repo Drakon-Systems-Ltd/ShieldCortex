@@ -10,14 +10,25 @@
  *   - catastrophic (`block`)        → permissionDecision "deny". ALWAYS — the
  *     hard-block tier ignores `actionGuard.enforce:false`, mirroring the plugin.
  *   - dangerous (`require_approval`) → permissionDecision "ask" (Claude Code's
- *     own confirm dialog) by default. `actionGuard.enforce:false` opts down to
- *     a stderr warning with NO decision. In headless runs ("claude --print")
- *     "ask" cannot prompt, so the call fails — the same fail-closed unattended
- *     posture as the plugin's no-approver deny path.
+ *     own confirm dialog) when the session can actually show one, else "deny"
+ *     (see prompt-surface rule below). `actionGuard.enforce:false` opts down to
+ *     a stderr warning with NO decision.
  *   - autoApprove match              → NO decision. The guard defers to Claude
  *     Code's own permission system rather than emitting "allow": ShieldCortex
  *     narrows or stays neutral, it never WIDENS what the user's settings allow.
  *   - benign / read-only / pure-print → no output at all.
+ *
+ * Prompt-surface rule: "ask" is only meaningful where Claude Code will actually
+ * raise a prompt. In `bypassPermissions` and `dontAsk` the harness shows no
+ * prompt, and when `permission_mode` is absent or unrecognised we cannot tell.
+ * Harnesses have not treated an unanswerable "ask" consistently — a Claude Code
+ * build 144 versions behind was observed discarding it and executing the command
+ * (aiquant, 2026-07-30), while current builds block. "deny" is the one verdict
+ * every version honours, so whenever approval is required and no prompt surface
+ * can be confirmed, the hook denies instead of asking. Same guard verdict, an
+ * outcome that does not depend on the harness version. The audit row records
+ * `permissionMode` and outcome `denied_no_prompt_surface` so this is
+ * distinguishable from a catastrophic auto-deny in forensics.
  *
  * Failure posture (WS2): a guard that cannot load or evaluate no longer fails
  * OPEN unconditionally. A small, dependency-free FALLBACK_CATASTROPHIC scan
@@ -71,6 +82,31 @@ function loadActionGuardConfig() {
     // corrupt config file must not silently disable the guard.
     return { ...DEFAULT_ACTION_GUARD };
   }
+}
+
+// ==================== PROMPT SURFACE ====================
+// Whether an "ask" verdict can actually reach a human in this session. See the
+// prompt-surface rule in the header comment for why an unanswerable ask is
+// downgraded to a deny rather than emitted anyway.
+
+/** Modes Claude Code documents as raising a permission prompt for a hook "ask". */
+const PROMPTING_PERMISSION_MODES = new Set(['default', 'manual', 'acceptEdits', 'plan', 'auto']);
+
+/** Modes Claude Code documents as showing no prompt — an "ask" has nowhere to go. */
+const PROMPTLESS_PERMISSION_MODES = new Set(['bypassPermissions', 'dontAsk']);
+
+/**
+ * Why this session cannot answer an "ask", or null when it can.
+ * Unknown/absent modes count as unconfirmable: a harness that does not tell us
+ * whether it can prompt cannot be trusted to honour a prompt.
+ */
+function noPromptSurfaceReason(permissionMode) {
+  if (typeof permissionMode !== 'string' || permissionMode.length === 0) {
+    return 'session reported no permission_mode';
+  }
+  if (PROMPTLESS_PERMISSION_MODES.has(permissionMode)) return `${permissionMode} mode shows no prompt`;
+  if (PROMPTING_PERMISSION_MODES.has(permissionMode)) return null;
+  return `unrecognised permission_mode "${permissionMode}"`;
 }
 
 // ==================== GUARD (lazy dist import) ====================
@@ -345,7 +381,10 @@ function summariseToolArgs(args) {
   return parts.join(' ').slice(0, 160);
 }
 
-function writeAuditEntry(toolName, verdict, args, action, outcome, brokerAudit) {
+// `extra` carries whatever the call site needs on the row: #139's
+// permissionMode, #143's broker verdict. One slot rather than one parameter per
+// feature — the two landed independently and each had added its own.
+function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
   try {
     const auditDir = join(homedir(), '.shieldcortex', 'audit');
     mkdirSync(auditDir, { recursive: true });
@@ -366,10 +405,11 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, brokerAudit) 
       ts: new Date().toISOString(),
       action,
       outcome,
-      // #143: present on exactly the calls the broker judged, so "was a model
-      // consulted, and what did it say?" is answerable from the audit stream
-      // alone. Same field, same shape, as the OpenClaw plugin emits.
-      ...(brokerAudit ? { broker: brokerAudit } : {}),
+      // #143's broker verdict arrives through here as `{ broker: … }`, so
+      // "was a model consulted, and what did it say?" stays answerable from the
+      // audit stream alone — same field and shape the OpenClaw plugin emits.
+      // #139 adds `permissionMode` + its outcome the same way.
+      ...extra,
     };
     appendFileSync(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n');
   } catch (err) {
@@ -398,6 +438,40 @@ function emitDecision(permissionDecision, reason) {
 }
 
 /**
+ * Emit the dangerous-tier outcome: "ask" where Claude Code will raise a prompt,
+ * "deny" where it will not (see the prompt-surface rule in the header).
+ *
+ * The guard's verdict is `require_approval` either way — only the outcome
+ * differs — so `action` is unchanged and the distinction lives in `outcome`
+ * plus the recorded `permissionMode`.
+ */
+function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit) {
+  // `brokerAudit` rides along so a brokered call keeps its judge verdict on the
+  // row whichever way this goes (#143 + #139): "was a model consulted, and did
+  // the harness even have a prompt surface?" must both be answerable from one
+  // audit line.
+  const broker = brokerAudit ? { broker: brokerAudit } : {};
+  const noPromptSurface = noPromptSurfaceReason(permissionMode);
+  if (!noPromptSurface) {
+    writeAuditEntry(toolName, auditVerdict, toolInput, action, 'asked', { permissionMode, ...broker });
+    emitDecision('ask', reason);
+    return;
+  }
+  writeAuditEntry(toolName, auditVerdict, toolInput, action, 'denied_no_prompt_surface', {
+    permissionMode: typeof permissionMode === 'string' ? permissionMode : null,
+    noPromptSurfaceReason: noPromptSurface,
+    ...broker,
+  });
+  console.error(
+    `[shieldcortex] action-guard DENIED ${toolName}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
+  );
+  emitDecision(
+    'deny',
+    `${reason} — this needs approval, but ${noPromptSurface}, so it is denied rather than left to an unanswerable prompt. Run it yourself, add an actionGuard.autoApprove entry for it, or set actionGuard.enforce:false to downgrade the dangerous tier to warnings.`,
+  );
+}
+
+/**
  * WS2 fail-closed path (issue #59): when the real guard cannot load or
  * evaluate, run the dependency-free fallback scan. Three tiers, so no
  * dangerous op is ever silently allowed on a scan failure — and every
@@ -410,7 +484,7 @@ function emitDecision(permissionDecision, reason) {
  *                     wedge normal work) but leave a visible breadcrumb.
  * ALWAYS terminates the process — the caller need do nothing after.
  */
-function handleDegradedGuard(toolName, toolInput, cfg, failureNote) {
+function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permissionMode) {
   // 1. Catastrophic — hard deny, always.
   if (fallbackCatastrophicMatch(toolInput)) {
     writeAuditEntry(
@@ -435,13 +509,15 @@ function handleDegradedGuard(toolName, toolInput, cfg, failureNote) {
       console.error(`[shieldcortex] ⚠️ action-guard unavailable (${failureNote}) — advisory (enforce:false), allowing dangerous ${toolName} [${dangerousSignal}]`);
       process.exit(0);
     }
-    writeAuditEntry(
+    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) — gating DANGEROUS ${toolName} [${dangerousSignal}] (fail-closed)`);
+    emitApprovalRequired(
       toolName,
       { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal] },
-      toolInput, 'gate_degraded', 'asked',
+      toolInput,
+      permissionMode,
+      'gate_degraded',
+      `ShieldCortex Action Guard: guard could not scan (${failureNote}); dangerous operation [${dangerousSignal}] gated — approve only if you trust it`,
     );
-    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) — gating DANGEROUS ${toolName} [${dangerousSignal}] to the permission dialog (fail-closed; headless runs block)`);
-    emitDecision('ask', `ShieldCortex Action Guard: guard could not scan (${failureNote}); dangerous operation [${dangerousSignal}] gated — approve only if you trust it`);
     process.exit(0);
   }
 
@@ -478,11 +554,14 @@ process.stdin.on('end', async () => {
     const toolName = typeof hookData.tool_name === 'string' ? hookData.tool_name : '';
     const toolInput =
       hookData.tool_input && typeof hookData.tool_input === 'object' ? hookData.tool_input : {};
+    // Absent on harnesses that don't report it — noPromptSurfaceReason() treats
+    // that as "cannot confirm a prompt surface", not as "prompting is fine".
+    const permissionMode = hookData.permission_mode;
     if (!toolName) process.exit(0);
 
     const guard = await loadGuard();
     if (!guard) {
-      handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build'); // always exits
+      handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode); // always exits
       return;
     }
 
@@ -499,7 +578,7 @@ process.stdin.on('end', async () => {
         resolveScriptSource ? { resolveScriptSource } : undefined,
       );
     } catch (err) {
-      handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`); // always exits
+      handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode); // always exits
       return;
     }
 
@@ -576,7 +655,7 @@ process.stdin.on('end', async () => {
     const brokered = broker ? await runBrokerPass(broker, toolName, toolInput, verdict) : null;
 
     if (brokered?.outcome === 'harden') {
-      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'auto_denied', brokered.audit);
+      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'auto_denied', { broker: brokered.audit });
       console.error(`[shieldcortex] approval broker HARDENED ${toolName} to a denial: ${brokered.reason}`);
       // No approve-hash offered. Hardening exists precisely for the case where
       // the request is trying to talk somebody into saying yes.
@@ -585,7 +664,7 @@ process.stdin.on('end', async () => {
     }
 
     if (brokered?.outcome === 'pre_clear') {
-      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved', brokered.audit);
+      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved', { broker: brokered.audit });
       console.error(`[shieldcortex] approval broker PRE-CLEARED ${toolName}: ${brokered.reason} [${verdict.signals.join(', ')}]`);
       // No decision emitted — the guard defers to Claude Code's own permission
       // system rather than answering "allow". ShieldCortex narrows or stays
@@ -607,7 +686,6 @@ process.stdin.on('end', async () => {
       }
     }
 
-    writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'asked', brokered?.audit);
     let message = `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`;
     if (approvals) {
       try {
@@ -617,7 +695,25 @@ process.stdin.on('end', async () => {
         // Hash is a nicety; never let it break the refusal path.
       }
     }
-    emitDecision('ask', message);
+    // #139: ask ONLY where a prompt can actually be raised. Under
+    // bypassPermissions, Claude Code 2.1.76 converts a hook `ask` into `allow`
+    // and executes — the guard looks like it fired, the audit row agrees, and
+    // the command still ran. `deny` is the one verdict every version honours
+    // unconditionally, so an unconfirmable prompt surface is treated as
+    // promptless rather than as fine.
+    //
+    // Placed at the END of the chain on purpose: the one-shot approval (#118)
+    // and the broker (#143) both get their say first, so an operator who
+    // already approved, or a call the judge hardened, is unaffected by this.
+    emitApprovalRequired(
+      toolName,
+      verdict,
+      toolInput,
+      permissionMode,
+      'require_approval',
+      message,
+      brokered?.audit,
+    );
     process.exit(0);
   } catch (error) {
     console.error(`[shieldcortex] action-guard hook error: ${error?.message ?? error}`);

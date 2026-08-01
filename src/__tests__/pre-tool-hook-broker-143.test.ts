@@ -115,6 +115,12 @@ describe('#143 — the approval broker through the real Claude Code hook', () =>
     const payload = JSON.stringify({
       session_id: 'broker-it', cwd: '/tmp', hook_event_name: 'PreToolUse',
       tool_name: toolName, tool_input: input,
+      // #139: an attended mode, so these tests exercise BROKER semantics rather
+      // than the prompt-surface rule. With the field absent the hook now denies
+      // (a harness that will not say whether it can prompt cannot be trusted to
+      // honour one) — correct, but not what this suite is about. The
+      // promptless modes have their own suite.
+      permission_mode: 'default',
     });
     const env: Record<string, string | undefined> = { ...process.env, HOME: home, USERPROFILE: home };
     for (const key of Object.keys(env)) if (key.startsWith('SHIELDCORTEX_')) delete env[key];

@@ -94,7 +94,11 @@ describe('#59 — Claude Code hook: dangerous degraded op is gated (ask), never 
       child.stdout.on('data', (c) => { stdout += c.toString(); });
       child.on('error', rej);
       child.on('close', (code) => res({ stdout, code: code ?? 0 }));
-      child.stdin.write(JSON.stringify({ tool_name: 'Bash', tool_input: { command } }));
+      // Interactive session: a prompt CAN be raised, so the dangerous tier asks.
+      // Prompt-less modes deny instead — see prompt-surface-deny.test.ts.
+      child.stdin.write(
+        JSON.stringify({ permission_mode: 'default', tool_name: 'Bash', tool_input: { command } }),
+      );
       child.stdin.end();
     });
   }

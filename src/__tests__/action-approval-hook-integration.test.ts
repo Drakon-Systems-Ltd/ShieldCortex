@@ -26,6 +26,11 @@ function runHook(home: string, input: Record<string, unknown>): { decision?: str
     hook_event_name: 'PreToolUse',
     tool_name: 'Bash',
     tool_input: input,
+    // #139: an attended mode, so this suite exercises the ONE-SHOT APPROVAL
+    // path rather than the prompt-surface rule. With the field absent the hook
+    // now denies outright — correct (a harness that will not say whether it can
+    // prompt cannot be trusted to honour one), but a different test's subject.
+    permission_mode: 'default',
   });
   const env = { ...process.env, HOME: home, USERPROFILE: home };
   for (const key of Object.keys(env)) {
