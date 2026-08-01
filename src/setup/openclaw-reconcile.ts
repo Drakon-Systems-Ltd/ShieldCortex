@@ -13,6 +13,9 @@ import {
   type ReconcileStep,
 } from '../integrations/openclaw-plugin-index.js';
 import { runPluginSelfCheck, type SelfCheckRunResult } from './openclaw-selfcheck.js';
+import { waitForGatewayReady } from './gateway-readiness.js';
+import { summariseRepair, renderRepairHeadline } from './repair-verdict.js';
+import { resolveRepairConsent } from './repair-consent.js';
 
 /**
  * The #74 metadata reconciler orchestrator.
@@ -78,6 +81,12 @@ export interface ReconcileOptions {
   /** Injectable duplicate-dir pruner (defaults to rm -rf of the project dir). */
   pruneDir?: (home: string, dirName: string) => void;
   /**
+   * Injectable readiness wait (#156). Defaults to polling OpenClaw's own
+   * boot-lifecycle table for a process that started AFTER the restart. Tests
+   * inject, so nothing ever sleeps on a live gateway.
+   */
+  waitForGateway?: (opts: { startedAfterMs: number }) => Promise<{ ready: boolean; reason?: string; waitedMs: number }>;
+  /**
    * Injectable state reader, used for the pre-remediation read AND the #145
    * post-remediation re-read (defaults to gather + reconcile against the
    * host). One seam for both so a test cannot accidentally pin only the pre
@@ -87,7 +96,14 @@ export interface ReconcileOptions {
 }
 
 function defaultApply(): boolean {
-  return process.env.JEST_WORKER_ID === undefined && process.env.SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE === '1';
+  // #156: typing `shieldcortex repair` at a terminal IS the consent — that is
+  // what the command means. The RESTART gate already worked this way; RECONCILE
+  // and CANARY did not, so an operator had to discover and combine THREE env
+  // vars to fix his own install, and omitting one bought a paragraph of jargon.
+  // Headless/agent/cron runs are unchanged and still require the explicit env:
+  // those are the contexts the zeroth law is about, where an agent running
+  // INSIDE the gateway must never restart it out from under itself.
+  return resolveRepairConsent({ env: process.env, isTty: Boolean(process.stdin.isTTY) }).reconcile;
 }
 
 /**
@@ -100,8 +116,8 @@ export function defaultRunCommand(argv: string[]): { status: number; output: str
   if (process.env.JEST_WORKER_ID !== undefined) {
     return { status: 1, output: 'skipped under test runner' };
   }
-  if (process.env.SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE !== '1') {
-    return { status: 1, output: 'reconcile execution requires SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1' };
+  if (!resolveRepairConsent({ env: process.env, isTty: Boolean(process.stdin.isTTY) }).reconcile) {
+    return { status: 1, output: 'reconcile execution needs a terminal, or SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 for automation' };
   }
   const r = spawnSync('openclaw', argv, {
     encoding: 'utf-8',
@@ -131,6 +147,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const selfCheck = options.selfCheck
     ?? ((h: string, p: string) => runPluginSelfCheck(h, { pluginId: p, expectedVersion: options.expectedVersion }));
   const pruneDir = options.pruneDir ?? defaultPruneDir;
+  const waitForGateway = options.waitForGateway ?? (opts => waitForGatewayReady(opts));
 
   const messages: string[] = [];
   const readState =
@@ -183,8 +200,28 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       continue;
     }
     if (step.kind === 'gateway-reload') {
+      const reloadRequestedAt = Date.now();
       const r = await reloadGateway();
-      stepResults.push({ kind: step.kind, ok: r.restarted, detail: r.detail ?? (r.restarted ? 'reloaded' : 'not reloaded') });
+      // #156: WAIT for the gateway to actually come back before anything reads
+      // the world again. `restartOpenClawGateway()` returns when the service
+      // manager has STARTED the process, not when the gateway has booted and
+      // registered its plugins — so the post-remediation re-read added by #145
+      // was racing the very restart it was meant to observe. Live, 1 Aug 2026:
+      // repair printed "FAILED … on-disk 4.47.22 is OLDER than expected
+      // 4.47.24" while doctor, seconds later on the same box, showed the build
+      // current and 29/32 green. The remediation had worked; the report was
+      // reading the pre-restart world.
+      let detail = r.detail ?? (r.restarted ? 'reloaded' : 'not reloaded');
+      if (r.restarted) {
+        const readiness = await waitForGateway({ startedAfterMs: reloadRequestedAt });
+        detail = readiness.ready
+          ? `reloaded and ready in ${(readiness.waitedMs / 1000).toFixed(1)}s`
+          // Not proven ready is NOT the same claim as broken — on a host whose
+          // boot-lifecycle table is unreadable we cannot bound the evidence at
+          // all, and asserting failure there is the #142 overreach again.
+          : `reloaded, but readiness ${readiness.reason === 'timeout' ? 'timed out' : 'could not be observed'} — the checks below may be reading a gateway that is still starting`;
+      }
+      stepResults.push({ kind: step.kind, ok: r.restarted, detail });
       continue;
     }
     if (step.kind === 'prune-duplicate-dirs') {
@@ -244,6 +281,31 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
 export function formatReconcileReport(result: ReconcileExecResult): string[] {
   const lines: string[] = [];
   const { verdict } = result;
+
+  // #156: the operator's question first, in English. The evidence still follows
+  // in full — this codebase has spent a week learning not to hide evidence —
+  // but it stops being the headline. An operator wants to know whether they are
+  // protected and what the single next thing is; they should not have to parse
+  // "roster proof"/"plugins_json"/"the 4.25.4 class" to find out.
+  const summary = summariseRepair({
+    applied: result.applied,
+    canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
+    readinessUnproven: result.stepResults.some(s => s.kind === 'gateway-reload' && /readiness (timed out|could not be observed)/.test(s.detail)),
+    ...(result.selfCheck
+      ? {
+        selfCheck: {
+          ok: result.selfCheck.ok,
+          rosterState: result.selfCheck.rosterState,
+          canaryProof: result.selfCheck.canaryProof,
+          versionProof: result.selfCheck.versionProof,
+        },
+      }
+      : {}),
+    ...(result.postVerdict ? { postState: result.postVerdict.state } : {}),
+  });
+  lines.push(...renderRepairHeadline(summary));
+  lines.push('');
+
   lines.push(`Plugin load state: ${verdict.state} [${verdict.severity}]`);
   for (const r of verdict.reasons) lines.push(`  • ${r}`);
 

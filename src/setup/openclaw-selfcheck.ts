@@ -14,6 +14,7 @@ import {
 } from '../integrations/openclaw-plugin-state.js';
 import { readLatestBootRoster, findRegistrationSince, type BootRoster } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
+import { resolveRepairConsent } from './repair-consent.js';
 import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
 
 /**
@@ -568,7 +569,12 @@ export async function defaultTriggerSyntheticOp(
   if (process.env.JEST_WORKER_ID !== undefined) {
     return { dispatched: false, detail: 'skipped under test runner' };
   }
-  if (process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY !== '1') {
+  // #156: a human at a terminal has consented. The probe is harmless by
+  // construction (a synthetic recursive-delete of a non-existent /tmp path,
+  // evaluated and audited BEFORE any execution), and requiring a third env var
+  // to prove enforcement is what made "am I protected?" unanswerable in
+  // practice. Headless runs still require the explicit env.
+  if (!resolveRepairConsent({ env: process.env, isTty: Boolean(process.stdin.isTTY) }).canary) {
     return {
       dispatched: false,
       detail: 'live canary requires SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 (drives a synthetic op through the live interceptor) — roster proof stands; enforcement not actively proven',
