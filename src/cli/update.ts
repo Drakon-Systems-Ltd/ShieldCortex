@@ -438,6 +438,70 @@ function maybePrint411Notice(currentVersion: string, mainUpdated: boolean): void
   process.stdout.write(`     ${paint('gray', 'changelog: ')}${paint('cyan', 'https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md')}\n\n`);
 }
 
+// ── #171: the two install-path fixes update was missing ─────
+
+/**
+ * Harden state permissions — the #163 fix, which `update` silently skipped.
+ *
+ * The audit hardening runs in `setupClaudeMd()` step 5, and `install` reaches
+ * it. `update` calls `setupHooks()` DIRECTLY, so every box that upgraded via
+ * `shieldcortex update` rather than the full install command kept its
+ * world-readable memories.db. The recurring codebase defect, again: a fix that
+ * lands on one of two call sites. Both surfaces now run the same helper.
+ */
+async function stepStatePermissions(): Promise<StepResult> {
+  return await step('State permissions', async () => {
+    const { secureStatePermissions } = await import('../setup/state-permissions.js');
+    const { getConfigDir } = await import('../cloud/config.js');
+    const findings = secureStatePermissions(getConfigDir());
+    const fixed = findings.filter((f) => f.fixed).length;
+    const failed = findings.length - fixed;
+    if (failed > 0) return { status: 'warn' as const, summary: `${failed} path(s) could not be tightened` };
+    return fixed > 0 ? `tightened ${fixed} path(s) to owner-only` : 'owner-only';
+  });
+}
+
+/**
+ * Finish by proving the update actually PROTECTS the box (#156/#171).
+ *
+ * Before this, `update` force-installed the plugin, printed the on-disk
+ * version transition, and left the gateway running the OLD build with one gray
+ * "restart …" hint in the footer. That gap — on-disk current, gateway stale —
+ * is the exact state three fleet boxes spent this week stuck in, and the state
+ * an operator explicitly cannot diagnose from our own output (doctor reads the
+ * disk; the gateway enforces from memory).
+ *
+ * So update now ends the same way repair does: reconcile → restart → wait for
+ * the gateway to prove it is the new process → self-check → one plain-English
+ * verdict line. Consent follows #156 exactly — an interactive terminal IS the
+ * consent (you typed `update`; a plugin update that leaves the old build
+ * enforcing is not an update), while headless runs still require the explicit
+ * envs and degrade to today's hint rather than restarting a gateway out from
+ * under an agent.
+ *
+ * The dynamic import is deliberate: npm has just replaced this package on
+ * disk, so importing here loads the FRESHLY INSTALLED reconcile/self-check —
+ * the new version verifies itself with its own logic, not last release's.
+ */
+async function stepVerifyProtection(home: string): Promise<void> {
+  if (!isRealtimePluginRegistered(home)) return;
+  process.stdout.write('\n');
+  try {
+    const { reconcileOpenClawPluginState, formatReconcileReport } = await import('../setup/openclaw-reconcile.js');
+    // Expected version read fresh from disk — after the npm step this is the
+    // NEW build, and pinning expectations to the in-process (old) version
+    // would certify the very staleness this step exists to end.
+    const result = await reconcileOpenClawPluginState({ home, expectedVersion: readPackageVersion() });
+    for (const line of formatReconcileReport(result)) {
+      process.stdout.write(`  ${line}\n`);
+    }
+    if (result.applied && !result.ok) process.exitCode = 1;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`  ${paint('gray', `protection check skipped — ${msg}`)}\n`);
+  }
+}
+
 // ── Public entry ────────────────────────────────────────────
 
 export async function runUpdate(): Promise<void> {
@@ -469,8 +533,13 @@ export async function runUpdate(): Promise<void> {
   await stepOpenClawPlugin(home);
   await stepOpenClawSkill(home);
   await stepClaudeHooks();
+  await stepStatePermissions();
 
   footer(Date.now() - flowStart, mainUpdated);
+
+  // The verdict comes AFTER the footer so the last thing on screen is the one
+  // line that answers "am I protected?" — not a spinner summary.
+  await stepVerifyProtection(home);
 
   // If the binding couldn't be auto-healed, print the exact copy-paste fix.
   if (engineResult.remediation) {
