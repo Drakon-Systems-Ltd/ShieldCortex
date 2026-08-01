@@ -184,6 +184,7 @@ export function __resetConfigStateForTest(): void {
   _lastShieldConfigRef = null;
   _registered = false;
   _beforeToolCallRegistered = false;
+  _registrationError = null;
 }
 
 type LlmInputEvent = {
@@ -447,6 +448,15 @@ let _registered = false;
 // unattended Codex agents even a no-op registered hook changes how OpenClaw
 // resolves approvals).
 let _beforeToolCallRegistered = false;
+// #134 §2: register() wraps its whole body in try/catch so a plugin failure
+// never blocks channel startup — correct, but it used to report the failure
+// with a bare console.warn (bypasses the gateway's structured log, so the
+// operator's only view of a dead security plugin is stdout no one reads) and
+// the /shieldcortex-status command lived INSIDE the same try block, so a
+// crash before that line meant the command never existed at all — the plugin
+// couldn't even honestly report its own death. Set here so the status handler
+// (registered unconditionally, before the risky init work) can read it.
+let _registrationError: string | null = null;
 
 function normaliseConfig(raw: unknown): SCConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
@@ -1129,12 +1139,73 @@ export default {
   register(api: PluginApi) {
     if (_registered) return;
     _registered = true;
-    try {
-    applyPluginConfigOverride(api);
 
     // --- Interceptor (lazy init) ---
     let interceptorReady: ReturnType<typeof createInterceptor> | null = null;
     let interceptorInitAttempted = false;
+
+    // #134 §2: registered UNCONDITIONALLY, before the try block below that can
+    // throw. Previously this command lived inside that try, so a plugin crash
+    // meant the operator had no /shieldcortex-status to run at all — the one
+    // place they'd look reported nothing, same as it not existing. Now it
+    // always exists, and honestly reports DEGRADED when init failed instead of
+    // rendering config-derived lines that describe a state the plugin never
+    // reached.
+    try {
+      api.registerCommand({
+        name: "shieldcortex-status",
+        description: "Show ShieldCortex real-time scanner status",
+        async handler() {
+          if (_registrationError) {
+            return {
+              text:
+                `ShieldCortex v${_version}\n` +
+                `  STATUS: DEGRADED — plugin failed to initialize: ${_registrationError}\n` +
+                `  Real-time scanning, memory capture and the Action Guard before_tool_call\n` +
+                `  hook are ALL INACTIVE. Channels started normally (fail-open by design —\n` +
+                `  a broken security plugin must never block the gateway), but this plugin\n` +
+                `  is doing nothing until the underlying error is fixed and the gateway is\n` +
+                `  restarted.`,
+            };
+          }
+          const cfg = await loadConfig();
+          const autoMemory = isAutoMemoryEnabled(cfg) ? "on" : "off";
+          const dedupe = isAutoMemoryDedupeEnabled(cfg) ? "on" : "off";
+          const cloud = cfg.cloudApiKey ? "configured" : "not configured";
+          // Resolve the Action Guard state the same way initInterceptor() does,
+          // so the status line reflects what before_tool_call will actually do.
+          const rawInterceptor = cfg.interceptor;
+          const guardCfg = {
+            ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] }),
+            ...(rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.actionGuard ?? {} : {}),
+          };
+          const interceptorOn = (rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.enabled : undefined) ?? DEFAULT_INTERCEPTOR_CONFIG.enabled;
+          const autoApproved = Array.isArray(guardCfg.autoApprove) ? guardCfg.autoApprove.length : 0;
+          const guardState = !_beforeToolCallRegistered
+            ? "off (before_tool_call not registered — interceptor disabled in plugin config)"
+            : !interceptorOn || !guardCfg.enabled
+              ? "off"
+              : `${guardCfg.enforce ? "enforce" : "warn"}${autoApproved > 0 ? ` (${autoApproved} auto-approved)` : ""}${interceptorReady ? "" : " — not yet initialised this session"}`;
+          const hooksLine = _beforeToolCallRegistered
+            ? "llm_input (scan), llm_output (memory), before_tool_call (action guard), session_end (cache reset)"
+            : "llm_input (scan), llm_output (memory)";
+          return {
+            text:
+              `ShieldCortex v${_version}\n` +
+              `  Hooks: ${hooksLine}\n` +
+              `  Action guard: ${guardState}\n` +
+              `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
+              `  Cloud sync: ${cloud}`,
+          };
+        },
+      });
+    } catch {
+      // Host doesn't support registerCommand at all — nothing more to do here;
+      // the try/catch below still logs the substantive init failure loudly.
+    }
+
+    try {
+    applyPluginConfigOverride(api);
 
     async function initInterceptor(): Promise<ReturnType<typeof createInterceptor> | null> {
       if (interceptorInitAttempted) return interceptorReady;
@@ -1231,49 +1302,27 @@ export default {
     api.on("llm_input", handleLlmInput, { timeoutMs: 30_000 });
     api.on("llm_output", handleLlmOutput, { timeoutMs: 30_000 });
 
-    // Register a lightweight status command so the plugin is not hook-only
-    api.registerCommand({
-      name: "shieldcortex-status",
-      description: "Show ShieldCortex real-time scanner status",
-      async handler() {
-        const cfg = await loadConfig();
-        const autoMemory = isAutoMemoryEnabled(cfg) ? "on" : "off";
-        const dedupe = isAutoMemoryDedupeEnabled(cfg) ? "on" : "off";
-        const cloud = cfg.cloudApiKey ? "configured" : "not configured";
-        // Resolve the Action Guard state the same way initInterceptor() does,
-        // so the status line reflects what before_tool_call will actually do.
-        const rawInterceptor = cfg.interceptor;
-        const guardCfg = {
-          ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] }),
-          ...(rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.actionGuard ?? {} : {}),
-        };
-        const interceptorOn = (rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.enabled : undefined) ?? DEFAULT_INTERCEPTOR_CONFIG.enabled;
-        const autoApproved = Array.isArray(guardCfg.autoApprove) ? guardCfg.autoApprove.length : 0;
-        const guardState = !_beforeToolCallRegistered
-          ? "off (before_tool_call not registered — interceptor disabled in plugin config)"
-          : !interceptorOn || !guardCfg.enabled
-            ? "off"
-            : `${guardCfg.enforce ? "enforce" : "warn"}${autoApproved > 0 ? ` (${autoApproved} auto-approved)` : ""}${interceptorReady ? "" : " — not yet initialised this session"}`;
-        const hooksLine = _beforeToolCallRegistered
-          ? "llm_input (scan), llm_output (memory), before_tool_call (action guard), session_end (cache reset)"
-          : "llm_input (scan), llm_output (memory)";
-        return {
-          text:
-            `ShieldCortex v${_version}\n` +
-            `  Hooks: ${hooksLine}\n` +
-            `  Action guard: ${guardState}\n` +
-            `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
-            `  Cloud sync: ${cloud}`,
-        };
-      },
-    });
-
     api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output${_beforeToolCallRegistered ? " + before_tool_call" : ""} + /shieldcortex-status)`);
     } catch (err) {
-      // Plugin must never block channel startup — warn and bail gracefully
+      // Plugin must never block channel startup — warn and bail gracefully.
+      // #134 §2: this used to be a bare console.warn, which bypasses the
+      // gateway's structured log entirely — real-time scanning, memory
+      // capture and the Action Guard before_tool_call hook all go dark with
+      // no [plugins] line anywhere an operator looks. Route through
+      // api.logger.warn (the structured channel) and only fall back to
+      // console.error — never console.warn, so a fallback line is visibly
+      // distinct from a routed one — if the host doesn't even provide a
+      // logger, which would itself be a broken host.
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[shieldcortex] WARNING: Plugin failed to initialize: ${msg}`);
-      console.warn('[shieldcortex] Real-time scanning is disabled. Channels will start normally.');
+      _registrationError = msg;
+      const warn = (api.logger as any)?.warn;
+      if (typeof warn === 'function') {
+        warn.call(api.logger, `[shieldcortex] WARNING: Plugin failed to initialize: ${msg}`);
+        warn.call(api.logger, '[shieldcortex] Real-time scanning is disabled. Channels will start normally.');
+      } else {
+        console.error(`[shieldcortex] WARNING: Plugin failed to initialize (no api.logger available): ${msg}`);
+        console.error('[shieldcortex] Real-time scanning is disabled. Channels will start normally.');
+      }
     }
   },
 };
