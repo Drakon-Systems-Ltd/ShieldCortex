@@ -10,7 +10,7 @@
   },
   "enabledByDefault": false,
   "activation": {
-    "onStartup": false,
+    "onStartup": true,
     "hooks": [
       "llm_input",
       "llm_output",
@@ -19,6 +19,9 @@
     ],
     "commands": [
       "shieldcortex-status"
+    ],
+    "onCapabilities": [
+      "hook"
     ]
   },
   "contracts": {},
