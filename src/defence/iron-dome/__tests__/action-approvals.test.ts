@@ -15,12 +15,14 @@ import {
   hashToolCall,
   recordPending,
   approveRequest,
+  denyRequest,
   consumeApproval,
   listApprovals,
   shortHash,
   DEFAULT_APPROVAL_TTL_MS,
 } from '../action-approvals.js';
 import { runApprove, isInteractive } from '../../../cli/approve.js';
+import { runDeny } from '../../../cli/deny.js';
 import { evaluateToolCall } from '../tool-action-guard.js';
 
 const SUDO = { command: 'sudo modprobe softdog' };
@@ -154,6 +156,82 @@ describe('action approvals (#118)', () => {
     });
   });
 
+  // ── #143 — deny is exactly as cheap as approve ──────────────────────────────
+  // The notification transport (operator-notify.ts) offers BOTH an approve and
+  // a deny affordance for the same hash, one tap each. `denyRequest` is the
+  // store-level half of "deny": it does not invent a second approval concept —
+  // it is the sibling of `approveRequest` on the SAME one-shot record, so every
+  // property #118 already proved (exact-hash binding, no self-service, no
+  // resurrection) applies to a deny exactly as it does to an approve.
+  describe('denyRequest (#143 — deny is as cheap as approve)', () => {
+    it('denies a pending request; the exact call is never approved', () => {
+      const pending = request();
+      const outcome = denyRequest(shortHash(pending.hash), { home, now: T0 });
+      expect(outcome.ok).toBe(true);
+      expect(consumeApproval('Bash', SUDO, { home, now: T0 })).toBeNull();
+    });
+
+    it('a denied hash cannot later be approved — deny is final, not a hold', () => {
+      const pending = request();
+      denyRequest(pending.hash, { home, now: T0 });
+      expect(approveRequest(pending.hash, { home, now: T0 })).toEqual({ ok: false, reason: 'not-found' });
+      expect(consumeApproval('Bash', SUDO, { home, now: T0 })).toBeNull();
+    });
+
+    it('an approved hash cannot then be denied — the human already spoke', () => {
+      const pending = request();
+      approveRequest(pending.hash, { home, now: T0 });
+      expect(denyRequest(pending.hash, { home, now: T0 })).toEqual({ ok: false, reason: 'already-approved' });
+      // The approval survives the rejected deny attempt.
+      expect(consumeApproval('Bash', SUDO, { home, now: T0 })).not.toBeNull();
+    });
+
+    it('reports not-found for an unknown hash', () => {
+      request();
+      expect(denyRequest('deadbeef', { home, now: T0 })).toEqual({ ok: false, reason: 'not-found' });
+    });
+
+    it('refuses an ambiguous prefix rather than guessing which one to deny', () => {
+      request(SUDO);
+      request(OTHER);
+      expect(denyRequest('', { home, now: T0 })).toEqual({ ok: false, reason: 'not-found' });
+      // Neither record was collaterally denied.
+      const a = approveRequest(hashToolCall('Bash', SUDO), { home, now: T0 });
+      expect(a.ok).toBe(true);
+    });
+
+    it('does not carry over to a different command on the same tool', () => {
+      request(SUDO);
+      const otherPending = request(OTHER, T0 + 1);
+      denyRequest(otherPending.hash, { home, now: T0 + 1 });
+      // SUDO is untouched — still approvable.
+      expect(approveRequest(hashToolCall('Bash', SUDO), { home, now: T0 + 1 }).ok).toBe(true);
+    });
+
+    it('a second deny of the same hash reports not-found, not a double-deny', () => {
+      const pending = request();
+      expect(denyRequest(pending.hash, { home, now: T0 }).ok).toBe(true);
+      expect(denyRequest(pending.hash, { home, now: T0 })).toEqual({ ok: false, reason: 'not-found' });
+    });
+
+    it('does not leave a denied record on disk — one-shot, like a consumed one', () => {
+      const pending = request();
+      denyRequest(pending.hash, { home, now: T0 });
+      const file = join(home, '.shieldcortex', 'approvals', 'approvals.json');
+      expect(JSON.parse(readFileSync(file, 'utf-8')).records).toEqual([]);
+    });
+
+    it('a retried request after a deny starts a fresh pending record', () => {
+      const pending = request();
+      denyRequest(pending.hash, { home, now: T0 });
+      // The agent (or operator re-running the same op) tries again later.
+      const retried = request(SUDO, T0 + 5_000);
+      expect(retried.hash).toBe(pending.hash);
+      expect(retried.approvedAt).toBeUndefined();
+      expect(listApprovals({ home, now: T0 + 5_000 })).toHaveLength(1);
+    });
+  });
+
   describe('storage hygiene', () => {
     it('writes the store 0600 — it names commands the operator ran', () => {
       request();
@@ -227,6 +305,55 @@ describe('action approvals (#118)', () => {
       expect(isInteractive({ stdin: { isTTY: true }, stdout: { isTTY: false } })).toBe(false);
       expect(isInteractive({ stdin: { isTTY: false }, stdout: { isTTY: true } })).toBe(false);
       expect(isInteractive({})).toBe(false);
+    });
+  });
+
+  // `shieldcortex deny <hash>` — the CLI half of denyRequest, mirroring
+  // approve.ts's TTY gate. An agent that could non-interactively deny its own
+  // pending request could wipe a suspicious refusal from the operator's queue
+  // before they ever saw it existed — denial is the safe DECISION direction,
+  // but self-service erasure of the evidence is not, so the same gate applies.
+  describe('CLI deny gate (#143) — one tap, same discipline as approve', () => {
+    const sink = () => {
+      const lines: string[] = [];
+      return { lines, write: (m: string) => { lines.push(m); } };
+    };
+
+    it('refuses to deny when stdio is not a TTY', () => {
+      const pending = request();
+      const out = sink();
+      const code = runDeny([pending.hash], { home, now: T0, interactive: false, log: out.write, error: out.write });
+
+      expect(code).toBe(1);
+      expect(out.lines.join('\n')).toMatch(/interactive terminal/i);
+      // Still there to approve or deny later — the CLI gate didn't touch it.
+      expect(approveRequest(pending.hash, { home, now: T0 }).ok).toBe(true);
+    });
+
+    it('denies when a human is at the keyboard, one tap', () => {
+      const pending = request();
+      const out = sink();
+      const code = runDeny([pending.hash], { home, now: T0, interactive: true, log: out.write, error: out.write });
+
+      expect(code).toBe(0);
+      expect(approveRequest(pending.hash, { home, now: T0 })).toEqual({ ok: false, reason: 'not-found' });
+      expect(consumeApproval('Bash', SUDO, { home, now: T0 })).toBeNull();
+    });
+
+    it('reports a clear error for an unknown hash rather than silently succeeding', () => {
+      const out = sink();
+      const code = runDeny(['deadbeef'], { home, now: T0, interactive: true, log: out.write, error: out.write });
+      expect(code).toBe(1);
+      expect(out.lines.join('\n')).toMatch(/no pending/i);
+    });
+
+    it('refuses to deny an already-approved request rather than revoking it', () => {
+      const pending = request();
+      approveRequest(pending.hash, { home, now: T0 });
+      const out = sink();
+      const code = runDeny([pending.hash], { home, now: T0, interactive: true, log: out.write, error: out.write });
+      expect(code).toBe(1);
+      expect(consumeApproval('Bash', SUDO, { home, now: T0 })).not.toBeNull();
     });
   });
 });
