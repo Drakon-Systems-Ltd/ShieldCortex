@@ -76,6 +76,11 @@ function loadActionGuardConfig() {
       // half of it here is how the two halves end up disagreeing. Absent or
       // not-exactly-enabled means the broker never runs.
       broker: raw.broker && typeof raw.broker === 'object' && !Array.isArray(raw.broker) ? raw.broker : null,
+      // #143 notify transport — same discipline: passed through RAW, validated
+      // only by normaliseNotifyConfig in dist. Absent or not-exactly-enabled
+      // means no channel is ever attempted (the existing hash-in-terminal
+      // refusal is the whole of this hook's behaviour, as before #143).
+      notify: raw.notify && typeof raw.notify === 'object' && !Array.isArray(raw.notify) ? raw.notify : null,
     };
   } catch {
     // Unreadable config → guard on with defaults. Enforce-by-default means a
@@ -215,6 +220,94 @@ async function loadBroker(rawBrokerConfig) {
     // A broker that cannot be assembled is a broker that does not run. The
     // operator still gets asked, which is where this hook started.
     return null;
+  }
+}
+
+/**
+ * Load the operator-notify transport (#143). Returns null when notify is not
+ * switched on, or when the dist build predates it — mirrors `loadBroker`
+ * exactly, for the same reason: this hook is one process per tool call and
+ * has no persistent state, so every load is from scratch, and every failure
+ * to assemble the transport must degrade to "no channel", never to a crash
+ * or a changed decision.
+ *
+ * This is INDEPENDENT of the AI broker (#143's judge layer): a hold reaches
+ * the operator whether or not a judge ran, because the gap this closes —
+ * "the operator never even heard about the request" — exists regardless of
+ * whether an AI looked at it first.
+ */
+async function loadNotify(rawNotifyConfig) {
+  if (!rawNotifyConfig || rawNotifyConfig.enabled !== true) return null;
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const load = async (file) => {
+    try {
+      return await import(pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', file)).href);
+    } catch {
+      return null;
+    }
+  };
+  try {
+    const [notifyConfigMod, notifyMod, webhookMod] = await Promise.all([
+      load('notify-config.js'), load('operator-notify.js'), load('webhook-notify-channel.js'),
+    ]);
+    if (typeof notifyConfigMod?.normaliseNotifyConfig !== 'function') return null;
+    if (typeof notifyMod?.requestOperatorApproval !== 'function') return null;
+    if (typeof webhookMod?.createWebhookNotifyChannel !== 'function') return null;
+
+    const normalised = notifyConfigMod.normaliseNotifyConfig(rawNotifyConfig);
+    if (!normalised?.enabled) return null;
+    // No webhookUrl (absent, or rejected by normaliseNotifyConfig — e.g. a
+    // non-http(s) scheme) means no configured channel exists yet. Degrading
+    // to null here, rather than constructing a channel that would never
+    // deliver, keeps this indistinguishable from "not configured" downstream.
+    if (!normalised.webhookUrl) return null;
+
+    return {
+      config: normalised,
+      requestOperatorApproval: notifyMod.requestOperatorApproval,
+      // `timeoutMs` is NOT a constructor option — the channel's `send()` is
+      // handed the deadline per-call (see `pingOperator`, and
+      // operator-notify.ts's `tryChannel`), so one channel object is timeout-
+      // agnostic and every caller (this hook, the OpenClaw plugin) supplies
+      // its own budget.
+      channel: webhookMod.createWebhookNotifyChannel({ url: normalised.webhookUrl }),
+    };
+  } catch {
+    // A transport that cannot be assembled is a transport that does not run.
+    // The operator still gets the unchanged hash-in-terminal refusal.
+    return null;
+  }
+}
+
+/**
+ * Best-effort ping through the configured channel. NEVER throws, NEVER
+ * blocks longer than the transport's own bounded timeout (see
+ * operator-notify.ts and webhook-notify-channel.ts, both of which enforce
+ * their own deadlines independent of this caller), and its result is used
+ * for nothing but a stderr breadcrumb — the hook's actual decision (the
+ * 'ask' + hash fallback) is decided before and after this call identically.
+ */
+async function pingOperator(notify, { toolName, toolInput, verdict, hash }) {
+  if (!notify) return;
+  try {
+    const result = await notify.requestOperatorApproval(
+      {
+        hash,
+        tool: toolName,
+        command: describeToolCall(toolName, toolInput),
+        signals: verdict.signals,
+        severity: verdict.severity,
+        reason: verdict.reason,
+      },
+      { channel: notify.channel, timeoutMs: notify.config.timeoutMs },
+    );
+    if (result?.deliveredVia) {
+      console.error(`[shieldcortex] approval broker: pinged the operator via ${result.deliveredVia} (${hash.slice(0, 12)}).`);
+    }
+  } catch (err) {
+    // A notify transport that throws must not change the guard's outcome —
+    // it already recorded/is about to record the pending hash regardless.
+    console.error(`[shieldcortex] ⚠️ operator-notify error: ${err?.message ?? err} — falling back to the terminal hash only.`);
   }
 }
 
@@ -688,11 +781,24 @@ process.stdin.on('end', async () => {
 
     let message = `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`;
     if (approvals) {
+      let fullHash;
       try {
-        const hash = approvals.hashToolCall(toolName, toolInput).slice(0, 12);
-        message += ` — to allow this exact command once, run in YOUR terminal: shieldcortex approve ${hash}`;
+        fullHash = approvals.hashToolCall(toolName, toolInput);
+        message += ` — to allow this exact command once, run in YOUR terminal: shieldcortex approve ${fullHash.slice(0, 12)}`;
       } catch {
         // Hash is a nicety; never let it break the refusal path.
+      }
+
+      // ── operator-notify transport (#143) ─────────────────────────────────
+      // The 433 real stops this issue was filed about all dead-ended right
+      // here: a hold with nothing but a hash in a transcript nobody was
+      // watching. If the operator configured a channel, ping it now — a
+      // best-effort ADDITION to the unchanged refusal above, never a
+      // replacement for it (`emitDecision('ask', message)` below still fires
+      // identically whether or not this delivers, times out, or errors).
+      if (fullHash) {
+        const notify = await loadNotify(cfg.notify);
+        await pingOperator(notify, { toolName, toolInput, verdict, hash: fullHash });
       }
     }
     // #139: ask ONLY where a prompt can actually be raised. Under

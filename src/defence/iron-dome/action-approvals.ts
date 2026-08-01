@@ -53,6 +53,11 @@ export interface ApprovalRecord {
   requestedAt: number;
   /** ms epoch the operator approved it; absent while pending. */
   approvedAt?: number;
+  /** ms epoch the operator denied it (#143); absent unless denied. Denial is
+   *  terminal — a denied record is removed from the store in the same call
+   *  that sets this, so it is never read back from disk. Present only on the
+   *  in-memory record `denyRequest` hands back to its caller, for audit. */
+  deniedAt?: number;
   /** ms epoch the approval was spent; absent while unused. */
   consumedAt?: number;
   /** Lifetime granted at approval time. */
@@ -175,6 +180,10 @@ export type ApproveOutcome =
   | { ok: true; record: ApprovalRecord }
   | { ok: false; reason: 'not-found' | 'already-approved' };
 
+export type DenyOutcome =
+  | { ok: true; record: ApprovalRecord }
+  | { ok: false; reason: 'not-found' | 'already-approved' };
+
 /**
  * Mark a pending request approved. Matches on the full hash or any unambiguous
  * prefix (operators paste the short form). Callers MUST have established that a
@@ -198,6 +207,44 @@ export function approveRequest(
   record.ttlMs = opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
   writeFileAtomic({ version: 1, records }, opts.home);
   return { ok: true, record };
+}
+
+/**
+ * Mark a pending request DENIED (#143). The sibling of `approveRequest` on the
+ * same one-shot record — not a second approval concept. Deny is deliberately
+ * as cheap as approve (one call, one match-by-hash-or-prefix) because a
+ * notification transport that makes "no" harder to tap than "yes" biases
+ * every ambiguous reply toward release.
+ *
+ * A deny is TERMINAL, not a hold: the record is removed from the store in the
+ * same call (mirrors how `consumeApproval` removes a spent approval), so a
+ * later `approveRequest` for the same hash finds nothing rather than a stale
+ * grantable record — a delayed or replayed "approve" arriving after a human
+ * already said no must not resurrect the request it was answering.
+ *
+ * An already-approved record refuses the deny outright (`already-approved`)
+ * rather than revoking it: the human already spoke, and a late or duplicate
+ * "no" (e.g. two channels both got a reply) must not undo a decision already
+ * made, especially one the guard may have already acted on.
+ */
+export function denyRequest(
+  hashOrPrefix: string,
+  opts: { home?: string; now?: number } = {},
+): DenyOutcome {
+  const now = opts.now ?? Date.now();
+  const file = readFile(opts.home);
+  const records = prune(file.records, now);
+  const needle = hashOrPrefix.trim().toLowerCase();
+  const matches = records.filter((r) => r.hash.startsWith(needle));
+
+  if (matches.length !== 1) return { ok: false, reason: 'not-found' };
+  const record = matches[0];
+  if (record.approvedAt) return { ok: false, reason: 'already-approved' };
+
+  const denied: ApprovalRecord = { ...record, deniedAt: now };
+  const remaining = records.filter((r) => r.hash !== record.hash);
+  writeFileAtomic({ version: 1, records: remaining }, opts.home);
+  return { ok: true, record: denied };
 }
 
 /**

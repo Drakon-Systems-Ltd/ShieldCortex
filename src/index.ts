@@ -840,6 +840,16 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "deny" subcommand (#143) — the sibling of "approve": reject a
+  // pending Action Guard request. Same store, same TTY gate; see
+  // src/cli/deny.ts. Exists so a notification transport can offer approve and
+  // deny as equally cheap, one-tap affordances on the same hash.
+  if (process.argv[2] === 'deny') {
+    const { runDeny } = await import('./cli/deny.js');
+    process.exitCode = runDeny(process.argv.slice(3));
+    return;
+  }
+
   // Handle "status" subcommand
   if (process.argv[2] === 'status') {
     const { handleStatusCommand } = await import('./setup/status.js');
@@ -1302,7 +1312,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve', 'deny',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
