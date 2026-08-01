@@ -604,12 +604,38 @@ type PipelineRunner = (content: string, title: string, source: { type: string; i
 //   * anything over the size cap is refused (the guard then records it as
 //     `opaque-script-invocation` rather than pretending it was scanned);
 //   * every error returns `null`. Nothing escapes.
-// The resolver lives in one place (#160). It was duplicated here while the
-// Claude Code hook had none at all, which is how the same guard reached
-// opposite verdicts on the two surfaces. Re-exported so this module's public
-// shape is unchanged for existing importers.
-import { createScriptSourceResolver } from '../../src/defence/iron-dome/script-source-resolver.js';
-export { createScriptSourceResolver, MAX_SCRIPT_SOURCE_BYTES, UNREADABLE_PATH_PREFIX } from '../../src/defence/iron-dome/script-source-resolver.js';
+// The resolver is DUPLICATED here, deliberately (#160).
+//
+// This plugin publishes as its own npm package and builds standalone
+// (tsconfig.openclaw-plugin.json pins rootDir to plugins/openclaw), so it
+// genuinely cannot import from src/ — converging by import broke the plugin
+// build outright. A real constraint, then, not a tidiness failure.
+//
+// But two copies of a safety-railed file reader reached from untrusted tool
+// input is two chances to drift, and drift is what #160 was about. So the
+// copies are held together by a BEHAVIOURAL drift test that runs both
+// implementations over one fixture table and requires identical answers
+// (src/__tests__/enforcement-surface-parity.test.ts). Guard the duplication
+// rather than pretend it away.
+export const MAX_SCRIPT_SOURCE_BYTES = 262_144;   // 256KB — matches the guard core's cap
+export const UNREADABLE_PATH_PREFIX = /^\/(?:proc|sys|dev)\//;
+
+export function createScriptSourceResolver(cwd?: string): (scriptPath: string) => string | null {
+  const base = cwd && typeof cwd === 'string' ? cwd : process.cwd();
+  return (scriptPath: string): string | null => {
+    try {
+      if (!scriptPath || typeof scriptPath !== 'string') return null;
+      const expanded = scriptPath.startsWith('~/') ? join(homedir(), scriptPath.slice(2)) : scriptPath;
+      const full = isAbsolute(expanded) ? expanded : resolvePath(base, expanded);
+      if (UNREADABLE_PATH_PREFIX.test(full)) return null;
+      const st = statSync(full);
+      if (!st.isFile() || st.size > MAX_SCRIPT_SOURCE_BYTES) return null;
+      return readFileSync(full, 'utf8');
+    } catch {
+      return null;                          // missing, unreadable, anything — stay silent, stay alive
+    }
+  };
+}
 
 /** Raised when the operator never answered the approval card (#143). Distinct
  *  from a transport error, because the two have opposite handling: an error

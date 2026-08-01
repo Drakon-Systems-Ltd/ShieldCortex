@@ -54,20 +54,65 @@ describe('#160 — both enforcement surfaces supply the script-source resolver',
     }
   });
 
-  it('the resolver has ONE implementation, imported rather than re-typed', () => {
-    // Two copies of a safety-railed file reader is two chances to drift; the
-    // rails (pseudo-fs refusal, regular-file check, size cap, never throw) must
-    // not exist in two places with a chance of diverging.
+  it('the shared resolver carries its safety rails with the implementation', () => {
     const shared = fs.readFileSync(
       path.join(repoRoot, 'src', 'defence', 'iron-dome', 'script-source-resolver.ts'),
       'utf-8',
     );
     expect(shared).toMatch(/export function createScriptSourceResolver/);
-    // The safety rails live with the implementation.
     expect(shared).toMatch(/UNREADABLE_PATH_PREFIX/);
     expect(shared).toMatch(/MAX_SCRIPT_SOURCE_BYTES/);
-    // And the resolver must never throw — a guard that throws fails open.
+    // The resolver must never throw — a guard that throws fails open.
     expect(shared).toMatch(/catch\s*{\s*\n\s*return null;/);
+  });
+
+  it('the plugin documents WHY it keeps its own copy, so the duplication is a decision not an accident', () => {
+    // The plugin publishes as its own npm package and builds standalone
+    // (rootDir pinned to plugins/openclaw), so it cannot import from src/ —
+    // converging by import breaks its build. A real constraint; it must be
+    // stated at the copy, or the next reader will "tidy" it and break the
+    // published package.
+    expect(pluginSrc).toMatch(/DUPLICATED here, deliberately \(#160\)/);
+    expect(pluginSrc).toMatch(/drift test/i);
+  });
+});
+
+describe('#160 — the two resolver copies are held together by behaviour, not by hope', () => {
+  // Text comparison would fail on a reformat and pass on a semantic change —
+  // exactly backwards. Both implementations are run over ONE fixture table and
+  // required to answer identically.
+  it('answers identically on every safety-rail case', async () => {
+    const { createScriptSourceResolver: shared } = await import('../defence/iron-dome/script-source-resolver.js');
+    const { createScriptSourceResolver: plugin } = await import('../../plugins/openclaw/interceptor.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-drift-'));
+    try {
+      const good = path.join(dir, 'ok.sh');
+      fs.writeFileSync(good, '#!/bin/sh\necho hi\n');
+      const big = path.join(dir, 'big.sh');
+      fs.writeFileSync(big, 'x'.repeat(300_000));          // over the 256KB cap
+      fs.mkdirSync(path.join(dir, 'adir'));
+
+      const fixtures = [
+        good,                                   // readable regular file
+        big,                                    // oversized
+        path.join(dir, 'adir'),                 // a directory
+        path.join(dir, 'missing.sh'),           // absent
+        '/proc/self/mem',                       // pseudo-filesystem
+        '/sys/kernel/notes',
+        '/dev/zero',
+        '',                                     // empty
+        'relative.sh',                          // relative, absent
+      ];
+
+      const a = shared(dir);
+      const b = plugin(dir);
+      for (const f of fixtures) {
+        expect({ path: f, result: a(f) }).toEqual({ path: f, result: b(f) });
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
