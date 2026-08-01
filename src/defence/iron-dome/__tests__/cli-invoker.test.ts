@@ -1,0 +1,293 @@
+/**
+ * Failing-first spec for the Claude Code CLI judge transport (#143).
+ *
+ * The design's rule for model access is "same credentials, never same context":
+ * the judge rides the operator's existing login and never sees the session it is
+ * judging. This transport is where that is either true or a lie, so the tests
+ * assert the *shape of the subprocess*, not just its output:
+ *
+ *   - tools disabled, no MCP, no CLAUDE.md, no hooks, no session — a classifier,
+ *     not an actor, and no path back into the agent it is judging;
+ *   - the untrusted prompt travels on stdin, never as an argv element;
+ *   - it runs in a scratch directory with an allowlisted environment, so the
+ *     agent's cwd and the operator's unrelated secrets are not along for the ride;
+ *   - a hard deadline that actually kills the child;
+ *   - every failure — non-zero exit, spawn error, timeout — surfaces as a
+ *     rejection, which `runJudge` turns into null, which the broker reads as
+ *     "hold for a human". Fail closed, end to end.
+ */
+import { describe, it, expect, jest } from '@jest/globals';
+import { tmpdir } from 'node:os';
+import {
+  createCliInvoker,
+  buildCliArgs,
+  buildJudgeEnv,
+  type ChildLike,
+  type SpawnLike,
+} from '../cli-invoker.js';
+import { runJudge } from '../approval-judge.js';
+
+// ── a fake child process, driven by the test ────────────────────────────────
+
+interface FakeChild extends ChildLike {
+  stdinChunks: string[];
+  stdinEnded: boolean;
+  signals: string[];
+  emitStdout(text: string): void;
+  emitStderr(text: string): void;
+  exit(code: number | null, signal?: string | null): void;
+  fail(err: Error): void;
+}
+
+function makeChild(): FakeChild {
+  const listeners: Record<string, Array<(...a: unknown[]) => void>> = {};
+  const outListeners: Array<(c: unknown) => void> = [];
+  const errListeners: Array<(c: unknown) => void> = [];
+  const child: FakeChild = {
+    stdinChunks: [],
+    stdinEnded: false,
+    signals: [],
+    killed: false,
+    stdin: {
+      write(s: string) { child.stdinChunks.push(s); return true; },
+      end() { child.stdinEnded = true; },
+      on() { /* error listener */ },
+    },
+    stdout: { on(_ev: string, cb: (c: unknown) => void) { outListeners.push(cb); } },
+    stderr: { on(_ev: string, cb: (c: unknown) => void) { errListeners.push(cb); } },
+    on(ev: 'error' | 'close', cb: (...args: never[]) => void) {
+      (listeners[ev] ??= []).push(cb as unknown as (...a: unknown[]) => void);
+    },
+    kill(signal?: string) { child.signals.push(signal ?? 'SIGTERM'); child.killed = true; return true; },
+    emitStdout(text: string) { for (const cb of outListeners) cb(Buffer.from(text)); },
+    emitStderr(text: string) { for (const cb of errListeners) cb(Buffer.from(text)); },
+    exit(code, signal = null) { for (const cb of listeners.close ?? []) cb(code, signal); },
+    fail(err) { for (const cb of listeners.error ?? []) cb(err); },
+  };
+  return child;
+}
+
+interface SpawnCall { command: string; args: string[]; options: { cwd?: string; env?: NodeJS.ProcessEnv } }
+
+function fakeSpawn(): { spawn: SpawnLike; calls: SpawnCall[]; child: FakeChild } {
+  const child = makeChild();
+  const calls: SpawnCall[] = [];
+  const spawn: SpawnLike = (command, args, options) => {
+    calls.push({ command, args: [...args], options: options ?? {} });
+    return child;
+  };
+  return { spawn, calls, child };
+}
+
+/** Drive one invocation: spawn, let the microtask queue settle, then act. */
+async function tick(): Promise<void> {
+  await new Promise(r => setTimeout(r, 5));
+}
+
+const SYSTEM = 'you are a classifier';
+const USER = 'judge this: rm -rf /tmp/x';
+
+// ── argv: what the subprocess is actually asked to be ───────────────────────
+
+describe('buildCliArgs', () => {
+  it('runs non-interactively with ALL tools disabled', () => {
+    const args = buildCliArgs(SYSTEM);
+    expect(args).toContain('--print');
+    // `--tools ""` is the CLI's documented "disable all tools". The judge is a
+    // classifier; if it could act, the broker would be an actor with a model's
+    // judgement and the operator's credentials.
+    const toolsAt = args.indexOf('--tools');
+    expect(toolsAt).toBeGreaterThanOrEqual(0);
+    expect(args[toolsAt + 1]).toBe('');
+  });
+
+  it('brings no session context: no MCP, no customisations, no persisted session', () => {
+    const args = buildCliArgs(SYSTEM);
+    expect(args).toContain('--strict-mcp-config');
+    // --safe-mode drops CLAUDE.md, skills, plugins, hooks and MCP servers. It is
+    // also what stops the judge's own process re-entering ShieldCortex's hooks.
+    expect(args).toContain('--safe-mode');
+    expect(args).toContain('--no-session-persistence');
+  });
+
+  it('passes the judge system prompt explicitly rather than inheriting one', () => {
+    const args = buildCliArgs(SYSTEM);
+    const at = args.indexOf('--system-prompt');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(args[at + 1]).toBe(SYSTEM);
+  });
+
+  it('adds --model only for a valid override', () => {
+    const withModel = buildCliArgs(SYSTEM, 'haiku');
+    expect(withModel[withModel.indexOf('--model') + 1]).toBe('haiku');
+    expect(buildCliArgs(SYSTEM)).not.toContain('--model');
+  });
+
+  it('refuses to turn a hostile model string into argv', () => {
+    // Defence in depth: broker-config already rejects these, but this function
+    // is the last place a string becomes an argument vector, so it re-checks.
+    for (const hostile of ['--dangerously-skip-permissions', '-p', 'haiku; rm -rf /', 'haiku`id`']) {
+      const args = buildCliArgs(SYSTEM, hostile);
+      expect(args).not.toContain('--model');
+      expect(args).not.toContain(hostile);
+      expect(args).not.toContain('--dangerously-skip-permissions');
+    }
+    // An empty/blank override is "no override", not an empty --model argument.
+    expect(buildCliArgs(SYSTEM, '   ')).not.toContain('--model');
+  });
+});
+
+// ── the subprocess environment ──────────────────────────────────────────────
+
+describe('buildJudgeEnv', () => {
+  const source: NodeJS.ProcessEnv = {
+    PATH: '/usr/bin',
+    HOME: '/home/op',
+    ANTHROPIC_API_KEY: 'sk-host',
+    CLAUDE_CONFIG_DIR: '/home/op/.claude',
+    // ↓ the agent's world. None of this is the judge's business.
+    GITHUB_TOKEN: 'ghp_secret',
+    AWS_SECRET_ACCESS_KEY: 'aws-secret',
+    DATABASE_URL: 'postgres://u:p@h/db',
+    SHIELDCORTEX_DIST_ROOT: '/somewhere',
+    OPENAI_API_KEY: 'sk-other',
+  };
+
+  it('forwards the host login and nothing else', () => {
+    const env = buildJudgeEnv(source);
+    expect(env.PATH).toBe('/usr/bin');
+    expect(env.HOME).toBe('/home/op');
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-host');
+    expect(env.CLAUDE_CONFIG_DIR).toBe('/home/op/.claude');
+  });
+
+  it("does not hand the agent's unrelated secrets to the judge", () => {
+    const env = buildJudgeEnv(source);
+    for (const leaked of ['GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'DATABASE_URL', 'OPENAI_API_KEY', 'SHIELDCORTEX_DIST_ROOT']) {
+      expect(env[leaked]).toBeUndefined();
+    }
+  });
+
+  it('omits absent variables rather than defining them empty', () => {
+    const env = buildJudgeEnv({ PATH: '/usr/bin' });
+    expect('ANTHROPIC_API_KEY' in env).toBe(false);
+  });
+});
+
+// ── the invocation ──────────────────────────────────────────────────────────
+
+describe('createCliInvoker', () => {
+  it('sends the untrusted prompt on stdin, never as an argument', async () => {
+    const { spawn, calls, child } = fakeSpawn();
+    const invoke = createCliInvoker({ spawn });
+    const p = invoke(SYSTEM, USER);
+    await tick();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.join(' ')).not.toContain(USER);
+    expect(child.stdinChunks.join('')).toBe(USER);
+    expect(child.stdinEnded).toBe(true);
+
+    child.emitStdout('{"assessment":"benign"}');
+    child.exit(0);
+    await expect(p).resolves.toBe('{"assessment":"benign"}');
+  });
+
+  it("runs in a scratch directory, never the agent's cwd", async () => {
+    const { spawn, calls, child } = fakeSpawn();
+    const p = createCliInvoker({ spawn })(SYSTEM, USER);
+    await tick();
+    expect(calls[0].options.cwd).toBe(tmpdir());
+    expect(calls[0].options.cwd).not.toBe(process.cwd());
+    child.exit(0);
+    await p.catch(() => { /* empty stdout is a failure; irrelevant here */ });
+  });
+
+  it('rejects when the CLI exits non-zero — and that becomes a HOLD', async () => {
+    const { spawn, child } = fakeSpawn();
+    const invoke = createCliInvoker({ spawn });
+    const p = invoke(SYSTEM, USER);
+    await tick();
+    child.emitStderr('not logged in');
+    child.exit(1);
+    await expect(p).rejects.toThrow();
+
+    // The whole point: a broken CLI must not become a confident yes.
+    const verdict = await runJudge(
+      { tool: 'Bash', toolInput: { command: 'x' }, verdict: { severity: 'dangerous', action: 'a', reason: 'r', signals: [] } },
+      createCliInvoker({ spawn: () => { const c = makeChild(); setTimeout(() => c.exit(1), 1); return c; } }),
+      { timeoutMs: 500 },
+    );
+    expect(verdict).toBeNull();
+  });
+
+  it('rejects when the CLI cannot be spawned at all', async () => {
+    const { spawn, child } = fakeSpawn();
+    const p = createCliInvoker({ spawn })(SYSTEM, USER);
+    await tick();
+    child.fail(new Error('ENOENT'));
+    await expect(p).rejects.toThrow(/ENOENT|spawn/i);
+  });
+
+  it('rejects when the CLI produced no output despite exiting cleanly', async () => {
+    const { spawn, child } = fakeSpawn();
+    const p = createCliInvoker({ spawn })(SYSTEM, USER);
+    await tick();
+    child.exit(0);
+    await expect(p).rejects.toThrow(/empty|no output/i);
+  });
+
+  it('enforces a hard deadline and TERMINATES the child', async () => {
+    const { spawn, child } = fakeSpawn();
+    const p = createCliInvoker({ spawn, timeoutMs: 30 })(SYSTEM, USER);
+    await expect(p).rejects.toThrow(/timed out/i);
+    // Not merely abandoned — a judge left running is a judge still spending the
+    // operator's rate limit.
+    expect(child.signals[0]).toBe('SIGTERM');
+    await new Promise(r => setTimeout(r, 120));
+    expect(child.signals).toContain('SIGKILL');
+  });
+
+  it('a late reply after the deadline cannot resurrect the verdict', async () => {
+    const { spawn, child } = fakeSpawn();
+    const p = createCliInvoker({ spawn, timeoutMs: 20 })(SYSTEM, USER);
+    await expect(p).rejects.toThrow(/timed out/i);
+    child.emitStdout('{"assessment":"benign","confidence":1,"inContext":true,"injectionSuspected":false}');
+    child.exit(0);
+    // Already rejected; the settled promise does not change.
+    await expect(p).rejects.toThrow(/timed out/i);
+  });
+
+  it('bounds how much output it will accumulate', async () => {
+    const { spawn, child } = fakeSpawn();
+    const p = createCliInvoker({ spawn })(SYSTEM, USER);
+    await tick();
+    child.emitStdout('x'.repeat(500_000));
+    child.exit(0);
+    const out = await p;
+    expect(out.length).toBeLessThanOrEqual(65_536);
+  });
+
+  it('uses the configured command so an operator can point at their own binary', async () => {
+    const { spawn, calls, child } = fakeSpawn();
+    const p = createCliInvoker({ spawn, command: '/opt/claude' })(SYSTEM, USER);
+    await tick();
+    expect(calls[0].command).toBe('/opt/claude');
+    child.exit(0);
+    await p.catch(() => { /* not the assertion */ });
+  });
+
+  it('spawns through the injected seam, so no real CLI is ever needed to test it', async () => {
+    const { spawn, child } = fakeSpawn();
+    const started = jest.fn();
+    const invoke = createCliInvoker({
+      spawn: (c, a, o) => { started(); return spawn(c, a, o); },
+      timeoutMs: 30,
+    });
+    const p = invoke(SYSTEM, USER);
+    await tick();
+    expect(started).toHaveBeenCalled();
+    await expect(p).rejects.toThrow(/timed out/i);
+    expect(child.killed).toBe(true);
+  });
+});

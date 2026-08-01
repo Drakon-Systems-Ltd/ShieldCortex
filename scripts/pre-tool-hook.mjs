@@ -71,6 +71,11 @@ function loadActionGuardConfig() {
       enforce: raw.enforce !== false,
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
       auditAllows: raw.auditAllows !== false,
+      // #143, passed through RAW. normaliseBrokerConfig in dist is the single
+      // place that knows which values would loosen an invariant; re-implementing
+      // half of it here is how the two halves end up disagreeing. Absent or
+      // not-exactly-enabled means the broker never runs.
+      broker: raw.broker && typeof raw.broker === 'object' && !Array.isArray(raw.broker) ? raw.broker : null,
     };
   } catch {
     // Unreadable config → guard on with defaults. Enforce-by-default means a
@@ -123,6 +128,126 @@ async function loadGuard() {
   }
 }
 
+/**
+ * Load the one-shot approval store (#118). Optional by design: when the dist
+ * module is missing the guard behaves exactly as it did before approvals
+ * existed — refuse and say so — rather than failing open.
+ */
+async function loadApprovals() {
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'action-approvals.js')).href
+    );
+    return typeof mod.consumeApproval === 'function' && typeof mod.recordPending === 'function'
+      ? mod
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the AI-assisted approval broker (#143). Returns null when the broker is
+ * not switched on, or when the dist build predates it.
+ *
+ * Null is the normal answer and a safe one: no broker means this hook behaves
+ * exactly as it did before #143 — every dangerous-tier call is refused with the
+ * `shieldcortex approve <hash>` fallback. All four pieces are required
+ * together; a decision core without its config normaliser would be a policy
+ * consuming unvalidated input, which is the one shape this must never take.
+ */
+async function loadBroker(rawBrokerConfig) {
+  if (!rawBrokerConfig || rawBrokerConfig.enabled !== true) return null;
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const load = async (file) => {
+    try {
+      return await import(pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', file)).href);
+    } catch {
+      return null;
+    }
+  };
+  try {
+    const [core, judge, config, cli] = await Promise.all([
+      load('approval-broker.js'), load('approval-judge.js'), load('broker-config.js'), load('cli-invoker.js'),
+    ]);
+    if (typeof core?.brokerDecision !== 'function') return null;
+    if (typeof judge?.runJudge !== 'function') return null;
+    if (typeof config?.normaliseBrokerConfig !== 'function') return null;
+    if (typeof cli?.createCliInvoker !== 'function') return null;
+
+    const normalised = config.normaliseBrokerConfig(rawBrokerConfig);
+    if (!normalised?.enabled) return null;
+    return {
+      config: normalised,
+      brokerDecision: core.brokerDecision,
+      runJudge: judge.runJudge,
+      createCliInvoker: cli.createCliInvoker,
+    };
+  } catch {
+    // A broker that cannot be assembled is a broker that does not run. The
+    // operator still gets asked, which is where this hook started.
+    return null;
+  }
+}
+
+/**
+ * One broker pass. Returns a decision, or null to mean "carry on as before".
+ *
+ * NOTE — the judge gets NO sessionSummary here, and that is deliberate. This
+ * hook is one process per tool call: it has no session state, and the only
+ * session-shaped thing within reach is the agent's own transcript, which is
+ * exactly what the judge must never read. With no context the judge is told to
+ * answer inContext:false, so on this surface the broker can HARDEN but will not
+ * pre-clear. That is the fail-closed half of the feature, which is the half
+ * worth having first.
+ */
+async function runBrokerPass(broker, toolName, toolInput, verdict) {
+  try {
+    const invoke = broker.createCliInvoker({
+      model: broker.config.model,
+      timeoutMs: broker.config.judgeTimeoutMs,
+    });
+    const judgeResult = await broker.runJudge(
+      {
+        tool: toolName,
+        toolInput,
+        verdict: {
+          severity: verdict.severity,
+          action: verdict.action,
+          reason: verdict.reason,
+          signals: verdict.signals,
+        },
+      },
+      invoke,
+      { timeoutMs: broker.config.judgeTimeoutMs },
+    );
+    const decision = broker.brokerDecision({
+      tool: toolName,
+      toolInput,
+      verdict,
+      judge: judgeResult,
+      policy: {
+        allowPreClear: broker.config.allowPreClear,
+        preClearConfidence: broker.config.preClearConfidence,
+      },
+    });
+    return decision && typeof decision.outcome === 'string' ? decision : null;
+  } catch (err) {
+    console.error(`[shieldcortex] ⚠️ approval broker error: ${err?.message ?? err} — refusing as usual`);
+    return null;
+  }
+}
+
+/** One-line description of a refused call, for the operator's approve list. */
+function describeToolCall(toolName, toolInput) {
+  const input = toolInput ?? {};
+  const surface =
+    input.command ?? input.file_path ?? input.path ?? input.url ?? input.pattern ?? '';
+  const text = typeof surface === 'string' ? surface : JSON.stringify(surface);
+  return text ? `${toolName}: ${text}` : toolName;
+}
+
 // ==================== FALLBACK (guard load/eval failure — WS2) ====================
 // Deliberately DUPLICATED from tool-action-guard.ts's CATASTROPHIC list, not
 // imported — it must keep working when the dist build is the thing that's
@@ -170,6 +295,8 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  // Guard's own approval store (#118): agent-side writes here mint approvals.
+  { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
@@ -227,6 +354,9 @@ function summariseToolArgs(args) {
   return parts.join(' ').slice(0, 160);
 }
 
+// `extra` carries whatever the call site needs on the row: #139's
+// permissionMode, #143's broker verdict. One slot rather than one parameter per
+// feature — the two landed independently and each had added its own.
 function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
   try {
     const auditDir = join(homedir(), '.shieldcortex', 'audit');
@@ -248,6 +378,10 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       ts: new Date().toISOString(),
       action,
       outcome,
+      // #143's broker verdict arrives through here as `{ broker: … }`, so
+      // "was a model consulted, and what did it say?" stays answerable from the
+      // audit stream alone — same field and shape the OpenClaw plugin emits.
+      // #139 adds `permissionMode` + its outcome the same way.
       ...extra,
     };
     appendFileSync(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n');
@@ -284,16 +418,22 @@ function emitDecision(permissionDecision, reason) {
  * differs — so `action` is unchanged and the distinction lives in `outcome`
  * plus the recorded `permissionMode`.
  */
-function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason) {
+function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit) {
+  // `brokerAudit` rides along so a brokered call keeps its judge verdict on the
+  // row whichever way this goes (#143 + #139): "was a model consulted, and did
+  // the harness even have a prompt surface?" must both be answerable from one
+  // audit line.
+  const broker = brokerAudit ? { broker: brokerAudit } : {};
   const noPromptSurface = noPromptSurfaceReason(permissionMode);
   if (!noPromptSurface) {
-    writeAuditEntry(toolName, auditVerdict, toolInput, action, 'asked', { permissionMode });
+    writeAuditEntry(toolName, auditVerdict, toolInput, action, 'asked', { permissionMode, ...broker });
     emitDecision('ask', reason);
     return;
   }
   writeAuditEntry(toolName, auditVerdict, toolInput, action, 'denied_no_prompt_surface', {
     permissionMode: typeof permissionMode === 'string' ? permissionMode : null,
     noPromptSurfaceReason: noPromptSurface,
+    ...broker,
   });
   console.error(
     `[shieldcortex] action-guard DENIED ${toolName}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
@@ -448,13 +588,95 @@ process.stdin.on('end', async () => {
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
+    // One-shot exact-command approval (#118). An operator who ran
+    // `shieldcortex approve <hash>` in a terminal gets exactly one pass for
+    // exactly this call; the approval is spent here. Everything else falls
+    // through to the normal refusal, which now carries the hash to approve.
+    const approvals = await loadApprovals();
+    if (approvals) {
+      try {
+        const spent = approvals.consumeApproval(toolName, toolInput);
+        if (spent) {
+          writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved');
+          console.error(
+            `[shieldcortex] action-guard: consumed operator approval ${spent.hash.slice(0, 12)} for ${toolName} (single use).`,
+          );
+          process.exit(0); // Defer to the harness's own permission system.
+        }
+      } catch {
+        // An unusable approvals store must never widen OR wedge the guard —
+        // fall through to the broker and then to the standard refusal below.
+      }
+    }
+
+    // ── AI-assisted approval broker (#143) ────────────────────────────────
+    // Runs AFTER the one-shot approval is consumed, deliberately: an operator
+    // who typed `shieldcortex approve <hash>` in their own terminal has already
+    // spoken, and the AI never overrules the human. It runs BEFORE the pending
+    // record is written, so a call the judge hardens is not simultaneously
+    // offered up for approval.
+    const broker = await loadBroker(cfg.broker);
+    const brokered = broker ? await runBrokerPass(broker, toolName, toolInput, verdict) : null;
+
+    if (brokered?.outcome === 'harden') {
+      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'auto_denied', { broker: brokered.audit });
+      console.error(`[shieldcortex] approval broker HARDENED ${toolName} to a denial: ${brokered.reason}`);
+      // No approve-hash offered. Hardening exists precisely for the case where
+      // the request is trying to talk somebody into saying yes.
+      emitDecision('deny', `ShieldCortex approval broker: ${brokered.reason}`);
+      process.exit(0);
+    }
+
+    if (brokered?.outcome === 'pre_clear') {
+      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved', { broker: brokered.audit });
+      console.error(`[shieldcortex] approval broker PRE-CLEARED ${toolName}: ${brokered.reason} [${verdict.signals.join(', ')}]`);
+      // No decision emitted — the guard defers to Claude Code's own permission
+      // system rather than answering "allow". ShieldCortex narrows or stays
+      // neutral; it never WIDENS what the user's own settings permit.
+      process.exit(0);
+    }
+
+    // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact.
+    if (approvals) {
+      try {
+        approvals.recordPending({
+          tool: toolName,
+          input: toolInput,
+          summary: describeToolCall(toolName, toolInput),
+          signals: verdict.signals,
+        });
+      } catch {
+        // As above: never widen, never wedge.
+      }
+    }
+
+    let message = `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`;
+    if (approvals) {
+      try {
+        const hash = approvals.hashToolCall(toolName, toolInput).slice(0, 12);
+        message += ` — to allow this exact command once, run in YOUR terminal: shieldcortex approve ${hash}`;
+      } catch {
+        // Hash is a nicety; never let it break the refusal path.
+      }
+    }
+    // #139: ask ONLY where a prompt can actually be raised. Under
+    // bypassPermissions, Claude Code 2.1.76 converts a hook `ask` into `allow`
+    // and executes — the guard looks like it fired, the audit row agrees, and
+    // the command still ran. `deny` is the one verdict every version honours
+    // unconditionally, so an unconfirmable prompt surface is treated as
+    // promptless rather than as fine.
+    //
+    // Placed at the END of the chain on purpose: the one-shot approval (#118)
+    // and the broker (#143) both get their say first, so an operator who
+    // already approved, or a call the judge hardened, is unaffected by this.
     emitApprovalRequired(
       toolName,
       verdict,
       toolInput,
       permissionMode,
       'require_approval',
-      `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`,
+      message,
+      brokered?.audit,
     );
     process.exit(0);
   } catch (error) {

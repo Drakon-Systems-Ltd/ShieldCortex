@@ -33,16 +33,23 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     fs.writeFileSync(fullPath, Buffer.alloc(bytes, 0));
   }
 
-  it('points at clearing backups when stale migration snapshots dominate', async () => {
+  it('backups dominating the directory is NOT a failure — they no longer spend the budget (#153)', async () => {
+    // This test previously asserted `fail` here, which encoded the #153
+    // incoherence as the expected behaviour: the planner was allowed to write
+    // a safety copy up to the limit, and doctor then called being at the limit
+    // broken. An operator could only clear that failure by deleting their own
+    // rollback point. Backups are now measured and reported but exempt from
+    // the budget, so this state is healthy — and the remedy must not blame
+    // them for an overage they can no longer cause.
     writeBytes('memories.db', 4 * KB);
     writeBytes('memories.db.pre-backfill-1700000000000', 40 * KB);
     writeBytes('memories.db.empty-live.1700000000001', 20 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
-    expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/stale DB backups/);
-    expect(result.fix).toMatch(/rm ~\/\.shieldcortex\/memories\.db/);
-    // The whole point: NOT the old blanket "Run memories prune/dedupe" advice.
-    expect(result.fix).not.toMatch(/^Run `shieldcortex memories prune/);
+    expect(result.status).toBe('pass');
+    // Still visible to the operator, reported alongside the budgeted figure.
+    expect(result.message).toMatch(/backups/i);
+    // #148's language rules still hold wherever backups are described.
+    expect(`${result.fix ?? ''} ${result.message}`).not.toMatch(/stale DB backups/i);
   });
 
   it('includes a DB / backups / logs breakdown in the message', async () => {

@@ -6,7 +6,8 @@ import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
 } from './openclaw-plugin-state.js';
-import { readLatestBootRoster } from './openclaw-gateway-roster.js';
+import { readLatestBootRoster, findRegistrationSince } from './openclaw-gateway-roster.js';
+import { readRunningGatewayProcess } from './openclaw-gateway-process.js';
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
@@ -82,6 +83,13 @@ export interface ReconcileInput {
    * installed and enabled. Null means "cannot prove", never "healthy".
    */
   liveRoster?: string[] | null;
+  /**
+   * A plugin registration line was sighted AFTER the boot roster snapshot
+   * (#142). The snapshot races registration (169 ms margin observed live), so
+   * absence-from-snapshot plus a later sighting is ambiguous — CLI processes
+   * write identical lines — and must not convict the host as UNPROTECTED.
+   */
+  registrationSeenAfterBoot?: boolean;
 }
 
 export type PluginLoadState =
@@ -89,6 +97,7 @@ export type PluginLoadState =
   | 'not-installed'
   | 'enabled-not-loaded'
   | 'index-unreadable'
+  | 'load-unproven'
   | 'version-regressed'
   | 'conflicted-metadata'
   | 'duplicate-install';
@@ -217,6 +226,16 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   if (!installed) {
     reasons.push('plugin not installed on this host (no config, installs.json, index record, or on-disk build)');
     return { ...base, state: 'not-installed', severity: 'ok', recommendedAction: 'install', reasons };
+  }
+
+  // 2a. #142 guard on rule 2: the boot line is a snapshot and registration
+  //     races it. When a registration line postdates the snapshot, absence
+  //     from the snapshot cannot convict — but CLI processes write identical
+  //     lines, so it cannot acquit either. Report the ambiguity as a warn and
+  //     point at the canary, never a confident UNPROTECTED on a maybe.
+  if (enabledInConfig && loadedInLiveRoster === false && input.registrationSeenAfterBoot === true) {
+    reasons.push('absent from the boot roster snapshot, but a plugin registration was sighted after that snapshot — registration races the boot line and CLI processes write identical lines, so load state is UNPROVEN; the consent-gated live canary is the arbiter');
+    return { ...base, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
   // 2. THE #103 silent drop: the RUNNING gateway's boot roster does not name
@@ -541,9 +560,27 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   // The default roster read touches the host's real gateway log dir (/tmp/openclaw),
   // which no `home` override can redirect — so it must never fire under Jest, or a
   // test would silently inherit THIS box's roster. Tests inject readLiveRoster.
+  // #142/#150: bound the boot line by the RUNNING gateway's process start
+  // (from OpenClaw's boot-lifecycle table). A line from a previous process, or
+  // one we cannot bound, yields null — "cannot prove", never a stale answer.
+  let bootAtMs: number | null = null;
   const readRoster =
     options.readLiveRoster ??
-    (() => (process.env.JEST_WORKER_ID !== undefined ? null : (readLatestBootRoster()?.plugins ?? null)));
+    (() => {
+      if (process.env.JEST_WORKER_ID !== undefined) return null;
+      const proc = readRunningGatewayProcess(home);
+      if (!proc) return null;
+      const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
+      bootAtMs = boot?.atMs ?? null;
+      return boot?.plugins ?? null;
+    });
+  const liveRoster = readRoster();
+  const registrationSeenAfterBoot =
+    liveRoster != null &&
+    !liveRoster.includes(pluginId) &&
+    process.env.JEST_WORKER_ID === undefined &&
+    bootAtMs != null &&
+    findRegistrationSince(bootAtMs) != null;
   return {
     pluginId,
     expectedVersion: options.expectedVersion,
@@ -552,7 +589,8 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     index: readIndex(home),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     projectDirs: scanProjectDirs(home, pluginId),
-    liveRoster: readRoster(),
+    liveRoster,
+    registrationSeenAfterBoot,
   };
 }
 

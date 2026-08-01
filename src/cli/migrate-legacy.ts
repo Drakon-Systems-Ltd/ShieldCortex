@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import readline from 'readline';
 import Database from 'better-sqlite3';
 import { deriveProjectKey } from '../context/derive-project-key.js';
+import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
 
 interface LegacyMemoryRow {
   id: number;
@@ -749,6 +750,9 @@ interface RepairReport {
   applied: number;
   logPath?: string;
   backupPath?: string;
+  /** Set when the repair declined to run — currently only when a safety
+   *  backup would not fit inside the disk budget (#148). */
+  aborted?: string;
 }
 
 function parseMapFlags(args: string[]): Record<string, string> {
@@ -909,10 +913,39 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
       }
     }
 
+    // Budget-aware safety backup (#148). This copy is a full duplicate of the
+    // database, and on a host whose DB is a large fraction of the disk limit it
+    // used to consume the entire remaining budget without looking — turning a
+    // maintenance command doctor had just RECOMMENDED into the thing that put
+    // the host over its own limit, with no way to win by hand because the next
+    // repair simply recreated it.
+    const plan = planBackup({ dbPath, limitBytes: DISK_LIMIT_BYTES });
+    if (plan.action === 'refuse') {
+      console.error(`Aborted — ${plan.reason}`);
+      report.aborted = plan.reason;
+      return report;
+    }
+    // Reclaim first when we are tight, so the new copy has somewhere to go.
+    if (plan.prune.length > 0) {
+      const removed = pruneOldBackups(path.dirname(dbPath), path.basename(dbPath), 0);
+      if (removed.length > 0) console.log(`Pruned ${removed.length} superseded backup(s) to make room.`);
+    }
+
     const backupPath = `${dbPath}.bak.${new Date().toISOString().replace(/[:.]/g, '-')}`;
     fs.copyFileSync(dbPath, backupPath);
     report.backupPath = backupPath;
     console.log(`Backup: ${backupPath}`);
+
+    // ...then prune UNCONDITIONALLY, keeping only the copy just written.
+    //
+    // Pruning only when short of room would still let backups accumulate on a
+    // healthy host until it filled — the same failure that took a fleet box to
+    // its limit, merely deferred. It also would not match what doctor now tells
+    // the operator happens. One repair, one rollback point.
+    const superseded = pruneOldBackups(path.dirname(dbPath), path.basename(dbPath), 1);
+    if (superseded.length > 0) {
+      console.log(`Pruned ${superseded.length} superseded backup(s); the newest is your rollback point.`);
+    }
 
     const update = db.prepare(
       `UPDATE memories SET project = ? WHERE project = ? ${typeFilter}`

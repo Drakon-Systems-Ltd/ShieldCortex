@@ -13,34 +13,44 @@ import type { PluginIndexRow } from '../integrations/openclaw-plugin-index.js';
 /**
  * Honest-state self-check (#74 deliverable 2). A security plugin must NEVER
  * report success unless BOTH proofs hold:
- *   (a) the loaded roster (plugins_json) shows the plugin actually loaded, AND
+ *   (a) the RUNNING gateway's boot roster names the plugin, AND
  *   (b) a live enforcement canary confirms the interceptor is denying + audited.
  * Absence of either proof is a hard fail — silence is never success.
+ *
+ * These fixtures were once named `loadedRoster` / `droppedRoster` while holding
+ * INSTALL-index rows, which is the misconception #152 was made of: the index
+ * records what is installed and enabled, never what the gateway loaded. They
+ * are named for what they actually are now, and every case supplies the live
+ * roster separately — because that is the only thing that can grant the proof.
  */
 const PLUGIN = 'shieldcortex-realtime';
 
-const loadedRoster: PluginIndexRow = {
+const indexEnabled: PluginIndexRow = {
   installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2' } },
   plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'npm' }],
   warning: null,
 };
-const droppedRoster: PluginIndexRow = {
+const indexMissing: PluginIndexRow = {
   installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2' } },
   plugins: [{ pluginId: 'brave', enabled: true, origin: 'npm' }],
   warning: 'conflicting plugin install metadata for: shieldcortex-realtime',
 };
 const passingCanary: CanaryResult = { ran: true, denied: true, auditEntryFound: true };
 
+/** The gateway's own boot line — the authoritative roster (#152). */
+const liveLoaded = [PLUGIN, 'anthropic'];
+const liveAbsent = ['anthropic', 'brave'];
+
 describe('evaluateSelfCheck — both-proofs-or-fail', () => {
   it('passes only when roster shows loaded AND canary denied + audited', () => {
-    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: loadedRoster, canary: passingCanary });
+    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: indexEnabled, liveRoster: liveLoaded, canary: passingCanary });
     expect(v.ok).toBe(true);
     expect(v.rosterProof).toBe(true);
     expect(v.canaryProof).toBe(true);
   });
 
   it('FAILS when the plugin is loaded but the canary never ran (headless/no-consent)', () => {
-    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: loadedRoster, canary: { ran: false, denied: false, auditEntryFound: false } });
+    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: indexEnabled, liveRoster: liveLoaded, canary: { ran: false, denied: false, auditEntryFound: false } });
     expect(v.ok).toBe(false);
     expect(v.rosterProof).toBe(true);
     expect(v.canaryProof).toBe(false);
@@ -48,20 +58,20 @@ describe('evaluateSelfCheck — both-proofs-or-fail', () => {
   });
 
   it('FAILS (the #74 drop) when the canary passes but the roster omits the plugin', () => {
-    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: droppedRoster, canary: passingCanary });
+    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: indexMissing, liveRoster: liveAbsent, canary: passingCanary });
     expect(v.ok).toBe(false);
     expect(v.rosterProof).toBe(false);
     expect(v.reasons.join(' ')).toMatch(/roster|loaded/i);
   });
 
   it('FAILS when the canary ran but the op was NOT denied (interceptor lenient)', () => {
-    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: loadedRoster, canary: { ran: true, denied: false, auditEntryFound: false } });
+    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: indexEnabled, liveRoster: liveLoaded, canary: { ran: true, denied: false, auditEntryFound: false } });
     expect(v.ok).toBe(false);
     expect(v.canaryProof).toBe(false);
   });
 
   it('FAILS when denied but no audit entry appeared (cannot prove the interceptor fired)', () => {
-    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: loadedRoster, canary: { ran: true, denied: true, auditEntryFound: false } });
+    const v = evaluateSelfCheck({ pluginId: PLUGIN, index: indexEnabled, liveRoster: liveLoaded, canary: { ran: true, denied: true, auditEntryFound: false } });
     expect(v.ok).toBe(false);
     expect(v.canaryProof).toBe(false);
   });
@@ -95,7 +105,8 @@ describe('runPluginSelfCheck — never touches the live gateway under Jest', () 
     // Inject a passing probe + a synthetic loaded roster reader.
     const v = await runPluginSelfCheck(tmpHome, {
       pluginId: PLUGIN,
-      readIndex: () => loadedRoster,
+      readIndex: () => indexEnabled,
+      readLiveRoster: () => liveLoaded,
       canaryProbe: async () => passingCanary,
     });
     expect(v.ok).toBe(true);

@@ -4,6 +4,107 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.22] - 2026-07-31
+
+**The backup budget is now tested where it is wired, not just where it is defined — and the storage limits live in one place without pretending two different policies are the same number.**
+
+### Fixed
+
+- **A repair no longer accumulates backups on a healthy host (#148 follow-up, PR #151).** 4.47.21 pruned superseded copies only when it was short of room. On a host with headroom, every repair still left another full-size copy behind, so the disk filled anyway — the original failure merely deferred — and `doctor`'s new text promised an unconditional prune the code did not perform. The prune now runs after every successful backup, keeping only the copy just written. One repair, one rollback point.
+
+### Added
+
+- **Wiring tests for the backup budget.** `backup-budget.test.ts` covered the planner in isolation; deleting its call site in `migrate-legacy.ts` left all twelve tests green while the bug was fully restored — the same mechanism-guarded/wiring-not shape as #146 and #94. New tests drive the real `repair-project-keys` path and were verified to fail with the call site removed. They also assert the refusal leaves the data untouched: declining to take a safety copy must decline the destructive rewrite too, or a disk problem is traded for data written with no rollback point.
+
+### Changed
+
+- **Storage limits consolidated into `src/limits.ts`** — previously three separate `100 * 1024 * 1024` literals across `database/init.ts`, `cli/doctor.ts` and the backup planner.
+  - **Deliberately still two constants, not one.** `DIRECTORY_BUDGET_BYTES` bounds everything under `~/.shieldcortex` (what `doctor` reports on, what the backup planner must respect); `MAX_DB_FILE_BYTES` bounds the live database file alone and blocks it when exceeded. They share a number today but are different policies, and collapsing them would have been a bug dressed as a tidy-up. Named apart so a change to one cannot silently move the other.
+  - **Known incoherence, surfaced rather than papered over:** with both at 100 MB, a 99 MB database passes the file cap while already exceeding the whole directory budget on its own — before a byte of WAL, audit log or backup. Separating the two numbers is a policy decision with migration consequences for existing hosts, so it is documented in `limits.ts` rather than quietly changed.
+
+### Notes
+
+- One pre-existing test in this area was vacuous rather than wrong: after its first round there was nothing left to rewrite, so no backup was ever taken and it passed with the wiring removed entirely. It now forces a real rewrite each round and asserts one happened. Worth stating plainly — across this release train, three separate defects were being held up by tests that either asserted the bug or proved nothing.
+
+## [4.47.21] - 2026-07-31
+
+**A maintenance backup can no longer spend the operator's entire disk budget (#148). The repair `doctor` recommends was the thing pushing large-DB hosts over their own limit.**
+
+### Fixed
+
+- **`repair-project-keys` sizes its safety backup against the disk budget before writing it (#148, PR #149).** Found on a fleet host: `doctor` warned about a project-key collision and recommended `--fix-project-keys`; that repair copied the whole 48 MB database with no headroom check, taking the host from 51.7 MB to 98.8 MB against its own 100 MB limit. The next `doctor` then reported a disk **failure caused by the fix it had itself recommended**. Clearing the file by hand did not help — the next repair recreated it. An unwinnable loop that left the host one write short of a failing memory system.
+  - The copy is now planned against the accounted limit and reclaims space from superseded backups when that creates room.
+  - When even pruning cannot make room it **refuses rather than overfilling**, naming the sizes and a way forward. An operator told "I can't take a safety copy" can act; one whose disk silently filled cannot.
+  - Superseded backups are pruned on write — the behaviour `doctor`'s own remedy text has been promising since 4.45.1 while nothing implemented it. The prune matches only ShieldCortex's own backup shape and never touches the live database, its WAL/shm siblings, or the lock.
+- **`doctor`'s disk remedy no longer misdescribes what it found.** It called the dominant file a "stale DB backup (migration snapshot)" and asserted "v4.45.1+ also auto-prunes them on start". On the affected host the file was a safety copy written minutes earlier by a recommended repair, the host was on 4.47.20, and no prune had happened. The text now describes what these files actually are and notes that the newest is the rollback point.
+
+### Notes
+
+- `DISK_LIMIT_BYTES` is now exported so the backup path and the check that reports on it agree. `database/init.ts` and `cli/doctor.ts` still carry their own copies of the same number — three copies of a limit is three chances to drift, and folding them together is worth doing.
+- A pre-existing test asserted the old remedy wording, including the false auto-prune claim — the second time this week a test had encoded a defect as expected behaviour. It now asserts the corrected contract and pins that both false claims are gone.
+
+## [4.47.20] - 2026-07-31
+
+**Hook commands must RESOLVE, not merely exist (#146). A fleet sweep found three of four boxes where every Claude Code hook — including the Action Guard — was configured, reported healthy, and dead.**
+
+### Fixed
+
+- **The installer wrote a bare command name, so enforcement depended on the operator's shell (#146, PR #147).** `shieldcortex hook pre-tool` only resolves if `shieldcortex` is on the PATH *of the non-interactive shell the harness spawns hooks in*. With a user-level npm prefix — the standard sudo-free setup — plus a distro `.bashrc` that extends PATH below its own `if not running interactively, return` guard, every hook fails with `command not found` while the operator's own terminal resolves it perfectly. Measured on four production boxes: three could not resolve it; two were running **zero Claude Code enforcement** for an unknown period.
+  - **Install now writes an absolute path.** The binary is located via the npm prefix and verified executable before use; the path is shell-quoted. If nothing resolves, the command degrades to the historical bare name rather than writing a path that is guaranteed not to exist.
+  - **Doctor now verifies by running.** The hook check asks the question the harness asks — resolve this token the way `sh -c` would — instead of the question it used to ask, which was whether an entry existed in `settings.json`. A configured-but-unresolvable hook is now a **failure**, not a pass: an operator who believes they are protected is worse off than one who knows they are not. Passing hooks now report "installed and resolving".
+  - **Upgrade repairs installs that are already wrong.** Fixing the template alone would leave every previously-installed box silently dead forever, since a bare command that does not resolve fails without a sound. The repair runs on every install and upgrade, is idempotent, and handles the env-var-prefixed form (`VAR=1 shieldcortex hook …`) that a naive prefix match skips.
+
+### Notes
+
+- This is the same false-green family as #94 (a stale plugin behind a current-looking tick) and #145 (`repair` reporting a pre-remediation state after remediating). The recurring defect is checks that verify **configuration** rather than **behaviour**.
+- One pre-existing test asserted the bare command and therefore encoded the bug as expected behaviour. It now asserts the real contract: the command targets the right subcommand, and is absolute and resolvable wherever a binary exists.
+- Operators can check any host directly with `sh -c "shieldcortex --version"` — from a script, not from an interactive prompt, since the interactive prompt is exactly what hides this.
+
+## [4.47.19] - 2026-07-31
+
+**The AI-assisted approval broker (#143): a model judges intent between the guard's verdict and the operator, and can only ever move the answer toward caution. Off by default.**
+
+The Action Guard's `require_approval` was a wall with no door on the Claude Code hook path. 4.47.18 gave it a terminal fallback (`shieldcortex approve <hash>`); this release adds the layer that decides whether the operator needs to be asked at all — and, when they are asked and do not answer, what silence means.
+
+### Added
+
+- **Approval broker decision core (`approval-broker.ts`).** Pure and synchronous — no model, no network, no clock — so the part that must never be wrong is exhaustively testable. Six invariants, each pinned by a test: catastrophic is never brokered; the judge may only escalate toward caution; a pre-clear requires ALL of reversible-signals + in-context + confident + injection-free; an absent or malformed judge holds for a human; the timeout is asymmetric; config may tighten but never loosen.
+  - **The reversibility band is the crux.** Everything reaching the broker is already dangerous-tier, so "pre-clear the low-risk ones" needed a real definition. A signal qualifies only if it is BOTH reversible AND stays on the host — five do today (`local-package-install`, `install-package`, `move-or-copy`, `change-permissions`, `git-mutate`). Deletion, privilege escalation, egress, scheduling, service control, registry execution, force-push and the guard's own state are all excluded; data leaving the host is irreversible by definition. An unrecognised signal is never pre-clearable.
+  - **Measured ceiling.** Replayed against 429 real stops from a production box: only 39 (9.1%) are pre-clearable at all, before any model or threshold is involved. The other 90.9% reach a human regardless. `scripts/preclear-ceiling.mts` ships so operators can measure their own.
+- **Judge layer (`approval-judge.ts`), built assuming the request is hostile.** A fresh, tool-less, single-shot classifier that never sees the agent's transcript — a poisoned session cannot argue for its own approval. The request sits inside a delimited block the system prompt names as untrusted, forged delimiters are defanged, and the prompt is length-bounded. Parsing is strict: any malformed field yields null, and null means hold. An out-of-range confidence is distrusted rather than clamped up.
+- **Pool-inherited model access — no new keys, no new bill, no new login.** On OpenClaw, a one-shot completion through the gateway's own model pool via an optional `context.invokeModel` seam; absent on every gateway build today, which correctly yields no judge and a hold. On the Claude Code hook, the already-logged-in CLI with every tool disabled, safe-mode, no session persistence, an allowlisted environment (the operator's Claude auth and basic plumbing only — no repo tokens, no cloud credentials), a scratch working directory and the prompt on stdin rather than argv.
+- **Asymmetric timeout.** Only a pre-cleared request may proceed on silence. Everything else auto-denies and queues for the operator, because an attacker fires when nobody is watching.
+- **Broker audit rows.** Every decision records outcome, judge assessment, confidence, injection flag, in-context flag and reason alongside the existing guard fields, so "was a model consulted, what did it say, and what did that change?" is answerable from the audit stream alone.
+
+### Notes
+
+- **Off by default** (`enabled: false`). Absent or disabled config is byte-for-byte the pre-#143 code path.
+- The judge spends the operator's own rate limit, so it runs only on dangerous-tier calls and is bounded per minute; exhausting the budget yields no judge, which yields a hold.
+- The operator always outranks the model: a live one-shot approval is consumed and the call proceeds *before* the broker runs.
+- Known limits, deliberately shipped visible: the OpenClaw pre-clear path has never run against a real model because no gateway exposes the seam; the Claude Code hook can harden but not pre-clear, since it has no honest session source and the transcript is precisely what the judge must not read; the 0.9 confidence floor is an a-priori default pending calibration.
+
+## [4.47.18] - 2026-07-31
+
+**The Action Guard precision pass: the guard now asks "is this an action?" — not "does this text look dangerous?" — and the operator finally gets the approval mechanism the refusal text always promised (#118, #89).**
+
+Measured on a production box before this release: 34% of 1,271 real tool calls over 25 days were gated, most of them benign. Replaying the 429 distinct stops from that log against this release: 312 now pass, 117 still stop, and every attack fixture still blocks at its existing tier.
+
+### Added
+
+- **One-shot exact-command approvals (#118, PR #127).** The dangerous-tier refusal said "approve this exact command" and no code implemented it — in hook mode `require_approval` was operationally a hard denial. Now the refusal names a hash; `shieldcortex approve <hash>` in a terminal grants exactly that (tool, input) pair one pass within 10 minutes (`--ttl` to change), consumed on first use. Granting requires stdin AND stdout to be TTYs so an agent with piped stdio cannot approve its own blocked command, and there is deliberately no env-var escape hatch. The store is 0600, written atomically, self-pruning; a corrupt store reads as empty (nothing approved). Catastrophic tier returns before approvals are ever consulted.
+  - **Review catch, shipped with the feature:** the store file itself is now inside the guard perimeter — any command naming the approvals directory earns `require_approval` (`touch-approval-store`), in the guard and both degraded-mode fallback lists, because a same-user agent editing the JSON directly would otherwise mint its own approval.
+
+### Fixed
+
+- **Payload vs action: typed scan regions (#89, PR #141).** The #138 folding fix closed the script-file bypass but read every byte of a folded script as if it were shell about to execute — so an analysis script that merely *contained* a force-push-shaped string in a regex table was blocked as a force-push. The guard now types each scan region: shell text is scanned exactly as before; inside interpreter source (python/node heredocs and folded files), comments and string literals are payload, not commands — unless the literal is the argument of a shell-out sink, which stays a command. Caller-written `-c`/heredoc bodies get no downgrade, preserving #84's adversarial floor, and the classifier fails closed: over the length cap or out of re-scan budget, a match counts as executed.
+  - **Path targets are not verbs (review catch):** `touch-sensitive-path` and `touch-approval-store` skip the interpreter-source downgrade entirely — a script that names a private key or the approvals store in a literal does so precisely because it is about to open it. URL and quoted-data exemptions still apply.
+- **Two false negatives closed by the same pass (#89, PR #141).** `timeout` was missing from the scheduler and registry-exec wrapper sets, so a crontab edit or a registry-package execution behind `timeout` was not gated at all. Wrapper sets now cover `timeout`, `setsid`, `ionice`, `command` and `exec`.
+- **A variable named `at` is not the at(1) scheduler (#89, PR #135).** The command-position anchor treats every line start as a command boundary, so an `at = token` assignment in an embedded script body fired `modify-scheduler` and blocked a read-only Xero pull. `at` immediately followed by `=` is an assignment in every language the guard scans; at(1)'s grammar has no `=` in that slot, so the carve-out costs no detection. Each allow-case ships a must-still-fire sibling.
+
+### Notes
+
+- FP classes from the same corpus deliberately NOT addressed here, tracked on #89: known-benign `npx` dev binaries read as registry-exec, venv-scoped pip installs read as host installs, recognised-CLI egress (`op`, `gh`, `flyctl`), and messaging CLIs matching service-control verbs. Benign recursive deletes of build dirs remain auto-denied at catastrophic tier — that is a tier decision, not a precision bug, and it is documented with numbers on the issue.
+
 ## [4.47.17] - 2026-07-30
 
 **Security: the Action Guard now scans the script a command invokes, not just the command string. Every rule was previously bypassable by moving the command into a file.**

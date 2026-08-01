@@ -638,9 +638,11 @@ ${bold}COMMANDS${reset}
   ${cyan}dashboard${reset}             Open the local security dashboard
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
-  ${cyan}doctor${reset}                Diagnose installation issues
+  ${cyan}doctor${reset}                Diagnose installation issues (exits 1 on a ❌; --strict also fails on ⚠️)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
+  ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
+                        command (no hash = list recent refusals; --ttl N minutes)
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
@@ -827,6 +829,14 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'sessions') {
     const { handleSessionsCommand } = await import('./cli/sessions.js');
     await handleSessionsCommand(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "approve" subcommand (#118) — one-shot exact-command Action Guard
+  // approvals. Granting requires a TTY; see src/cli/approve.ts for why.
+  if (process.argv[2] === 'approve') {
+    const { runApprove } = await import('./cli/approve.js');
+    process.exitCode = runApprove(process.argv.slice(3));
     return;
   }
 
@@ -1292,7 +1302,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {

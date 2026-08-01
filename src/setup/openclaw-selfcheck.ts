@@ -12,6 +12,8 @@ import {
   readInstalledRealtimePluginVersion,
   resolveRealtimePluginInstallPath,
 } from '../integrations/openclaw-plugin-state.js';
+import { readLatestBootRoster, findRegistrationSince, type BootRoster } from '../integrations/openclaw-gateway-roster.js';
+import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
 
 /**
@@ -23,16 +25,41 @@ import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
  * it was silently dropped from the loaded roster — the host was unprotected.
  *
  * So a flow may report success ONLY when BOTH independent proofs hold:
- *   (a) ROSTER  — OpenClaw's own loaded roster (`installed_plugin_index.
- *       plugins_json`) carries an enabled entry for the plugin, and
+ *   (a) ROSTER  — the RUNNING gateway's own boot line names the plugin, and
  *   (b) CANARY  — a live enforcement probe confirms the interceptor actually
  *       denied a known-bad operation AND wrote the corresponding audit entry.
+ *
+ * #152 (Michael's MacBook, 31 Jul 2026): the roster proof used to read
+ * `installed_plugin_index.plugins_json` and describe it as "the loaded roster".
+ * It is not — it records what OpenClaw has INSTALLED and enabled, which stays
+ * true while the gateway boots without the plugin. One repair run therefore
+ * printed "ABSENT from the RUNNING gateway boot roster" and "present + enabled
+ * in the loaded roster" seconds apart, and the check written to catch the #74
+ * fail-open returned PASS on a host sitting in it. The reconciler had already
+ * been fixed for this in #103; this module had not. The boot line is now the
+ * only thing that can grant the roster proof.
  *
  * Absence of either proof is a HARD FAIL. Silence is never success. The live
  * canary is guarded exactly like the gateway restart (JEST + explicit consent
  * env) so tests and this frozen box never trigger a live gateway operation;
  * callers inject a probe to exercise the wiring.
  */
+
+/**
+ * The ONE command that proves enforcement live. Defined here, printed nowhere
+ * else from a literal (#154).
+ *
+ * Field evidence, 1 Aug 2026: `doctor` printed two different commands for this
+ * same proof in a single run — `shieldcortex openclaw status` on the Action
+ * guard line, `shieldcortex repair` on the plugin line. Only the second reached
+ * the self-check; the first accepted the env var and silently ignored it. An
+ * operator followed the first, got a directory listing, and learned nothing
+ * about whether the host was protected.
+ *
+ * Both surfaces now run the canary, and both name it from this constant, so a
+ * future divergence has to be deliberate rather than accidental.
+ */
+export const LIVE_CANARY_COMMAND = 'SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex openclaw status';
 
 export interface CanaryResult {
   /** Whether the live enforcement probe actually executed. */
@@ -44,9 +71,25 @@ export interface CanaryResult {
   detail?: string;
 }
 
+/**
+ * What we actually know about the RUNNING gateway's roster (#152).
+ *
+ * The three states must never collapse into each other:
+ *   - `loaded`   — the gateway's own boot line names the plugin. Proof.
+ *   - `absent`   — the boot line was read and does NOT name it. The #74/#103
+ *                  fail-open, proven. A hard failure.
+ *   - `unproven` — the boot line could not be read. Absence of evidence.
+ *                  Not a pass, but equally not an accusation: #142 was a false
+ *                  "UNPROTECTED" produced by treating this state as `absent`.
+ */
+export type RosterProofState = 'loaded' | 'absent' | 'unproven';
+
 export interface SelfCheckVerdict {
   ok: boolean;
+  /** True ONLY for `rosterState === 'loaded'`. */
   rosterProof: boolean;
+  /** Which of the three roster answers we actually have. */
+  rosterState: RosterProofState;
   canaryProof: boolean;
   /** onDiskVersion >= expectedVersion (inert/true when no expectedVersion given). */
   versionProof: boolean;
@@ -57,6 +100,19 @@ export interface SelfCheckInput {
   pluginId: string;
   index: PluginIndexRow | null;
   canary: CanaryResult | null;
+  /**
+   * Plugin ids named on the RUNNING gateway's boot line, or null when it could
+   * not be read. This — not the install index — is the roster proof (#152).
+   */
+  liveRoster?: string[] | null;
+  /**
+   * A plugin registration line was sighted AFTER the boot roster snapshot
+   * (#142). Registration races the snapshot (169 ms margin observed live) and
+   * also happens mid-life, so absence-from-snapshot plus a later sighting is
+   * AMBIGUOUS — CLI processes write identical lines — and must yield
+   * `unproven`, never `absent`. It never grants `loaded`; the canary does.
+   */
+  registrationSeenAfterBoot?: boolean;
   /** The build the flow expects to be enforcing; enables the version proof. */
   expectedVersion?: string;
   /** Ground-truth on-disk version, for the version proof. */
@@ -76,15 +132,54 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
   const { pluginId, index, canary } = input;
   const reasons: string[] = [];
 
-  const rosterProof = Boolean(
+  // ── Roster proof (#152) ──────────────────────────────────────────────────
+  // The RUNNING gateway's boot line is the only ground truth for what was
+  // loaded. `installed_plugin_index.plugins_json` records what is INSTALLED and
+  // enabled — a plugin can sit in it, allow-listed and enabled, while the
+  // gateway booted without it. Reading the index here and calling it "the
+  // loaded roster" is what let this check pass on a host in exactly the
+  // condition it exists to catch.
+  const liveRoster = input.liveRoster ?? null;
+  const enabledInIndex = Boolean(
     index?.plugins?.some((p) => p.pluginId === pluginId && p.enabled === true),
   );
-  if (rosterProof) {
-    reasons.push('roster proof: plugin present + enabled in the loaded roster (plugins_json)');
-  } else if (index == null) {
-    reasons.push('roster proof FAILED: could not read the plugin install index (SQLite unavailable)');
+
+  let rosterState: RosterProofState;
+  if (liveRoster == null) {
+    rosterState = 'unproven';
+  } else if (liveRoster.includes(pluginId)) {
+    rosterState = 'loaded';
+  } else if (input.registrationSeenAfterBoot === true) {
+    // #142: the boot line is a snapshot and registration races it. A sighting
+    // after the snapshot means the snapshot cannot convict — but because CLI
+    // processes write identical lines, it cannot acquit either.
+    rosterState = 'unproven';
   } else {
-    reasons.push('roster proof FAILED: plugin ABSENT from the loaded roster — enabled in config but not loaded (the #74 silent drop)');
+    rosterState = 'absent';
+  }
+  const rosterProof = rosterState === 'loaded';
+
+  if (rosterState === 'loaded') {
+    reasons.push('roster proof: plugin named on the RUNNING gateway boot roster — actually loaded, not merely installed');
+  } else if (rosterState === 'absent') {
+    reasons.push('roster proof FAILED: plugin ABSENT from the RUNNING gateway boot roster — interceptor not loaded, host unprotected while status reports ON');
+    if (enabledInIndex) {
+      reasons.push('the SQLite install index lists it as enabled — install state, not load state; the live roster is authoritative');
+    }
+  } else if (liveRoster != null && input.registrationSeenAfterBoot === true) {
+    reasons.push(
+      'roster proof INCONCLUSIVE: absent from the boot roster snapshot, but a plugin registration was sighted after that snapshot — ' +
+        'registration races the boot line and CLI processes write identical lines, so neither loaded nor absent can be proven; ' +
+        'the consent-gated live canary is the arbiter',
+    );
+  } else {
+    // Unreadable. Say only what is true: we cannot prove it either way.
+    reasons.push(
+      'roster proof FAILED: could not read the running gateway boot roster (log rotated, wiped, or written elsewhere) — cannot confirm the interceptor is loaded' +
+        (enabledInIndex
+          ? '; the SQLite install index lists it as enabled, but that is install state, not load state'
+          : ''),
+    );
   }
 
   const canaryProof = Boolean(canary && canary.ran && canary.denied && canary.auditEntryFound);
@@ -115,7 +210,7 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     }
   }
 
-  return { ok: rosterProof && canaryProof && versionProof, rosterProof, canaryProof, versionProof, reasons };
+  return { ok: rosterProof && canaryProof && versionProof, rosterProof, rosterState, canaryProof, versionProof, reasons };
 }
 
 export interface RunSelfCheckOptions {
@@ -126,12 +221,27 @@ export interface RunSelfCheckOptions {
   readIndex?: (home: string) => PluginIndexRow | null;
   /** Injectable on-disk version reader (defaults to the live package.json read). */
   readOnDiskVersion?: (home: string) => string | null;
+  /**
+   * Injectable live-roster reader (defaults to the gateway's newest
+   * `http server listening` boot line, bounded by the running gateway's
+   * process start — a line from a previous process proves nothing, #142/#150).
+   * Returns null when it cannot be proven.
+   */
+  readLiveRoster?: () => string[] | null;
+  /**
+   * Injectable post-boot registration sighting (defaults to scanning the
+   * gateway logs for a `[shieldcortex] … registered` line newer than the boot
+   * roster snapshot, #142). Only consulted when the roster omits the plugin.
+   */
+  readRegistrationSeenAfterBoot?: () => boolean;
   /** Injectable live enforcement probe (defaults to the guarded real probe). */
   canaryProbe?: (home: string, pluginId: string) => Promise<CanaryResult>;
 }
 
 export interface SelfCheckRunResult extends SelfCheckVerdict {
   index: PluginIndexRow | null;
+  /** What the running gateway's boot line said, or null when unreadable. */
+  liveRoster: string[] | null;
   canary: CanaryResult;
 }
 
@@ -148,19 +258,53 @@ export async function runPluginSelfCheck(
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
   const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
   const readOnDisk = options.readOnDiskVersion ?? ((h: string) => readInstalledRealtimePluginVersion(h));
+  // The default roster read touches the host's real gateway log dir
+  // (/tmp/openclaw), which no `home` override can redirect — so it must never
+  // fire under Jest, or a test would silently inherit THIS box's roster and
+  // prove nothing. Tests inject readLiveRoster.
+  //
+  // #142/#150: the roster line is bounded by the RUNNING gateway's process
+  // start (from OpenClaw's own boot-lifecycle table). A boot line from a
+  // previous process, or one we cannot bound, yields null — "cannot prove",
+  // never a stale answer wearing a fresh badge.
+  let latestBoot: BootRoster | null | undefined;
+  const readRoster =
+    options.readLiveRoster ??
+    (() => {
+      if (process.env.JEST_WORKER_ID !== undefined) return null;
+      const proc = readRunningGatewayProcess(home);
+      if (!proc) return null;
+      latestBoot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
+      return latestBoot?.plugins ?? null;
+    });
+  // Only meaningful when the bounded boot line exists yet omits the plugin:
+  // a registration sighted after that snapshot means the snapshot cannot
+  // convict (#142's 169 ms race), though it also cannot acquit.
+  const readRegistration =
+    options.readRegistrationSeenAfterBoot ??
+    (() => {
+      if (process.env.JEST_WORKER_ID !== undefined) return false;
+      if (latestBoot?.atMs == null) return false;
+      return findRegistrationSince(latestBoot.atMs) != null;
+    });
   const probe = options.canaryProbe ?? defaultCanaryProbe;
 
   const index = readIndex(home);
+  const liveRoster = readRoster();
+  const registrationSeenAfterBoot =
+    liveRoster != null && !liveRoster.includes(pluginId) ? readRegistration() : false;
   const onDiskVersion = options.expectedVersion ? readOnDisk(home) : null;
   const canary = await probe(home, pluginId);
   const verdict = evaluateSelfCheck({
     pluginId,
     index,
+    liveRoster,
+    registrationSeenAfterBoot,
     canary,
     expectedVersion: options.expectedVersion,
     onDiskVersion,
   });
-  return { ...verdict, index, canary };
+  return { ...verdict, index, liveRoster, canary };
 }
 
 /** Injectable seams for the live enforcement canary, so the wiring is unit-tested. */

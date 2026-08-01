@@ -6,6 +6,11 @@ import path from 'path';
 import os from 'os';
 import { getAutoMemoryEnableConfig, setAutoMemoryEnableConfig } from '../cloud/config.js';
 import { readJsonConfigOrAbort, writeJsonConfigWithBackup } from './json-config.js';
+import {
+  resolveHookBinary,
+  needsAbsolutePathRepair,
+  repairHookCommand,
+} from './hook-command-resolution.js';
 
 // Resolved per call, not at import: an import-time constant freezes whichever
 // home os.homedir() saw when the module FIRST loaded, so any later redirection
@@ -81,6 +86,50 @@ const STOP_HOOK: HookEntry = {
 const SESSION_END_HOOK: HookEntry = {
   hooks: [{ type: 'command', command: 'shieldcortex hook session-end', timeout: 10 }],
 };
+
+/**
+ * Rewrite every ShieldCortex hook command to an absolute path (#146).
+ *
+ * Runs on EVERY install and upgrade, not just fresh installs. That is the whole
+ * point: fixing the template alone would leave every already-broken box broken
+ * forever, and those boxes cannot tell — a bare command that does not resolve
+ * fails silently and `doctor` used to report it green.
+ *
+ * Idempotent and conservative: an already-absolute command is untouched, a
+ * command that is not ours is untouched, and if no binary can be located
+ * nothing changes at all rather than writing a path that does not exist.
+ */
+function absolutiseHookCommands(settings: Record<string, any>): number {
+  const binary = resolveHookBinary();
+  if (!binary) return 0;
+  let repaired = 0;
+  for (const entries of Object.values(settings.hooks ?? {})) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      for (const hook of entry?.hooks ?? []) {
+        const cmd = hook?.command;
+        if (typeof cmd === 'string' && needsAbsolutePathRepair(cmd)) {
+          hook.command = repairHookCommand(cmd, binary);
+          repaired++;
+        }
+      }
+    }
+  }
+  return repaired;
+}
+
+/** A copy of a hook template with its command bound to an absolute path. */
+function withAbsoluteCommand(entry: HookEntry, binary: string | null): HookEntry {
+  if (!binary) return entry;
+  return {
+    ...entry,
+    hooks: entry.hooks.map(h =>
+      typeof h.command === 'string' && needsAbsolutePathRepair(h.command)
+        ? { ...h, command: repairHookCommand(h.command, binary) }
+        : { ...h },
+    ),
+  };
+}
 
 function hasCortexHook(entries: HookEntry[]): boolean {
   return entries.some((e) =>
@@ -235,13 +284,25 @@ export function setupHooks(options?: HookOptInOptions): void {
 
   let added = 0;
 
+  // Absolute path, resolved now (#146). A bare command name makes enforcement
+  // depend on the operator's shell config; three of four fleet boxes could not
+  // resolve one from the subprocess a harness spawns hooks in.
+  const hookBinary = resolveHookBinary();
+
+  // Repair hooks written by an EARLIER version before doing anything else —
+  // upgrade has to fix installs that are already wrong, or they stay wrong.
+  const repairedExisting = absolutiseHookCommands(settings);
+  if (repairedExisting > 0) {
+    console.log(`  ~ Hooks: repaired ${repairedExisting} bare command(s) to an absolute path (#146)`);
+  }
+
   // Install command hooks (PreCompact, SessionStart, UserPromptSubmit)
   for (const [name, entry] of Object.entries(CORTEX_HOOKS)) {
     if (!Array.isArray(settings.hooks[name])) {
       settings.hooks[name] = [];
     }
     if (!hasCortexHook(settings.hooks[name])) {
-      settings.hooks[name].push(entry);
+      settings.hooks[name].push(withAbsoluteCommand(entry, hookBinary));
       added++;
       console.log(`  + Hook: ${name}`);
     } else {
@@ -255,7 +316,7 @@ export function setupHooks(options?: HookOptInOptions): void {
       settings.hooks.SessionEnd = [];
     }
     if (!hasCortexHook(settings.hooks.SessionEnd)) {
-      settings.hooks.SessionEnd.push(SESSION_END_HOOK);
+      settings.hooks.SessionEnd.push(withAbsoluteCommand(SESSION_END_HOOK, hookBinary));
       added++;
       console.log(`  + Hook: SessionEnd (opt-in — flipping autoMemory.enableSessionEnd=true)`);
     } else {
@@ -269,7 +330,7 @@ export function setupHooks(options?: HookOptInOptions): void {
       settings.hooks.Stop = [];
     }
     if (!hasCortexHook(settings.hooks.Stop)) {
-      settings.hooks.Stop.push(STOP_HOOK);
+      settings.hooks.Stop.push(withAbsoluteCommand(STOP_HOOK, hookBinary));
       added++;
       console.log(`  + Hook: Stop (opt-in — flipping autoMemory.enableStop=true)`);
     } else {

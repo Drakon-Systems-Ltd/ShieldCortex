@@ -1,0 +1,161 @@
+/**
+ * ShieldCortex — resolvable hook commands (#146).
+ *
+ * Fleet evidence, 31 Jul 2026: three of four boxes could not resolve a bare
+ * `shieldcortex` from the non-interactive shell a harness spawns hooks in. Two
+ * were running zero Claude Code enforcement — installed, configured, and
+ * reported healthy by `doctor` the whole time.
+ *
+ * The cause was writing a bare command name. That makes enforcement depend on
+ * the operator's shell configuration, which we neither control nor inspect: a
+ * user-level npm prefix (the standard sudo-free setup) plus a distro `.bashrc`
+ * that extends PATH *below* its own non-interactive early-return is enough for
+ * every hook to die silently. The operator's own terminal resolves it fine, so
+ * nothing looks wrong.
+ *
+ * Three halves to the fix, all here so they cannot drift apart:
+ *
+ *   1. `buildHookCommand` — the installer writes an ABSOLUTE path.
+ *   2. `hookCommandResolves` — doctor verifies by RUNNING, not by reading.
+ *   3. `needsAbsolutePathRepair` / `repairHookCommand` — upgrade fixes installs
+ *      that are already wrong. Fixing the installer alone would leave every
+ *      existing broken box broken forever, which is the quiet half of this bug.
+ */
+import { accessSync, constants } from 'node:fs';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+/** The bare name we historically wrote, and still fall back to. */
+const BARE = 'shieldcortex';
+
+/**
+ * A leading run of `VAR=value` assignments, which sh treats as environment for
+ * the command that follows. Our own installer emits this form
+ * (`SHIELDCORTEX_RECALL_ENFORCE=1 shieldcortex hook prompt-recall`), and a
+ * fixer that only matches commands *starting with* `shieldcortex` silently
+ * skips them — which is exactly what happened during the live fleet repair.
+ */
+const ENV_PREFIX = /^((?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)/;
+
+function isExecutable(p: string): boolean {
+  try {
+    accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface ResolveHookBinaryOptions {
+  /** `<npm prefix>/bin`, when the caller already knows it. */
+  npmPrefixBin?: string;
+  /** Extra directories to try, in order. */
+  candidates?: string[];
+}
+
+/**
+ * Locate the shieldcortex binary as an absolute path, or null.
+ *
+ * Null is a legitimate answer and callers must handle it: writing a path that
+ * does not exist would be worse than the bare name we already write, because
+ * it would fail on every host rather than merely on most.
+ */
+export function resolveHookBinary(opts: ResolveHookBinaryOptions = {}): string | null {
+  const tried: string[] = [];
+  if (opts.npmPrefixBin) tried.push(join(opts.npmPrefixBin, BARE));
+  for (const c of opts.candidates ?? []) tried.push(c.endsWith(BARE) ? c : join(c, BARE));
+
+  // `npm prefix -g` is the authoritative answer for a global install and is
+  // where every affected fleet box had it. Consulted only if the caller did
+  // not already supply one, since spawning npm is slow.
+  if (!opts.npmPrefixBin) {
+    try {
+      const prefix = execFileSync('npm', ['config', 'get', 'prefix'], {
+        encoding: 'utf-8',
+        timeout: 5_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (prefix && prefix !== 'undefined') tried.push(join(prefix, 'bin', BARE));
+    } catch {
+      // npm absent or slow — fall through to the remaining candidates.
+    }
+  }
+
+  for (const p of tried) if (isExecutable(p)) return p;
+  return null;
+}
+
+/** Quote a path for `sh -c` only when it needs it. */
+function shellQuote(p: string): string {
+  return /[\s"'\\$`]/.test(p) ? `"${p.replace(/(["\\$`])/g, '\\$1')}"` : p;
+}
+
+/**
+ * The command string the installer writes.
+ *
+ * With no binary this returns the historical bare form — degrading to today's
+ * behaviour, which is at least correct on hosts where PATH happens to work.
+ */
+export function buildHookCommand(binary: string | null, subcommand: string): string {
+  if (!binary) return `${BARE} hook ${subcommand}`;
+  return `${shellQuote(binary)} hook ${subcommand}`;
+}
+
+/** Strip a leading env-assignment run and return the executable token. */
+function executableToken(command: string): string | null {
+  const trimmed = String(command ?? '').trim();
+  if (!trimmed) return null;
+  const withoutEnv = trimmed.replace(ENV_PREFIX, '');
+  const m = withoutEnv.match(/^("([^"]+)"|'([^']+)'|\S+)/);
+  if (!m) return null;
+  return m[2] ?? m[3] ?? m[1];
+}
+
+/**
+ * Does this command actually resolve to something runnable?
+ *
+ * This is the check that would have caught the live fleet breakage. It asks the
+ * question a harness asks — resolve this token the way a non-interactive shell
+ * would — rather than the question we used to ask, which was merely "is a hook
+ * entry present in settings.json".
+ */
+export function hookCommandResolves(command: string): boolean {
+  const exe = executableToken(command);
+  if (!exe) return false;
+
+  // Absolute or relative path: check it directly.
+  if (exe.includes('/')) return isExecutable(exe);
+
+  // Bare name: resolve it the way the hook's own subprocess will. `command -v`
+  // inside `sh -c` is precisely the lookup that failed on three fleet boxes.
+  try {
+    execFileSync('sh', ['-c', `command -v ${exe}`], {
+      timeout: 5_000,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Is this one of OUR commands, written in the fragile bare form? */
+export function needsAbsolutePathRepair(command: string): boolean {
+  const exe = executableToken(command);
+  if (!exe) return false;
+  return exe === BARE;
+}
+
+/**
+ * Rewrite a bare command to an absolute one, preserving any env-var prefix and
+ * every trailing argument. Idempotent: an already-absolute command is returned
+ * unchanged, so upgrade can run this on every box every time.
+ */
+export function repairHookCommand(command: string, binary: string | null): string {
+  if (!binary || !needsAbsolutePathRepair(command)) return command;
+  const trimmed = command.trim();
+  const envMatch = trimmed.match(ENV_PREFIX);
+  const prefix = envMatch ? envMatch[1] : '';
+  const rest = trimmed.slice(prefix.length);
+  return prefix + rest.replace(BARE, shellQuote(binary));
+}
