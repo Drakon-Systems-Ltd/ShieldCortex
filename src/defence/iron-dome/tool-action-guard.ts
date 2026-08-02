@@ -2167,9 +2167,28 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
 }
 
 /** Concatenate all top-level string argument values (bounded) for pattern scanning. */
+/**
+ * String args that can EXECUTE, for the secret-sighting surface (#185).
+ *
+ * `description` is excluded. It is the human-facing label of a tool call —
+ * prose ABOUT an action, with no execution path of any kind. Scanning it with
+ * command-line-grade secret patterns produced a live catastrophic auto-deny on
+ * 2 Aug 05:00: a worker refreshing an OAuth token wrote "client_secret=…" in
+ * its own description — narrating its job accurately — and was blocked for the
+ * narration while the command itself was clean. That teaches every agent to
+ * write vaguer descriptions, which degrades the audit trail this product
+ * exists to keep honest.
+ *
+ * This is the guard's own field discipline (see the exec-surface comment at
+ * the top of evaluateToolCall): danger patterns scan the EXECUTION surface,
+ * never agent-produced prose. The command, paths, urls, env maps and stdin
+ * payloads all still scan — a secret in any of those is a secret somewhere a
+ * shell can see it.
+ */
 function rawStringArgs(args: Record<string, unknown>): string {
   const parts: string[] = [];
-  for (const v of Object.values(args ?? {})) {
+  for (const [k, v] of Object.entries(args ?? {})) {
+    if (k === 'description') continue;
     if (typeof v === 'string') parts.push(v);
     else if (Array.isArray(v)) parts.push(v.filter(x => typeof x === 'string').join(' '));
   }
