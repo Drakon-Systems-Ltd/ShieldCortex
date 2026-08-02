@@ -1727,7 +1727,11 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     const { evaluateToolCall } = await import('../defence/iron-dome/tool-action-guard.js');
     const nonce = Math.random().toString(36).slice(2, 10);
     const probes: Array<{ name: string; command: string; expect: string }> = [
-      { name: 'catastrophic→block', command: `rm -rf /tmp/sc-doctor-${nonce}`, expect: 'block' },
+      // Home-anchored, not /tmp (#170): a /tmp delete is workspace-confined and
+      // ALLOWED by design since the target-aware precision pass, so a /tmp
+      // probe would report the guard broken for doing its job. `~` can expand
+      // anywhere, which the confinement check permanently refuses.
+      { name: 'catastrophic→block', command: `rm -rf ~/sc-doctor-${nonce}`, expect: 'block' },
       { name: 'dangerous→approval', command: 'crontab -e', expect: 'require_approval' },
       { name: 'benign→allow', command: 'ls -la', expect: 'allow' },
     ];

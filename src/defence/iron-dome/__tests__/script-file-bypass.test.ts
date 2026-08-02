@@ -65,7 +65,10 @@ describe('#4 — parity: inline verdict === via-file verdict', () => {
   const cases: Array<[signal: string, command: string]> = [
     ['install-package-global', 'npm install -g leftpad'],
     ['privilege-escalation', 'sudo systemctl restart nginx'],
-    ['file-delete', 'rm /tmp/old-report.txt'],
+    // /var, not /tmp (#170): a temp-path delete is workspace-confined and
+    // allows now; this table's subject is inline-vs-file PARITY, which needs a
+    // shape that actually gates on both surfaces.
+    ['file-delete', 'rm /var/data/old-report.txt'],
     ['dd-overwrite', 'dd if=/dev/zero of=/tmp/data.img bs=1M count=10'],
     ['truncate-to-zero', 'truncate -s 0 /var/log/app.log'],
   ];

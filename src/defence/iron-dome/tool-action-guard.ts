@@ -490,6 +490,12 @@ const CONTAINER_ESCAPE_RE = new RegExp([
 const RM_STATEMENT_RE = /(^|[;&|]|\n)\s*(?:sudo\s+)?rm\b([^;&|\n]*)/gi;
 const CONFINED_TEMP_TARGET_RE = /^(?:\/tmp|\/var\/tmp|\/private\/var\/folders)\/[^\s]+$/i;
 
+/** At least one statement on the line begins with a standalone `rm`. */
+function hasStandaloneRmStatement(text: string): boolean {
+  RM_STATEMENT_RE.lastIndex = 0;
+  return RM_STATEMENT_RE.test(text);
+}
+
 function deleteTargetsAreWorkspaceConfined(text: string): boolean {
   RM_STATEMENT_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -2083,6 +2089,12 @@ export function evaluateToolCall(
   // as 1a. A non-critical path still recursively deletes everything under it,
   // so it is folded into the DANGEROUS signals below (dangerSignals) instead.
   const findDeleteMatch = matchFindDelete(scanSurface);
+  // #170: a find-delete NARROWED by a filename/path filter is a targeted sweep
+  // — computed here because both the dangerous-signal assembly below and the
+  // file-delete exemption need the same answer for the same statement.
+  const findDeleteIsFiltered = findDeleteMatch
+    ? /\s-(?:name|iname|path|ipath|regex)\s+\S+/.test(findDeleteMatch[0])
+    : false;
   if (findDeleteMatch && isCriticalPath(findDeleteMatch[1])) {
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', ['recursive-find-delete'], findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80)),
@@ -2132,7 +2144,11 @@ export function evaluateToolCall(
     // Anything absolute, home-rooted, glob- or variable-expanded is untouched.
     .filter(m => !(m.signal === 'file-delete'
       && family !== 'delete'
-      && deleteTargetsAreWorkspaceConfined(scanSurface)));
+      && (deleteTargetsAreWorkspaceConfined(scanSurface)
+        // The `rm` embedded in a FILTERED find's -exec belongs to that sweep,
+        // not to a standalone delete statement — if no standalone rm exists on
+        // the line, the sweep's own (allowed) verdict covers it.
+        || (findDeleteIsFiltered && !hasStandaloneRmStatement(scanSurface)))));
   let dangerSignals = dangerMatches.map(m => m.signal);
   let dangerSpan = dangerMatches[0]?.span;
   // A pip install scoped to a venv / an explicit target prefix mutates that
@@ -2169,9 +2185,7 @@ export function evaluateToolCall(
   // wide enough to cover all deletes, which would have been far worse than the
   // bug. An UNFILTERED find-delete still gates: it really does remove
   // everything beneath its root, and the suite pins that direction too.
-  const findDeleteIsFiltered = findDeleteMatch
-    ? /\s-(?:name|iname|path|ipath|regex)\s+\S+/.test(findDeleteMatch[0])
-    : false;
+  // (`findDeleteIsFiltered` is computed with the match above, pre-assembly.)
   if (findDeleteMatch && !findDeleteIsFiltered && !dangerSignals.includes('recursive-find-delete')) {
     dangerSignals.push('recursive-find-delete');
     dangerSpan = dangerSpan ?? findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80);

@@ -45,7 +45,11 @@ describe('#128 — a dash-flag is not the delete command', () => {
   // ── the gate must still fire on the real thing ──
 
   it('a real rm still gates', () => {
-    expect((decide('rm /tmp/scratch.log').signals ?? [])).toContain('file-delete');
+    // /var, not /tmp (#170): temp-path deletes are workspace-confined and
+    // allowed now. This suite's subject is that `--rm` (the container FLAG)
+    // never counts as a delete while a real rm VERB does — which needs a
+    // target that still gates.
+    expect((decide('rm /var/log/scratch.log').signals ?? [])).toContain('file-delete');
   });
 
   it('a real rm INSIDE a container command still gates', () => {
