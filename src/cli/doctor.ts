@@ -2894,6 +2894,46 @@ export async function checkOpenClawRunningPluginVersion(
  * the operator invoked deliberately. Reporting a mode we quietly changed behind
  * their back would be its own dishonesty.
  */
+/**
+ * The installed OpenClaw SKILL must track the CLI version (#179).
+ *
+ * Found in the field, 1 Aug: a box whose every surface read green was carrying
+ * a skill copy 21 releases stale — nothing compared the skill to anything, so
+ * the drift was invisible by construction. The skill is the fleet's operating
+ * manual for this product; a stale one instructs agents in behaviour the
+ * shipped code no longer has.
+ *
+ * Absent skill is INFO, not a failure — Claude-Code-only installs never want
+ * it. Drift is a WARN with the one command that fixes it.
+ */
+export async function checkOpenClawSkillVersion(
+  home: string = os.homedir(),
+  cliVersion: string = pkg.version,
+): Promise<CheckResult> {
+  const label = 'OpenClaw skill version';
+  const { findInstalledSkillDirs, readInstalledSkillVersion } = await import('../setup/openclaw.js');
+  const dirs = findInstalledSkillDirs(home);
+  if (dirs.length === 0) {
+    return { label, status: 'info', message: 'skill not installed (optional) — `shieldcortex openclaw skill install` adds it' };
+  }
+  const v = readInstalledSkillVersion(dirs[0]);
+  if (!v) {
+    return {
+      label, status: 'warn',
+      message: `skill present at ${dirs[0]} but its SKILL.md version is unreadable`,
+      fix: 'Run shieldcortex openclaw skill install to reinstall a clean copy',
+    };
+  }
+  if (v === cliVersion) {
+    return { label, status: 'pass', message: `skill v${v} matches CLI v${cliVersion}` };
+  }
+  return {
+    label, status: 'warn',
+    message: `skill v${v} does not match CLI v${cliVersion} — agents are reading stale instructions`,
+    fix: 'Run shieldcortex openclaw skill install',
+  };
+}
+
 export async function checkStatePermissions(stateDir: string = getShieldCortexDir()): Promise<CheckResult> {
   const label = 'State permissions';
   let findings: Array<{ path: string; found: string; required: string }>;
@@ -3145,6 +3185,7 @@ export async function runDoctor(
     checkOpenClawResidue,
     checkOpenClawHookFreshness,
     checkOpenClawPluginVersion,
+    checkOpenClawSkillVersion,
     checkOpenClawPluginLoadState,
     checkOpenClawRunningPluginVersion,
     checkOpenClawPluginPackage,

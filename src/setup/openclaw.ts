@@ -1745,6 +1745,102 @@ export async function repairOpenClawPlugin(): Promise<void> {
   console.log('Repair complete. Restart the OpenClaw gateway to load the fresh plugin install.');
 }
 
+/**
+ * Resolve the `openclaw` binary robustly (#179).
+ *
+ * `which openclaw` alone fails on every box where user-level binaries are
+ * invisible to non-interactive shells — measured on two of five fleet hosts,
+ * and the same defect shape that left Claude Code hooks dead for weeks (#146:
+ * a bare command name is a bet about someone else's PATH). Fall back to the
+ * well-known install locations before giving up.
+ */
+export function resolveOpenClawBinary(home: string = os.homedir()): string | null {
+  try {
+    const found = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
+    if (found && fs.existsSync(found)) return found;
+  } catch { /* not on PATH — try known locations */ }
+  const candidates = [
+    path.join(home, '.npm-global', 'bin', 'openclaw'),
+    '/usr/local/bin/openclaw',
+    '/opt/homebrew/bin/openclaw',
+    path.join(home, '.local', 'bin', 'openclaw'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+/** The four places an installed skill copy can live, in preference order. */
+export function findInstalledSkillDirs(home: string = os.homedir()): string[] {
+  return [
+    path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
+    path.join(home, '.openclaw', 'skills', 'shieldcortex'),
+    path.join(home, 'clawd', 'skills', 'shieldcortex'),
+    path.join(home, 'friday', 'skills', 'shieldcortex'),
+  ].filter((d) => fs.existsSync(d));
+}
+
+/** Parse `version:` out of an installed SKILL.md frontmatter, or null. */
+export function readInstalledSkillVersion(skillDir: string): string | null {
+  try {
+    const text = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf-8').slice(0, 4000);
+    const m = text.match(/^\s*version:\s*([\w.\-]+)\s*$/m);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `shieldcortex openclaw skill install|update` (#179).
+ *
+ * Field report, 1 Aug: an operator on a fully-green box typed exactly this
+ * command and got the usage screen. Behind it, four stacked failures had let
+ * the installed skill silently age 21 releases: the npm tarball does not ship
+ * the skill (ClawHub is its distribution channel), the CLI offered no install
+ * path, `update` only refreshed a copy that already existed via a bare
+ * `openclaw` spawn that breaks on PATH-less hosts, and the ClawHub install now
+ * requires an acknowledge flag nothing passed. This command is the one path,
+ * and it VERIFIES: the installed SKILL.md version must match this CLI's
+ * version, or it says so plainly instead of printing a green line.
+ */
+export async function installOpenClawSkill(home: string = os.homedir()): Promise<boolean> {
+  const bin = resolveOpenClawBinary(home);
+  if (!bin) {
+    console.log('✗ Could not find the `openclaw` binary (PATH or known install locations).');
+    console.log('  Install OpenClaw first, or run: openclaw skills install shieldcortex --force --acknowledge-clawhub-risk');
+    return false;
+  }
+  const r = spawnSync(bin, ['skills', 'install', 'shieldcortex', '--force', '--acknowledge-clawhub-risk'], {
+    encoding: 'utf-8',
+    timeout: 120000,
+    env: { ...process.env, HOME: home },
+  });
+  const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  if (r.status !== 0) {
+    console.log('✗ ClawHub skill install failed:');
+    console.log(output.trim().split('\n').slice(-3).map((l) => `  ${l}`).join('\n'));
+    return false;
+  }
+  // Verify by reading what actually landed, never by trusting the exit code.
+  const dirs = findInstalledSkillDirs(home);
+  const version = dirs.length > 0 ? readInstalledSkillVersion(dirs[0]) : null;
+  const cliVersion = JSON.parse(
+    fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf-8'),
+  ).version as string;
+  if (!version) {
+    console.log('⚠ Install reported success but no SKILL.md version could be read — check `openclaw skills list`.');
+    return false;
+  }
+  if (version === cliVersion) {
+    console.log(`✓ ShieldCortex skill v${version} installed and matches this CLI.`);
+    return true;
+  }
+  console.log(`⚠ Skill installed at v${version}, but this CLI is v${cliVersion} — ClawHub may still be syncing the latest release. Re-run in a few minutes.`);
+  return false;
+}
+
 export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
@@ -1763,8 +1859,22 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
     case 'repair':
       await repairOpenClawPlugin();
       break;
+    case 'skill': {
+      // `install` and `update` are deliberately the same operation — ClawHub's
+      // force-install is idempotent, and the distinction was one more thing
+      // for an operator to guess wrong.
+      const verb = extraArgs[0] || '';
+      if (verb === 'install' || verb === 'update') {
+        const ok = await installOpenClawSkill();
+        if (!ok) process.exit(1);
+      } else {
+        console.log('Usage: shieldcortex openclaw skill <install|update>');
+        process.exit(1);
+      }
+      break;
+    }
     default:
-      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair>');
+      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair|skill install>');
       console.log('');
       console.log('Install options:');
       console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
