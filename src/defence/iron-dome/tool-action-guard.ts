@@ -461,6 +461,59 @@ const CONTAINER_ESCAPE_RE = new RegExp([
  * gate for the whole call — a container run in statement 1 must never launder a
  * host install in statement 2.
  */
+/**
+ * Every `rm` target in this text is a WORKSPACE-CONFINED path (#170).
+ *
+ * Danger in a delete is a property of the TARGET, not the verb. `rm -rf /`
+ * ends a machine; `rm -rf .next` is the first line of every JavaScript build
+ * on earth. Until now `recursive-force-delete` fired on the flags alone, so
+ * the guard hard-blocked `cd dashboard && rm -rf .next && npm run build` at
+ * the catastrophic tier — no prompt, no appeal. Measured over 2,420 real tool
+ * calls (30 Jul – 2 Aug), deletes of build artefacts and scratch directories
+ * were the single largest source of denied honest work.
+ *
+ * That matters more than the inconvenience: an agent taught that denials are
+ * noise starts routing around them, and this codebase has already caught one
+ * of its own cron workers reaching for the disable switch. Precision IS the
+ * security property.
+ *
+ * Confined means, for EVERY target on the line:
+ *   - a relative path that cannot climb out (no leading `/` or `~`, no `..`), or
+ *   - a path under a temp root the agent owns.
+ * Anything absolute, home-rooted, glob-rooted, or variable-expanded is NOT
+ * confined — a `$VAR` could be `/`, and this must never gamble on that.
+ *
+ * `delete-root-or-home` is a separate, target-aware rule and is deliberately
+ * untouched: `rm -rf /`, `~`, `$HOME`, `/etc` all still hard-block through it.
+ * This exemption only removes the verb-only signal, never the target one.
+ */
+const RM_STATEMENT_RE = /(^|[;&|]|\n)\s*(?:sudo\s+)?rm\b([^;&|\n]*)/gi;
+const CONFINED_TEMP_TARGET_RE = /^(?:\/tmp|\/var\/tmp|\/private\/var\/folders)\/[^\s]+$/i;
+
+function deleteTargetsAreWorkspaceConfined(text: string): boolean {
+  RM_STATEMENT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  let sawTarget = false;
+  let guard = 0;
+  while ((m = RM_STATEMENT_RE.exec(text)) !== null && guard++ < 64) {
+    const args = m[2] ?? '';
+    for (const raw of args.split(/\s+/)) {
+      const tok = raw.trim().replace(/^["']|["']$/g, '');
+      if (!tok || tok.startsWith('-')) continue;          // flags, not targets
+      sawTarget = true;
+      // Never gamble on anything that can expand or climb.
+      if (/[$`*?~]/.test(tok)) return false;
+      if (tok.includes('..')) return false;
+      if (tok.startsWith('/')) {
+        if (!CONFINED_TEMP_TARGET_RE.test(tok)) return false;
+        continue;
+      }
+      // Relative and non-climbing — a workspace path.
+    }
+  }
+  return sawTarget;
+}
+
 function installsAreContainerConfined(text: string): boolean {
   if (!CONTAINER_RUN_RE.test(text)) return false;
   if (CONTAINER_ESCAPE_RE.test(text)) return false;
@@ -1997,7 +2050,13 @@ export function evaluateToolCall(
   // Span-classified (#84): a catastrophic token inside a URL or a quoted DATA
   // argument is a mention, not intent (`grep "rm -rf /" log`, a fetched URL
   // whose path contains "rm-rf") — but any executed occurrence still hard-blocks.
-  const catastrophicMatches = matchSpansClassified(CATASTROPHIC, scanSurface, regions);
+  const catastrophicMatches = matchSpansClassified(CATASTROPHIC, scanSurface, regions)
+    // #170: drop the VERB-only delete signal when every target on the line is
+    // workspace-confined. The TARGET-aware rule (`delete-root-or-home`) is not
+    // in this filter, so `rm -rf /` and friends are unaffected — which the
+    // suite pins in both directions.
+    .filter(m => !(m.signal === 'recursive-force-delete'
+      && deleteTargetsAreWorkspaceConfined(scanSurface)));
   const catastrophicExecuted = catastrophicMatches.filter(m => m.tier === 'executed');
   if (catastrophicExecuted.length > 0) {
     const catastrophicSignals = catastrophicExecuted.map(m => m.signal);
@@ -2065,7 +2124,15 @@ export function evaluateToolCall(
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
   // Span-classified (#84): same mention-vs-intent filter as catastrophic above.
-  const dangerMatches = [...catastrophicPayload, ...matchSpansClassified(DANGEROUS, scanSurface, regions)];
+  const dangerMatches = [...catastrophicPayload, ...matchSpansClassified(DANGEROUS, scanSurface, regions)]
+    // #170: same target-not-verb principle as the catastrophic tier. A delete
+    // whose every target is workspace-confined (`rm -rf .next`, a scratch dir
+    // under /tmp) is ordinary work and must not need a human nod — that is the
+    // shape that produced most of the measured denials of honest engineering.
+    // Anything absolute, home-rooted, glob- or variable-expanded is untouched.
+    .filter(m => !(m.signal === 'file-delete'
+      && family !== 'delete'
+      && deleteTargetsAreWorkspaceConfined(scanSurface)));
   let dangerSignals = dangerMatches.map(m => m.signal);
   let dangerSpan = dangerMatches[0]?.span;
   // A pip install scoped to a venv / an explicit target prefix mutates that
@@ -2095,7 +2162,17 @@ export function evaluateToolCall(
   if (family === 'delete' && !dangerSignals.includes('file-delete')) dangerSignals.push('file-delete');
   // A `find -delete` / `find -exec rm` on a non-critical path (1b already
   // returned catastrophic for a critical one) is still a recognised recursive delete.
-  if (findDeleteMatch && !dangerSignals.includes('recursive-find-delete')) {
+  // #170: a find-delete NARROWED by a filename/type filter is a targeted sweep
+  // (`-name "*.lock" -delete`), not tree removal — the shape every maintenance
+  // script on earth uses to clear stale locks. Blocking it stopped a nightly
+  // backup at 01:00 and taught the agent running it to ask for an allowlist
+  // wide enough to cover all deletes, which would have been far worse than the
+  // bug. An UNFILTERED find-delete still gates: it really does remove
+  // everything beneath its root, and the suite pins that direction too.
+  const findDeleteIsFiltered = findDeleteMatch
+    ? /\s-(?:name|iname|path|ipath|regex)\s+\S+/.test(findDeleteMatch[0])
+    : false;
+  if (findDeleteMatch && !findDeleteIsFiltered && !dangerSignals.includes('recursive-find-delete')) {
     dangerSignals.push('recursive-find-delete');
     dangerSpan = dangerSpan ?? findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80);
   }
