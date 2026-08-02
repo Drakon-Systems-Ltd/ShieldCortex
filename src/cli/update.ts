@@ -336,24 +336,35 @@ async function stepOpenClawPlugin(home: string): Promise<StepResult> {
 }
 
 async function stepOpenClawSkill(home: string): Promise<StepResult> {
-  const skillDirs = [
-    path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
-    path.join(home, '.openclaw', 'skills', 'shieldcortex'),
-    path.join(home, 'clawd', 'skills', 'shieldcortex'),
-    path.join(home, 'friday', 'skills', 'shieldcortex'),
-  ];
-  if (!skillDirs.find((d) => fs.existsSync(d))) {
-    return await step('OpenClaw skill', async () => ({ status: 'skip' as const, summary: 'not installed' }));
+  // #179: this step used to be four stacked failures — it spawned a bare
+  // `openclaw` (invisible to non-interactive PATH on two of five fleet hosts),
+  // omitted the acknowledge flag ClawHub now requires (so even a resolvable
+  // binary cancelled), skipped silently when no copy existed, and reported
+  // "@latest installed" off the exit code without reading what landed. The
+  // measured result: a box carrying a skill 21 releases stale with every
+  // surface green. Now: resolved binary, acknowledge flag, verify-by-reading,
+  // and the skip names the command that installs.
+  const { resolveOpenClawBinary, findInstalledSkillDirs, readInstalledSkillVersion } =
+    await import('../setup/openclaw.js');
+  if (findInstalledSkillDirs(home).length === 0) {
+    return await step('OpenClaw skill', async () => ({
+      status: 'skip' as const,
+      summary: 'not installed — `shieldcortex openclaw skill install` adds it',
+    }));
   }
   return await step('OpenClaw skill', async () => {
+    const bin = resolveOpenClawBinary(home);
+    if (!bin) return { status: 'warn' as const, summary: 'openclaw binary not found — run `shieldcortex openclaw skill install`' };
     try {
-      await runQuiet('openclaw', ['skills', 'install', 'shieldcortex', '--force'], {
-        timeout: 60000,
+      await runQuiet(bin, ['skills', 'install', 'shieldcortex', '--force', '--acknowledge-clawhub-risk'], {
+        timeout: 120000,
         env: { ...process.env, HOME: home },
       });
-      return '@latest installed';
+      const dirs = findInstalledSkillDirs(home);
+      const v = dirs.length > 0 ? readInstalledSkillVersion(dirs[0]) : null;
+      return v ? `v${v} installed` : { status: 'warn' as const, summary: 'installed but version unreadable' };
     } catch {
-      return { status: 'warn' as const, summary: 'reinstall failed (run manually)' };
+      return { status: 'warn' as const, summary: 'reinstall failed — run `shieldcortex openclaw skill install`' };
     }
   });
 }
