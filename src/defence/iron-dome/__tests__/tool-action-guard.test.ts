@@ -36,7 +36,10 @@ describe('tool-action-guard — CATASTROPHIC ops are always blocked', () => {
     ['rm -rf /', { command: 'rm -rf /' }],
     ['rm -rf ~', { command: 'rm -rf ~' }],
     ['rm -fr /home/ubuntu', { command: 'rm -fr /home/ubuntu' }],
-    ['rm --recursive --force somedir', { command: 'rm --recursive --force somedir' }],
+    // Long-flag recognition, pinned against a NON-confined target (#170): a
+    // relative `somedir` is workspace-confined and allowed by design now, so
+    // the fixture targets a system path to keep testing what it was built for.
+    ['rm --recursive --force /srv/somedir', { command: 'rm --recursive --force /srv/somedir' }],
     ['rm -rf *', { command: 'cd /tmp && rm -rf *' }],
     ['fork bomb', { command: ':(){ :|:& };:' }],
     ['mkfs', { command: 'mkfs.ext4 /dev/sda1' }],

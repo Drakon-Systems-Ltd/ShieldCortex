@@ -398,7 +398,16 @@ export function buildSyntheticCanaryOp(nonce: string): SyntheticCanaryOp {
   return {
     toolName: 'Bash',
     arguments: {
-      command: `rm -rf /tmp/${nonce}`,
+      // HOME-anchored, not /tmp (#170): the guard now judges a delete by its
+      // TARGET, and a /tmp path is workspace-confined — allowed by design. The
+      // canary must be a shape the guard will always refuse, so it targets a
+      // synthetic dotdir under `~`, which the confinement check permanently
+      // rejects (`~` can expand anywhere). Both canary properties survive:
+      // catastrophic-shaped (blocked by a live interceptor), and provably
+      // harmless in the failure mode this probe exists to detect — if
+      // enforcement is OFF and the op executes, `rm -rf` on a nonexistent
+      // nonce-named dotdir is a no-op.
+      command: `rm -rf ~/.${nonce}`,
       description: `${CANARY_MARKER} synthetic enforcement probe ${nonce} — never executed`,
     },
   };

@@ -28,15 +28,27 @@ describe('catastrophic rm FP — a hyphenated filename is not an -rf flag', () =
     const r = v(command);
     expect(r.severity).not.toBe('catastrophic');
     expect(r.decision).not.toBe('block');
-    // it IS still a delete → dangerous tier (gated), just not a hard block
-    expect(r.signals).toContain('file-delete');
+    // #170 changed the follow-on tier by TARGET: a workspace-confined delete
+    // (relative path, no climb) is ordinary work and allows outright; an
+    // absolute path keeps the dangerous-tier `file-delete` gate. This suite's
+    // subject — the hyphenated-filename flag FP never reaching catastrophic —
+    // is unchanged either way.
+    const tok = command.split(/\s+/).pop() ?? '';
+    if (tok.startsWith('/')) {
+      expect(r.signals).toContain('file-delete');
+    } else {
+      expect(r.decision).toBe('allow');
+    }
   });
 });
 
 describe('catastrophic rm — real recursive-force deletes still hard-block (regression)', () => {
   const stillCatastrophic = [
     'rm -rf /',
-    'rm -fr /tmp/x',
+    // Was `/tmp/x` — a temp path is workspace-confined and allowed since #170;
+    // the fixture's purpose is the `-fr` flag-order recognition, so it keeps a
+    // non-confined target.
+    'rm -fr /srv/x',
     'rm -Rf ~/',
     'rm -rf --no-preserve-root /',
     'rm --recursive --force /home',

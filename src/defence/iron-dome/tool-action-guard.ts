@@ -216,8 +216,25 @@ const DANGEROUS: Pattern[] = [
   // unchanged, and `rm -rf` remains catastrophic wherever it appears.
   { re: /(?<![-\w])rm\b|(?<![-\w])unlink\b|(?<![-\w])rmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
-  { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
-  { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
+  // Force-push, bounded to ONE statement and to real force TOKENS (issue #191).
+  // Two independent widenings stacked here. The bridge was `[^|\n]*`, which
+  // crossed `;` and `&&` exactly like the package-manager rule did before #89 —
+  // so a plain `git push` in one statement paired with any later `-f`/`+` in an
+  // unrelated one (`git push origin main && rsync -f rules dst`, `… && trash
+  // old-f.tar.gz`, `… && echo "done+ok"`) gated as a force-push. And the force
+  // alternatives were unanchored: a bare `\+` matched a plus ANYWHERE, and
+  // `-f\b` matched the tail of any hyphenated word ending in `-f`. Both are now
+  // token-anchored — a force flag or a `+refspec` starts a shell word.
+  // Hit live on Friday-Mac's backup cron, whose entire chain was denied with the
+  // whole 80-char span echoed back as the "matched" text (fmtSpan truncation of
+  // a span that had swallowed four statements), which is why the error looked
+  // like it was quoting a force-push that was never there.
+  // `-[A-Za-z]*f[A-Za-z]*` rather than `-f\b`: git accepts clustered short
+  // options, and `git push -fq` slipped the word-boundary form entirely
+  // (issue #195). The leading `(?:^|\s)` still requires a real shell word, so
+  // #191's `trash old-f.tar.gz` stays clean.
+  { re: /\bgit\b[^|;&\n]*\bpush\b[^|;&\n]*(?:^|\s)(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b|\+\S)/i, signal: 'git-force-push' },
+  { re: /\bgit\b[^|;&\n]*\b(branch\s+-D|push\b[^|;&\n]*--delete|push\b[^|;&\n]*\s:)/i, signal: 'git-delete-branch' },
   // The process verbs here are the SHELL commands, not a language's process API
   // (issue #165). `process.kill(process.pid, sig)` in a build script forwards a
   // signal to ITSELF, and `child.kill()` is a method call — neither stops
@@ -396,6 +413,156 @@ function venvPrefixesCreatedIn(text: string): string[] {
   return out;
 }
 
+// ── Force-push must be an INVOCATION, not vocabulary (issue #195) ────────────
+//
+// #191 bounded the git-force-push rule to one statement and to real force
+// tokens, which killed the statement-bridging half. It left the other half
+// untouched: the rule never required `git` to be a command at all. So any text
+// that mentions git, then push, then a `+` or `-f` armed it — inside a quoted
+// argument, a commit message, a log-capture CLI's prose:
+//
+//   python3 cortex.py capture --what "git-force-push misfire … the + in +03-00"
+//   git commit -m "fix the git push +1 bug"
+//
+// `\bgit\b` even matched inside the hyphenated rule NAME. Reported by Friday,
+// who hit it while logging the lesson from the previous bug: writing up a
+// denial got denied. That is the failure mode worth killing on its own — it
+// suppresses exactly the record-keeping the fleet is asked for.
+//
+// Tokenising is what makes this precise: `tokeniseStatement` keeps a quoted
+// span whole, so `--what "… git push +1 …"` is ONE token that is not `git`,
+// while a real `git push -f` is three. Same principle as #188 and #193 — match
+// the invocation, never the vocabulary.
+const GIT_FORCE_FLAG = /^--force(?:-with-lease|-if-includes)?(?:=|$)|^-[A-Za-z]*f[A-Za-z]*$/;
+/** Wrappers that still leave the next word a real command. */
+const COMMAND_WRAPPER = /^(?:sudo|doas|env|nohup|time|timeout|xargs|nice|ionice|stdbuf|command|builtin|exec)$/;
+
+/**
+ * True when a statement genuinely invokes `git push` with a force token.
+ *
+ * Fail-closed on anything it cannot read as argv: `eval` can reconstitute a
+ * command from text, and a `$`-expansion can hide the verb, so a statement
+ * carrying either keeps the signal rather than being vouched for.
+ */
+function gitForcePushInvoked(text: string, depth = 0): boolean {
+  for (const stmt of splitCommandStatements(text)) {
+    if (!/\bgit\b/i.test(stmt) || !/\bpush\b/i.test(stmt)) continue;
+    if (/\beval\b/.test(stmt) || stmt.includes('$')) return true;   // unreadable → keep the gate
+    const tokens = tokeniseStatement(stmt);
+    // `bash -c 'git push --force'` — the tokeniser keeps that program whole, so
+    // the verb is inside a single token. Recurse into it (bounded), exactly as
+    // detectScriptInvocations does, or the quote becomes a bypass.
+    if (depth < MAX_INLINE_RECURSION) {
+      for (let i = 0; i < tokens.length; i++) {
+        const b = commandBaseName(tokens[i]);
+        if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (!tokens[j].startsWith('-')) break;
+          if (isInlineProgramFlag(b, tokens[j])) {
+            if (gitForcePushInvoked(tokens[j + 1] ?? '', depth + 1)) return true;
+            break;
+          }
+        }
+      }
+    }
+    for (let i = 0; i < tokens.length; i++) {
+      if (commandBaseName(tokens[i]).toLowerCase() !== 'git') continue;
+      // `git` must be the command, or sit directly behind a wrapper that leaves
+      // it one (`sudo git …`, `xargs git …`), or behind `VAR=x` assignments.
+      const prev = i > 0 ? commandBaseName(tokens[i - 1]) : '';
+      const atCommand = i === 0
+        || COMMAND_WRAPPER.test(prev)
+        || /^\w+=/.test(tokens[i - 1])
+        || /^-/.test(tokens[i - 1]) && i > 1 && COMMAND_WRAPPER.test(commandBaseName(tokens[i - 2]));
+      if (!atCommand) continue;
+      const args = tokens.slice(i + 1);
+      const pushAt = args.findIndex(a => a.toLowerCase() === 'push');
+      if (pushAt < 0) continue;                                     // `git commit -m "… push …"`
+      // Only flags/refspecs BELONGING to this push count.
+      for (const a of args.slice(pushAt + 1)) {
+        if (GIT_FORCE_FLAG.test(a)) return true;
+        if (a.startsWith('+') && a.length > 1) return true;         // `+main:main` refspec
+      }
+    }
+  }
+  return false;
+}
+
+// ── Read-only firewall inspection (issue #193) ───────────────────────────────
+//
+// `modify-network-firewall` matched the TOOL and never the verb, so `ufw status`,
+// `iptables -L`, `firewall-cmd --state` and `netplan get` gated exactly as hard
+// as `ufw disable` and `iptables -F`. Reading the firewall's state is what a
+// security-monitoring script does sixteen times before breakfast; it changes
+// nothing. Hit live on Friday-Mac, where a read-only `--getglobalstate` sweep
+// tripped a *modify* rule.
+//
+// Fail-closed by construction: this returns true only when EVERY firewall
+// invocation on the surface is one it positively recognises as read-only. An
+// unknown tool, an unparsed shape, a flag not on the list, or no recognised
+// invocation at all (the token was in folded source, or behind an expansion)
+// all keep the gate.
+const FIREWALL_TOOL_RE = /^(?:ip6?tables(?:-(?:save|restore|nft|legacy))?|ufw|nft|netplan|firewall-cmd)$/i;
+
+/** Per tool: does this argv read state without changing it? */
+function firewallArgvIsReadOnly(tool: string, args: readonly string[]): boolean {
+  const rest = args.filter(a => a !== '');
+  switch (tool.toLowerCase()) {
+    case 'ufw':
+      // `ufw status [verbose|numbered]`, `ufw show …`, `ufw version`.
+      return /^(?:status|show|version|--version)$/i.test(rest[0] ?? '');
+    case 'nft':
+      // `nft list …` / `nft describe …`. Everything else (add/flush/delete) writes.
+      return /^(?:list|describe|-v|--version|-h|--help)$/i.test(rest[0] ?? '');
+    case 'netplan':
+      return /^(?:get|status|info|--version)$/i.test(rest[0] ?? '');
+    case 'firewall-cmd':
+      // Query flags only. `--permanent`/`--zone=` are modifiers that change
+      // nothing on their own, so they are permitted alongside a query — but a
+      // single unrecognised flag keeps the gate.
+      return rest.length > 0 && rest.every(a =>
+        /^--(?:state|list-\S*|get-\S*|query-\S*|info-\S*|permanent|zone=\S*|policy=\S*|version|help)$/i.test(a));
+    default: {
+      // iptables family. Every flag must be an inspection or a selector; any
+      // chain-editing flag (-A -D -I -R -F -X -N -P -Z -E) keeps the gate.
+      // `-Z` zeroes counters — a write, however small — so it is NOT here.
+      if (rest.length === 0) return false;                    // bare `iptables` prints usage, but do not guess
+      let sawList = false;
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i];
+        if (!a.startsWith('-')) continue;                     // table / chain name
+        if (/^(?:-L|--list|-S|--list-rules)$/i.test(a)) { sawList = true; continue; }
+        if (/^(?:-n|--numeric|-v|--verbose|-x|--exact|--line-numbers|-w|--wait)$/.test(a)) continue;
+        if (/^(?:-t|--table)$/i.test(a)) { i++; continue; }   // takes a value
+        if (/^-[LSnvx]+$/.test(a)) { sawList = /[LS]/.test(a); continue; }   // clustered short flags
+        return false;                                         // anything else writes
+      }
+      return sawList;
+    }
+  }
+}
+
+/** True when every firewall invocation on the surface only READS state. */
+function firewallCallsAreReadOnly(text: string): boolean {
+  let seen = false;
+  for (const stmt of splitCommandStatements(text)) {
+    const tokens = tokeniseStatement(stmt);
+    if (tokens.length === 0) continue;
+    const i = commandWordIndex(tokens);
+    if (i >= tokens.length) continue;
+    const base = commandBaseName(tokens[i]);
+    if (!FIREWALL_TOOL_RE.test(base)) {
+      // The tool named anywhere OTHER than command position — an argument, a
+      // quoted string, a path — is not an invocation this predicate can vouch
+      // for. If it is the only occurrence, `seen` stays false and the gate holds.
+      continue;
+    }
+    seen = true;
+    if (!firewallArgvIsReadOnly(base, tokens.slice(i + 1))) return false;
+  }
+  return seen;
+}
+
 function hasUnscopedPipInstall(text: string): boolean {
   if (!/\bpip\d?\b/i.test(text) || !/\binstall\b/i.test(text)) return false;
   const venvs = venvPrefixesCreatedIn(text);
@@ -461,6 +628,92 @@ const CONTAINER_ESCAPE_RE = new RegExp([
  * gate for the whole call — a container run in statement 1 must never launder a
  * host install in statement 2.
  */
+/**
+ * Every `rm` target in this text is a WORKSPACE-CONFINED path (#170).
+ *
+ * Danger in a delete is a property of the TARGET, not the verb. `rm -rf /`
+ * ends a machine; `rm -rf .next` is the first line of every JavaScript build
+ * on earth. Until now `recursive-force-delete` fired on the flags alone, so
+ * the guard hard-blocked `cd dashboard && rm -rf .next && npm run build` at
+ * the catastrophic tier — no prompt, no appeal. Measured over 2,420 real tool
+ * calls (30 Jul – 2 Aug), deletes of build artefacts and scratch directories
+ * were the single largest source of denied honest work.
+ *
+ * That matters more than the inconvenience: an agent taught that denials are
+ * noise starts routing around them, and this codebase has already caught one
+ * of its own cron workers reaching for the disable switch. Precision IS the
+ * security property.
+ *
+ * Confined means, for EVERY target on the line:
+ *   - a relative path that cannot climb out (no leading `/` or `~`, no `..`), or
+ *   - a path under a temp root the agent owns.
+ * Anything absolute, home-rooted, glob-rooted, or variable-expanded is NOT
+ * confined — a `$VAR` could be `/`, and this must never gamble on that.
+ *
+ * `delete-root-or-home` is a separate, target-aware rule and is deliberately
+ * untouched: `rm -rf /`, `~`, `$HOME`, `/etc` all still hard-block through it.
+ * This exemption only removes the verb-only signal, never the target one.
+ */
+// Command position for `rm` is not only "after a statement separator": a
+// subshell, a brace group and a command substitution all open one too. The
+// original class stopped at `;&|`, so `rm -rf dist && out=$(rm -rf /etc/foo)`
+// parsed as ONE confined statement and the substitution's target was never
+// examined — a confined delete laundered an unconfined one on the same line
+// (measured, #196). Openers are separators for the arg span as well, so the
+// substitution's arguments end at its `)` rather than swallowing the rest.
+const RM_STATEMENT_RE = /(^|[;&|(){}`\n]|\$\()\s*(?:sudo\s+)?rm\b([^;&|(){}`\n]*)/gi;
+// Every occurrence of `rm` as a bare word — the accounting baseline for the
+// check below. The lookarounds exclude `rm` inside a path or an identifier
+// (`build/rm-cache`, `src/rm/x`), which is not a delete verb at all and must
+// not cost the exemption.
+const RM_WORD_RE = /(?<![\w./-])rm(?![\w./-])/gi;
+const CONFINED_TEMP_TARGET_RE = /^(?:\/tmp|\/var\/tmp|\/private\/var\/folders)\/[^\s]+$/i;
+/** Beyond this many `rm` statements the line is not analysable — never exempt. */
+const RM_STATEMENT_SCAN_LIMIT = 64;
+
+/** At least one statement on the line begins with a standalone `rm`. */
+function hasStandaloneRmStatement(text: string): boolean {
+  RM_STATEMENT_RE.lastIndex = 0;
+  return RM_STATEMENT_RE.test(text);
+}
+
+function deleteTargetsAreWorkspaceConfined(text: string): boolean {
+  RM_STATEMENT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  let sawTarget = false;
+  let statements = 0;
+  while ((m = RM_STATEMENT_RE.exec(text)) !== null) {
+    // Truncating the scan used to fall out of the loop and return the verdict
+    // built from the statements already seen — so a long enough command was
+    // exempted on the strength of its first 64 deletes (measured, #196). An
+    // unanalysable line is never downgraded.
+    if (++statements > RM_STATEMENT_SCAN_LIMIT) return false;
+    const args = m[2] ?? '';
+    for (const raw of args.split(/\s+/)) {
+      const tok = raw.trim().replace(/^["']|["']$/g, '');
+      if (!tok || tok.startsWith('-')) continue;          // flags, not targets
+      sawTarget = true;
+      // Never gamble on anything that can expand or climb.
+      if (/[$`*?~]/.test(tok)) return false;
+      if (tok.includes('..')) return false;
+      if (tok.startsWith('/')) {
+        if (!CONFINED_TEMP_TARGET_RE.test(tok)) return false;
+        continue;
+      }
+      // Relative and non-climbing — a workspace path.
+    }
+  }
+  if (!sawTarget) return false;
+  // Every `rm` on the line must have been one of the statements just examined.
+  // If the splitter could not account for one — `find … -exec rm -rf {} +`,
+  // `xargs rm`, any shape not yet understood — its target was never checked,
+  // and an unexamined delete must not inherit the exemption its neighbours
+  // earned. Fail-safe by construction rather than by enumeration.
+  RM_WORD_RE.lastIndex = 0;
+  const occurrences = (text.match(RM_WORD_RE) ?? []).length;
+  return occurrences === statements;
+}
+
 function installsAreContainerConfined(text: string): boolean {
   if (!CONTAINER_RUN_RE.test(text)) return false;
   if (CONTAINER_ESCAPE_RE.test(text)) return false;
@@ -989,13 +1242,25 @@ function classifyWithCtx(
     //     neither is at(1). This holds whether or not the region shells out: a
     //     bare source line is never a shell statement.
     //
-    //     Bare code matching an UNANCHORED rule (`sudo`, `rm`, `curl`) is
-    //     untouched and still contributes, which is what keeps the #138
-    //     script-file parity table at its current tiers. `|` and `>` are
-    //     deliberately NOT anchor characters here — `redirect-to-block-device`
-    //     is an unanchored rule that legitimately starts with one.
+    //     `|` and `>` are deliberately NOT anchor characters here —
+    //     `redirect-to-block-device` is an unanchored rule that legitimately
+    //     starts with one.
     if (isShellAnchorChar(text, start)) return 'mention';
-    break;
+    // 3c) #188: bare code matching an UNANCHORED rule (`sudo`, `rm`, `curl`)
+    //     used to fall straight through to 'executed'. But a shell verb sitting
+    //     in interpreter code position is an identifier, not a command:
+    //     `sudo = ["michael", "admin"]` is an assignment, and Python has no way
+    //     to execute the name `sudo`. The ONLY route from this region to a shell
+    //     is a string handed to a sink — and 3a-i above already classified those
+    //     literals 'executed', which is what keeps write-then-exec closed.
+    //     So bare code takes exactly the same tiers as a literal (3a): inert
+    //     when the region never shells out, demoted to payload when it does and
+    //     the source was folded from a file on disk, and unchanged ('executed')
+    //     for an inline program the agent wrote into the command itself.
+    //     The #138 shell-script parity table is untouched: a folded `.sh` region
+    //     is language 'sh' and never enters this loop.
+    if (!r.hasSink) return 'mention';
+    return r.folded ? 'payload' : 'executed';
   }
   return 'executed';
 }
@@ -1392,6 +1657,35 @@ function findInterpreterRunFiles(cmd: string, files: readonly string[]): Set<str
     }
     if (m[0].length === 0) re.lastIndex++; // never spin forever on a zero-length match
   }
+  // #194 — the alternation above matches the candidate ANYWHERE on an
+  // interpreter's command line, so a file merely NAMED as an argument to some
+  // OTHER program read as "the interpreter runs this file". `node
+  // scripts/run-jest.mjs src/zz.test.ts` and `python3 -m pytest tests/test_x.py`
+  // both kept their heredoc bodies scanned, which is the write-a-test-then-run-
+  // it workflow: a fixture full of danger vocabulary, hard-blocked at the
+  // catastrophic tier with no prompt. Blocked this box's own investigation
+  // twice inside ten minutes.
+  //
+  // Program position is already defined once, in `detectScriptInvocations` —
+  // which skips flags, understands `-c`/`-m`/`-e` inline programs, and recurses
+  // into `bash -c`. Reuse it rather than write a second, divergent definition
+  // (the recurring root cause in this file is a rule implemented twice).
+  // Intersecting NARROWS `found`, so this can only ever keep more bodies inert;
+  // the saturation guard below is what stops that being a bypass.
+  if (found.size > 0) {
+    const invoked = detectScriptInvocations(cmd);
+    // Detection is capped (MAX_DETECTED_SCRIPTS). At the cap it may not have
+    // reached a later real invocation, so trust the wider regex and keep every
+    // body scanned — fail closed.
+    if (invoked.length < MAX_DETECTED_SCRIPTS) {
+      const runsFile = (candidate: string): boolean => invoked.some(({ path }) =>
+        path === candidate
+        || path.endsWith(`/${candidate}`)
+        || candidate.endsWith(`/${path}`)
+        || path === `./${candidate}`);
+      for (const f of [...found]) if (!runsFile(f)) found.delete(f);
+    }
+  }
   return found;
 }
 
@@ -1620,6 +1914,8 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
+  const surface = maskSinkFreeInlinePrograms(execSurface);
+
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
@@ -1627,7 +1923,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     found.push({ path: clean, lang: lang ?? langFromPath(clean) });
   };
 
-  for (const stmt of splitCommandStatements(execSurface)) {
+  for (const stmt of splitCommandStatements(surface)) {
     if (found.length >= MAX_DETECTED_SCRIPTS) break;
     if (!stmt.trim()) continue;
     const tokens = tokeniseStatement(stmt);
@@ -1874,6 +2170,37 @@ function inlineProgramRegions(text: string): ScanRegion[] {
 }
 
 /**
+ * #190 — a path literal inside an inline interpreter program is not a command.
+ *
+ * `splitCommandStatements` treats `(` and `)` as statement breaks, because in
+ * shell they are. Applied to an inline interpreter program they are not: the
+ * Python one-liner `python3 -c "json.load(open('~/x.jsonl'))"` splits into a
+ * statement whose only token is `~/x.jsonl`, which reads as a path in command
+ * position — so the guard folded the DATA FILE and, `.jsonl` being no code
+ * extension, scanned its contents as SHELL. Any one-liner that opened a log,
+ * a JSON baseline or a CSV was denied for whatever substrings that data
+ * happened to contain. Worst case is self-inflicted: ShieldCortex's own audit
+ * log records the tokens that tripped past denials, so reading it back to
+ * investigate a denial produced another one. A guard whose telemetry cannot be
+ * read is a guard that cannot be debugged.
+ *
+ * Same family as #188 — shell rules applied to a non-shell code position — and
+ * resolved the same way #89 resolves it: by what the region can REACH. A
+ * sink-free program provably cannot start a process, so nothing in it is an
+ * invocation and it is masked out (length-preserving, so every offset computed
+ * against the original text stays valid). A program that CAN shell out —
+ * `os.system('bash /tmp/x.sh')` — keeps its text and its nested invocation is
+ * still found, because there the path really is in command position.
+ */
+function maskSinkFreeInlinePrograms(text: string): string {
+  const regions = inlineProgramRegions(text).filter(r => !r.hasSink);
+  if (regions.length === 0) return text;
+  let out = text;
+  for (const r of regions) out = out.slice(0, r.start) + ' '.repeat(r.end - r.start) + out.slice(r.end);
+  return out;
+}
+
+/**
  * Split `[0, length)` into the shell ranges left over once `carved` regions are
  * removed, so every byte of the scan surface belongs to exactly one region.
  */
@@ -1997,7 +2324,13 @@ export function evaluateToolCall(
   // Span-classified (#84): a catastrophic token inside a URL or a quoted DATA
   // argument is a mention, not intent (`grep "rm -rf /" log`, a fetched URL
   // whose path contains "rm-rf") — but any executed occurrence still hard-blocks.
-  const catastrophicMatches = matchSpansClassified(CATASTROPHIC, scanSurface, regions);
+  const catastrophicMatches = matchSpansClassified(CATASTROPHIC, scanSurface, regions)
+    // #170: drop the VERB-only delete signal when every target on the line is
+    // workspace-confined. The TARGET-aware rule (`delete-root-or-home`) is not
+    // in this filter, so `rm -rf /` and friends are unaffected — which the
+    // suite pins in both directions.
+    .filter(m => !(m.signal === 'recursive-force-delete'
+      && deleteTargetsAreWorkspaceConfined(scanSurface)));
   const catastrophicExecuted = catastrophicMatches.filter(m => m.tier === 'executed');
   if (catastrophicExecuted.length > 0) {
     const catastrophicSignals = catastrophicExecuted.map(m => m.signal);
@@ -2024,6 +2357,12 @@ export function evaluateToolCall(
   // as 1a. A non-critical path still recursively deletes everything under it,
   // so it is folded into the DANGEROUS signals below (dangerSignals) instead.
   const findDeleteMatch = matchFindDelete(scanSurface);
+  // #170: a find-delete NARROWED by a filename/path filter is a targeted sweep
+  // — computed here because both the dangerous-signal assembly below and the
+  // file-delete exemption need the same answer for the same statement.
+  const findDeleteIsFiltered = findDeleteMatch
+    ? /\s-(?:name|iname|path|ipath|regex)\s+\S+/.test(findDeleteMatch[0])
+    : false;
   if (findDeleteMatch && isCriticalPath(findDeleteMatch[1])) {
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', ['recursive-find-delete'], findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80)),
@@ -2065,7 +2404,36 @@ export function evaluateToolCall(
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
   // Span-classified (#84): same mention-vs-intent filter as catastrophic above.
-  const dangerMatches = [...catastrophicPayload, ...matchSpansClassified(DANGEROUS, scanSurface, regions)];
+  // #188: a DANGEROUS token whose every occurrence is a PAYLOAD LITERAL inside
+  // FOLDED interpreter source is shell vocabulary in a language that is not
+  // shell — an identifier, a comment, a dict key. #165 already drew this line,
+  // but only for files with NO shell-out sink: one `subprocess.run` anywhere
+  // re-armed every rule against every literal in the whole file. That is the
+  // shape of a security-monitoring script, and it hard-denied one for 2.5 days
+  // (`sudo = ["michael", "admin"]  # macOS admin group = sudo equivalent`).
+  // The relief is deliberately narrow and cannot reopen write-then-exec:
+  //   - a literal that is a shell-out call's OWN argument is 'executed' (3a-i),
+  //   - a folded `.sh` file is shell and never reaches the payload tier,
+  //   - CATASTROPHIC payload still gates here via `catastrophicPayload`,
+  //   - path-target rules never reach the payload tier at all (naming the path
+  //     IS the access), so `id_rsa` in folded source is untouched by this.
+  // Demoted, not dropped: the signals are surfaced at the sensitive tier below
+  // so the match stays auditable instead of vanishing.
+  const dangerClassified = matchSpansClassified(DANGEROUS, scanSurface, regions);
+  const dangerPayloadOnly = dangerClassified.filter(m => m.tier === 'payload');
+  const dangerMatches = [...catastrophicPayload, ...dangerClassified.filter(m => m.tier === 'executed')]
+    // #170: same target-not-verb principle as the catastrophic tier. A delete
+    // whose every target is workspace-confined (`rm -rf .next`, a scratch dir
+    // under /tmp) is ordinary work and must not need a human nod — that is the
+    // shape that produced most of the measured denials of honest engineering.
+    // Anything absolute, home-rooted, glob- or variable-expanded is untouched.
+    .filter(m => !(m.signal === 'file-delete'
+      && family !== 'delete'
+      && (deleteTargetsAreWorkspaceConfined(scanSurface)
+        // The `rm` embedded in a FILTERED find's -exec belongs to that sweep,
+        // not to a standalone delete statement — if no standalone rm exists on
+        // the line, the sweep's own (allowed) verdict covers it.
+        || (findDeleteIsFiltered && !hasStandaloneRmStatement(scanSurface)))));
   let dangerSignals = dangerMatches.map(m => m.signal);
   let dangerSpan = dangerMatches[0]?.span;
   // A pip install scoped to a venv / an explicit target prefix mutates that
@@ -2083,6 +2451,17 @@ export function evaluateToolCall(
   if (dangerSignals.includes('install-package') && installsAreContainerConfined(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'install-package');
   }
+  // Force-push must be an invocation, not vocabulary (issue #195): talking
+  // ABOUT a force-push — in a commit message, a log-capture CLI's prose — is
+  // not performing one.
+  if (dangerSignals.includes('git-force-push') && !gitForcePushInvoked(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'git-force-push');
+  }
+  // Reading the firewall's state changes nothing (issue #193). The rule matched
+  // the tool and never the verb, so a status sweep gated as hard as a flush.
+  if (dangerSignals.includes('modify-network-firewall') && firewallCallsAreReadOnly(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'modify-network-firewall');
+  }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
   // behind and is not egress (issue #73.2). Secret-bearing egress already hard
@@ -2095,7 +2474,15 @@ export function evaluateToolCall(
   if (family === 'delete' && !dangerSignals.includes('file-delete')) dangerSignals.push('file-delete');
   // A `find -delete` / `find -exec rm` on a non-critical path (1b already
   // returned catastrophic for a critical one) is still a recognised recursive delete.
-  if (findDeleteMatch && !dangerSignals.includes('recursive-find-delete')) {
+  // #170: a find-delete NARROWED by a filename/type filter is a targeted sweep
+  // (`-name "*.lock" -delete`), not tree removal — the shape every maintenance
+  // script on earth uses to clear stale locks. Blocking it stopped a nightly
+  // backup at 01:00 and taught the agent running it to ask for an allowlist
+  // wide enough to cover all deletes, which would have been far worse than the
+  // bug. An UNFILTERED find-delete still gates: it really does remove
+  // everything beneath its root, and the suite pins that direction too.
+  // (`findDeleteIsFiltered` is computed with the match above, pre-assembly.)
+  if (findDeleteMatch && !findDeleteIsFiltered && !dangerSignals.includes('recursive-find-delete')) {
     dangerSignals.push('recursive-find-delete');
     dangerSpan = dangerSpan ?? findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80);
   }
@@ -2123,10 +2510,19 @@ export function evaluateToolCall(
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
+  // Dangerous vocabulary demoted at #188 rides along here: allowed, but named,
+  // so a reviewer can still see what the folded source said.
+  const payloadSignals = [...new Set(dangerPayloadOnly.map(m => m.signal))];
   const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
     return verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
-      [sensitiveSignal, ...opaqueSignals]);
+      [sensitiveSignal, ...payloadSignals, ...opaqueSignals]);
+  }
+  if (payloadSignals.length > 0) {
+    return verdict('allow', 'sensitive', family, canonical,
+      buildReason('dangerous vocabulary appears only as data inside folded script source',
+        payloadSignals, dangerPayloadOnly[0].span),
+      [...payloadSignals, ...opaqueSignals]);
   }
 
   // 3a) A script invocation whose contents could NOT be read (issue #4). Allowed

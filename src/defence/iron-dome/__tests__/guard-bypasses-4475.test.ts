@@ -198,14 +198,25 @@ describe('#4475.5 — `find … -delete` / `find … -exec rm` must be recognise
     expect(v.signals).toContain('recursive-find-delete');
   });
 
+  // #170 split what used to be one "non-critical path" tier in two, by the
+  // property that actually matters:
+  //  - UNFILTERED find-delete still gates — it removes everything beneath its
+  //    root, and only the root's criticality was ever checked.
+  //  - a find NARROWED by -name/-path/-regex is a targeted sweep (`-name
+  //    "*.o"`), the shape every maintenance script uses — allowed. Blocking it
+  //    stopped a production nightly backup at 01:00 on 2 Aug.
   const approve: Array<[string, string]> = [
-    ['find non-critical path -delete', 'find /tmp/scratch -delete'],
-    ['find non-critical path -exec rm', 'find ./build -name "*.o" -exec rm {} \\;'],
+    ['find non-critical path -delete (unfiltered)', 'find /tmp/scratch -delete'],
   ];
   it.each(approve)('requires approval (non-critical path): %s', (_l, command) => {
     const v = verdict({ command });
     expect(v.decision).toBe('require_approval');
     expect(v.signals).toContain('recursive-find-delete');
+  });
+
+  it('allows a FILTERED find-exec-rm sweep on a workspace path (#170)', () => {
+    const v = verdict({ command: 'find ./build -name "*.o" -exec rm {} \\;' });
+    expect(v.decision).toBe('allow');
   });
 
   // Must-still-allow: a find with no -delete/-exec rm is just a search.

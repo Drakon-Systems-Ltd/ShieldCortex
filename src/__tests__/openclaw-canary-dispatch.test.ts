@@ -35,11 +35,18 @@ describe('buildSyntheticCanaryOp — provably harmless, known-bad, canary-tagged
     expect(v.severity).toBe('catastrophic');
   });
 
-  it('is provably harmless: targets a synthetic /tmp canary path (a no-op even if it ran)', () => {
+  it('is provably harmless: targets a synthetic nonce-named dotdir (a no-op even if it ran)', () => {
+    // Was a /tmp path — #170's target-aware precision made /tmp deletes
+    // workspace-confined and ALLOWED, which silently broke the canary's
+    // known-bad property (caught by the sibling test above going red). The
+    // canary now targets `~/.<nonce>`: the confinement check permanently
+    // rejects `~` (it can expand anywhere), so the shape stays catastrophic —
+    // and a nonexistent nonce-named dotdir is still a no-op if it ever runs.
     const op = buildSyntheticCanaryOp('sc-canary-NONCE1');
     const command = String(op.arguments.command);
-    expect(command).toContain('/tmp/');
-    // Never a real/root/home target — the delete surface is a synthetic path only.
+    expect(command).toContain('~/.sc-canary-NONCE1');
+    // Never a bare root/home target — the delete surface is the synthetic
+    // dotdir only, not `~` or `/` themselves.
     expect(command).not.toMatch(/\srm\b[^\n]*\s(?:\/|~|\$HOME)(?:\s|$)/);
   });
 
