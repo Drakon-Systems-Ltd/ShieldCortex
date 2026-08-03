@@ -1691,6 +1691,8 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
+  const surface = maskSinkFreeInlinePrograms(execSurface);
+
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
@@ -1698,7 +1700,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     found.push({ path: clean, lang: lang ?? langFromPath(clean) });
   };
 
-  for (const stmt of splitCommandStatements(execSurface)) {
+  for (const stmt of splitCommandStatements(surface)) {
     if (found.length >= MAX_DETECTED_SCRIPTS) break;
     if (!stmt.trim()) continue;
     const tokens = tokeniseStatement(stmt);
@@ -1941,6 +1943,37 @@ function inlineProgramRegions(text: string): ScanRegion[] {
     }
     INLINE_PROGRAM_RE.lastIndex = Math.max(progEnd, m.index + m[0].length);
   }
+  return out;
+}
+
+/**
+ * #190 — a path literal inside an inline interpreter program is not a command.
+ *
+ * `splitCommandStatements` treats `(` and `)` as statement breaks, because in
+ * shell they are. Applied to an inline interpreter program they are not: the
+ * Python one-liner `python3 -c "json.load(open('~/x.jsonl'))"` splits into a
+ * statement whose only token is `~/x.jsonl`, which reads as a path in command
+ * position — so the guard folded the DATA FILE and, `.jsonl` being no code
+ * extension, scanned its contents as SHELL. Any one-liner that opened a log,
+ * a JSON baseline or a CSV was denied for whatever substrings that data
+ * happened to contain. Worst case is self-inflicted: ShieldCortex's own audit
+ * log records the tokens that tripped past denials, so reading it back to
+ * investigate a denial produced another one. A guard whose telemetry cannot be
+ * read is a guard that cannot be debugged.
+ *
+ * Same family as #188 — shell rules applied to a non-shell code position — and
+ * resolved the same way #89 resolves it: by what the region can REACH. A
+ * sink-free program provably cannot start a process, so nothing in it is an
+ * invocation and it is masked out (length-preserving, so every offset computed
+ * against the original text stays valid). A program that CAN shell out —
+ * `os.system('bash /tmp/x.sh')` — keeps its text and its nested invocation is
+ * still found, because there the path really is in command position.
+ */
+function maskSinkFreeInlinePrograms(text: string): string {
+  const regions = inlineProgramRegions(text).filter(r => !r.hasSink);
+  if (regions.length === 0) return text;
+  let out = text;
+  for (const r of regions) out = out.slice(0, r.start) + ' '.repeat(r.end - r.start) + out.slice(r.end);
   return out;
 }
 
