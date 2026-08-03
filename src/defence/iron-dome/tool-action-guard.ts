@@ -654,8 +654,22 @@ const CONTAINER_ESCAPE_RE = new RegExp([
  * untouched: `rm -rf /`, `~`, `$HOME`, `/etc` all still hard-block through it.
  * This exemption only removes the verb-only signal, never the target one.
  */
-const RM_STATEMENT_RE = /(^|[;&|]|\n)\s*(?:sudo\s+)?rm\b([^;&|\n]*)/gi;
+// Command position for `rm` is not only "after a statement separator": a
+// subshell, a brace group and a command substitution all open one too. The
+// original class stopped at `;&|`, so `rm -rf dist && out=$(rm -rf /etc/foo)`
+// parsed as ONE confined statement and the substitution's target was never
+// examined — a confined delete laundered an unconfined one on the same line
+// (measured, #196). Openers are separators for the arg span as well, so the
+// substitution's arguments end at its `)` rather than swallowing the rest.
+const RM_STATEMENT_RE = /(^|[;&|(){}`\n]|\$\()\s*(?:sudo\s+)?rm\b([^;&|(){}`\n]*)/gi;
+// Every occurrence of `rm` as a bare word — the accounting baseline for the
+// check below. The lookarounds exclude `rm` inside a path or an identifier
+// (`build/rm-cache`, `src/rm/x`), which is not a delete verb at all and must
+// not cost the exemption.
+const RM_WORD_RE = /(?<![\w./-])rm(?![\w./-])/gi;
 const CONFINED_TEMP_TARGET_RE = /^(?:\/tmp|\/var\/tmp|\/private\/var\/folders)\/[^\s]+$/i;
+/** Beyond this many `rm` statements the line is not analysable — never exempt. */
+const RM_STATEMENT_SCAN_LIMIT = 64;
 
 /** At least one statement on the line begins with a standalone `rm`. */
 function hasStandaloneRmStatement(text: string): boolean {
@@ -667,8 +681,13 @@ function deleteTargetsAreWorkspaceConfined(text: string): boolean {
   RM_STATEMENT_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   let sawTarget = false;
-  let guard = 0;
-  while ((m = RM_STATEMENT_RE.exec(text)) !== null && guard++ < 64) {
+  let statements = 0;
+  while ((m = RM_STATEMENT_RE.exec(text)) !== null) {
+    // Truncating the scan used to fall out of the loop and return the verdict
+    // built from the statements already seen — so a long enough command was
+    // exempted on the strength of its first 64 deletes (measured, #196). An
+    // unanalysable line is never downgraded.
+    if (++statements > RM_STATEMENT_SCAN_LIMIT) return false;
     const args = m[2] ?? '';
     for (const raw of args.split(/\s+/)) {
       const tok = raw.trim().replace(/^["']|["']$/g, '');
@@ -684,7 +703,15 @@ function deleteTargetsAreWorkspaceConfined(text: string): boolean {
       // Relative and non-climbing — a workspace path.
     }
   }
-  return sawTarget;
+  if (!sawTarget) return false;
+  // Every `rm` on the line must have been one of the statements just examined.
+  // If the splitter could not account for one — `find … -exec rm -rf {} +`,
+  // `xargs rm`, any shape not yet understood — its target was never checked,
+  // and an unexamined delete must not inherit the exemption its neighbours
+  // earned. Fail-safe by construction rather than by enumeration.
+  RM_WORD_RE.lastIndex = 0;
+  const occurrences = (text.match(RM_WORD_RE) ?? []).length;
+  return occurrences === statements;
 }
 
 function installsAreContainerConfined(text: string): boolean {
