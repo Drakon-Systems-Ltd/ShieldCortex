@@ -229,7 +229,11 @@ const DANGEROUS: Pattern[] = [
   // whole 80-char span echoed back as the "matched" text (fmtSpan truncation of
   // a span that had swallowed four statements), which is why the error looked
   // like it was quoting a force-push that was never there.
-  { re: /\bgit\b[^|;&\n]*\bpush\b[^|;&\n]*(?:^|\s)(?:--force\b|-f\b|\+\S)/i, signal: 'git-force-push' },
+  // `-[A-Za-z]*f[A-Za-z]*` rather than `-f\b`: git accepts clustered short
+  // options, and `git push -fq` slipped the word-boundary form entirely
+  // (issue #195). The leading `(?:^|\s)` still requires a real shell word, so
+  // #191's `trash old-f.tar.gz` stays clean.
+  { re: /\bgit\b[^|;&\n]*\bpush\b[^|;&\n]*(?:^|\s)(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b|\+\S)/i, signal: 'git-force-push' },
   { re: /\bgit\b[^|;&\n]*\b(branch\s+-D|push\b[^|;&\n]*--delete|push\b[^|;&\n]*\s:)/i, signal: 'git-delete-branch' },
   // The process verbs here are the SHELL commands, not a language's process API
   // (issue #165). `process.kill(process.pid, sig)` in a build script forwards a
@@ -407,6 +411,81 @@ function venvPrefixesCreatedIn(text: string): string[] {
     while ((m = re.exec(text)) !== null) out.push(m[1].replace(/^['"]|['"]$/g, ''));
   }
   return out;
+}
+
+// ── Force-push must be an INVOCATION, not vocabulary (issue #195) ────────────
+//
+// #191 bounded the git-force-push rule to one statement and to real force
+// tokens, which killed the statement-bridging half. It left the other half
+// untouched: the rule never required `git` to be a command at all. So any text
+// that mentions git, then push, then a `+` or `-f` armed it — inside a quoted
+// argument, a commit message, a log-capture CLI's prose:
+//
+//   python3 cortex.py capture --what "git-force-push misfire … the + in +03-00"
+//   git commit -m "fix the git push +1 bug"
+//
+// `\bgit\b` even matched inside the hyphenated rule NAME. Reported by Friday,
+// who hit it while logging the lesson from the previous bug: writing up a
+// denial got denied. That is the failure mode worth killing on its own — it
+// suppresses exactly the record-keeping the fleet is asked for.
+//
+// Tokenising is what makes this precise: `tokeniseStatement` keeps a quoted
+// span whole, so `--what "… git push +1 …"` is ONE token that is not `git`,
+// while a real `git push -f` is three. Same principle as #188 and #193 — match
+// the invocation, never the vocabulary.
+const GIT_FORCE_FLAG = /^--force(?:-with-lease|-if-includes)?(?:=|$)|^-[A-Za-z]*f[A-Za-z]*$/;
+/** Wrappers that still leave the next word a real command. */
+const COMMAND_WRAPPER = /^(?:sudo|doas|env|nohup|time|timeout|xargs|nice|ionice|stdbuf|command|builtin|exec)$/;
+
+/**
+ * True when a statement genuinely invokes `git push` with a force token.
+ *
+ * Fail-closed on anything it cannot read as argv: `eval` can reconstitute a
+ * command from text, and a `$`-expansion can hide the verb, so a statement
+ * carrying either keeps the signal rather than being vouched for.
+ */
+function gitForcePushInvoked(text: string, depth = 0): boolean {
+  for (const stmt of splitCommandStatements(text)) {
+    if (!/\bgit\b/i.test(stmt) || !/\bpush\b/i.test(stmt)) continue;
+    if (/\beval\b/.test(stmt) || stmt.includes('$')) return true;   // unreadable → keep the gate
+    const tokens = tokeniseStatement(stmt);
+    // `bash -c 'git push --force'` — the tokeniser keeps that program whole, so
+    // the verb is inside a single token. Recurse into it (bounded), exactly as
+    // detectScriptInvocations does, or the quote becomes a bypass.
+    if (depth < MAX_INLINE_RECURSION) {
+      for (let i = 0; i < tokens.length; i++) {
+        const b = commandBaseName(tokens[i]);
+        if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (!tokens[j].startsWith('-')) break;
+          if (isInlineProgramFlag(b, tokens[j])) {
+            if (gitForcePushInvoked(tokens[j + 1] ?? '', depth + 1)) return true;
+            break;
+          }
+        }
+      }
+    }
+    for (let i = 0; i < tokens.length; i++) {
+      if (commandBaseName(tokens[i]).toLowerCase() !== 'git') continue;
+      // `git` must be the command, or sit directly behind a wrapper that leaves
+      // it one (`sudo git …`, `xargs git …`), or behind `VAR=x` assignments.
+      const prev = i > 0 ? commandBaseName(tokens[i - 1]) : '';
+      const atCommand = i === 0
+        || COMMAND_WRAPPER.test(prev)
+        || /^\w+=/.test(tokens[i - 1])
+        || /^-/.test(tokens[i - 1]) && i > 1 && COMMAND_WRAPPER.test(commandBaseName(tokens[i - 2]));
+      if (!atCommand) continue;
+      const args = tokens.slice(i + 1);
+      const pushAt = args.findIndex(a => a.toLowerCase() === 'push');
+      if (pushAt < 0) continue;                                     // `git commit -m "… push …"`
+      // Only flags/refspecs BELONGING to this push count.
+      for (const a of args.slice(pushAt + 1)) {
+        if (GIT_FORCE_FLAG.test(a)) return true;
+        if (a.startsWith('+') && a.length > 1) return true;         // `+main:main` refspec
+      }
+    }
+  }
+  return false;
 }
 
 // ── Read-only firewall inspection (issue #193) ───────────────────────────────
@@ -2344,6 +2423,12 @@ export function evaluateToolCall(
   // outside the container run keeps it for the whole call.
   if (dangerSignals.includes('install-package') && installsAreContainerConfined(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'install-package');
+  }
+  // Force-push must be an invocation, not vocabulary (issue #195): talking
+  // ABOUT a force-push — in a commit message, a log-capture CLI's prose — is
+  // not performing one.
+  if (dangerSignals.includes('git-force-push') && !gitForcePushInvoked(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'git-force-push');
   }
   // Reading the firewall's state changes nothing (issue #193). The rule matched
   // the tool and never the verb, so a status sweep gated as hard as a flush.
