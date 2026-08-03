@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.29] - 2026-08-03
+
+**A delete is judged by its target, not its verb — and the guard stops denying the ordinary work of the agents it protects.**
+
+Measured first: of 2,420 real tool calls through the Claude Code hook across 30 Jul – 2 Aug, 135 were denied. Almost none were attacks. Two production crons on the fleet were silently dead for days — one for 2.5 — because a security-monitoring script contains the vocabulary of the things it monitors. An agent taught that denials are noise starts routing around them, so precision here *is* the security property.
+
+### Fixed
+
+- **`rm -rf .next` is not a catastrophic event (#170, #180).** `recursive-force-delete` fired on the flags alone, so `cd dashboard && rm -rf .next && npm run build` hard-blocked with no prompt and no appeal. Deletes are now exempt only when *every* target is workspace-confined — a non-climbing relative path, or a path under a temp root. Anything absolute, home-rooted, glob- or variable-expanded is untouched, because a `$VAR` could be `/`. The target-aware `delete-root-or-home` rule is deliberately unchanged: `rm -rf /`, `~`, `$HOME` and `/etc` still hard-block.
+- **A confined delete could launder an unconfined one (#196).** Two fail-open defects in the exemption above, found by reading it before release rather than by its tests passing. The statement scan gave up after 64 deletes and still returned "confined"; and command position was recognised only after `;&|`, so `rm -rf dist && out=$(rm -rf /etc/foo)` was allowed outright. Substitutions and subshells are now command position, a truncated scan never exempts, and every `rm` on the line must be one the splitter actually examined — so `find … -exec rm` and shapes not yet understood keep the gate rather than inheriting their neighbours' exemption.
+- **A shell verb in interpreter code position is an identifier (#188).** `sudo = ["michael", "admin"]` in a Python script hard-denied a fleet agent's daily security cron for 2.5 days. #165 drew this line only for folded files with no shell-out sink — one `subprocess.run` anywhere re-armed every shell rule against every token, which is the exact shape of a monitoring script.
+- **ShieldCortex's audit log denied the commands that read it (#190).** Statement splitting breaks on `(` and `)` because in shell those are statement breaks; inside an inline interpreter program they are not, so reading a `.jsonl` split into a statement whose only token was the path, and every past denial writes its trigger tokens into that log.
+- **`git-force-push` fired on prose (#191, #195).** The bridge crossed `;` and `&&`, the force alternatives were unanchored, and the rule never required `git` to be a command — `\bgit\b` matched inside the hyphenated rule name. Writing up a denial got the write-up denied.
+- **Reading the firewall's state is not modifying it (#193).** `ufw status` and `iptables -L` gated as hard as `ufw disable`.
+- **Naming a file is not running it (#194).** The write-then-exec check matched the written filename anywhere on an interpreter's command line, so `node scripts/run-jest.mjs src/x.test.ts` counted as executing the test file. The guard blocked the investigation of its own bug, twice.
+
+### Changed
+
+- The enforcement canary and the doctor's catastrophic probe no longer use `/tmp` targets, which the confinement rule above now correctly allows. Both moved to targets confinement permanently rejects, so every box's proof that enforcement is live keeps proving it.
+
 ## [4.47.22] - 2026-07-31
 
 **The backup budget is now tested where it is wired, not just where it is defined — and the storage limits live in one place without pretending two different policies are the same number.**
