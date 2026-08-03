@@ -409,6 +409,81 @@ function venvPrefixesCreatedIn(text: string): string[] {
   return out;
 }
 
+// ── Read-only firewall inspection (issue #193) ───────────────────────────────
+//
+// `modify-network-firewall` matched the TOOL and never the verb, so `ufw status`,
+// `iptables -L`, `firewall-cmd --state` and `netplan get` gated exactly as hard
+// as `ufw disable` and `iptables -F`. Reading the firewall's state is what a
+// security-monitoring script does sixteen times before breakfast; it changes
+// nothing. Hit live on Friday-Mac, where a read-only `--getglobalstate` sweep
+// tripped a *modify* rule.
+//
+// Fail-closed by construction: this returns true only when EVERY firewall
+// invocation on the surface is one it positively recognises as read-only. An
+// unknown tool, an unparsed shape, a flag not on the list, or no recognised
+// invocation at all (the token was in folded source, or behind an expansion)
+// all keep the gate.
+const FIREWALL_TOOL_RE = /^(?:ip6?tables(?:-(?:save|restore|nft|legacy))?|ufw|nft|netplan|firewall-cmd)$/i;
+
+/** Per tool: does this argv read state without changing it? */
+function firewallArgvIsReadOnly(tool: string, args: readonly string[]): boolean {
+  const rest = args.filter(a => a !== '');
+  switch (tool.toLowerCase()) {
+    case 'ufw':
+      // `ufw status [verbose|numbered]`, `ufw show …`, `ufw version`.
+      return /^(?:status|show|version|--version)$/i.test(rest[0] ?? '');
+    case 'nft':
+      // `nft list …` / `nft describe …`. Everything else (add/flush/delete) writes.
+      return /^(?:list|describe|-v|--version|-h|--help)$/i.test(rest[0] ?? '');
+    case 'netplan':
+      return /^(?:get|status|info|--version)$/i.test(rest[0] ?? '');
+    case 'firewall-cmd':
+      // Query flags only. `--permanent`/`--zone=` are modifiers that change
+      // nothing on their own, so they are permitted alongside a query — but a
+      // single unrecognised flag keeps the gate.
+      return rest.length > 0 && rest.every(a =>
+        /^--(?:state|list-\S*|get-\S*|query-\S*|info-\S*|permanent|zone=\S*|policy=\S*|version|help)$/i.test(a));
+    default: {
+      // iptables family. Every flag must be an inspection or a selector; any
+      // chain-editing flag (-A -D -I -R -F -X -N -P -Z -E) keeps the gate.
+      // `-Z` zeroes counters — a write, however small — so it is NOT here.
+      if (rest.length === 0) return false;                    // bare `iptables` prints usage, but do not guess
+      let sawList = false;
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i];
+        if (!a.startsWith('-')) continue;                     // table / chain name
+        if (/^(?:-L|--list|-S|--list-rules)$/i.test(a)) { sawList = true; continue; }
+        if (/^(?:-n|--numeric|-v|--verbose|-x|--exact|--line-numbers|-w|--wait)$/.test(a)) continue;
+        if (/^(?:-t|--table)$/i.test(a)) { i++; continue; }   // takes a value
+        if (/^-[LSnvx]+$/.test(a)) { sawList = /[LS]/.test(a); continue; }   // clustered short flags
+        return false;                                         // anything else writes
+      }
+      return sawList;
+    }
+  }
+}
+
+/** True when every firewall invocation on the surface only READS state. */
+function firewallCallsAreReadOnly(text: string): boolean {
+  let seen = false;
+  for (const stmt of splitCommandStatements(text)) {
+    const tokens = tokeniseStatement(stmt);
+    if (tokens.length === 0) continue;
+    const i = commandWordIndex(tokens);
+    if (i >= tokens.length) continue;
+    const base = commandBaseName(tokens[i]);
+    if (!FIREWALL_TOOL_RE.test(base)) {
+      // The tool named anywhere OTHER than command position — an argument, a
+      // quoted string, a path — is not an invocation this predicate can vouch
+      // for. If it is the only occurrence, `seen` stays false and the gate holds.
+      continue;
+    }
+    seen = true;
+    if (!firewallArgvIsReadOnly(base, tokens.slice(i + 1))) return false;
+  }
+  return seen;
+}
+
 function hasUnscopedPipInstall(text: string): boolean {
   if (!/\bpip\d?\b/i.test(text) || !/\binstall\b/i.test(text)) return false;
   const venvs = venvPrefixesCreatedIn(text);
@@ -2240,6 +2315,11 @@ export function evaluateToolCall(
   // outside the container run keeps it for the whole call.
   if (dangerSignals.includes('install-package') && installsAreContainerConfined(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'install-package');
+  }
+  // Reading the firewall's state changes nothing (issue #193). The rule matched
+  // the tool and never the verb, so a status sweep gated as hard as a flush.
+  if (dangerSignals.includes('modify-network-firewall') && firewallCallsAreReadOnly(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'modify-network-firewall');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
