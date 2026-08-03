@@ -1551,6 +1551,35 @@ function findInterpreterRunFiles(cmd: string, files: readonly string[]): Set<str
     }
     if (m[0].length === 0) re.lastIndex++; // never spin forever on a zero-length match
   }
+  // #194 — the alternation above matches the candidate ANYWHERE on an
+  // interpreter's command line, so a file merely NAMED as an argument to some
+  // OTHER program read as "the interpreter runs this file". `node
+  // scripts/run-jest.mjs src/zz.test.ts` and `python3 -m pytest tests/test_x.py`
+  // both kept their heredoc bodies scanned, which is the write-a-test-then-run-
+  // it workflow: a fixture full of danger vocabulary, hard-blocked at the
+  // catastrophic tier with no prompt. Blocked this box's own investigation
+  // twice inside ten minutes.
+  //
+  // Program position is already defined once, in `detectScriptInvocations` —
+  // which skips flags, understands `-c`/`-m`/`-e` inline programs, and recurses
+  // into `bash -c`. Reuse it rather than write a second, divergent definition
+  // (the recurring root cause in this file is a rule implemented twice).
+  // Intersecting NARROWS `found`, so this can only ever keep more bodies inert;
+  // the saturation guard below is what stops that being a bypass.
+  if (found.size > 0) {
+    const invoked = detectScriptInvocations(cmd);
+    // Detection is capped (MAX_DETECTED_SCRIPTS). At the cap it may not have
+    // reached a later real invocation, so trust the wider regex and keep every
+    // body scanned — fail closed.
+    if (invoked.length < MAX_DETECTED_SCRIPTS) {
+      const runsFile = (candidate: string): boolean => invoked.some(({ path }) =>
+        path === candidate
+        || path.endsWith(`/${candidate}`)
+        || candidate.endsWith(`/${path}`)
+        || path === `./${candidate}`);
+      for (const f of [...found]) if (!runsFile(f)) found.delete(f);
+    }
+  }
   return found;
 }
 
