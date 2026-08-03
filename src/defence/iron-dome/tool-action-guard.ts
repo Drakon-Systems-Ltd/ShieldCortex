@@ -1048,13 +1048,25 @@ function classifyWithCtx(
     //     neither is at(1). This holds whether or not the region shells out: a
     //     bare source line is never a shell statement.
     //
-    //     Bare code matching an UNANCHORED rule (`sudo`, `rm`, `curl`) is
-    //     untouched and still contributes, which is what keeps the #138
-    //     script-file parity table at its current tiers. `|` and `>` are
-    //     deliberately NOT anchor characters here — `redirect-to-block-device`
-    //     is an unanchored rule that legitimately starts with one.
+    //     `|` and `>` are deliberately NOT anchor characters here —
+    //     `redirect-to-block-device` is an unanchored rule that legitimately
+    //     starts with one.
     if (isShellAnchorChar(text, start)) return 'mention';
-    break;
+    // 3c) #188: bare code matching an UNANCHORED rule (`sudo`, `rm`, `curl`)
+    //     used to fall straight through to 'executed'. But a shell verb sitting
+    //     in interpreter code position is an identifier, not a command:
+    //     `sudo = ["michael", "admin"]` is an assignment, and Python has no way
+    //     to execute the name `sudo`. The ONLY route from this region to a shell
+    //     is a string handed to a sink — and 3a-i above already classified those
+    //     literals 'executed', which is what keeps write-then-exec closed.
+    //     So bare code takes exactly the same tiers as a literal (3a): inert
+    //     when the region never shells out, demoted to payload when it does and
+    //     the source was folded from a file on disk, and unchanged ('executed')
+    //     for an inline program the agent wrote into the command itself.
+    //     The #138 shell-script parity table is untouched: a folded `.sh` region
+    //     is language 'sh' and never enters this loop.
+    if (!r.hasSink) return 'mention';
+    return r.folded ? 'payload' : 'executed';
   }
   return 'executed';
 }
@@ -2136,7 +2148,24 @@ export function evaluateToolCall(
 
   // 2) Dangerous — recognised, effectful, worth a human nod → require approval.
   // Span-classified (#84): same mention-vs-intent filter as catastrophic above.
-  const dangerMatches = [...catastrophicPayload, ...matchSpansClassified(DANGEROUS, scanSurface, regions)]
+  // #188: a DANGEROUS token whose every occurrence is a PAYLOAD LITERAL inside
+  // FOLDED interpreter source is shell vocabulary in a language that is not
+  // shell — an identifier, a comment, a dict key. #165 already drew this line,
+  // but only for files with NO shell-out sink: one `subprocess.run` anywhere
+  // re-armed every rule against every literal in the whole file. That is the
+  // shape of a security-monitoring script, and it hard-denied one for 2.5 days
+  // (`sudo = ["michael", "admin"]  # macOS admin group = sudo equivalent`).
+  // The relief is deliberately narrow and cannot reopen write-then-exec:
+  //   - a literal that is a shell-out call's OWN argument is 'executed' (3a-i),
+  //   - a folded `.sh` file is shell and never reaches the payload tier,
+  //   - CATASTROPHIC payload still gates here via `catastrophicPayload`,
+  //   - path-target rules never reach the payload tier at all (naming the path
+  //     IS the access), so `id_rsa` in folded source is untouched by this.
+  // Demoted, not dropped: the signals are surfaced at the sensitive tier below
+  // so the match stays auditable instead of vanishing.
+  const dangerClassified = matchSpansClassified(DANGEROUS, scanSurface, regions);
+  const dangerPayloadOnly = dangerClassified.filter(m => m.tier === 'payload');
+  const dangerMatches = [...catastrophicPayload, ...dangerClassified.filter(m => m.tier === 'executed')]
     // #170: same target-not-verb principle as the catastrophic tier. A delete
     // whose every target is workspace-confined (`rm -rf .next`, a scratch dir
     // under /tmp) is ordinary work and must not need a human nod — that is the
@@ -2214,10 +2243,19 @@ export function evaluateToolCall(
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
+  // Dangerous vocabulary demoted at #188 rides along here: allowed, but named,
+  // so a reviewer can still see what the folded source said.
+  const payloadSignals = [...new Set(dangerPayloadOnly.map(m => m.signal))];
   const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
     return verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
-      [sensitiveSignal, ...opaqueSignals]);
+      [sensitiveSignal, ...payloadSignals, ...opaqueSignals]);
+  }
+  if (payloadSignals.length > 0) {
+    return verdict('allow', 'sensitive', family, canonical,
+      buildReason('dangerous vocabulary appears only as data inside folded script source',
+        payloadSignals, dangerPayloadOnly[0].span),
+      [...payloadSignals, ...opaqueSignals]);
   }
 
   // 3a) A script invocation whose contents could NOT be read (issue #4). Allowed

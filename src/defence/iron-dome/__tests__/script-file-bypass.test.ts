@@ -92,18 +92,31 @@ describe('#4 — parity: inline verdict === via-file verdict', () => {
     expect(v.signals).toContain('recursive-force-delete');
   });
 
+  // #188: the payload is now written in the language of the interpreter that
+  // will actually run it. This test previously put SHELL text (`sudo rm -r …`)
+  // inside /tmp/a.py, /tmp/a.js, /tmp/a.rb and /tmp/a.pl — a shape that cannot
+  // execute anything, because `python3 a.py` on a line of shell is a syntax
+  // error, not a privileged command. Gating it cost real work (a production
+  // security cron hard-denied for 2.5 days on a Python variable NAMED `sudo`)
+  // and bought no defence. What the test is FOR — you cannot hide a privileged
+  // action behind a file — is unchanged and now tested in the shape that can
+  // actually reach a shell: a string handed to the language's exec sink.
   it('covers every invocation shape, not just `bash f.sh`', () => {
     const payload = 'sudo rm -r /var/lib/thing\n';
+    const py = 'import subprocess\nsubprocess.run("sudo rm -r /var/lib/thing", shell=True)\n';
+    const js = 'require("child_process").execSync("sudo rm -r /var/lib/thing");\n';
+    const rb = 'system("sudo rm -r /var/lib/thing")\n';
+    const pl = 'system("sudo rm -r /var/lib/thing");\n';
     const shapes: Array<[string, Record<string, string>]> = [
       ['bash -e /tmp/a.sh', { '/tmp/a.sh': payload }],
       ['sh /tmp/a.sh', { '/tmp/a.sh': payload }],
       ['zsh /tmp/a.sh', { '/tmp/a.sh': payload }],
       ['dash /tmp/a.sh', { '/tmp/a.sh': payload }],
       ['ksh /tmp/a.sh', { '/tmp/a.sh': payload }],
-      ['python3 /tmp/a.py', { '/tmp/a.py': payload }],
-      ['node /tmp/a.js', { '/tmp/a.js': payload }],
-      ['ruby /tmp/a.rb', { '/tmp/a.rb': payload }],
-      ['perl /tmp/a.pl', { '/tmp/a.pl': payload }],
+      ['python3 /tmp/a.py', { '/tmp/a.py': py }],
+      ['node /tmp/a.js', { '/tmp/a.js': js }],
+      ['ruby /tmp/a.rb', { '/tmp/a.rb': rb }],
+      ['perl /tmp/a.pl', { '/tmp/a.pl': pl }],
       ['./a.sh', { './a.sh': payload }],
       ['/opt/tools/a.sh', { '/opt/tools/a.sh': payload }],
       ['source /tmp/a.sh', { '/tmp/a.sh': payload }],
