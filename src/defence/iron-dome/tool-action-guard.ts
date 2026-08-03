@@ -216,8 +216,21 @@ const DANGEROUS: Pattern[] = [
   // unchanged, and `rm -rf` remains catastrophic wherever it appears.
   { re: /(?<![-\w])rm\b|(?<![-\w])unlink\b|(?<![-\w])rmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
-  { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
-  { re: /\bgit\b[^|\n]*\b(branch\s+-D|push\b[^|\n]*--delete|push\b[^|\n]*\s:)/i, signal: 'git-delete-branch' },
+  // Force-push, bounded to ONE statement and to real force TOKENS (issue #191).
+  // Two independent widenings stacked here. The bridge was `[^|\n]*`, which
+  // crossed `;` and `&&` exactly like the package-manager rule did before #89 —
+  // so a plain `git push` in one statement paired with any later `-f`/`+` in an
+  // unrelated one (`git push origin main && rsync -f rules dst`, `… && trash
+  // old-f.tar.gz`, `… && echo "done+ok"`) gated as a force-push. And the force
+  // alternatives were unanchored: a bare `\+` matched a plus ANYWHERE, and
+  // `-f\b` matched the tail of any hyphenated word ending in `-f`. Both are now
+  // token-anchored — a force flag or a `+refspec` starts a shell word.
+  // Hit live on Friday-Mac's backup cron, whose entire chain was denied with the
+  // whole 80-char span echoed back as the "matched" text (fmtSpan truncation of
+  // a span that had swallowed four statements), which is why the error looked
+  // like it was quoting a force-push that was never there.
+  { re: /\bgit\b[^|;&\n]*\bpush\b[^|;&\n]*(?:^|\s)(?:--force\b|-f\b|\+\S)/i, signal: 'git-force-push' },
+  { re: /\bgit\b[^|;&\n]*\b(branch\s+-D|push\b[^|;&\n]*--delete|push\b[^|;&\n]*\s:)/i, signal: 'git-delete-branch' },
   // The process verbs here are the SHELL commands, not a language's process API
   // (issue #165). `process.kill(process.pid, sig)` in a build script forwards a
   // signal to ITSELF, and `child.kill()` is a method call — neither stops
