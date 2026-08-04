@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.30] - 2026-08-04
+
+**Uninstall removes everything install creates — or tells you, on screen, why it kept something.**
+
+Field origin: the operator asked whether uninstall needed updating — the same instinct that caught `update` skipping install's permission hardening (#171). It did. Install had grown the ClawHub skill (#179/#187) and uninstall never learned about it, so an "uninstalled" box kept a stale skill copy that would silently age. Same disease as everything that week: a second call site the fix never reached.
+
+### Fixed
+
+- **Uninstall now removes installed skill copies (#197).** `shieldcortex uninstall` and `shieldcortex openclaw uninstall` remove the known skill install locations, and `shieldcortex openclaw skill uninstall` exists for the standalone case. OpenClaw's CLI has install and update but no uninstall verb for skills, so direct removal is the only mechanism — gated on a fail-closed ownership check: a directory that merely shares the name, or whose `SKILL.md` cannot be read, is left alone with a warning rather than deleted.
+
+### Added
+
+- **An uninstall parity manifest, enforced by test.** Every artifact any install surface creates now carries exactly one declared fate: a removal function the tests prove is actually called from the uninstall path, or a written reason it is deliberately kept. A new artifact cannot ship without an uninstall story — the parity test fails the build. The skill-removal call is additionally pinned inside the full uninstall path's own body, so a standalone verb someone *could* type does not count as parity.
+- **Uninstall ends with "Kept on purpose:".** The memory database (your data, not ours to delete), the audit trail (outlives the tool so past enforcement stays reviewable), config backups (your rollback), and the npm package (npm owns it) — each named with its reason as the last thing on screen, because silence about a kept artifact reads as coverage.
+
 ## [4.47.29] - 2026-08-03
 
 **A delete is judged by its target, not its verb — and the guard stops denying the ordinary work of the agents it protects.**
