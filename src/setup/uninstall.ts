@@ -14,6 +14,7 @@ import readline from 'readline';
 import { uninstallService } from '../service/install.js';
 import { uninstallOpenClawHook } from './openclaw.js';
 import { looksLikeShieldcortex } from './json-config.js';
+import { formatKeptSummary } from './uninstall-manifest.js';
 
 /**
  * Check if the current process is running in an agent context.
@@ -326,10 +327,10 @@ export async function uninstallAll(options?: {
     }
   }
 
-  console.log('\nDatabase preserved at ~/.shieldcortex/memories.db — delete manually if desired.');
-  console.log('Uninstall complete.\n');
-  console.log('To also remove the npm package:');
-  console.log('  npm uninstall -g shieldcortex');
+  // The last thing on screen is what we deliberately did NOT remove, and why
+  // (#197). Silence about a kept artifact reads as coverage.
+  console.log('\nUninstall complete.\n');
+  console.log(formatKeptSummary());
   console.log('\nTo clear the npx cache:');
   console.log('  npx cache clean shieldcortex  (npm 9+)');
   console.log('  rm -rf ~/.npm/_npx             (older npm)\n');
