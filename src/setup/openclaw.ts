@@ -1173,6 +1173,11 @@ export async function uninstallOpenClawHook(): Promise<void> {
   // Clean up legacy plugin entry if present
   cleanupLegacyPlugin();
 
+  // Remove installed skill copies (#197) — before this, an "uninstalled" box
+  // kept a stale ClawHub skill that would silently age (the aiquant disease,
+  // in reverse: drift on a box that thinks it is clean).
+  uninstallOpenClawSkill();
+
   if (removed === 0) {
     console.log('cortex-memory hook is not installed.');
   }
@@ -1841,6 +1846,50 @@ export async function installOpenClawSkill(home: string = os.homedir()): Promise
   return false;
 }
 
+/**
+ * Ownership check before deleting a skill directory. Fail-closed: an
+ * unreadable or foreign SKILL.md means we do not touch the directory —
+ * `findInstalledSkillDirs` matches by directory name, and a user's unrelated
+ * "shieldcortex" folder must survive our uninstall.
+ */
+export function skillDirLooksShieldcortex(dir: string): boolean {
+  try {
+    const text = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf-8').slice(0, 4000);
+    return /^\s*name:\s*['"]?shieldcortex['"]?\s*$/mi.test(text);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove installed skill copies (#197). OpenClaw's CLI has install/update but
+ * no uninstall verb for skills, so direct removal of the known install
+ * locations is the only mechanism — gated on the ownership check above.
+ */
+export function uninstallOpenClawSkill(home: string = os.homedir()): { removed: string[]; skipped: string[] } {
+  const removed: string[] = [];
+  const skipped: string[] = [];
+  for (const dir of findInstalledSkillDirs(home)) {
+    if (!skillDirLooksShieldcortex(dir)) {
+      console.warn(`Skill: ${dir} does not look ShieldCortex-owned — leaving it alone.`);
+      skipped.push(dir);
+      continue;
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log(`Skill: removed ${dir}`);
+      removed.push(dir);
+    } catch (err: any) {
+      console.warn(`Skill: failed to remove ${dir}: ${err.message}`);
+      skipped.push(dir);
+    }
+  }
+  if (removed.length === 0 && skipped.length === 0) {
+    console.log('Skill: no installed copies found.');
+  }
+  return { removed, skipped };
+}
+
 export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
@@ -1867,8 +1916,10 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       if (verb === 'install' || verb === 'update') {
         const ok = await installOpenClawSkill();
         if (!ok) process.exit(1);
+      } else if (verb === 'uninstall') {
+        uninstallOpenClawSkill();
       } else {
-        console.log('Usage: shieldcortex openclaw skill <install|update>');
+        console.log('Usage: shieldcortex openclaw skill <install|update|uninstall>');
         process.exit(1);
       }
       break;
