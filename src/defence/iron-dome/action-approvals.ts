@@ -34,6 +34,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'os';
 import { join } from 'path';
 
+import { classifyFamily } from './tool-action-guard.js';
+
 /** Default lifetime of an operator approval before it must be re-granted. */
 export const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
 
@@ -77,13 +79,41 @@ export function shortHash(hash: string): string {
 }
 
 /**
+ * Advisory fields on an EXEC tool call (#201). A Claude-harness Bash call
+ * carries `description` (a free-text label the model re-words on every
+ * attempt) and `timeout` — neither changes what executes, but hashing them
+ * minted a fresh approval id per ATTEMPT, so `shieldcortex approve` could
+ * never land: the operator approved hash A and the identical retry presented
+ * hash B. Stripped for exec-family tools only: on any other tool a
+ * `description` may be payload (an issue body, a PR description), where
+ * approving one text must not release another.
+ *
+ * Deliberately NOT stripped: `dangerouslyDisableSandbox`, `run_in_background`
+ * — they change confinement/supervision, so an approval for the sandboxed
+ * form must not release the unsandboxed one.
+ */
+const EXEC_ADVISORY_KEYS = new Set(['description', 'timeout']);
+
+function projectForHash(tool: string, input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  if (classifyFamily(tool) !== 'exec') return input;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(input as Record<string, unknown>)) {
+    if (!EXEC_ADVISORY_KEYS.has(key)) out[key] = (input as Record<string, unknown>)[key];
+  }
+  return out;
+}
+
+/**
  * Canonical hash of the exact call. Stable across processes: object keys are
  * sorted, whitespace in string values is collapsed, and everything else is
  * JSON with no formatting. Two textually different-but-equivalent commands
- * (extra spaces) hash the same; a different command never does.
+ * (extra spaces) hash the same; a different command never does. Exec-tool
+ * advisory fields are excluded (#201) so the hash is per COMMAND, not per
+ * attempt.
  */
 export function hashToolCall(tool: string, input: unknown): string {
-  const canonical = JSON.stringify([tool, canonicalise(input)]);
+  const canonical = JSON.stringify([tool, canonicalise(projectForHash(tool, input))]);
   return createHash('sha256').update(canonical).digest('hex');
 }
 

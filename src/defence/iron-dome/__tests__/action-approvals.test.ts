@@ -59,6 +59,42 @@ describe('action approvals (#118)', () => {
     });
   });
 
+  describe('#201 — advisory fields do not move the hash of an exec call', () => {
+    // The live failure: every agent retry re-words `description` (and often
+    // `timeout`), so the approval id was minted per ATTEMPT and the operator
+    // chased a moving target. Neither field changes what executes.
+    const CMD = { command: 'sleep 10 && /opt/homebrew/bin/openclaw gateway restart' };
+
+    it('description and timeout are annotation, not action', () => {
+      expect(hashToolCall('Bash', { ...CMD, description: 'Restart the gateway after a delay', timeout: 120000 }))
+        .toBe(hashToolCall('Bash', { ...CMD, description: 'Restart OpenClaw gateway', timeout: 600000 }));
+      expect(hashToolCall('Bash', { ...CMD, description: 'x' })).toBe(hashToolCall('Bash', CMD));
+    });
+
+    it('load-bearing fields still move it', () => {
+      expect(hashToolCall('Bash', { ...CMD, dangerouslyDisableSandbox: true }))
+        .not.toBe(hashToolCall('Bash', CMD));
+      expect(hashToolCall('Bash', { ...CMD, run_in_background: true }))
+        .not.toBe(hashToolCall('Bash', CMD));
+    });
+
+    it('non-exec tools keep full-input hashing — description may be payload there', () => {
+      expect(hashToolCall('create_issue', { title: 't', description: 'a' }))
+        .not.toBe(hashToolCall('create_issue', { title: 't', description: 'b' }));
+    });
+
+    it('the live sequence: approve once, identical command with a re-worded description passes', () => {
+      const attempt1 = { ...CMD, description: 'Restart the gateway after a delay' };
+      const attempt2 = { ...CMD, description: 'Retry: restart OpenClaw gateway', timeout: 600000 };
+      const pending = recordPending(
+        { tool: 'Bash', input: attempt1, summary: `Bash: ${CMD.command}`, signals: ['service-restart'] },
+        { home, now: T0 },
+      );
+      expect(approveRequest(shortHash(pending.hash), { home, now: T0 + 1000 }).ok).toBe(true);
+      expect(consumeApproval('Bash', attempt2, { home, now: T0 + 2000 })).not.toBeNull();
+    });
+  });
+
   describe('the acceptance path', () => {
     it('refused → approved → passes ONCE → refused again', () => {
       const pending = request();
