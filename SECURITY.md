@@ -4,7 +4,11 @@ Thanks for helping keep ShieldCortex — and the projects that depend on it — 
 
 ## Reporting a Vulnerability
 
-**Email: [security@drakonsystems.com](mailto:security@drakonsystems.com)**
+**Email: [support@drakonsystems.com](mailto:support@drakonsystems.com)**
+
+> `security@drakonsystems.com` is **not** a live mailbox and never was — mail to it
+> bounces. It was published here and on the website in error until 6 Aug 2026. If you
+> sent a report there, we did not receive it; please resend to the address above.
 
 Please do **not** open a public GitHub issue for security vulnerabilities. For non-security bugs, file an issue as normal.
 
@@ -53,6 +57,15 @@ We support the latest two major versions of the `shieldcortex` npm package. Olde
 ## Safe-Harbour
 
 If you act in good faith — staying within the scope above, avoiding privacy violations and service disruption, and giving us reasonable time to remediate before public disclosure — we will not initiate legal action against you. Testing is authorised only against your own machine, your own ShieldCortex Cloud account, or a designated test account you have created.
+
+## Acknowledgements
+
+We do not offer monetary rewards. We do credit every researcher whose report leads to a
+fix, by the name and link they ask for.
+
+| Researcher | Report | Shipped in |
+|---|---|---|
+| [Sarvesh P](https://www.sarvee.in) | Credential-leak detection bypasses (current provider key formats) and prompt-injection detection failures; also surfaced that the published security contact was a dead mailbox | [4.47.31](CHANGELOG.md) |
 
 ## Full Policy
 
