@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.31] - 2026-08-06
+
+**An outside researcher found the credential detector blind to the default OpenAI key format — and the audit it triggered found the safety net beneath it switched off.**
+
+Field origin: an external vulnerability report through the VDP on 2026-08-05. It also bounced off our own published security address, which did not exist. Both are fixed here.
+
+### Fixed
+
+- **Current OpenAI key formats are detected (#203).** `sk-proj-` has been OpenAI's default since 2024, and the detector missed it: the regex was `/sk-[A-Za-z0-9]{20,}/`, and the dash after `proj` breaks the match. In strict mode the key was allowed in every context tested — bare, in prose, in JSON, in a code block, quoted, labelled. `sk-svcacct-` and `sk-admin-` were missed for the same reason. The prefixes are enumerated rather than allowing dashes freely after `sk-`, because a free dash matches ordinary hyphenated prose and double-fires on every `sk-ant-` key: recall is not worth buying with precision.
+- **The entropy net was disabled for most key shapes — the root cause.** The fallback that catches formats no pattern knows yet skipped any token matching an npm package specifier, `/^@?[a-z][a-z0-9._-]*.../i`. That is also the shape of `sk-proj-`, `dop_v1_`, `hvs.`, `github_pat_` and much else, so the net was off for the whole class. That is why the reported key was invisible in *all* contexts rather than merely unattributed, and why fixing the regex alone would have left the next new format invisible too. The rule is now entropy-gated: a genuine package specifier is low-entropy, key material is not.
+- **Eight more provider formats had gone stale.** Audited every pattern against current provider documentation: GitHub `ghs_` (App installation), `ghu_`, `ghr_` — which had no pattern at all, and are the tokens CI runners and agents carry; AWS `ASIA` temporary credentials; Stripe `rk_` restricted keys and `whsec_` webhook signing secrets; Slack `xoxp-`/`xoxa-`/`xoxr-`, `xapp-`, `xoxe.` rotation tokens and `/triggers/` webhooks; Google `GOCSPX-` OAuth client secrets; DigitalOcean `doo_v1_`/`dor_v1_`; uppercase hex in Twilio key SIDs.
+- **The published security contact was a dead mailbox.** `security@drakonsystems.com` did not exist — verified against our own mail exchanger, which returned `550 5.1.1 User does not exist`, identical to a control address, while the other mailboxes resolved. Every report sent to the address in our `security.txt` had been silently bounced. That address was published in five places; all now point at a live mailbox.
+
+### Added
+
+- **A standing key-format test battery.** Forty tests covering every current provider format, the six bypass contexts from the report, the already-covered formats as a negative control, and a precision battery of realistic non-secrets — hyphenated prose, Kubernetes names, git branches, SHAs, digests, semver, CSS classes. A detector that goes stale as a provider rotates its format now fails the build rather than a stranger's inbox.
+
+### Known gaps, named rather than implied
+
+- The instruction detector is a keyword list, and 18 of 19 grammatical, multilingual and obfuscated variations bypass it. That is a design problem, not a missing pattern — adding inflections fixes three strings and leaves the class untouched. Tracked with a staged plan; the regex tier should be understood as a fast pre-filter, not a detector.
+- No credential pattern uses word boundaries; the Azure 32-hex pattern fires twice inside a single SHA-256 digest. Precision work, tracked separately so it can be measured against the corpus rather than bundled into a recall change.
+
 ## [4.47.30] - 2026-08-04
 
 **Uninstall removes everything install creates — or tells you, on screen, why it kept something.**
