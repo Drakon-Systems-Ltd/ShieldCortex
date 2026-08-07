@@ -4,11 +4,12 @@ Thanks for helping keep ShieldCortex — and the projects that depend on it — 
 
 ## Reporting a Vulnerability
 
-**Email: [support@drakonsystems.com](mailto:support@drakonsystems.com)**
+**Email: [security@drakonsystems.com](mailto:security@drakonsystems.com)**
 
-> `security@drakonsystems.com` is **not** a live mailbox and never was — mail to it
-> bounces. It was published here and on the website in error until 6 Aug 2026. If you
-> sent a report there, we did not receive it; please resend to the address above.
+> `security@drakonsystems.com` went live on 7 Aug 2026; delivery is verified. Before
+> that date it bounced — if you sent a report there on or before 6 Aug 2026, we did
+> not receive it; please resend. Reports to
+> [support@drakonsystems.com](mailto:support@drakonsystems.com) also reach us.
 
 Please do **not** open a public GitHub issue for security vulnerabilities. For non-security bugs, file an issue as normal.
 
