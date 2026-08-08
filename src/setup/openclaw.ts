@@ -554,6 +554,63 @@ export function trustLocalPlugin(_installDir: string, _version: string, homeArg?
   }
 }
 
+/**
+ * Post-install registration verification + restore (#213).
+ *
+ * Field origin: on 8 Aug 2026 the 4.47.32 installer's native path
+ * (`openclaw plugins install`, exit 0) left openclaw.json WITHOUT the
+ * shieldcortex-realtime stanza — `plugins.allow` and `plugins.entries` both —
+ * and nothing checked. The #74 honest-state self-check proves the RUNNING
+ * gateway's roster, which still held the pre-install plugin, so it passed;
+ * the box booted unprotected at the next gateway restart while the CLI had
+ * reported installed.
+ *
+ * Invariant: an installer must never reduce the protection state it found.
+ * This re-reads the ON-DISK config after any install path — the artifact that
+ * decides what loads at the next restart, which no runtime roster can prove —
+ * and restores the stanza through trustLocalPlugin (merge-preserving, never a
+ * whole-file clobber) when it is missing or disabled. Callers fail LOUD when
+ * `registered` comes back false.
+ *
+ * `homeArg` is the same test seam as trustLocalPlugin's.
+ */
+export function verifyPluginRegistration(homeArg?: string): {
+  registered: boolean;
+  restored: boolean;
+  detail: string;
+} {
+  const configPath = homeArg
+    ? path.join(homeArg, '.openclaw', 'openclaw.json')
+    : openClawConfigPath();
+  const pluginId = PLUGIN_DIR_NAME;
+
+  const readState = (): { needsWrite: boolean; detail: string } => {
+    try {
+      if (!fs.existsSync(configPath)) return { needsWrite: true, detail: 'openclaw.json does not exist' };
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      return pluginInstallNeedsWrite(config, pluginId, '', '')
+        ? { needsWrite: true, detail: `${pluginId} missing or disabled in plugins.allow/entries` }
+        : { needsWrite: false, detail: 'registered' };
+    } catch (err) {
+      return { needsWrite: true, detail: `openclaw.json unreadable (${(err as Error).message})` };
+    }
+  };
+
+  const before = readState();
+  if (!before.needsWrite) return { registered: true, restored: false, detail: before.detail };
+
+  const wrote = trustLocalPlugin('', '', homeArg);
+  const after = readState();
+  if (!after.needsWrite) return { registered: true, restored: true, detail: `restored: ${before.detail}` };
+  return {
+    registered: false,
+    restored: false,
+    detail: wrote
+      ? `restore wrote but verification still failed: ${after.detail}`
+      : `restore write failed: ${after.detail}`,
+  };
+}
+
 function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
   if (!isOpenClawInstalled()) return null;
@@ -1042,6 +1099,27 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
 
   // Install the real-time plugin to the extensions directory
   const pluginInstallMode = installPlugin({ noPlugins: options.noPlugins });
+
+  // #213: verify the ON-DISK registration after whichever install path ran,
+  // BEFORE the gateway restart below — the restart boots from openclaw.json,
+  // and the native `openclaw plugins install` path has wiped the stanza in
+  // the field while exiting 0. The roster self-check further down cannot
+  // catch this: it proves the running gateway, which still holds the
+  // pre-install plugin until the restart.
+  if (pluginInstallMode !== 'skipped') {
+    const reg = verifyPluginRegistration();
+    if (reg.restored) {
+      console.warn('⚠  Install left shieldcortex-realtime unregistered in openclaw.json — stanza restored (#213).');
+      console.warn(`   (${reg.detail})`);
+    } else if (!reg.registered) {
+      console.error('✗ SECURITY: shieldcortex-realtime is NOT registered in openclaw.json and restore failed.');
+      console.error(`  ${reg.detail}`);
+      console.error('  The box will be UNPROTECTED after the next gateway restart even though files were installed.');
+      console.error('  Restore by hand: add "shieldcortex-realtime" to plugins.allow and');
+      console.error('  plugins.entries["shieldcortex-realtime"] = { "enabled": true } in ~/.openclaw/openclaw.json.');
+      process.exitCode = 1;
+    }
+  }
 
   console.log('');
   if (migratedLegacy > 0) {
