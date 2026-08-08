@@ -136,8 +136,20 @@ function isLikelyFalsePositive(token: string): boolean {
   // Semver versions (possibly with pre-release tags)
   if (/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(token)) return true;
 
-  // npm package specifiers (e.g., @types/node-18.11.18)
-  if (/^@?[a-z][a-z0-9._-]*(?:\/[a-z][a-z0-9._-]*)?$/i.test(token)) return true;
+  // npm package specifiers (e.g., @types/node-18.11.18).
+  //
+  // Entropy-gated on purpose. The shape [a-z0-9._-] starting with a letter is
+  // ALSO the shape of a large share of real key material — sk-proj-…,
+  // sk-svcacct-…, dop_v1_…, hvs.…, github_pat_… — so an ungated rule here
+  // silently switched the entropy net off for every one of them, which is how
+  // an OpenAI project key stayed invisible in all contexts (VDP 2026-08-05).
+  // A genuine package specifier is low-entropy; key material is not, so
+  // entropy is the discriminator that keeps the rule's intent without the hole.
+  if (
+    /^@?[a-z][a-z0-9._-]*(?:\/[a-z][a-z0-9._-]*)?$/i.test(token) &&
+    shannonEntropy(token) < ENTROPY_THRESHOLD
+  )
+    return true;
 
   // Pure lowercase with dashes — likely a slug or CSS class
   if (/^[a-z\-]+$/.test(token)) return true;

@@ -1707,11 +1707,12 @@ export async function checkDefenceCanary(): Promise<CheckResult> {
  *      probes: a catastrophic shape must block, a dangerous shape must gate,
  *      a benign shape must allow. A wrong verdict is a hard fail — the guard
  *      logic itself is broken on this box's build.
- *   2. Resolves the box's ACTUAL config for BOTH guard surfaces — the Claude
- *      Code hook reads top-level `actionGuard`, the OpenClaw plugin reads
- *      `interceptor.actionGuard` — and warns when either surface is opted
- *      down, or when the two resolve differently (the split-key gotcha: an
- *      operator setting one key may believe it governs both surfaces).
+ *   2. Resolves the box's EFFECTIVE guard config (#209): top-level
+ *      `actionGuard` governs both surfaces, `interceptor.actionGuard` is a
+ *      deprecated per-key gap-fill alias (top-level wins on conflict). Warns
+ *      when the effective posture is opted down (naming the exact key that
+ *      set it), when the alias is present at all, and when the alias holds
+ *      conflicting — and therefore ignored — values.
  *
  * Honest labelling: this is an in-process check of guard logic + config. It
  * does NOT prove the OpenClaw interceptor or the PreToolUse hook is actually
@@ -1771,52 +1772,106 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     return results;
   }
 
-  // 2. Config-surface resolution (hook: `actionGuard`; plugin: `interceptor.actionGuard`).
+  // 2. Config resolution (#209). Both surfaces now resolve ONE effective
+  //    config: top-level `actionGuard` governs, `interceptor.actionGuard` is
+  //    a deprecated per-key gap-fill alias, top-level wins on conflict. This
+  //    check mirrors that merge (the hook, the plugin and this file are three
+  //    build units that cannot share an import — keep them in step by hand),
+  //    evaluates posture warnings against the EFFECTIVE config with per-key
+  //    provenance, and flags the alias itself so operators migrate off it.
   try {
     const configPath = path.join(getShieldCortexDir(), 'config.json');
     const raw = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
-    const resolve = (r: unknown) => {
-      const o = r && typeof r === 'object' ? (r as Record<string, unknown>) : {};
-      return { enabled: o.enabled !== false, enforce: o.enforce !== false };
-    };
-    const hook = resolve(raw?.actionGuard);
-    const plugin = resolve(raw?.interceptor?.actionGuard);
+    const isBlock = (v: unknown): v is Record<string, unknown> =>
+      !!v && typeof v === 'object' && !Array.isArray(v);
+    const top = isBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
+    const alias = isBlock(raw?.interceptor?.actionGuard)
+      ? (raw.interceptor.actionGuard as Record<string, unknown>)
+      : null;
+    const merged = { ...(alias ?? {}), ...(top ?? {}) };
+    const effective = { enabled: merged.enabled !== false, enforce: merged.enforce !== false };
+    // Which key set this value — top-level when it has the key, else the alias.
+    const provenance = (k: string) =>
+      top && k in top ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
 
-    for (const [surface, cfg, key] of [
-      ['Claude Code hook', hook, 'actionGuard'],
-      ['OpenClaw plugin', plugin, 'interceptor.actionGuard'],
-    ] as const) {
-      if (!cfg.enabled) {
-        results.push({
-          label: `${label} config`,
-          status: 'warn',
-          message: `${surface} surface is disabled in config (\`${key}.enabled: false\`) — tool calls on that surface are not gated`,
-          fix: `Remove \`${key}.enabled: false\` from ~/.shieldcortex/config.json to restore gating.`,
-        });
-      } else if (!cfg.enforce) {
-        results.push({
-          label: `${label} config`,
-          status: 'warn',
-          message: `${surface} surface runs in warn-mode (\`${key}.enforce: false\`) — dangerous ops log but are not gated (catastrophic still blocks)`,
-        });
-      }
-    }
-    if (hook.enabled !== plugin.enabled || hook.enforce !== plugin.enforce) {
+    if (!effective.enabled) {
       results.push({
         label: `${label} config`,
         status: 'warn',
-        message:
-          `the two guard surfaces DIVERGE: Claude Code hook reads \`actionGuard\` ` +
-          `(enabled=${hook.enabled}, enforce=${hook.enforce}) while the OpenClaw plugin reads ` +
-          `\`interceptor.actionGuard\` (enabled=${plugin.enabled}, enforce=${plugin.enforce}) — ` +
-          `an operator setting one key may believe it governs both`,
+        message: `Action Guard is disabled in config (\`${provenance('enabled')}: false\`) — tool calls are not gated on either surface`,
+        fix: `Remove \`${provenance('enabled')}: false\` from ~/.shieldcortex/config.json to restore gating.`,
       });
+    } else if (!effective.enforce) {
+      results.push({
+        label: `${label} config`,
+        status: 'warn',
+        message: `Action Guard runs in warn-mode (\`${provenance('enforce')}: false\`) on both surfaces — dangerous ops log but are not gated (catastrophic still blocks)`,
+      });
+    }
+
+    if (alias) {
+      const conflicts = top
+        ? Object.keys(alias).filter(
+            (k) => k in top && JSON.stringify(top[k]) !== JSON.stringify(alias[k]),
+          )
+        : [];
+      if (conflicts.length > 0) {
+        results.push({
+          label: `${label} config`,
+          status: 'warn',
+          message:
+            `deprecated \`interceptor.actionGuard\` differs from \`actionGuard\` on: ${conflicts.join(', ')} — ` +
+            `the top-level value wins on both surfaces (#209), the alias values are ignored`,
+          fix: 'Run `shieldcortex doctor --fix-action-guard` to migrate the alias into the top-level block.',
+        });
+      } else {
+        results.push({
+          label: `${label} config`,
+          status: 'warn',
+          message:
+            `config uses the deprecated \`interceptor.actionGuard\` alias — it still works (both surfaces honour it), ` +
+            `but the single source of truth is the top-level \`actionGuard\` block (#209)`,
+          fix: 'Run `shieldcortex doctor --fix-action-guard` to migrate.',
+        });
+      }
     }
   } catch {
     // Unreadable config resolves to defaults on both runtime surfaces — nothing to warn about here.
   }
 
   return results;
+}
+
+/**
+ * `doctor --fix-action-guard` (#209): migrate the deprecated
+ * `interceptor.actionGuard` alias into the top-level `actionGuard` block —
+ * same merge the runtime surfaces apply (top-level wins per key, alias
+ * gap-fills), so the written config is exactly what was already in effect.
+ * Backs up config.json first and removes an emptied `interceptor` block.
+ */
+export function fixActionGuardConfig(): { changed: boolean; backupPath?: string; message: string } {
+  const configPath = path.join(getShieldCortexDir(), 'config.json');
+  if (!fs.existsSync(configPath)) return { changed: false, message: 'no config file — nothing to migrate' };
+  const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  const isBlock = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === 'object' && !Array.isArray(v);
+  const alias = isBlock(raw?.interceptor) && isBlock(raw.interceptor.actionGuard)
+    ? (raw.interceptor.actionGuard as Record<string, unknown>)
+    : null;
+  if (!alias) return { changed: false, message: 'no `interceptor.actionGuard` alias in config — nothing to migrate' };
+
+  const backupPath = `${configPath}.bak-fix-209-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  fs.copyFileSync(configPath, backupPath);
+
+  raw.actionGuard = { ...alias, ...(isBlock(raw.actionGuard) ? raw.actionGuard : {}) };
+  delete raw.interceptor.actionGuard;
+  if (Object.keys(raw.interceptor).length === 0) delete raw.interceptor;
+  fs.writeFileSync(configPath, JSON.stringify(raw, null, 2));
+  return {
+    changed: true,
+    backupPath,
+    message: `migrated interceptor.actionGuard into the top-level actionGuard block (backup: ${backupPath})`,
+  };
 }
 
 // ── Check 8b: Claude Code enforcement floor ───────────────
@@ -3235,6 +3290,34 @@ export async function runDoctor(
       }
     } else if (idx !== -1) {
       console.log(`  ${dim}--fix-project-keys: nothing to fix (no collision warning).${reset}\n`);
+    }
+  }
+
+  // --fix-action-guard (#209): migrate the deprecated interceptor.actionGuard
+  // alias into the top-level actionGuard block (backup + rewrite via
+  // fixActionGuardConfig), then re-run the check so the printed report
+  // reflects the post-fix state.
+  if (args.includes('--fix-action-guard')) {
+    try {
+      const fix = fixActionGuardConfig();
+      if (fix.changed) {
+        const refreshed = await checkActionGuard();
+        const start = results.findIndex((r) => r.label.startsWith('Action guard'));
+        if (start !== -1) {
+          const kept = results.filter((r) => !r.label.startsWith('Action guard'));
+          kept.splice(start, 0, ...refreshed);
+          results.length = 0;
+          results.push(...kept);
+        } else {
+          results.push(...refreshed);
+        }
+        console.log(`  ${dim}--fix-action-guard: ${fix.message}${reset}\n`);
+      } else {
+        console.log(`  ${dim}--fix-action-guard: ${fix.message}.${reset}\n`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  ${dim}--fix-action-guard failed: ${msg}${reset}\n`);
     }
   }
 

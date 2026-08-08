@@ -30,7 +30,7 @@ export type CredentialSeverity = 'critical' | 'high' | 'medium' | 'low';
 // ── Known API Key Patterns ──
 
 export const API_KEY_PATTERNS: CredentialPattern[] = [
-  // OpenAI
+  // OpenAI — legacy `sk-` + body. No longer issued, but still valid in the wild.
   {
     name: 'OpenAI API Key',
     type: 'api_key',
@@ -39,6 +39,39 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     severity: 'critical',
     confidence: 0.95,
     minLength: 24,
+  },
+  // OpenAI — modern prefixed keys. `sk-proj-` has been the default since 2024,
+  // so the legacy pattern above misses essentially every key issued since.
+  //
+  // The prefixes are enumerated rather than allowing `-` freely after `sk-`
+  // (i.e. NOT /sk-[A-Za-z0-9\-_]{20,}/). A free dash would match ordinary
+  // hyphenated prose starting "sk-" and would also double-fire on every
+  // Anthropic `sk-ant-` key. Enumeration keeps recall without spending
+  // precision — the thing this codebase can least afford.
+  {
+    name: 'OpenAI Project API Key',
+    type: 'api_key',
+    provider: 'openai',
+    regex: /sk-proj-[A-Za-z0-9_-]{20,}/g,
+    severity: 'critical',
+    confidence: 0.97,
+  },
+  {
+    name: 'OpenAI Service Account Key',
+    type: 'api_key',
+    provider: 'openai',
+    regex: /sk-svcacct-[A-Za-z0-9_-]{20,}/g,
+    severity: 'critical',
+    confidence: 0.97,
+  },
+  {
+    // Org-level: billing, membership and project administration.
+    name: 'OpenAI Admin Key',
+    type: 'api_key',
+    provider: 'openai',
+    regex: /sk-admin-[A-Za-z0-9_-]{20,}/g,
+    severity: 'critical',
+    confidence: 0.97,
   },
   // Anthropic
   {
@@ -49,12 +82,13 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     severity: 'critical',
     confidence: 0.98,
   },
-  // AWS Access Key
+  // AWS Access Key. ASIA = STS temporary credentials; short-lived, but a live
+  // one plus its session token is full account access for its TTL.
   {
     name: 'AWS Access Key ID',
     type: 'api_key',
     provider: 'aws',
-    regex: /AKIA[0-9A-Z]{16}/g,
+    regex: /A[KS]IA[0-9A-Z]{16}/g,
     severity: 'critical',
     confidence: 0.97,
   },
@@ -85,6 +119,17 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     confidence: 0.98,
   },
   {
+    // ghu_ user-to-server, ghs_ App installation, ghr_ refresh.
+    // ghs_ in particular is what CI and agent runners carry, and it had no
+    // pattern at all before this — the widest of the confirmed gaps.
+    name: 'GitHub App Token',
+    type: 'api_key',
+    provider: 'github',
+    regex: /gh[usr]_[A-Za-z0-9]{36,}/g,
+    severity: 'critical',
+    confidence: 0.98,
+  },
+  {
     name: 'GitHub Fine-grained PAT',
     type: 'api_key',
     provider: 'github',
@@ -110,6 +155,16 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     confidence: 0.95,
   },
   {
+    // Restricted keys. Stripe's own guidance now steers users off sk_ onto
+    // rk_, so today's gap is tomorrow's default.
+    name: 'Stripe Restricted Key',
+    type: 'api_key',
+    provider: 'stripe',
+    regex: /rk_(?:live|test)_[A-Za-z0-9]{24,}/g,
+    severity: 'critical',
+    confidence: 0.97,
+  },
+  {
     name: 'Stripe Publishable Key',
     type: 'api_key',
     provider: 'stripe',
@@ -117,12 +172,22 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     severity: 'medium',
     confidence: 0.90,
   },
+  {
+    // Webhook signing secret — forges inbound events if leaked.
+    name: 'Stripe Webhook Signing Secret',
+    type: 'api_key',
+    provider: 'stripe',
+    regex: /whsec_[A-Za-z0-9]{24,}/g,
+    severity: 'critical',
+    confidence: 0.96,
+  },
   // Twilio
   {
     name: 'Twilio API Key',
     type: 'api_key',
     provider: 'twilio',
-    regex: /SK[a-f0-9]{32}/g,
+    // Twilio's spec permits uppercase hex; the old class missed those SIDs.
+    regex: /SK[a-fA-F0-9]{32}/g,
     severity: 'critical',
     confidence: 0.90,
   },
@@ -145,10 +210,39 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     confidence: 0.96,
   },
   {
+    // xoxp- user tokens carry a human's full workspace scope — arguably worse
+    // than the bot token above. xoxa-/xoxr- are the legacy app/refresh pair.
+    name: 'Slack User Token',
+    type: 'api_key',
+    provider: 'slack',
+    regex: /xox[par]-[0-9]{10,}-[0-9A-Za-z\-]{20,}/g,
+    severity: 'critical',
+    confidence: 0.96,
+  },
+  {
+    // App-level token (connections/socket mode).
+    name: 'Slack App-Level Token',
+    type: 'api_key',
+    provider: 'slack',
+    regex: /xapp-[0-9]-[A-Z0-9]{9,}-[0-9]{10,}-[a-f0-9]{40,}/g,
+    severity: 'critical',
+    confidence: 0.96,
+  },
+  {
+    // Rotation-era tokens: xoxe.xoxb-… / xoxe-… . The bot pattern above
+    // cannot match these — its `[0-9]{10,}` segment fails on the xoxe prefix.
+    name: 'Slack Rotating Token',
+    type: 'api_key',
+    provider: 'slack',
+    regex: /xoxe[.-][A-Za-z0-9.\-]{20,}/g,
+    severity: 'critical',
+    confidence: 0.95,
+  },
+  {
     name: 'Slack Webhook URL',
     type: 'api_key',
     provider: 'slack',
-    regex: /https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]{8,}\/B[A-Z0-9]{8,}\/[A-Za-z0-9]{20,}/g,
+    regex: /https:\/\/hooks\.slack\.com\/(?:services|triggers)\/T[A-Z0-9]{8,}\/B?[A-Z0-9]{8,}\/[A-Za-z0-9]{20,}/g,
     severity: 'high',
     confidence: 0.95,
   },
@@ -160,6 +254,14 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     regex: /AIza[A-Za-z0-9\-_]{35}/g,
     severity: 'critical',
     confidence: 0.95,
+  },
+  {
+    name: 'Google OAuth Client Secret',
+    type: 'api_key',
+    provider: 'google',
+    regex: /GOCSPX-[A-Za-z0-9_-]{20,}/g,
+    severity: 'critical',
+    confidence: 0.97,
   },
   // Mailgun
   {
@@ -212,7 +314,8 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     name: 'DigitalOcean Personal Access Token',
     type: 'api_key',
     provider: 'digitalocean',
-    regex: /dop_v1_[a-f0-9]{64}/g,
+    // dop_ personal access, doo_ OAuth access, dor_ refresh.
+    regex: /do[opr]_v1_[a-f0-9]{64}/g,
     severity: 'critical',
     confidence: 0.97,
   },

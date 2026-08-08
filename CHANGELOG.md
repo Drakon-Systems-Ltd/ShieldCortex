@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.33] - 2026-08-08
+
+**The 4.47.32 installer could silently unregister the very plugin it was installing.**
+
+Field origin: hours after 4.47.32 shipped, a fleet box that ran `shieldcortex install` booted its gateway with no ShieldCortex plugin — `plugins.allow` and `plugins.entries` had lost the `shieldcortex-realtime` stanza — while the CLI had reported installed. The operator caught it from a config backup and restored by hand (#213).
+
+### Fixed
+
+- **Install now verifies the on-disk registration and restores it (#213).** The native install path (`openclaw plugins install`, tried first) was trusted blindly on exit 0; nothing re-read openclaw.json afterwards, and the honest-state self-check proves the *running* gateway's roster — which still holds the pre-install plugin until the next restart, exactly when the wipe bites. `verifyPluginRegistration()` now re-reads the config after any install path, restores a missing or disabled stanza through the merge-preserving `trustLocalPlugin` (other plugins' entries untouched, never a whole-file clobber), and runs *before* the gateway-restart step so the restart boots from a verified config. If restore is impossible the install fails loud — a `SECURITY` block naming the manual fix, exit code 1 — instead of reporting success on an unprotected box. Invariant: an installer must never reduce the protection state it found.
+
+## [4.47.32] - 2026-08-08
+
+**A fresh-install field review (Edith's box) found the extractor shredding infrastructure notes and the Action Guard running two postures at once.**
+
+Field origin: an operator review of a clean v4.47.31 install filed #208–#210 on 2026-08-08. The two that hurt are fixed here; #210 (entropy false-positives on SharePoint drive IDs / PDF filenames) is accepted and tracked for a precision pass with its own measurement battery.
+
+### Fixed
+
+- **Dots inside IP addresses, versions and filenames no longer end an auto-extraction capture (#208).** All 41 extraction patterns matched capture text with `[^.!?\n]`, so the first dot in `192.168.4.1`, `v4.47.31` or `config.json` terminated the sentence — a week of network-infrastructure work was memorised as truncated stumps ("Fix: (Ring camera squatting .") and proactive recall then injected that noise into new sessions. The capture class is now rewritten at definition time (`dotAware()`): a dot only terminates when followed by whitespace or end-of-line, which is what a sentence boundary actually looks like. Existing stump memories are not rewritten — re-extract or prune them (`shieldcortex memories`).
+- **The Action Guard has one config, not two (#209).** The Claude Code hook read top-level `actionGuard` while the OpenClaw plugin read `interceptor.actionGuard`, so the two enforcement surfaces could silently hold different postures — warn-mode on one, enforcing on the other — and doctor only warned about it. Top-level `actionGuard` now governs every surface; `interceptor.actionGuard` is a deprecated alias that gap-fills per key, with the top-level value winning on conflict (surfaced on stderr and in doctor, never honoured silently). `doctor --fix-action-guard` migrates the alias into the top-level block — config backed up first, and the written config is exactly what was already in effect at runtime, so migration can never change posture. Catastrophic ops hard-block regardless, as always.
+
+## [4.47.31] - 2026-08-06
+
+**An outside researcher found the credential detector blind to the default OpenAI key format — and the audit it triggered found the safety net beneath it switched off.**
+
+Field origin: an external vulnerability report through the VDP on 2026-08-05. It also bounced off our own published security address, which did not exist. Both are fixed here.
+
+### Fixed
+
+- **Current OpenAI key formats are detected (#203).** `sk-proj-` has been OpenAI's default since 2024, and the detector missed it: the regex was `/sk-[A-Za-z0-9]{20,}/`, and the dash after `proj` breaks the match. In strict mode the key was allowed in every context tested — bare, in prose, in JSON, in a code block, quoted, labelled. `sk-svcacct-` and `sk-admin-` were missed for the same reason. The prefixes are enumerated rather than allowing dashes freely after `sk-`, because a free dash matches ordinary hyphenated prose and double-fires on every `sk-ant-` key: recall is not worth buying with precision.
+- **The entropy net was disabled for most key shapes — the root cause.** The fallback that catches formats no pattern knows yet skipped any token matching an npm package specifier, `/^@?[a-z][a-z0-9._-]*.../i`. That is also the shape of `sk-proj-`, `dop_v1_`, `hvs.`, `github_pat_` and much else, so the net was off for the whole class. That is why the reported key was invisible in *all* contexts rather than merely unattributed, and why fixing the regex alone would have left the next new format invisible too. The rule is now entropy-gated: a genuine package specifier is low-entropy, key material is not.
+- **Eight more provider formats had gone stale.** Audited every pattern against current provider documentation: GitHub `ghs_` (App installation), `ghu_`, `ghr_` — which had no pattern at all, and are the tokens CI runners and agents carry; AWS `ASIA` temporary credentials; Stripe `rk_` restricted keys and `whsec_` webhook signing secrets; Slack `xoxp-`/`xoxa-`/`xoxr-`, `xapp-`, `xoxe.` rotation tokens and `/triggers/` webhooks; Google `GOCSPX-` OAuth client secrets; DigitalOcean `doo_v1_`/`dor_v1_`; uppercase hex in Twilio key SIDs.
+- **The published security contact was a dead mailbox.** `security@drakonsystems.com` did not exist — verified against our own mail exchanger, which returned `550 5.1.1 User does not exist`, identical to a control address, while the other mailboxes resolved. Every report sent to the address in our `security.txt` had been silently bounced. That address was published in five places; all now point at a live mailbox.
+
+### Added
+
+- **A standing key-format test battery.** Forty tests covering every current provider format, the six bypass contexts from the report, the already-covered formats as a negative control, and a precision battery of realistic non-secrets — hyphenated prose, Kubernetes names, git branches, SHAs, digests, semver, CSS classes. A detector that goes stale as a provider rotates its format now fails the build rather than a stranger's inbox.
+
+### Known gaps, named rather than implied
+
+- The instruction detector is a keyword list, and 18 of 19 grammatical, multilingual and obfuscated variations bypass it. That is a design problem, not a missing pattern — adding inflections fixes three strings and leaves the class untouched. Tracked with a staged plan; the regex tier should be understood as a fast pre-filter, not a detector.
+- No credential pattern uses word boundaries; the Azure 32-hex pattern fires twice inside a single SHA-256 digest. Precision work, tracked separately so it can be measured against the corpus rather than bundled into a recall change.
+
 ## [4.47.30] - 2026-08-04
 
 **Uninstall removes everything install creates — or tells you, on screen, why it kept something.**

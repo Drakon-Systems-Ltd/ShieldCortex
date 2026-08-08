@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { checkActionGuard } from '../doctor.js';
+import { checkActionGuard, fixActionGuardConfig } from '../doctor.js';
 
 /**
  * Issue #94 — doctor had ZERO Action Guard check: its "Defence canary" probes
@@ -77,5 +77,86 @@ describe('doctor — Action Guard check (#94)', () => {
     const probe = results.find((r) => r.label === 'Action guard');
     expect(probe).toBeDefined();
     expect(probe!.status).toBe('pass');
+  });
+});
+
+/**
+ * Issue #209 — the split-key gotcha is resolved, not just warned about:
+ * top-level `actionGuard` now governs BOTH surfaces and
+ * `interceptor.actionGuard` is a deprecated gap-fill alias. Doctor's job
+ * changes accordingly: warn that the alias is in use (with the migration
+ * command), report conflicts as top-level-wins, and evaluate posture
+ * warnings against the EFFECTIVE merged config with per-key provenance.
+ */
+describe('doctor — Action Guard #209 alias resolution and migration', () => {
+  it('warns that the deprecated alias is in use, pointing at --fix-action-guard', async () => {
+    writeConfig({ interceptor: { actionGuard: { enforce: true } } });
+    const results = await checkActionGuard();
+    const warn = results.find((r) => r.status === 'warn' && /deprecated/i.test(r.message));
+    expect(warn).toBeDefined();
+    expect(warn!.fix ?? warn!.message).toMatch(/--fix-action-guard/);
+  });
+
+  it('conflict warning names the keys and states that top-level wins', async () => {
+    writeConfig({ actionGuard: { enforce: false }, interceptor: { actionGuard: { enforce: true } } });
+    const results = await checkActionGuard();
+    const warn = results.find((r) => r.status === 'warn' && /differ/i.test(r.message));
+    expect(warn).toBeDefined();
+    expect(warn!.message).toMatch(/enforce/);
+    expect(warn!.message).toMatch(/top-level|actionGuard.*wins/i);
+  });
+
+  it('posture warnings use the effective merged config with key provenance', async () => {
+    // enforce:false comes from the ALIAS (top-level does not set it) — the
+    // warn must fire and must name the alias key that caused it.
+    writeConfig({ actionGuard: { enabled: true }, interceptor: { actionGuard: { enforce: false } } });
+    const results = await checkActionGuard();
+    const warn = results.find((r) => r.status === 'warn' && /warn-mode/i.test(r.message));
+    expect(warn).toBeDefined();
+    expect(warn!.message).toMatch(/interceptor\.actionGuard\.enforce/);
+  });
+
+  it('does NOT warn warn-mode when top-level enforce:true overrides an alias enforce:false', async () => {
+    writeConfig({ actionGuard: { enforce: true }, interceptor: { actionGuard: { enforce: false } } });
+    const results = await checkActionGuard();
+    expect(results.find((r) => /warn-mode/i.test(r.message))).toBeUndefined();
+  });
+
+  it('fixActionGuardConfig migrates the alias into top-level, backs up, and clears the warning', async () => {
+    writeConfig({
+      actionGuard: { enforce: false },
+      interceptor: { enabled: true, actionGuard: { enforce: true, autoApprove: ['git_force_push'] } },
+    });
+    const fix = fixActionGuardConfig();
+    expect(fix.changed).toBe(true);
+    expect(fix.backupPath && fs.existsSync(fix.backupPath)).toBe(true);
+
+    const after = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
+    // Top-level wins on conflict (enforce stays false), alias gap-fills (autoApprove kept).
+    expect(after.actionGuard).toEqual({ enforce: false, autoApprove: ['git_force_push'] });
+    expect(after.interceptor.actionGuard).toBeUndefined();
+    // Sibling interceptor keys survive the migration.
+    expect(after.interceptor.enabled).toBe(true);
+
+    const results = await checkActionGuard();
+    expect(results.find((r) => /deprecated/i.test(r.message))).toBeUndefined();
+
+    if (fix.backupPath) fs.rmSync(fix.backupPath, { force: true });
+  });
+
+  it('fixActionGuardConfig removes an emptied interceptor block entirely', async () => {
+    writeConfig({ interceptor: { actionGuard: { enforce: false } } });
+    const fix = fixActionGuardConfig();
+    expect(fix.changed).toBe(true);
+    const after = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
+    expect(after.actionGuard).toEqual({ enforce: false });
+    expect(after.interceptor).toBeUndefined();
+    if (fix.backupPath) fs.rmSync(fix.backupPath, { force: true });
+  });
+
+  it('fixActionGuardConfig is a no-op without the alias', async () => {
+    writeConfig({ actionGuard: { enforce: false } });
+    const fix = fixActionGuardConfig();
+    expect(fix.changed).toBe(false);
   });
 });
