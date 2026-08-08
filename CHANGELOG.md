@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.32] - 2026-08-08
+
+**A fresh-install field review (Edith's box) found the extractor shredding infrastructure notes and the Action Guard running two postures at once.**
+
+Field origin: an operator review of a clean v4.47.31 install filed #208–#210 on 2026-08-08. The two that hurt are fixed here; #210 (entropy false-positives on SharePoint drive IDs / PDF filenames) is accepted and tracked for a precision pass with its own measurement battery.
+
+### Fixed
+
+- **Dots inside IP addresses, versions and filenames no longer end an auto-extraction capture (#208).** All 41 extraction patterns matched capture text with `[^.!?\n]`, so the first dot in `192.168.4.1`, `v4.47.31` or `config.json` terminated the sentence — a week of network-infrastructure work was memorised as truncated stumps ("Fix: (Ring camera squatting .") and proactive recall then injected that noise into new sessions. The capture class is now rewritten at definition time (`dotAware()`): a dot only terminates when followed by whitespace or end-of-line, which is what a sentence boundary actually looks like. Existing stump memories are not rewritten — re-extract or prune them (`shieldcortex memories`).
+- **The Action Guard has one config, not two (#209).** The Claude Code hook read top-level `actionGuard` while the OpenClaw plugin read `interceptor.actionGuard`, so the two enforcement surfaces could silently hold different postures — warn-mode on one, enforcing on the other — and doctor only warned about it. Top-level `actionGuard` now governs every surface; `interceptor.actionGuard` is a deprecated alias that gap-fills per key, with the top-level value winning on conflict (surfaced on stderr and in doctor, never honoured silently). `doctor --fix-action-guard` migrates the alias into the top-level block — config backed up first, and the written config is exactly what was already in effect at runtime, so migration can never change posture. Catastrophic ops hard-block regardless, as always.
+
 ## [4.47.31] - 2026-08-06
 
 **An outside researcher found the credential detector blind to the default OpenAI key format — and the audit it triggered found the safety net beneath it switched off.**
