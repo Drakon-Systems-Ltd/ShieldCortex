@@ -64,8 +64,30 @@ function loadActionGuardConfig() {
     const configPath = join(homedir(), '.shieldcortex', 'config.json');
     if (!existsSync(configPath)) return { ...DEFAULT_ACTION_GUARD };
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    const raw = config?.actionGuard;
-    if (!raw || typeof raw !== 'object') return { ...DEFAULT_ACTION_GUARD };
+    // #209: single source of truth. Top-level `actionGuard` governs every
+    // surface; `interceptor.actionGuard` is a deprecated alias that fills
+    // per-key gaps so pre-#209 configs keep their posture. On a conflicting
+    // key the top-level value wins and the conflict is reported on stderr —
+    // honoured silently, a wrong alias would recreate the split-brain this
+    // fix exists to kill. Mirrored in plugins/openclaw/index.ts
+    // (normaliseConfig) and src/cli/doctor.ts (checkActionGuard); the three
+    // build units cannot share an import, so keep them in step by hand.
+    const isBlock = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    const top = isBlock(config?.actionGuard) ? config.actionGuard : null;
+    const alias = isBlock(config?.interceptor?.actionGuard) ? config.interceptor.actionGuard : null;
+    if (top && alias) {
+      const conflicts = Object.keys(alias).filter(
+        (k) => k in top && JSON.stringify(top[k]) !== JSON.stringify(alias[k]),
+      );
+      if (conflicts.length > 0) {
+        process.stderr.write(
+          `[ShieldCortex] deprecated interceptor.actionGuard conflicts with actionGuard on: ${conflicts.join(', ')} — ` +
+          `top-level actionGuard wins; run \`shieldcortex doctor --fix-action-guard\` to migrate\n`,
+        );
+      }
+    }
+    const raw = top || alias ? { ...(alias ?? {}), ...(top ?? {}) } : null;
+    if (!raw) return { ...DEFAULT_ACTION_GUARD };
     return {
       enabled: raw.enabled !== false,
       enforce: raw.enforce !== false,
