@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.33] - 2026-08-08
+
+**The 4.47.32 installer could silently unregister the very plugin it was installing.**
+
+Field origin: hours after 4.47.32 shipped, a fleet box that ran `shieldcortex install` booted its gateway with no ShieldCortex plugin — `plugins.allow` and `plugins.entries` had lost the `shieldcortex-realtime` stanza — while the CLI had reported installed. The operator caught it from a config backup and restored by hand (#213).
+
+### Fixed
+
+- **Install now verifies the on-disk registration and restores it (#213).** The native install path (`openclaw plugins install`, tried first) was trusted blindly on exit 0; nothing re-read openclaw.json afterwards, and the honest-state self-check proves the *running* gateway's roster — which still holds the pre-install plugin until the next restart, exactly when the wipe bites. `verifyPluginRegistration()` now re-reads the config after any install path, restores a missing or disabled stanza through the merge-preserving `trustLocalPlugin` (other plugins' entries untouched, never a whole-file clobber), and runs *before* the gateway-restart step so the restart boots from a verified config. If restore is impossible the install fails loud — a `SECURITY` block naming the manual fix, exit code 1 — instead of reporting success on an unprotected box. Invariant: an installer must never reduce the protection state it found.
+
 ## [4.47.32] - 2026-08-08
 
 **A fresh-install field review (Edith's box) found the extractor shredding infrastructure notes and the Action Guard running two postures at once.**
