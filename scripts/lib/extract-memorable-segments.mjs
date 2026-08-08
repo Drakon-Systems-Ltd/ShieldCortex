@@ -293,24 +293,38 @@ export function getExtractionThreshold(category, dynamicThreshold, categoryThres
 // the sentence ended. The new form stops at the first `.`, `!`, `?`, or
 // newline, capping at 200 chars for safety, and optionally consumes the
 // terminator so the captured group ends cleanly. v4.24.3.
+//
+// Issue #208: the naive class treated EVERY dot as a terminator, so dots
+// inside IP addresses ("172.16.0.10"), version strings ("v4.47.31"),
+// dotted host shorthand (".6") and filenames truncated the capture,
+// storing stumps like "Fix: (Ring camera squatting .". A dot/!/? is only
+// a sentence terminator when followed by whitespace or end-of-input;
+// otherwise it is content. `dotAware` rewrites each literal below into
+// that form at definition time, so the patterns stay readable while the
+// runtime class is context-sensitive. New patterns keep using `[^.!?\n]`
+// and inherit the rewrite automatically.
+
+const SEG_SRC = '(?:[^.!?\\n]|[.!?](?!\\s|$))';
+const dotAware = (re) => new RegExp(re.source.replaceAll('[^.!?\\n]', SEG_SRC), re.flags);
+const dotAwareAll = (patterns) => patterns.map(dotAware);
 
 export const FULL_EXTRACTORS = [
   {
     name: 'decision',
     titlePrefix: 'Decision: ',
-    patterns: [
+    patterns: dotAwareAll([
       /(?:we\s+)?decided\s+(?:to\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:going|went)\s+with\s+([^.!?\n]{15,150}[.!?]?)/gi,
       /(?:chose|chosen|selected)\s+([^.!?\n]{15,150}[.!?]?)/gi,
       /the\s+(?:approach|solution|fix)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:using|will\s+use)\s+([^.!?\n]{15,150}[.!?]?)/gi,
       /(?:opted\s+for|settled\s+on)\s+([^.!?\n]{15,150}[.!?]?)/gi,
-    ],
+    ]),
   },
   {
     name: 'error-fix',
     titlePrefix: 'Fix: ',
-    patterns: [
+    patterns: dotAwareAll([
       /(?:fixed|solved|resolved)\s+(?:by\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /the\s+(?:fix|solution|workaround)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:root\s+cause|issue)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
@@ -318,49 +332,49 @@ export const FULL_EXTRACTORS = [
       /(?:problem|issue)\s+was\s+([^.!?\n]{15,150}[.!?]?)/gi,
       /(?:the\s+)?bug\s+(?:is|was)\s+([^.!?\n]{15,150}[.!?]?)/gi,
       /(?:debugging|debugged)\s+([^.!?\n]{15,150}[.!?]?)/gi,
-    ],
+    ]),
   },
   {
     name: 'learning',
     titlePrefix: 'Learned: ',
-    patterns: [
+    patterns: dotAwareAll([
       /(?:learned|discovered|realized|found\s+out)\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /turns\s+out\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:TIL|today\s+I\s+learned)[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:now\s+)?(?:understand|know)\s+(?:that\s+)?([^.!?\n]{15,150}[.!?]?)/gi,
       /(?:figured\s+out|worked\s+out)\s+([^.!?\n]{15,150}[.!?]?)/gi,
-    ],
+    ]),
   },
   {
     name: 'architecture',
     titlePrefix: 'Architecture: ',
-    patterns: [
+    patterns: dotAwareAll([
       /the\s+architecture\s+(?:is|uses|consists\s+of)\s+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:design|pattern)\s+(?:is|uses)\s+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:system|api|database)\s+(?:structure|design)\s+(?:is|uses)\s+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:created|added|implemented|built)\s+(?:a\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:refactored|updated|changed)\s+(?:the\s+)?([^.!?\n]{15,150}[.!?]?)/gi,
-    ],
+    ]),
   },
   {
     name: 'preference',
     titlePrefix: 'Preference: ',
-    patterns: [
+    patterns: dotAwareAll([
       /(?:always|never)\s+([^.!?\n]{10,150}[.!?]?)/gi,
       /(?:prefer|want)\s+to\s+([^.!?\n]{10,150}[.!?]?)/gi,
       /(?:should|must)\s+(?:always\s+)?([^.!?\n]{10,150}[.!?]?)/gi,
-    ],
+    ]),
   },
   {
     name: 'important-note',
     titlePrefix: 'Note: ',
-    patterns: [
+    patterns: dotAwareAll([
       /important[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:note|remember)[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:key|critical)\s+(?:point|thing)[:\s]+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:this\s+is\s+)?(?:crucial|essential)[:\s]+([^.!?\n]{15,150}[.!?]?)/gi,
       /(?:don't\s+forget|keep\s+in\s+mind)[:\s]+([^.!?\n]{15,150}[.!?]?)/gi,
-    ],
+    ]),
   },
 ];
 
@@ -373,29 +387,29 @@ export const STOP_HOOK_EXTRACTORS = [
   {
     name: 'error-fix',
     titlePrefix: 'Fix: ',
-    patterns: [
+    patterns: dotAwareAll([
       /(?:fixed|solved|resolved)\s+(?:by\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /the\s+(?:fix|solution|workaround)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:root\s+cause|issue)\s+(?:is|was)\s+([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:error|bug)\s+(?:was\s+)?caused\s+by\s+([^.!?\n]{15,200}[.!?]?)/gi,
-    ],
+    ]),
   },
   {
     name: 'learning',
     titlePrefix: 'Learned: ',
-    patterns: [
+    patterns: dotAwareAll([
       /(?:learned|discovered|realized|found\s+out)\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /turns\s+out\s+(?:that\s+)?([^.!?\n]{15,200}[.!?]?)/gi,
       /(?:figured\s+out|worked\s+out)\s+([^.!?\n]{15,150}[.!?]?)/gi,
-    ],
+    ]),
   },
   {
     name: 'preference',
     titlePrefix: 'Preference: ',
-    patterns: [
+    patterns: dotAwareAll([
       /(?:always|never)\s+([^.!?\n]{10,150}[.!?]?)/gi,
       /(?:prefer|want)\s+to\s+([^.!?\n]{10,150}[.!?]?)/gi,
-    ],
+    ]),
   },
 ];
 
@@ -437,7 +451,7 @@ export function extractFirstSentence(text, maxLen = 120) {
   // version strings ("v4.24.3") don't fool it. A matched sentence is returned
   // WHOLE when it fits — the old `slice(0, maxLen)` chopped clean sentences
   // mid-word (every truncated title was exactly prefix+80 chars).
-  const match = trimmed.match(/^([^.!?\n]{15,160}[.!?])(?:\s|$)/);
+  const match = trimmed.match(dotAware(/^([^.!?\n]{15,160}[.!?])(?:\s|$)/));
   // A matched sentence is COMPLETE (regex-bounded ≤161 chars) — return it whole,
   // terminator intact. Re-truncating it to maxLen stripped the terminator and
   // appended a misleading ellipsis, just moving the truncation cliff 80→120
