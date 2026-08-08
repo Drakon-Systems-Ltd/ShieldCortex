@@ -510,6 +510,26 @@ function normaliseConfig(raw: unknown, dropped?: string[]): SCConfig {
   const interceptor = normaliseInterceptorConfig(value.interceptor, dropped);
   if (interceptor) config.interceptor = interceptor;
 
+  // #209: single source of truth for the Action Guard. A top-level
+  // `actionGuard` block governs every surface; `interceptor.actionGuard` is a
+  // deprecated alias kept as per-key gap-fill so pre-#209 configs keep their
+  // posture. On a conflicting key the top-level value wins. The fold happens
+  // HERE, at the parse boundary, so initInterceptor and everything downstream
+  // still sees exactly one guard config at `interceptor.actionGuard` and the
+  // alias can never leak into the enforcement path. Conflicts are surfaced by
+  // `shieldcortex doctor` and the Claude Code hook's stderr note, not logged
+  // here — this parse also runs on the shield config file path, which has no
+  // logger. Mirrored in scripts/pre-tool-hook.mjs (loadActionGuardConfig) and
+  // src/cli/doctor.ts (checkActionGuard); the three build units cannot share
+  // an import, so keep them in step by hand.
+  const topGuard = normaliseActionGuardBlock(value.actionGuard, dropped, "actionGuard");
+  if (topGuard) {
+    config.interceptor = {
+      ...(config.interceptor ?? {}),
+      actionGuard: { ...(config.interceptor?.actionGuard ?? {}), ...topGuard },
+    };
+  }
+
   return config;
 }
 
@@ -538,6 +558,57 @@ function normaliseSeverityMap<A extends string>(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * Validate one Action Guard block. Shared by the deprecated
+ * `interceptor.actionGuard` alias and the top-level `actionGuard` key (#209) —
+ * `pathPrefix` names which of the two a dropped key came from, so the #115
+ * warn log stays exact. Returns undefined (not {}) when nothing valid was
+ * found, matching normaliseInterceptorConfig's "empty means absent" contract.
+ */
+function normaliseActionGuardBlock(
+  raw: unknown,
+  dropped: string[] | undefined,
+  pathPrefix: string,
+): InterceptorUserConfig["actionGuard"] | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    dropped?.push(pathPrefix);
+    return undefined;
+  }
+  const rawGuard = raw as Record<string, unknown>;
+  const guard: NonNullable<InterceptorUserConfig["actionGuard"]> = {};
+  if (rawGuard.enabled !== undefined) {
+    if (typeof rawGuard.enabled === "boolean") guard.enabled = rawGuard.enabled;
+    else dropped?.push(`${pathPrefix}.enabled`);
+  }
+  if (rawGuard.enforce !== undefined) {
+    if (typeof rawGuard.enforce === "boolean") guard.enforce = rawGuard.enforce;
+    else dropped?.push(`${pathPrefix}.enforce`);
+  }
+  if (rawGuard.auditAllows !== undefined) {
+    if (typeof rawGuard.auditAllows === "boolean") guard.auditAllows = rawGuard.auditAllows;
+    else dropped?.push(`${pathPrefix}.auditAllows`);
+  }
+  if (rawGuard.autoApprove !== undefined) {
+    if (Array.isArray(rawGuard.autoApprove) && rawGuard.autoApprove.every((entry) => typeof entry === "string")) {
+      // #115: defensive copy — downstream (initInterceptor's spread into
+      // InterceptorConfig) is read-only today, but aliasing the caller's
+      // array means a future in-place mutation of the host config object
+      // would silently corrupt the normalised config too.
+      guard.autoApprove = [...(rawGuard.autoApprove as string[])];
+    } else {
+      dropped?.push(`${pathPrefix}.autoApprove`);
+    }
+  }
+  // Carried through untouched — normaliseBrokerConfig is the boundary, and
+  // splitting that job across two files is how one of the halves ends up
+  // being the lenient one.
+  if (rawGuard.broker && typeof rawGuard.broker === "object" && !Array.isArray(rawGuard.broker)) {
+    guard.broker = rawGuard.broker as Record<string, unknown>;
+  }
+  return Object.keys(guard).length > 0 ? guard : undefined;
+}
+
 function normaliseInterceptorConfig(raw: unknown, dropped?: string[]): InterceptorUserConfig | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
@@ -554,44 +625,8 @@ function normaliseInterceptorConfig(raw: unknown, dropped?: string[]): Intercept
   const failurePolicy = normaliseSeverityMap(value.failurePolicy, FAILURE_ACTIONS, dropped, "interceptor.failurePolicy");
   if (failurePolicy) out.failurePolicy = failurePolicy;
 
-  if (value.actionGuard !== undefined) {
-    if (value.actionGuard && typeof value.actionGuard === "object" && !Array.isArray(value.actionGuard)) {
-      const rawGuard = value.actionGuard as Record<string, unknown>;
-      const guard: NonNullable<InterceptorUserConfig["actionGuard"]> = {};
-      if (rawGuard.enabled !== undefined) {
-        if (typeof rawGuard.enabled === "boolean") guard.enabled = rawGuard.enabled;
-        else dropped?.push("interceptor.actionGuard.enabled");
-      }
-      if (rawGuard.enforce !== undefined) {
-        if (typeof rawGuard.enforce === "boolean") guard.enforce = rawGuard.enforce;
-        else dropped?.push("interceptor.actionGuard.enforce");
-      }
-      if (rawGuard.auditAllows !== undefined) {
-        if (typeof rawGuard.auditAllows === "boolean") guard.auditAllows = rawGuard.auditAllows;
-        else dropped?.push("interceptor.actionGuard.auditAllows");
-      }
-      if (rawGuard.autoApprove !== undefined) {
-        if (Array.isArray(rawGuard.autoApprove) && rawGuard.autoApprove.every((entry) => typeof entry === "string")) {
-          // #115: defensive copy — downstream (initInterceptor's spread into
-          // InterceptorConfig) is read-only today, but aliasing the caller's
-          // array means a future in-place mutation of the host config object
-          // would silently corrupt the normalised config too.
-          guard.autoApprove = [...(rawGuard.autoApprove as string[])];
-        } else {
-          dropped?.push("interceptor.actionGuard.autoApprove");
-        }
-      }
-      // Carried through untouched — normaliseBrokerConfig is the boundary, and
-      // splitting that job across two files is how one of the halves ends up
-      // being the lenient one.
-      if (rawGuard.broker && typeof rawGuard.broker === "object" && !Array.isArray(rawGuard.broker)) {
-        guard.broker = rawGuard.broker as Record<string, unknown>;
-      }
-      if (Object.keys(guard).length > 0) out.actionGuard = guard;
-    } else {
-      dropped?.push("interceptor.actionGuard");
-    }
-  }
+  const actionGuard = normaliseActionGuardBlock(value.actionGuard, dropped, "interceptor.actionGuard");
+  if (actionGuard) out.actionGuard = actionGuard;
 
   // #115: empty/all-invalid normalises to undefined, not {} — {} is truthy
   // and made applyPluginConfigOverride treat a no-op interceptor block as a
