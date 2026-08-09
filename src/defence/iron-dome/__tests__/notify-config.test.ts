@@ -102,3 +102,16 @@ describe('normaliseNotifyConfig — total function', () => {
     expect((cfg as unknown as Record<string, unknown>).evilOverride).toBeUndefined();
   });
 });
+
+describe('normaliseNotifyConfig — openclaw channel flag (#143 native cards)', () => {
+  it('defaults OFF and arms only on exactly true', () => {
+    expect(normaliseNotifyConfig({ enabled: true }).openclaw).toBe(false);
+    expect(normaliseNotifyConfig({ enabled: true, openclaw: true }).openclaw).toBe(true);
+  });
+
+  it('truthy-but-not-true never arms it', () => {
+    for (const junk of ['true', 1, {}, [], 'yes']) {
+      expect(normaliseNotifyConfig({ enabled: true, openclaw: junk }).openclaw).toBe(false);
+    }
+  });
+});

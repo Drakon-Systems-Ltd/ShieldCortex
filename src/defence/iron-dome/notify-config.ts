@@ -28,6 +28,13 @@ export interface NotifyConfig {
    *  Absent = no configured channel (the TUI tier and the hash fallback are
    *  the only things left). See webhook-notify-channel.ts. */
   webhookUrl?: string;
+  /** Deliver via a native OpenClaw plugin-approval card — Approve/Deny
+   *  buttons on whatever channel the operator's gateway already reaches
+   *  (Telegram, WhatsApp, Discord…). Strict `true` only, same as `enabled`:
+   *  this arms a channel that can put taps within reach of a phone, so a
+   *  truthy-but-not-true value must read as "not opted in".
+   *  See openclaw-approval-channel.ts. */
+  openclaw: boolean;
 }
 
 const TIMEOUT_MIN_MS = 500;
@@ -37,6 +44,7 @@ const WEBHOOK_URL_MAX_LENGTH = 2_048;
 export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
   enabled: false,
   timeoutMs: 10_000,
+  openclaw: false,
 };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -88,6 +96,9 @@ export function normaliseNotifyConfig(raw: unknown): NotifyConfig {
     // stray "true" string or a 1 must not arm the transport.
     enabled: raw.enabled === true,
     timeoutMs: boundedNumber(raw.timeoutMs, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS) ?? DEFAULT_NOTIFY_CONFIG.timeoutMs,
+    // Strict true for the same reason as `enabled`: this arms a channel that
+    // raises native gateway approval cards. Junk degrades to "not opted in".
+    openclaw: raw.openclaw === true,
   };
 
   const webhookUrl = normaliseWebhookUrl(raw.webhookUrl);

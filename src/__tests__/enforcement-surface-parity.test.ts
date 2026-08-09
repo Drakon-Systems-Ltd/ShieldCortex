@@ -157,3 +157,49 @@ describe('#160 — the fold actually changes the verdict, so the wiring is load-
     expect(resolve('/nonexistent/definitely/not/here.sh')).toBeNull();
   });
 });
+
+describe('#189 — the two reviewed-script-check copies are held together the same way', () => {
+  // Same duplication, same reason (TS6059 build boundary), same defence: one
+  // fixture table, identical answers, or this goes red.
+  it('answers identically on every canonicalisation and drift case', async () => {
+    const { createReviewedScriptCheck: shared } = await import('../defence/iron-dome/reviewed-scripts.js');
+    const { createReviewedScriptCheck: plugin } = await import('../../plugins/openclaw/interceptor.js');
+    const { hashScriptSource } = await import('../defence/iron-dome/reviewed-scripts.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-189-drift-'));
+    try {
+      const source = '#!/bin/sh\nls -la ~/.ssh\n';
+      const pinned = path.join(dir, 'sentry.sh');
+      fs.writeFileSync(pinned, source);
+      const twin = path.join(dir, 'twin.sh');
+      fs.writeFileSync(twin, source);
+      const link = path.join(dir, 'link.sh');
+      fs.symlinkSync(pinned, link);
+
+      const entries = [
+        { path: pinned, sha256: hashScriptSource(source) },
+        { path: path.join(dir, 'gone.sh'), sha256: hashScriptSource(source) },
+        { path: 'relative.sh', sha256: hashScriptSource(source) },          // dropped: not absolute
+        { path: pinned, sha256: 'nothex' },                                  // dropped: bad hash
+      ];
+
+      const fixtures: Array<[string, string]> = [
+        [pinned, source],                       // exact match
+        [pinned, source + '#edited'],           // content drift
+        [twin, source],                          // same bytes, different file
+        [link, source],                          // symlink to the pin
+        ['./sentry.sh', source],                 // relative to cwd
+        ['', source],                            // junk path
+        [pinned, undefined as unknown as string] // junk source
+      ];
+
+      const a = shared(entries, dir);
+      const b = plugin(entries, dir);
+      for (const [p, s] of fixtures) {
+        expect({ path: p, result: a(p, s) }).toEqual({ path: p, result: b(p, s) });
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

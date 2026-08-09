@@ -572,6 +572,31 @@ export function removeTrustedSkill(path: string): void {
   });
 }
 
+// ── Reviewed-script allowlist (#189) ──────────────────
+
+function actionGuardBlock(raw: Record<string, unknown>): Record<string, unknown> {
+  return raw.actionGuard && typeof raw.actionGuard === 'object' && !Array.isArray(raw.actionGuard)
+    ? (raw.actionGuard as Record<string, unknown>)
+    : {};
+}
+
+/** RAW entries from `actionGuard.reviewedScripts` — shape validation is
+ *  normaliseReviewedScripts's job (reviewed-scripts.ts), not this reader's. */
+export function getReviewedScriptsRaw(): unknown[] {
+  const guard = actionGuardBlock(readRawConfig());
+  return Array.isArray(guard.reviewedScripts) ? guard.reviewedScripts : [];
+}
+
+/** Replace the allowlist wholesale. Same throw-policy as addTrustedSkill: a
+ *  corrupt config surfaces as a throw, never as a silent wipe-and-rewrite. */
+export function setReviewedScripts(entries: Array<Record<string, unknown>>): void {
+  mutateRawConfig((raw) => {
+    const guard = actionGuardBlock(raw);
+    guard.reviewedScripts = entries;
+    raw.actionGuard = guard;
+  });
+}
+
 // ── Cloud Iron Dome Cache ─────────────────────────────
 
 /**

@@ -248,6 +248,9 @@ interface InterceptorUserConfig {
      *  single place that knows which values would loosen an invariant. Off
      *  unless `enabled: true`. */
     broker?: Record<string, unknown>;
+    /** Reviewed-script allowlist (#189). Passed through RAW; validated
+     *  entry-by-entry inside createReviewedScriptCheck. */
+    reviewedScripts?: unknown[];
   };
 }
 
@@ -388,6 +391,22 @@ const INTERCEPTOR_JSON_SCHEMA = {
               },
             },
             model: { type: "string" },
+          },
+        },
+        // #189. Each entry pins one script by absolute path + content hash;
+        // createReviewedScriptCheck has the last word on every field.
+        reviewedScripts: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              path: { type: "string" },
+              sha256: { type: "string" },
+              note: { type: "string" },
+              addedAt: { type: "number" },
+            },
+            required: ["path", "sha256"],
           },
         },
       },
@@ -605,6 +624,11 @@ function normaliseActionGuardBlock(
   // being the lenient one.
   if (rawGuard.broker && typeof rawGuard.broker === "object" && !Array.isArray(rawGuard.broker)) {
     guard.broker = rawGuard.broker as Record<string, unknown>;
+  }
+  // #189: same passthrough discipline — createReviewedScriptCheck is the
+  // boundary that shape-validates each entry.
+  if (Array.isArray(rawGuard.reviewedScripts)) {
+    guard.reviewedScripts = [...rawGuard.reviewedScripts];
   }
   return Object.keys(guard).length > 0 ? guard : undefined;
 }

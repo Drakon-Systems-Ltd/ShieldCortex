@@ -56,6 +56,13 @@ export interface ToolGuardVerdict {
    * span would be the secret, and the audit log must not store credentials.
    */
   matches?: Array<{ signal: string; span: string }>;
+  /**
+   * Scripts whose source was exempted from folding by the reviewed-script
+   * allowlist (#189). Present only when an exemption actually fired, so its
+   * absence means "nothing was exempted", never "nobody looked". Both audit
+   * writers persist it: a verdict that leaned on review must say so.
+   */
+  reviewedScripts?: string[];
 }
 
 // ── Tool-name recognition ───────────────────────────────────────────────────
@@ -2042,6 +2049,22 @@ export interface ToolGuardOptions {
    * and must never block (see the interceptor's fs-backed implementation).
    */
   resolveScriptSource?: (scriptPath: string) => string | null;
+  /**
+   * The reviewed-script allowlist check (#189). Given the path a command
+   * invokes and the EXACT source text the resolver just returned for it,
+   * answer whether a human has pinned this script — path AND content hash —
+   * as reviewed (`shieldcortex allowlist add`). A reviewed file's source is
+   * not folded into the scan surface: its content is human-vouched, and any
+   * edit changes the hash and re-gates it on the next call.
+   *
+   * Same purity contract as `resolveScriptSource`: supplied by the caller,
+   * must never throw, judged here as strict `=== true` so a confused
+   * predicate (undefined, a promise, a truthy object) reads as "not
+   * reviewed" — the allowlist can only ever fail closed. The COMMAND LINE
+   * that invokes the script is always still scanned in full; review relieves
+   * the file body only, never the invocation.
+   */
+  isReviewedScript?: (scriptPath: string, source: string) => boolean;
 }
 
 interface ScriptFold {
@@ -2051,6 +2074,9 @@ interface ScriptFold {
   opaque: boolean;
   /** Byte ranges of `content` and the language each was folded from (issue #89). */
   regions: ScanRegion[];
+  /** Paths whose source was exempted by the reviewed-script allowlist (#189) —
+   *  surfaced on the verdict so every audit row shows review was exercised. */
+  reviewed: string[];
 }
 
 /**
@@ -2061,16 +2087,18 @@ interface ScriptFold {
 function foldScriptSources(
   execCommand: string,
   resolveScriptSource?: (scriptPath: string) => string | null,
+  isReviewedScript?: (scriptPath: string, source: string) => boolean,
 ): ScriptFold {
   const roots = detectScriptInvocations(execCommand);
-  if (roots.length === 0) return { content: '', opaque: false, regions: [] };
-  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [] };
+  if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [] };
+  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [] };
 
   const visited = new Set<string>();
   const queue: Array<{ path: string; lang: ScriptLang; depth: number }> =
     roots.map(r => ({ path: r.path, lang: r.lang, depth: 1 }));
   const parts: string[] = [];
   const regions: ScanRegion[] = [];
+  const reviewed: string[] = [];
   let total = 0;
   let cursor = 0;                                       // offset of the next part within `content`
   let opaque = false;
@@ -2092,6 +2120,27 @@ function foldScriptSources(
     if (src.length === 0) continue;                     // empty file — nothing to scan, not a gap
     if (src.includes('\0')) { opaque = true; continue; }        // binary
     if (src.length > MAX_SCRIPT_BYTES || total + src.length > MAX_FOLDED_BYTES) { opaque = true; continue; }
+
+    // Reviewed-script allowlist (#189): checked HERE, against the exact bytes
+    // just resolved — hash-then-fold on the same read, so there is no window
+    // for the file to change between "verified" and "scanned" (the TOCTOU
+    // that would exist if a CLI verified the hash up front). Strict `=== true`
+    // and exception-swallowing keep a broken predicate indistinguishable from
+    // "not reviewed". The file is skipped WITHOUT setting `opaque`: this is a
+    // human's explicit decision, not a scan gap — but it is recorded, so an
+    // audit row can never show a clean scan that silently omitted a file.
+    // Nested invocations inside a reviewed script are not followed: its
+    // children were part of what the human reviewed, and following them
+    // would re-gate a monitor because a helper it calls names `id_rsa`.
+    if (typeof isReviewedScript === 'function') {
+      let isReviewed = false;
+      try {
+        isReviewed = isReviewedScript(next.path, src) === true;
+      } catch {
+        isReviewed = false;
+      }
+      if (isReviewed) { reviewed.push(next.path); continue; }
+    }
 
     // `commandScanText` only strips SHELL constructs (pure prints, `#` comments,
     // quoted heredocs). For interpreter source those are the wrong rules — a `#`
@@ -2115,7 +2164,7 @@ function foldScriptSources(
     }
   }
 
-  return { content: parts.join('\n'), opaque, regions };
+  return { content: parts.join('\n'), opaque, regions, reviewed };
 }
 
 // ── Interpreter heredocs (issue #89) ─────────────────────────────────────────
@@ -2332,8 +2381,15 @@ export function evaluateToolCall(
   // An oversized command is already flagged (and already anomalous); skip the
   // work rather than tokenise 50k+ chars of it.
   const fold: ScriptFold = command.length > OVERSIZED_COMMAND_LENGTH
-    ? { content: '', opaque: false, regions: [] }
-    : foldScriptSources(execCommand, options?.resolveScriptSource);
+    ? { content: '', opaque: false, regions: [], reviewed: [] }
+    : foldScriptSources(execCommand, options?.resolveScriptSource, options?.isReviewedScript);
+
+  // #189: every verdict minted past this point records which files the
+  // reviewed-script allowlist exempted from folding — including a `block`
+  // from the command line itself, so a post-incident reading of the audit
+  // row can see review was in play even when it didn't change the outcome.
+  const withReview = (v: ToolGuardVerdict): ToolGuardVerdict =>
+    fold.reviewed.length > 0 ? { ...v, reviewedScripts: [...fold.reviewed] } : v;
   // Folded script source is appended, never substituted: the command surface is
   // scanned exactly as before, so no existing verdict can change direction.
   const scanSurface = fold.content ? `${execSurface}\n${fold.content}` : execSurface;
@@ -2378,10 +2434,10 @@ export function evaluateToolCall(
   const catastrophicExecuted = catastrophicMatches.filter(m => m.tier === 'executed');
   if (catastrophicExecuted.length > 0) {
     const catastrophicSignals = catastrophicExecuted.map(m => m.signal);
-    return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
+    return withReview(verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', catastrophicSignals, catastrophicExecuted[0].span),
       [...catastrophicSignals, ...opaqueSignals],
-      catastrophicExecuted.map(m => ({ signal: m.signal, span: m.span })));
+      catastrophicExecuted.map(m => ({ signal: m.signal, span: m.span }))));
   }
   // A catastrophic pattern that only appears as a PAYLOAD LITERAL inside
   // interpreter source that shells out somewhere is not proven inert (so it is
@@ -2393,8 +2449,8 @@ export function evaluateToolCall(
   // 1a) A structured delete tool carries its target as a path, not a command —
   // deleting a critical path (root, home, a system dir, a wildcard) is catastrophic.
   if (family === 'delete' && isCriticalPath(path)) {
-    return verdict('block', 'catastrophic', family, 'delete_file',
-      `catastrophic delete of a critical path (${path})`, ['delete-critical-path']);
+    return withReview(verdict('block', 'catastrophic', family, 'delete_file',
+      `catastrophic delete of a critical path (${path})`, ['delete-critical-path']));
   }
 
   // 1b) `find <path> -delete` / `find <path> -exec rm …` (issue #4475.5) is
@@ -2409,10 +2465,10 @@ export function evaluateToolCall(
     ? /\s-(?:name|iname|path|ipath|regex)\s+\S+/.test(findDeleteMatch[0])
     : false;
   if (findDeleteMatch && isCriticalPath(findDeleteMatch[1])) {
-    return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
+    return withReview(verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', ['recursive-find-delete'], findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80)),
       ['recursive-find-delete', ...opaqueSignals],
-      [{ signal: 'recursive-find-delete', span: fmtSpan(findDeleteMatch[0]) }]);
+      [{ signal: 'recursive-find-delete', span: fmtSpan(findDeleteMatch[0]) }]));
   }
 
   // 1c) Secret exfiltration: external egress carrying a credential/secret.
@@ -2435,8 +2491,8 @@ export function evaluateToolCall(
     }
   }
   if (egress && secretSighted && looksExternal(url, scanSurface)) {
-    return verdict('block', 'catastrophic', family, 'data_exfiltration',
-      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]);
+    return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
+      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
   }
 
   const canonical = ACTION_BY_FAMILY[family];
@@ -2560,13 +2616,13 @@ export function evaluateToolCall(
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
-    return verdict('require_approval', 'dangerous', family, action,
+    return withReview(verdict('require_approval', 'dangerous', family, action,
       buildReason('recognised dangerous operation requires approval', dangerSignals, dangerSpan),
       [...dangerSignals, ...opaqueSignals],
       [...new Set(dangerSignals)].flatMap(s => {
         const span = dangerEvidence.get(s);
         return span !== undefined ? [{ signal: s, span }] : [];
-      }));
+      })));
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
@@ -2575,18 +2631,18 @@ export function evaluateToolCall(
   const payloadSignals = [...new Set(dangerPayloadOnly.map(m => m.signal))];
   const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
-    return verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
-      [sensitiveSignal, ...payloadSignals, ...opaqueSignals]);
+    return withReview(verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
+      [sensitiveSignal, ...payloadSignals, ...opaqueSignals]));
   }
   if (payloadSignals.length > 0) {
-    return verdict('allow', 'sensitive', family, canonical,
+    return withReview(verdict('allow', 'sensitive', family, canonical,
       buildReason('dangerous vocabulary appears only as data inside folded script source',
         payloadSignals, dangerPayloadOnly[0].span),
       [...payloadSignals, ...opaqueSignals],
       payloadSignals.flatMap(s => {
         const m = dangerPayloadOnly.find(x => x.signal === s);
         return m ? [{ signal: s, span: m.span }] : [];
-      }));
+      })));
   }
 
   // 3a) A script invocation whose contents could NOT be read (issue #4). Allowed
@@ -2595,14 +2651,14 @@ export function evaluateToolCall(
   // invisible. When the source IS resolvable and clean, nothing is added here
   // and the verdict is bit-for-bit what it was before this change.
   if (opaqueSignals.length > 0) {
-    return verdict('allow', 'sensitive', family, canonical,
-      buildReason('script contents were not scanned', opaqueSignals), opaqueSignals);
+    return withReview(verdict('allow', 'sensitive', family, canonical,
+      buildReason('script contents were not scanned', opaqueSignals), opaqueSignals));
   }
 
   // 4) A bare exec/network/write/git call with no dangerous signal is treated as
   // benign so the guard does not interrupt routine work (npm test, git status…).
   // (Read-only and memory tools already short-circuited to allow above.)
-  return verdict('allow', 'benign', family, canonical, 'no dangerous signal detected', []);
+  return withReview(verdict('allow', 'benign', family, canonical, 'no dangerous signal detected', []));
 }
 
 function dangerActionFor(signals: string[], family: ToolFamily): string {

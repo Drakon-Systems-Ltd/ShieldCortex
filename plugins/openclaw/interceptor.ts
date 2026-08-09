@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, appendFileSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, appendFileSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, isAbsolute, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import { createGatewayInvoker, type BrokerInvokerContext, type ModelInvokerLike } from './broker-invoker.js';
@@ -35,6 +35,11 @@ export interface ActionGuardConfig {
    *  the broker — this plugin never interprets it, so a hostile value cannot be
    *  laundered by travelling through here. Absent/disabled = today's behaviour. */
   broker?: Record<string, unknown>;
+  /** RAW reviewed-script allowlist (#189), same passthrough discipline: shape
+   *  validation lives in `normaliseReviewedScripts` in the main package (and in
+   *  this plugin's duplicated `createReviewedScriptCheck` — see the build-
+   *  boundary note at that function). Absent/malformed = nothing is exempt. */
+  reviewedScripts?: unknown[];
 }
 
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
@@ -49,6 +54,8 @@ export interface ToolGuardVerdictLike {
   signals: string[];
   /** Rule → matched-span evidence behind `signals` (issue #192). */
   matches?: Array<{ signal: string; span: string }>;
+  /** Files the reviewed-script allowlist exempted from folding (#189). */
+  reviewedScripts?: string[];
 }
 /** Optional 4th-parameter seam on the real evaluator (issue #4): the guard core
  *  stays pure/synchronous and asks the CALLER to resolve an invoked script's
@@ -56,6 +63,9 @@ export interface ToolGuardVerdictLike {
  *  command. Structurally typed, like ToolGuardVerdictLike above. */
 export interface ToolGuardEvaluatorOptions {
   resolveScriptSource?: (scriptPath: string) => string | null;
+  /** #189: answers whether a human pinned this exact path + content as
+   *  reviewed. An evaluator that predates the seam simply ignores it. */
+  isReviewedScript?: (scriptPath: string, source: string) => boolean;
 }
 export type ToolGuardEvaluator = (
   toolName: string,
@@ -181,6 +191,8 @@ export interface InterceptAuditEntry {
    *  no pattern produced a span. `secret-egress` never contributes one — the
    *  span would be the secret. */
   matches?: Array<{ signal: string; span: string }>;
+  /** Files the reviewed-script allowlist exempted from folding (#189). */
+  reviewedScripts?: string[];
 }
 
 const WATCHED_TOOLS = ['remember', 'mcp__memory__remember'] as const;
@@ -643,6 +655,52 @@ export function createScriptSourceResolver(cwd?: string): (scriptPath: string) =
   };
 }
 
+// #189 reviewed-script allowlist — DUPLICATED from
+// src/defence/iron-dome/reviewed-scripts.ts for the same build-boundary reason
+// as the resolver above (TS6059), and held to it by the same parity test
+// (src/__tests__/enforcement-surface-parity.test.ts). Same rails, same
+// answers, or the drift test goes red.
+const REVIEWED_MAX_ENTRIES = 200;
+const REVIEWED_MAX_PATH_LENGTH = 1_024;
+const REVIEWED_SHA256_RE = /^[0-9a-f]{64}$/;
+
+export function createReviewedScriptCheck(
+  rawEntries: unknown,
+  cwd?: string,
+): (scriptPath: string, source: string) => boolean {
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0) return () => false;
+  const byCanonical = new Map<string, string>();          // canonical path → sha256
+  for (const item of rawEntries.slice(0, REVIEWED_MAX_ENTRIES)) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.path !== 'string' || typeof rec.sha256 !== 'string') continue;
+    const path = rec.path.trim();
+    const sha256 = rec.sha256.trim().toLowerCase();
+    if (!path || path.length > REVIEWED_MAX_PATH_LENGTH || !isAbsolute(path)) continue;
+    if (!REVIEWED_SHA256_RE.test(sha256)) continue;
+    try {
+      byCanonical.set(realpathSync(path), sha256);
+    } catch {
+      /* pinned file missing — entry cannot match anything */
+    }
+  }
+  if (byCanonical.size === 0) return () => false;
+
+  const base = cwd && typeof cwd === 'string' ? cwd : process.cwd();
+  return (scriptPath: string, source: string): boolean => {
+    try {
+      if (!scriptPath || typeof scriptPath !== 'string' || typeof source !== 'string') return false;
+      const expanded = scriptPath.startsWith('~/') ? join(homedir(), scriptPath.slice(2)) : scriptPath;
+      const full = isAbsolute(expanded) ? expanded : resolvePath(base, expanded);
+      const expected = byCanonical.get(realpathSync(full));
+      if (!expected) return false;
+      return createHash('sha256').update(source, 'utf8').digest('hex') === expected;
+    } catch {
+      return false;
+    }
+  };
+}
+
 /** Raised when the operator never answered the approval card (#143). Distinct
  *  from a transport error, because the two have opposite handling: an error
  *  routes to failurePolicy, a timeout routes to the broker's asymmetric rule. */
@@ -746,6 +804,8 @@ export function createInterceptor(
       preview: preview.slice(0, 200), ts: new Date().toISOString(),
       // #192: the durable record keeps the evidence, not just the rule names.
       ...(v.matches && v.matches.length > 0 ? { matches: v.matches } : {}),
+      // #189: an allow that leaned on the reviewed-script allowlist says so.
+      ...(v.reviewedScripts && v.reviewedScripts.length > 0 ? { reviewedScripts: v.reviewedScripts } : {}),
     };
   }
 
@@ -914,6 +974,11 @@ export function createInterceptor(
       // resolver. An evaluator that predates the seam simply ignores it.
       v = evaluateToolCall(context.toolName, context.arguments || {}, undefined, {
         resolveScriptSource: createScriptSourceResolver(toolCallCwd(context)),
+        // #189: same allowlist, same predicate semantics as the hook surface —
+        // config is RAW here, validated inside createReviewedScriptCheck.
+        ...(actionGuardCfg.reviewedScripts && actionGuardCfg.reviewedScripts.length > 0
+          ? { isReviewedScript: createReviewedScriptCheck(actionGuardCfg.reviewedScripts, toolCallCwd(context)) }
+          : {}),
       });
     } catch (err) {
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`);
