@@ -48,6 +48,14 @@ export interface ToolGuardVerdict {
   reason: string;
   /** Matched indicators, e.g. `['recursive-force-delete', 'root-path']`. */
   signals: string[];
+  /**
+   * The evidence behind `signals` (issue #192): each rule that fired, with the
+   * `fmtSpan`-bounded text it matched, so the durable audit record can explain
+   * a denial without re-running the command on the reporter's box. Absent on
+   * clean allows. `secret-egress` deliberately never contributes a span — the
+   * span would be the secret, and the audit log must not store credentials.
+   */
+  matches?: Array<{ signal: string; span: string }>;
 }
 
 // ── Tool-name recognition ───────────────────────────────────────────────────
@@ -1829,6 +1837,40 @@ function looksLikePathToken(tok: string): boolean {
   return /^(?:\.{1,2}\/|\/|~\/)/.test(tok) && !/^\/dev\//.test(tok);
 }
 
+// Recognised executable INSTALL roots (issue #199). An extensionless file in
+// one of these, invoked in command position, is an installed CLI — a Homebrew
+// or npm shim whose body names its package manager by construction. Folding it
+// read the launcher's plumbing as the operator's intent and denied a service
+// restart as a global install; the class covers essentially every installed
+// CLI on macOS.
+//
+// The boundary is the bare-name symmetry: `openclaw gateway restart` never
+// folds (a bare command word is not a path token), so relieving the SPELT
+// path of the same executable adds zero exposure — anything that could plant a
+// malicious file in these roots could equally plant it on $PATH, where the
+// guard never looked. Everything outside the relief stays folded: files WITH
+// an extension (`/usr/local/bin/backup.sh` is a parked script, not a shim),
+// project-local `./bin/…` dirs (exactly what folding exists for), and any file
+// executed BY an interpreter (`bash /opt/homebrew/bin/x` runs it AS a script).
+const INSTALLED_BIN_DIR_RE = new RegExp(
+  '^(?:'
+  + '/usr(?:/local)?/s?bin'                                  // /usr/bin /usr/sbin /usr/local/(s)bin
+  + '|/s?bin'                                                // /bin /sbin
+  + '|/opt/(?:homebrew|local)/s?bin'                         // Homebrew ARM / MacPorts
+  + '|/(?:opt/homebrew|usr/local)/opt/[^/]+/s?bin'           // Homebrew keg-only …/opt/<pkg>/bin
+  + '|/(?:opt/homebrew|usr/local)/Cellar/[^/]+/[^/]+/s?bin'  // Homebrew Cellar
+  + '|/snap/bin'
+  + '|/home/linuxbrew/\\.linuxbrew/s?bin'
+  + '|(?:~|/home/[^/]+|/Users/[^/]+)/\\.(?:npm-global/bin|local/bin|cargo/bin|volta/bin|asdf/shims|nvm/versions/node/[^/]+/bin)'
+  + '|(?:.*/)?node_modules/\\.bin'
+  + ')/[^/]+$',
+);
+
+/** An extensionless executable in a recognised install root — see #199 above. */
+function isInstalledBinaryPath(tok: string): boolean {
+  return INSTALLED_BIN_DIR_RE.test(tok) && !/\.[A-Za-z0-9]+$/.test(commandBaseName(tok));
+}
+
 /** Does an interpreter flag mean "the program is inline / on stdin", not a file? */
 function isInlineProgramFlag(interp: string, flag: string): boolean {
   const cluster = /^-[A-Za-z]+$/.test(flag) ? flag.slice(1) : '';
@@ -1970,8 +2012,10 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     // `./f.sh`, `/opt/deploy/run`, `~/bin/task` — the kernel picks the
     // interpreter from the shebang, which the guard cannot see, so fall back to
     // the extension and default to shell (the fail-closed choice: shell is the
-    // language every rule is written for).
-    if (looksLikePathToken(cmd)) add(cmd);
+    // language every rule is written for). An installed CLI's shim is the one
+    // exception (#199): its body is the launcher's plumbing, not the operator's
+    // command, and the bare-name spelling of the same call never folds at all.
+    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd);
   }
   return found;
 }
@@ -2336,7 +2380,8 @@ export function evaluateToolCall(
     const catastrophicSignals = catastrophicExecuted.map(m => m.signal);
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', catastrophicSignals, catastrophicExecuted[0].span),
-      [...catastrophicSignals, ...opaqueSignals]);
+      [...catastrophicSignals, ...opaqueSignals],
+      catastrophicExecuted.map(m => ({ signal: m.signal, span: m.span })));
   }
   // A catastrophic pattern that only appears as a PAYLOAD LITERAL inside
   // interpreter source that shells out somewhere is not proven inert (so it is
@@ -2366,7 +2411,8 @@ export function evaluateToolCall(
   if (findDeleteMatch && isCriticalPath(findDeleteMatch[1])) {
     return verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('catastrophic operation blocked', ['recursive-find-delete'], findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80)),
-      ['recursive-find-delete', ...opaqueSignals]);
+      ['recursive-find-delete', ...opaqueSignals],
+      [{ signal: 'recursive-find-delete', span: fmtSpan(findDeleteMatch[0]) }]);
   }
 
   // 1c) Secret exfiltration: external egress carrying a credential/secret.
@@ -2436,12 +2482,18 @@ export function evaluateToolCall(
         || (findDeleteIsFiltered && !hasStandaloneRmStatement(scanSurface)))));
   let dangerSignals = dangerMatches.map(m => m.signal);
   let dangerSpan = dangerMatches[0]?.span;
+  // #192: evidence for the final verdict, keyed by signal so the filters below
+  // (container-confined, force-push-invoked, firewall-read-only) drop a
+  // signal's evidence simply by dropping the signal.
+  const dangerEvidence = new Map<string, string>();
+  for (const m of dangerMatches) if (!dangerEvidence.has(m.signal)) dangerEvidence.set(m.signal, m.span);
   // A pip install scoped to a venv / an explicit target prefix mutates that
   // prefix, not the host (issue #89 class 4) — it falls through to the
   // sensitive-but-allowed tier below, exactly like a workspace-local npm install.
   if (hasUnscopedPipInstall(scanSurface) && !dangerSignals.includes('install-package')) {
     dangerSignals.push('install-package');
     dangerSpan = dangerSpan ?? 'pip install';
+    if (!dangerEvidence.has('install-package')) dangerEvidence.set('install-package', 'pip install');
   }
   // A system install confined to a sealed throwaway container mutates that
   // container, not the host (issue #128) — drop the host-mutation signal. The
@@ -2469,6 +2521,7 @@ export function evaluateToolCall(
   if (egress && looksExternal(url, scanSurface) && hasOutboundData(args, scanSurface)) {
     dangerSignals.push('external-egress');
     dangerSpan = dangerSpan ?? (url || 'external host');
+    dangerEvidence.set('external-egress', fmtSpan(url || 'external host'));
   }
   // A structured delete tool is inherently a delete, even with no "rm" in any arg.
   if (family === 'delete' && !dangerSignals.includes('file-delete')) dangerSignals.push('file-delete');
@@ -2485,6 +2538,7 @@ export function evaluateToolCall(
   if (findDeleteMatch && !findDeleteIsFiltered && !dangerSignals.includes('recursive-find-delete')) {
     dangerSignals.push('recursive-find-delete');
     dangerSpan = dangerSpan ?? findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80);
+    dangerEvidence.set('recursive-find-delete', fmtSpan(findDeleteMatch[0]));
   }
   // npx/bunx (issue #92 must-fix, ALSO item): only an explicit remote-fetch
   // shape counts as registry-code-exec — see isGatedNpxBunx for the boundary.
@@ -2493,6 +2547,7 @@ export function evaluateToolCall(
   if (isGatedNpxBunx(scanSurface) && !dangerSignals.includes('registry-code-exec')) {
     dangerSignals.push('registry-code-exec');
     dangerSpan = dangerSpan ?? (scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0]?.trim() ?? 'npx/bunx');
+    dangerEvidence.set('registry-code-exec', fmtSpan(scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0] ?? 'npx/bunx'));
   }
   // An anomalously long command is worth a human nod on its own (issue
   // #86-redos) — flagged here, after every catastrophic check above has
@@ -2501,12 +2556,17 @@ export function evaluateToolCall(
   if (command.length > OVERSIZED_COMMAND_LENGTH) {
     dangerSignals.push('oversized-command');
     dangerSpan = dangerSpan ?? `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`;
+    dangerEvidence.set('oversized-command', `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`);
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
     return verdict('require_approval', 'dangerous', family, action,
       buildReason('recognised dangerous operation requires approval', dangerSignals, dangerSpan),
-      [...dangerSignals, ...opaqueSignals]);
+      [...dangerSignals, ...opaqueSignals],
+      [...new Set(dangerSignals)].flatMap(s => {
+        const span = dangerEvidence.get(s);
+        return span !== undefined ? [{ signal: s, span }] : [];
+      }));
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
@@ -2522,7 +2582,11 @@ export function evaluateToolCall(
     return verdict('allow', 'sensitive', family, canonical,
       buildReason('dangerous vocabulary appears only as data inside folded script source',
         payloadSignals, dangerPayloadOnly[0].span),
-      [...payloadSignals, ...opaqueSignals]);
+      [...payloadSignals, ...opaqueSignals],
+      payloadSignals.flatMap(s => {
+        const m = dangerPayloadOnly.find(x => x.signal === s);
+        return m ? [{ signal: s, span: m.span }] : [];
+      }));
   }
 
   // 3a) A script invocation whose contents could NOT be read (issue #4). Allowed
@@ -2599,6 +2663,9 @@ function verdict(
   action: string,
   reason: string,
   signals: string[],
+  matches?: Array<{ signal: string; span: string }>,
 ): ToolGuardVerdict {
-  return { decision, severity, family, action, reason, signals };
+  return matches && matches.length > 0
+    ? { decision, severity, family, action, reason, signals, matches }
+    : { decision, severity, family, action, reason, signals };
 }

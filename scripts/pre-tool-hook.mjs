@@ -520,6 +520,11 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       ts: new Date().toISOString(),
       action,
       outcome,
+      // #192: the durable record keeps the evidence (rule → matched span), not
+      // just the rule names — a folded-source denial is diagnosable from the
+      // row alone. Absent when no pattern produced a span; secret-egress never
+      // contributes one (the span would be the secret).
+      ...(verdict.matches && verdict.matches.length > 0 ? { matches: verdict.matches } : {}),
       // #143's broker verdict arrives through here as `{ broker: … }`, so
       // "was a model consulted, and what did it say?" stays answerable from the
       // audit stream alone — same field and shape the OpenClaw plugin emits.

@@ -47,6 +47,8 @@ export interface ToolGuardVerdictLike {
   action: string;
   reason: string;
   signals: string[];
+  /** Rule → matched-span evidence behind `signals` (issue #192). */
+  matches?: Array<{ signal: string; span: string }>;
 }
 /** Optional 4th-parameter seam on the real evaluator (issue #4): the guard core
  *  stays pure/synchronous and asks the CALLER to resolve an invoked script's
@@ -175,6 +177,10 @@ export interface InterceptAuditEntry {
    *  calls the broker judged, so "was a model consulted, and what did it say?"
    *  is answerable from the audit stream alone. Absent = the broker never ran. */
   broker?: BrokerAuditLike;
+  /** Rule → matched-span evidence behind `threats` (issue #192). Absent when
+   *  no pattern produced a span. `secret-egress` never contributes one — the
+   *  span would be the secret. */
+  matches?: Array<{ signal: string; span: string }>;
 }
 
 const WATCHED_TOOLS = ['remember', 'mcp__memory__remember'] as const;
@@ -738,6 +744,8 @@ export function createInterceptor(
       anomalyScore: v.decision === 'block' ? 1 : v.decision === 'allow' ? 0.1 : 0.6,
       trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
       preview: preview.slice(0, 200), ts: new Date().toISOString(),
+      // #192: the durable record keeps the evidence, not just the rule names.
+      ...(v.matches && v.matches.length > 0 ? { matches: v.matches } : {}),
     };
   }
 
