@@ -103,6 +103,11 @@ function loadActionGuardConfig() {
       // means no channel is ever attempted (the existing hash-in-terminal
       // refusal is the whole of this hook's behaviour, as before #143).
       notify: raw.notify && typeof raw.notify === 'object' && !Array.isArray(raw.notify) ? raw.notify : null,
+      // #189 reviewed-script allowlist — same discipline again: RAW array,
+      // shape-validated only by normaliseReviewedScripts in dist. Absent or
+      // malformed means no exemption ever fires, which is where the guard
+      // started — the allowlist can only fail closed.
+      reviewedScripts: Array.isArray(raw.reviewedScripts) ? raw.reviewedScripts : null,
     };
   } catch {
     // Unreadable config → guard on with defaults. Enforce-by-default means a
@@ -176,6 +181,27 @@ async function loadScriptResolver() {
     );
     return typeof mod.createScriptSourceResolver === 'function'
       ? mod.createScriptSourceResolver(process.cwd())
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Load the reviewed-script allowlist check (#189). Optional exactly like the
+ * resolver above, and meaningless without it: an exemption only exists where
+ * a fold would have happened. Missing module, empty config, malformed
+ * entries — all degrade to "no exemptions", never to an error.
+ */
+async function loadReviewedScriptCheck(rawEntries) {
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0) return undefined;
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'reviewed-scripts.js')).href
+    );
+    return typeof mod.createReviewedScriptCheck === 'function'
+      ? mod.createReviewedScriptCheck(rawEntries, process.cwd())
       : undefined;
   } catch {
     return undefined;
@@ -269,8 +295,9 @@ async function loadNotify(rawNotifyConfig) {
     }
   };
   try {
-    const [notifyConfigMod, notifyMod, webhookMod] = await Promise.all([
+    const [notifyConfigMod, notifyMod, webhookMod, openclawMod] = await Promise.all([
       load('notify-config.js'), load('operator-notify.js'), load('webhook-notify-channel.js'),
+      load('openclaw-approval-channel.js'),
     ]);
     if (typeof notifyConfigMod?.normaliseNotifyConfig !== 'function') return null;
     if (typeof notifyMod?.requestOperatorApproval !== 'function') return null;
@@ -278,11 +305,36 @@ async function loadNotify(rawNotifyConfig) {
 
     const normalised = notifyConfigMod.normaliseNotifyConfig(rawNotifyConfig);
     if (!normalised?.enabled) return null;
-    // No webhookUrl (absent, or rejected by normaliseNotifyConfig — e.g. a
-    // non-http(s) scheme) means no configured channel exists yet. Degrading
+
+    // Channel precedence: the native OpenClaw approval card (#143's real
+    // destination — Approve/Deny buttons on the operator's own channel) when
+    // opted in AND buildable, else the webhook. One channel per hold: the
+    // card and a webhook ping racing each other would give two surfaces the
+    // same one-shot hash and make the store's "already-approved" refusals
+    // look like faults. A configured webhook remains the fallback for a box
+    // where the openclaw binary or the dist module has gone missing.
+    let channel = null;
+    if (
+      normalised.openclaw === true &&
+      typeof openclawMod?.createOpenClawApprovalChannel === 'function' &&
+      typeof openclawMod?.resolveOpenClawBinaryLite === 'function'
+    ) {
+      const openclawBin = openclawMod.resolveOpenClawBinaryLite();
+      if (openclawBin) {
+        channel = openclawMod.createOpenClawApprovalChannel({
+          openclawBin,
+          waiterEntry: resolve(distRoot, 'defence', 'iron-dome', 'openclaw-approval-waiter.js'),
+        });
+      }
+    }
+    if (!channel && normalised.webhookUrl) {
+      channel = webhookMod.createWebhookNotifyChannel({ url: normalised.webhookUrl });
+    }
+    // Neither channel buildable (absent/rejected webhookUrl, no openclaw
+    // opt-in or no binary) means no configured channel exists yet. Degrading
     // to null here, rather than constructing a channel that would never
     // deliver, keeps this indistinguishable from "not configured" downstream.
-    if (!normalised.webhookUrl) return null;
+    if (!channel) return null;
 
     return {
       config: normalised,
@@ -292,7 +344,7 @@ async function loadNotify(rawNotifyConfig) {
       // operator-notify.ts's `tryChannel`), so one channel object is timeout-
       // agnostic and every caller (this hook, the OpenClaw plugin) supplies
       // its own budget.
-      channel: webhookMod.createWebhookNotifyChannel({ url: normalised.webhookUrl }),
+      channel,
     };
   } catch {
     // A transport that cannot be assembled is a transport that does not run.
@@ -525,6 +577,12 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       // row alone. Absent when no pattern produced a span; secret-egress never
       // contributes one (the span would be the secret).
       ...(verdict.matches && verdict.matches.length > 0 ? { matches: verdict.matches } : {}),
+      // #189: when the reviewed-script allowlist exempted a file from folding,
+      // the row says so — an allow that leaned on review must be tellable
+      // apart from an allow that scanned everything.
+      ...(verdict.reviewedScripts && verdict.reviewedScripts.length > 0
+        ? { reviewedScripts: verdict.reviewedScripts }
+        : {}),
       // #143's broker verdict arrives through here as `{ broker: … }`, so
       // "was a model consulted, and what did it say?" stays answerable from the
       // audit stream alone — same field and shape the OpenClaw plugin emits.
@@ -686,6 +744,11 @@ process.stdin.on('end', async () => {
     }
 
     const resolveScriptSource = await loadScriptResolver();
+    // #189: the allowlist check only rides along when a resolver exists —
+    // without a resolver nothing folds, so there is nothing to exempt.
+    const isReviewedScript = resolveScriptSource
+      ? await loadReviewedScriptCheck(cfg.reviewedScripts)
+      : undefined;
     let verdict;
     try {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
@@ -695,7 +758,9 @@ process.stdin.on('end', async () => {
         toolName,
         toolInput,
         undefined,
-        resolveScriptSource ? { resolveScriptSource } : undefined,
+        resolveScriptSource
+          ? (isReviewedScript ? { resolveScriptSource, isReviewedScript } : { resolveScriptSource })
+          : undefined,
       );
     } catch (err) {
       handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode); // always exits

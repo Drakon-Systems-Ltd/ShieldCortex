@@ -643,6 +643,8 @@ ${bold}COMMANDS${reset}
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
+  ${cyan}allowlist${reset} [add|remove|verify]  Pin a human-reviewed script (path + content hash)
+                        so the guard stops folding its source; any edit re-gates it
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
@@ -847,6 +849,15 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'deny') {
     const { runDeny } = await import('./cli/deny.js');
     process.exitCode = runDeny(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "allowlist" subcommand (#189) — the reviewed-script allowlist:
+  // standing, content-hash-pinned trust for human-reviewed scripts, where
+  // approve/deny above are one-shot. TTY-gated on every mutating verb.
+  if (process.argv[2] === 'allowlist') {
+    const { runAllowlist } = await import('./cli/allowlist.js');
+    process.exitCode = runAllowlist(process.argv.slice(3));
     return;
   }
 
@@ -1312,7 +1323,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve', 'deny',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve', 'deny', 'allowlist',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
