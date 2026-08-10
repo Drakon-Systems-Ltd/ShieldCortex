@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
@@ -42,6 +42,14 @@ type DefenceModule = {
   ) => {
     clean: boolean;
     injection: { clean: boolean; riskLevel: string; detections: unknown[] };
+  };
+  /** #225 sink: the notify transport shared with the Action Guard (#143).
+   *  Optional — an older installed dist won't have it, and the guard must
+   *  degrade to a loud log rather than fail. */
+  normaliseNotifyConfig?: (raw: unknown) => { enabled: boolean; webhookUrl?: string; secret?: string; timeoutMs?: number };
+  createWebhookNotifyChannel?: (opts: { url: string; secret?: string }) => {
+    name: string;
+    send: (n: Record<string, unknown>, o: { timeoutMs: number }) => Promise<{ delivered: boolean; reason?: string }>;
   };
 };
 
@@ -251,6 +259,93 @@ interface InterceptorUserConfig {
     /** Reviewed-script allowlist (#189). Passed through RAW; validated
      *  entry-by-entry inside createReviewedScriptCheck. */
     reviewedScripts?: unknown[];
+  };
+  /** Conversation firewall posture (#225). See CONVERSATION_POSTURES. */
+  conversation?: { posture?: ConversationPosture };
+}
+
+/**
+ * What the conversation firewall is allowed to DO about a detection (#225).
+ *
+ * Before this existed, scanning ran on `llm_input` — an OpenClaw *observation*
+ * hook with no blocking contract — and a detection's entire effect was a
+ * console line. The product implied a firewall and shipped a logger. These
+ * three postures make the difference explicit and reportable:
+ *
+ *   off      — do not scan the conversation at all
+ *   observe  — scan, audit, notify the operator, NEVER block
+ *   enforce  — additionally block the run (via `before_agent_run`)
+ *
+ * Default is `observe`, deliberately. It is exactly the behaviour that shipped
+ * before — but named honestly instead of implied to be protection — and #182
+ * says the guard's false-positive rate is still unmeasured. An unmeasured
+ * blocker in front of every turn would be a worse incident than the one this
+ * fixes; `enforce` is opt-in until that number exists.
+ */
+export type ConversationPosture = 'off' | 'observe' | 'enforce';
+const CONVERSATION_POSTURES: readonly ConversationPosture[] = ['off', 'observe', 'enforce'];
+
+/** Resolve the configured posture. Anything unrecognised resolves DOWN to
+ *  `observe`, never up to `enforce`: a typo must not silently start blocking
+ *  every turn on an operator's box. */
+export function conversationPosture(raw: unknown): ConversationPosture {
+  if (!raw || typeof raw !== 'object') return 'observe';
+  const value = (raw as { posture?: unknown }).posture;
+  return typeof value === 'string' && (CONVERSATION_POSTURES as readonly string[]).includes(value)
+    ? (value as ConversationPosture)
+    : 'observe';
+}
+
+/** A scan outcome as the conversation guard sees it. `errored` marks a scan
+ *  that could not be completed — distinct from a clean one, because "we did
+ *  not look" must never be reported as "we looked and it was fine". */
+export interface ConversationScanResult {
+  clean: boolean;
+  summary: string;
+  errored?: boolean;
+}
+
+export interface ConversationDecision {
+  block: boolean;
+  notify: boolean;
+  audit: boolean;
+  reason: string | null;
+}
+
+/**
+ * The whole decision, as a pure function — no I/O, no hooks, so the posture
+ * semantics are testable directly and cannot drift as the plumbing changes.
+ *
+ * The key line is `notify` on a non-blocking detection: logging is not a sink.
+ * The #225 finding was that a HIGH verdict reached a log file and nothing else,
+ * so a real threat on a real box was seen by nobody. Under `observe` we still
+ * do not stop the turn — but a human hears about it.
+ */
+export function evaluateConversationRun(
+  posture: ConversationPosture,
+  scan: ConversationScanResult,
+): ConversationDecision {
+  if (posture === 'off') return { block: false, notify: false, audit: false, reason: null };
+
+  // Scanner failure fails OPEN — a broken scanner must not wedge every turn,
+  // which is the outcome ShieldCortex exists to prevent — but it is reported,
+  // because an unprotected turn must never read as a protected one.
+  if (scan.errored) {
+    return {
+      block: false,
+      notify: true,
+      audit: true,
+      reason: `conversation scan unavailable (${scan.summary}) — turn allowed unscanned`,
+    };
+  }
+
+  if (scan.clean) return { block: false, notify: false, audit: false, reason: null };
+
+  return {
+    block: posture === 'enforce',
+    notify: true,
+    audit: true,
+    reason: `conversation threat: ${scan.summary}`,
   };
 }
 
@@ -474,6 +569,10 @@ let _registered = false;
 // unattended Codex agents even a no-op registered hook changes how OpenClaw
 // resolves approvals).
 let _beforeToolCallRegistered = false;
+// #225: whether the gateway accepted our conversation ENFORCEMENT hook. False on
+// an older gateway that has no before_agent_run — in which case the firewall is
+// observe-only no matter what the posture says, and must report itself as such.
+let _beforeAgentRunRegistered = false;
 // #134 §2: register() wraps its whole body in try/catch so a plugin failure
 // never blocks channel startup — correct, but it used to report the failure
 // with a bare console.warn (bypasses the gateway's structured log, so the
@@ -651,6 +750,24 @@ function normaliseInterceptorConfig(raw: unknown, dropped?: string[]): Intercept
 
   const actionGuard = normaliseActionGuardBlock(value.actionGuard, dropped, "interceptor.actionGuard");
   if (actionGuard) out.actionGuard = actionGuard;
+
+  // #225: conversation posture. An invalid value is DROPPED (and named in the
+  // warn log) rather than coerced, so `conversationPosture()` falls back to
+  // `observe` — the safe direction. A typo must never start blocking turns.
+  if (value.conversation !== undefined) {
+    if (value.conversation && typeof value.conversation === "object" && !Array.isArray(value.conversation)) {
+      const posture = (value.conversation as { posture?: unknown }).posture;
+      if (posture !== undefined) {
+        if (typeof posture === "string" && (CONVERSATION_POSTURES as readonly string[]).includes(posture)) {
+          out.conversation = { posture: posture as ConversationPosture };
+        } else {
+          dropped?.push("interceptor.conversation.posture");
+        }
+      }
+    } else {
+      dropped?.push("interceptor.conversation");
+    }
+  }
 
   // #115: empty/all-invalid normalises to undefined, not {} — {} is truthy
   // and made applyPluginConfigOverride treat a no-op interceptor block as a
@@ -1060,8 +1177,102 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
 }
 
 function handleLlmInput(event: LlmInputEvent, ctx: AgentCtx): void {
-  // Fire and forget
+  // Fire and forget — OBSERVATION ONLY. This hook cannot block (#225); the
+  // enforcement point is handleBeforeAgentRun below.
   void scanLlmInput(event, ctx);
+}
+
+/**
+ * Route a conversation-threat detection to a HUMAN (#225).
+ *
+ * This is the "sink" the issue is named for. Before it existed, a HIGH verdict
+ * produced a console line and an audit row, and a real detection on a live box
+ * was seen by nobody. It reuses the Action Guard's notify transport (#143)
+ * rather than inventing a second one — two notification paths would drift, and
+ * the operator would learn which one to ignore.
+ *
+ * Returns whether a human was actually reached, so callers (and doctor) can
+ * report "detected but undeliverable" instead of implying someone was told.
+ * Never throws: a failed notification must not become a failed turn.
+ */
+async function notifyOperator(reason: string, blocked: boolean): Promise<boolean> {
+  try {
+    const mod = await getDefenceModule();
+    const cfg = await loadConfig();
+    const raw = (cfg.interceptor?.actionGuard as { notify?: unknown } | undefined)?.notify;
+    if (!mod?.normaliseNotifyConfig || !mod.createWebhookNotifyChannel || !raw) return false;
+    const notify = mod.normaliseNotifyConfig(raw);
+    if (!notify.enabled || !notify.webhookUrl) return false;
+    const channel = mod.createWebhookNotifyChannel({ url: notify.webhookUrl, secret: notify.secret });
+    const res = await channel.send(
+      {
+        kind: 'conversation_threat',
+        severity: blocked ? 'blocked' : 'observed',
+        reason,
+        host: hostname(),
+        ts: new Date().toISOString(),
+      },
+      { timeoutMs: notify.timeoutMs ?? 5_000 },
+    );
+    return res.delivered === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The conversation firewall's enforcement point (#225).
+ *
+ * Unlike `llm_input`, this hook is awaited by the gateway and its return value
+ * decides whether the run proceeds. It scans the prompt, applies the configured
+ * posture, and — critically — routes a detection to a HUMAN rather than only to
+ * a log file. The finding this fixes was that a HIGH verdict on a live box was
+ * seen by nobody.
+ *
+ * Fails OPEN on any internal error: a security plugin that bricks the gateway
+ * has caused a worse outage than the one it prevents. Every failure is reported.
+ */
+export async function handleBeforeAgentRun(
+  event: { prompt?: string; sessionId?: string; model?: string },
+  _ctx: AgentCtx,
+): Promise<{ block: true; reason: string } | undefined> {
+  let posture: ConversationPosture = 'observe';
+  try {
+    const cfg = await loadConfig();
+    posture = conversationPosture(cfg.interceptor?.conversation);
+    if (posture === 'off') return undefined;
+
+    const text = String(event?.prompt ?? '');
+    if (!text || text.length < 10 || isInternalContent(text)) return undefined;
+
+    let scan: ConversationScanResult;
+    try {
+      scan = await scanRealtimeContent(text);
+    } catch (err) {
+      scan = { clean: true, summary: (err as Error).message, errored: true };
+    }
+
+    const decision = evaluateConversationRun(posture, scan);
+    if (decision.audit) {
+      auditLog({
+        type: 'threat', hook: 'before_agent_run', sessionId: event?.sessionId,
+        model: event?.model, reason: decision.reason, posture,
+        outcome: decision.block ? 'blocked' : 'allowed',
+        preview: text.slice(0, 100), ts: new Date().toISOString(),
+      });
+    }
+    if (decision.notify) {
+      // The sink. Under `observe` we do not stop the turn — but the operator
+      // hears about it, which is the entire point of #225.
+      console.warn(`[shieldcortex] ⚠️ ${decision.reason} — posture=${posture}, ${decision.block ? 'BLOCKED' : 'allowed'}`);
+      void notifyOperator(decision.reason ?? 'conversation threat', decision.block).catch(() => {});
+    }
+    return decision.block ? { block: true, reason: decision.reason ?? 'conversation threat' } : undefined;
+  } catch (e) {
+    // Fail open, loudly. Never let the guard's own failure stop the agent.
+    console.error('[shieldcortex] before_agent_run error (failing open):', e instanceof Error ? e.message : String(e));
+    return undefined;
+  }
 }
 
 // Skip text blocks that are ShieldCortex/OpenClaw tool-result pass-throughs
@@ -1420,6 +1631,26 @@ export default {
 
     api.on("llm_input", handleLlmInput, { timeoutMs: 30_000 });
     api.on("llm_output", handleLlmOutput, { timeoutMs: 30_000 });
+
+    // #225: the conversation firewall's ENFORCEMENT point. `llm_input` above is
+    // an OpenClaw *observation* hook — it cannot stop anything, which is why a
+    // detected injection reached the model regardless and the only trace was a
+    // console line. `before_agent_run` is the documented hook that can block a
+    // run, so the verdict lands here where it can actually act.
+    //
+    // Registered unconditionally: the posture (off/observe/enforce) decides
+    // what happens, and it is read per-call so a config change takes effect
+    // without a restart. Registering conditionally would make "is the guard
+    // wired?" depend on config read at boot — the exact class of silent gap
+    // that #214/#222 were.
+    try {
+      api.on("before_agent_run", handleBeforeAgentRun, { timeoutMs: 30_000 });
+      _beforeAgentRunRegistered = true;
+    } catch {
+      // Older gateway without the hook: stay honest rather than pretend. The
+      // status command and doctor read this flag and must report observe-only.
+      _beforeAgentRunRegistered = false;
+    }
 
     api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output${_beforeToolCallRegistered ? " + before_tool_call" : ""} + /shieldcortex-status)`);
     } catch (err) {

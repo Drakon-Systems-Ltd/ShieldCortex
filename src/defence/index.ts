@@ -113,3 +113,13 @@ export type { CloudConfig, DefenceMode, VerifyConfig, OpenClawMemoryConfig } fro
 export { syncToCloud } from '../cloud/sync.js';
 export { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 export { submitVerification, pollVerification } from '../cloud/verify.js';
+
+// Operator notification (#143 transport, reused by the #225 conversation sink).
+// Exported from the barrel so the OpenClaw plugin — which builds across a
+// package boundary and can only reach us through `shieldcortex/defence` — can
+// route a conversation-threat detection to a human instead of a log file.
+export { normaliseNotifyConfig, normaliseWebhookUrl } from './iron-dome/notify-config.js';
+export type { NotifyConfig } from './iron-dome/notify-config.js';
+export { createWebhookNotifyChannel } from './iron-dome/webhook-notify-channel.js';
+export { formatOperatorNotification } from './iron-dome/operator-notify.js';
+export type { OperatorNotification, NotifyChannel } from './iron-dome/operator-notify.js';

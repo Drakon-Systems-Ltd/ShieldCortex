@@ -14,6 +14,7 @@
     "hooks": [
       "llm_input",
       "llm_output",
+      "before_agent_run",
       "before_tool_call",
       "session_end"
     ],
@@ -110,7 +111,7 @@
     "properties": {
       "enabled": {
         "type": "boolean",
-        "description": "Unused — plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
+        "description": "Unused \u2014 plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
       },
       "binaryPath": {
         "type": "string"
