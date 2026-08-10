@@ -15,6 +15,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
 import type { InterceptorConfig, BrokerRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
@@ -1418,10 +1419,28 @@ export default {
       api.logger?.info?.('[shieldcortex] interceptor.enabled:false in plugin config — before_tool_call hook not registered');
     }
 
+    // These two are CONVERSATION hooks: OpenClaw drops them at registration
+    // for a non-bundled plugin unless the host grants
+    // plugins.entries.<id>.hooks.allowConversationAccess = true. We still
+    // attempt registration (the host decides, and the grant can be added
+    // without a code change), but we must not CLAIM them afterwards — see the
+    // honesty note on the log line below (#225).
     api.on("llm_input", handleLlmInput, { timeoutMs: 30_000 });
     api.on("llm_output", handleLlmOutput, { timeoutMs: 30_000 });
 
-    api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output${_beforeToolCallRegistered ? " + before_tool_call" : ""} + /shieldcortex-status)`);
+    // #225: this line used to announce `llm_input + llm_output` unconditionally.
+    // On any host without the conversation-access grant the gateway logged, on
+    // the very next two lines, that it had dropped both — so ShieldCortex was
+    // claiming conversation protection it did not have, in the one place an
+    // operator looks to confirm startup. Report only what is actually live, and
+    // name the missing grant when it is the reason.
+    const conversationAccess = readConversationAccess(homedir(), PLUGIN_ID);
+    api.logger.info(
+      `[shieldcortex] v${_version} registered (${describeRegisteredHooks({
+        access: conversationAccess,
+        beforeToolCallRegistered: _beforeToolCallRegistered,
+      })})`,
+    );
     } catch (err) {
       // Plugin must never block channel startup — warn and bail gracefully.
       // #134 §2: this used to be a bare console.warn, which bypasses the
