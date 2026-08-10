@@ -25,6 +25,11 @@ import {
   describeConversationAccess,
   conversationAccessFix,
 } from '../integrations/openclaw-conversation-access.js';
+import {
+  readOpenClawHostVersion,
+  evaluateEnforcementSupport,
+  describeEnforcementSupport,
+} from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
@@ -2665,7 +2670,12 @@ export async function checkOpenClawConversationScanning(
   }
 
   const state = readConversationAccess(home, REALTIME_PLUGIN_ID);
-  const message = describeConversationAccess(state, REALTIME_PLUGIN_ID);
+  // #225 phase 2: the grant and the host's CAPABILITY are independent facts,
+  // and an operator needs both. Granting access on a host whose OpenClaw
+  // predates before_agent_run buys observation and nothing more — saying so up
+  // front is cheaper than discovering it after enabling enforcement.
+  const capability = evaluateEnforcementSupport(readOpenClawHostVersion(home));
+  const message = `${describeConversationAccess(state, REALTIME_PLUGIN_ID)}; ${describeEnforcementSupport(capability)}`;
 
   if (!state.readable) {
     return {
@@ -2677,6 +2687,17 @@ export async function checkOpenClawConversationScanning(
   }
   if (!state.granted) {
     return { label, status: 'warn', message, fix: conversationAccessFix(REALTIME_PLUGIN_ID) };
+  }
+  if (capability.support === 'unsupported') {
+    // Granted but incapable: scanning happens, enforcement never can. That is a
+    // real ceiling on this host, not a misconfiguration — warn, and name the
+    // version that lifts it.
+    return {
+      label,
+      status: 'warn',
+      message,
+      fix: `Upgrade OpenClaw to ${capability.minVersion} or later if you want conversation enforcement to become possible. Scanning and auditing work as-is.`,
+    };
   }
   return { label, status: 'info', message };
 }
