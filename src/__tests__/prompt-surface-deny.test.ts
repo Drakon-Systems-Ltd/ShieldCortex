@@ -19,7 +19,7 @@ import http from 'http';
 import type { AddressInfo } from 'net';
 import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -314,6 +314,26 @@ describe('Action Guard hook — prompt-surface rule', () => {
       const result = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
       const reason = String(decisionOf(result.stdout).permissionDecisionReason);
       expect(String(delivered().shortHash)).toBe(reason.match(/shieldcortex approve ([0-9a-f]{12})/)![1]);
+    });
+
+    it('the approve command it offers really does authorise the retry', async () => {
+      // The denial text tells the operator that approving unblocks the NEXT
+      // attempt. That is only true because the pending record is written
+      // before the prompt-surface branch — pin it, or the message becomes a
+      // promise the guard does not keep.
+      writeNotifyConfig();
+      await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
+      const shortHash = String(delivered().shortHash);
+
+      const { approveRequest } = await import(
+        pathToFileURL(path.join(REPO_ROOT, 'dist', 'defence', 'iron-dome', 'action-approvals.js')).href
+      ) as { approveRequest: (h: string, o: { home: string }) => { ok: boolean } };
+      expect(approveRequest(shortHash, { home: tempHome }).ok).toBe(true);
+
+      // The retry now defers to the harness's own permission system: no
+      // decision emitted at all, exactly as #118 has always behaved.
+      const retry = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
+      expect(retry.stdout).toBe('');
     });
 
     // ── the property that matters most ──────────────────────────────────────
