@@ -44,6 +44,25 @@
  *     not a rung of it.
  */
 
+/**
+ * What actually happened to the held call, from the operator's point of view.
+ *
+ * The distinction is not cosmetic. On a promptless box — `bypassPermissions`,
+ * which is how every unattended agent and cron on this fleet runs — the hook
+ * cannot raise a prompt, so the guard DENIES rather than leaving an
+ * unanswerable ask (#139). Before this discriminator existed, both outcomes
+ * were notified with the same "approval needed" wording, so the operator was
+ * asked to approve something that had already been refused and handed back to
+ * the agent seconds earlier. Measured cost of that on this fleet: 41 gated
+ * actions hard-denied in one week with nobody told a job had died.
+ *
+ *   'approval_requested'      — the call is HELD, a human answer still decides it.
+ *   'denied_no_prompt_surface' — the call is DEAD. Nothing is waiting on the
+ *                                operator; this is an incident report, and the
+ *                                only forward path is authorising a RETRY.
+ */
+export type OperatorNotificationEvent = 'approval_requested' | 'denied_no_prompt_surface';
+
 /** What the judge (approval-judge.ts) found, carried for display only. This
  *  module never re-derives a decision from it — see the module doc above. */
 export interface NotificationJudgeSummary {
@@ -62,6 +81,12 @@ export interface NotificationJudgeSummary {
  * be tricked into tapping yes on something you didn't initiate").
  */
 export interface OperatorNotification {
+  /** Which of the two outcomes this is. Required, because a notification whose
+   *  wording does not match what happened is worse than none: the operator
+   *  learns that these messages are approximately true and stops reading them.
+   *  Every pre-existing construction site supplies 'approval_requested', which
+   *  is exactly what they all meant before the discriminator existed. */
+  event: OperatorNotificationEvent;
   /** Full sha256 from action-approvals.ts's hashToolCall. The one thing every
    *  reply — tap, webhook, or terminal — must be bound to. */
   hash: string;
@@ -79,9 +104,23 @@ export interface OperatorNotification {
    *  judge ran — rendered explicitly, never silently omitted, so "no AI
    *  looked at this" is as visible as a verdict would be. */
   judge: NotificationJudgeSummary | null;
+  /** WHY no prompt could be raised, verbatim from the hook's
+   *  `noPromptSurfaceReason` (e.g. `bypassPermissions mode shows no prompt`).
+   *  Only set on 'denied_no_prompt_surface' — on the approval path there is
+   *  nothing to explain, the ask went out. */
+  deniedReason?: string;
+  /** Which job this was. An alert that says "something was blocked somewhere"
+   *  is unactionable: the operator's next move is always to go look at the job
+   *  that died, and these two fields are the only handle on it this hook has
+   *  (`session_id` / `cwd` off the harness payload). Carried on both events —
+   *  useful on an ask, load-bearing on a denial. */
+  sessionId?: string;
+  cwd?: string;
   /** The `shieldcortex approve <hash>` / `shieldcortex deny <hash>` text.
    *  ALWAYS present — this is the floor (#118) and is never conditional on
-   *  whether a channel is configured or expected to succeed. */
+   *  whether a channel is configured or expected to succeed. On a denial it
+   *  carries the approve half only: the call is already refused, so "deny" is
+   *  an affordance with nothing behind it. */
   fallbackHint: string;
 }
 
@@ -114,6 +153,15 @@ export interface RequestOperatorApprovalInput {
   severity: string;
   reason: string;
   judge?: NotificationJudgeSummary | null;
+  /** Defaults to 'approval_requested' — so a caller written before the
+   *  discriminator existed keeps producing byte-identical notifications. */
+  event?: OperatorNotificationEvent;
+  /** Only meaningful with event: 'denied_no_prompt_surface'; ignored otherwise
+   *  rather than rendered, so a caller cannot accidentally tell the operator an
+   *  action was blocked when it is merely held. */
+  deniedReason?: string;
+  sessionId?: string;
+  cwd?: string;
 }
 
 export interface RequestOperatorApprovalDeps {
@@ -150,10 +198,24 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  *  command keeps a single pathological tool call from producing a
  *  multi-megabyte push notification or webhook payload. */
 const MAX_COMMAND_CHARS = 2_000;
+/** Session id, cwd and the denial reason all arrive from the harness's own
+ *  JSON payload, which this module does not control. Same instinct as
+ *  MAX_COMMAND_CHARS: bound anything that crosses in from outside before it
+ *  becomes a push notification. */
+const MAX_CONTEXT_CHARS = 500;
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max)}… [truncated ${text.length - max} chars]`;
+}
+
+/** A bounded, non-empty string, or undefined — a field we cannot render
+ *  honestly is omitted rather than shown as "undefined". */
+function optionalText(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim();
+  if (!trimmed) return undefined;
+  return truncate(trimmed, MAX_CONTEXT_CHARS);
 }
 
 /** Build the notification content once, so every channel in the resolution
@@ -161,7 +223,9 @@ function truncate(text: string, max: number): string {
  *  differently-scoped version of what tripped. */
 function buildNotification(input: RequestOperatorApprovalInput): OperatorNotification {
   const shortHash = input.hash.slice(0, 12);
-  return {
+  const denied = input.event === 'denied_no_prompt_surface';
+  const notification: OperatorNotification = {
+    event: denied ? 'denied_no_prompt_surface' : 'approval_requested',
     hash: input.hash,
     shortHash,
     tool: input.tool,
@@ -170,8 +234,24 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
     severity: input.severity,
     reason: input.reason,
     judge: input.judge ?? null,
-    fallbackHint: `shieldcortex approve ${shortHash}   |   shieldcortex deny ${shortHash}`,
+    // On a denial the deny half is dropped: the guard already said no, and an
+    // affordance that does nothing is how an operator learns to ignore the
+    // ones that do.
+    fallbackHint: denied
+      ? `shieldcortex approve ${shortHash}   (authorises a RETRY — the blocked call is already gone)`
+      : `shieldcortex approve ${shortHash}   |   shieldcortex deny ${shortHash}`,
   };
+  // Only set on the event they belong to, so an absent field is unambiguous
+  // rather than "maybe the caller forgot".
+  if (denied) {
+    const deniedReason = optionalText(input.deniedReason);
+    if (deniedReason) notification.deniedReason = deniedReason;
+  }
+  const sessionId = optionalText(input.sessionId);
+  if (sessionId) notification.sessionId = sessionId;
+  const cwd = optionalText(input.cwd);
+  if (cwd) notification.cwd = cwd;
+  return notification;
 }
 
 /** Human-readable rendering, used by channels that send plain text (webhook
@@ -179,16 +259,32 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
  *  richer presentation (inline buttons, etc.) from the structured
  *  `OperatorNotification` instead — this is the lowest common denominator. */
 export function formatOperatorNotification(n: OperatorNotification): string {
-  const lines = [
-    '🛡️ ShieldCortex — approval needed',
-    '',
+  // A stale caller (an older dist, a plugin built before the discriminator)
+  // can hand over an object with no `event` at all. Anything that is not
+  // EXACTLY the denial reads as the approval wording — the same value every
+  // pre-#143-denial caller meant — so an unknown value degrades to today's
+  // text rather than to a false "this was blocked".
+  const denied = n.event === 'denied_no_prompt_surface';
+  const lines = denied
+    ? ['🛡️ ShieldCortex — BLOCKED: this action did NOT run', '']
+    : ['🛡️ ShieldCortex — approval needed', ''];
+  lines.push(
     `Tool:      ${n.tool}`,
     `Command:   ${n.command}`,
     `Tripped:   ${n.signals.join(', ') || 'none'}`,
     `Tier:      ${n.severity}`,
     `Reason:    ${n.reason}`,
-    '',
-  ];
+  );
+  if (denied) {
+    // WHICH JOB DIED. Without this the alert is a fact about the fleet rather
+    // than something an operator can act on — the incident this fixes was
+    // found by reading audit jsonl by hand precisely because the alert (when
+    // it arrived at all) never named the session or the working directory.
+    lines.push(`Blocked:   ${n.deniedReason ?? 'no prompt surface in this session'}`);
+    if (n.sessionId) lines.push(`Session:   ${n.sessionId}`);
+    if (n.cwd) lines.push(`Cwd:       ${n.cwd}`);
+  }
+  lines.push('');
   if (n.judge) {
     lines.push(
       `AI judge:  ${n.judge.assessment} (confidence ${n.judge.confidence})` +
@@ -200,8 +296,17 @@ export function formatOperatorNotification(n: OperatorNotification): string {
     lines.push('AI judge:  no judge ran — this verdict is rules-only');
   }
   lines.push('');
-  lines.push(`[Approve]  shieldcortex approve ${n.shortHash}`);
-  lines.push(`[Deny]     shieldcortex deny ${n.shortHash}`);
+  if (denied) {
+    // No Approve/Deny pair: there is nothing left to deny, and the approve
+    // command means something different here — it authorises the NEXT attempt,
+    // which is the only thing that can still happen.
+    lines.push('The agent has already been refused; this job did not do the work.');
+    lines.push('To authorise a RETRY, run in YOUR terminal:');
+    lines.push(`  shieldcortex approve ${n.shortHash}`);
+  } else {
+    lines.push(`[Approve]  shieldcortex approve ${n.shortHash}`);
+    lines.push(`[Deny]     shieldcortex deny ${n.shortHash}`);
+  }
   return truncate(lines.join('\n'), 4_000);
 }
 
@@ -245,6 +350,13 @@ async function tryChannel(
 /**
  * Try to reach the operator: TUI first (only if `attended`), then the
  * configured channel. Returns which one delivered, or null.
+ *
+ * Despite the name, this also carries the `denied_no_prompt_surface` event
+ * (see `OperatorNotificationEvent`) — the transport, the resolution order and
+ * the deadline are identical whether the news is "a human must decide this" or
+ * "a job just died and nobody was told", and duplicating all of that to change
+ * one string would be the more dangerous change. The name is kept because
+ * every caller, every channel and the #118 store already speak it.
  *
  * This function does not record a pending approval, does not consume one,
  * and does not decide approve/deny — see the module doc. Callers keep doing

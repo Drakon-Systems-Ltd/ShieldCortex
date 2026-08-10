@@ -327,9 +327,21 @@ async function loadNotify(rawNotifyConfig) {
         });
       }
     }
-    if (!channel && normalised.webhookUrl) {
-      channel = webhookMod.createWebhookNotifyChannel({ url: normalised.webhookUrl });
-    }
+    // The webhook, when configured. It serves two roles and is still built at
+    // most once: the primary channel where no card channel exists, and — for
+    // `denied_no_prompt_surface` — the ONLY channel, because the card channel
+    // is interactive-only and correctly refuses an event with no live decision
+    // behind it (see openclaw-approval-channel.ts). Still one channel per
+    // hold: `pingOperator` picks exactly one, never both.
+    const webhookChannel = normalised.webhookUrl
+      ? webhookMod.createWebhookNotifyChannel({
+          url: normalised.webhookUrl,
+          // Signs the body so the receiver can reject spoofed POSTs. Passed
+          // straight through and never logged — see notify-config.ts.
+          secret: normalised.webhookSecret,
+        })
+      : null;
+    if (!channel) channel = webhookChannel;
     // Neither channel buildable (absent/rejected webhookUrl, no openclaw
     // opt-in or no binary) means no configured channel exists yet. Degrading
     // to null here, rather than constructing a channel that would never
@@ -339,6 +351,11 @@ async function loadNotify(rawNotifyConfig) {
     return {
       config: normalised,
       requestOperatorApproval: notifyMod.requestOperatorApproval,
+      /** Where a denial goes when the primary channel cannot carry one. Null
+       *  means an openclaw-only install: the denial reaches no channel, which
+       *  is the honest outcome until a non-interactive gateway send path
+       *  exists to point it at. The terminal-hash floor is unchanged. */
+      denialChannel: webhookChannel,
       // `timeoutMs` is NOT a constructor option — the channel's `send()` is
       // handed the deadline per-call (see `pingOperator`, and
       // operator-notify.ts's `tryChannel`), so one channel object is timeout-
@@ -359,10 +376,30 @@ async function loadNotify(rawNotifyConfig) {
  * operator-notify.ts and webhook-notify-channel.ts, both of which enforce
  * their own deadlines independent of this caller), and its result is used
  * for nothing but a stderr breadcrumb — the hook's actual decision (the
- * 'ask' + hash fallback) is decided before and after this call identically.
+ * 'ask'/'deny' + hash fallback) is decided before and after this call
+ * identically.
+ *
+ * `noPromptSurface` is the ONLY thing that makes this call know which branch
+ * `emitApprovalRequired` is about to take. It is the same pure function
+ * evaluated on the same `permissionMode` a few lines later — recomputing a
+ * pure string is cheaper and far less fragile than restructuring the refusal
+ * path around the notification, and it means the notify layer cannot alter
+ * the verdict even by accident: the decision is still derived, independently,
+ * from the permission mode alone.
+ *
+ * When it is non-null the held call has ALREADY been refused by the time this
+ * message lands, so the operator is told a job died — not asked a question
+ * nothing is waiting on (#143).
  */
-async function pingOperator(notify, { toolName, toolInput, verdict, hash }) {
+async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionId, cwd }) {
   if (!notify) return;
+  const denied = typeof noPromptSurface === 'string' && noPromptSurface.length > 0;
+  // A denial cannot go to an interactive Approve/Deny card — there is nothing
+  // left to decide — so it takes the plain-message channel or no channel at
+  // all. `deliveredVia: null` is a normal outcome here, exactly as it is when
+  // nothing is configured.
+  const channel = denied ? notify.denialChannel : notify.channel;
+  if (!channel) return;
   try {
     const result = await notify.requestOperatorApproval(
       {
@@ -372,11 +409,21 @@ async function pingOperator(notify, { toolName, toolInput, verdict, hash }) {
         signals: verdict.signals,
         severity: verdict.severity,
         reason: verdict.reason,
+        event: denied ? 'denied_no_prompt_surface' : 'approval_requested',
+        deniedReason: denied ? noPromptSurface : undefined,
+        // Which job. Straight off the harness payload, bounded and validated
+        // by buildNotification in operator-notify.ts.
+        sessionId,
+        cwd,
       },
-      { channel: notify.channel, timeoutMs: notify.config.timeoutMs },
+      { channel, timeoutMs: notify.config.timeoutMs },
     );
     if (result?.deliveredVia) {
-      console.error(`[shieldcortex] approval broker: pinged the operator via ${result.deliveredVia} (${hash.slice(0, 12)}).`);
+      console.error(
+        denied
+          ? `[shieldcortex] operator-notify: reported the DENIAL of ${toolName} via ${result.deliveredVia} (${hash.slice(0, 12)}).`
+          : `[shieldcortex] approval broker: pinged the operator via ${result.deliveredVia} (${hash.slice(0, 12)}).`,
+      );
     }
   } catch (err) {
     // A notify transport that throws must not change the guard's outcome —
@@ -886,11 +933,28 @@ process.stdin.on('end', async () => {
       // here: a hold with nothing but a hash in a transcript nobody was
       // watching. If the operator configured a channel, ping it now — a
       // best-effort ADDITION to the unchanged refusal above, never a
-      // replacement for it (`emitDecision('ask', message)` below still fires
-      // identically whether or not this delivers, times out, or errors).
+      // replacement for it (`emitApprovalRequired` below still emits the
+      // identical decision whether or not this delivers, times out, or errors).
+      //
+      // The notification must say which of the two things actually happens
+      // next, so it is told the prompt-surface verdict up front: on a
+      // promptless box this is not "approve this?" but "this was BLOCKED and
+      // did not run". `emitApprovalRequired` re-derives the same value from
+      // the same permissionMode below and remains the sole owner of the
+      // decision — nothing here can change it.
       if (fullHash) {
         const notify = await loadNotify(cfg.notify);
-        await pingOperator(notify, { toolName, toolInput, verdict, hash: fullHash });
+        await pingOperator(notify, {
+          toolName,
+          toolInput,
+          verdict,
+          hash: fullHash,
+          noPromptSurface: noPromptSurfaceReason(permissionMode),
+          // Which job died. Absent on a harness that does not report them —
+          // rendered only when present, never as "undefined".
+          sessionId: typeof hookData.session_id === 'string' ? hookData.session_id : undefined,
+          cwd: typeof hookData.cwd === 'string' ? hookData.cwd : undefined,
+        });
       }
     }
     // #139: ask ONLY where a prompt can actually be raised. Under

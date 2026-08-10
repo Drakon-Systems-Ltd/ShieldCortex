@@ -69,6 +69,44 @@ describe('normaliseNotifyConfig — webhookUrl validation', () => {
   });
 });
 
+describe('normaliseNotifyConfig — webhookSecret (#143)', () => {
+  // Without a secret the webhook channel can only ever send UNAUTHENTICATED
+  // POSTs, and any receiver worth pointing it at — one that can page a human
+  // or re-run a killed job — has to reject unsigned requests. The channel has
+  // always been able to sign; until now nothing could give it the key.
+  it('accepts a plausible key and hands it through', () => {
+    expect(normaliseNotifyConfig({ enabled: true, webhookSecret: 's3cret-key' }).webhookSecret).toBe('s3cret-key');
+  });
+
+  it('is absent by default — signing is opt-in, exactly like everything else here', () => {
+    expect(normaliseNotifyConfig({ enabled: true }).webhookSecret).toBeUndefined();
+    expect(DEFAULT_NOTIFY_CONFIG.webhookSecret).toBeUndefined();
+  });
+
+  it('drops a non-string rather than signing over "[object Object]"', () => {
+    for (const junk of [12345, { secret: 'x' }, ['x'], true, null]) {
+      expect(normaliseNotifyConfig({ enabled: true, webhookSecret: junk }).webhookSecret).toBeUndefined();
+    }
+  });
+
+  it('drops an over-long value rather than truncating it into a key nothing shares', () => {
+    // A silently truncated key produces a signature the receiver can never
+    // reproduce — a 401 with no explanation. Absent is the honest state.
+    const huge = 'k'.repeat(5_000);
+    expect(normaliseNotifyConfig({ enabled: true, webhookSecret: huge }).webhookSecret).toBeUndefined();
+  });
+
+  it('treats empty or whitespace-only as absent, and trims the surrounding whitespace a config file collects', () => {
+    expect(normaliseNotifyConfig({ enabled: true, webhookSecret: '' }).webhookSecret).toBeUndefined();
+    expect(normaliseNotifyConfig({ enabled: true, webhookSecret: '   \n' }).webhookSecret).toBeUndefined();
+    expect(normaliseNotifyConfig({ enabled: true, webhookSecret: '  abc123\n' }).webhookSecret).toBe('abc123');
+  });
+
+  it('survives without a webhookUrl — a key configured before the URL is not silently thrown away', () => {
+    expect(normaliseNotifyConfig({ enabled: true, webhookSecret: 'abc' }).webhookSecret).toBe('abc');
+  });
+});
+
 describe('normaliseNotifyConfig — timeoutMs bounds', () => {
   it('defaults when absent, non-numeric, or out of range', () => {
     expect(normaliseNotifyConfig({ enabled: true }).timeoutMs).toBe(DEFAULT_NOTIFY_CONFIG.timeoutMs);
@@ -90,6 +128,7 @@ describe('normaliseNotifyConfig — total function', () => {
       { enabled: true, webhookUrl: { toString: () => { throw new Error('boom'); } } },
       { __proto__: { enabled: true } },
       { enabled: true, timeoutMs: { valueOf: () => 1 } },
+      { enabled: true, webhookSecret: { toString: () => { throw new Error('boom'); } } },
       JSON.parse('{"enabled":true,"webhookUrl":"https://x.com","extra":{"a":[1,2,{"b":3}]}}'),
     ];
     for (const h of hostiles) {

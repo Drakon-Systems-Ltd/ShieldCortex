@@ -36,8 +36,23 @@ export interface WebhookNotifyChannelOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** The event as a header/body value. Anything that is not exactly the denial
+ *  reads as `approval_requested` — a receiver routing on this header must
+ *  never see a value this module invented, and an older caller with no `event`
+ *  at all keeps getting the header it has always got. */
+function eventOf(n: OperatorNotification): string {
+  return n.event === 'denied_no_prompt_surface' ? 'denied_no_prompt_surface' : 'approval_requested';
+}
+
 function buildPayload(n: OperatorNotification): Record<string, unknown> {
-  return {
+  const event = eventOf(n);
+  const denied = event === 'denied_no_prompt_surface';
+  const payload: Record<string, unknown> = {
+    // First field on purpose: a receiver that renders these into a chat has to
+    // know whether it is drawing a question or an incident report BEFORE it
+    // draws anything, and drawing Approve/Deny buttons on a dead request is
+    // how an operator is trained to ignore the live ones.
+    event,
     hash: n.hash,
     shortHash: n.shortHash,
     tool: n.tool,
@@ -48,9 +63,18 @@ function buildPayload(n: OperatorNotification): Record<string, unknown> {
     judge: n.judge,
     text: formatOperatorNotification(n),
     approveCommand: `shieldcortex approve ${n.shortHash}`,
-    denyCommand: `shieldcortex deny ${n.shortHash}`,
     ts: new Date().toISOString(),
   };
+  // Present only where they mean something: `denyCommand` on a live hold (on a
+  // denial there is nothing left to deny), the denial context on a denial.
+  // `denied_no_prompt_surface` is a NEW event, so no existing receiver can be
+  // relying on the shape of its body — the `approval_requested` body is
+  // unchanged but for the added `event` key.
+  if (!denied) payload.denyCommand = `shieldcortex deny ${n.shortHash}`;
+  if (denied && n.deniedReason) payload.deniedReason = n.deniedReason;
+  if (n.sessionId) payload.sessionId = n.sessionId;
+  if (n.cwd) payload.cwd = n.cwd;
+  return payload;
 }
 
 /**
@@ -73,7 +97,10 @@ export function createWebhookNotifyChannel(opts: WebhookNotifyChannelOptions): N
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
-        'X-ShieldCortex-Event': 'approval_requested',
+        // Derived, not hardcoded: a receiver that filters or routes on this
+        // header (page me for a denial, queue an approval) is the whole point
+        // of having a header at all.
+        'X-ShieldCortex-Event': eventOf(notification),
       };
       if (opts.secret) {
         headers['X-ShieldCortex-Signature'] = createHmac('sha256', opts.secret).update(body).digest('hex');

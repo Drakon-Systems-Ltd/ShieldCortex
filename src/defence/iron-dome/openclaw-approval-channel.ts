@@ -175,6 +175,24 @@ export function createOpenClawApprovalChannel(opts: OpenClawApprovalChannelOptio
   return {
     name: 'openclaw-approval',
     async send(notification, { timeoutMs }) {
+      // This channel has exactly ONE send path — `plugin.approval.request`,
+      // an interactive Approve/Deny card — and a `denied_no_prompt_surface`
+      // notification has no live decision behind it: the guard already refused
+      // the call and handed the agent a denial. A card whose buttons change
+      // nothing is worse than no card, because it teaches the operator that
+      // these taps are optional. So this event is refused here, cheaply and
+      // before spawning anything, and the caller falls through to a channel
+      // that can carry a plain message (the webhook — see `loadNotify` in
+      // scripts/pre-tool-hook.mjs). Sending it as a non-interactive gateway
+      // message instead would need a gateway route this codebase has not
+      // verified exists, plus channel/target config NotifyConfig does not
+      // have; inventing either would be a worse trade than falling back.
+      if (notification.event === 'denied_no_prompt_surface') {
+        return {
+          delivered: false,
+          reason: 'openclaw approval cards are interactive-only — a denial has no decision left to offer',
+        };
+      }
       const params = buildCardRequestParams(notification);
       const receiptDir = opts.receiptDir ?? join(tmpdir(), 'shieldcortex-approval-receipts');
       const receiptPath = join(receiptDir, `${randomUUID()}.json`);
