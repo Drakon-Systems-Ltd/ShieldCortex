@@ -17,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
+import { classifyConversationOrigin } from './conversation-trust.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
 import type { InterceptorConfig, BrokerRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
@@ -172,6 +173,12 @@ async function getDefenceModule(): Promise<DefenceModule | null> {
 }
 
 // Test seams (jest only): inject a stub defence module / spy runtime, then reset.
+/** Test seam for the conversation-taint store — lets a test assert that a
+ *  detection actually reached the store (or, for owner input, did not). */
+export function __getSessionTaintForTest(): typeof sessionTaint {
+  return sessionTaint;
+}
+
 export function __setDefenceModuleForTest(mod: DefenceModule | null | undefined): void {
   _defenceModOverride = mod;
   _defenceModPromise = null;
@@ -192,6 +199,9 @@ export function __resetConfigStateForTest(): void {
 type LlmInputEvent = {
   runId: string; sessionId: string; provider: string; model: string;
   systemPrompt?: string; prompt: string; historyMessages: unknown[]; imagesCount: number;
+  /** Host-supplied: this turn came from the gateway's owner. Absent on hosts
+   *  that do not report it — treated as NOT the owner, never as trusted. */
+  senderIsOwner?: boolean;
 };
 type LlmOutputEvent = {
   runId: string; sessionId: string; provider: string; model: string;
@@ -1043,18 +1053,46 @@ function isInternalContent(text: string): boolean {
 export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promise<void> {
   try {
     // Only scan user content, skip system/boot/heartbeat prompts
+    // Trust is resolved per TURN, not per message: the host tells us who sent
+    // this turn, but history messages carry no individual attribution, so there
+    // is no honest way to score them separately.
+    //
+    // Resolved LAZILY, on first detection only. Computing it up front would put
+    // a config read on every single turn to answer a question that only matters
+    // when something is actually found.
+    let trustMemo: ReturnType<typeof classifyConversationOrigin> | null = null;
+    const resolveTrust = async () => {
+      if (!trustMemo) {
+        trustMemo = classifyConversationOrigin({
+          senderIsOwner: event.senderIsOwner,
+          trustOwnerInput: (await loadConfig() as { conversationTrust?: { trustOwnerInput?: boolean } })
+            ?.conversationTrust?.trustOwnerInput,
+        });
+      }
+      return trustMemo;
+    };
     const userTexts = extractUserContent(event.historyMessages).slice(-5);
     const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t));
     for (const text of texts) {
       if (!text || text.length < 10) continue;
       const result = await scanRealtimeContent(text);
       if (!result.clean) {
-        console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary}`);
+        const trust = await resolveTrust();
+        console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary} [${trust.origin}]`);
         // #233: THE sink that has teeth. Logging a detection changed nothing —
         // the tool call this injection is steering, one turn later, was
         // evaluated as if it had never been seen. Tainting the session makes
         // the Action Guard tighten by one notch for a bounded window.
-        sessionTaint.mark(event.sessionId, { reason: `conversation scan: ${result.summary}` });
+        //
+        // Source trust gates the CONSEQUENCE, never the detection: the warn and
+        // the audit row above happen whoever sent this. What trust decides is
+        // whether it may tighten the guard. The operator typing "delete the old
+        // logs" is an instruction, and treating it as an attack is the false
+        // alarm that gets a control switched off. Everything the agent was
+        // handed — including another agent on a closed channel — is data.
+        if (trust.mayTaint) {
+          sessionTaint.mark(event.sessionId, { reason: `conversation scan: ${result.summary}` });
+        }
         const entry = {
           type: "threat", hook: "llm_input", sessionId: event.sessionId,
           model: event.model, reason: result.summary,
