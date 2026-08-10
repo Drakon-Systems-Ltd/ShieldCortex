@@ -19,7 +19,12 @@ import {
   findEoverrideRiskPins,
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
-import { gatherReconcileInput, reconcilePluginState, type ReconcileVerdict } from '../integrations/openclaw-plugin-index.js';
+import { gatherReconcileInput, reconcilePluginState, REALTIME_PLUGIN_ID, type ReconcileVerdict } from '../integrations/openclaw-plugin-index.js';
+import {
+  readConversationAccess,
+  describeConversationAccess,
+  conversationAccessFix,
+} from '../integrations/openclaw-conversation-access.js';
 import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
@@ -2633,6 +2638,49 @@ export async function checkOpenClawPluginVersion(
  * reads OpenClaw's own loaded roster, so a silent drop cannot hide. `home` /
  * `expectedVersion` are injectable for tests.
  */
+/**
+ * #225 phase 1: report whether conversation scanning is actually happening.
+ *
+ * OpenClaw drops the conversation hooks (`llm_input`/`llm_output`) at
+ * registration unless a non-bundled plugin is granted
+ * `plugins.entries.<id>.hooks.allowConversationAccess = true`. On this fleet
+ * the gateway logged that drop six times in one day while ShieldCortex's own
+ * startup line announced both hooks as registered — protection claimed, not
+ * held.
+ *
+ * Two honest outcomes, and neither is a green tick for "protected":
+ *  - ungranted → WARN. Nothing is being scanned. Not a `fail`: withholding
+ *    conversation access is a legitimate operator choice on a sensitive
+ *    surface, and crying damage over a deliberate decision is how a check
+ *    earns the right to be ignored.
+ *  - granted → INFO, explicitly OBSERVATION ONLY. `llm_input` has no blocking
+ *    contract, so a pass tick here would be a fresh false green.
+ */
+export async function checkOpenClawConversationScanning(
+  home: string = os.homedir(),
+): Promise<CheckResult> {
+  const label = 'Conversation scanning';
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  const state = readConversationAccess(home, REALTIME_PLUGIN_ID);
+  const message = describeConversationAccess(state, REALTIME_PLUGIN_ID);
+
+  if (!state.readable) {
+    return {
+      label,
+      status: 'warn',
+      message,
+      fix: 'Check that ~/.openclaw/openclaw.json exists and is valid JSON, then re-run `shieldcortex doctor`.',
+    };
+  }
+  if (!state.granted) {
+    return { label, status: 'warn', message, fix: conversationAccessFix(REALTIME_PLUGIN_ID) };
+  }
+  return { label, status: 'info', message };
+}
+
 export async function checkOpenClawPluginLoadState(
   home: string = os.homedir(),
   expectedVersion: string = pkg.version,
@@ -3304,6 +3352,7 @@ export async function runDoctor(
     checkOpenClawPluginVersion,
     checkOpenClawSkillVersion,
     checkOpenClawPluginLoadState,
+    checkOpenClawConversationScanning,
     checkOpenClawRunningPluginVersion,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
