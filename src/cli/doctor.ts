@@ -19,7 +19,7 @@ import {
   findEoverrideRiskPins,
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
-import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
+import { gatherReconcileInput, reconcilePluginState, type ReconcileVerdict } from '../integrations/openclaw-plugin-index.js';
 import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
@@ -2642,7 +2642,20 @@ export async function checkOpenClawPluginLoadState(
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
+  return renderPluginLoadVerdict(reconcilePluginState(gatherReconcileInput(home, { expectedVersion })));
+}
+
+/**
+ * Verdict → operator-facing check result. Split out of
+ * `checkOpenClawPluginLoadState` so every state can be asserted directly
+ * (#222): the bug there was not the classification but the RENDERING — a
+ * `default:` arm that returned `pass`, so any state this function did not
+ * explicitly recognise (including a newly added unprotected one) green-ticked.
+ * There is no catch-all pass here now; `healthy` is spelled out, and anything
+ * unrecognised warns.
+ */
+export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult {
+  const label = 'OpenClaw plugin loaded';
   const fix = 'Run `shieldcortex repair` to reconcile the plugin install metadata and verify it actually loads.';
 
   switch (verdict.state) {
@@ -2704,7 +2717,43 @@ export async function checkOpenClawPluginLoadState(
         message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it`,
         fix,
       };
-    default:
+    case 'installed-not-enabled':
+      // #222: the #214 installer wipe. The package is on disk and correct; the
+      // openclaw.json registration is gone, so the gateway will not load it.
+      // 'warn' only in the narrow case where the RUNNING gateway still has it
+      // from a pre-wipe boot — protected now, unprotected at the next restart.
+      return verdict.severity === 'warn'
+        ? {
+            label,
+            status: 'warn',
+            message:
+              'realtime plugin is loaded in the RUNNING gateway but is NO LONGER REGISTERED in openclaw.json — protection ends at the next gateway restart',
+            fix: 'Run `shieldcortex repair` to restore the plugin registration before the next restart.',
+          }
+        : {
+            label,
+            status: 'fail',
+            message:
+              'realtime plugin is installed on disk but NOT REGISTERED in openclaw.json (no entry, absent from plugins.allow) — the host is UNPROTECTED: no memory firewall, no action guard',
+            fix: 'Run `shieldcortex repair` to restore the plugin registration. The package itself is fine — it does not need reinstalling.',
+          };
+    case 'disabled-by-operator':
+      // Deliberate opt-out. Reporting damage here would train operators to
+      // ignore the check that catches a real wipe.
+      return {
+        label,
+        status: 'info',
+        message: 'realtime plugin is explicitly disabled in openclaw.json (enabled:false) — not loaded, by choice',
+      };
+    case 'config-unreadable':
+      return {
+        label,
+        status: 'warn',
+        message:
+          'cannot read ~/.openclaw/openclaw.json — cannot tell whether the realtime plugin is still registered; NOT necessarily unprotected',
+        fix: 'Check that ~/.openclaw/openclaw.json exists and is valid JSON, then re-run `shieldcortex doctor`.',
+      };
+    case 'healthy':
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
       // canary (that needs gateway consent) — so it must not claim "enforcing"
       // from roster presence alone (#74 attempt #3 was roster-present-but-not-
@@ -2713,6 +2762,15 @@ export async function checkOpenClawPluginLoadState(
         label,
         status: 'pass',
         message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+      };
+    default:
+      // NOT a pass. A state this renderer does not recognise is an unknown, and
+      // #222 is precisely what happens when an unknown renders as health.
+      return {
+        label,
+        status: 'warn',
+        message: `unrecognised plugin state '${String(verdict.state)}' — cannot confirm the realtime plugin is loaded`,
+        fix,
       };
   }
 }

@@ -224,6 +224,29 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       stepResults.push({ kind: step.kind, ok: r.restarted, detail });
       continue;
     }
+    // #222: restore a wiped openclaw.json registration. Imported lazily — a
+    // static import would drag setup/openclaw.ts in at module load, which is
+    // exactly why this orchestrator lives in its own file (see header), and
+    // openclaw.ts already imports THIS module dynamically in the other
+    // direction.
+    if (step.kind === 'restore-registration') {
+      let ok = false;
+      let detail = '';
+      try {
+        const { trustLocalPlugin } = await import('./openclaw.js');
+        // installDir/version are accepted but no longer persisted; the write is
+        // merge-preserving and idempotent, so a partially-wiped stanza is safe.
+        ok = trustLocalPlugin('', options.expectedVersion, home);
+        detail = ok
+          ? 'registration restored in openclaw.json (entry + plugins.allow)'
+          : 'could not restore the registration — openclaw.json may be read-only or malformed';
+      } catch (err) {
+        detail = `restore failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      stepResults.push({ kind: step.kind, ok, detail });
+      if (!ok) messages.push(`SECURITY: ${detail} — the host stays UNPROTECTED until the plugin is registered again`);
+      continue;
+    }
     if (step.kind === 'prune-duplicate-dirs') {
       let ok = true;
       for (const d of step.dirs ?? []) {
