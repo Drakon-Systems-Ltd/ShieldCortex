@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.36] - 2026-08-10
+
+**A denial now reaches the operator *as* a denial.**
+
+Field origin: scheduled work was dying silently, and the one notification that did fire made it harder to diagnose rather than easier. On a box with no prompt surface, the operator received a card worded *"approval needed"* for a call the guard had already refused — no session, no cwd, and no statement that a job had just died. Answering it did nothing, because there was nothing left to answer. Six scheduled jobs were killed in ~30 hours on one box (2 Aug), discovered only by reading `~/.shieldcortex/audit/realtime-*.jsonl` by hand; `scripts/email_pickup.py` was denied 15 consecutive times, every 30 minutes — roughly 7 hours of email triage silently dead while the job's own status reported nothing wrong. Eight more were reproduced independently on an *enforcing* 4.47.35 box with `notify.openclaw` *enabled*, so this was neither warn mode, missing config, nor a stale version.
+
+### Fixed
+
+- **A denial and a request are now different events (#143, #223).** `scripts/pre-tool-hook.mjs` pinged the operator *before* the code that chooses between `ask` and `deny`, so the notification could not know which had happened and always said "approval needed". Notifications now carry a discriminator, `OperatorNotificationEvent = 'approval_requested' | 'denied_no_prompt_surface'`. A denial renders as `🛡️ ShieldCortex — BLOCKED: this action did NOT run`, carries `Blocked:` / `Session:` / `Cwd:`, and offers the retry-authorising `shieldcortex approve <hash>` only — no Approve/Deny pair on a request that is already dead, and no `denyCommand`.
+- **Both channels carry the distinction.** Native OpenClaw approval cards and the webhook channel (`X-ShieldCortex-Event` header, `event` as the first body key), so a receiver can branch on outcome without parsing prose.
+- **Back-compatible by construction.** `event` defaults to `'approval_requested'` and every pre-existing caller produces a byte-identical notification; an unknown or missing event renders as the approval wording. A stale `dist` degrading to today's text is safe — degrading to a false "this was blocked" is not.
+
+### Added
+
+- **A webhook secret field**, so a fallback receiver can reject unsigned posts.
+
+### Pinned by test
+
+A broken notifier can never become a broken guard: a receiver returning 500, one that never responds (cut off at the deadline), and a refused connection each change the guard's decision by nothing.
+
+### Known gap, named rather than implied
+
+This closes the *notification* half of the unattended lane. It does **not** deliver durable pending approvals or action resumption — a denial still kills the job; the operator now learns that it happened and can authorise the retry. That remainder, and the broker itself, stay open on #143. Note also that per #183 the approval hash covers the whole tool-input blob, so a quoted hash is not always spendable by the operator who receives it.
+
+## [4.47.35] - 2026-08-09
+
+**Republish only: the 4.47.34 npm artifacts did not contain 4.47.34's features.**
+
+The 4.47.34 publish ran on a box with `ignore-scripts=true`, so `prepublishOnly` (version sync-check, build, `test:dist`) never fired and npm packed a `dist/` from before the #220 merge — a package claiming the reviewed-script allowlist and native approval cards while containing neither. Source was identical at both tags; this cut exists so the registry artifact matches its label. **4.47.34 is deprecated on npm for both packages** — install 4.47.35 or later. No source change from 4.47.34.
+
+## [4.47.34] - 2026-08-09
+
+**Standing trust for human-reviewed scripts, one-tap approvals on the operator's own channel, and the last two folded-source false positives retired.**
+
+### Added
+
+- **Reviewed-script allowlist (#189).** `shieldcortex allowlist add <path> [--note]` pins a human-reviewed script by canonical path *and* content sha256, and the guard stops folding that file's source into the scan surface. Any edit changes the hash and silently re-gates — the re-gate is the feature. `remove`, `list` and `verify` (exit 1 on drift) are included. TTY-gated on add/remove exactly like `approve`/`deny`, on #118's threat model: an agent must not be able to pin its own payload. Review never relieves the invoking command line (catastrophic tier included), inline `-c`/heredoc code, a moved or copied file (realpath both sides), or an edited one. The check runs hash-then-skip on the same resolved read, so there is no TOCTOU window between verifying and folding. Wired on both enforcement surfaces and held together by a parity drift test; exemptions are recorded on the verdict (`reviewedScripts`) and persisted by both audit writers, so an allow that leaned on review is tellable apart from an allow that scanned everything.
+- **Native approval cards on the operator's channel (#143, partial).** `actionGuard.notify: { enabled: true, openclaw: true }` delivers holds as OpenClaw plugin approvals — Approve/Deny buttons wherever the operator's gateway already reaches. The webhook channel remains the fallback and the default stays OFF. The gateway scopes a pending approval to the requesting connection, so a detached waiter owns the card end-to-end and maps only the two offered decisions onto the #118 store: timeout, junk, `allow-always` (never offered) and gateway errors all leave the store untouched. Silence is not a no.
+
+### Fixed
+
+- **An approval is spendable by the command it was granted for (#201).** An operator would approve a hash for a denied command, the agent would re-issue the *identical* command, and it would be denied again under a fresh hash — because the model re-words the advisory `description` (and often `timeout`) on each attempt, and both were hashed. `hashToolCall` now projects `description` and `timeout` out of the input for exec-family tools before hashing. Deliberately still moving the hash: `command` itself, `dangerouslyDisableSandbox`, `run_in_background` — confinement and supervision changes must never ride an existing approval — and the full input of every non-exec tool, where a `description` is payload rather than annotation.
+- **An installed CLI's shim is not the operator's command (#199).** `sleep 30 && /opt/homebrew/bin/openclaw gateway restart` was denied as `install-package-global`, because the guard folded the Homebrew shim's body and scanned the launcher plumbing as live shell — a class covering essentially every Homebrew- or npm-installed CLI. Spelling the full path to an installed executable must not be scarier than typing its bare name; the bare name never folds, so relieving the spelt path adds no exposure. Relief is narrow: extensionless files, in recognised install roots, in command position only. Files with extensions, project-local `./bin/` directories and interpreter-invoked files still fold, fail-closed.
+- **Audit rows keep the matched span (#192).** `ToolGuardVerdict.matches` carries `{signal, span}` for every verdict a pattern produced, and both audit writers persist it, so a folded-source denial is diagnosable from the durable row instead of needing a re-run on the reporter's box. Two boundaries hold: `secret-egress` never contributes a span (the span would be the secret), and spans stay bounded at 80 characters.
+
 ## [4.47.33] - 2026-08-08
 
 **The 4.47.32 installer could silently unregister the very plugin it was installing.**
