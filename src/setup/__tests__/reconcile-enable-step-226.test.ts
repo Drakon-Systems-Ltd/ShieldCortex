@@ -66,7 +66,7 @@ function harness(over: { enableOk?: boolean } = {}) {
             : input;
           return { input: i, verdict: reconcilePluginState(i) };
         },
-        enablePluginConfig: (home, pluginId) => {
+        restoreRegistration: (home, pluginId) => {
           enableCalls.push({ home, pluginId });
           const ok = over.enableOk !== false;
           if (ok) enabled = true;
@@ -90,13 +90,13 @@ function harness(over: { enableOk?: boolean } = {}) {
   };
 }
 
-describe('#226 reconcile executor — enable-plugin-config', () => {
+describe('#226 reconcile executor — restore-registration', () => {
   it('writes the config instead of shelling out to the installer', async () => {
     const h = harness();
     const result = await h.run();
 
     expect(result.plan.map((s) => s.kind)).toEqual([
-      'enable-plugin-config',
+      'restore-registration',
       'gateway-reload',
       'self-check',
     ]);
@@ -109,7 +109,7 @@ describe('#226 reconcile executor — enable-plugin-config', () => {
     const result = await harness().run();
     expect(result.ok).toBe(true);
     expect(result.postVerdict?.state).toBe('healthy');
-    expect(result.stepResults.find((s) => s.kind === 'enable-plugin-config')?.ok).toBe(true);
+    expect(result.stepResults.find((s) => s.kind === 'restore-registration')?.ok).toBe(true);
   });
 
   it('a failed enable is a FAILED reconcile — never masked by a clean command list', async () => {
@@ -118,8 +118,8 @@ describe('#226 reconcile executor — enable-plugin-config', () => {
     // empty command list, and `[].every(...)` is true.
     const result = await harness({ enableOk: false }).run();
     expect(result.ok).toBe(false);
-    expect(result.stepResults.find((s) => s.kind === 'enable-plugin-config')?.ok).toBe(false);
-    expect(result.messages.join(' ')).toMatch(/could not enable the plugin in openclaw\.json/i);
+    expect(result.stepResults.find((s) => s.kind === 'restore-registration')?.ok).toBe(false);
+    expect(result.messages.join(' ')).toMatch(/could not restore the plugin registration in openclaw\.json/i);
     expect(result.postVerdict?.state).toBe('installed-not-enabled');
   });
 });

@@ -81,13 +81,13 @@ export interface ReconcileOptions {
   /** Injectable duplicate-dir pruner (defaults to rm -rf of the project dir). */
   pruneDir?: (home: string, dirName: string) => void;
   /**
-   * Injectable config-enable writer for the `enable-plugin-config` step.
+   * Injectable registration writer for the `restore-registration` step.
    * Defaults to `verifyPluginRegistration`, which merge-preserves every other
    * key in openclaw.json and re-reads to prove the write landed. Imported
    * lazily for the same reason `reloadGateway` is: setup/openclaw.ts trips
    * Jest's ESM loader if this module imports it eagerly.
    */
-  enablePluginConfig?: (home: string, pluginId: string) => { ok: boolean; detail: string };
+  restoreRegistration?: (home: string, pluginId: string) => { ok: boolean; detail: string };
   /**
    * Injectable readiness wait (#156). Defaults to polling OpenClaw's own
    * boot-lifecycle table for a process that started AFTER the restart. Tests
@@ -141,15 +141,17 @@ function defaultPruneDir(home: string, dirName: string): void {
 }
 
 /**
- * Turn the EXISTING install back on in openclaw.json (#222/#12 remediation).
+ * Restore the registration for the EXISTING install in openclaw.json
+ * (#222/#228 remediation).
  *
  * Deliberately not an install: the package is already on disk and correct, and
  * the state we are fixing is a config one. `verifyPluginRegistration` is reused
  * rather than reimplemented because it already merge-preserves every other
  * plugin's stanza (#112 regression) and re-reads the file afterwards, so a
- * write that silently did not land cannot be reported as a success.
+ * write that silently did not land cannot be reported as a success — which is
+ * why it is preferred here over a bare `trustLocalPlugin` write.
  */
-async function defaultEnablePluginConfig(home: string): Promise<{ ok: boolean; detail: string }> {
+async function defaultRestoreRegistration(home: string): Promise<{ ok: boolean; detail: string }> {
   const { verifyPluginRegistration, resolveConversationAccessConsent } = await import('./openclaw.js');
   // #226: repair closes the conversation-access gate too — but only when the
   // operator has asked for it on this run, exactly as the installer does.
@@ -251,17 +253,26 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       stepResults.push({ kind: step.kind, ok: r.restarted, detail });
       continue;
     }
-    if (step.kind === 'enable-plugin-config') {
+    // #222/#226: restore a wiped openclaw.json registration. The writer is
+    // imported lazily — a static import would drag setup/openclaw.ts in at
+    // module load, which is exactly why this orchestrator lives in its own file
+    // (see header), and openclaw.ts already imports THIS module dynamically in
+    // the other direction.
+    if (step.kind === 'restore-registration') {
       let r: { ok: boolean; detail: string };
       try {
-        r = options.enablePluginConfig
-          ? options.enablePluginConfig(home, pluginId)
-          : await defaultEnablePluginConfig(home);
+        r = options.restoreRegistration
+          ? options.restoreRegistration(home, pluginId)
+          : await defaultRestoreRegistration(home);
       } catch (err) {
-        r = { ok: false, detail: `enable failed: ${err instanceof Error ? err.message : String(err)}` };
+        r = { ok: false, detail: `restore failed: ${err instanceof Error ? err.message : String(err)}` };
       }
       stepResults.push({ kind: step.kind, ok: r.ok, detail: r.detail });
-      if (!r.ok) messages.push(`could not enable the plugin in openclaw.json: ${r.detail}`);
+      if (!r.ok) {
+        messages.push(
+          `SECURITY: could not restore the plugin registration in openclaw.json: ${r.detail} — the host stays UNPROTECTED until the plugin is registered again`,
+        );
+      }
       continue;
     }
     if (step.kind === 'prune-duplicate-dirs') {
@@ -292,11 +303,11 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
 
   // Honest-state contract: overall success ONLY if the self-check ran AND passed.
   const selfCheckOk = Boolean(selfCheckResult?.ok);
-  // `enable-plugin-config` counts as a remediation command: it is the whole
+  // `restore-registration` counts as a remediation command: it is the whole
   // remediation for the #222 state, and a plan whose only action failed must
   // never come back ok just because it shells out to nothing.
   const commandsOk = stepResults
-    .filter((s) => s.kind.startsWith('openclaw') || s.kind === 'enable-plugin-config')
+    .filter((s) => s.kind.startsWith('openclaw') || s.kind === 'restore-registration')
     .every((s) => s.ok);
   const ok = selfCheckOk && commandsOk;
   if (!ok) {

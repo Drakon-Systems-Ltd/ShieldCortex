@@ -22,8 +22,19 @@ import {
 import {
   gatherReconcileInput,
   reconcilePluginState,
-  readConversationAccessGate,
+  REALTIME_PLUGIN_ID,
+  type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
+import {
+  readConversationAccess,
+  describeConversationAccess,
+  conversationAccessFix,
+} from '../integrations/openclaw-conversation-access.js';
+import {
+  readOpenClawHostVersion,
+  evaluateEnforcementSupport,
+  describeEnforcementSupport,
+} from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
@@ -34,7 +45,6 @@ import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
-import { CONVERSATION_ACCESS_REMEDY } from '../setup/openclaw.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -2638,6 +2648,65 @@ export async function checkOpenClawPluginVersion(
  * reads OpenClaw's own loaded roster, so a silent drop cannot hide. `home` /
  * `expectedVersion` are injectable for tests.
  */
+/**
+ * #225 phase 1: report whether conversation scanning is actually happening.
+ *
+ * OpenClaw drops the conversation hooks (`llm_input`/`llm_output`) at
+ * registration unless a non-bundled plugin is granted
+ * `plugins.entries.<id>.hooks.allowConversationAccess = true`. On this fleet
+ * the gateway logged that drop six times in one day while ShieldCortex's own
+ * startup line announced both hooks as registered — protection claimed, not
+ * held.
+ *
+ * Two honest outcomes, and neither is a green tick for "protected":
+ *  - ungranted → WARN. Nothing is being scanned. Not a `fail`: withholding
+ *    conversation access is a legitimate operator choice on a sensitive
+ *    surface, and crying damage over a deliberate decision is how a check
+ *    earns the right to be ignored.
+ *  - granted → INFO, explicitly OBSERVATION ONLY. `llm_input` has no blocking
+ *    contract, so a pass tick here would be a fresh false green.
+ */
+export async function checkOpenClawConversationScanning(
+  home: string = os.homedir(),
+): Promise<CheckResult> {
+  const label = 'Conversation scanning';
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  const state = readConversationAccess(home, REALTIME_PLUGIN_ID);
+  // #225 phase 2: the grant and the host's CAPABILITY are independent facts,
+  // and an operator needs both. Granting access on a host whose OpenClaw
+  // predates before_agent_run buys observation and nothing more — saying so up
+  // front is cheaper than discovering it after enabling enforcement.
+  const capability = evaluateEnforcementSupport(readOpenClawHostVersion(home));
+  const message = `${describeConversationAccess(state, REALTIME_PLUGIN_ID)}; ${describeEnforcementSupport(capability)}`;
+
+  if (!state.readable) {
+    return {
+      label,
+      status: 'warn',
+      message,
+      fix: 'Check that ~/.openclaw/openclaw.json exists and is valid JSON, then re-run `shieldcortex doctor`.',
+    };
+  }
+  if (!state.granted) {
+    return { label, status: 'warn', message, fix: conversationAccessFix(REALTIME_PLUGIN_ID) };
+  }
+  if (capability.support === 'unsupported') {
+    // Granted but incapable: scanning happens, enforcement never can. That is a
+    // real ceiling on this host, not a misconfiguration — warn, and name the
+    // version that lifts it.
+    return {
+      label,
+      status: 'warn',
+      message,
+      fix: `Upgrade OpenClaw to ${capability.minVersion} or later if you want conversation enforcement to become possible. Scanning and auditing work as-is.`,
+    };
+  }
+  return { label, status: 'info', message };
+}
+
 export async function checkOpenClawPluginLoadState(
   home: string = os.homedir(),
   expectedVersion: string = pkg.version,
@@ -2647,7 +2716,44 @@ export async function checkOpenClawPluginLoadState(
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
+  const result = renderPluginLoadVerdict(
+    reconcilePluginState(gatherReconcileInput(home, { expectedVersion })),
+  );
+
+  // #226: "loaded" is not "protecting the conversation". A loaded plugin whose
+  // conversation-access grant is missing has had its llm_input/llm_output
+  // registrations refused by the host: it gates tool calls and scans no
+  // conversation content at all. A green tick that says "loaded" and stops
+  // there is read as "protected", so the pass is downgraded — a WARN, matching
+  // the severity `checkOpenClawConversationScanning` uses for the same fact
+  // (#225/#230): withholding the grant is a legitimate operator choice, not
+  // damage. Only the pass is touched; every failing/warning state above owns
+  // its own message and must not have this stacked on top of it.
+  if (result.status === 'pass') {
+    const access = readConversationAccess(home, REALTIME_PLUGIN_ID);
+    if (access.readable && !access.granted) {
+      return {
+        ...result,
+        status: 'warn',
+        message: `${result.message}. NOTE: conversation-hook access is NOT granted, so the gateway refuses this plugin's llm_input/llm_output hooks — tool-call gating is live, conversation scanning is NOT`,
+        fix: conversationAccessFix(REALTIME_PLUGIN_ID),
+      };
+    }
+  }
+  return result;
+}
+
+/**
+ * Verdict → operator-facing check result. Split out of
+ * `checkOpenClawPluginLoadState` so every state can be asserted directly
+ * (#222): the bug there was not the classification but the RENDERING — a
+ * `default:` arm that returned `pass`, so any state this function did not
+ * explicitly recognise (including a newly added unprotected one) green-ticked.
+ * There is no catch-all pass here now; `healthy` is spelled out, and anything
+ * unrecognised warns.
+ */
+export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult {
+  const label = 'OpenClaw plugin loaded';
   const fix = 'Run `shieldcortex repair` to reconcile the plugin install metadata and verify it actually loads.';
 
   switch (verdict.state) {
@@ -2680,22 +2786,23 @@ export async function checkOpenClawPluginLoadState(
         fix: 'Check the file: `node -e "JSON.parse(require(\'fs\').readFileSync(process.env.HOME+\'/.openclaw/openclaw.json\',\'utf8\'))"` — fix the JSON (or the permissions), then re-run doctor.',
       };
     case 'installed-not-enabled':
-      // #222: the package is on disk and nothing in config enables it. The old
-      // switch had no case for this state at all, so it fell to `default:` and
-      // printed the green "realtime plugin loaded (roster-confirmed)" tick —
-      // the unprotected state silencing the alarm built to catch it.
+      // #222/#228: the #214 installer wipe. The package is on disk and correct;
+      // the openclaw.json registration is gone. The old switch had no case for
+      // this state at all, so it fell to `default:` and printed the green
+      // "realtime plugin loaded (roster-confirmed)" tick — the unprotected
+      // state silencing the alarm built to catch it.
       return {
         label,
         status: 'fail',
         message:
-          'realtime plugin is installed on disk but NOT enabled in openclaw.json — the gateway will boot WITHOUT the interceptor: no memory firewall, no action guard' +
+          'realtime plugin is installed on disk but NOT REGISTERED in openclaw.json (no entry, absent from plugins.allow) — the host is UNPROTECTED: the gateway will boot WITHOUT the interceptor, no memory firewall, no action guard' +
           (verdict.loadedInLiveRoster === true
             ? '. The RUNNING gateway still has it loaded from the pre-wipe config, so protection ends at the next restart'
             : ''),
         // Not `repair`'s reinstall: the package is already here and correct.
-        fix: 'Re-enable the EXISTING install: `shieldcortex repair` (writes plugins.allow + plugins.entries["shieldcortex-realtime"].enabled = true and reloads the gateway). Nothing is reinstalled.',
+        fix: 'Restore the registration for the EXISTING install: `shieldcortex repair` (writes plugins.allow + plugins.entries["shieldcortex-realtime"].enabled = true and reloads the gateway). Nothing is reinstalled.',
       };
-    case 'intentionally-disabled':
+    case 'disabled-by-operator':
       // #12: an explicit `enabled: false` is an operator decision, not an
       // incident. Reporting a human's own deliberate choice back to them as a
       // red FAIL is how the check that catches the real wipe gets ignored. A
@@ -2786,29 +2893,22 @@ export async function checkOpenClawPluginLoadState(
     // hazard rebuilt: the next state added to PluginLoadState would inherit
     // "healthy" silently. Only `healthy` may render a pass here; anything
     // unrecognised lands in the arm below and warns.
-    case 'healthy': {
+    case 'healthy':
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
       // canary (that needs gateway consent) — so it must not claim "enforcing"
       // from roster presence alone (#74 attempt #3 was roster-present-but-not-
       // enforcing). Say "loaded (roster-confirmed)"; point at repair's canary. (#74 finding 6)
       //
-      // #226 adds a second thing "loaded" does not mean. A loaded plugin whose
-      // conversation-access grant is missing has had its llm_input/llm_output
-      // registrations refused by the host: it is loaded, it gates tool calls,
-      // and it scans no conversation content. A green tick that says "loaded"
-      // and stops there is read as "protected".
-      const gate = readConversationAccessGate(home);
-      const loaded = `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`;
-      if (gate.granted === false) {
-        return {
-          label,
-          status: 'warn',
-          message: `${loaded}. NOTE: conversation-hook access is NOT granted, so the gateway refuses this plugin's llm_input/llm_output hooks — tool-call gating is live, conversation scanning is NOT`,
-          fix: `Grant it deliberately: ${CONVERSATION_ACCESS_REMEDY}`,
-        };
-      }
-      return { label, status: 'pass', message: loaded };
-    }
+      // "Loaded" does not mean "scanning conversations" either — that gap is
+      // owned by `checkOpenClawPluginLoadState`, which downgrades this tick when
+      // the conversation-access grant is missing (#226), and reported in full by
+      // `checkOpenClawConversationScanning` (#225/#230). This renderer is pure:
+      // it reads the verdict and nothing off disk.
+      return {
+        label,
+        status: 'pass',
+        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+      };
     default: {
       // A state the reconciler produced and this renderer does not know. It is
       // reachable only by adding a PluginLoadState without a case here — which
@@ -2824,120 +2924,6 @@ export async function checkOpenClawPluginLoadState(
       };
     }
   }
-}
-
-/**
- * #226 — the conversation-hook access gate.
- *
- * Read out of the host's own loader (`dist/loader-*.js` → `registerTypedHook`),
- * identical in every OpenClaw build inspected:
- *
- *   if (isConversationHookName(hookName)) {
- *     if (record.origin !== "bundled" && policy?.allowConversationAccess !== true) {
- *       pushDiagnostic({ level: "warn", … }); return;   // registration DROPPED
- *     }
- *   }
- *
- * ShieldCortex is non-bundled. Without
- * `plugins.entries.<id>.hooks.allowConversationAccess === true`, every hook on
- * the conversation plane it registers is discarded at load: `llm_input` and
- * `llm_output` on every build, and from 2026.5.9-beta.1 — the first whose
- * `CONVERSATION_HOOK_NAMES` lists it — the `before_agent_run` gate itself. The
- * plugin still loads, `before_tool_call` still gates, `/shieldcortex-status`
- * still runs, and no conversation content is scanned by anything. There is no
- * error: the only trace is a plugin diagnostic in the gateway log.
- *
- * That is a claim/reality gap, so it gets its own line rather than a footnote:
- * an operator reading a page of green ticks must not have to infer it.
- *
- * Scope: it evaluates the grant ONLY where the plugin is expected to load. Every
- * state in which it is not — uninstalled, wiped from config, deliberately
- * disabled, enabled-but-absent, or an unreadable config — is already owned by
- * `checkOpenClawPluginLoadState`, which names the state and the right repair. A
- * second red line here would point at the wrong fix (grant a permission to a
- * plugin that is not running) and bury the right one.
- */
-export async function checkOpenClawConversationAccess(
-  home: string = os.homedir(),
-): Promise<CheckResult> {
-  const label = 'OpenClaw conversation access';
-  if (!fs.existsSync(path.join(home, '.openclaw'))) {
-    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
-  }
-
-  // This check only has a question to answer when the plugin is expected to
-  // LOAD. The grant governs what a loaded plugin's conversation hooks are
-  // allowed to do; on a host where the plugin is not going to load at all,
-  // there are no hooks for the gateway to refuse, and a second red line about a
-  // missing grant is noise stacked on top of the line that owns the actual
-  // problem. Every state below already has its own verdict in
-  // `checkOpenClawPluginLoadState`, which names the state and its remedy:
-  //
-  //   not-installed          — nothing on the box
-  //   enabled-not-installed  — config claims it, no package (that check FAILS)
-  //   installed-not-enabled  — the #222 wipe (that check FAILS)
-  //   intentionally-disabled — the operator turned it off (that check WARNS)
-  //   config-unreadable      — no verdict is possible at all (that check WARNS)
-  //
-  // Emitting a conversation-access FAIL over any of them tells an operator to
-  // grant a permission to a plugin that is not running — the wrong repair, and
-  // it buries the right one. Deferring is not silence: the load-state line is
-  // louder, and it is the one to act on.
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: pkg.version }));
-  const deferred: Record<string, string> = {
-    'not-installed': 'realtime plugin not installed',
-    'enabled-not-installed': 'realtime plugin is enabled in config but not installed — see the plugin load state check',
-    'installed-not-enabled': 'realtime plugin is installed but not enabled in openclaw.json — see the plugin load state check',
-    'intentionally-disabled': 'realtime plugin is deliberately disabled in openclaw.json — see the plugin load state check',
-  };
-  if (verdict.state in deferred) {
-    return { label, status: 'info', message: `skipped (${deferred[verdict.state]})` };
-  }
-  if (verdict.state === 'config-unreadable') {
-    // The one indeterminate case: openclaw.json is there and unparseable, so
-    // neither the enable flag nor the grant can be read. Warn, never fail —
-    // convicting off a file we could not read is the #11 mistake.
-    return {
-      label,
-      status: 'warn',
-      message: 'cannot determine conversation-hook access — ~/.openclaw/openclaw.json exists but could not be read or parsed, so neither the enable state nor the grant is knowable',
-      fix: 'Fix or re-create ~/.openclaw/openclaw.json, then re-run doctor.',
-    };
-  }
-
-  const gate = readConversationAccessGate(home);
-
-  if (gate.granted === null) {
-    // Cannot-read is not "not granted" — the same distinction the reconciler
-    // makes about the enable flag. Never convict off a file we could not parse.
-    return {
-      label,
-      status: 'warn',
-      message: `cannot determine conversation-hook access — ${gate.detail}`,
-      fix: 'Fix or re-create ~/.openclaw/openclaw.json, then re-run doctor.',
-    };
-  }
-
-  if (gate.granted === true) {
-    // Granted is NOT the same as enforcing, and this check must not imply it.
-    // The grant only means the host will accept the registrations; whether the
-    // posture blocks anything is the plugin's business, and whether the hook
-    // exists at all depends on the host build.
-    return {
-      label,
-      status: 'pass',
-      message: 'conversation-hook access granted — the gateway will accept the plugin\'s llm_input/llm_output (and, on 2026.5.9+, before_agent_run) registrations. Acceptance is not enforcement: the posture decides what a detection does',
-    };
-  }
-
-  return {
-    label,
-    status: 'fail',
-    message:
-      `conversation-hook access NOT granted (${gate.detail}) — OpenClaw REFUSES every conversation hook this plugin registers. ` +
-      'The plugin loads and tool-call gating works, but NOTHING on the conversation path is scanned: no llm_input scanning, no llm_output memory capture, and no conversation firewall. Every surface still reports real-time scanning as on',
-    fix: CONVERSATION_ACCESS_REMEDY,
-  };
 }
 
 /**
@@ -3476,7 +3462,7 @@ export async function runDoctor(
     checkOpenClawPluginVersion,
     checkOpenClawSkillVersion,
     checkOpenClawPluginLoadState,
-    checkOpenClawConversationAccess,
+    checkOpenClawConversationScanning,
     checkOpenClawRunningPluginVersion,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,

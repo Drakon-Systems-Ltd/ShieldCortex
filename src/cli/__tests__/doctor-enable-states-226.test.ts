@@ -81,7 +81,7 @@ describe('#226 doctor reports the config-side states truthfully', () => {
     const r = await checkOpenClawPluginLoadState(home, '4.47.35');
     // The regression: this used to be `pass` — "realtime plugin loaded".
     expect(r.status).toBe('fail');
-    expect(r.message).toMatch(/NOT enabled in openclaw\.json/i);
+    expect(r.message).toMatch(/NOT REGISTERED in openclaw\.json/i);
     expect(r.message).toMatch(/no memory firewall|no action guard/i);
     expect(r.fix).toMatch(/Nothing is reinstalled/i);
     expect(r.fix).not.toMatch(/plugins install|--force/i);
@@ -121,7 +121,7 @@ describe('#226 doctor reports the config-side states truthfully', () => {
   });
 
   it('a WIPED stanza is the state that fails outright — the two are not the same', async () => {
-    // The contrast is the whole reason `intentionally-disabled` can afford to
+    // The contrast is the whole reason `disabled-by-operator` can afford to
     // be a warn: the state nobody chose still exits 1 without any flag.
     const pkgDir = installOnDisk();
     writeIndex([], pkgDir);

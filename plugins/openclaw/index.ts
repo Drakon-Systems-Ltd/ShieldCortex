@@ -31,6 +31,8 @@ import path from "node:path";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
+import { createSessionTaintStore } from './session-taint.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
 import type { InterceptorConfig, BrokerRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
@@ -868,6 +870,14 @@ interface SCConfig {
 }
 
 const PLUGIN_ID = "shieldcortex-realtime";
+
+/**
+ * #233: conversation-level taint, shared between the conversation scan (which
+ * writes it) and the Action Guard (which reads it). Both run in THIS process,
+ * so an in-memory store is the whole mechanism — keyed per session because one
+ * gateway serves many concurrent chats.
+ */
+const sessionTaint = createSessionTaintStore();
 const PLUGIN_PACKAGE_NAME = "@drakon-systems/shieldcortex-realtime";
 const PLUGIN_CONFIG_UI_HINTS = {
   binaryPath: {
@@ -2035,6 +2045,11 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
       }
       if (!result.clean) {
         console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary}`);
+        // #233: THE sink that has teeth. Logging a detection changed nothing —
+        // the tool call this injection is steering, one turn later, was
+        // evaluated as if it had never been seen. Tainting the session makes
+        // the Action Guard tighten by one notch for a bounded window.
+        sessionTaint.mark(event.sessionId, { reason: `conversation scan: ${result.summary}` });
         // #226: NO `preview`. This row carried the first 100 characters of the
         // prompt — the exact text that tripped an injection detector, i.e.
         // hostile by assumption — into an append-only file that syncs. The gate
@@ -2897,11 +2912,13 @@ async function handleTypedBeforeToolCall(
   event: TypedBeforeToolCallEvent,
   interceptor: ReturnType<typeof createInterceptor>,
   logger: PluginApi["logger"],
+  sessionId?: string,
 ): Promise<TypedBeforeToolCallResult | void> {
   try {
     await interceptor.handleToolCall({
       toolName: event.toolName,
       arguments: event.params ?? {},
+      sessionId,
       requireApproval: async (message: string) => {
         throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message));
       },
@@ -3132,6 +3149,13 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #233: the read side of conversation taint. Returns null for a clean
+          // or unknown session, so the guard behaves exactly as before unless a
+          // conversation detection actually happened in THIS session.
+          sessionTaint: (sessionId) => {
+            const rec = sessionId ? sessionTaint.get(sessionId) : null;
+            return rec ? { reason: rec.reason } : null;
+          },
           onAuditEntry: (entry) => syncInterceptEvent(entry, {
             cloudApiKey: (scConfig as any).cloudApiKey ?? '',
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
@@ -3168,12 +3192,17 @@ export default {
     if (!interceptorDisabledInHostConfig) {
       // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
       // can block or require approval before the selected tool executes.
-      api.on('before_tool_call', async (event: TypedBeforeToolCallEvent) => {
+      api.on('before_tool_call', async (event: TypedBeforeToolCallEvent, ctx?: { sessionId?: string }) => {
         const interceptor = await initInterceptor();
         if (!interceptor) return;
-        return handleTypedBeforeToolCall(event, interceptor, api.logger);
+        // #233: the host supplies the session on the tool CONTEXT, not the
+        // event. Without it a taint cannot be matched to the call it should
+        // gate, so the escalation would silently never fire.
+        return handleTypedBeforeToolCall(event, interceptor, api.logger, ctx?.sessionId);
       }, { priority: 80, timeoutMs: 30_000 });
       _beforeToolCallRegistered = true;
+      // NOTE: session_end is NOT registered here — it moved out of this guard
+      // in #226 and is registered unconditionally below.
     } else {
       api.logger?.info?.('[shieldcortex] interceptor.enabled:false in plugin config — before_tool_call hook not registered');
     }
@@ -3198,18 +3227,26 @@ export default {
     try {
       api.on('session_end', (event?: { sessionId?: string; sessionKey?: string }, ctx?: AgentCtx) => {
         interceptorReady?.resetSession();
+        const endedSession = ctx?.sessionId ?? ctx?.sessionKey ?? event?.sessionId ?? event?.sessionKey ?? null;
         // #226: the scan-unavailable alert window is session state too, and it
         // is keyed per session — so clear THIS session's window and nobody
         // else's. Clearing them all would re-arm alerting for every live
         // session every time any one of them ended.
-        resetScanUnavailableAlertState(
-          ctx?.sessionId ?? ctx?.sessionKey ?? event?.sessionId ?? event?.sessionKey ?? null,
-        );
+        resetScanUnavailableAlertState(endedSession);
+        // #233: a taint must not outlive the conversation that earned it. Same
+        // per-session rule, for the same reason.
+        if (endedSession) sessionTaint.clear(endedSession);
       });
     } catch {
       // session_end may not be a supported hook — TTL safety net handles this
     }
 
+    // llm_input/llm_output are CONVERSATION hooks: OpenClaw drops them at
+    // registration for a non-bundled plugin unless the host grants
+    // plugins.entries.<id>.hooks.allowConversationAccess = true. Registration is
+    // still attempted (the host decides, and the grant can be added without a
+    // code change), but they must not be CLAIMED afterwards — see the startup
+    // line below (#225/#230).
     api.on("llm_input", handleLlmInput, { timeoutMs: 30_000 });
     api.on("llm_output", handleLlmOutput, { timeoutMs: 30_000 });
 
@@ -3260,6 +3297,14 @@ export default {
     // five fleet hosts surveyed in #222 that was the normal outcome of a
     // documented install. Report it at boot rather than let the operator infer
     // protection from a registration line that only states intent.
+    // The host's own in-memory config is the better source (it is what the
+    // loader consulted), so it is preferred; the file the host reads is the
+    // fallback for a runtime that does not expose it. `readConversationAccess`
+    // is #225's shared reader — it also tells us whether the config could be
+    // read at all, which is what keeps "not granted" apart from "cannot tell"
+    // on the startup line below.
+    const diskAccess = readConversationAccess(homedir(), PLUGIN_ID);
+    let rootConfigSeen = false;
     try {
       const runtimeConfigApi = (api as PluginApi).runtime?.config;
       const rootConfig = typeof runtimeConfigApi?.current === 'function'
@@ -3267,9 +3312,12 @@ export default {
         : typeof runtimeConfigApi?.loadConfig === 'function'
           ? runtimeConfigApi.loadConfig()
           : (api as PluginApi).config;
-      _conversationAccessGranted = readConversationAccessGrant(rootConfig);
+      rootConfigSeen = Boolean(rootConfig) && typeof rootConfig === 'object';
+      _conversationAccessGranted = rootConfigSeen
+        ? readConversationAccessGrant(rootConfig)
+        : diskAccess.granted;
     } catch {
-      _conversationAccessGranted = false;
+      _conversationAccessGranted = diskAccess.granted;
     }
     if (!_conversationAccessGranted) {
       (api.logger as any)?.warn?.(
@@ -3279,7 +3327,29 @@ export default {
       );
     }
 
-    api.logger.info(`[shieldcortex] v${_version} registered (llm_input + llm_output${_beforeToolCallRegistered ? " + before_tool_call" : ""}${_beforeAgentRunRequested ? " + before_agent_run" : ""} + /shieldcortex-status; conversation access ${_conversationAccessGranted ? 'GRANTED' : 'NOT granted — conversation hooks will be refused'})`);
+    // #225/#230: this line used to announce `llm_input + llm_output`
+    // unconditionally. On any host without the conversation-access grant the
+    // gateway logged, on the very next two lines, that it had dropped both — so
+    // ShieldCortex was claiming conversation protection it did not have, in the
+    // one place an operator looks to confirm startup. Report only what is
+    // actually live, and name the missing grant when it is the reason.
+    //
+    // `before_agent_run` (#226) is on the same list from 2026.5.9-beta.1, so it
+    // is claimed only when the grant is present AND registration was attempted
+    // this session.
+    api.logger.info(
+      `[shieldcortex] v${_version} registered (${describeRegisteredHooks({
+        access: {
+          granted: _conversationAccessGranted,
+          // We could read SOMETHING (the host's config or the file) ⇒ the
+          // ungranted state is a fact, not a failed measurement.
+          readable: rootConfigSeen || diskAccess.readable,
+          entryPresent: diskAccess.entryPresent,
+        },
+        beforeToolCallRegistered: _beforeToolCallRegistered,
+        beforeAgentRunRequested: _beforeAgentRunRequested,
+      })})`,
+    );
     } catch (err) {
       // Plugin must never block channel startup — warn and bail gracefully.
       // #134 §2: this used to be a bare console.warn, which bypasses the

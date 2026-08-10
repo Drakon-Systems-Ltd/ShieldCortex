@@ -52,13 +52,13 @@ function input(over: Partial<ReconcileInput> = {}): ReconcileInput {
 }
 
 describe('#226 (1) installed-not-enabled repairs by ENABLING, never reinstalling', () => {
-  it('is a fail, and the recommended action is enable-in-config', () => {
+  it('is a fail, and the recommended action is re-register', () => {
     const v = reconcilePluginState(
       input({ config: { enabled: null, inAllow: false }, liveRoster: [] }),
     );
     expect(v.state).toBe('installed-not-enabled');
     expect(v.severity).toBe('fail');
-    expect(v.recommendedAction).toBe('enable-in-config');
+    expect(v.recommendedAction).toBe('re-register');
   });
 
   it('the plan writes the config and reloads — it never runs an install command', () => {
@@ -71,7 +71,7 @@ describe('#226 (1) installed-not-enabled repairs by ENABLING, never reinstalling
       expectedVersion: '4.47.35',
     });
     expect(steps.map((s) => s.kind)).toEqual([
-      'enable-plugin-config',
+      'restore-registration',
       'gateway-reload',
       'self-check',
     ]);
@@ -80,14 +80,14 @@ describe('#226 (1) installed-not-enabled repairs by ENABLING, never reinstalling
     expect(steps.some((s) => (s.command ?? []).includes('install'))).toBe(false);
   });
 
-  it('stays enable-in-config for an OpenClaw-tracked install too', () => {
+  it('stays re-register for an OpenClaw-tracked install too', () => {
     // openClawTracked used to switch the routing to `plugins update`, which is
     // just as irrelevant to a config flag as `plugins install`.
     const v = reconcilePluginState(
       input({ config: { enabled: null, inAllow: false }, liveRoster: [] }),
     );
     expect(v.openClawTracked).toBe(true);
-    expect(v.recommendedAction).toBe('enable-in-config');
+    expect(v.recommendedAction).toBe('re-register');
   });
 });
 
@@ -193,7 +193,7 @@ describe('#226 (12) explicit enabled:false is ALWAYS an intentional disable', ()
         liveRoster: [],
       }),
     );
-    expect(v.state).toBe('intentionally-disabled');
+    expect(v.state).toBe('disabled-by-operator');
     expect(v.severity).toBe('warn');
     expect(v.recommendedAction).toBe('none');
     // Remediation must never propose reinstalling a package that is present.
@@ -207,7 +207,7 @@ describe('#226 (12) explicit enabled:false is ALWAYS an intentional disable', ()
       input({ config: { enabled: false, inAllow: false }, liveRoster: [] }),
     );
     expect(v.loadedInIndex).toBe(true);
-    expect(v.state).toBe('intentionally-disabled');
+    expect(v.state).toBe('disabled-by-operator');
     expect(v.severity).toBe('warn');
   });
 
@@ -215,7 +215,7 @@ describe('#226 (12) explicit enabled:false is ALWAYS an intentional disable', ()
     const v = reconcilePluginState(
       input({ config: { enabled: false, inAllow: false }, liveRoster: [PLUGIN] }),
     );
-    expect(v.state).toBe('intentionally-disabled');
+    expect(v.state).toBe('disabled-by-operator');
     expect(v.severity).toBe('warn');
     expect(v.reasons.join(' ')).toMatch(/protection ends at the next restart/i);
   });
@@ -226,7 +226,7 @@ describe('#226 (12) explicit enabled:false is ALWAYS an intentional disable', ()
     const v = reconcilePluginState(
       input({ config: { enabled: false, inAllow: true }, liveRoster: [] }),
     );
-    expect(v.state).toBe('intentionally-disabled');
+    expect(v.state).toBe('disabled-by-operator');
     expect(v.severity).toBe('warn');
   });
 
@@ -244,7 +244,7 @@ describe('#226 (12) explicit enabled:false is ALWAYS an intentional disable', ()
     );
     expect(v.state).toBe('installed-not-enabled');
     expect(v.severity).toBe('fail');
-    expect(v.recommendedAction).toBe('enable-in-config');
+    expect(v.recommendedAction).toBe('re-register');
   });
 });
 

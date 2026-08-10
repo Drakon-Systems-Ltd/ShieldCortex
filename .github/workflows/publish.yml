@@ -249,51 +249,28 @@ jobs:
         if: env.HAS_CLAWHUB_TOKEN == 'true'
         run: npm install -g clawhub
 
-      - name: Check ClawHub version
-        id: clawhub_version_check
+      # Publish + verify in one place (scripts/clawhub-sync.mjs), so the release
+      # gate is the same code path a human runs locally and is unit-tested
+      # (src/__tests__/clawhub-sync-state.test.ts).
+      #
+      # This step CAN FAIL, and that is the point (#200). It previously emitted
+      # `::warning` on a mismatch and exited 0, so the job went green while
+      # ClawHub served stale code — three times (4.47.29, 4.47.30, 4.47.36).
+      #
+      # It polls because ClawHub promotes through a moderation queue: 4.47.36
+      # took ~26 minutes from upload to promotion, so a 10-minute bound would
+      # false-fail a perfectly healthy release. 30 minutes sits above the
+      # observed norm, and the script exits the moment the version promotes.
+      #
+      # Exit codes: 0 synced · 2 uploaded-but-unpromoted · 1 never landed.
+      # Both failures are red, but they say which one happened — republishing a
+      # 'pending' version just burns a version number on an "already exists".
+      - name: Sync + verify ClawHub
         if: env.HAS_CLAWHUB_TOKEN == 'true'
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.tag.outputs.version }}
-        run: |
-          clawhub login --token "$CLAWHUB_TOKEN" --no-browser
-          clawhub whoami
-          CLAWHUB_LATEST=$(clawhub inspect shieldcortex 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")
-          echo "ClawHub latest: '${CLAWHUB_LATEST}'  releasing: '${RELEASE_VERSION}'"
-          if [ "$CLAWHUB_LATEST" = "$RELEASE_VERSION" ]; then
-            echo "clawhub_has_version=true" >> $GITHUB_OUTPUT
-          else
-            echo "clawhub_has_version=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Publish ShieldCortex skill to ClawHub
-        if: env.HAS_CLAWHUB_TOKEN == 'true' && steps.clawhub_version_check.outputs.clawhub_has_version == 'false'
-        continue-on-error: true
-        env:
-          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.tag.outputs.version }}
-        run: |
-          clawhub publish "$GITHUB_WORKSPACE/skills/shieldcortex" \
-            --slug shieldcortex \
-            --name "ShieldCortex" \
-            --version "$RELEASE_VERSION" \
-            --changelog "Auto-sync from npm publish ${RELEASE_TAG}"
-
-      # Make the ClawHub outcome VISIBLE. Warns (does not fail the release) if the
-      # version didn't land — e.g. the interactive MIT-0 web gate — pointing to the
-      # manual web fallback, so this can never silently rot again.
-      - name: Verify ClawHub sync
-        if: env.HAS_CLAWHUB_TOKEN == 'true'
-        env:
-          RELEASE_VERSION: ${{ steps.tag.outputs.version }}
-        run: |
-          CLAWHUB_LATEST=$(clawhub inspect shieldcortex 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")
-          if [ "$CLAWHUB_LATEST" = "$RELEASE_VERSION" ]; then
-            echo "✅ ClawHub synced at ${RELEASE_VERSION}"
-          else
-            echo "::warning title=ClawHub not synced::ClawHub is at '${CLAWHUB_LATEST}', expected '${RELEASE_VERSION}'. If blocked by the MIT-0 web gate, publish manually at https://clawhub.ai/skills/publish — drop skills/shieldcortex, tick the MIT-0 box, set version ${RELEASE_VERSION}."
-          fi
+        run: node scripts/clawhub-sync.mjs --wait 30
 
       - name: Skip ClawHub sync (missing token)
         if: env.HAS_CLAWHUB_TOKEN != 'true'

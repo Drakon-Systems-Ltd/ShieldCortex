@@ -66,7 +66,7 @@ describe('#222 wiped stanza must never read healthy', () => {
       },
     });
     expect(v.severity).toBe('warn');
-    expect(v.state).toBe('intentionally-disabled');
+    expect(v.state).toBe('disabled-by-operator');
     expect(v.state).not.toBe('healthy');
   });
 
@@ -76,7 +76,7 @@ describe('#222 wiped stanza must never read healthy', () => {
       config: { enabled: false, inAllow: true },
     });
     expect(v.severity).toBe('warn');
-    expect(v.state).toBe('intentionally-disabled');
+    expect(v.state).toBe('disabled-by-operator');
     expect(v.state).not.toBe('healthy');
     // Still says out loud that the host is running without protection.
     expect(v.reasons.join(' ')).toMatch(/WITHOUT the memory firewall/i);

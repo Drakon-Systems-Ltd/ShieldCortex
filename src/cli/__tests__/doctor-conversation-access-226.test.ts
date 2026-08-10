@@ -3,11 +3,10 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { checkOpenClawConversationAccess, checkOpenClawPluginLoadState } from '../doctor.js';
-import { readConversationAccessGate } from '../../integrations/openclaw-plugin-index.js';
+import { checkOpenClawConversationScanning, checkOpenClawPluginLoadState } from '../doctor.js';
 
 /**
- * #226 item 6 — the conversation-hook access gate.
+ * #226 item 6 — the conversation-hook access gate, as doctor reports it.
  *
  * Verified against the host's own loader (the installed OpenClaw 2026.5.2 at
  * ~/.npm-global/lib/node_modules/openclaw, `dist/loader-*.js`, and unchanged in
@@ -24,11 +23,21 @@ import { readConversationAccessGate } from '../../integrations/openclaw-plugin-i
  * registers on the conversation plane is discarded at load: llm_input,
  * llm_output, and on 2026.5.9+ the before_agent_run gate itself. Nothing
  * throws. The plugin loads, before_tool_call still gates, and no conversation
- * content is scanned by anything — while every ShieldCortex surface reports
- * real-time scanning as on.
+ * content is scanned by anything.
  *
- * The three answers doctor must keep apart are granted / not-granted /
- * cannot-tell. Fully isolated in a temp HOME.
+ * WHAT THIS FILE OWNS AFTER THE #230 MERGE. The dedicated line that reports
+ * conversation-scanning state is `checkOpenClawConversationScanning` (#225
+ * phase 1 + #231 capability detection), and its severity contract lives in
+ * src/__tests__/conversation-access-honesty-225.test.ts: an ungranted host
+ * WARNS, because withholding conversation access is a legitimate operator
+ * choice. #226's earlier `checkOpenClawConversationAccess` (which failed on the
+ * same fact, and read the grant through a second copy of the reader) is gone.
+ *
+ * What survives here is the part #230 does not cover: the "OpenClaw plugin
+ * loaded" tick must not read as protection while the grant is absent. Loaded is
+ * still true and still said; the line simply stops short of a green tick.
+ *
+ * Fully isolated in a temp HOME.
  */
 
 const PLUGIN = 'shieldcortex-realtime';
@@ -76,143 +85,6 @@ function healthyInstall(entry: Record<string, unknown>): void {
   db.close();
 }
 
-describe('#226 readConversationAccessGate — strict true, and cannot-tell stays cannot-tell', () => {
-  const writeRaw = (body: string): void => {
-    fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), body, 'utf-8');
-  };
-
-  it('grants only on exactly true', () => {
-    writeRaw(JSON.stringify({ plugins: { entries: { [PLUGIN]: { hooks: { allowConversationAccess: true } } } } }));
-    expect(readConversationAccessGate(home, PLUGIN).granted).toBe(true);
-  });
-
-  it('a truthy-but-not-true value is a refusal, exactly as the host reads it', () => {
-    for (const v of ['true', 1, {}]) {
-      writeRaw(JSON.stringify({ plugins: { entries: { [PLUGIN]: { hooks: { allowConversationAccess: v } } } } }));
-      const gate = readConversationAccessGate(home, PLUGIN);
-      expect(gate.granted).toBe(false);
-      expect(gate.detail).toMatch(/only exactly true/);
-    }
-  });
-
-  it('unset is a refusal, and says so as "not set" rather than as a wrong value', () => {
-    writeRaw(JSON.stringify({ plugins: { entries: { [PLUGIN]: { enabled: true } } } }));
-    const gate = readConversationAccessGate(home, PLUGIN);
-    expect(gate.granted).toBe(false);
-    expect(gate.detail).toMatch(/is not set/);
-  });
-
-  it('an unreadable config is null — never "not granted"', () => {
-    writeRaw('{ "plugins": { "entries": { "shieldcortex-realtime": { "hooks');
-    expect(readConversationAccessGate(home, PLUGIN).granted).toBeNull();
-  });
-});
-
-describe('#226 doctor: OpenClaw conversation access', () => {
-  it('FAILS when the grant is absent, and names what is silently not happening', async () => {
-    healthyInstall({ enabled: true });
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('fail');
-    expect(r.message).toMatch(/NOT granted/);
-    expect(r.message).toMatch(/REFUSES every conversation hook/i);
-    expect(r.fix).toMatch(/allowConversationAccess/);
-  });
-
-  it('PASSES when granted — but does not upgrade "accepted" into "enforcing"', async () => {
-    healthyInstall({ enabled: true, hooks: { allowConversationAccess: true } });
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('pass');
-    expect(r.message).toMatch(/Acceptance is not enforcement/i);
-  });
-
-  it('WARNS, never fails, when the config cannot be read', async () => {
-    healthyInstall({ enabled: true, hooks: { allowConversationAccess: true } });
-    fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), '{ truncated', 'utf-8');
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('warn');
-    expect(r.message).toMatch(/cannot determine/i);
-  });
-
-  it('skips when the plugin is not installed — no hooks to refuse', async () => {
-    fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('info');
-  });
-
-  it('skips when OpenClaw is not on the box at all', async () => {
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('info');
-  });
-});
-
-/**
- * The grant only decides what a LOADED plugin's conversation hooks may do. On a
- * host where the plugin is not going to load, there are no hooks for the
- * gateway to refuse — and the load-state check has already printed the state
- * and the correct repair. A second red line here would tell the operator to
- * grant a permission to a plugin that is not running: the wrong fix, printed
- * over the right one.
- */
-describe('#226 the conversation-access line defers to the load-state line it does not own', () => {
-  it('does not fail a deliberately disabled plugin', async () => {
-    healthyInstall({ enabled: false });
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('info');
-    expect(r.message).toMatch(/deliberately disabled/i);
-
-    // …and the line that DOES own the state still reports it.
-    const load = await checkOpenClawPluginLoadState(home, '4.47.35');
-    expect(load.status).toBe('warn');
-    expect(load.message).toMatch(/explicitly disabled/i);
-  });
-
-  it('does not fail a plugin wiped out of the config (#222)', async () => {
-    healthyInstall({ enabled: true });
-    const cfgPath = path.join(home, '.openclaw', 'openclaw.json');
-    fs.writeFileSync(cfgPath, JSON.stringify({ plugins: { entries: {}, allow: [] } }), 'utf-8');
-
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('info');
-    expect(r.message).toMatch(/not enabled in openclaw\.json/i);
-
-    const load = await checkOpenClawPluginLoadState(home, '4.47.35');
-    expect(load.status).toBe('fail');
-  });
-
-  it('does not fail an enabled-but-not-installed host', async () => {
-    const oc = path.join(home, '.openclaw');
-    fs.mkdirSync(oc, { recursive: true });
-    fs.writeFileSync(
-      path.join(oc, 'openclaw.json'),
-      JSON.stringify({ plugins: { entries: { [PLUGIN]: { enabled: true } }, allow: [PLUGIN] } }),
-      'utf-8',
-    );
-
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('info');
-    expect(r.message).toMatch(/not installed/i);
-
-    const load = await checkOpenClawPluginLoadState(home, '4.47.35');
-    expect(load.status).toBe('fail');
-  });
-
-  it('an unreadable config is a WARN here, never a grant verdict', async () => {
-    healthyInstall({ enabled: true });
-    fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), '{ truncated', 'utf-8');
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('warn');
-    expect(r.message).toMatch(/could not be read/i);
-    expect(r.status).not.toBe('fail');
-  });
-
-  it('still FAILS the state it does own: installed, enabled, and no grant', async () => {
-    healthyInstall({ enabled: true });
-    const r = await checkOpenClawConversationAccess(home);
-    expect(r.status).toBe('fail');
-  });
-});
-
 describe('#226 the "plugin loaded" tick never reads as protection while the grant is absent', () => {
   it('downgrades the roster-confirmed PASS to a warn that names the gap', async () => {
     healthyInstall({ enabled: true });
@@ -222,6 +94,7 @@ describe('#226 the "plugin loaded" tick never reads as protection while the gran
     expect(r.message).toMatch(/loaded \(roster-confirmed/);
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/conversation scanning is NOT/i);
+    expect(r.fix).toMatch(/allowConversationAccess/);
   });
 
   it('stays a clean PASS once the grant is present', async () => {
@@ -229,5 +102,63 @@ describe('#226 the "plugin loaded" tick never reads as protection while the gran
     const r = await checkOpenClawPluginLoadState(home, '4.47.35');
     expect(r.status).toBe('pass');
     expect(r.message).not.toMatch(/conversation scanning is NOT/i);
+  });
+
+  it('a truthy-but-not-true grant is a refusal, exactly as the host reads it', async () => {
+    // OpenClaw compares `!== true`, so this host has NO conversation plane.
+    // Reporting it as granted would recreate the bug in the reporting layer.
+    healthyInstall({ enabled: true, hooks: { allowConversationAccess: 'true' } });
+    const r = await checkOpenClawPluginLoadState(home, '4.47.35');
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/conversation scanning is NOT/i);
+  });
+
+  it('does not stack the note onto a state that already failed for another reason', async () => {
+    // The wipe (#222) owns its own line and its own repair. A grant note glued
+    // to it would point at the wrong fix.
+    healthyInstall({ enabled: true });
+    fs.writeFileSync(
+      path.join(home, '.openclaw', 'openclaw.json'),
+      JSON.stringify({ plugins: { entries: {}, allow: [] } }),
+      'utf-8',
+    );
+    const r = await checkOpenClawPluginLoadState(home, '4.47.35');
+    expect(r.status).toBe('fail');
+    expect(r.message).not.toMatch(/conversation scanning is NOT/i);
+  });
+
+  it('an unreadable config never produces a grant verdict on this line', async () => {
+    // Cannot-read is not "not granted": the load-state check reports the
+    // indeterminate state, and no conversation note is appended to it.
+    healthyInstall({ enabled: true });
+    fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), '{ truncated', 'utf-8');
+    const r = await checkOpenClawPluginLoadState(home, '4.47.35');
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/INDETERMINATE/);
+    expect(r.message).not.toMatch(/conversation scanning is NOT/i);
+  });
+});
+
+describe('#226/#230 the dedicated conversation-scanning line owns the grant itself', () => {
+  it('WARNS — never fails — when the grant is absent, and names the key', async () => {
+    healthyInstall({ enabled: true });
+    const r = await checkOpenClawConversationScanning(home);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/INACTIVE/);
+    expect(r.fix).toMatch(/allowConversationAccess/);
+  });
+
+  it('granted is INFO and says observation-only — acceptance is not enforcement', async () => {
+    healthyInstall({ enabled: true, hooks: { allowConversationAccess: true } });
+    const r = await checkOpenClawConversationScanning(home);
+    expect(r.status).not.toBe('fail');
+    expect(r.message.toLowerCase()).toMatch(/observation only/);
+    expect(r.message.toLowerCase()).not.toMatch(/\bprotected\b/);
+  });
+
+  it('skips when OpenClaw is not on the box at all', async () => {
+    const r = await checkOpenClawConversationScanning(home);
+    expect(r.status).toBe('info');
+    expect(r.message).toMatch(/skipped/i);
   });
 });
