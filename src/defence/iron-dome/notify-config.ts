@@ -28,6 +28,15 @@ export interface NotifyConfig {
    *  Absent = no configured channel (the TUI tier and the hash fallback are
    *  the only things left). See webhook-notify-channel.ts. */
   webhookUrl?: string;
+  /** HMAC-SHA256 signing key for the webhook body (`X-ShieldCortex-Signature`,
+   *  see webhook-notify-channel.ts). Without it this install can only ever
+   *  send UNAUTHENTICATED POSTs, and any receiver worth pointing at — one that
+   *  can page a human or re-run a job — has to reject unsigned requests.
+   *
+   *  This is the one field in this file that is a credential: it is never
+   *  logged, never put in an error message, and never written to an audit row.
+   *  Nothing here formats it, and nothing downstream may either. */
+  webhookSecret?: string;
   /** Deliver via a native OpenClaw plugin-approval card — Approve/Deny
    *  buttons on whatever channel the operator's gateway already reaches
    *  (Telegram, WhatsApp, Discord…). Strict `true` only, same as `enabled`:
@@ -40,6 +49,11 @@ export interface NotifyConfig {
 const TIMEOUT_MIN_MS = 500;
 const TIMEOUT_MAX_MS = 60_000;
 const WEBHOOK_URL_MAX_LENGTH = 2_048;
+/** An HMAC key is a key, not a document. Generous enough for any real
+ *  generator (a 512-bit hex key is 128 chars), small enough that a config file
+ *  that has accidentally swallowed a file's contents is rejected rather than
+ *  hashed. */
+const WEBHOOK_SECRET_MAX_LENGTH = 512;
 
 export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
   enabled: false,
@@ -84,6 +98,29 @@ export function normaliseWebhookUrl(v: unknown): string | undefined {
 }
 
 /**
+ * The webhook signing key, or undefined. Same "unusable reads as absent"
+ * discipline as every other field here — a non-string, an empty string, or
+ * something too long to be a key is dropped, which degrades to today's
+ * unsigned POST rather than to a crash or to a signature computed over
+ * `[object Object]`.
+ *
+ * Trimmed deliberately: config files acquire trailing newlines, and the
+ * receiver's copy of the secret is invariably the trimmed literal, so trimming
+ * turns an invisible whitespace mismatch into a working signature rather than
+ * a 401 nobody can explain.
+ *
+ * NOTE for anyone editing this: no branch of this function may put the value
+ * into a thrown error, a log line, or a return value other than the secret
+ * itself. It is the only credential in this config.
+ */
+export function normaliseWebhookSecret(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim();
+  if (!trimmed || trimmed.length > WEBHOOK_SECRET_MAX_LENGTH) return undefined;
+  return trimmed;
+}
+
+/**
  * Turn whatever was on disk into a config the notify transport can be
  * trusted with. Total: every input, including junk, yields a valid
  * NotifyConfig — never throws, never passes an unrecognised key through.
@@ -103,6 +140,12 @@ export function normaliseNotifyConfig(raw: unknown): NotifyConfig {
 
   const webhookUrl = normaliseWebhookUrl(raw.webhookUrl);
   if (webhookUrl !== undefined) cfg.webhookUrl = webhookUrl;
+
+  // Kept independent of `webhookUrl`: a secret configured without a URL is
+  // harmless (nothing signs anything), and dropping it here would make a
+  // later URL fix silently produce unsigned POSTs.
+  const webhookSecret = normaliseWebhookSecret(raw.webhookSecret);
+  if (webhookSecret !== undefined) cfg.webhookSecret = webhookSecret;
 
   return cfg;
 }

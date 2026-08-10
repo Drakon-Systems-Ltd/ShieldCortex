@@ -168,6 +168,7 @@ describe('requestOperatorApproval — a broken or hostile channel never releases
 describe('the notification content', () => {
   it('carries the exact command, the tripped signals, the tier, and both affordances bound to the SAME hash', () => {
     const text = formatOperatorNotification({
+      event: 'approval_requested',
       hash: BASE_INPUT.hash,
       shortHash: BASE_INPUT.hash.slice(0, 12),
       tool: BASE_INPUT.tool,
@@ -189,6 +190,7 @@ describe('the notification content', () => {
 
   it('surfaces the judge verdict when present', () => {
     const text = formatOperatorNotification({
+      event: 'approval_requested',
       hash: BASE_INPUT.hash,
       shortHash: BASE_INPUT.hash.slice(0, 12),
       tool: BASE_INPUT.tool,
@@ -206,6 +208,7 @@ describe('the notification content', () => {
 
   it('says plainly when no judge ran, rather than omitting the field silently', () => {
     const text = formatOperatorNotification({
+      event: 'approval_requested',
       hash: BASE_INPUT.hash,
       shortHash: BASE_INPUT.hash.slice(0, 12),
       tool: BASE_INPUT.tool,
@@ -233,6 +236,7 @@ describe('the notification content', () => {
   it('truncates a pathologically long command rather than sending it unbounded', () => {
     const huge = 'echo ' + 'A'.repeat(50_000);
     const text = formatOperatorNotification({
+      event: 'approval_requested',
       hash: BASE_INPUT.hash,
       shortHash: BASE_INPUT.hash.slice(0, 12),
       tool: 'Bash',

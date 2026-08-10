@@ -20,6 +20,7 @@ import { createWebhookNotifyChannel } from '../webhook-notify-channel.js';
 import type { OperatorNotification } from '../operator-notify.js';
 
 const NOTIFICATION: OperatorNotification = {
+  event: 'approval_requested',
   hash: 'b'.repeat(64),
   shortHash: 'bbbbbbbbbbbb',
   tool: 'Bash',

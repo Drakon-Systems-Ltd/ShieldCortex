@@ -16,6 +16,7 @@ import {
 } from '../openclaw-approval-channel.js';
 
 const NOTIFICATION: OperatorNotification = {
+  event: 'approval_requested',
   hash: 'f'.repeat(64),
   shortHash: 'f'.repeat(12),
   tool: 'Bash',
