@@ -95,6 +95,7 @@ export interface ReconcileInput {
 export type PluginLoadState =
   | 'healthy'
   | 'not-installed'
+  | 'installed-not-enabled'
   | 'enabled-not-loaded'
   | 'index-unreadable'
   | 'load-unproven'
@@ -226,6 +227,33 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   if (!installed) {
     reasons.push('plugin not installed on this host (no config, installs.json, index record, or on-disk build)');
     return { ...base, state: 'not-installed', severity: 'ok', recommendedAction: 'install', reasons };
+  }
+
+  // 1b. #222 — THE GATING BUG. Every rule below is guarded by
+  //     `enabledInConfig`, so when #214's installer wipe deleted the entry AND
+  //     removed the id from `plugins.allow`, all of them were skipped and
+  //     control fell through to `healthy`/`ok`. The state that leaves a host
+  //     unprotected silenced the alarm built to catch it, and doctor printed a
+  //     green "plugin loaded" tick over a box with no memory firewall and no
+  //     action guard.
+  //
+  //     The distinction: rule 1 above ("nothing installed anywhere") is
+  //     legitimately ok — nothing is installed, so nothing is claimed. THIS is
+  //     different: the package is on disk, the operator believes a security
+  //     product is running, and the next gateway restart will boot without it.
+  //     That is a fail, and it must be evaluated BEFORE any enabledInConfig
+  //     gate can skip it.
+  if (!enabledInConfig) {
+    reasons.push('installed on disk but NOT enabled in openclaw.json (entry missing/disabled and not in plugins.allow) — the gateway will boot WITHOUT the interceptor: no memory firewall, no action guard');
+    if (loadedInIndex) reasons.push('the SQLite install index still lists it as enabled — the index lags a config wipe; config decides what loads at the next restart');
+    if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway did load it — from the config as it was BEFORE the wipe; protection ends at the next restart');
+    return {
+      ...base,
+      state: 'installed-not-enabled',
+      severity: 'fail',
+      recommendedAction: openClawTracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
+      reasons,
+    };
   }
 
   // 2a. #142 guard on rule 2: the boot line is a snapshot and registration
