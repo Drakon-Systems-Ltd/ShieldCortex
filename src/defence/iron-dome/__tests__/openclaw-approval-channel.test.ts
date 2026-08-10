@@ -128,6 +128,55 @@ describe('openclaw-approval-channel — delivery is not consent', () => {
   });
 });
 
+describe('a denial never becomes a card (#143)', () => {
+  // The card is the only send path this channel has, and its buttons decide a
+  // LIVE hold. A `denied_no_prompt_surface` notification has no live decision
+  // behind it — the guard already refused the call and told the agent so. A
+  // card whose Approve/Deny changes nothing teaches the operator that these
+  // taps are optional, which is a worse outcome than the message not arriving
+  // on this channel at all. The caller falls through to the plain-message
+  // channel (the webhook) instead.
+  const DENIED = { ...NOTIFICATION, event: 'denied_no_prompt_surface' as const, deniedReason: 'bypassPermissions mode shows no prompt' };
+
+  test('reports not-delivered and never spawns the waiter', async () => {
+    const spawn = fakeSpawn();
+    const ch = createOpenClawApprovalChannel({
+      ...CHANNEL_OPTS,
+      spawnImpl: spawn.impl,
+      readReceipt: receiptSequence([{ phase: 'requesting' }]),
+    });
+
+    const result = await ch.send(DENIED, { timeoutMs: 5_000 });
+
+    expect(result.delivered).toBe(false);
+    if (!result.delivered) expect(result.reason).toMatch(/interactive/i);
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  test('refuses immediately — no receipt poll, so a denial adds no latency to the hook', async () => {
+    let polls = 0;
+    const ch = createOpenClawApprovalChannel({
+      ...CHANNEL_OPTS,
+      spawnImpl: fakeSpawn().impl,
+      readReceipt: () => { polls += 1; return { phase: 'requesting' }; },
+    });
+    await ch.send(DENIED, { timeoutMs: 5_000 });
+    expect(polls).toBe(0);
+  });
+
+  test('the approval event is unaffected — cards still go up for live holds', async () => {
+    const spawn = fakeSpawn();
+    const ch = createOpenClawApprovalChannel({
+      ...CHANNEL_OPTS,
+      spawnImpl: spawn.impl,
+      readReceipt: receiptSequence([{ phase: 'requesting' }]),
+    });
+    const result = await ch.send(NOTIFICATION, { timeoutMs: 5_000 });
+    expect(result).toEqual({ delivered: true });
+    expect(spawn.calls).toHaveLength(1);
+  });
+});
+
 describe('buildCardFields / buildCardRequestParams — what the operator sees', () => {
   test('caps: title ≤ 80, description ≤ 256, even for a pathological command', () => {
     const { title, description } = buildCardFields({
