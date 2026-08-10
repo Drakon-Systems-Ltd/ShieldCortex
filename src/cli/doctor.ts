@@ -19,7 +19,11 @@ import {
   findEoverrideRiskPins,
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
-import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
+import {
+  gatherReconcileInput,
+  reconcilePluginState,
+  readConversationAccessGate,
+} from '../integrations/openclaw-plugin-index.js';
 import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
@@ -30,6 +34,7 @@ import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
+import { CONVERSATION_ACCESS_REMEDY } from '../setup/openclaw.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -2648,6 +2653,78 @@ export async function checkOpenClawPluginLoadState(
   switch (verdict.state) {
     case 'not-installed':
       return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
+    case 'enabled-not-installed':
+      // openclaw.json turns on a plugin that is not on this host. Reporting it
+      // as "skipped (not installed)" — which is what the old default branch's
+      // sibling case did — describes the disk and hides the claim: every
+      // config-reading surface says protection is ON, and the gateway boots
+      // without an interceptor. Install state and claimed state disagree, and
+      // the operator's belief follows the claim.
+      return {
+        label,
+        status: 'fail',
+        message:
+          'openclaw.json ENABLES the realtime plugin but no package is installed on this host — the gateway boots with NO memory firewall and NO action guard while config reports it ON',
+        fix: 'Install the plugin: `openclaw plugins install @drakon-systems/shieldcortex-realtime@latest`, then restart the gateway (or run `shieldcortex repair`, which will do both).',
+      };
+    case 'config-unreadable':
+      // #11: cannot-read is not absent. A truncated or permission-denied
+      // openclaw.json used to collapse into "no entry", which the #222 rule
+      // then convicted as an unprotected wipe — a false red pointing an
+      // operator at a repair for a config that is merely half-written.
+      return {
+        label,
+        status: 'warn',
+        message:
+          '~/.openclaw/openclaw.json exists but could NOT be read or parsed — the plugin\'s enable state is INDETERMINATE. Neither protected nor unprotected is proven',
+        fix: 'Check the file: `node -e "JSON.parse(require(\'fs\').readFileSync(process.env.HOME+\'/.openclaw/openclaw.json\',\'utf8\'))"` — fix the JSON (or the permissions), then re-run doctor.',
+      };
+    case 'installed-not-enabled':
+      // #222: the package is on disk and nothing in config enables it. The old
+      // switch had no case for this state at all, so it fell to `default:` and
+      // printed the green "realtime plugin loaded (roster-confirmed)" tick —
+      // the unprotected state silencing the alarm built to catch it.
+      return {
+        label,
+        status: 'fail',
+        message:
+          'realtime plugin is installed on disk but NOT enabled in openclaw.json — the gateway will boot WITHOUT the interceptor: no memory firewall, no action guard' +
+          (verdict.loadedInLiveRoster === true
+            ? '. The RUNNING gateway still has it loaded from the pre-wipe config, so protection ends at the next restart'
+            : ''),
+        // Not `repair`'s reinstall: the package is already here and correct.
+        fix: 'Re-enable the EXISTING install: `shieldcortex repair` (writes plugins.allow + plugins.entries["shieldcortex-realtime"].enabled = true and reloads the gateway). Nothing is reinstalled.',
+      };
+    case 'intentionally-disabled':
+      // #12: an explicit `enabled: false` is an operator decision, not an
+      // incident. Reporting a human's own deliberate choice back to them as a
+      // red FAIL is how the check that catches the real wipe gets ignored. A
+      // WIPED stanza (no entry at all) is the case above, and it still fails.
+      //
+      // WARN IS DELIBERATE, AND SO IS THE EXIT CODE IT PRODUCES.
+      //
+      // Under `doctorExitCode`, ⚠️ is exit 0 and ❌ is exit 1, so an ordinary
+      // `shieldcortex doctor` on a deliberately-disabled host SUCCEEDS while
+      // printing this warning. That is the intended contract, not an oversight:
+      // an operator who turned the plugin off does not want their scripts to
+      // start failing because of it, and the state is fully described here.
+      //
+      // A fleet that wants "disabled anywhere is a build failure" has a
+      // supported route, and it is `--strict`: it escalates every ⚠️ to exit 1,
+      // so this line gates CI without changing what a human sees. Escalating the
+      // severity itself would take that choice away from both audiences at once
+      // — the operator loses a green run they are entitled to, and CI gains
+      // nothing it could not already have.
+      return {
+        label,
+        status: 'warn',
+        message:
+          'realtime plugin is installed but explicitly disabled in openclaw.json (enabled: false) — this host is running WITHOUT the memory firewall and action guard, which is what disabled means. An operator wrote that, so it is reported as a deliberate state rather than a fault' +
+          (verdict.loadedInLiveRoster === true
+            ? '. The RUNNING gateway still has it loaded from the pre-disable config, so it goes away at the next restart'
+            : ''),
+        fix: 'If that was not intentional, set plugins.entries["shieldcortex-realtime"].enabled = true in ~/.openclaw/openclaw.json and restart the gateway — the package is already installed, nothing needs reinstalling. To make a disabled host fail a pipeline, run `shieldcortex doctor --strict` (⚠️ becomes exit 1); plain `doctor` exits 0 on a deliberate disable by design.',
+      };
     case 'index-unreadable':
       // DIAGNOSTIC-UNAVAILABLE, not a security fail-open: a broken better-sqlite3
       // binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
@@ -2704,17 +2781,163 @@ export async function checkOpenClawPluginLoadState(
         message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it`,
         fix,
       };
-    default:
+    // EXPLICIT, not `default:`. #222 was a state that fell through to a green
+    // tick because no branch claimed it, and a `default: → pass` arm is that
+    // hazard rebuilt: the next state added to PluginLoadState would inherit
+    // "healthy" silently. Only `healthy` may render a pass here; anything
+    // unrecognised lands in the arm below and warns.
+    case 'healthy': {
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
       // canary (that needs gateway consent) — so it must not claim "enforcing"
       // from roster presence alone (#74 attempt #3 was roster-present-but-not-
       // enforcing). Say "loaded (roster-confirmed)"; point at repair's canary. (#74 finding 6)
+      //
+      // #226 adds a second thing "loaded" does not mean. A loaded plugin whose
+      // conversation-access grant is missing has had its llm_input/llm_output
+      // registrations refused by the host: it is loaded, it gates tool calls,
+      // and it scans no conversation content. A green tick that says "loaded"
+      // and stops there is read as "protected".
+      const gate = readConversationAccessGate(home);
+      const loaded = `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`;
+      if (gate.granted === false) {
+        return {
+          label,
+          status: 'warn',
+          message: `${loaded}. NOTE: conversation-hook access is NOT granted, so the gateway refuses this plugin's llm_input/llm_output hooks — tool-call gating is live, conversation scanning is NOT`,
+          fix: `Grant it deliberately: ${CONVERSATION_ACCESS_REMEDY}`,
+        };
+      }
+      return { label, status: 'pass', message: loaded };
+    }
+    default: {
+      // A state the reconciler produced and this renderer does not know. It is
+      // reachable only by adding a PluginLoadState without a case here — which
+      // is exactly how #222 happened — so it reports the gap instead of
+      // inheriting a green tick. `state` is typed `never` here, so a new state
+      // also fails the typecheck before it can ever reach a user.
+      const unknown: never = verdict.state;
       return {
         label,
-        status: 'pass',
-        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+        status: 'warn',
+        message: `plugin load state '${String(unknown)}' is not recognised by this version of doctor — cannot confirm the realtime plugin is loaded (this is a doctor gap, not proof of a problem)`,
+        fix,
       };
+    }
   }
+}
+
+/**
+ * #226 — the conversation-hook access gate.
+ *
+ * Read out of the host's own loader (`dist/loader-*.js` → `registerTypedHook`),
+ * identical in every OpenClaw build inspected:
+ *
+ *   if (isConversationHookName(hookName)) {
+ *     if (record.origin !== "bundled" && policy?.allowConversationAccess !== true) {
+ *       pushDiagnostic({ level: "warn", … }); return;   // registration DROPPED
+ *     }
+ *   }
+ *
+ * ShieldCortex is non-bundled. Without
+ * `plugins.entries.<id>.hooks.allowConversationAccess === true`, every hook on
+ * the conversation plane it registers is discarded at load: `llm_input` and
+ * `llm_output` on every build, and from 2026.5.9-beta.1 — the first whose
+ * `CONVERSATION_HOOK_NAMES` lists it — the `before_agent_run` gate itself. The
+ * plugin still loads, `before_tool_call` still gates, `/shieldcortex-status`
+ * still runs, and no conversation content is scanned by anything. There is no
+ * error: the only trace is a plugin diagnostic in the gateway log.
+ *
+ * That is a claim/reality gap, so it gets its own line rather than a footnote:
+ * an operator reading a page of green ticks must not have to infer it.
+ *
+ * Scope: it evaluates the grant ONLY where the plugin is expected to load. Every
+ * state in which it is not — uninstalled, wiped from config, deliberately
+ * disabled, enabled-but-absent, or an unreadable config — is already owned by
+ * `checkOpenClawPluginLoadState`, which names the state and the right repair. A
+ * second red line here would point at the wrong fix (grant a permission to a
+ * plugin that is not running) and bury the right one.
+ */
+export async function checkOpenClawConversationAccess(
+  home: string = os.homedir(),
+): Promise<CheckResult> {
+  const label = 'OpenClaw conversation access';
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  // This check only has a question to answer when the plugin is expected to
+  // LOAD. The grant governs what a loaded plugin's conversation hooks are
+  // allowed to do; on a host where the plugin is not going to load at all,
+  // there are no hooks for the gateway to refuse, and a second red line about a
+  // missing grant is noise stacked on top of the line that owns the actual
+  // problem. Every state below already has its own verdict in
+  // `checkOpenClawPluginLoadState`, which names the state and its remedy:
+  //
+  //   not-installed          — nothing on the box
+  //   enabled-not-installed  — config claims it, no package (that check FAILS)
+  //   installed-not-enabled  — the #222 wipe (that check FAILS)
+  //   intentionally-disabled — the operator turned it off (that check WARNS)
+  //   config-unreadable      — no verdict is possible at all (that check WARNS)
+  //
+  // Emitting a conversation-access FAIL over any of them tells an operator to
+  // grant a permission to a plugin that is not running — the wrong repair, and
+  // it buries the right one. Deferring is not silence: the load-state line is
+  // louder, and it is the one to act on.
+  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: pkg.version }));
+  const deferred: Record<string, string> = {
+    'not-installed': 'realtime plugin not installed',
+    'enabled-not-installed': 'realtime plugin is enabled in config but not installed — see the plugin load state check',
+    'installed-not-enabled': 'realtime plugin is installed but not enabled in openclaw.json — see the plugin load state check',
+    'intentionally-disabled': 'realtime plugin is deliberately disabled in openclaw.json — see the plugin load state check',
+  };
+  if (verdict.state in deferred) {
+    return { label, status: 'info', message: `skipped (${deferred[verdict.state]})` };
+  }
+  if (verdict.state === 'config-unreadable') {
+    // The one indeterminate case: openclaw.json is there and unparseable, so
+    // neither the enable flag nor the grant can be read. Warn, never fail —
+    // convicting off a file we could not read is the #11 mistake.
+    return {
+      label,
+      status: 'warn',
+      message: 'cannot determine conversation-hook access — ~/.openclaw/openclaw.json exists but could not be read or parsed, so neither the enable state nor the grant is knowable',
+      fix: 'Fix or re-create ~/.openclaw/openclaw.json, then re-run doctor.',
+    };
+  }
+
+  const gate = readConversationAccessGate(home);
+
+  if (gate.granted === null) {
+    // Cannot-read is not "not granted" — the same distinction the reconciler
+    // makes about the enable flag. Never convict off a file we could not parse.
+    return {
+      label,
+      status: 'warn',
+      message: `cannot determine conversation-hook access — ${gate.detail}`,
+      fix: 'Fix or re-create ~/.openclaw/openclaw.json, then re-run doctor.',
+    };
+  }
+
+  if (gate.granted === true) {
+    // Granted is NOT the same as enforcing, and this check must not imply it.
+    // The grant only means the host will accept the registrations; whether the
+    // posture blocks anything is the plugin's business, and whether the hook
+    // exists at all depends on the host build.
+    return {
+      label,
+      status: 'pass',
+      message: 'conversation-hook access granted — the gateway will accept the plugin\'s llm_input/llm_output (and, on 2026.5.9+, before_agent_run) registrations. Acceptance is not enforcement: the posture decides what a detection does',
+    };
+  }
+
+  return {
+    label,
+    status: 'fail',
+    message:
+      `conversation-hook access NOT granted (${gate.detail}) — OpenClaw REFUSES every conversation hook this plugin registers. ` +
+      'The plugin loads and tool-call gating works, but NOTHING on the conversation path is scanned: no llm_input scanning, no llm_output memory capture, and no conversation firewall. Every surface still reports real-time scanning as on',
+    fix: CONVERSATION_ACCESS_REMEDY,
+  };
 }
 
 /**
@@ -3205,6 +3428,13 @@ export async function runDoctorAiSection(
  * and a first run must not fail anyone's pipeline for being a first run.
  * `--strict` opts into escalating ⚠️ as well, for callers that want a
  * zero-tolerance gate.
+ *
+ * That split is the enforcement contract for every DELIBERATE-but-degraded
+ * state — an operator's `enabled: false` being the canonical one (#12/#226).
+ * Such a state warns and exits 0 for the human who chose it, and exits 1 under
+ * `--strict` for the fleet that has decided it is not acceptable. Neither
+ * audience needs the severity itself changed, and changing it would silently
+ * override the other one's policy.
  */
 export function doctorExitCode(results: CheckResult[], opts: { strict?: boolean } = {}): number {
   if (results.some(r => r.status === 'fail')) return 1;
@@ -3246,6 +3476,7 @@ export async function runDoctor(
     checkOpenClawPluginVersion,
     checkOpenClawSkillVersion,
     checkOpenClawPluginLoadState,
+    checkOpenClawConversationAccess,
     checkOpenClawRunningPluginVersion,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,

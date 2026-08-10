@@ -501,19 +501,26 @@ export function formatActionGuardPrompt(toolName: string, v: ToolGuardVerdictLik
 
 // --- Audit Logging (local JSONL) ---
 
-const AUDIT_DIR = join(homedir(), '.shieldcortex', 'audit');
+/** Resolve per write so isolated tests can redirect every realtime audit path.
+ * The conversation hook already honours this variable; the interceptor did not,
+ * which caused otherwise-isolated Action Guard suites to append fabricated
+ * intercept rows to the host's real security audit. */
+function auditDir(): string {
+  const override = process.env.SHIELDCORTEX_AUDIT_DIR;
+  return override?.trim() || join(homedir(), '.shieldcortex', 'audit');
+}
 
 // Issue #95: an unwritable audit sink used to be swallowed by this bare catch —
 // entries silently dropped forever. Still best-effort (an audit failure must
 // never block the agent), but the FIRST failure now warns loudly with the sink
-// path and the error, and later failures keep a drop count for the breadcrumb.
+// path and error. Suppress repeats so a broken disk does not flood gateway logs.
 let auditSinkFailures = 0;
-export function noteAuditSinkFailure(err: unknown): void {
+export function noteAuditSinkFailure(err: unknown, dir: string = auditDir()): void {
   auditSinkFailures++;
   if (auditSinkFailures === 1) {
     const detail = err instanceof Error ? err.message : String(err);
     console.warn(
-      `[shieldcortex] ⚠️ audit sink UNWRITABLE (${AUDIT_DIR}): ${detail} — audit entries are being DROPPED. ` +
+      `[shieldcortex] ⚠️ audit sink UNWRITABLE (${dir}): ${detail} — audit entries are being DROPPED. ` +
       `Fix the directory permissions/disk; enforcement continues but leaves no trail until this is resolved.`,
     );
   }
@@ -521,14 +528,15 @@ export function noteAuditSinkFailure(err: unknown): void {
 export function __resetAuditSinkFailuresForTest(): void { auditSinkFailures = 0; }
 
 function writeAuditEntry(entry: InterceptAuditEntry): void {
+  const dir = auditDir();
   try {
-    mkdirSync(AUDIT_DIR, { recursive: true });
+    mkdirSync(dir, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
-    const file = join(AUDIT_DIR, `realtime-${date}.jsonl`);
+    const file = join(dir, `realtime-${date}.jsonl`);
     appendFileSync(file, JSON.stringify(entry) + '\n');
   } catch (err) {
     // Best-effort — never block on audit failure, but never silent either (#95).
-    noteAuditSinkFailure(err);
+    noteAuditSinkFailure(err, dir);
   }
 }
 

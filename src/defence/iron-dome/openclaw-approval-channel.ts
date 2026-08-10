@@ -193,6 +193,17 @@ export function createOpenClawApprovalChannel(opts: OpenClawApprovalChannelOptio
           reason: 'openclaw approval cards are interactive-only — a denial has no decision left to offer',
         };
       }
+      // #225, same reasoning one step further: a conversation-firewall alert
+      // has no held call at all — no hash, no tool, no decision. It is refused
+      // here BEFORE `buildCardRequestParams` can read fields this notification
+      // does not have (which would raise a card titled "approve undefined?"),
+      // and the caller falls through to a channel that carries plain messages.
+      if (notification.event === 'conversation_threat') {
+        return {
+          delivered: false,
+          reason: 'openclaw approval cards are interactive-only — a conversation-firewall alert has no decision to offer',
+        };
+      }
       const params = buildCardRequestParams(notification);
       const receiptDir = opts.receiptDir ?? join(tmpdir(), 'shieldcortex-approval-receipts');
       const receiptPath = join(receiptDir, `${randomUUID()}.json`);

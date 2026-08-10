@@ -60,8 +60,15 @@
  *   'denied_no_prompt_surface' — the call is DEAD. Nothing is waiting on the
  *                                operator; this is an incident report, and the
  *                                only forward path is authorising a RETRY.
+ *   'conversation_threat'      — the conversation firewall saw something on the
+ *                                INPUT path (#225). There is no held tool call,
+ *                                no approval hash, and nothing for the operator
+ *                                to approve — see ConversationThreatNotification.
  */
-export type OperatorNotificationEvent = 'approval_requested' | 'denied_no_prompt_surface';
+export type OperatorNotificationEvent =
+  | 'approval_requested'
+  | 'denied_no_prompt_surface'
+  | 'conversation_threat';
 
 /** What the judge (approval-judge.ts) found, carried for display only. This
  *  module never re-derives a decision from it — see the module doc above. */
@@ -85,8 +92,13 @@ export interface OperatorNotification {
    *  wording does not match what happened is worse than none: the operator
    *  learns that these messages are approximately true and stops reading them.
    *  Every pre-existing construction site supplies 'approval_requested', which
-   *  is exactly what they all meant before the discriminator existed. */
-  event: OperatorNotificationEvent;
+   *  is exactly what they all meant before the discriminator existed.
+   *
+   *  'conversation_threat' is deliberately NOT assignable here: that event has
+   *  no hash, tool or command, so it gets its own type
+   *  (`ConversationThreatNotification`) rather than this one with holes in it.
+   *  Excluding it also makes the two a real discriminated union. */
+  event: Exclude<OperatorNotificationEvent, 'conversation_threat'>;
   /** Full sha256 from action-approvals.ts's hashToolCall. The one thing every
    *  reply — tap, webhook, or terminal — must be bound to. */
   hash: string;
@@ -124,6 +136,64 @@ export interface OperatorNotification {
   fallbackHint: string;
 }
 
+/**
+ * What the conversation firewall did about what it saw (#225).
+ *
+ *   'blocked'     — posture `enforce` and a dirty verdict: the run did NOT go
+ *                   to the model.
+ *   'observed'    — a dirty verdict under posture `observe`: the run PROCEEDED.
+ *                   Saying "blocked" here would be the same lie #143's event
+ *                   discriminator exists to prevent.
+ *   'unavailable' — the scanner could not be run at all. The turn proceeded
+ *                   UNSCANNED, which is neither clean nor protected and must
+ *                   never be rendered as either.
+ */
+export type ConversationThreatOutcome = 'blocked' | 'observed' | 'unavailable';
+
+/**
+ * A conversation-firewall detection, on its way to a human (#225).
+ *
+ * Deliberately NOT an `OperatorNotification`. There is no held call behind it,
+ * so there is no `hash`, no `tool`, no `command` and no approve/deny pair — and
+ * because those fields do not exist on this type, no channel can render an
+ * Approve button bound to `undefined`, which is exactly what the first cut of
+ * this feature did by casting an ad-hoc `{kind, ...}` object through
+ * `NotifyChannel.send`. A notification the operator can tap and change nothing
+ * is how they learn to ignore the ones that matter.
+ *
+ * What it carries is bounded and derived: a risk SUMMARY from the scanner, the
+ * posture, the outcome, and enough identity to find the session. It never
+ * carries the prompt — the input that tripped a prompt-injection detector is
+ * hostile text by assumption, and forwarding it onto a chat surface would
+ * relay the attack to the operator's phone.
+ */
+export interface ConversationThreatNotification {
+  event: 'conversation_threat';
+  outcome: ConversationThreatOutcome;
+  /** The configured posture at the moment of the decision (off/observe/enforce). */
+  posture: string;
+  /** Scanner verdict summary, e.g. `HIGH (2 detections)`. Never prompt text. */
+  summary: string;
+  /** One-line operator-facing explanation, built by the caller. */
+  reason: string;
+  /** Which conversation, so the operator can go and look. */
+  sessionId?: string;
+  /** Model the run would have gone to, when the host names it. */
+  model?: string;
+  /** Which box. A fleet alert with no host is unactionable. */
+  host?: string;
+  detectedAt: string;
+}
+
+/** Every shape a channel can be handed. */
+export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification;
+
+export function isConversationThreatNotification(
+  n: AnyOperatorNotification,
+): n is ConversationThreatNotification {
+  return (n as { event?: unknown })?.event === 'conversation_threat';
+}
+
 export type ChannelSendResult =
   | { delivered: true }
   | { delivered: false; reason: string };
@@ -142,7 +212,7 @@ export type ChannelSendResult =
  */
 export interface NotifyChannel {
   name: string;
-  send(notification: OperatorNotification, opts: { timeoutMs: number }): Promise<ChannelSendResult>;
+  send(notification: AnyOperatorNotification, opts: { timeoutMs: number }): Promise<ChannelSendResult>;
 }
 
 export interface RequestOperatorApprovalInput {
@@ -154,8 +224,11 @@ export interface RequestOperatorApprovalInput {
   reason: string;
   judge?: NotificationJudgeSummary | null;
   /** Defaults to 'approval_requested' — so a caller written before the
-   *  discriminator existed keeps producing byte-identical notifications. */
-  event?: OperatorNotificationEvent;
+   *  discriminator existed keeps producing byte-identical notifications.
+   *  A conversation-firewall alert is not requested through here: it has no
+   *  hash to bind a reply to. Use `buildConversationThreatNotification` +
+   *  `deliverOperatorNotification`. */
+  event?: Exclude<OperatorNotificationEvent, 'conversation_threat'>;
   /** Only meaningful with event: 'denied_no_prompt_surface'; ignored otherwise
    *  rather than rendered, so a caller cannot accidentally tell the operator an
    *  action was blocked when it is merely held. */
@@ -254,11 +327,97 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
   return notification;
 }
 
+/** The bounded fields a caller may supply for a conversation-firewall alert.
+ *  Everything here is truncated and type-checked before it becomes a payload:
+ *  the caller is the OpenClaw plugin, running inside a gateway whose input is
+ *  by definition untrusted on this path. */
+export interface ConversationThreatInput {
+  outcome: ConversationThreatOutcome;
+  posture: string;
+  summary: string;
+  reason: string;
+  sessionId?: string;
+  model?: string;
+  host?: string;
+  /** ISO timestamp; supplied by the caller so a test can pin it. */
+  detectedAt: string;
+}
+
+/**
+ * Build a conversation-threat notification (#225). The single construction
+ * point, mirroring `buildNotification` for the approval path: every channel
+ * then sees byte-identical, bounded fields, and no caller can smuggle prompt
+ * text through by putting it in a field this builder does not truncate.
+ */
+export function buildConversationThreatNotification(
+  input: ConversationThreatInput,
+): ConversationThreatNotification {
+  const n: ConversationThreatNotification = {
+    event: 'conversation_threat',
+    outcome: input.outcome,
+    posture: truncate(String(input.posture ?? 'unknown'), 32),
+    summary: truncate(String(input.summary ?? 'unspecified'), MAX_CONTEXT_CHARS),
+    reason: truncate(String(input.reason ?? ''), MAX_CONTEXT_CHARS),
+    detectedAt: input.detectedAt,
+  };
+  const sessionId = optionalText(input.sessionId);
+  if (sessionId) n.sessionId = sessionId;
+  const model = optionalText(input.model);
+  if (model) n.model = model;
+  const host = optionalText(input.host);
+  if (host) n.host = host;
+  return n;
+}
+
+/**
+ * Render a conversation-firewall alert (#225).
+ *
+ * Three properties this rendering must keep, all of them learned the expensive
+ * way in #143: it names WHAT HAPPENED to the turn before anything else (an
+ * "observed" alert that reads like a block teaches operators the alerts are
+ * approximately true); it offers NO approve/deny affordance, because there is
+ * nothing to approve; and it never prints the offending text.
+ */
+export function formatConversationThreatNotification(n: ConversationThreatNotification): string {
+  const headline =
+    n.outcome === 'blocked'
+      ? '🛡️ ShieldCortex — conversation BLOCKED: this turn did NOT reach the model'
+      : n.outcome === 'unavailable'
+        ? '🛡️ ShieldCortex — conversation NOT SCANNED: the scanner was unavailable, the turn ran unscanned'
+        : '🛡️ ShieldCortex — conversation threat detected: the turn RAN (observe posture, nothing was blocked)';
+  const lines = [headline, ''];
+  lines.push(
+    `Verdict:   ${n.summary}`,
+    `Posture:   ${n.posture}`,
+    `Outcome:   ${n.outcome}`,
+    `Detail:    ${n.reason}`,
+  );
+  if (n.sessionId) lines.push(`Session:   ${n.sessionId}`);
+  if (n.model) lines.push(`Model:     ${n.model}`);
+  if (n.host) lines.push(`Host:      ${n.host}`);
+  lines.push(`At:        ${n.detectedAt}`);
+  lines.push('');
+  // No [Approve]/[Deny]: there is no held call and no hash. What an operator
+  // can actually do is change the posture or go and read the session.
+  lines.push(
+    n.outcome === 'observed'
+      ? 'Nothing was blocked. To make this posture stop the turn, set interceptor.conversation.posture=enforce.'
+      : n.outcome === 'unavailable'
+        ? 'The turn was NOT scanned. Check the ShieldCortex install on this host — this is an unprotected turn, not a clean one.'
+        : 'The turn was refused before it reached the model. No action is pending.',
+  );
+  lines.push('The prompt itself is deliberately NOT included in this alert.');
+  return truncate(lines.join('\n'), 4_000);
+}
+
 /** Human-readable rendering, used by channels that send plain text (webhook
  *  bodies, gateway chat messages). Channels are free to build their own
  *  richer presentation (inline buttons, etc.) from the structured
  *  `OperatorNotification` instead — this is the lowest common denominator. */
-export function formatOperatorNotification(n: OperatorNotification): string {
+export function formatOperatorNotification(n: AnyOperatorNotification): string {
+  // #225 alerts have no hash, no tool and no command — they get their own
+  // rendering rather than an approval layout with empty fields in it.
+  if (isConversationThreatNotification(n)) return formatConversationThreatNotification(n);
   // A stale caller (an older dist, a plugin built before the discriminator)
   // can hand over an object with no `event` at all. Anything that is not
   // EXACTLY the denial reads as the approval wording — the same value every
@@ -318,7 +477,7 @@ export function formatOperatorNotification(n: OperatorNotification): string {
  */
 async function tryChannel(
   channel: NotifyChannel,
-  notification: OperatorNotification,
+  notification: AnyOperatorNotification,
   timeoutMs: number,
 ): Promise<ChannelSendResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -368,15 +527,48 @@ export async function requestOperatorApproval(
   input: RequestOperatorApprovalInput,
   deps: RequestOperatorApprovalDeps,
 ): Promise<RequestOperatorApprovalResult> {
-  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const notification = buildNotification(input);
-  const attempts: RequestOperatorApprovalResult['attempts'] = [];
 
   const candidates: NotifyChannel[] = [];
   if (deps.attended && deps.tui) candidates.push(deps.tui);
   if (deps.channel) candidates.push(deps.channel);
 
-  for (const ch of candidates) {
+  return deliverOperatorNotification(notification, {
+    channels: candidates,
+    timeoutMs: deps.timeoutMs,
+    onAttempt: deps.onAttempt,
+  });
+}
+
+export interface DeliverNotificationDeps {
+  /** Tried in order; the first delivery wins. An empty list is the honest
+   *  "nothing configured" case and returns `deliveredVia: null` without
+   *  pretending an attempt was made. */
+  channels: NotifyChannel[];
+  timeoutMs?: number;
+  onAttempt?: (channel: string, result: ChannelSendResult) => void;
+}
+
+/**
+ * Hand an already-built notification to the first channel that will take it
+ * (#225 uses this directly; `requestOperatorApproval` is now a thin wrapper
+ * that builds the approval-shaped notification and calls straight through).
+ *
+ * ONE delivery core, deliberately: the #225 conversation sink must not grow a
+ * second transport with its own timeout handling and its own idea of what
+ * "delivered" means. Every guarantee `tryChannel` makes — bounded deadline,
+ * every failure mode normalised, nothing but the boolean read back from a
+ * channel — therefore holds for conversation alerts too, unchanged.
+ */
+export async function deliverOperatorNotification(
+  notification: AnyOperatorNotification,
+  deps: DeliverNotificationDeps,
+): Promise<RequestOperatorApprovalResult> {
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const attempts: RequestOperatorApprovalResult['attempts'] = [];
+
+  for (const ch of deps.channels ?? []) {
+    if (!ch || typeof ch.send !== 'function') continue;
     const result = await tryChannel(ch, notification, timeoutMs);
     attempts.push({ channel: ch.name, result });
     deps.onAttempt?.(ch.name, result);

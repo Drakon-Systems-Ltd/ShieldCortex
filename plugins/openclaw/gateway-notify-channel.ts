@@ -48,6 +48,7 @@ export interface JudgeSummaryLike {
 
 /** Mirrors `OperatorNotification` in operator-notify.ts. */
 export interface OperatorNotificationLike {
+  event?: string;
   hash: string;
   shortHash: string;
   tool: string;
@@ -59,26 +60,55 @@ export interface OperatorNotificationLike {
   fallbackHint: string;
 }
 
+/** Mirrors `ConversationThreatNotification` in operator-notify.ts (#225).
+ *  No hash, no tool, no command — see that type's doc for why the absence is
+ *  the point. */
+export interface ConversationThreatNotificationLike {
+  event: 'conversation_threat';
+  outcome: 'blocked' | 'observed' | 'unavailable';
+  posture: string;
+  summary: string;
+  reason: string;
+  sessionId?: string;
+  model?: string;
+  host?: string;
+  detectedAt: string;
+}
+
+export type AnyNotificationLike = OperatorNotificationLike | ConversationThreatNotificationLike;
+
 export type ChannelSendResultLike = { delivered: true } | { delivered: false; reason: string };
 
 /** Mirrors `NotifyChannel` in operator-notify.ts. */
 export interface NotifyChannelLike {
   name: string;
-  send(notification: OperatorNotificationLike, opts: { timeoutMs: number }): Promise<ChannelSendResultLike>;
+  send(notification: AnyNotificationLike, opts: { timeoutMs: number }): Promise<ChannelSendResultLike>;
 }
 
 /** What the gateway seam is handed — trusted-or-bounded fields only, same
- *  discipline as `GatewayCompletionRequest` in broker-invoker.ts. */
+ *  discipline as `GatewayCompletionRequest` in broker-invoker.ts.
+ *
+ *  The approval fields are OPTIONAL because #225's conversation alert has none
+ *  of them. A host rendering buttons off `approveCommand` must get `undefined`
+ *  and draw nothing, rather than a command string ending in "undefined". */
 export interface GatewayOperatorMessage {
   text: string;
-  hash: string;
-  shortHash: string;
-  tool: string;
-  command: string;
-  signals: string[];
-  severity: string;
-  approveCommand: string;
-  denyCommand: string;
+  event: string;
+  hash?: string;
+  shortHash?: string;
+  tool?: string;
+  command?: string;
+  signals?: string[];
+  severity?: string;
+  approveCommand?: string;
+  denyCommand?: string;
+  /** #225 fields, present only on a conversation alert. */
+  outcome?: string;
+  posture?: string;
+  summary?: string;
+  sessionId?: string;
+  model?: string;
+  host?: string;
 }
 
 /** The optional seam. Structural, so any gateway shape that fits can supply it. */
@@ -121,9 +151,69 @@ function renderText(n: OperatorNotificationLike): string {
   return lines.join('\n').slice(0, 4_000);
 }
 
-function buildMessage(n: OperatorNotificationLike): GatewayOperatorMessage {
+export function isConversationThreatLike(
+  n: AnyNotificationLike,
+): n is ConversationThreatNotificationLike {
+  return (n as { event?: unknown })?.event === 'conversation_threat';
+}
+
+/**
+ * #225's rendering. Kept in sync BY HAND with
+ * `formatConversationThreatNotification` in operator-notify.ts, for the same
+ * cross-boundary reason as `renderText` above, and pinned by this file's tests.
+ *
+ * Says what happened to the turn FIRST, and offers no affordance: there is no
+ * held call behind a conversation alert, so an Approve line here would be a
+ * button wired to nothing.
+ */
+function renderThreatText(n: ConversationThreatNotificationLike): string {
+  const headline =
+    n.outcome === 'blocked'
+      ? '🛡️ ShieldCortex — conversation BLOCKED: this turn did NOT reach the model'
+      : n.outcome === 'unavailable'
+        ? '🛡️ ShieldCortex — conversation NOT SCANNED: the scanner was unavailable, the turn ran unscanned'
+        : '🛡️ ShieldCortex — conversation threat detected: the turn RAN (observe posture, nothing was blocked)';
+  const lines = [
+    headline,
+    '',
+    `Verdict:   ${n.summary}`,
+    `Posture:   ${n.posture}`,
+    `Outcome:   ${n.outcome}`,
+    `Detail:    ${n.reason}`,
+  ];
+  if (n.sessionId) lines.push(`Session:   ${n.sessionId}`);
+  if (n.model) lines.push(`Model:     ${n.model}`);
+  if (n.host) lines.push(`Host:      ${n.host}`);
+  lines.push(`At:        ${n.detectedAt}`);
+  lines.push('');
+  lines.push(
+    n.outcome === 'observed'
+      ? 'Nothing was blocked. To make this posture stop the turn, set interceptor.conversation.posture=enforce.'
+      : n.outcome === 'unavailable'
+        ? 'The turn was NOT scanned. Check the ShieldCortex install on this host — this is an unprotected turn, not a clean one.'
+        : 'The turn was refused before it reached the model. No action is pending.',
+  );
+  lines.push('The prompt itself is deliberately NOT included in this alert.');
+  return lines.join('\n').slice(0, 4_000);
+}
+
+function buildMessage(n: AnyNotificationLike): GatewayOperatorMessage {
+  if (isConversationThreatLike(n)) {
+    return {
+      text: renderThreatText(n),
+      event: 'conversation_threat',
+      outcome: n.outcome,
+      posture: n.posture,
+      summary: n.summary,
+      severity: n.outcome === 'blocked' ? 'blocked' : n.outcome === 'unavailable' ? 'unavailable' : 'observed',
+      ...(n.sessionId ? { sessionId: n.sessionId } : {}),
+      ...(n.model ? { model: n.model } : {}),
+      ...(n.host ? { host: n.host } : {}),
+    };
+  }
   return {
     text: renderText(n),
+    event: n.event === 'denied_no_prompt_surface' ? 'denied_no_prompt_surface' : 'approval_requested',
     hash: n.hash,
     shortHash: n.shortHash,
     tool: n.tool,

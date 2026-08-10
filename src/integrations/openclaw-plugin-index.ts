@@ -5,6 +5,7 @@ import semver from 'semver';
 import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
+  resolveLocalExtensionInstall,
 } from './openclaw-plugin-state.js';
 import { readLatestBootRoster, findRegistrationSince } from './openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from './openclaw-gateway-process.js';
@@ -62,19 +63,71 @@ export interface InstallsJsonRecord {
   installPath?: string | null;
 }
 
+/**
+ * What `~/.openclaw/openclaw.json` says about this plugin — INCLUDING whether
+ * we could read the file at all.
+ *
+ * `readable` is the field this type exists for. Before it, a truncated,
+ * permission-denied or half-written openclaw.json was caught by the same
+ * `catch` as a file with no entry, and both produced `{ enabled: null, inAllow:
+ * false }`. "We could not read the config" then classified identically to "the
+ * config says nothing" — so an unreadable file became a confident verdict about
+ * a state we had no evidence for, in whichever direction the rules happened to
+ * fall. Cannot-read is now its own answer.
+ *
+ * `present` distinguishes the two readable-absence cases: no file on disk at
+ * all (a host that never configured OpenClaw) versus a file that parsed fine
+ * and simply has no entry for us (the #222 wipe).
+ */
+export interface ConfigEnableState {
+  enabled: boolean | null;
+  inAllow: boolean;
+  /** False ⇒ the file exists but could not be read/parsed. Optional so
+   *  pre-existing callers and fixtures keep meaning "readable". */
+  readable?: boolean;
+  /** False ⇒ no openclaw.json on disk. Optional for the same reason. */
+  present?: boolean;
+}
+
 export interface ReconcileInput {
   pluginId: string;
   /** The version the package expects to be enforcing (pkg.version). */
   expectedVersion: string;
   /** `~/.openclaw/openclaw.json` → plugins.entries[id].enabled + plugins.allow. */
-  config: { enabled: boolean | null; inAllow: boolean };
+  config: ConfigEnableState;
   /** Legacy installs.json record, or null when absent. */
   installsJson: InstallsJsonRecord | null;
   /** Parsed latest SQLite index row, or null when the index is unreadable. */
   index: PluginIndexRow | null;
   /** Ground-truth version from the plugin's on-disk package.json, or null. */
   onDiskVersion: string | null;
-  /** `~/.openclaw/npm/projects/*` dir names matching the plugin. */
+  /**
+   * A VALID plugin build found on disk, with its version unread or unreadable
+   * (#226).
+   *
+   * The trusted-local-copy install — `~/.openclaw/extensions/<id>` — has no
+   * installs.json record, no SQLite index record and no npm project dir, so
+   * before this field the reconciler saw a host with a working, gateway-loaded
+   * plugin and concluded nothing was installed. Paired with the enabled config
+   * stanza that same installer writes, the verdict was `enabled-not-installed`:
+   * a red FAIL saying the box boots unprotected, about a protected box.
+   *
+   * It is a PATH, not a directory listing: `resolveLocalExtensionInstall`
+   * requires both `index.js` and `openclaw.plugin.json` before returning one,
+   * so a bare or half-copied directory left behind by an interrupted install
+   * does not qualify. Trading the false FAIL for a false PASS would be the
+   * worse bug — that is the #222 shape.
+   */
+  onDiskInstallPath?: string | null;
+  /**
+   * `~/.openclaw/npm/projects/*` dir names matching the plugin.
+   *
+   * A DUPLICATE-detection signal, not an installation one (#226). An uninstall
+   * routinely leaves one of these behind — `openclaw plugins uninstall` drops
+   * the install record and the config stanza and does not always reap the npm
+   * project dir — so a directory on its own proves nothing about whether a
+   * plugin is installed. See the `installed` computation below.
+   */
   projectDirs?: string[];
   /**
    * Plugin ids named on the RUNNING gateway's boot roster line, or null when
@@ -95,8 +148,15 @@ export interface ReconcileInput {
 export type PluginLoadState =
   | 'healthy'
   | 'not-installed'
+  /** Config says enabled, but there is no package on this host to enable. */
+  | 'enabled-not-installed'
+  /** Installed on disk, nothing in config enables it (the #222 wipe). */
   | 'installed-not-enabled'
+  /** Installed, explicitly `enabled: false`, with no evidence it was ever on. */
+  | 'intentionally-disabled'
   | 'enabled-not-loaded'
+  /** openclaw.json is on disk but unreadable — no verdict is possible. */
+  | 'config-unreadable'
   | 'index-unreadable'
   | 'load-unproven'
   | 'version-regressed'
@@ -108,6 +168,11 @@ export type ReconcileSeverity = 'ok' | 'warn' | 'fail';
 export type RecommendedAction =
   | 'none'
   | 'install'
+  /** Flip the EXISTING install back on in openclaw.json. Never reinstalls: the
+   *  package is already on disk and byte-identical to what was installed, so
+   *  re-running the installer churns the gateway and (per #214) can wipe the
+   *  very stanza we are trying to write. */
+  | 'enable-in-config'
   | 'update-openclaw-tracked'
   | 'reinstall-pinned'
   | 'dedupe-and-reload';
@@ -131,6 +196,11 @@ export interface ReconcileVerdict {
   /** The SQLite install index was actually readable (false ⇒ we CANNOT know
    * whether the plugin is loaded — never claim UNPROTECTED off an unreadable index). */
   indexReadable: boolean;
+  /** `~/.openclaw/openclaw.json` parsed (false ⇒ every config-derived field
+   *  below is absence-of-evidence, not evidence-of-absence). */
+  configReadable: boolean;
+  /** An openclaw.json exists on disk at all. */
+  configPresent: boolean;
   /** An npm install record exists in the SQLite index ⇒ OpenClaw-tracked. */
   openClawTracked: boolean;
   /** The index warning string names this plugin (benign on its own). */
@@ -179,9 +249,27 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const indexVersion = indexRecord?.version ?? indexRecord?.resolvedVersion ?? null;
   const onDiskVersion = input.onDiskVersion ?? null;
 
-  const installed = Boolean(
-    input.installsJson || onDiskVersion || indexRecord || projectDirs.length > 0,
-  );
+  // What counts as INSTALLED (#226). Four sources, all of them records of an
+  // install having been performed and still standing:
+  //
+  //   - installs.json (the legacy install record)
+  //   - an on-disk package.json we could read a version out of
+  //   - OpenClaw's own install-index record
+  //   - a VALID trusted-local-copy build in ~/.openclaw/extensions (index.js +
+  //     openclaw.plugin.json both present — see `onDiskInstallPath`). This is
+  //     the fallback install path, and none of the three layers above records
+  //     it, so without this the whole install read as absent.
+  //
+  // `projectDirs` is deliberately NOT one of them. It is an npm project
+  // directory under `~/.openclaw/npm/projects`, and a deliberate uninstall
+  // routinely leaves an empty one behind: the install record goes, the config
+  // stanza goes, the directory stays. Counting it made a cleanly uninstalled
+  // host classify as installed-not-enabled and report a red FAIL — "the gateway
+  // will boot WITHOUT the interceptor" — about a plugin the operator removed on
+  // purpose. It stays in the input because it is real evidence of a DUPLICATE
+  // (see the `projectDirs.length > 1` branch below); it is just not evidence of
+  // an installation.
+  const installed = Boolean(input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath);
 
   // The index warning is present even on healthy hosts (it names every plugin
   // whose legacy/SQLite metadata differs), so it is a signal, not a verdict.
@@ -206,12 +294,18 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
 
   const indexReadable = index != null;
+  // Optional on the input so every pre-existing fixture keeps its meaning: a
+  // caller that says nothing about readability is one that read the config.
+  const configReadable = config.readable !== false;
+  const configPresent = config.present !== false;
 
   const base = {
     enabledInConfig,
     loadedInIndex,
     loadedInLiveRoster,
     indexReadable,
+    configReadable,
+    configPresent,
     openClawTracked,
     indexWarnsConflict,
     metadataConflict,
@@ -223,8 +317,32 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
 
   // ── Priority order: most severe first ────────────────────────────────────
 
+  // 0. THE CONFIG ITSELF IS UNREADABLE. Everything below reasons from
+  //    `enabledInConfig`, which is derived from a file we just failed to parse.
+  //    Collapsing that into "no entry" manufactures a verdict out of a missing
+  //    measurement: on a truncated openclaw.json it reads as the #222 wipe
+  //    (false red, sends an operator to repair a config that is merely
+  //    half-written), and on a host whose file we cannot open it would just as
+  //    happily read as healthy. Neither is knowledge. Report the gap.
+  if (!configReadable) {
+    reasons.push('~/.openclaw/openclaw.json exists but could NOT be read or parsed (truncated, malformed, or permission-denied) — the enable state is INDETERMINATE, not absent; no protection verdict can be drawn from it');
+    if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway has the plugin loaded, so the box is protected right now — but what it will load at the next restart depends on this unreadable file');
+    else if (loadedInIndex) reasons.push("OpenClaw's install index lists it as enabled — install state, not load state, and it cannot substitute for the config");
+    return { ...base, state: 'config-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+  }
+
   // 1. Nothing installed anywhere.
   if (!installed) {
+    // 1a. …but the config asks for it. This is NOT the benign "nothing is
+    //     installed so nothing is claimed" case: openclaw.json enables a
+    //     security plugin that is not on this host, so the gateway boots
+    //     without it while every config-reading surface says it is on. The old
+    //     code returned not-installed/ok here and doctor printed
+    //     "skipped (realtime plugin not installed)" over exactly that.
+    if (enabledInConfig) {
+      reasons.push('openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON');
+      return { ...base, state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install', reasons };
+    }
     reasons.push('plugin not installed on this host (no config, installs.json, index record, or on-disk build)');
     return { ...base, state: 'not-installed', severity: 'ok', recommendedAction: 'install', reasons };
   }
@@ -243,15 +361,50 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   //     product is running, and the next gateway restart will boot without it.
   //     That is a fail, and it must be evaluated BEFORE any enabledInConfig
   //     gate can skip it.
+  //
+  //     One case inside it is NOT a fault: an explicit `enabled: false`. That
+  //     is a sentence an operator typed. A security check that reports a
+  //     human's own decision back to them as a red FAIL is training them to
+  //     ignore it — the same "cry wolf" failure #142 fixed on the roster side.
+  //     A wiped stanza (no entry at all) still fails: nobody typed that.
   if (!enabledInConfig) {
+    // #226: `enabled: false` is ALWAYS the intentional case, with no evidence
+    // test in front of it. The first cut gated it on "was this plugin ever
+    // running here" (a stale install-index row, or the live roster) and called
+    // the answer prior-enablement evidence. It is not evidence of anything of
+    // the kind: the index lags config by design and still lists a plugin the
+    // operator disabled minutes ago, and the running gateway is *expected* to
+    // still have it loaded from the pre-disable config. So the ordinary
+    // sequence — edit openclaw.json, run doctor before restarting — hit both
+    // branches and reported an operator's deliberate, correct action as a
+    // security failure, which is exactly the alarm-fatigue this rule set is
+    // trying to avoid. What the disable DID do to the host is still said out
+    // loud below; it is simply not called a fault.
+    if (config.enabled === false) {
+      reasons.push(`installed on disk and explicitly disabled in openclaw.json (plugins.entries.${pluginId}.enabled = false) — an operator wrote that, so it reads as an INTENTIONAL disable, not a fault`);
+      reasons.push('the host is running WITHOUT the memory firewall and action guard: that is what disabled means. Set enabled back to true to restore protection — the package is already installed, nothing needs reinstalling');
+      if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway still has it loaded from the config as it was before the disable — protection ends at the next restart');
+      // `warn`, and that maps to exit 0 in an ordinary `shieldcortex doctor`
+      // run: see doctorExitCode(). A fleet that wants a disabled host to fail
+      // its pipeline uses `doctor --strict`, which escalates every ⚠️ to exit 1.
+      // Both audiences are served without either overriding the other, which is
+      // why this severity stays `warn` rather than being promoted to `fail`.
+      return { ...base, state: 'intentionally-disabled', severity: 'warn', recommendedAction: 'none', reasons };
+    }
+
     reasons.push('installed on disk but NOT enabled in openclaw.json (entry missing/disabled and not in plugins.allow) — the gateway will boot WITHOUT the interceptor: no memory firewall, no action guard');
     if (loadedInIndex) reasons.push('the SQLite install index still lists it as enabled — the index lags a config wipe; config decides what loads at the next restart');
     if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway did load it — from the config as it was BEFORE the wipe; protection ends at the next restart');
+    // Repair by ENABLING the install that is already here. The old routing sent
+    // this state to `openclaw plugins update` / `plugins install --force`,
+    // which reinstalls a package that is present and correct and does not
+    // write the enable flag at all — so remediation ran, reported success, and
+    // left the config exactly as unprotected as it found it.
     return {
       ...base,
       state: 'installed-not-enabled',
       severity: 'fail',
-      recommendedAction: openClawTracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
+      recommendedAction: 'enable-in-config',
       reasons,
     };
   }
@@ -350,6 +503,9 @@ export type ReconcileStepKind =
   | 'openclaw-update'
   | 'openclaw-install-pinned'
   | 'openclaw-install'
+  /** Write `plugins.entries[id].enabled = true` (+ `plugins.allow`) back into
+   *  openclaw.json, merge-preserving. The package is already on disk. */
+  | 'enable-plugin-config'
   | 'prune-duplicate-dirs'
   | 'gateway-reload'
   | 'self-check';
@@ -405,6 +561,18 @@ export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOption
   };
 
   switch (verdict.recommendedAction) {
+    case 'enable-in-config':
+      // No install step, deliberately. The bug this routing replaces sent an
+      // installed-but-disabled host through `plugins install --force`: a
+      // reinstall of a package that is already correct, which does not touch
+      // the enable flag, so the plan "succeeded" and the host stayed off.
+      steps.push({
+        kind: 'enable-plugin-config',
+        description: 'enable the EXISTING install in openclaw.json (plugins.allow + plugins.entries[id].enabled = true) — the package is already on disk, nothing is reinstalled',
+      });
+      reloadThenVerify();
+      break;
+
     case 'update-openclaw-tracked':
       pruneStep();
       steps.push({
@@ -533,21 +701,124 @@ export interface GatherOptions {
   readLiveRoster?: () => string[] | null;
 }
 
-function readConfigEnable(home: string, pluginId: string): { enabled: boolean | null; inAllow: boolean } {
+/**
+ * Read the enable state out of `~/.openclaw/openclaw.json`, keeping the three
+ * outcomes apart: parsed, absent, and UNREADABLE.
+ *
+ * The old body had one `catch` for all of them and returned `{ enabled: null,
+ * inAllow: false }` — so a truncated or permission-denied config was reported
+ * as a config that simply says nothing, and the reconciler then drew a
+ * confident protection verdict from a file it had never read.
+ */
+export function readConfigEnable(home: string, pluginId: string): ConfigEnableState {
+  const configPath = path.join(home, '.openclaw', 'openclaw.json');
+  let raw: string;
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')) as {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (err) {
+    // ENOENT is a real answer: there is no config, so nothing enables us. Any
+    // other read failure (EACCES, EISDIR, I/O) is a missing measurement.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return { enabled: null, inAllow: false, readable: true, present: false };
+    return { enabled: null, inAllow: false, readable: false, present: true };
+  }
+  try {
+    const cfg = JSON.parse(raw) as {
       plugins?: { entries?: Record<string, { enabled?: unknown }>; allow?: unknown };
     };
+    // JSON.parse happily accepts `"x"`, `null` and `7`. A config that is not an
+    // object is not a config we have read the plugin stanza out of.
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+      return { enabled: null, inAllow: false, readable: false, present: true };
+    }
     const entry = cfg.plugins?.entries?.[pluginId];
     const enabled = entry && typeof entry.enabled === 'boolean' ? entry.enabled : null;
     const allow = Array.isArray(cfg.plugins?.allow) ? (cfg.plugins!.allow as unknown[]) : [];
     const inAllow = allow.some(
       (e) => typeof e === 'string' && (e === pluginId || e.endsWith(`/${pluginId}`) || e.includes(`/${pluginId}/`)),
     );
-    return { enabled, inAllow };
+    return { enabled, inAllow, readable: true, present: true };
   } catch {
-    return { enabled: null, inAllow: false };
+    // Malformed/truncated JSON — the file is there, we just cannot know what it says.
+    return { enabled: null, inAllow: false, readable: false, present: true };
   }
+}
+
+/**
+ * The conversation-hook access gate, as OpenClaw's plugin loader enforces it.
+ *
+ * The rule, read out of the loader that applies it (`dist/loader-*.js`,
+ * `registerTypedHook`) and identical in every build inspected:
+ *
+ *   if (isConversationHookName(hookName)) {
+ *     if (record.origin !== "bundled" && policy?.allowConversationAccess !== true) {
+ *       pushDiagnostic({ level: "warn", … }); return;   // hook silently dropped
+ *     }
+ *   }
+ *
+ * What counts as a conversation hook GREW. From the published npm artifacts'
+ * own `hook-types.d.ts`:
+ *
+ *   ≤2026.5.7        CONVERSATION_HOOK_NAMES = llm_input, llm_output,
+ *                    before_agent_finalize, agent_end. `before_agent_run` does
+ *                    not appear anywhere in the file (0 hits).
+ *   2026.5.9-beta.1+ …the same, plus before_model_resolve, before_agent_reply
+ *                    AND before_agent_run — so from that build on, the grant
+ *                    also gates the conversation firewall's enforcement point.
+ *                    (Still true in 2026.7.1.)
+ *
+ * ShieldCortex is a non-bundled plugin, so WITHOUT
+ * `plugins.entries.<id>.hooks.allowConversationAccess = true` its `llm_input`
+ * and `llm_output` registrations are discarded at load with nothing louder than
+ * a plugin diagnostic — and from 2026.5.9-beta.1 on, `before_agent_run` with
+ * them. The plugin still loads, `before_tool_call` still gates, and every
+ * ShieldCortex surface still says realtime scanning is on — while no
+ * conversation content is scanned at all.
+ *
+ * `granted: null` means we could not read the config, never "not granted": the
+ * same cannot-read/absent distinction the reconciler makes above.
+ */
+export interface ConversationAccessGate {
+  granted: boolean | null;
+  /** The raw value found, for reporting an explicit `false` distinctly. */
+  raw: unknown;
+  detail: string;
+}
+
+export function readConversationAccessGate(home: string, pluginId: string = REALTIME_PLUGIN_ID): ConversationAccessGate {
+  const configPath = path.join(home, '.openclaw', 'openclaw.json');
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') {
+      return { granted: false, raw: undefined, detail: 'no ~/.openclaw/openclaw.json — the gate is unset, so conversation hooks are dropped' };
+    }
+    return { granted: null, raw: undefined, detail: 'openclaw.json could not be read or parsed — cannot tell whether the gate is set' };
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    return { granted: null, raw: undefined, detail: 'openclaw.json did not parse to an object — cannot tell whether the gate is set' };
+  }
+  const entry = (cfg as { plugins?: { entries?: Record<string, unknown> } }).plugins?.entries?.[pluginId];
+  const hooks = entry && typeof entry === 'object' && !Array.isArray(entry)
+    ? (entry as { hooks?: unknown }).hooks
+    : undefined;
+  const raw = hooks && typeof hooks === 'object' && !Array.isArray(hooks)
+    ? (hooks as { allowConversationAccess?: unknown }).allowConversationAccess
+    : undefined;
+  // Strict `true`, exactly as the host tests it (`explicitConversationAccess !== true`).
+  if (raw === true) {
+    return { granted: true, raw, detail: `plugins.entries.${pluginId}.hooks.allowConversationAccess = true` };
+  }
+  return {
+    granted: false,
+    raw,
+    detail:
+      raw === undefined
+        ? `plugins.entries.${pluginId}.hooks.allowConversationAccess is not set`
+        : `plugins.entries.${pluginId}.hooks.allowConversationAccess = ${JSON.stringify(raw)} (the host accepts only exactly true)`,
+  };
 }
 
 function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRecord | null {
@@ -616,6 +887,10 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     installsJson: readInstallsJsonRecord(home, pluginId),
     index: readIndex(home),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
+    // #226: the trusted-local-copy build, only when it is a REAL one (index.js
+    // + openclaw.plugin.json). Kept separate from `onDiskVersion` so a valid
+    // copy whose manifest version we could not read still counts as installed.
+    onDiskInstallPath: resolveLocalExtensionInstall(home),
     projectDirs: scanProjectDirs(home, pluginId),
     liveRoster,
     registrationSeenAfterBoot,

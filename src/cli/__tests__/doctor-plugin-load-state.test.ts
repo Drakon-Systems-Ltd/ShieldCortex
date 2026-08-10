@@ -31,7 +31,18 @@ function setup(opts: { enabled: boolean; roster: Array<{ pluginId: string; enabl
   fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ version: opts.onDisk }));
   fs.writeFileSync(
     path.join(oc, 'openclaw.json'),
-    JSON.stringify({ plugins: { entries: { [PLUGIN]: { enabled: opts.enabled } }, allow: [PLUGIN] } }),
+    // #226: a fully-registered stanza now also carries the conversation-hook
+    // grant. Without it OpenClaw refuses the plugin's llm_input/llm_output
+    // registrations, and the load-state check says so rather than green-ticking
+    // — that downgrade has its own coverage in
+    // doctor-conversation-access-226.test.ts. These fixtures are about LOAD
+    // state, so they grant it and keep the two concerns separate.
+    JSON.stringify({
+      plugins: {
+        entries: { [PLUGIN]: { enabled: opts.enabled, hooks: { allowConversationAccess: true } } },
+        allow: [PLUGIN],
+      },
+    }),
   );
   fs.writeFileSync(
     path.join(oc, 'plugins', 'installs.json'),

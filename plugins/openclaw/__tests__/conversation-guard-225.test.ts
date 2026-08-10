@@ -45,8 +45,8 @@ describe('#225 conversationPosture — config resolution', () => {
 });
 
 describe('#225 evaluateConversationRun — the decision, not the plumbing', () => {
-  const dirty = { clean: false, summary: 'HIGH (2 detections)' };
-  const clean = { clean: true, summary: 'unknown' };
+  const dirty = { clean: false, summary: 'HIGH (2 detections)', available: true };
+  const clean = { clean: true, summary: 'unknown', available: true };
 
   it('enforce + dirty → blocks, and the reason names the verdict', () => {
     const d = evaluateConversationRun('enforce', dirty);
@@ -74,16 +74,41 @@ describe('#225 evaluateConversationRun — the decision, not the plumbing', () =
 
   it('off → no scan, no audit, no notify, even on a dirty verdict', () => {
     const d = evaluateConversationRun('off', dirty);
-    expect(d).toEqual({ block: false, notify: false, audit: false, reason: null });
+    expect(d).toEqual({ block: false, notify: false, audit: false, reason: null, outcome: 'not-scanned' });
   });
 
   it('a scanner error fails OPEN but is reported — never wedges every turn', () => {
     // A broken scanner must not turn the gateway into a brick. It must also
-    // not read as protected: notify carries the failure to a human.
-    const d = evaluateConversationRun('enforce', { clean: true, summary: 'scan unavailable', errored: true });
+    // not read as protected: notify carries the failure to a human, and the
+    // outcome is its own word — never 'clean', never 'observed'.
+    const d = evaluateConversationRun('enforce', {
+      clean: false,
+      available: false,
+      errored: true,
+      error: 'no in-process defence module and the MCP fallback returned nothing',
+      summary: 'scan unavailable',
+    });
     expect(d.block).toBe(false);
     expect(d.notify).toBe(true);
-    expect(d.reason).toMatch(/unavailable|error/i);
+    expect(d.outcome).toBe('unavailable');
+    expect(d.reason).toMatch(/unavailable/i);
+  });
+
+  it('an unavailable scan is never routed through the clean branch, whatever `clean` says', () => {
+    // Belt and braces for the shape the old scanner returned:
+    // `{ clean: true, summary: 'scan unavailable' }`. Even if something
+    // upstream reconstructs that and marks it unavailable, it must not fall
+    // into the silent clean path.
+    const d = evaluateConversationRun('observe', { clean: true, summary: 'scan unavailable', available: false });
+    expect(d.outcome).toBe('unavailable');
+    expect(d.notify).toBe(true);
+    expect(d.audit).toBe(true);
+  });
+
+  it('names the outcome the operator will be told: blocked vs observed', () => {
+    expect(evaluateConversationRun('enforce', dirty).outcome).toBe('blocked');
+    expect(evaluateConversationRun('observe', dirty).outcome).toBe('observed');
+    expect(evaluateConversationRun('observe', clean).outcome).toBe('clean');
   });
 });
 

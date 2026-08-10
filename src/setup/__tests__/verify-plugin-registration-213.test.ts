@@ -97,6 +97,41 @@ describe('verifyPluginRegistration (#213)', () => {
     });
   });
 
+  it('#226: an enabled stanza with no conversation grant is NOT drift on its own', () => {
+    // The grant is a separate operator decision, so its absence is a gap doctor
+    // reports — not something a registration check silently writes.
+    writeConfig({
+      plugins: {
+        allow: ['shieldcortex-realtime'],
+        entries: { 'shieldcortex-realtime': { enabled: true } },
+      },
+    });
+    const before = fs.readFileSync(configPath(), 'utf-8');
+    const result = verifyPluginRegistration(tempHome);
+    expect(result.registered).toBe(true);
+    expect(result.restored).toBe(false);
+    expect(fs.readFileSync(configPath(), 'utf-8')).toBe(before);
+  });
+
+  it('#226: WITH consent, the missing grant is drift and is restored, naming which half was missing', () => {
+    writeConfig({
+      plugins: {
+        allow: ['shieldcortex-realtime'],
+        entries: { 'shieldcortex-realtime': { enabled: true } },
+      },
+    });
+    const result = verifyPluginRegistration(tempHome, { grantConversationAccess: true });
+    expect(result.registered).toBe(true);
+    expect(result.restored).toBe(true);
+    expect(result.detail).toMatch(/allowConversationAccess/);
+    expect(result.detail).not.toMatch(/missing or disabled/);
+    const after = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
+    expect(after.plugins.entries['shieldcortex-realtime']).toEqual({
+      enabled: true,
+      hooks: { allowConversationAccess: true },
+    });
+  });
+
   it('creates the registration when no config file exists at all', () => {
     const result = verifyPluginRegistration(tempHome);
     expect(result.registered).toBe(true);

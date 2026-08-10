@@ -41,13 +41,45 @@ describe('#222 wiped stanza must never read healthy', () => {
     expect(v.reasons.join(' ')).toMatch(/config|enabled|unprotected/i);
   });
 
-  it('explicitly disabled in config while installed → FAIL, not healthy', () => {
+  /**
+   * #226 draws the line #222 did not need to. A WIPE (no entry at all) is
+   * nobody's decision and stays a fail — that is the case above, and it is the
+   * one #222 is about. An EXPLICIT `enabled: false` is a sentence somebody
+   * typed, so it is an intentional disable: reported, never green, but a warn
+   * rather than a security FAIL. Reporting a human's own deliberate action back
+   * to them in red is how the alarm that catches the real wipe gets ignored.
+   *
+   * There is deliberately no "but it was running here before" escape hatch. A
+   * stale install-index row and a still-loaded running gateway are both the
+   * EXPECTED state right after a disable and before a restart, so using either
+   * as evidence of a fault would convict the most ordinary sequence there is.
+   */
+  it('explicitly disabled → WARN (intentional), never healthy, whatever the index says', () => {
+    const v = reconcilePluginState({
+      ...BASE,
+      config: { enabled: false, inAllow: true },
+      // OpenClaw's own install index still lists it enabled — it lags config.
+      index: {
+        installRecords: { 'shieldcortex-realtime': { source: 'npm', version: '4.47.35' } },
+        plugins: [{ pluginId: 'shieldcortex-realtime', enabled: true }],
+        warning: null,
+      },
+    });
+    expect(v.severity).toBe('warn');
+    expect(v.state).toBe('intentionally-disabled');
+    expect(v.state).not.toBe('healthy');
+  });
+
+  it('explicitly disabled with no index row either → the same warn', () => {
     const v = reconcilePluginState({
       ...BASE,
       config: { enabled: false, inAllow: true },
     });
-    expect(v.severity).toBe('fail');
+    expect(v.severity).toBe('warn');
+    expect(v.state).toBe('intentionally-disabled');
     expect(v.state).not.toBe('healthy');
+    // Still says out loud that the host is running without protection.
+    expect(v.reasons.join(' ')).toMatch(/WITHOUT the memory firewall/i);
   });
 
   it('the verdict names the remedy, not just the symptom', () => {
