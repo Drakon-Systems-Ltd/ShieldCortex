@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
+import { createSessionTaintStore } from './session-taint.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
 import type { InterceptorConfig, BrokerRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
@@ -268,6 +269,14 @@ interface SCConfig {
 }
 
 const PLUGIN_ID = "shieldcortex-realtime";
+
+/**
+ * #233: conversation-level taint, shared between the conversation scan (which
+ * writes it) and the Action Guard (which reads it). Both run in THIS process,
+ * so an in-memory store is the whole mechanism — keyed per session because one
+ * gateway serves many concurrent chats.
+ */
+const sessionTaint = createSessionTaintStore();
 const PLUGIN_PACKAGE_NAME = "@drakon-systems/shieldcortex-realtime";
 const PLUGIN_CONFIG_UI_HINTS = {
   binaryPath: {
@@ -1041,6 +1050,11 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
       const result = await scanRealtimeContent(text);
       if (!result.clean) {
         console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary}`);
+        // #233: THE sink that has teeth. Logging a detection changed nothing —
+        // the tool call this injection is steering, one turn later, was
+        // evaluated as if it had never been seen. Tainting the session makes
+        // the Action Guard tighten by one notch for a bounded window.
+        sessionTaint.mark(event.sessionId, { reason: `conversation scan: ${result.summary}` });
         const entry = {
           type: "threat", hook: "llm_input", sessionId: event.sessionId,
           model: event.model, reason: result.summary,
@@ -1169,11 +1183,13 @@ async function handleTypedBeforeToolCall(
   event: TypedBeforeToolCallEvent,
   interceptor: ReturnType<typeof createInterceptor>,
   logger: PluginApi["logger"],
+  sessionId?: string,
 ): Promise<TypedBeforeToolCallResult | void> {
   try {
     await interceptor.handleToolCall({
       toolName: event.toolName,
       arguments: event.params ?? {},
+      sessionId,
       requireApproval: async (message: string) => {
         throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message));
       },
@@ -1365,6 +1381,13 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #233: the read side of conversation taint. Returns null for a clean
+          // or unknown session, so the guard behaves exactly as before unless a
+          // conversation detection actually happened in THIS session.
+          sessionTaint: (sessionId) => {
+            const rec = sessionId ? sessionTaint.get(sessionId) : null;
+            return rec ? { reason: rec.reason } : null;
+          },
           onAuditEntry: (entry) => syncInterceptEvent(entry, {
             cloudApiKey: (scConfig as any).cloudApiKey ?? '',
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
@@ -1401,17 +1424,24 @@ export default {
     if (!interceptorDisabledInHostConfig) {
       // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
       // can block or require approval before the selected tool executes.
-      api.on('before_tool_call', async (event: TypedBeforeToolCallEvent) => {
+      api.on('before_tool_call', async (event: TypedBeforeToolCallEvent, ctx?: { sessionId?: string }) => {
         const interceptor = await initInterceptor();
         if (!interceptor) return;
-        return handleTypedBeforeToolCall(event, interceptor, api.logger);
+        // #233: the host supplies the session on the tool CONTEXT, not the
+        // event. Without it a taint cannot be matched to the call it should
+        // gate, so the escalation would silently never fire.
+        return handleTypedBeforeToolCall(event, interceptor, api.logger, ctx?.sessionId);
       }, { priority: 80, timeoutMs: 30_000 });
       _beforeToolCallRegistered = true;
 
       // Try to register session_end for cache cleanup (only meaningful while
       // an interceptor can exist)
       try {
-        api.on('session_end', () => { interceptorReady?.resetSession(); });
+        api.on('session_end', (ev?: { sessionId?: string }) => {
+          interceptorReady?.resetSession();
+          // #233: a taint must not outlive the conversation that earned it.
+          if (ev?.sessionId) sessionTaint.clear(ev.sessionId);
+        });
       } catch {
         // session_end may not be a supported hook — TTL safety net handles this
       }
