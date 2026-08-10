@@ -3,6 +3,7 @@ import { mkdirSync, appendFileSync, readFileSync, realpathSync, statSync } from 
 import { join, isAbsolute, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import { createGatewayInvoker, type BrokerInvokerContext, type ModelInvokerLike } from './broker-invoker.js';
+import { escalateForTaint, type GuardDecision, type GuardSeverity } from './session-taint.js';
 
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 export type InterceptAction = 'log' | 'warn' | 'require_approval';
@@ -166,6 +167,9 @@ export interface ToolCallContext {
    *  used to resolve a relative script path (issue #4). Falls back to the
    *  call's own `cwd` argument, then `process.cwd()`. */
   cwd?: string;
+  /** The gateway session this call belongs to (#233). Used to look up a
+   *  conversation-level taint; absent means no escalation, never a default. */
+  sessionId?: string;
 }
 
 export interface InterceptAuditEntry {
@@ -191,6 +195,11 @@ export interface InterceptAuditEntry {
    *  no pattern produced a span. `secret-egress` never contributes one — the
    *  span would be the secret. */
   matches?: Array<{ signal: string; span: string }>;
+  /** Set when a conversation-level detection earlier in this session tightened
+   *  the verdict (#233). Present ONLY when taint actually changed the answer,
+   *  so an escalated denial is tellable from a natively catastrophic one — and
+   *  a reviewer can find every decision the conversation scanner influenced. */
+  escalated?: { by: 'session-taint'; from: string; to: string; reason: string };
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
 }
@@ -749,6 +758,10 @@ interface InterceptorOptions {
   onAuditEntry?: (entry: InterceptAuditEntry) => void;
   /** Tool Action Guard evaluator, injected from `shieldcortex/defence` at runtime. */
   evaluateToolCall?: ToolGuardEvaluator;
+  /** #233: look up a conversation-level taint for this session. Returning null
+   *  (or throwing) means no escalation — a broken scanner must never become a
+   *  new source of denials. */
+  sessionTaint?: (sessionId: string | undefined) => { reason: string } | null;
   /** Approval broker (#143), injected from `shieldcortex/defence` at runtime.
    *  Absent, or present with `config.enabled: false`, means no model is ever
    *  consulted and the guard behaves exactly as it did before #143. */
@@ -984,6 +997,47 @@ export function createInterceptor(
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`);
       return;
     }
+
+    // #233: a prompt injection detected on the CONVERSATION path earlier in this
+    // session tightens the guard by one notch for a bounded window — sensitive
+    // work starts asking, dangerous work stops. Benign work is untouched: an
+    // agent that cannot read a file is useless, and a taint response that halts
+    // ordinary work is one operators switch off.
+    //
+    // This is the enforcement answer instead of blocking the turn itself
+    // (see docs/design/2026-08-10-conversation-taint-escalation.md): the guard
+    // is already trusted, already gates actions, and a false positive here
+    // costs an approval prompt rather than the user's message.
+    //
+    // Failure is soft by construction — no taint lookup, or a throwing one,
+    // simply means no escalation. This must never become a way for a broken
+    // scanner to start denying tool calls.
+    let taint: { reason: string } | null = null;
+    try {
+      taint = options?.sessionTaint?.(context.sessionId) ?? null;
+    } catch {
+      taint = null;
+    }
+    let escalation: InterceptAuditEntry['escalated'] | undefined;
+    if (taint) {
+      const esc = escalateForTaint({
+        decision: v.decision as GuardDecision,
+        severity: v.severity as GuardSeverity,
+        tainted: true,
+      });
+      if (esc.escalated) {
+        log.warn(
+          `[shieldcortex] action-guard ESCALATED ${context.toolName}: ${v.decision} → ${esc.decision} (tainted session: ${taint.reason})`,
+        );
+        // Recorded STRUCTURALLY, not just in the reason string: the audit entry
+        // has no reason field, so an escalation folded into the verdict text
+        // would vanish from the durable record — invisible in exactly the
+        // forensic view that needs it.
+        escalation = { by: 'session-taint', from: v.decision, to: esc.decision, reason: taint.reason };
+        v = { ...v, decision: esc.decision, reason: `${v.reason} — ESCALATED by tainted session: ${taint.reason}` };
+      }
+    }
+
     if (v.decision === 'allow') {
       // Issue #95: a RECOGNISED allow (the guard evaluated a known operation
       // family and let it through — severity above benign) leaves an audit
@@ -998,7 +1052,7 @@ export function createInterceptor(
     }
 
     const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-    const base = guardAuditBase(context.toolName, v, preview);
+    const base = { ...guardAuditBase(context.toolName, v, preview), ...(escalation ? { escalated: escalation } : {}) };
     const severity: Severity = v.severity === 'catastrophic' ? 'critical' : 'high';
 
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
