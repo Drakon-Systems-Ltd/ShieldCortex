@@ -22,6 +22,7 @@ import { describe, it, expect, jest } from '@jest/globals';
 import {
   requestOperatorApproval,
   formatOperatorNotification,
+  buildActionGuardOutcomeNotification,
   type NotifyChannel,
   type ChannelSendResult,
 } from '../operator-notify.js';
@@ -443,6 +444,34 @@ describe('best-effort for both events — a broken channel changes nothing', () 
     };
     const result = await requestOperatorApproval({ ...BASE_INPUT, event }, { channel: hostile });
     expect(result.attempts).toEqual([{ channel: 'hostile', result: { delivered: true } }]);
+  });
+});
+
+describe('Action Guard terminal outcome notification construction', () => {
+  it('redacts secrets, urls, unsafe session ids, cwd values, and signal tokens at the exported builder boundary', () => {
+    const secret = 'DO_NOT_PERSIST_OPERATOR_NOTIFY_VALUE_1234567890';
+    const n = buildActionGuardOutcomeNotification({
+      event: 'action_guard_denial',
+      outcome: 'auto_denied',
+      tool: `Bash ${secret}`,
+      surface: `https://example.invalid/${secret}`,
+      signals: ['secret-egress', secret, 'ghp_FAKEFAKEFAKEFAKEFAKE'],
+      severity: 'critical',
+      reason: `blocked because ${secret}`,
+      correlationId: `session-${secret}`,
+      detectedAt: `https://example.invalid/${secret}`,
+    });
+
+    const rendered = JSON.stringify(n) + formatOperatorNotification(n);
+    expect(rendered).not.toContain(secret);
+    expect(rendered).not.toContain('https://example.invalid');
+    expect(rendered).not.toContain('ghp_');
+    expect(n.tool).toBe('tool');
+    expect(n.surface).toBe('redacted action surface');
+    expect(n.reason).toMatch(/inspect local audit/i);
+    expect(n.correlationId).toBeUndefined();
+    expect(n.detectedAt).toBe('1970-01-01T00:00:00.000Z');
+    expect(n.signals).toEqual(['secret-egress', 'redacted-signal']);
   });
 });
 

@@ -187,10 +187,14 @@ export function createOpenClawApprovalChannel(opts: OpenClawApprovalChannelOptio
       // message instead would need a gateway route this codebase has not
       // verified exists, plus channel/target config NotifyConfig does not
       // have; inventing either would be a worse trade than falling back.
-      if (notification.event === 'denied_no_prompt_surface') {
+      if (
+        notification.event === 'denied_no_prompt_surface' ||
+        notification.event === 'action_guard_denial' ||
+        notification.event === 'action_guard_warning'
+      ) {
         return {
           delivered: false,
-          reason: 'openclaw approval cards are interactive-only — a denial has no decision left to offer',
+          reason: 'openclaw approval cards are interactive-only — this guard outcome has no decision left to offer',
         };
       }
       // #225, same reasoning one step further: a conversation-firewall alert
@@ -204,7 +208,8 @@ export function createOpenClawApprovalChannel(opts: OpenClawApprovalChannelOptio
           reason: 'openclaw approval cards are interactive-only — a conversation-firewall alert has no decision to offer',
         };
       }
-      const params = buildCardRequestParams(notification);
+      const approvalNotification = notification as OperatorNotification;
+      const params = buildCardRequestParams(approvalNotification);
       const receiptDir = opts.receiptDir ?? join(tmpdir(), 'shieldcortex-approval-receipts');
       const receiptPath = join(receiptDir, `${randomUUID()}.json`);
 
@@ -224,7 +229,7 @@ export function createOpenClawApprovalChannel(opts: OpenClawApprovalChannelOptio
           [
             opts.waiterEntry,
             '--params-b64', Buffer.from(JSON.stringify(params), 'utf8').toString('base64'),
-            '--hash', notification.hash,
+            '--hash', approvalNotification.hash,
             '--openclaw-bin', opts.openclawBin,
             '--receipt', receiptPath,
           ],
