@@ -59,6 +59,13 @@ type PluginInstallMode = 'native-package' | 'native-link' | 'trusted-local-copy'
  * produce broken state. We warn and skip by default.
  */
 export function isDockerEnvironment(): boolean {
+  // An EXPLICIT opt-out wins over every marker below. `installPlugin`'s own
+  // skip message already tells the operator to run
+  // `DOCKER=false shieldcortex openclaw install`, and until now that advice did
+  // nothing: `/.dockerenv` and the cgroup probe were checked first and
+  // unconditionally, so the documented escape hatch could not open. Checked
+  // first, because that is what "override" means.
+  if (process.env.DOCKER === 'false' || process.env.DOCKER === '0') return false;
   // Standard Docker marker file
   try {
     if (fs.existsSync('/.dockerenv')) return true;
@@ -396,7 +403,18 @@ function cleanupLegacyPlugin(): void {
   }
 }
 
-function openClawConfigPath(): string {
+/**
+ * The openclaw.json this process will read and WRITE.
+ *
+ * Exported so a test can assert, before it runs anything with side effects,
+ * that its home redirect actually reached this module. Under Jest a plain
+ * `process.env.HOME` override does NOT redirect `os.homedir()` — jest's
+ * `process.env` is a copy that never reaches the native binding — so a suite
+ * that assumes it does silently operates on the developer's REAL
+ * `~/.openclaw/openclaw.json`. Checking this path first turns that into a
+ * loud failure instead of a live config edit.
+ */
+export function openClawConfigPath(): string {
   return path.join(resolveUserHome(), '.openclaw', 'openclaw.json');
 }
 
@@ -420,6 +438,10 @@ export function pluginInstallNeedsWrite(
   pluginId: string,
   _installDir: string,
   _version: string,
+  /** #226: only when the operator has asked for conversation access does its
+   *  absence count as drift. Default false — an install without that consent is
+   *  complete without the grant. */
+  requireConversationGrant = false,
 ): boolean {
   if (!config || typeof config !== 'object') return true;
   const c = config as { plugins?: unknown };
@@ -440,11 +462,123 @@ export function pluginInstallNeedsWrite(
   if (hasStale) return true;
 
   const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
-  const entry = entries[pluginId] as { enabled?: unknown } | undefined;
+  const entry = entries[pluginId] as { enabled?: unknown; hooks?: unknown } | undefined;
   if (!entry || entry.enabled !== true) return true;
+
+  // #226: `enabled: true` alone does not buy a working install. Conversation
+  // hooks — llm_input and llm_output on every build inspected, plus
+  // before_agent_run from 2026.5.9-beta.1 — are refused for every NON-BUNDLED
+  // plugin unless this gate is exactly `true`; the host's registry drops the
+  // registration with a plugin diagnostic and nothing else. A host in that
+  // state loads ShieldCortex, gates tool calls, reports "real-time scanning"
+  // from every surface, and scans no conversation content at all.
+  //
+  // It is only DRIFT when the operator has actually asked for the grant. An
+  // install that has not been given conversation consent is complete without
+  // it — see trustLocalPlugin — and treating the absence as drift would make
+  // every run rewrite the config to add a permission nobody requested.
+  if (requireConversationGrant && !hasConversationAccessGrant(entry)) return true;
 
   return false;
 }
+
+/** Strict `true`, exactly as the host tests it (`explicitConversationAccess !== true`).
+ *  `undefined` and `false` are the same refusal there and must be here. */
+export function hasConversationAccessGrant(entry: { hooks?: unknown } | undefined): boolean {
+  const hooks = entry?.hooks;
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return false;
+  return (hooks as { allowConversationAccess?: unknown }).allowConversationAccess === true;
+}
+
+/**
+ * Has the operator asked for conversation access on THIS run (#226)?
+ *
+ * The grant lets a non-bundled plugin read every prompt and every model
+ * response on the box. Issue #225 is explicit that it is "the operator's call
+ * per box — the installer must never set it silently", and OpenClaw made it a
+ * separate key, defaulting off, for the same reason. So installing ShieldCortex
+ * does not grant it; ASKING for it does, either way round:
+ *
+ *   shieldcortex openclaw install --allow-conversation-access
+ *   SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1 shieldcortex openclaw install
+ *
+ * Anything else — including a plain install on an interactive terminal — leaves
+ * the gate untouched and prints the one-line remedy. Doctor fails on it
+ * separately, so the gap is reported until a human closes it.
+ */
+export function resolveConversationAccessConsent(input: {
+  argv?: string[];
+  env?: NodeJS.ProcessEnv;
+}): boolean {
+  const argv = input.argv ?? [];
+  if (argv.includes('--allow-conversation-access')) return true;
+  return (input.env ?? {}).SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS === '1';
+}
+
+/**
+ * Read the conversation-access grant straight off the config on disk (#226).
+ *
+ * Used to REPORT after an install rather than to decide anything: the installer
+ * must state what the box actually ends up in, not what it was asked for. A
+ * write that silently did not land — a read-only config, a race with the
+ * gateway, a restore that failed — would otherwise be announced as a grant.
+ */
+export function readConversationAccessGrantOnDisk(homeArg?: string): boolean {
+  const configPath = homeArg
+    ? path.join(homeArg, '.openclaw', 'openclaw.json')
+    : openClawConfigPath();
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+      plugins?: { entries?: Record<string, { hooks?: unknown } | undefined> };
+    };
+    return hasConversationAccessGrant(config?.plugins?.entries?.[PLUGIN_DIR_NAME]);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Say — out loud, on every non-skipped install path — whether this box now
+ * grants conversation-hook access (#226).
+ *
+ * Hoisted out of `installPlugin`'s trusted-local-copy branch, which was the
+ * only place it ran. The native `openclaw plugins install` path returns from
+ * `installPlugin` several branches earlier, so the most common install on a box
+ * with the binary printed nothing at all about the grant — the operator saw
+ * "Installed real-time plugin", and whether their conversation firewall could
+ * see anything was left to be inferred.
+ */
+function reportConversationAccessState(requested: boolean): void {
+  const granted = readConversationAccessGrantOnDisk();
+  if (granted) {
+    console.log(
+      requested
+        ? '  Granted conversation-hook access at your request (plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess = true)'
+        : '  Conversation-hook access is already granted on this box (plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess = true)',
+    );
+    console.log('  — this lets ShieldCortex read prompts and model output on this box. Remove the key to revoke it.');
+    return;
+  }
+  if (requested) {
+    // Asked for, not on disk. Never silently downgrade this to the ordinary
+    // "not granted" note: the operator gave consent and the box did not take
+    // it, which is a failed install step, not a default.
+    console.warn('  ⚠  Conversation-hook access was REQUESTED but is NOT set in openclaw.json after the install.');
+    console.warn('     The conversation firewall will stay inert until it is. Set it by hand:');
+    console.warn(`     ${CONVERSATION_ACCESS_REMEDY}`);
+    return;
+  }
+  console.log('  NOTE: conversation-hook access is NOT granted, so OpenClaw will refuse this plugin\'s llm_input/');
+  console.log('  llm_output hooks (and, on 2026.5.9-beta.1+, before_agent_run): tool-call gating works,');
+  console.log('  conversation scanning does NOT.');
+  console.log(`  ${CONVERSATION_ACCESS_REMEDY}`);
+}
+
+/** The remedy, in one line, so every surface that reports the gap prints the
+ *  same thing and an operator never has to reconstruct the JSON path. */
+export const CONVERSATION_ACCESS_REMEDY =
+  'Re-run with `shieldcortex openclaw install --allow-conversation-access`, or set ' +
+  '"hooks": { "allowConversationAccess": true } on plugins.entries["shieldcortex-realtime"] in ~/.openclaw/openclaw.json, then restart the gateway.';
 
 /**
  * Register a locally-copied plugin in OpenClaw's user config.
@@ -474,7 +608,13 @@ export function pluginInstallNeedsWrite(
  * repairOpenClawManagedPins(); jest's process.env copy never reaches the
  * native os.homedir() binding, so a HOME override can't work there.
  */
-export function trustLocalPlugin(_installDir: string, _version: string, homeArg?: string): boolean {
+export function trustLocalPlugin(
+  _installDir: string,
+  _version: string,
+  homeArg?: string,
+  opts: { grantConversationAccess?: boolean } = {},
+): boolean {
+  const grantConversationAccess = opts.grantConversationAccess === true;
   const configPath = homeArg
     ? path.join(homeArg, '.openclaw', 'openclaw.json')
     : openClawConfigPath();
@@ -490,7 +630,7 @@ export function trustLocalPlugin(_installDir: string, _version: string, homeArg?
     const config = JSON.parse(raw);
 
     // Idempotency: skip the write if everything is already correct.
-    if (!pluginInstallNeedsWrite(config, pluginId, _installDir, _version)) {
+    if (!pluginInstallNeedsWrite(config, pluginId, _installDir, _version, grantConversationAccess)) {
       return true;
     }
 
@@ -525,9 +665,42 @@ export function trustLocalPlugin(_installDir: string, _version: string, homeArg?
       ? { ...(plugins.entries as Record<string, unknown>) }
       : {};
     const existingEntry = entries[pluginId];
-    entries[pluginId] = (typeof existingEntry === 'object' && existingEntry !== null)
-      ? { ...(existingEntry as Record<string, unknown>), enabled: true }
-      : { enabled: true };
+    const existingEntryObj = (typeof existingEntry === 'object' && existingEntry !== null)
+      ? (existingEntry as Record<string, unknown>)
+      : {};
+    // #226: the conversation-access grant, written ONLY when asked for.
+    //
+    // OpenClaw refuses every conversation hook a NON-BUNDLED plugin registers
+    // unless `plugins.entries.<id>.hooks.allowConversationAccess` is exactly
+    // true. Without it ShieldCortex loads, gates tool calls, and
+    // silently scans nothing on the conversation path while every surface it
+    // has says real-time scanning is on — a false green of exactly the class
+    // #214/#222 were. So the installer must be ABLE to write it.
+    //
+    // It must not write it unasked. The grant authorises this plugin to read
+    // every prompt and every model response on the box; that is a different
+    // decision from "install the plugin", with a different blast radius, which
+    // is why OpenClaw made it a separate key that defaults off. #225 is
+    // explicit: "the operator's call per box — the installer must never set it
+    // silently. It should be detected and reported." So consent comes from
+    // `--allow-conversation-access` or SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1
+    // (resolveConversationAccessConsent), the caller passes it in here, and
+    // without it the gate is left exactly as found and reported by doctor.
+    //
+    // Any other hook policy the operator has set (`allowPromptInjection`, …) is
+    // preserved — only this one key is ever authored, and only on consent.
+    const existingHooks = (typeof existingEntryObj.hooks === 'object' && existingEntryObj.hooks !== null && !Array.isArray(existingEntryObj.hooks))
+      ? (existingEntryObj.hooks as Record<string, unknown>)
+      : null;
+    entries[pluginId] = {
+      ...existingEntryObj,
+      enabled: true,
+      ...(grantConversationAccess
+        ? { hooks: { ...(existingHooks ?? {}), allowConversationAccess: true } }
+        : existingHooks
+          ? { hooks: existingHooks }
+          : {}),
+    };
 
     const newPlugins: Record<string, unknown> = {
       ...plugins,
@@ -574,7 +747,10 @@ export function trustLocalPlugin(_installDir: string, _version: string, homeArg?
  *
  * `homeArg` is the same test seam as trustLocalPlugin's.
  */
-export function verifyPluginRegistration(homeArg?: string): {
+export function verifyPluginRegistration(
+  homeArg?: string,
+  opts: { grantConversationAccess?: boolean } = {},
+): {
   registered: boolean;
   restored: boolean;
   detail: string;
@@ -583,14 +759,23 @@ export function verifyPluginRegistration(homeArg?: string): {
     ? path.join(homeArg, '.openclaw', 'openclaw.json')
     : openClawConfigPath();
   const pluginId = PLUGIN_DIR_NAME;
+  const grantConversationAccess = opts.grantConversationAccess === true;
 
   const readState = (): { needsWrite: boolean; detail: string } => {
     try {
       if (!fs.existsSync(configPath)) return { needsWrite: true, detail: 'openclaw.json does not exist' };
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      return pluginInstallNeedsWrite(config, pluginId, '', '')
-        ? { needsWrite: true, detail: `${pluginId} missing or disabled in plugins.allow/entries` }
-        : { needsWrite: false, detail: 'registered' };
+      if (!pluginInstallNeedsWrite(config, pluginId, '', '', grantConversationAccess)) {
+        return { needsWrite: false, detail: 'registered' };
+      }
+      // Name WHICH half is missing. "missing or disabled" over a stanza whose
+      // only fault is the #226 conversation grant sends an operator looking at
+      // an `enabled: true` line and concluding the check is broken.
+      const entry = (config?.plugins?.entries ?? {})[pluginId] as { enabled?: unknown; hooks?: unknown } | undefined;
+      const detail = entry?.enabled === true && !hasConversationAccessGrant(entry)
+        ? `${pluginId} is enabled but hooks.allowConversationAccess is not true — the gateway will refuse its conversation hooks`
+        : `${pluginId} missing or disabled in plugins.allow/entries`;
+      return { needsWrite: true, detail };
     } catch (err) {
       return { needsWrite: true, detail: `openclaw.json unreadable (${(err as Error).message})` };
     }
@@ -599,7 +784,7 @@ export function verifyPluginRegistration(homeArg?: string): {
   const before = readState();
   if (!before.needsWrite) return { registered: true, restored: false, detail: before.detail };
 
-  const wrote = trustLocalPlugin('', '', homeArg);
+  const wrote = trustLocalPlugin('', '', homeArg, { grantConversationAccess });
   const after = readState();
   if (!after.needsWrite) return { registered: true, restored: true, detail: `restored: ${before.detail}` };
   return {
@@ -611,7 +796,23 @@ export function verifyPluginRegistration(homeArg?: string): {
   };
 }
 
+/**
+ * Test seam for the native install path (#226).
+ *
+ * `tryNativeOpenClawPluginInstall` spawns the real `openclaw` binary, so the
+ * branch it guards — the one that returns BEFORE `trustLocalPlugin` ever runs —
+ * could not be exercised without one on the box. That is precisely the branch
+ * where the conversation-access grant went missing: on any host with the binary
+ * on PATH, `--allow-conversation-access` reached an installer that returned
+ * early and never wrote it.
+ */
+let _nativePluginInstallForTest: (() => PluginInstallMode | null) | null = null;
+export function __setNativePluginInstallForTest(fn: (() => PluginInstallMode | null) | null): void {
+  _nativePluginInstallForTest = fn;
+}
+
 function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
+  if (_nativePluginInstallForTest) return _nativePluginInstallForTest();
   if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
   if (!isOpenClawInstalled()) return null;
 
@@ -696,7 +897,7 @@ function isPluginInLoadPaths(): boolean {
  *
  * @param options.noPlugins  Skip plugin installation entirely (--no-plugins flag)
  */
-function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode {
+function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?: boolean } = {}): PluginInstallMode {
   if (options.noPlugins) {
     console.log('  Skipping plugin install (--no-plugins flag).');
     return 'skipped';
@@ -815,8 +1016,15 @@ function installPlugin(options: { noPlugins?: boolean } = {}): PluginInstallMode
       }
     } catch { /* keep whatever version the manifest has */ }
 
-    if (trustLocalPlugin(destDir, pluginVersion)) {
+    const grantConversationAccess = options.grantConversationAccess === true;
+    if (trustLocalPlugin(destDir, pluginVersion, undefined, { grantConversationAccess })) {
       console.log('Registered plugin in OpenClaw config (plugins.allow + installs)');
+      // The granted/NOT-granted notice used to live HERE, on this branch only —
+      // so the native install paths above (`openclaw plugins install`, which is
+      // the FIRST thing tried and succeeds on any box with the binary on PATH)
+      // printed nothing about conversation access at all. It is now reported
+      // once by installOpenClawHook, after the registration verify, for every
+      // non-skipped install mode. See reportConversationAccessState.
       console.log(`Installed real-time plugin to ${destDir}`);
       return 'trusted-local-copy';
     } else {
@@ -983,6 +1191,17 @@ export interface OpenClawInstallOptions {
   /** Skip plugin installation (--no-plugins flag) */
   noPlugins?: boolean;
   /**
+   * #226: write `plugins.entries[id].hooks.allowConversationAccess = true`
+   * (--allow-conversation-access / SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1).
+   *
+   * OFF by default, and deliberately not implied by installing. The grant lets
+   * a non-bundled plugin read every prompt and model response on the box —
+   * OpenClaw made it a separate, default-off key for that reason, and #225 is
+   * explicit that the installer must never set it silently. Without it the
+   * conversation hooks are refused by the host and doctor reports the gap.
+   */
+  grantConversationAccess?: boolean;
+  /**
    * Best-effort restart of the OpenClaw gateway after install so the freshly
    * copied hook + plugin files are picked up without manual intervention.
    * Defaults to true. Set to false (or pass `--no-gateway-restart` from the
@@ -1098,7 +1317,10 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   }
 
   // Install the real-time plugin to the extensions directory
-  const pluginInstallMode = installPlugin({ noPlugins: options.noPlugins });
+  const pluginInstallMode = installPlugin({
+    noPlugins: options.noPlugins,
+    grantConversationAccess: options.grantConversationAccess,
+  });
 
   // #213: verify the ON-DISK registration after whichever install path ran,
   // BEFORE the gateway restart below — the restart boots from openclaw.json,
@@ -1106,8 +1328,19 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   // the field while exiting 0. The roster self-check further down cannot
   // catch this: it proves the running gateway, which still holds the
   // pre-install plugin until the restart.
+  //
+  // #226: the consent is passed THROUGH here, and that is what makes
+  // `--allow-conversation-access` mean anything on a native install. Only the
+  // trusted-local-copy branch of installPlugin called trustLocalPlugin at all;
+  // the native paths return before it, so on any host with the `openclaw`
+  // binary on PATH — the common case, and the path installPlugin tries FIRST —
+  // the flag was accepted, echoed in the help text, and silently did nothing.
+  // This call is the one place every non-skipped install mode converges on, and
+  // it both writes the grant and re-reads the file to prove it landed.
   if (pluginInstallMode !== 'skipped') {
-    const reg = verifyPluginRegistration();
+    const reg = verifyPluginRegistration(undefined, {
+      grantConversationAccess: options.grantConversationAccess === true,
+    });
     if (reg.restored) {
       console.warn('⚠  Install left shieldcortex-realtime unregistered in openclaw.json — stanza restored (#213).');
       console.warn(`   (${reg.detail})`);
@@ -1119,6 +1352,13 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
       console.error('  plugins.entries["shieldcortex-realtime"] = { "enabled": true } in ~/.openclaw/openclaw.json.');
       process.exitCode = 1;
     }
+    // #226: report the conversation-access state for EVERY install mode that
+    // did work, reading it back off disk rather than restating what was asked
+    // for. Both outcomes matter to an operator and neither should have to be
+    // discovered from a config diff: granting lets ShieldCortex read every
+    // prompt and model response on this box, and NOT granting leaves the
+    // conversation firewall inert while the rest of the product works.
+    reportConversationAccessState(options.grantConversationAccess === true);
   }
 
   console.log('');
@@ -1972,10 +2212,13 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
   const restartGateway = !extraArgs.includes('--no-gateway-restart');
+  // #226: separate consent, because it is a separate decision — see
+  // resolveConversationAccessConsent.
+  const grantConversationAccess = resolveConversationAccessConsent({ argv: extraArgs, env: process.env });
 
   switch (subcommand) {
     case 'install':
-      await installOpenClawHook({ noHooks, noPlugins, restartGateway });
+      await installOpenClawHook({ noHooks, noPlugins, restartGateway, grantConversationAccess });
       break;
     case 'uninstall':
       await uninstallOpenClawHook();
@@ -2009,6 +2252,13 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
       console.log('  --no-plugins            Skip plugin installation (useful in Docker/CI)');
       console.log('  --no-gateway-restart    Skip the auto gateway restart after install');
+      console.log('  --allow-conversation-access');
+      console.log('                          Grant OpenClaw conversation-hook access to the plugin');
+      console.log('                          (plugins.entries[id].hooks.allowConversationAccess=true).');
+      console.log('                          REQUIRED for llm_input/llm_output scanning, and for the');
+      console.log('                          conversation firewall on 2026.5.9-beta.1+. Off by default:');
+      console.log('                          it lets the plugin read every prompt and model response');
+      console.log('                          on this box, which is your call, not the installer\'s.');
       console.log('');
       console.log('Repair: diagnose + safely fix duplicate-plugin-id state surfaced by');
       console.log('`shieldcortex doctor`. Preserves the customer\'s OpenClaw-side plugin');

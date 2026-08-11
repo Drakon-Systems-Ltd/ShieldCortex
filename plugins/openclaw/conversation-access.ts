@@ -63,14 +63,22 @@ export function readConversationAccess(home: string, pluginId: string): Conversa
 /**
  * The hooks this plugin can honestly claim at startup. Conversation hooks are
  * only listed when the host will actually keep them.
+ *
+ * `before_agent_run` — the conversation firewall's enforcement point (#226) —
+ * is a conversation hook too from OpenClaw 2026.5.9-beta.1, so it is listed
+ * only when the grant is present AND registration was attempted this session.
+ * Claiming it on an ungranted host would recreate the exact bug this function
+ * exists to remove, one hook further along.
  */
 export function describeRegisteredHooks(opts: {
   access: ConversationAccessState;
   beforeToolCallRegistered: boolean;
+  beforeAgentRunRequested?: boolean;
 }): string {
   const live: string[] = [];
   if (opts.access.granted) live.push('llm_input', 'llm_output');
   if (opts.beforeToolCallRegistered) live.push('before_tool_call');
+  if (opts.access.granted && opts.beforeAgentRunRequested) live.push('before_agent_run');
   live.push('/shieldcortex-status');
 
   let line = live.join(' + ');

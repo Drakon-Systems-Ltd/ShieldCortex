@@ -67,6 +67,10 @@ describe('#112 follow-up — trustLocalPlugin leaves other plugins\' entries unt
 
     const after = readConfig();
     expect(after.plugins.entries.codex).toEqual(EDITH_CODEX_ENTRY);
+    // #226: a plain install writes `enabled` and NOTHING else. The
+    // conversation-access grant is a separate decision (it authorises reading
+    // every prompt on the box) and is never written unasked — see the
+    // consent-gated cases below.
     expect(after.plugins.entries[PLUGIN_ID]).toEqual({ enabled: true });
     expect(after.plugins.allow).toContain(PLUGIN_ID);
   });
@@ -97,6 +101,70 @@ describe('#112 follow-up — trustLocalPlugin leaves other plugins\' entries unt
 
     // Already-correct config → idempotency gate skips the write entirely.
     expect(readConfig()).toEqual(before);
+  });
+
+  it('#226: a plain install NEVER writes the conversation-access grant', () => {
+    // The grant authorises this plugin to read every prompt and every model
+    // response on the box. Installing a plugin is not asking for that, and #225
+    // is explicit that the installer must never set it silently.
+    writeConfig({ plugins: { entries: {} } });
+
+    expect(trustLocalPlugin('/unused', '0.0.0-test', tmpHome)).toBe(true);
+
+    expect(fs.readFileSync(configPath(), 'utf-8')).not.toContain('allowConversationAccess');
+    expect(readConfig().plugins.entries[PLUGIN_ID]).toEqual({ enabled: true });
+  });
+
+  it('#226: writes the grant when the operator explicitly asks for it', () => {
+    writeConfig({ plugins: { entries: { codex: EDITH_CODEX_ENTRY } } });
+
+    expect(
+      trustLocalPlugin('/unused', '0.0.0-test', tmpHome, { grantConversationAccess: true }),
+    ).toBe(true);
+
+    const after = readConfig();
+    expect(after.plugins.entries[PLUGIN_ID]).toEqual({
+      enabled: true,
+      hooks: { allowConversationAccess: true },
+    });
+    // Still only OUR entry.
+    expect(after.plugins.entries.codex).toEqual(EDITH_CODEX_ENTRY);
+  });
+
+  it('#226: granting preserves other hook policies the operator set', () => {
+    writeConfig({
+      plugins: {
+        allow: [PLUGIN_ID],
+        entries: {
+          [PLUGIN_ID]: { enabled: true, hooks: { allowPromptInjection: false } },
+        },
+      },
+    });
+
+    expect(
+      trustLocalPlugin('/unused', '0.0.0-test', tmpHome, { grantConversationAccess: true }),
+    ).toBe(true);
+
+    expect(readConfig().plugins.entries[PLUGIN_ID].hooks).toEqual({
+      allowPromptInjection: false,
+      allowConversationAccess: true,
+    });
+  });
+
+  it('#226: an install WITHOUT consent never revokes a grant the operator already made', () => {
+    writeConfig({
+      plugins: {
+        allow: [PLUGIN_ID],
+        entries: { [PLUGIN_ID]: { enabled: false, hooks: { allowConversationAccess: true } } },
+      },
+    });
+
+    expect(trustLocalPlugin('/unused', '0.0.0-test', tmpHome)).toBe(true);
+
+    expect(readConfig().plugins.entries[PLUGIN_ID]).toEqual({
+      enabled: true,
+      hooks: { allowConversationAccess: true },
+    });
   });
 
   it('preserves our own user-set interceptor config when (re)enabling', () => {

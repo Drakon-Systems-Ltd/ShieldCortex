@@ -28,10 +28,23 @@
  *    the same principle applied to the conversation path.
  *
  * IMPORTANT — trust gates the CONSEQUENCE, not the detection. Content is always
- * scanned and a detection is always audited, whatever its origin; trust decides
- * only whether that detection may escalate the Action Guard (#233). Skipping the
- * scan would trade away visibility, which is what got us into #225 in the first
- * place. This keeps the operator's false-alarm cost at zero without going blind.
+ * scanned and a detection is always audited and alerted, whatever its origin;
+ * trust decides only what that detection is allowed to DO. There are two such
+ * consequences and this module governs both:
+ *
+ *   - escalation — tainting the session so the Action Guard tightens (#233)
+ *   - enforcement — blocking the turn outright via `before_agent_run` (#226)
+ *
+ * The second is why this matters more than it looks. Under `enforce`, a block
+ * does not merely warn the owner: OpenClaw replaces the message and does not
+ * retain the original, so a false positive on the owner's own typing DESTROYS
+ * what they wrote. "Paste a web page into Telegram and lose it" is the single
+ * worst outcome this system can produce, aimed at the one participant whose
+ * input is an instruction rather than an attack.
+ *
+ * Skipping the scan would trade away visibility, which is what got us into #225
+ * in the first place. This keeps the operator's false-alarm cost at zero without
+ * going blind.
  */
 
 export type ConversationOrigin = 'owner' | 'non-owner' | 'unknown';
@@ -40,7 +53,19 @@ export interface ConversationTrustDecision {
   origin: ConversationOrigin;
   /** Always true. Detection and audit are unconditional — see module note. */
   scan: boolean;
-  /** May a detection in this content tighten the Action Guard? */
+  /**
+   * May a detection in this content have CONSEQUENCES for the turn?
+   *
+   * ONE flag, both consequences: the session taint that tightens the Action
+   * Guard (#233) and the `before_agent_run` block that destroys the turn
+   * (#226). Deliberately not two fields. They answer the same question — "is
+   * this the owner's instruction, or data that reached the agent from somewhere
+   * else?" — and a second flag would eventually be set differently by an edit
+   * that only had one of the consequences in mind, which is how you end up with
+   * a gate that BLOCKS content it has already decided is trusted enough not to
+   * taint. The name is the first consequence that existed; read it as
+   * "may act on this detection".
+   */
   mayTaint: boolean;
   reason: string;
 }

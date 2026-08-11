@@ -156,8 +156,15 @@ describe('#222 — doctor cannot green-tick an unrecognised state', () => {
   });
 
   it('does not fail a deliberate opt-out', () => {
+    // Reported, never green, never red. #226 settled the exact severity: a
+    // `warn`, which `doctorExitCode` maps to exit 0 for the operator who typed
+    // `enabled: false` and to exit 1 under `--strict` for a fleet that will not
+    // accept a disabled host. What matters here is that it is neither a failure
+    // nor a pass — see doctor-enable-states-226.test.ts for the exit-code
+    // contract itself.
     const r = renderPluginLoadVerdict(verdictFor('disabled-by-operator'));
-    expect(r.status).toBe('info');
+    expect(r.status).not.toBe('fail');
+    expect(r.status).not.toBe('pass');
   });
 });
 

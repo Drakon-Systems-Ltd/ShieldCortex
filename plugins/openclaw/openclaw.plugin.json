@@ -6,7 +6,9 @@
   "kind": null,
   "engines": {
     "openclaw": ">=2026.3.22",
-    "recommended": ">=2026.4.23"
+    "recommended": ">=2026.4.23",
+    "conversationGate": ">=2026.5.12",
+    "conversationGateNote": "The before_agent_run gate (conversation firewall enforcement) first appears in OpenClaw 2026.5.9-beta.1 and first ships stable in 2026.5.12; 2026.5.7 has no such hook. Below that floor the hook registration is silently dropped by the host, so the plugin reports the conversation plane as observation-only rather than claiming enforcement. Everything else in this plugin still works at the `openclaw` floor above."
   },
   "enabledByDefault": false,
   "activation": {
@@ -14,6 +16,7 @@
     "hooks": [
       "llm_input",
       "llm_output",
+      "before_agent_run",
       "before_tool_call",
       "session_end"
     ],
@@ -102,6 +105,48 @@
       "description": "Write an audit entry when the guard evaluates a recognised (sensitive-tier) operation and allows it, so forensics can distinguish scanned-and-allowed from never-scanned. Benign allows are never audited.",
       "type": "boolean",
       "advanced": true
+    },
+    "interceptor.actionGuard.broker.enabled": {
+      "label": "AI Approval Broker",
+      "description": "Let a fast model judge dangerous-tier approvals before they reach you: it can deny outright when it sees injection, and release reversible, in-context, high-confidence actions without waiting. Never applies to catastrophic operations. Off by default.",
+      "type": "boolean",
+      "advanced": true
+    },
+    "interceptor.actionGuard.broker.allowPreClear": {
+      "label": "Allow Broker Pre-clear",
+      "description": "Off = every dangerous-tier action still waits for you; the broker can then only harden, never release.",
+      "type": "boolean",
+      "advanced": true
+    },
+    "interceptor.conversation.posture": {
+      "label": "Conversation Firewall",
+      "description": "What the conversation firewall does with a detection on the input path. off = do not scan; observe = scan, audit and alert the operator but never stop the turn (default); enforce = block the run via before_agent_run. Requires plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true on this host — OpenClaw refuses conversation hooks without that operator grant, and ShieldCortex will never set it for you.",
+      "type": "string"
+    },
+    "interceptor.actionGuard.notify.enabled": {
+      "label": "Operator Notifications",
+      "description": "Reach a human when the guard holds an action, or when the conversation firewall detects a threat. Off by default.",
+      "type": "boolean",
+      "advanced": true
+    },
+    "interceptor.actionGuard.notify.webhookUrl": {
+      "label": "Notify Webhook URL",
+      "description": "http(s) endpoint the notification is POSTed to. Conversation-firewall alerts carry no approve/deny affordance — there is nothing to approve.",
+      "type": "string",
+      "advanced": true
+    },
+    "interceptor.actionGuard.notify.webhookSecret": {
+      "label": "Notify Webhook Secret",
+      "description": "HMAC-SHA256 key for X-ShieldCortex-Signature, so the receiver can reject spoofed POSTs.",
+      "type": "string",
+      "sensitive": true,
+      "advanced": true
+    },
+    "interceptor.actionGuard.notify.openclaw": {
+      "label": "Notify via OpenClaw",
+      "description": "Deliver through the gateway's own channel where the runtime provides that seam.",
+      "type": "boolean",
+      "advanced": true
     }
   },
   "configSchema": {
@@ -110,7 +155,7 @@
     "properties": {
       "enabled": {
         "type": "boolean",
-        "description": "Unused — plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
+        "description": "Unused \u2014 plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
       },
       "binaryPath": {
         "type": "string"
@@ -136,6 +181,17 @@
         "type": "integer",
         "minimum": 50,
         "maximum": 1000
+      },
+      "conversationTrust": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "trustOwnerInput": {
+            "type": "boolean",
+            "default": true,
+            "description": "Default true: a message the host attributes to the gateway OWNER is an instruction, so a detection in it is audited and alerted but never taints the session or blocks the turn. Set false on a host where the owner routinely pastes untrusted content and you would rather have the caution than the quiet. Content from anyone else — including another agent on a trusted channel — is data regardless of this setting."
+          }
+        }
       },
       "interceptor": {
         "type": "object",
@@ -225,6 +281,22 @@
               }
             }
           },
+          "conversation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "posture": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "observe",
+                  "enforce"
+                ],
+                "default": "observe",
+                "description": "off = do not scan the conversation; observe = scan, audit and alert but never block (default); enforce = block the run on a dirty verdict via before_agent_run. Requires hooks.allowConversationAccess=true on this host."
+              }
+            }
+          },
           "actionGuard": {
             "type": "object",
             "additionalProperties": false,
@@ -247,7 +319,224 @@
               "auditAllows": {
                 "type": "boolean",
                 "default": true
+              },
+              "broker": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "AI-assisted approval broker (#143). Off unless enabled is exactly true. normaliseBrokerConfig in the main package still has the last word on every value here, so anything that slips past this schema is still range-checked and dropped before the broker sees it.",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "allowPreClear": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "preClearConfidence": {
+                    "type": "number",
+                    "minimum": 0.9,
+                    "maximum": 1
+                  },
+                  "judgeTimeoutMs": {
+                    "type": "number",
+                    "minimum": 500,
+                    "maximum": 60000
+                  },
+                  "approvalTimeoutMs": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "sensitive": {
+                        "type": "number",
+                        "minimum": 1000,
+                        "maximum": 3600000
+                      },
+                      "dangerous": {
+                        "type": "number",
+                        "minimum": 1000,
+                        "maximum": 3600000
+                      }
+                    }
+                  },
+                  "model": {
+                    "type": "string"
+                  }
+                }
+              },
+              "notify": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Operator-notify transport (#143), also used by the conversation firewall’s detection sink (#225). Off unless enabled is exactly true.",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "webhookUrl": {
+                    "type": "string"
+                  },
+                  "webhookSecret": {
+                    "type": "string"
+                  },
+                  "openclaw": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "timeoutMs": {
+                    "type": "number",
+                    "minimum": 500,
+                    "maximum": 60000
+                  }
+                }
+              },
+              "reviewedScripts": {
+                "type": "array",
+                "description": "Reviewed-script allowlist (#189). Each entry pins ONE script by absolute path and content hash; createReviewedScriptCheck has the last word on every field.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "sha256": {
+                      "type": "string"
+                    },
+                    "note": {
+                      "type": "string"
+                    },
+                    "addedAt": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256"
+                  ]
+                }
               }
+            }
+          }
+        }
+      },
+      "actionGuard": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "enforce": {
+            "type": "boolean",
+            "default": true
+          },
+          "autoApprove": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "auditAllows": {
+            "type": "boolean",
+            "default": true
+          },
+          "broker": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "AI-assisted approval broker (#143). Off unless enabled is exactly true. normaliseBrokerConfig in the main package still has the last word on every value here, so anything that slips past this schema is still range-checked and dropped before the broker sees it.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": false
+              },
+              "allowPreClear": {
+                "type": "boolean",
+                "default": false
+              },
+              "preClearConfidence": {
+                "type": "number",
+                "minimum": 0.9,
+                "maximum": 1
+              },
+              "judgeTimeoutMs": {
+                "type": "number",
+                "minimum": 500,
+                "maximum": 60000
+              },
+              "approvalTimeoutMs": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "sensitive": {
+                    "type": "number",
+                    "minimum": 1000,
+                    "maximum": 3600000
+                  },
+                  "dangerous": {
+                    "type": "number",
+                    "minimum": 1000,
+                    "maximum": 3600000
+                  }
+                }
+              },
+              "model": {
+                "type": "string"
+              }
+            }
+          },
+          "notify": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Operator-notify transport (#143), also used by the conversation firewall’s detection sink (#225). Off unless enabled is exactly true.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": false
+              },
+              "webhookUrl": {
+                "type": "string"
+              },
+              "webhookSecret": {
+                "type": "string"
+              },
+              "openclaw": {
+                "type": "boolean",
+                "default": false
+              },
+              "timeoutMs": {
+                "type": "number",
+                "minimum": 500,
+                "maximum": 60000
+              }
+            }
+          },
+          "reviewedScripts": {
+            "type": "array",
+            "description": "Reviewed-script allowlist (#189). Each entry pins ONE script by absolute path and content hash; createReviewedScriptCheck has the last word on every field.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "sha256": {
+                  "type": "string"
+                },
+                "note": {
+                  "type": "string"
+                },
+                "addedAt": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "path",
+                "sha256"
+              ]
             }
           }
         }
