@@ -238,6 +238,37 @@ describe('determinism', () => {
   });
 });
 
+describe('rebuild hygiene', () => {
+  it('clears source_risk on rebuild — no ghost risk keyed to a dead projection', () => {
+    const db = getDatabase();
+    insertAuditRow();
+    db.prepare(`
+      INSERT INTO source_risk (source_key, risk, updated_at)
+      VALUES ('agent:ghost', 0.9, '2026-08-01T00:00:00.000Z')
+    `).run();
+
+    rebuildThreatGraph();
+
+    expect(db.prepare('SELECT COUNT(*) as c FROM source_risk').get()).toEqual({ c: 0 });
+  });
+
+  it('records corrupt attrs as a visible error and moves the cursor on', () => {
+    insertAuditRow();
+    projectToCompletion();
+    const db = getDatabase();
+    db.prepare("UPDATE threat_nodes SET attrs = 'not-json' WHERE kind = 'source'").run();
+
+    insertAuditRow(); // same source — projection must read-modify-write the corrupt attrs
+    const result = projectAuditLedger();
+    expect(result.processed).toBe(1);
+    expect(result.errors.length).toBe(1);
+    expect(result.errors[0]).toContain('corrupt attrs');
+
+    // Cursor advanced despite the error — the ledger is not wedged.
+    expect(projectAuditLedger().processed).toBe(0);
+  });
+});
+
 describe('bounds', () => {
   it('routes sources beyond the cap to the overflow bucket', () => {
     for (let i = 0; i < 4; i++) {

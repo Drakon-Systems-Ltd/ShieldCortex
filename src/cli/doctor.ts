@@ -442,6 +442,19 @@ export async function checkThreatGraph(
 
     const cursor = state?.last_audit_id ?? 0;
     const lag = maxAudit - cursor;
+
+    // Never-ran is not "caught up". A small backlog on a fresh install is a
+    // friendly info (the next worker tick handles it); a backlog past the
+    // warn threshold with no run ever means no worker is projecting — warn.
+    const neverRan = (!state || !state.last_run_at) && cursor === 0;
+    if (neverRan && maxAudit > 0 && lag <= lagWarnThreshold) {
+      return {
+        label,
+        status: 'info',
+        message: `projector has not run yet (${maxAudit} audit rows waiting) — a worker tick or \`shieldcortex threat-graph rebuild\` will populate the graph`,
+      };
+    }
+
     if (lag > lagWarnThreshold) {
       return {
         label,

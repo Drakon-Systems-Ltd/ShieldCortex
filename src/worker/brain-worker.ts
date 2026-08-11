@@ -359,7 +359,7 @@ export class BrainWorker {
       // concurrent workers are safe; a held lease no-ops cheaply.
       if (isThreatGraphEnabled()) {
         try {
-          const projection = runProjectorWithLease({
+          const projection = await runProjectorWithLease({
             realtimeDir: this.config.threatGraphRealtimeDir ?? defaultRealtimeAuditDir(),
           });
           if (projection.ran && ((projection.audit?.processed ?? 0) > 0 || (projection.realtime?.processed ?? 0) > 0)) {

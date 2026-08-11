@@ -29,13 +29,22 @@
  * migration scripts.
  */
 
+// Internal — deliberately not exported from lib.ts or the package exports
+// map until the Phase B/C surface stabilises; consume via the threat_graph
+// MCP tool or the `shieldcortex threat-graph` CLI.
+
 import { getDatabase } from '../database/init.js';
 import { projectRealtimeLedger, type RealtimeResult } from './realtime-ledger.js';
+import { sourceKey } from './keys.js';
 import {
   assertNotInTransaction,
+  cachedStmt,
   evictEdgeOverflow,
   evictEventOverflow,
   toIso,
+  updateAttrs,
+  upsertEdge,
+  upsertNode,
 } from './shared.js';
 
 /** Bump when projection rules change to force a rebuild on the next run. */
@@ -101,83 +110,8 @@ function ensureStateRow(): void {
   getDatabase().prepare('INSERT OR IGNORE INTO threat_graph_state (id) VALUES (1)').run();
 }
 
-/**
- * Upsert a node, folding first_seen/last_seen from the ledger row's timestamp.
- * Returns the node id. `attrs` mutation is left to callers via updateAttrs.
- */
-function upsertNode(kind: string, key: string, ts: string): number {
-  const db = getDatabase();
-  db.prepare(`
-    INSERT INTO threat_nodes (kind, key, attrs, first_seen, last_seen)
-    VALUES (?, ?, '{}', ?, ?)
-    ON CONFLICT(kind, key) DO UPDATE SET
-      first_seen = MIN(first_seen, excluded.first_seen),
-      last_seen = MAX(last_seen, excluded.last_seen)
-  `).run(kind, key, ts, ts);
-  const row = db.prepare('SELECT id FROM threat_nodes WHERE kind = ? AND key = ?').get(kind, key) as { id: number };
-  return row.id;
-}
-
-function updateAttrs(nodeId: number, mutate: (attrs: Record<string, unknown>) => void): void {
-  const db = getDatabase();
-  const row = db.prepare('SELECT attrs FROM threat_nodes WHERE id = ?').get(nodeId) as { attrs: string };
-  let attrs: Record<string, unknown>;
-  try {
-    attrs = JSON.parse(row.attrs) as Record<string, unknown>;
-  } catch {
-    attrs = {};
-  }
-  mutate(attrs);
-  db.prepare('UPDATE threat_nodes SET attrs = ? WHERE id = ?').run(JSON.stringify(attrs), nodeId);
-}
-
 function bump(attrs: Record<string, unknown>, field: string, by = 1): void {
   attrs[field] = (typeof attrs[field] === 'number' ? (attrs[field] as number) : 0) + by;
-}
-
-/**
- * Upsert an aggregate edge: count++, timestamp fold, FIFO-capped evidence.
- */
-function upsertEdge(
-  src: number,
-  predicate: string,
-  dst: number,
-  ts: string,
-  evidenceRef: number | null,
-  evidenceCap: number,
-): void {
-  const db = getDatabase();
-  const existing = db.prepare(
-    'SELECT id, count, evidence FROM threat_edges WHERE src = ? AND predicate = ? AND dst = ?'
-  ).get(src, predicate, dst) as { id: number; count: number; evidence: string } | undefined;
-
-  if (!existing) {
-    const evidence = evidenceRef === null ? [] : [evidenceRef];
-    db.prepare(`
-      INSERT INTO threat_edges (src, predicate, dst, count, first_seen, last_seen, writer, evidence)
-      VALUES (?, ?, ?, 1, ?, ?, 'projector', ?)
-    `).run(src, predicate, dst, ts, ts, JSON.stringify(evidence));
-    return;
-  }
-
-  let evidence: number[];
-  try {
-    evidence = JSON.parse(existing.evidence) as number[];
-  } catch {
-    evidence = [];
-  }
-  if (evidenceRef !== null) {
-    evidence.push(evidenceRef);
-    if (evidence.length > evidenceCap) evidence = evidence.slice(-evidenceCap);
-  }
-  db.prepare(`
-    UPDATE threat_edges SET
-      count = count + 1,
-      first_seen = MIN(first_seen, ?),
-      last_seen = MAX(last_seen, ?),
-      evidence = ?
-    WHERE id = ?
-  `).run(ts, ts, JSON.stringify(evidence), existing.id);
 }
 
 /**
@@ -193,8 +127,7 @@ function resolveSourceNode(
   errors: string[],
 ): number {
   const db = getDatabase();
-  const identifier = row.source_identifier.slice(0, opts.sourceKeyMaxLength);
-  const key = `${row.source_type}:${identifier}`;
+  const key = sourceKey(row.source_type, row.source_identifier, opts.sourceKeyMaxLength);
 
   const existing = db.prepare("SELECT id FROM threat_nodes WHERE kind = 'source' AND key = ?").get(key) as { id: number } | undefined;
   if (existing) {
@@ -232,9 +165,9 @@ function projectRow(row: AuditRow, opts: Required<ProjectorOptions>, errors: str
 
   const patternIds = new Map<string, number>();
   for (const name of patterns) {
-    const patternId = upsertNode('pattern', name, ts);
+    const patternId = upsertNode('pattern', name.slice(0, opts.sourceKeyMaxLength), ts);
     patternIds.set(name, patternId);
-    upsertEdge(sourceId, 'triggered', patternId, ts, row.id, opts.evidenceCap);
+    upsertEdge(sourceId, 'triggered', patternId, ts, { ref: row.id, cap: opts.evidenceCap });
   }
 
   // Tier 2: event nodes for notable rows only.
@@ -254,9 +187,9 @@ function projectRow(row: AuditRow, opts: Required<ProjectorOptions>, errors: str
     // risk with self-inflicted blocks.
     if (indicators.includes('pipeline_error')) attrs.pipeline_error = true;
   });
-  upsertEdge(eventId, 'from_source', sourceId, ts, row.id, opts.evidenceCap);
+  upsertEdge(eventId, 'from_source', sourceId, ts, { ref: row.id, cap: opts.evidenceCap });
   for (const [, patternId] of patternIds) {
-    upsertEdge(eventId, 'matched', patternId, ts, row.id, opts.evidenceCap);
+    upsertEdge(eventId, 'matched', patternId, ts, { ref: row.id, cap: opts.evidenceCap });
   }
   return { eventMinted: true };
 }
@@ -278,7 +211,7 @@ export function projectAuditLedger(options?: ProjectorOptions): ProjectResult {
 
   const batch = db.transaction(() => {
     const state = db.prepare('SELECT last_audit_id FROM threat_graph_state WHERE id = 1').get() as { last_audit_id: number };
-    const rows = db.prepare(`
+    const rows = cachedStmt(`
       SELECT id, project, timestamp, source_type, source_identifier,
              firewall_result, anomaly_score, threat_indicators, blocked_patterns
       FROM defence_audit WHERE id > ? ORDER BY id ASC LIMIT ?
@@ -323,12 +256,19 @@ export function projectToCompletion(options?: ProjectorOptions): ProjectResult {
   return total;
 }
 
-/** Clear the derived view and reset both cursors. Stamps PROJECTOR_VERSION. */
+/**
+ * Clear the derived view and reset both cursors. Stamps PROJECTOR_VERSION.
+ * source_risk is cleared too: a rebuild over a retention-purged ledger yields
+ * lower sums, and stale risk rows keyed to the old projection would be ghost
+ * risk no ledger supports. (Phase B's re-seed step wraps this — see the
+ * design doc's Retention section.)
+ */
 function clearGraph(): void {
   const db = getDatabase();
   db.transaction(() => {
     db.prepare('DELETE FROM threat_edges').run();
     db.prepare('DELETE FROM threat_nodes').run();
+    db.prepare('DELETE FROM source_risk').run();
     db.prepare(`
       UPDATE threat_graph_state
       SET last_audit_id = 0, last_rt_cursor = '', last_error = NULL, projector_version = ?
@@ -396,8 +336,14 @@ const DEFAULT_MAX_BATCHES = 20;
  * doctor's freshness signal cannot be fooled by a projector that fails every
  * tick. The lease release is exception-isolated: a busy DB during release
  * must never mask the original error (expiry heals an unreleased lease).
+ *
+ * ASYNC on purpose: better-sqlite3 is synchronous, and the mcp-profile
+ * worker shares its event loop with the MCP server — the first-ever run
+ * projects the whole retained ledger, which would otherwise block responses
+ * for seconds right after session start. Yielding between batches caps the
+ * continuous block at one ~500-row batch.
  */
-export function runProjectorWithLease(options?: LeaseRunOptions): LeaseRunResult {
+export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<LeaseRunResult> {
   assertNotInTransaction('lease runner');
   const db = getDatabase();
   ensureStateRow();
@@ -437,6 +383,8 @@ export function runProjectorWithLease(options?: LeaseRunOptions): LeaseRunResult
       audit.errors.push(...r.errors);
       audit.cursor = r.cursor;
       if (r.processed === 0) break;
+      // Yield the event loop between synchronous batches (see doc comment).
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
     runErrors.push(...audit.errors);
 
@@ -477,6 +425,10 @@ export function runProjectorWithLease(options?: LeaseRunOptions): LeaseRunResult
  * Canonical dump for determinism checks: nodes ordered by (kind, key), edges
  * by (src_key, predicate, dst_key), surrogate ids excluded. Two projections
  * of the same ledger rows must produce byte-identical dumps.
+ *
+ * The dump COVERS attrs — so attrs may hold only ledger-derived values
+ * (ledger timestamps included). Anything decayed or wall-clock-relative
+ * belongs in source_risk, which is deliberately outside this contract.
  */
 export function canonicalDump(): string {
   const db = getDatabase();

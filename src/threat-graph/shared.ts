@@ -5,7 +5,60 @@
 
 import os from 'os';
 import path from 'path';
+import type { Statement } from 'better-sqlite3';
 import { getDatabase } from '../database/init.js';
+
+/**
+ * Typed attrs shapes. Runtime stays JSON; these keep B's additions honest.
+ * DETERMINISM CONTRACT: attrs may contain only values derivable from ledger
+ * rows (ledger timestamps included) — canonicalDump() covers attrs, so
+ * anything decayed or wall-clock-relative lives in source_risk, which sits
+ * outside the determinism contract.
+ */
+export interface SourceAttrs {
+  scan_count?: number;
+  allow_count?: number;
+  block_count?: number;
+  quarantine_count?: number;
+  /** Phase B: raw exponent sum + its ledger-time reference. */
+  risk_sum?: number;
+  risk_ref_ts?: string;
+}
+
+export interface EventAttrs {
+  verdict?: string;
+  anomaly?: number;
+  project?: string;
+  pipeline_error?: boolean;
+  hook?: string;
+  reason?: string;
+  model?: string;
+  chars?: number;
+  contentSha256?: string;
+}
+
+/**
+ * Per-connection prepared-statement cache. init.ts closes and reopens the
+ * handle on recovery paths, so statements are keyed by Database instance —
+ * a naive once-cache would throw 'database connection is not open' after any
+ * reopen and, behind a fail-soft catch, silently disable a feature forever.
+ */
+const stmtCache = new WeakMap<object, Map<string, Statement>>();
+
+export function cachedStmt(sql: string): Statement {
+  const db = getDatabase();
+  let perDb = stmtCache.get(db);
+  if (!perDb) {
+    perDb = new Map();
+    stmtCache.set(db, perDb);
+  }
+  let stmt = perDb.get(sql);
+  if (!stmt) {
+    stmt = db.prepare(sql);
+    perDb.set(sql, stmt);
+  }
+  return stmt;
+}
 
 /** Default realtime JSONL location — matches the OpenClaw plugin's auditDir(). */
 export function defaultRealtimeAuditDir(): string {
@@ -37,6 +90,85 @@ export function assertNotInTransaction(where: string): void {
   if (getDatabase().inTransaction) {
     throw new Error(`threat-graph ${where} must not run inside an open transaction`);
   }
+}
+
+/**
+ * Upsert a node, folding first_seen/last_seen from the ledger row's
+ * timestamp. Returns the node id. The single write primitive for BOTH ledger
+ * projectors (and Phase B's sweep) — do not fork per-writer copies.
+ */
+export function upsertNode(kind: string, key: string, ts: string): number {
+  cachedStmt(`
+    INSERT INTO threat_nodes (kind, key, attrs, first_seen, last_seen)
+    VALUES (?, ?, '{}', ?, ?)
+    ON CONFLICT(kind, key) DO UPDATE SET
+      first_seen = MIN(first_seen, excluded.first_seen),
+      last_seen = MAX(last_seen, excluded.last_seen)
+  `).run(kind, key, ts, ts);
+  return (cachedStmt('SELECT id FROM threat_nodes WHERE kind = ? AND key = ?')
+    .get(kind, key) as { id: number }).id;
+}
+
+/**
+ * Read-modify-write a node's attrs. THROWS on corrupt attrs JSON — the
+ * row-level catch in the batch loop records it and moves the cursor on, so
+ * corruption becomes a doctor-visible error instead of a silent counter
+ * reset (which, once Phase B stores risk sums here, would be silent risk
+ * amnesty).
+ */
+export function updateAttrs(nodeId: number, mutate: (attrs: Record<string, unknown>) => void): void {
+  const row = cachedStmt('SELECT attrs FROM threat_nodes WHERE id = ?').get(nodeId) as { attrs: string };
+  let attrs: Record<string, unknown>;
+  try {
+    attrs = JSON.parse(row.attrs) as Record<string, unknown>;
+  } catch {
+    throw new Error(`corrupt attrs JSON on threat_node ${nodeId} — rebuild the threat graph`);
+  }
+  mutate(attrs);
+  cachedStmt('UPDATE threat_nodes SET attrs = ? WHERE id = ?').run(JSON.stringify(attrs), nodeId);
+}
+
+/**
+ * Upsert an edge: count++, MIN/MAX timestamp fold, optionally FIFO-capped
+ * evidence. The single edge primitive for all writers.
+ */
+export function upsertEdge(
+  src: number,
+  predicate: string,
+  dst: number,
+  ts: string,
+  evidence?: { ref: number; cap: number },
+): void {
+  const existing = cachedStmt(
+    'SELECT id, evidence FROM threat_edges WHERE src = ? AND predicate = ? AND dst = ?'
+  ).get(src, predicate, dst) as { id: number; evidence: string } | undefined;
+
+  if (!existing) {
+    cachedStmt(`
+      INSERT INTO threat_edges (src, predicate, dst, count, first_seen, last_seen, writer, evidence)
+      VALUES (?, ?, ?, 1, ?, ?, 'projector', ?)
+    `).run(src, predicate, dst, ts, ts, JSON.stringify(evidence ? [evidence.ref] : []));
+    return;
+  }
+
+  let refs: number[] = [];
+  if (evidence) {
+    try {
+      refs = JSON.parse(existing.evidence) as number[];
+    } catch {
+      refs = [];
+    }
+    refs.push(evidence.ref);
+    if (refs.length > evidence.cap) refs = refs.slice(-evidence.cap);
+  }
+  cachedStmt(`
+    UPDATE threat_edges SET
+      count = count + 1,
+      first_seen = MIN(first_seen, ?),
+      last_seen = MAX(last_seen, ?),
+      evidence = CASE WHEN ? THEN ? ELSE evidence END
+    WHERE id = ?
+  `).run(ts, ts, evidence ? 1 : 0, JSON.stringify(refs), existing.id);
 }
 
 /**

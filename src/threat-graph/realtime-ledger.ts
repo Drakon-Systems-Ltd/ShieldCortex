@@ -30,7 +30,13 @@
 import fs from 'fs';
 import path from 'path';
 import { getDatabase } from '../database/init.js';
-import { assertNotInTransaction, evictEventOverflow, toIso } from './shared.js';
+import {
+  assertNotInTransaction,
+  evictEventOverflow,
+  toIso,
+  upsertEdge,
+  upsertNode,
+} from './shared.js';
 
 export interface RealtimeLedgerOptions {
   /** Directory holding realtime-YYYY-MM-DD.jsonl files. */
@@ -146,28 +152,6 @@ function collectPending(
   return out;
 }
 
-function upsertNode(kind: string, key: string, ts: string): number {
-  const db = getDatabase();
-  db.prepare(`
-    INSERT INTO threat_nodes (kind, key, attrs, first_seen, last_seen)
-    VALUES (?, ?, '{}', ?, ?)
-    ON CONFLICT(kind, key) DO UPDATE SET
-      first_seen = MIN(first_seen, excluded.first_seen),
-      last_seen = MAX(last_seen, excluded.last_seen)
-  `).run(kind, key, ts, ts);
-  return (db.prepare('SELECT id FROM threat_nodes WHERE kind = ? AND key = ?').get(kind, key) as { id: number }).id;
-}
-
-function insertEdgeIfAbsent(src: number, predicate: string, dst: number, ts: string): void {
-  getDatabase().prepare(`
-    INSERT INTO threat_edges (src, predicate, dst, count, first_seen, last_seen, writer, evidence)
-    VALUES (?, ?, ?, 1, ?, ?, 'projector', '[]')
-    ON CONFLICT(src, predicate, dst) DO UPDATE SET
-      count = count + 1,
-      last_seen = MAX(last_seen, excluded.last_seen)
-  `).run(src, predicate, dst, ts, ts);
-}
-
 export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeResult {
   assertNotInTransaction('realtime ledger');
   const db = getDatabase();
@@ -224,11 +208,11 @@ export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeR
       db.prepare('UPDATE threat_nodes SET attrs = ? WHERE id = ?').run(JSON.stringify(attrs), eventId);
 
       const sourceId = upsertNode('source', `conversation:${hook}`, ts);
-      insertEdgeIfAbsent(eventId, 'from_source', sourceId, ts);
+      upsertEdge(eventId, 'from_source', sourceId, ts);
 
       if (sessionId) {
         const sessId = upsertNode('session', sessionId, ts);
-        insertEdgeIfAbsent(eventId, 'in_session', sessId, ts);
+        upsertEdge(eventId, 'in_session', sessId, ts);
       }
       result.eventNodes++;
     }

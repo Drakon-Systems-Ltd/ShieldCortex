@@ -60,20 +60,20 @@ afterEach(() => {
 });
 
 describe('single-writer lease', () => {
-  it('processes under an acquired lease and releases on completion', () => {
+  it('processes under an acquired lease and releases on completion', async () => {
     insertAuditRow();
-    const first = runProjectorWithLease({ now: T0 });
+    const first = await runProjectorWithLease({ now: T0 });
     expect(first.ran).toBe(true);
     expect(first.audit?.processed).toBe(1);
 
     // Released: an immediate second run may acquire again (new rows process).
     insertAuditRow();
-    const second = runProjectorWithLease({ now: T0 + 1000 });
+    const second = await runProjectorWithLease({ now: T0 + 1000 });
     expect(second.ran).toBe(true);
     expect(second.audit?.processed).toBe(1);
   });
 
-  it('no-ops while a foreign lease is unexpired, and recovers after expiry', () => {
+  it('no-ops while a foreign lease is unexpired, and recovers after expiry', async () => {
     insertAuditRow();
     const db = getDatabase();
     db.prepare('INSERT OR IGNORE INTO threat_graph_state (id) VALUES (1)').run();
@@ -81,11 +81,11 @@ describe('single-writer lease', () => {
     db.prepare('UPDATE threat_graph_state SET lease_expires_at = ? WHERE id = 1')
       .run(new Date(T0 + 60_000).toISOString());
 
-    const blocked = runProjectorWithLease({ now: T0 });
+    const blocked = await runProjectorWithLease({ now: T0 });
     expect(blocked.ran).toBe(false);
 
     // A crashed holder's stale lease is not permanent: past expiry, we acquire.
-    const recovered = runProjectorWithLease({ now: T0 + 61_000 });
+    const recovered = await runProjectorWithLease({ now: T0 + 61_000 });
     expect(recovered.ran).toBe(true);
     expect(recovered.audit?.processed).toBe(1);
   });
@@ -218,15 +218,15 @@ describe('realtime JSONL ledger', () => {
 });
 
 describe('projector version upgrades', () => {
-  it('a stored version older than the code forces a from-zero rebuild on the next lease run', () => {
+  it('a stored version older than the code forces a from-zero rebuild on the next lease run', async () => {
     insertAuditRow();
-    runProjectorWithLease({ now: T0 });
+    await runProjectorWithLease({ now: T0 });
     const db = getDatabase();
     // Plant a stale-version marker plus a junk node a rebuild must clear.
     db.prepare('UPDATE threat_graph_state SET projector_version = 0 WHERE id = 1').run();
     db.prepare("INSERT INTO threat_nodes (kind, key, attrs, first_seen, last_seen) VALUES ('campaign', 'stale-junk', '{}', 'x', 'x')").run();
 
-    const run = runProjectorWithLease({ now: T0 + 1000 });
+    const run = await runProjectorWithLease({ now: T0 + 1000 });
     expect(run.ran).toBe(true);
     expect(db.prepare("SELECT id FROM threat_nodes WHERE key = 'stale-junk'").get()).toBeUndefined();
     // Real projection replayed and version stamped current.
@@ -237,17 +237,17 @@ describe('projector version upgrades', () => {
 });
 
 describe('error visibility', () => {
-  it('persists realtime errors into last_error on a successful run, and clears them once healthy', () => {
+  it('persists realtime errors into last_error on a successful run, and clears them once healthy', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-rt-'));
     fs.writeFileSync(path.join(dir, 'realtime-2026-08-11.jsonl'), 'garbage line\n');
-    runProjectorWithLease({ now: T0, realtimeDir: dir });
+    await runProjectorWithLease({ now: T0, realtimeDir: dir });
 
     const db = getDatabase();
     let state = db.prepare('SELECT last_error FROM threat_graph_state WHERE id = 1').get() as { last_error: string | null };
     expect(state.last_error).toContain('malformed');
 
     // Next run with nothing wrong clears the stale error.
-    runProjectorWithLease({ now: T0 + 1000, realtimeDir: dir });
+    await runProjectorWithLease({ now: T0 + 1000, realtimeDir: dir });
     state = db.prepare('SELECT last_error FROM threat_graph_state WHERE id = 1').get() as { last_error: string | null };
     expect(state.last_error).toBeNull();
   });

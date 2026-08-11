@@ -749,6 +749,63 @@ missing table, corrupt row) must yield modifier 0 and an unblocked scan —
 this test is the enforcement of invariant 4. All ordinary unit tests: decay
 takes `now` as a parameter, no network, no LLM.
 
+## Phase B implementation notes (pre-B architecture audit, 2026-08-11)
+
+A four-lens audit of the shipped Phase A stack pinned these decisions so B is
+built on facts, not the doc's assumptions. They amend the sections above.
+
+1. **Attestation must be plumbed — it does not exist in the ledger.**
+   `resolveToolSource` computes the inferred/declared/clamped metadata and
+   discards it before the pipeline runs; no audit column records it, and a
+   cleanly-declared source leaves no trace. B therefore ships: (a)
+   `resolveToolSource` returns `{ source, attested }` — attested is
+   deliberately NOT a field on `DefenceSource`, which is caller-suppliable
+   through scan-only/SDK surfaces and would let integrators self-attest;
+   (b) a nullable `source_attested INTEGER` guarded-ALTER on `defence_audit`
+   (alongside `risk_modifier` — two ALTERs); (c) an explicit egress
+   declaration for both new columns (the v4.29.0 rule). The projector reads
+   attestation per-row from the ledger — never from live config, which would
+   break replay determinism.
+2. **`strictSourceMode` is currently unwired** — defined in `DefenceConfig`,
+   consumed nowhere on the live tool path. B must wire it into
+   `resolveToolSource` (strict ⇒ every resolution attested) before
+   implementing the doc's attested definition, or that half is silently
+   always-false.
+3. **Rebuild seeding.** `clearGraph()` now clears `source_risk` too (ghost
+   risk keyed to a dead projection must not survive a rebuild). Because a
+   replay over a retention-purged ledger yields lower sums, B's rebuild path
+   snapshots `{source_key → exponent sum, ref_ts}` from source-node attrs
+   before clearing and re-seeds after replay, with a test asserting
+   rebuild-after-purge never lowers a source's risk below its decayed
+   pre-rebuild value. The raw sum lives in source-node `attrs`
+   (ledger-time-normalised — it is replay state and sits inside the
+   canonicalDump determinism contract); decayed output lives in
+   `source_risk` (wall-clock-relative, outside the contract).
+4. **28-day windowed counters need a query path.** They cannot come from the
+   graph (ALLOW rows mint no events) or from monotonic counters. B adds a
+   guarded composite index `idx_audit_source_ident_ts ON defence_audit
+   (source_type, source_identifier, timestamp)` and computes the window in
+   the idle sweep with one range query per pass.
+5. **Hot-path read mechanics.** The pipeline's `source_risk` lookup uses the
+   shared `sourceKey()` helper (`threat-graph/keys.ts`, deliberately DB-free
+   so pipeline code can import it) — identical normalisation to the
+   projector or long identifiers silently read no row. The prepared
+   statement is cached **keyed on the Database instance** (init.ts closes
+   and reopens the handle on recovery; a naive once-cache would throw into
+   the fail-to-zero guard and silently disable the modifier until restart —
+   the exact invisible-off state invariant 4 warns about). Overflow-bucket
+   sources have no per-key risk row and read modifier 0 by construction.
+6. **`operation='review'` rows** (reset-source, Phase C decisions) are
+   excluded from counters and risk accrual when B rewrites the projector's
+   SELECT — operator actions are not scans.
+7. **Custom-pattern identity**: B's pipeline diff adds `custom:<id>` to
+   `blocked_patterns` when local custom patterns fire (today they land only
+   in free-text reason, invisible to the graph). Cloud-synced patterns keyed
+   `custom:<category>` need a SaaS payload change — tracked for Phase C prep.
+8. **Realtime rows accrue no risk in B** (no verdict field; pooled
+   unattested identities are enforcement-inert anyway) — weights for
+   conversation detections are decided in Phase D with campaign detection.
+
 ## Open questions
 
 1. **Half-life and accrual-cap defaults** (14 d / 2.0-per-24 h) — shapes are

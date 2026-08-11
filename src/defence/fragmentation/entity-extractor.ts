@@ -3,6 +3,14 @@
  *
  * Identifies security-relevant entities (URLs, credentials, commands, etc.)
  * that could be fragments of a larger attack payload.
+ *
+ * CHARTER: this is the SYNC-PATH working set for fragment-assembly scoring
+ * (24h window). It is NOT superseded by the threat graph: the graph's event
+ * tier records only caught/notable rows, while fragment assembly is about
+ * individually-innocuous ALLOW writes that only add up to an attack in
+ * aggregate — exactly the rows the graph never sees. The threat graph's
+ * campaign detection (Phase D) complements this with cross-source
+ * attribution over CAUGHT events; neither replaces the other.
  */
 
 import { getDatabase } from '../../database/init.js';
