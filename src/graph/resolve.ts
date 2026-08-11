@@ -49,8 +49,10 @@ export function resolveEntity(name: string, type: EntityType): number {
     }
   }
 
-  // 4. Fuzzy match (names > 5 chars)
-  if (name.length > 5) {
+  // 4. Fuzzy match (names > 5 chars). Never for files: Levenshtein ≤ 2
+  // silently merged distinct paths ('server.ts' ↔ 'server.js') into one
+  // entity, and the alias was permanent.
+  if (name.length > 5 && type !== 'file') {
     const candidates = db.prepare('SELECT id, name, aliases FROM entities WHERE type = ? AND LENGTH(name) BETWEEN ? AND ?')
       .all(type, name.length - 2, name.length + 2) as { id: number; name: string; aliases: string | null }[];
     for (const cand of candidates) {

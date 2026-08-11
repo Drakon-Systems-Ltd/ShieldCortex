@@ -740,7 +740,7 @@ but you can use this tool to check for new contradictions at any time.`,
   // Graph Query - Traverse from an entity
   server.tool(
     'graph_query',
-    'Traverse the knowledge graph from an entity. Returns connected entities and relationships up to N hops away.',
+    'Traverse the knowledge graph from an entity. Returns each reachable entity once, at its shallowest depth, with the edge that first reached it (BFS spanning tree — parallel edges between the same pair are not enumerated).',
     {
       entity: z.string().describe('Entity name to start from'),
       depth: z.number().optional().describe('Max traversal depth (default 2)'),

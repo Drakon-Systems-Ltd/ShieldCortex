@@ -198,6 +198,7 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+CREATE INDEX IF NOT EXISTS idx_entities_name_nocase ON entities(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
 
 -- Ontology: Subject-predicate-object triples

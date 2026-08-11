@@ -79,6 +79,33 @@ const STOPWORDS = new Set([
   'extraction', 'implementation', 'configuration', 'optimization',
 ]);
 
+// Code-identifier suffixes: PascalCase words ending in these are exception
+// classes, config shapes, etc. — not tools (AbortError, WorkerConfigs).
+const CODE_IDENTIFIER_SUFFIX_RE = /(?:Error|Exception|Config|Warning)s?$/;
+
+// Documentation placeholder path segments (path/to/server.js, your/file.ts).
+const PLACEHOLDER_PATH_RE = /(?:^|\/)(?:path\/to|your|example|foo|bar|sample|dummy)(?:\/|$)/i;
+
+// Pronouns the "Name said" pattern must not mint as people — personal,
+// indefinite, and interrogative.
+const PRONOUNS = new Set([
+  'he', 'she', 'they', 'it', 'we', 'you',
+  'someone', 'somebody', 'everyone', 'everybody', 'anyone', 'anybody',
+  'nobody', 'who',
+]);
+
+// Ops verbs the before-keyword pattern must not mint as tools
+// ("Restart server", "deleted database").
+const OPS_VERBS = new Set([
+  'restart', 'restarts', 'restarted', 'restarting', 'stop', 'stopped',
+  'stopping', 'start', 'started', 'starting', 'delete', 'deleted', 'deleting',
+  'drop', 'dropped', 'dropping', 'update', 'updated', 'updating', 'upgrade',
+  'upgraded', 'upgrading', 'install', 'installed', 'installing', 'reinstall',
+  'rebuild', 'rebuilt', 'rebuilding', 'launch', 'launched', 'launching',
+  'running', 'crashed', 'crashing', 'local', 'remote', 'production',
+  'staging', 'dev', 'web', 'backup',
+]);
+
 const FILE_EXT_RE = /\b[\w./-]+\.(ts|py|js|sql|json|md|tsx|jsx|rs|go|css|html)\b/g;
 const DIR_PATH_RE = /\b(src|lib|dist|tests?|scripts?|dashboard)\/[\w./-]+\b/g;
 const USERNAME_RE = /@(\w+)/g;
@@ -109,11 +136,13 @@ export function extractFromMemory(title: string, content: string, category: stri
 
   // Files
   for (const m of text.matchAll(FILE_EXT_RE)) {
+    if (PLACEHOLDER_PATH_RE.test(m[0])) continue;
     addEntity(m[0], 'file');
   }
   for (const m of text.matchAll(DIR_PATH_RE)) {
     // Skip if already captured as a file with extension
     const val = m[0];
+    if (PLACEHOLDER_PATH_RE.test(val)) continue;
     if (!entityMap.has(`${val}::file`)) {
       addEntity(val, 'file');
     }
@@ -142,6 +171,7 @@ export function extractFromMemory(title: string, content: string, category: stri
   for (const m of text.matchAll(PASCAL_CASE_RE)) {
     const word = m[1];
     if (!PASCAL_CASE_FALSE_POSITIVES.has(word.toUpperCase()) &&
+        !CODE_IDENTIFIER_SUFFIX_RE.test(word) &&
         !LANGUAGES.has(word) &&
         !TOOLS_AND_SERVICES.has(word)) {
       addEntity(word, 'tool');
@@ -153,6 +183,7 @@ export function extractFromMemory(title: string, content: string, category: stri
     const word = m[1];
     if (word.length > 1 &&
         !PASCAL_CASE_FALSE_POSITIVES.has(word.toUpperCase()) &&
+        !OPS_VERBS.has(word.toLowerCase()) &&
         !['the', 'a', 'an', 'this', 'that', 'my', 'our', 'its'].includes(word.toLowerCase())) {
       const canonical = TOOLS_LOWER.get(word.toLowerCase());
       addEntity(canonical || word, 'tool');
@@ -164,6 +195,7 @@ export function extractFromMemory(title: string, content: string, category: stri
     addEntity(m[1], 'person');
   }
   for (const m of text.matchAll(NAME_SAID_RE)) {
+    if (PRONOUNS.has(m[1].toLowerCase())) continue;
     addEntity(m[1], 'person');
   }
 
@@ -274,12 +306,15 @@ export function extractFromMemory(title: string, content: string, category: stri
     if (what && how) addTriple(how, 'fixes', what);
   }
 
-  // "chose X over Y"
+  // "chose X over Y" — a direct triple between the two options. (The old
+  // 'project'-subject prefers/avoids triples were silently dropped at insert
+  // time from v2.10.0 onward: 'project' became a STOPWORD, so its entity never
+  // existed and the nameToId lookup in applyExtractionResult came back
+  // undefined. v1.13.0–v2.9.x DID persist them — backfillGraph heals those.)
   for (const m of text.matchAll(new RegExp(`\\bchose\\s+${ENT}\\s+over\\s+${ENT}`, 'gi'))) {
     const pref = resolveEntityName(m[1]);
     const avoid = resolveEntityName(m[2]);
-    if (pref) addTriple('project', 'prefers', pref);
-    if (avoid) addTriple('project', 'avoids', avoid);
+    if (pref && avoid) addTriple(pref, 'preferred_over', avoid);
   }
 
   // "X configured with Y"
@@ -289,11 +324,9 @@ export function extractFromMemory(title: string, content: string, category: stri
     if (subj && obj) addTriple(subj, 'configures', obj);
   }
 
-  // "implemented X" — only if X resolves
-  for (const m of text.matchAll(new RegExp(`\\bimplemented\\s+${ENT}`, 'gi'))) {
-    const what = resolveEntityName(m[1]);
-    if (what) addTriple('project', 'implements', what);
-  }
+  // (The "implemented X" pattern was removed: its 'project' subject meant the
+  // triple was silently dropped at insert time from v2.10.0 onward — dead code;
+  // the v1.13.0–v2.9.x rows it did persist are healed by backfillGraph.)
 
   // "X extends Y"
   for (const m of text.matchAll(new RegExp(`${ENT}\\s+extends\\s+${ENT}`, 'gi'))) {
