@@ -200,7 +200,7 @@ shieldcortex doctor
 
 ShieldCortex has two tiers:
 
-- **Free (MIT)** — every local feature, forever: memory, recall, review, dashboard, Iron Dome, custom injection patterns, custom policies, custom firewall rules, audit export, the dependency scanner, Cortex mistake learning, unlimited X-Ray (including npm deep scans and the CI/CD gate), and the OpenClaw/Codex integrations. No trial, no licence key, no signup. The cloud free tier is included too: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email.
+- **Free (MIT)** — every local feature: memory, recall, review, dashboard, Iron Dome, custom injection patterns, custom policies, custom firewall rules, audit export, the dependency scanner, Cortex mistake learning, unlimited X-Ray (including npm deep scans and the CI/CD gate), and the OpenClaw/Codex integrations. No trial, no licence key, no signup. The cloud free tier is included too: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email.
 - **Enterprise** — full cloud memory/graph replication, team management, shared patterns, servers and fleets, self-hosted deployments, SLA. Contact **sales@drakonsystems.com**.
 
 Check the current state at any time:
@@ -890,7 +890,7 @@ the default with a warning on stderr — it is never silently ignored.
 
 ## 💚 Free and Open Source
 
-ShieldCortex is **MIT licensed** and **free — every local feature, unlimited, forever**. No trial, no licence key.
+ShieldCortex is **MIT licensed** and **free — every local feature, unlimited**. No trial, no licence key.
 
 The [cloud free tier](https://shieldcortex.ai/pricing) is included: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email from the local dashboard.
 
