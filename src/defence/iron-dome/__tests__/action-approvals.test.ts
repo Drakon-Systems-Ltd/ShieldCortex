@@ -480,18 +480,23 @@ describe('#183 — only reviewed non-exec command surfaces strip advisory fields
     expect(unsafe).not.toBe(safe);
   });
 
-  it('the live store path spends a Workflow.script approval after description is re-worded', () => {
+  it('the live store path rejects a changed payload, then spends the exact Workflow.script approval', () => {
     const now = 1_800_000_000_000;
     const home = mkdtempSync(join(tmpdir(), 'sc-approvals-183-live-'));
     try {
-      const first = { script: SCRIPT, description: 'Publish the release branch' };
-      const retry = { script: SCRIPT, description: 'Ship the hotfix now' };
+      const first = { script: SCRIPT, description: 'Publish the release branch', dangerouslyDisableSandbox: false };
+      const changed = { script: SCRIPT, description: 'Ship the hotfix now', dangerouslyDisableSandbox: true };
+      const retry = { script: SCRIPT, description: 'Ship the hotfix now', dangerouslyDisableSandbox: false };
       const pending = recordPending(
         { tool: 'Workflow', input: first, summary: 'Workflow: release script', signals: ['exec-like'] },
         { home, now },
       );
       expect(approveRequest(shortHash(pending.hash), { home, now: now + 1000 }).ok).toBe(true);
-      expect(consumeApproval('Workflow', retry, { home, now: now + 2000 })).not.toBeNull();
+      // An unlisted, load-bearing field stays bound even though description is
+      // advisory for this reviewed command surface. A mismatch cannot spend the
+      // grant, so the approved payload remains available for the honest retry.
+      expect(consumeApproval('Workflow', changed, { home, now: now + 2000 })).toBeNull();
+      expect(consumeApproval('Workflow', retry, { home, now: now + 3000 })).not.toBeNull();
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
