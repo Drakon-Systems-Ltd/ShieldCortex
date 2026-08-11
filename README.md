@@ -860,6 +860,10 @@ All config lives in `~/.shieldcortex/config.json`:
       "enabled": true
     }
   ],
+  "memory": {
+    "maxLongTermMemories": 5000,
+    "maxShortTermMemories": 250
+  },
   "expiryRules": [
     { "category": "todo", "maxAgeDays": 30 },
     { "category": "architecture", "protect": true }
@@ -873,7 +877,12 @@ All config lives in `~/.shieldcortex/config.json`:
 }
 ```
 
-Full reference: [docs/configuration.md](docs/configuration.md)
+**`memory`** — the caps at which ShieldCortex starts evicting. Once a store
+reaches its cap, every new memory that is kept permanently evicts an older one,
+so this is the point at which the product begins forgetting on your behalf.
+Defaults are `1000` long-term / `100` short-term. Values below `10` are refused
+(a cap of `0` would evict the whole store) and any invalid value falls back to
+the default with a warning on stderr — it is never silently ignored.
 
 </details>
 
