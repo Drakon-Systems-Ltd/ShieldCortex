@@ -6,6 +6,7 @@
  */
 
 import fs from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
@@ -19,7 +20,7 @@ function defaultBasePath(): string {
 }
 
 function ensureDir(dir: string): void {
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirSecure(dir);
 }
 
 function findingDedupeKey(target: string, f: XRayFinding): string {

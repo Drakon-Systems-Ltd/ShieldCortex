@@ -49,6 +49,7 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
+import { mkdirSecure } from './lib/state-perms.mjs';
 import { dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -635,7 +636,7 @@ function summariseToolArgs(args) {
 function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
   try {
     const auditDir = join(homedir(), '.shieldcortex', 'audit');
-    mkdirSync(auditDir, { recursive: true });
+    mkdirSecure(auditDir);
     const date = new Date().toISOString().slice(0, 10);
     const entry = {
       type: 'intercept',

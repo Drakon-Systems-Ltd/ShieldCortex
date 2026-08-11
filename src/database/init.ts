@@ -14,6 +14,7 @@ import { getInlineSchema } from './inline-schema.js';
 import { seedDefaultFirewallRules } from './seed-firewall-rules.js';
 import { debugLog } from '../debug-log.js';
 import { MAX_DB_FILE_BYTES, WARN_DB_FILE_BYTES } from '../limits.js';
+import { mkdirSecure, SECURE_OPEN_MODE } from '../setup/state-permissions.js';
 
 const _currentFile = fileURLToPath(import.meta.url);
 const _currentDir = dirname(_currentFile);
@@ -226,7 +227,7 @@ function acquireStartupLock(dbPath: string): void {
   }, null, 2);
 
   const tryOpen = () => {
-    lockFileFd = openSync(lockFilePath as string, 'wx');
+    lockFileFd = openSync(lockFilePath as string, 'wx', SECURE_OPEN_MODE);
     writeFileSync(lockFileFd, payload, 'utf-8');
   };
 
@@ -514,9 +515,9 @@ export function initDatabase(dbPath?: string): Database.Database {
   enforceSafeRuntimePath(expandedPath, explicitDbPath);
   const dir = dirname(expandedPath);
 
-  // Create directory if it doesn't exist
+  // Create directory if it doesn't exist — owner-only from the first mkdir (#218).
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSecure(dir);
   }
 
   // Store path for size monitoring

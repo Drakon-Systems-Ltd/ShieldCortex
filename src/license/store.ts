@@ -11,6 +11,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, statSync } from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import { join } from 'path';
 import { homedir } from 'os';
 import { verifyLicenseKey } from './verify.js';
@@ -176,7 +177,7 @@ export function activateLicense(key: string): LicenseInfo {
 
   const configDir = getConfigDir();
   const licenseFile = getLicenseFilePath();
-  mkdirSync(configDir, { recursive: true });
+  mkdirSecure(configDir);
   writeFileSync(licenseFile, JSON.stringify(file, null, 2) + '\n', { mode: 0o600 });
 
   // Refresh cache + mtime so the next getLicense() call in this process
