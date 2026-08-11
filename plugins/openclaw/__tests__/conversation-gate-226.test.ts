@@ -15,6 +15,7 @@ import plugin, {
   recordHostRuntimeVersion,
   readConversationAccessGrant,
   CONVERSATION_GATE_MIN_OPENCLAW,
+  CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW,
   __setDefenceModuleForTest,
   __setRuntimeForTest,
   __setGatewayNotifyContextForTest,
@@ -1029,12 +1030,33 @@ describe('#226 host consent + gate support are reported as evidence, not as a ti
     expect(hostSupportsConversationGate({ version: null, root: null, declaresGate: null })).toBe('unknown');
   });
 
-  it('the version floor is the one established from published artifacts', () => {
-    expect(CONVERSATION_GATE_MIN_OPENCLAW).toBe('2026.5.9-beta.1');
+  it('the prerelease band is UNPROVEN, never a confident answer in either direction', () => {
+    // 2026.5.9-beta.1 → 2026.5.11 ship the hook, but below the stable floor.
+    // Claiming 'supported' would be the #222 false green; claiming
+    // 'unsupported' would tell an operator their host cannot block when it
+    // can. With no declaration evidence, neither claim is made.
+    for (const version of ['2026.5.9-beta.1', '2026.5.10', '2026.5.11']) {
+      expect(hostSupportsConversationGate({ version, root: null, declaresGate: null })).toBe('unknown');
+    }
+    // Declarations still outrank the version, in both directions.
+    expect(hostSupportsConversationGate({ version: '2026.5.10', root: '/x', declaresGate: true })).toBe('supported');
+    expect(hostSupportsConversationGate({ version: '2026.5.10', root: '/x', declaresGate: false })).toBe('unsupported');
+    // Below the prerelease the hook does not exist at all — that IS knowable.
+    expect(hostSupportsConversationGate({ version: '2026.5.9-alpha.1', root: null, declaresGate: null })).toBe('unsupported');
+  });
+
+  it('the version floor is the STABLE release, and the prerelease is subordinate to it', () => {
+    // One authoritative floor, shared with src/integrations (which cannot be
+    // imported from the plugin build) and openclaw.plugin.json. Pinned across
+    // all three by src/__tests__/conversation-gate-floor-parity-226.test.ts.
+    expect(CONVERSATION_GATE_MIN_OPENCLAW).toBe('2026.5.12');
+    expect(CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW).toBe('2026.5.9-beta.1');
     // 2026.5.7 shipped no such hook; 2026.5.9-beta.1 was the first that did.
-    expect(compareOpenClawVersions('2026.5.7', CONVERSATION_GATE_MIN_OPENCLAW)).toBeLessThan(0);
-    expect(compareOpenClawVersions('2026.5.9-beta.1', CONVERSATION_GATE_MIN_OPENCLAW)).toBe(0);
-    expect(compareOpenClawVersions('2026.5.12', CONVERSATION_GATE_MIN_OPENCLAW)).toBeGreaterThan(0);
+    expect(compareOpenClawVersions('2026.5.7', CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW)).toBeLessThan(0);
+    expect(compareOpenClawVersions('2026.5.9-beta.1', CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW)).toBe(0);
+    expect(compareOpenClawVersions('2026.5.12', CONVERSATION_GATE_MIN_OPENCLAW)).toBe(0);
+    // The prerelease sorts below the floor, which is what makes it a band.
+    expect(compareOpenClawVersions(CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW, CONVERSATION_GATE_MIN_OPENCLAW)).toBeLessThan(0);
     // A prerelease sorts below its own release.
     expect(compareOpenClawVersions('2026.5.9-beta.1', '2026.5.9')).toBeLessThan(0);
     // Junk is unknown, never "new enough".

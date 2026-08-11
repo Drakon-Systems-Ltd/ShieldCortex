@@ -25,7 +25,24 @@ import fs from 'fs';
 import path from 'path';
 import semver from 'semver';
 
-/** First OpenClaw release containing `before_agent_run` (dist-verified). */
+/**
+ * First STABLE OpenClaw release containing `before_agent_run` (dist-verified).
+ *
+ * ONE floor, stated in three files that cannot import each other — this one,
+ * `CONVERSATION_GATE_MIN_OPENCLAW` in `plugins/openclaw/index.ts`, and
+ * `engines.conversationGate` in `plugins/openclaw/openclaw.plugin.json`. The
+ * plugin compiles to its own dist under `rootDir: ./plugins/openclaw` and does
+ * not carry `semver`, so it cannot import this module; the manifest is JSON the
+ * host reads and imports nothing. They are pinned equal by
+ * `src/__tests__/conversation-gate-floor-parity-226.test.ts` — edit one and
+ * that test names the others.
+ *
+ * The hook first appears in the 2026.5.9-beta.1 PRERELEASE. That is recorded in
+ * the plugin (`CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW`) and in the
+ * manifest note, and it is deliberately not a floor: it decides nothing an
+ * operator is shown. The stable release is the single answer to "can this host
+ * enforce".
+ */
 export const CONVERSATION_ENFORCEMENT_MIN_OPENCLAW = '2026.5.12';
 
 export type EnforcementSupport = 'supported' | 'unsupported' | 'unknown';

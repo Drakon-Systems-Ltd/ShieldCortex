@@ -1014,14 +1014,26 @@ describe('#226 compareOpenClawVersions orders prereleases numerically and refuse
     expect(compareOpenClawVersions('', '2026.5.9')).toBeNull();
   });
 
-  it('the gate-support verdict follows: beta.10 is supported, a 4-part version is unknown', () => {
+  it('the gate-support verdict follows the prerelease ordering at the band edge', () => {
     const probe = (version: string | null) => ({ version, root: null, declaresGate: null });
-    expect(hostSupportsConversationGate(probe('2026.5.9-beta.10'))).toBe('supported');
-    expect(hostSupportsConversationGate(probe('2026.5.9-beta.1'))).toBe('supported');
+    // The floor is the STABLE release (2026.5.12) — see
+    // CONVERSATION_GATE_MIN_OPENCLAW. Between the first prerelease that ships
+    // the hook and that floor is a band where a version number alone cannot
+    // answer the question, so the verdict is UNPROVEN rather than a guess in
+    // either direction.
+    expect(hostSupportsConversationGate(probe('2026.5.12'))).toBe('supported');
+    expect(hostSupportsConversationGate(probe('2026.5.9-beta.10'))).toBe('unknown');
+    expect(hostSupportsConversationGate(probe('2026.5.9-beta.1'))).toBe('unknown');
+    // This is where the prerelease ordering still decides a verdict: beta.1 is
+    // the band's lower edge, so a comparator that put beta.10 BELOW beta.1
+    // would drop a host that ships the hook out of the band and call it
+    // unsupported. Anything genuinely below the band is unsupported.
+    expect(hostSupportsConversationGate(probe('2026.5.9-alpha.9'))).toBe('unsupported');
     expect(hostSupportsConversationGate(probe('2026.5.8'))).toBe('unsupported');
     expect(hostSupportsConversationGate(probe('2026.5.9.1'))).toBe('unknown');
     // Declared support still outranks any version arithmetic.
     expect(hostSupportsConversationGate({ version: '2026.5.9.1', root: null, declaresGate: true })).toBe('supported');
+    expect(hostSupportsConversationGate({ version: '2026.5.9-beta.10', root: null, declaresGate: true })).toBe('supported');
   });
 });
 

@@ -33,6 +33,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
+import { classifyConversationOrigin } from './conversation-trust.js';
+import type { ConversationTrustDecision } from './conversation-trust.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
 import type { InterceptorConfig, BrokerRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
@@ -224,6 +226,12 @@ async function getDefenceModule(): Promise<DefenceModule | null> {
 }
 
 // Test seams (jest only): inject a stub defence module / spy runtime, then reset.
+/** Test seam for the conversation-taint store — lets a test assert that a
+ *  detection actually reached the store (or, for owner input, did not). */
+export function __getSessionTaintForTest(): typeof sessionTaint {
+  return sessionTaint;
+}
+
 export function __setDefenceModuleForTest(mod: DefenceModule | null | undefined): void {
   _defenceModOverride = mod;
   _defenceModPromise = null;
@@ -251,6 +259,9 @@ export function __resetConfigStateForTest(): void {
 type LlmInputEvent = {
   runId: string; sessionId: string; provider: string; model: string;
   systemPrompt?: string; prompt: string; historyMessages: unknown[]; imagesCount: number;
+  /** Host-supplied: this turn came from the gateway's owner. Absent on hosts
+   *  that do not report it — treated as NOT the owner, never as trusted. */
+  senderIsOwner?: boolean;
 };
 type LlmOutputEvent = {
   runId: string; sessionId: string; provider: string; model: string;
@@ -402,10 +413,17 @@ export interface ConversationDecision {
  * The #225 finding was that a HIGH verdict reached a log file and nothing else,
  * so a real threat on a real box was seen by nobody. Under `observe` we still
  * do not stop the turn — but a human hears about it.
+ *
+ * `trust` is the second input because BLOCKING is a consequence, and #235's rule
+ * is that source trust gates consequences (see conversation-trust.ts). It is
+ * optional, and its absence means "origin not established", which resolves
+ * toward enforcement rather than away from it: a caller that does not know who
+ * spoke has not proved the owner did.
  */
 export function evaluateConversationRun(
   posture: ConversationPosture,
   scan: ConversationScanResult,
+  trust?: ConversationTrustDecision,
 ): ConversationDecision {
   if (posture === 'off') {
     return { block: false, notify: false, audit: false, reason: null, outcome: 'not-scanned' };
@@ -431,12 +449,23 @@ export function evaluateConversationRun(
     return { block: false, notify: false, audit: false, reason: null, outcome: 'clean' };
   }
 
-  const block = posture === 'enforce';
+  // #235: the owner's own words are an instruction, so `enforce` does not act on
+  // them. This is the branch the whole trust module exists for — a block here
+  // does not warn the operator, it DESTROYS their message: OpenClaw keeps only
+  // the replacement text. Everything above still happened: the content was
+  // scanned, and `notify`/`audit` below are true whoever sent it. Only the
+  // consequence is withheld, and the reason says so on the row rather than
+  // leaving an enforce-posture host that did not block looking like a bug.
+  const trusted = trust !== undefined && !trust.mayTaint;
+  const block = posture === 'enforce' && !trusted;
   return {
     block,
     notify: true,
     audit: true,
-    reason: `conversation threat: ${scan.summary}`,
+    reason:
+      posture === 'enforce' && trusted
+        ? `conversation threat: ${scan.summary} — NOT blocked: ${trust!.reason}`
+        : `conversation threat: ${scan.summary}`,
     outcome: block ? 'blocked' : 'observed',
   };
 }
@@ -462,9 +491,45 @@ export function evaluateConversationRun(
  * diagnostic — it does not throw. So a version check is the only honest way to
  * know, and claiming enforcement without one is exactly the class of false
  * green #222 is about.
+ *
+ * ── ONE FLOOR, THREE FILES ────────────────────────────────────────────────
+ *
+ * The authoritative value is the STABLE release, and it is stated in three
+ * places that cannot import each other:
+ *
+ *   plugins/openclaw/index.ts                       — this constant
+ *   src/integrations/openclaw-conversation-capability.ts
+ *                                                   — CONVERSATION_ENFORCEMENT_MIN_OPENCLAW
+ *   plugins/openclaw/openclaw.plugin.json           — engines.conversationGate
+ *
+ * THE BOUNDARY IS REAL, not a preference. The plugin ships as its own dist,
+ * compiled by `tsconfig.openclaw-plugin.json` with `rootDir:
+ * ./plugins/openclaw` and an explicit `include` list; a `src/` import does not
+ * merely offend layering, it fails to emit — and the src module imports
+ * `semver`, which the plugin bundle does not carry (hence the hand-rolled
+ * `compareOpenClawVersions` below). The manifest is JSON read by the host and
+ * imports nothing at all.
+ *
+ * So the three are pinned EQUAL by test instead of shared by import:
+ * `src/__tests__/conversation-gate-floor-parity-226.test.ts` reads all three
+ * and fails on drift. Change one, that test tells you about the other two.
+ *
+ * `CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW` is deliberately SUBORDINATE: it
+ * decides nothing an operator sees. Its only job is to mark the band where a
+ * version number alone cannot answer the question — see
+ * `hostSupportsConversationGate`.
  */
-export const CONVERSATION_GATE_MIN_OPENCLAW = '2026.5.9-beta.1';
-export const CONVERSATION_GATE_MIN_OPENCLAW_STABLE = '2026.5.12';
+export const CONVERSATION_GATE_MIN_OPENCLAW = '2026.5.12';
+/**
+ * Documentation of when the hook first appeared, NOT a second floor.
+ *
+ * The previous cut used this as the support threshold, which made the plugin's
+ * operator-facing verdict disagree with the CLI's on any 2026.5.9-beta.1 →
+ * 2026.5.11 host: `shieldcortex doctor` said enforcement was unavailable while
+ * the plugin's own status line said supported. Two answers to one question is
+ * how the next false green gets built.
+ */
+export const CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW = '2026.5.9-beta.1';
 
 /**
  * Compare two OpenClaw CalVer strings (`2026.5.12`, `2026.5.9-beta.1`).
@@ -726,7 +791,21 @@ export function hostSupportsConversationGate(probe: HostOpenClawProbe | string |
   if (!resolved.version) return 'unknown';
   const cmp = compareOpenClawVersions(resolved.version, CONVERSATION_GATE_MIN_OPENCLAW);
   if (cmp === null) return 'unknown';
-  return cmp >= 0 ? 'supported' : 'unsupported';
+  if (cmp >= 0) return 'supported';
+
+  // Below the STABLE floor. One band inside that is not honestly 'unsupported':
+  // 2026.5.9-beta.1 → 2026.5.11 ship the hook as a prerelease, so calling them
+  // unsupported would tell an operator "no posture can block a turn on this
+  // host" about a host that blocks. The opposite claim is worse still, so
+  // neither is made: this is the absence of a measurement, and
+  // `describeConversationPlane` renders it as UNPROVEN and active:false.
+  //
+  // In practice a real prerelease install lands on `declaresGate` above and
+  // never reaches here — this branch is what happens when the declarations
+  // could not be read either, i.e. when we genuinely do not know.
+  const pre = compareOpenClawVersions(resolved.version, CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW);
+  if (pre === null) return 'unknown';
+  return pre >= 0 ? 'unknown' : 'unsupported';
 }
 
 /**
@@ -818,7 +897,7 @@ export function describeConversationPlane(input: {
       active: false,
       summary:
         `INACTIVE for enforcement: ${hostText} predates the before_agent_run gate ` +
-        `(first published in ${CONVERSATION_GATE_MIN_OPENCLAW}, first stable ${CONVERSATION_GATE_MIN_OPENCLAW_STABLE}) — ` +
+        `(floor ${CONVERSATION_GATE_MIN_OPENCLAW}; first seen as a prerelease in ${CONVERSATION_GATE_FIRST_PRERELEASE_OPENCLAW}) — ` +
         'observation only; no posture can block a turn on this host',
     };
   }
@@ -867,6 +946,20 @@ interface SCConfig {
   openclawAutoMemoryNoveltyThreshold?: number;
   openclawAutoMemoryMaxRecent?: number;
   interceptor?: InterceptorUserConfig;
+  /**
+   * Source trust for conversation content (see conversation-trust.ts).
+   *
+   * Declared and PARSED here, not read off an untyped cast. `normaliseConfig`
+   * is a strict allowlist — that is the whole point of #112/#115 — so a key it
+   * does not name is dropped on both config paths (~/.shieldcortex/config.json
+   * and the openclaw.json plugin entry). Landed as a cast against an SCConfig
+   * that had no such field, `conversationTrust.trustOwnerInput` was therefore
+   * read as `undefined` on every host, and the documented opt-out could not be
+   * turned on by anyone. It matters more now that trust also gates BLOCKING:
+   * an operator who wants owner input policed like everything else has to have
+   * a working way to say so.
+   */
+  conversationTrust?: { trustOwnerInput?: boolean };
 }
 
 const PLUGIN_ID = "shieldcortex-realtime";
@@ -1034,6 +1127,26 @@ const CONVERSATION_JSON_SCHEMA = {
   },
 };
 
+/** #235/#226. Mirrored verbatim into openclaw.plugin.json's configSchema, for
+ *  the same reason as the conversation posture above: the host validates the
+ *  on-disk config against THAT file, and a key our parser reads but neither
+ *  schema declares is one an operator cannot set at all. */
+const CONVERSATION_TRUST_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    trustOwnerInput: {
+      type: "boolean",
+      default: true,
+      description:
+        "Default true: a message the host attributes to the gateway OWNER is an instruction, so a detection in it " +
+        "is audited and alerted but never taints the session or blocks the turn. Set false on a host where the owner " +
+        "routinely pastes untrusted content and you would rather have the caution than the quiet. Content from " +
+        "anyone else — including another agent on a trusted channel — is data regardless of this setting.",
+    },
+  },
+};
+
 /**
  * The Action Guard block, declared ONCE and mounted in BOTH places the parser
  * accepts it (#226).
@@ -1159,6 +1272,10 @@ const PLUGIN_CONFIG_JSON_SCHEMA = {
     // declare it, so `additionalProperties: false` rejected the documented
     // config shape before the parser ever saw it.
     actionGuard: ACTION_GUARD_JSON_SCHEMA,
+    // #235/#226: source trust. Same reason as `actionGuard` above — the parser
+    // reads it, so the schema must declare it or `additionalProperties: false`
+    // rejects the whole config an operator writes from our documentation.
+    conversationTrust: CONVERSATION_TRUST_JSON_SCHEMA,
   },
 };
 
@@ -1262,6 +1379,20 @@ function normaliseConfig(raw: unknown, dropped?: string[]): SCConfig {
   // `enabled:"false"` was exactly this shape of typo).
   const interceptor = normaliseInterceptorConfig(value.interceptor, dropped);
   if (interceptor) config.interceptor = interceptor;
+
+  // Source trust (#235, wired to the gate in #226). Booleans only, and the
+  // block is kept only when it holds a valid one: a `trustOwnerInput: "false"`
+  // typo — the exact shape of the #112 incident — must not read as the opt-out
+  // having been applied, because the operator who wrote it believes owner input
+  // is being policed and it would not be.
+  if (value.conversationTrust && typeof value.conversationTrust === "object" && !Array.isArray(value.conversationTrust)) {
+    const trustRaw = value.conversationTrust as Record<string, unknown>;
+    if (typeof trustRaw.trustOwnerInput === "boolean") {
+      config.conversationTrust = { trustOwnerInput: trustRaw.trustOwnerInput };
+    } else if (trustRaw.trustOwnerInput !== undefined) {
+      dropped?.push("conversationTrust.trustOwnerInput");
+    }
+  }
 
   // #209: single source of truth for the Action Guard. A top-level
   // `actionGuard` block governs every surface; `interceptor.actionGuard` is a
@@ -1450,6 +1581,13 @@ function normaliseInterceptorConfig(raw: unknown, dropped?: string[]): Intercept
  */
 function mergeConfigs(base: SCConfig, override: SCConfig): SCConfig {
   const merged: SCConfig = { ...base, ...override };
+  // Per-key, like every other nested block here. A plain spread would let an
+  // openclaw.json entry that mentions `conversationTrust` at all replace the
+  // shield-config block wholesale, silently reverting an opt-out set in the
+  // file the operator considers authoritative.
+  if (base.conversationTrust || override.conversationTrust) {
+    merged.conversationTrust = { ...base.conversationTrust, ...override.conversationTrust };
+  }
   if (base.interceptor || override.interceptor) {
     const b = base.interceptor ?? {};
     const o = override.interceptor ?? {};
@@ -2009,6 +2147,27 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
     if (conversationPosture(cfg.interceptor?.conversation) === 'off') return;
 
     // Only scan user content, skip system/boot/heartbeat prompts
+    // Trust is resolved per TURN, not per message: the host tells us who sent
+    // this turn, but history messages carry no individual attribution, so there
+    // is no honest way to score them separately.
+    //
+    // Resolved LAZILY, on first detection only. Computing it up front would put
+    // a config read on every single turn to answer a question that only matters
+    // when something is actually found.
+    let trustMemo: ConversationTrustDecision | null = null;
+    const resolveTrust = async () => {
+      if (!trustMemo) {
+        // `cfg` is already in hand from the posture read above, so this costs
+        // no I/O. It also reads the PARSED field rather than casting the config
+        // object — the cast this replaces asserted a key that normaliseConfig
+        // drops, so it was always undefined. See SCConfig.conversationTrust.
+        trustMemo = classifyConversationOrigin({
+          senderIsOwner: event.senderIsOwner,
+          trustOwnerInput: cfg.conversationTrust?.trustOwnerInput,
+        });
+      }
+      return trustMemo;
+    };
     const userTexts = extractUserContent(event.historyMessages).slice(-5);
     const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t));
     for (const text of texts) {
@@ -2044,12 +2203,22 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
         continue;
       }
       if (!result.clean) {
-        console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary}`);
+        const trust = await resolveTrust();
+        console.warn(`[shieldcortex] ⚠️ Threat in LLM input: ${result.summary} [${trust.origin}]`);
         // #233: THE sink that has teeth. Logging a detection changed nothing —
         // the tool call this injection is steering, one turn later, was
         // evaluated as if it had never been seen. Tainting the session makes
         // the Action Guard tighten by one notch for a bounded window.
-        sessionTaint.mark(event.sessionId, { reason: `conversation scan: ${result.summary}` });
+        //
+        // Source trust gates the CONSEQUENCE, never the detection: the warn and
+        // the audit row below happen whoever sent this. What trust decides is
+        // whether it may tighten the guard. The operator typing "delete the old
+        // logs" is an instruction, and treating it as an attack is the false
+        // alarm that gets a control switched off. Everything the agent was
+        // handed — including another agent on a closed channel — is data.
+        if (trust.mayTaint) {
+          sessionTaint.mark(event.sessionId, { reason: `conversation scan: ${result.summary}` });
+        }
         // #226: NO `preview`. This row carried the first 100 characters of the
         // prompt — the exact text that tripped an injection detector, i.e.
         // hostile by assumption — into an append-only file that syncs. The gate
@@ -2602,7 +2771,16 @@ export async function handleBeforeAgentRun(
       scan = { clean: false, available: false, errored: true, error: detail, summary: 'scan unavailable' };
     }
 
-    const decision = evaluateConversationRun(posture, scan);
+    // #235: WHO sent this turn, resolved before the verdict is applied.
+    // `senderIsOwner` was declared on the event and read by nothing, so the
+    // enforce path could block the operator's own paste and destroy it. The
+    // config is already loaded, so this is a pure call — no second read.
+    const trust = classifyConversationOrigin({
+      senderIsOwner: event?.senderIsOwner,
+      trustOwnerInput: cfg.conversationTrust?.trustOwnerInput,
+    });
+
+    const decision = evaluateConversationRun(posture, scan, trust);
 
     // #226: REDACT ONCE, then use the redacted string everywhere the reason
     // goes — the persisted decision row, the outbound notification, the block
@@ -2667,6 +2845,13 @@ export async function handleBeforeAgentRun(
         reason: safeReason,
         posture,
         outcome: decision.outcome,
+        // #235: the origin, on every conversation decision row. Without it an
+        // operator auditing an `enforce` host cannot tell a turn that was not
+        // blocked because it was clean from one that was not blocked because
+        // the owner sent it — and "why did this not block?" is the question
+        // this row exists to answer. A label ('owner'/'non-owner'/'unknown'),
+        // never a sender id: the row syncs.
+        origin: trust.origin,
         // The verdict summary, never the prompt. The input that trips an
         // injection detector is hostile text by assumption; copying it into an
         // audit row that syncs to the dashboard/cloud would carry the payload

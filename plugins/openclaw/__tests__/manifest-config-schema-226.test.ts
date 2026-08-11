@@ -245,6 +245,36 @@ describe('#226 the manifest and the runtime schema do not drift apart', () => {
     );
   });
 
+  it('conversationTrust is declared identically in both files, and is actually parsed', () => {
+    // #235 landed `conversationTrust.trustOwnerInput` as a READ against a
+    // config object that no schema declared and `normaliseConfig` did not
+    // allowlist. Under `additionalProperties: false` an operator who sets it
+    // has their whole plugin config rejected by the host; on a host that does
+    // not validate, the key is dropped by the parser and reads as undefined.
+    // Either way the documented opt-out could not be turned on by anyone —
+    // which matters because it is the only way to ask for the owner's own
+    // input to be policed like everything else.
+    expect(manifest.configSchema.properties.conversationTrust).toEqual(
+      runtimeSchema.properties.conversationTrust,
+    );
+    expect(validate({ conversationTrust: { trustOwnerInput: false } })).toBe(true);
+    expect(validate({ conversationTrust: { trustOwnerInput: 'false' } })).toBe(false);
+    expect(validate({ conversationTrust: { trustOwner: false } })).toBe(false);
+
+    // …and the parser KEEPS what the schema accepts. A schema that validates a
+    // key the parser drops is the same silent failure wearing the other hat.
+    const parse = (v: unknown) => (plugin.configSchema as { parse(v: unknown): any }).parse(v);
+    expect(parse({ conversationTrust: { trustOwnerInput: false } }).conversationTrust).toEqual({
+      trustOwnerInput: false,
+    });
+    expect(parse({ conversationTrust: { trustOwnerInput: true } }).conversationTrust).toEqual({
+      trustOwnerInput: true,
+    });
+    // A non-boolean is dropped rather than coerced — `"false"` is the #112 typo
+    // shape, and reading it as the opt-out would be a guess.
+    expect(parse({ conversationTrust: { trustOwnerInput: 'false' } }).conversationTrust).toBeUndefined();
+  });
+
   it('the manifest accepts a broker and a reviewedScripts entry at BOTH locations', () => {
     // The reproduction, one layer out from notify: these are documented,
     // parsed, enforced keys, and `additionalProperties: false` made a config

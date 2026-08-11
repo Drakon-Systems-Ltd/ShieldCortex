@@ -1,6 +1,6 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "4.47.36",
+  "version": "4.47.37",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
@@ -181,6 +181,17 @@
         "type": "integer",
         "minimum": 50,
         "maximum": 1000
+      },
+      "conversationTrust": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "trustOwnerInput": {
+            "type": "boolean",
+            "default": true,
+            "description": "Default true: a message the host attributes to the gateway OWNER is an instruction, so a detection in it is audited and alerted but never taints the session or blocks the turn. Set false on a host where the owner routinely pastes untrusted content and you would rather have the caution than the quiet. Content from anyone else — including another agent on a trusted channel — is data regardless of this setting."
+          }
+        }
       },
       "interceptor": {
         "type": "object",
