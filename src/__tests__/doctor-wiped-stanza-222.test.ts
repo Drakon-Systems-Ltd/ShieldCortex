@@ -206,3 +206,54 @@ describe('#222 — repair actually remediates the wiped state', () => {
     expect(plan.map((s) => s.kind)).toContain('self-check');
   });
 });
+
+describe('#103 — doctor must not claim roster confirmation it does not have', () => {
+  function healthyVerdict(loadedInLiveRoster: boolean | null) {
+    return {
+      state: 'healthy' as const,
+      severity: 'ok' as const,
+      recommendedAction: 'none' as const,
+      enabledInConfig: true,
+      loadedInIndex: true,
+      loadedInLiveRoster,
+      indexReadable: true,
+      openClawTracked: true,
+      indexWarnsConflict: false,
+      metadataConflict: false,
+      indexVersion: '4.47.38',
+      installsJsonVersion: '4.47.38',
+      onDiskVersion: '4.47.38',
+      expectedVersion: '4.47.38',
+      reasons: ['whatever the reconciler said'],
+    };
+  }
+
+  it('claims "roster-confirmed" ONLY when the live roster actually named the plugin', () => {
+    const r = renderPluginLoadVerdict(healthyVerdict(true));
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/roster-confirmed/);
+  });
+
+  it('does NOT claim roster-confirmed when the boot roster could not be read', () => {
+    // The #103 inversion, rebuilt one layer up: reconcilePluginState reaches
+    // `healthy` for BOTH cases and records the difference only in `reasons`,
+    // which this renderer discards. Asserting confirmation off an unread
+    // roster is install state described as load state.
+    const r = renderPluginLoadVerdict(healthyVerdict(null));
+    expect(r.message).not.toMatch(/roster-confirmed/);
+    expect(r.message.toLowerCase()).toMatch(/not proven|could not be read/);
+  });
+
+  it('keeps the status the reconciler assigned — the CLAIM was the defect, not the severity', () => {
+    // The reconciler classifies this severity:'ok' (installed, enabled,
+    // versions agree). Escalating in the renderer would contradict the verdict
+    // AND warn on every host whose gateway log is merely unreadable — noise
+    // that trains operators to ignore the check. What was wrong was asserting
+    // evidence we do not have, so that is all that changes.
+    expect(renderPluginLoadVerdict(healthyVerdict(null)).status).toBe('pass');
+  });
+
+  it('still points at the live canary as the way to actually prove it', () => {
+    expect(renderPluginLoadVerdict(healthyVerdict(null)).message).toMatch(/canary|prove it live/i);
+  });
+});
