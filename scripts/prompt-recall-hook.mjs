@@ -10,6 +10,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { mkdirSecure } from './lib/state-perms.mjs';
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -255,7 +256,7 @@ function loadDedupState() {
 
 function saveDedupState(state) {
   try {
-    mkdirSync(join(homedir(), '.shieldcortex'), { recursive: true });
+    mkdirSecure(join(homedir(), '.shieldcortex'));
     writeFileSync(RECALL_DEDUP_PATH, JSON.stringify(state), { mode: 0o600 });
   } catch {
     // Best-effort.

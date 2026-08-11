@@ -9,6 +9,7 @@
  */
 
 import fs from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
 import os from 'os';
 
@@ -59,7 +60,7 @@ export function setUpsellState(updates: Partial<UpsellState>): void {
   try {
     const dir = path.dirname(statePath());
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+      mkdirSecure(dir);
     }
     const current = getUpsellState();
     const next: UpsellState = { ...current, ...updates };

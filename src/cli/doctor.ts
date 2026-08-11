@@ -3256,7 +3256,13 @@ export async function checkStatePermissions(stateDir: string = getShieldCortexDi
     message:
       `${findings.length} path(s) readable or writable beyond the owner (${worst}${findings.length > 4 ? ', …' : ''}) — ` +
       `the memory database and the audit trail must be owner-only`,
-    fix: 'Run `shieldcortex install` (it hardens on every run), or by hand: chmod 700 ~/.shieldcortex ~/.shieldcortex/{audit,approvals,logs} && chmod 600 ~/.shieldcortex/memories.db* ~/.shieldcortex/config.json*',
+    // #218: point at `repair` — it now re-hardens the state tree directly
+    // (runStatePermissionPass) without rewriting CLAUDE.md/hooks the way a full
+    // `install` does. The manual one-liner uses an explicit `audit approvals
+    // logs` list rather than a `{…}` brace expansion, because the guard's
+    // touch-approval-store rule gates the expanded form (approving our own
+    // printed advice would be its own paper cut).
+    fix: 'Run `shieldcortex repair` (it re-hardens the state tree), or by hand: chmod 700 ~/.shieldcortex && chmod 700 ~/.shieldcortex/audit ~/.shieldcortex/approvals ~/.shieldcortex/logs && chmod 600 ~/.shieldcortex/memories.db* ~/.shieldcortex/config.json*',
   };
 }
 

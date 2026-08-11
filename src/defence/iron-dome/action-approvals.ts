@@ -30,6 +30,7 @@
  */
 
 import { createHash } from 'crypto';
+import { mkdirSecure } from '../../setup/state-permissions.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -179,7 +180,7 @@ function readFile(home?: string): ApprovalFile {
 
 function writeFileAtomic(file: ApprovalFile, home?: string): void {
   const dir = approvalsDir(home);
-  mkdirSync(dir, { recursive: true });
+  mkdirSecure(dir);
   const target = approvalsPath(home);
   const tmp = `${target}.tmp`;
   writeFileSync(tmp, JSON.stringify(file, null, 2), { mode: 0o600 });

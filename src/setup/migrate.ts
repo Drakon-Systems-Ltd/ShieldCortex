@@ -6,6 +6,7 @@
  */
 
 import fs from 'fs';
+import { mkdirSecure } from './state-permissions.js';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
@@ -232,7 +233,7 @@ export function migrateDatabase(): { copied: boolean; merged: boolean; mergedCou
 
   // Fresh install — just copy
   if (!fs.existsSync(targetPath)) {
-    fs.mkdirSync(targetDir, { recursive: true });
+    mkdirSecure(targetDir);
     fs.copyFileSync(legacyPath, targetPath);
     console.log(`  Database: copied ${legacyPath} → ${targetPath}`);
     console.log(`  (Original preserved at ${legacyPath} for rollback)`);

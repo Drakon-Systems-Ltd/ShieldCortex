@@ -10,6 +10,7 @@
  *   - Running as a local/dev install (npm_config_global !== 'true')
  */
 import { existsSync, copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSecure, STATE_FILE_MODE } from './lib/state-perms.mjs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { spawnSync } from 'child_process';
@@ -40,12 +41,12 @@ function writeFreshInstallDefaults() {
   if (existsSync(configFile)) return false;
 
   try {
-    mkdirSync(configDir, { recursive: true });
+    mkdirSecure(configDir);
     const defaults = {
       openclawAutoMemory: true,
       proactiveRecall: true,
     };
-    writeFileSync(configFile, JSON.stringify(defaults, null, 2) + '\n');
+    writeFileSync(configFile, JSON.stringify(defaults, null, 2) + '\n', { mode: STATE_FILE_MODE });
     return true;
   } catch {
     return false;
