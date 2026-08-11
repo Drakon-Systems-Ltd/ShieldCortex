@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.38] - 2026-08-11
+
+**A full memory store no longer eats the memory you just saved.**
+
+Field origin: an outside report (#236) with sixteen days of evidence from a live box. Once `long_term` reached its 1000-row cap, every new write below salience 1.0 was deleted **milliseconds after `remember` returned success with its ID** — 169 of 171 such writes lost, while every write at exactly 1.0 survived. `importance:"high"` maps to 0.8, so the memories most worth keeping were precisely the ones being dropped, and nothing in the tool response distinguished a stored memory from a discarded one.
+
+### Fixed
+
+- **Cap eviction can no longer select a brand-new row (#236).** Root cause: eviction ordered by raw `salience ASC`, but long-term salience is a forward-only ratchet (the decay pass only ever processed short-term rows), so a mature store is a solid wall of 1.0 and a fresh write below it is the unique global minimum — always the victim, with the `access_count ASC` tiebreak anti-selecting newborns for good measure. Two independent fixes, both required:
+  - **A one-hour grace window, state-independent:** a row created within the last hour is never an eviction victim, whatever the salience distribution says. A cap breach during the window becomes a temporary overshoot — reclaimed on the next pass — rather than data loss. Overshoot is recoverable; deletion is not.
+  - **Eviction now ranks by effective salience** (recency × access × pin × downvote penalty) — the same signal recall ranks by — instead of a saturated raw value. Eviction and recall finally agree about what is valuable: the stalest, least-consulted, most-downvoted rows go first. A pleasant consequence: downvoted near-duplicates become the *preferred* cap victims.
+  - **Pinned rows are never cap-evicted**, matching `prune.ts`. Pinning more rows than the cap keeps them all; the store stays over cap rather than overriding an explicit keep.
+  - The `short_term` eviction query had the identical shape and received the identical fix.
+
 ## [4.47.37] - 2026-08-11
 
 **Three checks that could only ever report success, and the first defence on the conversation path that does anything.**
