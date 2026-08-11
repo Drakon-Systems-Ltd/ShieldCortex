@@ -35,6 +35,7 @@ import { generateContextSummary, formatContextSummary, consolidate, fullCleanup 
 import { getHighPriorityMemories, getRecentMemories, getRelatedMemories, createMemoryLink, RelationshipType, enrichMemory } from './memory/store.js';
 import { detectContradictions, getContradictionsFor } from './memory/contradiction.js';
 import { handleGraphQuery, handleGraphEntities, handleGraphExplain } from './tools/graph.js';
+import { handleThreatGraphQuery } from './tools/threat-graph.js';
 import { checkDatabaseSize } from './database/init.js';
 import { queryAuditLogs, getAuditStats, getLifetimeStats } from './defence/audit/index.js';
 import { scanExistingMemories } from './defence/scanner/index.js';
@@ -748,6 +749,21 @@ but you can use this tool to check for new contradictions at any time.`,
     },
     { title: 'Knowledge Graph Query', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('graph', withResponseScan('graph_query', async (args) => handleGraphQuery(args)))
+  );
+
+  // Threat Graph - query the security event graph (Phase A)
+  server.tool(
+    'threat_graph',
+    'Query the threat graph — the security event graph projected from the defence audit ledgers. Views: sources (per-source counters), source (one source with its triggered patterns + recent events), events (recent notable events), campaigns (Phase D, empty until then). Responses are row- and byte-capped with an explicit truncated flag.',
+    {
+      view: z.enum(['sources', 'source', 'events', 'campaigns']).describe('What to list'),
+      key: z.string().optional().describe("Source key for view 'source', e.g. 'agent:jarvis'"),
+      project: z.string().optional().describe('Filter events by originating project'),
+      since: z.string().optional().describe('ISO timestamp — only rows seen at/after this'),
+      limit: z.number().optional().describe('Max rows (default 50, hard cap 200)'),
+    },
+    { title: 'Threat Graph Query', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    withKillSwitchGuard('graph', withResponseScan('threat_graph', async (args) => handleThreatGraphQuery(args)))
   );
 
   // Graph Entities - List known entities

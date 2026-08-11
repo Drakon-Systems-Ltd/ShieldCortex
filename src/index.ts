@@ -909,6 +909,45 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "threat-graph" subcommand (docs/design/2026-08-11-threat-graph.md)
+  if (process.argv[2] === 'threat-graph') {
+    const action = process.argv[3];
+    if (action !== 'rebuild' && action !== 'status') {
+      console.error('Unknown threat-graph command. Available: rebuild, status');
+      process.exit(1);
+    }
+    const { initDatabase } = await import('./database/init.js');
+    const os = await import('os');
+    const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.shieldcortex', 'memories.db');
+    initDatabase(dbPath);
+
+    if (action === 'rebuild') {
+      const { rebuildThreatGraph } = await import('./threat-graph/projector.js');
+      const { defaultRealtimeAuditDir } = await import('./threat-graph/shared.js');
+      console.log('Rebuilding the threat graph from both audit ledgers...');
+      const result = rebuildThreatGraph({ realtimeDir: defaultRealtimeAuditDir() });
+      console.log(
+        `Done! Projected ${result.processed} audit rows (${result.eventNodes} notable events).` +
+        (result.errors.length > 0 ? ` ${result.errors.length} note(s) recorded — see doctor.` : '')
+      );
+    } else if (action === 'status') {
+      const { getDatabase } = await import('./database/init.js');
+      const db = getDatabase();
+      const state = db.prepare('SELECT * FROM threat_graph_state WHERE id = 1').get() as Record<string, unknown> | undefined;
+      const maxAudit = (db.prepare('SELECT COALESCE(MAX(id), 0) as m FROM defence_audit').get() as { m: number }).m;
+      const counts = db.prepare(
+        'SELECT kind, COUNT(*) as c FROM threat_nodes GROUP BY kind ORDER BY kind'
+      ).all() as Array<{ kind: string; c: number }>;
+      console.log('Threat graph status:');
+      console.log(`  cursor: ${state?.last_audit_id ?? 0} of ${maxAudit} audit rows`);
+      console.log(`  realtime cursor: ${state?.last_rt_cursor || '(none)'}`);
+      console.log(`  last run: ${state?.last_run_at ?? 'never'}`);
+      if (state?.last_error) console.log(`  last error: ${state.last_error}`);
+      for (const row of counts) console.log(`  ${row.kind}: ${row.c}`);
+    }
+    return;
+  }
+
   // Handle "license" subcommand (also "licence" for British spelling)
   if (process.argv[2] === 'license' || process.argv[2] === 'licence') {
     const { handleLicenseCommand } = await import('./license/cli.js');

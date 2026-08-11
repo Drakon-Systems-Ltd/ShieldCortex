@@ -446,6 +446,18 @@ export function readRawConfig(): Record<string, unknown> {
   return readRawConfigState().data;
 }
 
+/**
+ * Threat-graph feature gate (docs/design/2026-08-11-threat-graph.md).
+ * Enabled unless config sets `threatGraph.enabled: false` explicitly.
+ * Pass `raw` for tests; production callers omit it and read the live config.
+ */
+export function isThreatGraphEnabled(raw?: Record<string, unknown>): boolean {
+  const source = raw ?? readRawConfig();
+  const block = source.threatGraph;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return true;
+  return (block as Record<string, unknown>).enabled !== false;
+}
+
 function invalidateRawConfigCache(): void {
   cachedRawConfig = null;
   cachedRawConfigFile = null;

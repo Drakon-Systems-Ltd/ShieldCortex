@@ -376,6 +376,105 @@ async function checkDatabase(): Promise<CheckResult> {
 }
 
 /**
+ * Threat-graph projector freshness (docs/design/2026-08-11-threat-graph.md,
+ * Phase A). A stalled projector degrades to "no data" silently by design
+ * (invariant 4: a missing/stale value must never harm a scan) — this check is
+ * what makes a dead projector a finding instead of a silent regression, the
+ * #200/#222 lesson that a check that can only report success is not a check.
+ *
+ * Uses the initialised singleton when present (tests); otherwise opens the
+ * DB file read-only like every other doctor check.
+ */
+export async function checkThreatGraph(
+  opts: { lagWarnThreshold?: number; enabled?: boolean } = {},
+): Promise<CheckResult> {
+  const label = 'Threat graph';
+  const lagWarnThreshold = opts.lagWarnThreshold ?? 1000;
+
+  // Config gate first: a deliberately disabled projector accrues lag by
+  // design and must not WARN forever. `opts.enabled` is a test seam only.
+  const { isThreatGraphEnabled } = await import('../cloud/config.js');
+  const enabled = opts.enabled ?? isThreatGraphEnabled();
+  if (!enabled) {
+    return { label, status: 'info', message: 'disabled by config (threatGraph.enabled=false)' };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Database = require('better-sqlite3');
+  let db: any = null;
+  let opened = false;
+  try {
+    const { isDatabaseInitialized, getDatabase } = await import('../database/init.js');
+    if (isDatabaseInitialized()) {
+      db = getDatabase();
+    } else {
+      const dbPath = getDbPath();
+      const gate = databasePrerequisite(label, dbPath);
+      if (gate) return gate;
+      db = new Database(dbPath, { readonly: true });
+      opened = true;
+    }
+
+    const hasTable = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'threat_graph_state'"
+    ).get();
+    if (!hasTable) {
+      return {
+        label,
+        status: 'info',
+        message: 'threat-graph tables not present yet (created on next init after upgrade)',
+      };
+    }
+
+    const state = db.prepare(
+      'SELECT last_audit_id, last_rt_cursor, last_run_at, last_error FROM threat_graph_state WHERE id = 1'
+    ).get() as { last_audit_id: number; last_rt_cursor: string; last_run_at: string | null; last_error: string | null } | undefined;
+    const maxAudit = (db.prepare('SELECT COALESCE(MAX(id), 0) as m FROM defence_audit').get() as { m: number }).m;
+
+    if (state?.last_error) {
+      return {
+        label,
+        status: 'warn',
+        message: `last projector run recorded an error: ${state.last_error.slice(0, 200)}`,
+        fix: 'shieldcortex threat-graph rebuild',
+      };
+    }
+
+    const cursor = state?.last_audit_id ?? 0;
+    const lag = maxAudit - cursor;
+    if (lag > lagWarnThreshold) {
+      return {
+        label,
+        status: 'warn',
+        message: `projector is ${lag} audit rows behind (cursor ${cursor} of ${maxAudit})` +
+          (state?.last_run_at ? `, last ran ${state.last_run_at}` : ', never ran'),
+        fix: 'ensure a worker is running (MCP server or dashboard), or: shieldcortex threat-graph rebuild',
+      };
+    }
+
+    return {
+      label,
+      status: 'pass',
+      message: maxAudit === 0
+        ? 'nothing to project yet'
+        : `caught up (cursor ${cursor} of ${maxAudit}` +
+          `${state?.last_rt_cursor ? `, realtime at ${state.last_rt_cursor}` : ''}` +
+          `${state?.last_run_at ? `, last ran ${state.last_run_at}` : ''})`,
+    };
+  } catch (e) {
+    return {
+      label,
+      status: 'warn',
+      message: `check failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  } finally {
+    if (opened && db) {
+      try { db.close(); } catch { /* readonly probe */ }
+    }
+  }
+}
+
+/**
  * Gate for the checks that can say nothing without a readable database.
  * Returns the result to return early with, or null to carry on.
  *
@@ -3503,6 +3602,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkThreatGraph,
     checkClaudeCodeVersion,
     checkModelCache,
   ];
