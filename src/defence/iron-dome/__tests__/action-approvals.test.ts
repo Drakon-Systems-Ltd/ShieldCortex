@@ -426,29 +426,31 @@ describe('approval store is inside the guard perimeter', () => {
   });
 });
 
-/**
- * #183 — the approval hash must be per COMMAND on anything that carries a
- * command, not merely on tools whose NAME looks executable.
- *
- * #201 stripped the model-authored advisory fields (`description`, `timeout`)
- * so an operator's grant survives the agent re-wording its retry. But it gated
- * that on `classifyFamily(tool) === 'exec'`, which reads the tool NAME — while
- * the guard's dangerous-tier decision reads the ARGUMENT surface
- * (`extractCommand` picks `command|cmd|script|code|input|shell|run`).
- *
- * The two disagree on real tools. `Workflow` does not match the exec-name
- * regex, so it classifies `unknown` — yet its `script` key IS an exec surface,
- * so it reaches the dangerous tier and the approval loop with `description`
- * still in the hash. A cron that re-presents the same script on its next tick
- * mints a fresh hash and cannot spend its own grant: exactly #183's Expected.
- */
-describe('#183 — advisory fields are stripped whenever the call carries a command', () => {
+describe('#183 — only reviewed non-exec command surfaces strip advisory fields', () => {
   const SCRIPT = 'await $`git push --force origin main`;';
 
-  it('a non-exec-NAMED tool with a script surface hashes per command, not per attempt', () => {
+  it('Workflow.script hashes per command, not per re-worded attempt', () => {
     const first = hashToolCall('Workflow', { script: SCRIPT, description: 'Publish the release branch' });
     const retry = hashToolCall('Workflow', { script: SCRIPT, description: 'Ship the hotfix now' });
     expect(retry).toBe(first);
+  });
+
+  it('does not treat Workflow.input as an approved command contract', () => {
+    const first = hashToolCall('Workflow', { input: SCRIPT, description: 'Payload A' });
+    const changed = hashToolCall('Workflow', { input: SCRIPT, description: 'Payload B' });
+    expect(changed).not.toBe(first);
+  });
+
+  it('does not infer command semantics from an unknown tool script field', () => {
+    const first = hashToolCall('UnknownWidget', { script: SCRIPT, description: 'Payload A' });
+    const changed = hashToolCall('UnknownWidget', { script: SCRIPT, description: 'Payload B' });
+    expect(changed).not.toBe(first);
+  });
+
+  it.each(['code', 'input'] as const)('keeps create_issue description bound beside a %s payload', (field) => {
+    const first = hashToolCall('create_issue', { title: 'Bug', [field]: SCRIPT, description: 'Body A' });
+    const changed = hashToolCall('create_issue', { title: 'Bug', [field]: SCRIPT, description: 'Body B' });
+    expect(changed).not.toBe(first);
   });
 
   it('the command itself still decides the hash', () => {
@@ -463,7 +465,7 @@ describe('#183 — advisory fields are stripped whenever the call carries a comm
     expect(b).toBe(a);
   });
 
-  it('does NOT strip when there is no command surface — a description is payload there', () => {
+  it('keeps description bound when there is no reviewed command surface', () => {
     // An issue/PR body is the payload: approving one text must never release
     // another. This is the boundary #201 drew and it must survive.
     const a = hashToolCall('create_issue', { title: 'Bug', description: 'Steps to reproduce: A' });
@@ -476,5 +478,22 @@ describe('#183 — advisory fields are stripped whenever the call carries a comm
     const safe = hashToolCall('Workflow', { script: SCRIPT, dangerouslyDisableSandbox: false });
     const unsafe = hashToolCall('Workflow', { script: SCRIPT, dangerouslyDisableSandbox: true });
     expect(unsafe).not.toBe(safe);
+  });
+
+  it('the live store path spends a Workflow.script approval after description is re-worded', () => {
+    const now = 1_800_000_000_000;
+    const home = mkdtempSync(join(tmpdir(), 'sc-approvals-183-live-'));
+    try {
+      const first = { script: SCRIPT, description: 'Publish the release branch' };
+      const retry = { script: SCRIPT, description: 'Ship the hotfix now' };
+      const pending = recordPending(
+        { tool: 'Workflow', input: first, summary: 'Workflow: release script', signals: ['exec-like'] },
+        { home, now },
+      );
+      expect(approveRequest(shortHash(pending.hash), { home, now: now + 1000 }).ok).toBe(true);
+      expect(consumeApproval('Workflow', retry, { home, now: now + 2000 })).not.toBeNull();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
