@@ -121,6 +121,8 @@ describe('#226 the "plugin loaded" tick never reads as protection while the gran
 
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/conversation scanning is NOT/i);
+    expect(r.message).toMatch(/tool-call gating is NOT separately proven/i);
+    expect(r.message).not.toMatch(/tool-call gating is live/i);
     expect(r.fix).toMatch(/allowConversationAccess/);
   });
 

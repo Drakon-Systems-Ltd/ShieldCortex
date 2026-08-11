@@ -2716,14 +2716,14 @@ export async function checkOpenClawPluginLoadState(
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const result = renderPluginLoadVerdict(
-    reconcilePluginState(gatherReconcileInput(home, { expectedVersion })),
-  );
+  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
+  const result = renderPluginLoadVerdict(verdict);
 
-  // #226: "loaded" is not "protecting the conversation". A loaded plugin whose
+  // #226: "loaded" is not "protecting the conversation". A plugin whose
   // conversation-access grant is missing has had its llm_input/llm_output
-  // registrations refused by the host: it gates tool calls and scans no
-  // conversation content at all. A green tick that says "loaded" and stops
+  // registrations refused by the host. Tool-call gating is live only when the
+  // running roster proves the plugin loaded; conversation scanning is absent
+  // either way. A green tick that says "loaded" and stops
   // there is read as "protected", so the pass is downgraded — a WARN, matching
   // the severity `checkOpenClawConversationScanning` uses for the same fact
   // (#225/#230): withholding the grant is a legitimate operator choice, not
@@ -2732,10 +2732,14 @@ export async function checkOpenClawPluginLoadState(
   if (result.status === 'pass') {
     const access = readConversationAccess(home, REALTIME_PLUGIN_ID);
     if (access.readable && !access.granted) {
+      const toolCallStatus =
+        verdict.loadedInLiveRoster === true
+          ? 'tool-call gating is live'
+          : 'tool-call gating is NOT separately proven while live-roster evidence is unavailable';
       return {
         ...result,
         status: 'warn',
-        message: `${result.message}. NOTE: conversation-hook access is NOT granted, so the gateway refuses this plugin's llm_input/llm_output hooks — tool-call gating is live, conversation scanning is NOT`,
+        message: `${result.message}. NOTE: conversation-hook access is NOT granted, so the gateway refuses this plugin's llm_input/llm_output hooks — ${toolCallStatus}; conversation scanning is NOT live`,
         fix: conversationAccessFix(REALTIME_PLUGIN_ID),
       };
     }
