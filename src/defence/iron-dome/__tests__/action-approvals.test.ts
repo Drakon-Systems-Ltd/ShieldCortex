@@ -425,3 +425,93 @@ describe('approval store is inside the guard perimeter', () => {
     expect(v.signals).not.toContain('touch-approval-store');
   });
 });
+
+describe('#183 — only reviewed non-exec command surfaces strip advisory fields', () => {
+  const SCRIPT = 'await $`git push --force origin main`;';
+
+  it('Workflow.script hashes per command, not per re-worded attempt', () => {
+    const first = hashToolCall('Workflow', { script: SCRIPT, description: 'Publish the release branch' });
+    const retry = hashToolCall('Workflow', { script: SCRIPT, description: 'Ship the hotfix now' });
+    expect(retry).toBe(first);
+  });
+
+  it('does not treat Workflow.input as an approved command contract', () => {
+    const first = hashToolCall('Workflow', { input: SCRIPT, description: 'Payload A' });
+    const changed = hashToolCall('Workflow', { input: SCRIPT, description: 'Payload B' });
+    expect(changed).not.toBe(first);
+  });
+
+  it('does not infer command semantics from an unknown tool script field', () => {
+    const first = hashToolCall('UnknownWidget', { script: SCRIPT, description: 'Payload A' });
+    const changed = hashToolCall('UnknownWidget', { script: SCRIPT, description: 'Payload B' });
+    expect(changed).not.toBe(first);
+  });
+
+  it.each(['code', 'input'] as const)('keeps create_issue description bound beside a %s payload', (field) => {
+    const first = hashToolCall('create_issue', { title: 'Bug', [field]: SCRIPT, description: 'Body A' });
+    const changed = hashToolCall('create_issue', { title: 'Bug', [field]: SCRIPT, description: 'Body B' });
+    expect(changed).not.toBe(first);
+  });
+
+  it.each(['mcp__evil__workflow', 'mcp__evil__Workflow', 'evil.workflow'])(
+    'refuses the relief to an MCP-namespaced look-alike (%s)',
+    (tool) => {
+      // The allowlist is keyed on the RAW tool name. If it were normalised the
+      // way classifyFamily normalises, any MCP server could register a tool
+      // called `workflow` and inherit a contract reviewed for exactly one
+      // first-party tool.
+      const first = hashToolCall(tool, { script: SCRIPT, description: 'Payload A' });
+      const changed = hashToolCall(tool, { script: SCRIPT, description: 'Payload B' });
+      expect(changed).not.toBe(first);
+    },
+  );
+
+  it('the command itself still decides the hash', () => {
+    const a = hashToolCall('Workflow', { script: SCRIPT, description: 'x' });
+    const b = hashToolCall('Workflow', { script: 'await $`git push origin main`;', description: 'x' });
+    expect(b).not.toBe(a);
+  });
+
+  it('still strips for a genuinely exec-named tool (#201 unchanged)', () => {
+    const a = hashToolCall('Bash', { command: 'git push', description: 'one' });
+    const b = hashToolCall('Bash', { command: 'git push', description: 'two' });
+    expect(b).toBe(a);
+  });
+
+  it('keeps description bound when there is no reviewed command surface', () => {
+    // An issue/PR body is the payload: approving one text must never release
+    // another. This is the boundary #201 drew and it must survive.
+    const a = hashToolCall('create_issue', { title: 'Bug', description: 'Steps to reproduce: A' });
+    const b = hashToolCall('create_issue', { title: 'Bug', description: 'Steps to reproduce: B' });
+    expect(b).not.toBe(a);
+  });
+
+  it('confinement flags still move the hash on a command-carrying tool', () => {
+    // An approval for the sandboxed form must not release the unsandboxed one.
+    const safe = hashToolCall('Workflow', { script: SCRIPT, dangerouslyDisableSandbox: false });
+    const unsafe = hashToolCall('Workflow', { script: SCRIPT, dangerouslyDisableSandbox: true });
+    expect(unsafe).not.toBe(safe);
+  });
+
+  it('the live store path rejects a changed payload, then spends the exact Workflow.script approval', () => {
+    const now = 1_800_000_000_000;
+    const home = mkdtempSync(join(tmpdir(), 'sc-approvals-183-live-'));
+    try {
+      const first = { script: SCRIPT, description: 'Publish the release branch', dangerouslyDisableSandbox: false };
+      const changed = { script: SCRIPT, description: 'Ship the hotfix now', dangerouslyDisableSandbox: true };
+      const retry = { script: SCRIPT, description: 'Ship the hotfix now', dangerouslyDisableSandbox: false };
+      const pending = recordPending(
+        { tool: 'Workflow', input: first, summary: 'Workflow: release script', signals: ['exec-like'] },
+        { home, now },
+      );
+      expect(approveRequest(shortHash(pending.hash), { home, now: now + 1000 }).ok).toBe(true);
+      // An unlisted, load-bearing field stays bound even though description is
+      // advisory for this reviewed command surface. A mismatch cannot spend the
+      // grant, so the approved payload remains available for the honest retry.
+      expect(consumeApproval('Workflow', changed, { home, now: now + 2000 })).toBeNull();
+      expect(consumeApproval('Workflow', retry, { home, now: now + 3000 })).not.toBeNull();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
