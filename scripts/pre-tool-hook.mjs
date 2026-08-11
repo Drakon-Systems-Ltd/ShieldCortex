@@ -489,7 +489,7 @@ async function runBrokerPass(broker, toolName, toolInput, verdict) {
  * them. Keep the established command/target fields otherwise unchanged.
  */
 const DESCRIBE_KEYS = [
-  'command', 'script', 'file_path', 'path', 'url', 'pattern',
+  'command', 'file_path', 'path', 'url', 'pattern',
 ];
 
 /**
@@ -510,8 +510,11 @@ const DESCRIBE_KEYS = [
  */
 function describeToolCall(toolName, toolInput) {
   const input = toolInput ?? {};
+  const keys = String(toolName).trim().toLowerCase() === 'workflow'
+    ? ['command', 'script', ...DESCRIBE_KEYS.slice(1)]
+    : DESCRIBE_KEYS;
   let surface = '';
-  for (const key of DESCRIBE_KEYS) {
+  for (const key of keys) {
     const value = input[key];
     if (value === undefined || value === null) continue;
     surface = typeof value === 'string' ? value : JSON.stringify(value);

@@ -221,6 +221,21 @@ describe('#143 — the operator-notify transport through the real Claude Code ho
     expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
+  it('does not export an arbitrary non-Workflow script payload', () => {
+    const sentinel = 'PRIVATE_PAYLOAD_SENTINEL';
+    writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
+    const r = runHook(
+      { script: `git push --force origin main # ${sentinel}`, description: 'Create a tracking issue' },
+      'create_issue',
+    );
+
+    expect(r.decision).toBe('ask');
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.command).toBe('create_issue');
+    expect(JSON.stringify(body)).not.toContain(sentinel);
+  });
+
   it('never reaches the channel for a catastrophic call — it is blocked before any approval flow exists', () => {
     writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
     const r = runHook(CATASTROPHIC);
