@@ -2822,7 +2822,34 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           'cannot read ~/.openclaw/openclaw.json — cannot tell whether the realtime plugin is still registered; NOT necessarily unprotected',
         fix: 'Check that ~/.openclaw/openclaw.json exists and is valid JSON, then re-run `shieldcortex doctor`.',
       };
-    case 'healthy':
+    case 'healthy': {
+      // #103: "roster-confirmed" is a claim about EVIDENCE, and this arm used to
+      // make it unconditionally. `reconcilePluginState` reaches `healthy` both
+      // when the running gateway's boot roster names the plugin AND when that
+      // roster could not be read at all — it records the difference in
+      // `reasons`, which this renderer discards. So on any host where the boot
+      // line was unreadable, doctor asserted roster confirmation it did not
+      // have: install state described as load state, which is the exact
+      // inversion #103 was filed for, rebuilt one layer up.
+      //
+      // Proven ⇒ pass. Unproven ⇒ warn, matching the `index-unreadable`
+      // precedent above ("cannot know" is a diagnostic gap, never health).
+      const rosterProven = verdict.loadedInLiveRoster === true;
+      const version = verdict.onDiskVersion ?? verdict.expectedVersion;
+      if (!rosterProven) {
+        // Status stays `pass`: the reconciler classified this `severity: 'ok'`
+        // (installed, enabled, versions agree) and nothing is known to be
+        // wrong, so escalating here would both contradict the verdict and warn
+        // on every host whose gateway log is merely unreadable. What was wrong
+        // was the CLAIM, not the status — so the claim is what changes.
+        return {
+          label,
+          status: 'pass',
+          message:
+            `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
+            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+        };
+      }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
       // canary (that needs gateway consent) — so it must not claim "enforcing"
       // from roster presence alone (#74 attempt #3 was roster-present-but-not-
@@ -2830,8 +2857,9 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'pass',
-        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+        message: `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
+    }
     default:
       // NOT a pass. A state this renderer does not recognise is an unknown, and
       // #222 is precisely what happens when an unknown renders as health.
