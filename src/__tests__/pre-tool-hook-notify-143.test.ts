@@ -37,6 +37,8 @@ const REAL_DIST = join(repoRoot, 'dist', 'defence', 'iron-dome');
 
 const IRREVERSIBLE = { command: 'sudo modprobe softdog' };
 const CATASTROPHIC = { command: 'rm -rf /' };
+/** A dangerous command carried under `script`, not `command` (#183/#241). */
+const WORKFLOW_FORCE_PUSH = 'await $`git push --force origin main`;';
 
 interface HookResult { decision?: string; reason?: string; stderr: string }
 
@@ -182,6 +184,41 @@ describe('#143 — the operator-notify transport through the real Claude Code ho
     expect(String(body!.fallbackHint)).toMatch(/shieldcortex deny [0-9a-f]{12}/);
     // The SAME hash appears in the notification and in the terminal fallback.
     expect(String(body!.shortHash)).toBe(String(r.reason).match(/shieldcortex approve ([0-9a-f]{12})/)![1]);
+  });
+
+  it('shows the payload the hash actually covers, not a bare tool name (#183/#241)', () => {
+    // #183 made `Workflow.script` a reviewed command surface: a re-worded
+    // `description` no longer mints a fresh hash, so an operator approval for
+    // one of these finally LANDS. That makes what the operator is shown
+    // load-bearing. The command lives under `script`, which is not one of the
+    // keys the guard hook used to describe a call — so this notification said
+    // only "Workflow" while the hash it carried covered a force-push.
+    writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
+    const r = runHook({ script: WORKFLOW_FORCE_PUSH, description: 'Publish the release branch' }, 'Workflow');
+
+    expect(r.decision).toBe('ask');
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.command).toContain(WORKFLOW_FORCE_PUSH);
+    expect(body!.command).not.toBe('Workflow');
+    expect(body!.signals).toContain('git-force-push');
+    // Same hash in the notification and the terminal fallback, as above.
+    expect(String(body!.shortHash)).toBe(String(r.reason).match(/shieldcortex approve ([0-9a-f]{12})/)![1]);
+  });
+
+  it('does not export arbitrary non-exec code/input payloads while fixing Workflow.script', () => {
+    const sentinel = 'PRIVATE_PAYLOAD_SENTINEL';
+    writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
+    const r = runHook(
+      { code: `git push --force origin main # ${sentinel}`, description: 'Create a tracking issue' },
+      'create_issue',
+    );
+
+    expect(r.decision).toBe('ask');
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.command).toBe('create_issue');
+    expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
   it('never reaches the channel for a catastrophic call — it is blocked before any approval flow exists', () => {

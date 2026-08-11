@@ -480,13 +480,44 @@ async function runBrokerPass(broker, toolName, toolInput, verdict) {
   }
 }
 
-/** One-line description of a refused call, for the operator's approve list. */
+/**
+ * Surfaces the operator is shown. `script` is the only expansion in #241:
+ * it is the explicitly reviewed non-exec command field for Workflow. Do not
+ * mirror extractCommand's broad detection heuristic here — arbitrary `code`
+ * or `input` fields may contain issue bodies or other sensitive payloads, and
+ * notification transport needs a separate redaction design before exporting
+ * them. Keep the established command/target fields otherwise unchanged.
+ */
+const DESCRIBE_KEYS = [
+  'command', 'script', 'file_path', 'path', 'url', 'pattern',
+];
+
+/**
+ * One-line description of a refused call, for the operator's approve list and
+ * for the notification's `command` field.
+ *
+ * INVARIANT: the operator must be shown the SAME surface the guard judged and
+ * the hash covers. A tool that carries its command under `script` (Workflow),
+ * `code` or `input` used to render as a bare tool name, so both
+ * `shieldcortex approve --list` and the notification said only "Workflow"
+ * while the hash being approved covered a force-push. That is the one thing a
+ * notification may never do (operator-notify.ts: "the exact command/target the
+ * guard flagged — never a paraphrase").
+ *
+ * DISPLAY ONLY: this never feeds `hashToolCall`, so widening what is shown
+ * cannot widen what an approval releases. Bounding lives downstream —
+ * `recordPending` caps the stored summary, `buildNotification` caps `command`.
+ */
 function describeToolCall(toolName, toolInput) {
   const input = toolInput ?? {};
-  const surface =
-    input.command ?? input.file_path ?? input.path ?? input.url ?? input.pattern ?? '';
-  const text = typeof surface === 'string' ? surface : JSON.stringify(surface);
-  return text ? `${toolName}: ${text}` : toolName;
+  let surface = '';
+  for (const key of DESCRIBE_KEYS) {
+    const value = input[key];
+    if (value === undefined || value === null) continue;
+    surface = typeof value === 'string' ? value : JSON.stringify(value);
+    if (surface) break;
+  }
+  return surface ? `${toolName}: ${surface}` : toolName;
 }
 
 // ==================== FALLBACK (guard load/eval failure — WS2) ====================

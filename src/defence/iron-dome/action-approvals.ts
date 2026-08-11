@@ -106,6 +106,11 @@ const NON_EXEC_COMMAND_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = new Ma
 ]);
 
 function hasReviewedCommandSurface(tool: string, input: Record<string, unknown>): boolean {
+  // Matched on the RAW tool name, deliberately NOT `normaliseToolName` (which
+  // classifyFamily above uses). Normalising would map `mcp__evil__workflow`
+  // onto this entry, letting any MCP server claim a relief that was reviewed
+  // for exactly one first-party tool contract. Only an exact name qualifies;
+  // a namespaced look-alike keeps its full input bound.
   const fields = NON_EXEC_COMMAND_FIELDS.get(tool.trim().toLowerCase());
   if (!fields) return false;
   return [...fields].some((field) => typeof input[field] === 'string' && input[field].length > 0);

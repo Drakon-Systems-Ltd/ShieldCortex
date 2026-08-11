@@ -453,6 +453,19 @@ describe('#183 — only reviewed non-exec command surfaces strip advisory fields
     expect(changed).not.toBe(first);
   });
 
+  it.each(['mcp__evil__workflow', 'mcp__evil__Workflow', 'evil.workflow'])(
+    'refuses the relief to an MCP-namespaced look-alike (%s)',
+    (tool) => {
+      // The allowlist is keyed on the RAW tool name. If it were normalised the
+      // way classifyFamily normalises, any MCP server could register a tool
+      // called `workflow` and inherit a contract reviewed for exactly one
+      // first-party tool.
+      const first = hashToolCall(tool, { script: SCRIPT, description: 'Payload A' });
+      const changed = hashToolCall(tool, { script: SCRIPT, description: 'Payload B' });
+      expect(changed).not.toBe(first);
+    },
+  );
+
   it('the command itself still decides the hash', () => {
     const a = hashToolCall('Workflow', { script: SCRIPT, description: 'x' });
     const b = hashToolCall('Workflow', { script: 'await $`git push origin main`;', description: 'x' });
