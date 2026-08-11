@@ -425,3 +425,56 @@ describe('approval store is inside the guard perimeter', () => {
     expect(v.signals).not.toContain('touch-approval-store');
   });
 });
+
+/**
+ * #183 — the approval hash must be per COMMAND on anything that carries a
+ * command, not merely on tools whose NAME looks executable.
+ *
+ * #201 stripped the model-authored advisory fields (`description`, `timeout`)
+ * so an operator's grant survives the agent re-wording its retry. But it gated
+ * that on `classifyFamily(tool) === 'exec'`, which reads the tool NAME — while
+ * the guard's dangerous-tier decision reads the ARGUMENT surface
+ * (`extractCommand` picks `command|cmd|script|code|input|shell|run`).
+ *
+ * The two disagree on real tools. `Workflow` does not match the exec-name
+ * regex, so it classifies `unknown` — yet its `script` key IS an exec surface,
+ * so it reaches the dangerous tier and the approval loop with `description`
+ * still in the hash. A cron that re-presents the same script on its next tick
+ * mints a fresh hash and cannot spend its own grant: exactly #183's Expected.
+ */
+describe('#183 — advisory fields are stripped whenever the call carries a command', () => {
+  const SCRIPT = 'await $`git push --force origin main`;';
+
+  it('a non-exec-NAMED tool with a script surface hashes per command, not per attempt', () => {
+    const first = hashToolCall('Workflow', { script: SCRIPT, description: 'Publish the release branch' });
+    const retry = hashToolCall('Workflow', { script: SCRIPT, description: 'Ship the hotfix now' });
+    expect(retry).toBe(first);
+  });
+
+  it('the command itself still decides the hash', () => {
+    const a = hashToolCall('Workflow', { script: SCRIPT, description: 'x' });
+    const b = hashToolCall('Workflow', { script: 'await $`git push origin main`;', description: 'x' });
+    expect(b).not.toBe(a);
+  });
+
+  it('still strips for a genuinely exec-named tool (#201 unchanged)', () => {
+    const a = hashToolCall('Bash', { command: 'git push', description: 'one' });
+    const b = hashToolCall('Bash', { command: 'git push', description: 'two' });
+    expect(b).toBe(a);
+  });
+
+  it('does NOT strip when there is no command surface — a description is payload there', () => {
+    // An issue/PR body is the payload: approving one text must never release
+    // another. This is the boundary #201 drew and it must survive.
+    const a = hashToolCall('create_issue', { title: 'Bug', description: 'Steps to reproduce: A' });
+    const b = hashToolCall('create_issue', { title: 'Bug', description: 'Steps to reproduce: B' });
+    expect(b).not.toBe(a);
+  });
+
+  it('confinement flags still move the hash on a command-carrying tool', () => {
+    // An approval for the sandboxed form must not release the unsandboxed one.
+    const safe = hashToolCall('Workflow', { script: SCRIPT, dangerouslyDisableSandbox: false });
+    const unsafe = hashToolCall('Workflow', { script: SCRIPT, dangerouslyDisableSandbox: true });
+    expect(unsafe).not.toBe(safe);
+  });
+});

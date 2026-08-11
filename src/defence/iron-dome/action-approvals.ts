@@ -34,7 +34,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'os';
 import { join } from 'path';
 
-import { classifyFamily } from './tool-action-guard.js';
+import { classifyFamily, extractCommand } from './tool-action-guard.js';
 
 /** Default lifetime of an operator approval before it must be re-granted. */
 export const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -94,9 +94,35 @@ export function shortHash(hash: string): string {
  */
 const EXEC_ADVISORY_KEYS = new Set(['description', 'timeout']);
 
+/**
+ * #183: the projection must follow the same signal the GUARD followed to gate
+ * this call in the first place.
+ *
+ * #201 gated on `classifyFamily(tool) === 'exec'`, which reads the tool NAME —
+ * while the dangerous-tier decision reads the ARGUMENT surface, via
+ * `extractCommand` (`command|cmd|script|code|input|shell|run`). Real tools sit
+ * in the gap: `Workflow` does not match the exec-name regex, so it classifies
+ * `unknown`, yet its `script` key IS a command. Such a call reached the
+ * approval loop with `description` still in the hash, so a cron re-presenting
+ * the same script on its next tick minted a fresh hash and could not spend its
+ * own grant.
+ *
+ * Carrying a command is what makes a `description` an annotation rather than
+ * the payload — so that, not the name, is the right test.
+ */
+function hasCommandSurface(input: unknown): boolean {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  return extractCommand(input as Record<string, unknown>).length > 0;
+}
+
 function projectForHash(tool: string, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
-  if (classifyFamily(tool) !== 'exec') return input;
+  // Either signal is enough: an exec-family tool may carry its command under a
+  // key `extractCommand` does not know, and a command-carrying tool may not be
+  // exec-NAMED. A tool with neither keeps its `description` in the hash, where
+  // it is payload (an issue body, a PR description) and approving one text
+  // must never release another.
+  if (classifyFamily(tool) !== 'exec' && !hasCommandSurface(input)) return input;
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(input as Record<string, unknown>)) {
     if (!EXEC_ADVISORY_KEYS.has(key)) out[key] = (input as Record<string, unknown>)[key];
