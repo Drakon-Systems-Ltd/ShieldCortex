@@ -10,6 +10,7 @@
 
 import type Database from 'better-sqlite3';
 import { getDatabase, withTransaction } from '../database/init.js';
+import { resolveMemoryConfig } from './config.js';
 import { expireQuarantineItems } from '../defence/quarantine/auto-expire.js';
 import { guardReadRows } from '../defence/trust/read-guard.js';
 import type { DefenceSource } from '../defence/types.js';
@@ -62,7 +63,7 @@ import { computeEffectiveSalience } from '../../scripts/lib/salience.mjs';
  * This is like the brain's sleep consolidation - should be run periodically
  */
 export function consolidate(
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = resolveMemoryConfig()
 ): ConsolidationResult {
   // Wrap entire consolidation in a transaction for atomicity
   return withTransaction(() => {
@@ -614,7 +615,7 @@ function pickEvictionVictims(
  * Removes the lowest-effective-salience eligible memories when limits are
  * exceeded — never newborns, never pinned rows (see pickEvictionVictims/#236).
  */
-export function enforceMemoryLimits(config: MemoryConfig = DEFAULT_CONFIG): number {
+export function enforceMemoryLimits(config: MemoryConfig = resolveMemoryConfig()): number {
   // Note: If called within consolidate(), this is already in a transaction
   // If called standalone, we wrap it for safety
   const db = getDatabase();

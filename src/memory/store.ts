@@ -28,6 +28,7 @@ import {
   extractTags,
   analyzeSalienceFactors,
 } from './salience.js';
+import { resolveMemoryConfig } from './config.js';
 import { calculateDecayedScore } from './decay.js';
 import {
   emitMemoryCreated,
@@ -443,7 +444,7 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
  */
 export function addMemory(
   input: MemoryInput,
-  config: MemoryConfig = DEFAULT_CONFIG,
+  config: MemoryConfig = resolveMemoryConfig(),
   source?: DefenceSource
 ): Memory {
   // Check if memory creation is paused
@@ -1234,7 +1235,7 @@ export function deleteMemory(
  */
 export function getProjectMemories(
   project: string,
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = resolveMemoryConfig()
 ): Memory[] {
   const db = getDatabase();
   const rows = db.prepare(`
