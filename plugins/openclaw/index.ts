@@ -30,6 +30,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
@@ -120,44 +121,110 @@ function addAncestorCandidates(candidates: Set<string>, startPath: string) {
   }
 }
 
-function collectRuntimeCandidates(): string[] {
+/**
+ * Ask Node where the `shieldcortex` package actually is (#174).
+ *
+ * The plugin declares `shieldcortex` as a peer, so on ANY layout Node's own
+ * resolver can find it from here — no guessing at install prefixes. Resolving
+ * `shieldcortex/package.json` rather than the runtime file directly is
+ * deliberate: `./package.json` is the one subpath the main package's `exports`
+ * map always declares, whereas `hooks/openclaw/**` is in `files` but NOT in
+ * `exports`, so resolving it throws ERR_PACKAGE_PATH_NOT_EXPORTED.
+ *
+ * This is the strategy that fixes the reported `~/.local` host, and it works
+ * without widening the public `exports` surface.
+ */
+function addResolvedPeerCandidate(
+  candidates: Set<string>,
+  fromUrl: string,
+  resolve: (spec: string, from: string) => string = (spec, from) => createRequire(from).resolve(spec),
+): void {
+  try {
+    addRuntimeCandidate(candidates, path.dirname(resolve("shieldcortex/package.json", fromUrl)));
+  } catch { /* not resolvable from here — later strategies still apply */ }
+}
+
+/**
+ * Every place the runtime might live, in the order we should try them.
+ *
+ * `home` is injected because Jest sandboxes SHIELDCORTEX_CONFIG_DIR but never
+ * HOME, so a test that did not inject it would probe the developer's real
+ * install and pass for the wrong reason.
+ */
+function collectRuntimeCandidates(
+  home: string = homedir(),
+  resolveFrom: string = import.meta.url,
+): string[] {
   const candidates = new Set<string>();
 
-  // 1. Relative path (works when running from within npm package tree)
-  candidates.add(new URL("../../hooks/openclaw/cortex-memory/runtime.mjs", import.meta.url).href);
+  // 0. Operator escape hatch. `resolveOpenClawBinary` and the approval channel
+  //    already honour an env override for the same class of "we guessed your
+  //    install prefix wrong" problem; this list was the only copy without one,
+  //    which is why every new prefix (bun, volta, asdf, ~/.local) has needed a
+  //    code change. Accepts either the runtime file itself or a package root.
+  const envOverride = process.env.SHIELDCORTEX_RUNTIME_PATH?.trim();
+  if (envOverride) {
+    if (envOverride.endsWith(".mjs") && existsSync(envOverride)) {
+      candidates.add(pathToFileURL(envOverride).href);
+    } else {
+      addRuntimeCandidate(candidates, envOverride);
+    }
+  }
 
-  // 2. Config file override (reads path from ~/.shieldcortex/config.json instead of env var)
+  // 1. Ask Node. Works on every layout including the ~/.local one this fixes.
+  addResolvedPeerCandidate(candidates, resolveFrom);
+
+  // 2. Relative path — the repo/source-tree layout, where ../../hooks/… is real.
+  //    GUARDED, unlike before: on an installed layout this resolves to a
+  //    non-existent scoped path (`@drakon-systems/hooks/…`), and because it was
+  //    the only unguarded entry it became the SOLE list member and its
+  //    ERR_MODULE_NOT_FOUND became the operator-visible failure — the exact
+  //    message #174 reports. It is a real candidate in the source tree, so it
+  //    is kept and screened rather than deleted.
+  const relative = fileURLToPath(new URL("../../hooks/openclaw/cortex-memory/runtime.mjs", resolveFrom));
+  if (existsSync(relative)) candidates.add(pathToFileURL(relative).href);
+
+  // 3. Config file override. Honours SHIELDCORTEX_CONFIG_DIR like the rest of
+  //    the product — reading homedir() directly made this permanently blind on
+  //    a host that relocates its config.
   try {
-    const cfgPath = path.join(homedir(), ".shieldcortex", "config.json");
+    const configDir = process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(home, ".shieldcortex");
+    const cfgPath = path.join(configDir, "config.json");
     if (existsSync(cfgPath)) {
       const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
       if (cfg.installRoot) addRuntimeCandidate(candidates, cfg.installRoot);
     }
   } catch { /* no config */ }
 
-  // 3. Walk up from current file location
-  addAncestorCandidates(candidates, path.dirname(fileURLToPath(import.meta.url)));
+  // 4. Walk up from current file location
+  addAncestorCandidates(candidates, path.dirname(fileURLToPath(resolveFrom)));
 
-  // 4. Resolve via common bin symlink paths (no child_process needed)
-  for (const binDir of ["/usr/local/bin", "/opt/homebrew/bin", path.join(homedir(), ".npm-global", "bin")]) {
+  // 5. Resolve via common bin symlink paths (no child_process needed)
+  for (const binDir of [
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    path.join(home, ".npm-global", "bin"),
+    path.join(home, ".local", "bin"),            // #174: pip-style / npm --prefix ~/.local
+  ]) {
     const binPath = path.join(binDir, "shieldcortex");
     try {
       if (existsSync(binPath)) addAncestorCandidates(candidates, realpathSync(binPath));
     } catch { /* broken symlink */ }
   }
 
-  // 5. Common global install paths (covers npm root -g results without spawning npm)
+  // 6. Common global install paths (covers npm root -g results without spawning npm)
   for (const root of [
     "/usr/lib/node_modules/shieldcortex",
     "/usr/local/lib/node_modules/shieldcortex",
     "/opt/homebrew/lib/node_modules/shieldcortex",
-    path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex"),
-    path.join(homedir(), ".nvm", "versions", "node"),  // nvm users
+    path.join(home, ".npm-global", "lib", "node_modules", "shieldcortex"),
+    path.join(home, ".local", "lib", "node_modules", "shieldcortex"),   // #174
+    path.join(home, ".nvm", "versions", "node"),  // nvm users
   ]) {
     if (root.includes(".nvm")) {
       // For nvm, check the current symlink
       try {
-        const currentNode = path.join(homedir(), ".nvm", "current", "lib", "node_modules", "shieldcortex");
+        const currentNode = path.join(home, ".nvm", "current", "lib", "node_modules", "shieldcortex");
         addRuntimeCandidate(candidates, currentNode);
       } catch { /* no nvm */ }
     } else {
@@ -190,6 +257,18 @@ async function getRuntime(): Promise<OpenClawRuntime> {
         }
       }
 
+      // #174: with every candidate screened by existsSync, "none found" is a
+      // real outcome and must not render as `Tried: . Last error: unknown
+      // error`. Name the escape hatch instead — this message is the only thing
+      // an operator on an unusual install prefix has to go on.
+      if (tried.length === 0) {
+        throw new Error(
+          "Could not load OpenClaw runtime: the shieldcortex package was not found from the plugin, " +
+          "and no known install prefix contained hooks/openclaw/cortex-memory/runtime.mjs. " +
+          "Point at it explicitly with SHIELDCORTEX_RUNTIME_PATH=/path/to/shieldcortex " +
+          "(or to the runtime.mjs itself), or reinstall so `shieldcortex` resolves as a peer of the plugin.",
+        );
+      }
       const detail = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error");
       throw new Error(`Could not load OpenClaw runtime. Tried: ${tried.join(", ")}. Last error: ${detail}`);
     })();
@@ -230,6 +309,13 @@ async function getDefenceModule(): Promise<DefenceModule | null> {
  *  detection actually reached the store (or, for owner input, did not). */
 export function __getSessionTaintForTest(): typeof sessionTaint {
   return sessionTaint;
+}
+
+/** Test seam for #174 runtime resolution: `home` and the resolving module URL
+ *  are injectable because Jest sandboxes SHIELDCORTEX_CONFIG_DIR but never
+ *  HOME, so an un-injected probe would read the developer's real install. */
+export function __collectRuntimeCandidatesForTest(home?: string, from?: string): string[] {
+  return collectRuntimeCandidates(home, from);
 }
 
 export function __setDefenceModuleForTest(mod: DefenceModule | null | undefined): void {
