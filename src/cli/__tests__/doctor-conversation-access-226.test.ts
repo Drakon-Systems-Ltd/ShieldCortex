@@ -3,7 +3,15 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { checkOpenClawConversationScanning, checkOpenClawPluginLoadState } from '../doctor.js';
+import {
+  checkOpenClawConversationScanning,
+  checkOpenClawPluginLoadState,
+  renderPluginLoadVerdict,
+} from '../doctor.js';
+import {
+  gatherReconcileInput,
+  reconcilePluginState,
+} from '../../integrations/openclaw-plugin-index.js';
 
 /**
  * #226 item 6 — the conversation-hook access gate, as doctor reports it.
@@ -63,8 +71,15 @@ afterEach(() => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
-/** Installed on disk, enabled in config, present on the live roster — i.e. the
- *  host that every other doctor check calls healthy. */
+/** Installed on disk, enabled in config, and present in the SQLite install
+ *  index — i.e. the host that every other doctor check calls healthy.
+ *
+ *  NOT the live boot roster: that read touches the real /tmp/openclaw gateway
+ *  log, which no `home` override redirects, so it is deliberately guarded to
+ *  null under Jest (openclaw-plugin-index.ts) and `checkOpenClawPluginLoadState`
+ *  injects no replacement. Index presence is not roster presence — conflating
+ *  the two is #103 itself, which is why nothing here asserts on the
+ *  roster-confirmed wording. */
 function healthyInstall(entry: Record<string, unknown>): void {
   const oc = path.join(home, '.openclaw');
   const dirName = 'drakon-systems-shieldcortex-realtime-abc';
@@ -86,12 +101,24 @@ function healthyInstall(entry: Record<string, unknown>): void {
 }
 
 describe('#226 the "plugin loaded" tick never reads as protection while the grant is absent', () => {
-  it('downgrades the roster-confirmed PASS to a warn that names the gap', async () => {
+  it('downgrades the load-state PASS to a warn that names the gap', async () => {
     healthyInstall({ enabled: true });
     const r = await checkOpenClawPluginLoadState(home, '4.47.35');
+
     // Loaded is still true and still said; what changes is that the line no
-    // longer stops there.
-    expect(r.message).toMatch(/loaded \(roster-confirmed/);
+    // longer stops there. This pins the PRESERVATION of the underlying verdict
+    // rather than its wording: #239 rewrote the healthy arm's text (it stops
+    // claiming "roster-confirmed" when the live boot roster could not be read,
+    // which under Jest is always — see healthyInstall). #226 owns the fact that
+    // the base message survives intact and the note is APPENDED to it, never
+    // that the base says any particular thing; the roster-confirmed wording is
+    // pinned where it belongs, in doctor-wiped-stanza-222.test.ts's #103 block.
+    const base = renderPluginLoadVerdict(
+      reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '4.47.35' })),
+    );
+    expect(base.status).toBe('pass');
+    expect(r.message.startsWith(base.message)).toBe(true);
+
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/conversation scanning is NOT/i);
     expect(r.fix).toMatch(/allowConversationAccess/);

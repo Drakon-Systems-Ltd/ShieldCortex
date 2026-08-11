@@ -8,7 +8,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { initDatabase } from './database/init.js';
-import { DEFAULT_CONFIG } from './memory/types.js';
+import { resolveMemoryConfig } from './memory/config.js';
 import { getCurrentVersion } from './api/version.js';
 import {
   initProjectContext,
@@ -203,8 +203,10 @@ export function checkAndTriggerKillSwitch(text: string, source: string): boolean
  * Create and configure the MCP server
  */
 export function createServer(dbPath?: string): McpServer {
-  // Initialize database
-  const config = { ...DEFAULT_CONFIG };
+  // Initialize database. Caps come from the operator's `memory` block when set
+  // (see memory/config.ts) — the ceiling at which the product starts forgetting
+  // on their behalf should be theirs to choose.
+  const config = resolveMemoryConfig();
   if (dbPath) {
     config.dbPath = dbPath;
   }

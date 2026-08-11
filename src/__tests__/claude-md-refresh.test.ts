@@ -9,12 +9,14 @@ describe('CLAUDE.md ghost-tool block refresh (guards against #27)', () => {
   let tempHome: string;
   let homedirSpy: jest.SpiedFunction<typeof os.homedir>;
   let logSpy: jest.SpiedFunction<typeof console.log>;
+  let previousExitCode: string | number | null | undefined;
 
   beforeEach(() => {
     jest.resetModules();
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-claude-md-'));
     process.env.HOME = tempHome;
     process.env.USERPROFILE = tempHome;
+    previousExitCode = process.exitCode;
     homedirSpy = jest.spyOn(os, 'homedir').mockReturnValue(tempHome);
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
   });
@@ -26,6 +28,7 @@ describe('CLAUDE.md ghost-tool block refresh (guards against #27)', () => {
     else process.env.HOME = originalHome;
     if (originalUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserProfile;
+    process.exitCode = previousExitCode;
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 

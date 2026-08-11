@@ -2129,26 +2129,54 @@ function foldScriptSources(
     // "not reviewed". The file is skipped WITHOUT setting `opaque`: this is a
     // human's explicit decision, not a scan gap — but it is recorded, so an
     // audit row can never show a clean scan that silently omitted a file.
-    // Nested invocations inside a reviewed script are not followed: its
-    // children were part of what the human reviewed, and following them
-    // would re-gate a monitor because a helper it calls names `id_rsa`.
+    // Review is PER FILE, never transitive. The pin's whole contract is
+    // "path + content hash — any edit re-gates", and that can only hold for
+    // bytes something actually hashes. This arm used to `continue` past the
+    // nested-invocation queue below, so a reviewed SHELL script's children
+    // were neither folded nor pinned: review a wrapper once and it
+    // permanently exempted a mutable subtree.
+    //
+    // That is #93's write-then-exec with a human's review supplying the key —
+    // an agent drops a payload into an unpinned helper, then runs the
+    // reviewed parent that calls it, and nothing ever scans the payload.
+    //
+    // So a reviewed file still skips folding its OWN source (that is the #189
+    // relief, intact), but its children are still discovered and folded
+    // unless they are themselves pinned. Exempting a whole toolchain means
+    // pinning each file in it — explicit, and each one re-gates on edit.
+    //
+    // Skipped WITHOUT setting `opaque`: this is a human's explicit decision,
+    // not a scan gap — but it is recorded, so an audit row can never show a
+    // clean scan that silently omitted a file.
+    let isReviewed = false;
     if (typeof isReviewedScript === 'function') {
-      let isReviewed = false;
       try {
         isReviewed = isReviewedScript(next.path, src) === true;
       } catch {
         isReviewed = false;
       }
-      if (isReviewed) { reviewed.push(next.path); continue; }
+      if (isReviewed) reviewed.push(next.path);
     }
 
     // `commandScanText` only strips SHELL constructs (pure prints, `#` comments,
     // quoted heredocs). For interpreter source those are the wrong rules — a `#`
     // comment strip is harmless, but a Python `'…#…'` literal must not lose its
     // tail — so non-shell sources are folded verbatim and classified instead.
-    const scan = next.lang === 'sh'
+    // Computed even for a reviewed file, because its children still have to be
+    // discovered from it.
+    const reviewedScan = next.lang === 'sh'
       ? commandScanText(deobfuscateIfs(src))
       : deobfuscateIfs(src);
+    if (isReviewed) {
+      const nestedOfReviewed = next.lang === 'sh' ? detectScriptInvocations(reviewedScan) : [];
+      if (nestedOfReviewed.length > 0) {
+        if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
+        else for (const n of nestedOfReviewed) if (!visited.has(n.path)) queue.push({ ...n, depth: next.depth + 1 });
+      }
+      continue;
+    }
+
+    const scan = reviewedScan;
     total += src.length;
     if (parts.length > 0) cursor += 1;                  // the '\n' join separator
     regions.push({ start: cursor, end: cursor + scan.length, lang: next.lang, hasSink: SHELL_OUT_SINK.test(scan), folded: true });

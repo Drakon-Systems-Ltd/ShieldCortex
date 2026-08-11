@@ -2893,7 +2893,35 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
     // hazard rebuilt: the next state added to PluginLoadState would inherit
     // "healthy" silently. Only `healthy` may render a pass here; anything
     // unrecognised lands in the arm below and warns.
-    case 'healthy':
+    case 'healthy': {
+      // #103: "roster-confirmed" is a claim about EVIDENCE, and this arm used to
+      // make it unconditionally. `reconcilePluginState` reaches `healthy` both
+      // when the running gateway's boot roster names the plugin AND when that
+      // roster could not be read at all — it records the difference in
+      // `reasons`, which this renderer discards. So on any host where the boot
+      // line was unreadable, doctor asserted roster confirmation it did not
+      // have: install state described as load state, which is the exact
+      // inversion #103 was filed for, rebuilt one layer up.
+      //
+      // Proven ⇒ pass with an evidence-backed roster claim. Unproven ⇒ pass
+      // with an explicit diagnostic gap, matching the reconciler's `ok` verdict
+      // without turning installation evidence into a live-load assertion.
+      const rosterProven = verdict.loadedInLiveRoster === true;
+      const version = verdict.onDiskVersion ?? verdict.expectedVersion;
+      if (!rosterProven) {
+        // Status stays `pass`: the reconciler classified this `severity: 'ok'`
+        // (installed, enabled, versions agree) and nothing is known to be
+        // wrong, so escalating here would both contradict the verdict and warn
+        // on every host whose gateway log is merely unreadable. What was wrong
+        // was the CLAIM, not the status — so the claim is what changes.
+        return {
+          label,
+          status: 'pass',
+          message:
+            `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
+            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+        };
+      }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
       // canary (that needs gateway consent) — so it must not claim "enforcing"
       // from roster presence alone (#74 attempt #3 was roster-present-but-not-
@@ -2907,8 +2935,9 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'pass',
-        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+        message: `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
+    }
     default: {
       // A state the reconciler produced and this renderer does not know. It is
       // reachable only by adding a PluginLoadState without a case here — which
