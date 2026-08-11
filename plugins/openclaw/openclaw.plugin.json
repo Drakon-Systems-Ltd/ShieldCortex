@@ -1,6 +1,6 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "4.47.38",
+  "version": "4.47.39",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
@@ -155,7 +155,7 @@
     "properties": {
       "enabled": {
         "type": "boolean",
-        "description": "Unused \u2014 plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
+        "description": "Unused — plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
       },
       "binaryPath": {
         "type": "string"

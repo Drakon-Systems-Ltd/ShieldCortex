@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [4.47.39] - 2026-08-11
+
+**The OpenClaw conversation firewall now reaches the real host path — and approvals bind to what the operator actually reviewed.**
+
+### Security
+
+- **Conversation threats can block the run they are steering (#225, #226).** The plugin now uses OpenClaw's real `before_agent_run` contract, returns the host's `{ outcome: "block", reason }` decision shape, and keeps older hosts honest: enforcement is supported only where the blocking hook exists (OpenClaw 2026.5.12+). `observe`, `enforce`, and `off` remain distinct; `off` returns before conversation inspection, owner input is scanned but not treated as hostile data, and external/unknown sources remain subject to enforcement.
+- **The consent and delivery paths are real, not inferred.** Conversation hooks require the operator's explicit `hooks.allowConversationAccess: true` grant; install, repair, doctor, manifest schema, and runtime status now agree on that boundary. Scanner/config/runtime unavailability is audited and rate-limited instead of silently becoming clean, notification delivery records transport truth rather than dispatch intent, and new conversation audit rows persist bounded hash/length metadata instead of raw prompts.
+- **Approval hashes bind to the reviewed payload (#183, #241).** Description-only retries for exec-family tools remain spendable, while unknown and non-exec tools retain full payload binding. `Workflow.script` is an explicit reviewed surface; namespaced look-alikes and unlisted-field mutations cannot reuse the grant. The operator-notification path exposes `script` only for exact `Workflow`, preventing unrelated tool payloads from leaking through the approval card or pending summary.
+
+### Fixed
+
+- **Doctor no longer claims a live protection plane without live evidence (#103, #226, #239).** A missing conversation grant warns without pretending conversation scanning is active, and “tool-call gating is live” appears only when the running gateway roster actually proves the plugin loaded. If roster evidence is unavailable, doctor says the gating state is not separately proven.
+- **OpenClaw registration repair is executable, not advice.** A wiped/disabled stanza is distinguished from an intentional opt-out or unreadable config; repair restores registration through the merge-preserving writer, reloads the gateway, and verifies the resulting state.
+
 ## [4.47.38] - 2026-08-11
 
 **A full memory store no longer eats the memory you just saved.**
