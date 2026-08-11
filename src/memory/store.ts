@@ -445,7 +445,8 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
 export function addMemory(
   input: MemoryInput,
   config: MemoryConfig = resolveMemoryConfig(),
-  source?: DefenceSource
+  source?: DefenceSource,
+  options?: { sourceAttested?: boolean },
 ): Memory {
   // Check if memory creation is paused
   if (isPaused()) {
@@ -483,6 +484,7 @@ export function addMemory(
   const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
   const defenceResult: DefencePipelineResult = runDefencePipeline(
     input.content, input.title, effectiveSource, undefined, input.project,
+    { sourceAttested: options?.sourceAttested },
   );
 
   // P1/WS4: the ONE verdict→disposition mapping, shared with the hook path

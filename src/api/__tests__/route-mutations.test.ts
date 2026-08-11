@@ -127,6 +127,7 @@ describe('API route mutation regressions', () => {
         getDeviceId: () => 'device-123',
         getDeviceName: () => 'edith',
         getDefenceMode: () => 'balanced',
+        getStrictSourceMode: () => false,
         getVerifyConfig: () => ({
           verifyEnabled: false,
           verifyMode: 'advisory',

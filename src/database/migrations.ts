@@ -833,9 +833,20 @@ export function runMigrations(database: Database.Database): void {
       if (!auditColNames.has('content_hash')) {
         database.exec('ALTER TABLE defence_audit ADD COLUMN content_hash TEXT');
       }
+      // Threat-graph Phase B (docs/design/2026-08-11-threat-graph.md):
+      // source_attested = the resolution was system-derived or strict-mode
+      // (NULL on legacy rows and unplumbed paths); risk_modifier = the
+      // advisory trust modifier computed for this scan (NULL until the
+      // modifier ships/fires). Local-only until declared as egress.
+      if (!auditColNames.has('source_attested')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN source_attested INTEGER');
+      }
+      if (!auditColNames.has('risk_modifier')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN risk_modifier REAL');
+      }
     }
   } catch (err) {
-    logIfUnexpectedDdlError(err, 'defence_audit provenance columns (operation, content_hash)');
+    logIfUnexpectedDdlError(err, 'defence_audit provenance columns (operation, content_hash, source_attested, risk_modifier)');
   }
 
   if (!columnNames.has('content_hash')) {

@@ -203,5 +203,14 @@ export interface AuditEntry {
   blocked_patterns: string; // JSON array
   reason: string | null;
   fragmentation_score: number | null;
+  /**
+   * Threat-graph Phase B: 1 = the source identity was system-derived
+   * (env-inferred, clamped, or env-confirmed) or the deployment runs
+   * strictSourceMode; 0 = accepted self-declaration; NULL/omitted = legacy
+   * row or a caller that has not plumbed attestation.
+   */
+  source_attested?: number | null;
+  /** Threat-graph Phase B: advisory trust modifier computed for this scan. */
+  risk_modifier?: number | null;
   pipeline_duration_ms: number | null;
 }

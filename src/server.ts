@@ -148,6 +148,17 @@ function resolveToolSource(declaredSource: DefenceSource | undefined, toolName: 
   return resolveToolSourceImpl(declaredSource, {
     toolName,
     project: getActiveProject(),
+  }).source;
+}
+
+/**
+ * Full resolution including attestation — used by write paths that record
+ * source_attested on the audit ledger (threat-graph Phase B).
+ */
+function resolveToolSourceFull(declaredSource: DefenceSource | undefined, toolName: string) {
+  return resolveToolSourceImpl(declaredSource, {
+    toolName,
+    project: getActiveProject(),
   });
 }
 
@@ -275,8 +286,8 @@ Content is scanned through the defence pipeline before storage. Suspicious conte
           isError: true,
         };
       }
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'remember');
-      const result = await executeRemember({ ...args, source });
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'remember');
+      const result = await executeRemember({ ...args, source: resolved.source, sourceAttested: resolved.attested });
       return {
         content: [{ type: 'text', text: formatRememberResult(result) }],
       };

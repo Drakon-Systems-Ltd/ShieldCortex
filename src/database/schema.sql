@@ -313,6 +313,8 @@ CREATE TABLE IF NOT EXISTS defence_audit (
   reason TEXT,
   fragmentation_score REAL,
   pipeline_duration_ms INTEGER,
+  source_attested INTEGER,              -- threat-graph Phase B: 1 = identity system-derived or strict-mode; NULL = legacy/unplumbed
+  risk_modifier REAL,                   -- threat-graph Phase B: advisory trust modifier computed for this scan
   FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
 );
 

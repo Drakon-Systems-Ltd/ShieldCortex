@@ -41,12 +41,24 @@ import { getEnabledCustomPatterns } from './custom-patterns/store.js';
 // getEnabledFirewallRules()/getEnabledCustomPatterns() throw if the DB is
 // uninitialised, and that must still fail closed rather than weaken a decision.
 
+export interface PipelineRunOptions {
+  /**
+   * Threat-graph attestation (docs/design/2026-08-11-threat-graph.md,
+   * Phase B): whether the source identity was system-derived (see
+   * resolveToolSource). Recorded on the audit row; undefined = not plumbed
+   * (legacy callers) and lands as NULL. Deliberately not part of
+   * DefenceSource — that type is caller-suppliable.
+   */
+  sourceAttested?: boolean;
+}
+
 export function runDefencePipeline(
   content: string,
   title: string,
   source: DefenceSource,
   config?: DefenceConfig,
   project?: string,
+  options?: PipelineRunOptions,
 ): DefencePipelineResult {
   const cfg = config ?? { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
   const startTime = performance.now();
@@ -243,6 +255,7 @@ export function runDefencePipeline(
       reason,
       fragmentation_score: fragmentation?.score ?? null,
       pipeline_duration_ms: durationMs,
+      source_attested: options?.sourceAttested === undefined ? null : (options.sourceAttested ? 1 : 0),
     });
 
     // 7. Emit defence event for real-time dashboard alerts (BLOCK/QUARANTINE only)
@@ -329,6 +342,7 @@ export function runDefencePipeline(
       reason: `Pipeline error (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
       fragmentation_score: null,
       pipeline_duration_ms: durationMs,
+      source_attested: options?.sourceAttested === undefined ? null : (options.sourceAttested ? 1 : 0),
     });
 
     return {

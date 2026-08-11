@@ -251,6 +251,8 @@ export function getInlineSchema(): string {
       reason TEXT,
       fragmentation_score REAL,
       pipeline_duration_ms INTEGER,
+      source_attested INTEGER,
+      risk_modifier REAL,
       FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
     );
 

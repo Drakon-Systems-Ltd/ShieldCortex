@@ -447,6 +447,15 @@ export function readRawConfig(): Record<string, unknown> {
 }
 
 /**
+ * Strict source mode (DefenceConfig.strictSourceMode's config-file wire —
+ * previously defined but consumed nowhere). Read from the top-level
+ * `strictSourceMode` key, mirroring `defenceMode`. Default false.
+ */
+export function getStrictSourceMode(): boolean {
+  return readRawConfig().strictSourceMode === true;
+}
+
+/**
  * Threat-graph feature gate (docs/design/2026-08-11-threat-graph.md).
  * Enabled unless config sets `threatGraph.enabled: false` explicitly.
  * Pass `raw` for tests; production callers omit it and read the live config.
