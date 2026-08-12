@@ -129,10 +129,16 @@ describe('#217 — output transport is a sink, not just body vocabulary', () => 
     expect(decide(cmd).decision).toBe('block');
   });
 
-  it('but a discard redirect keeps the #217 relief', () => {
+  it.each([
     // `2>/dev/null` on a probe is the shape this fix exists to allow.
-    const v = decide(`cat > /tmp/p.mjs <<'EOF'\n${PROBE_BODY}\nEOF\nnode /tmp/p.mjs 2>/dev/null`);
-    expect(v.decision).not.toBe('block');
+    ['discard', `cat > /tmp/p.mjs <<'EOF'\n${PROBE_BODY}\nEOF\nnode /tmp/p.mjs 2>/dev/null`],
+    // The fd-to-fd case the exemption is genuinely FOR. Narrowing the rule to
+    // reject fd-prefixed redirects (the fix above) must not take this with it —
+    // `2>&1` carries the output nowhere new, and it is on half the diagnostic
+    // one-liners anyone types.
+    ['fd-to-fd duplication', `cat > /tmp/p.mjs <<'EOF'\n${PROBE_BODY}\nEOF\nnode /tmp/p.mjs 2>&1`],
+  ])('but a %s keeps the #217 relief', (_name, cmd) => {
+    expect(decide(cmd).decision).not.toBe('block');
   });
 });
 
