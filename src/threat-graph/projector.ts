@@ -37,6 +37,16 @@ import { getDatabase } from '../database/init.js';
 import { projectRealtimeLedger, type RealtimeResult } from './realtime-ledger.js';
 import { sourceKey } from './keys.js';
 import {
+  DEFAULT_ANOMALY_THRESHOLD,
+  DEFAULT_HALF_LIFE_MS,
+  RATE_CAP,
+  RATE_WINDOW_MS,
+  eventWeight,
+  foldEvent,
+  runRiskSweep,
+  type RiskState,
+} from './risk.js';
+import {
   assertNotInTransaction,
   cachedStmt,
   evictEdgeOverflow,
@@ -65,6 +75,8 @@ export interface ProjectorOptions {
   anomalyEventThreshold?: number;
   /** Max length of a source identifier contributing to node identity. */
   sourceKeyMaxLength?: number;
+  /** Risk half-life (ms); used by the rebuild re-seed and idle sweep. */
+  halfLifeMs?: number;
 }
 
 export interface ProjectResult {
@@ -82,6 +94,7 @@ const DEFAULTS: Required<ProjectorOptions> = {
   evidenceCap: 20,
   anomalyEventThreshold: 0.7,
   sourceKeyMaxLength: 200,
+  halfLifeMs: DEFAULT_HALF_LIFE_MS,
 };
 
 interface AuditRow {
@@ -155,12 +168,45 @@ function projectRow(row: AuditRow, opts: Required<ProjectorOptions>, errors: str
   const indicators = parseJsonArray(row.threat_indicators);
   const anomaly = row.anomaly_score ?? 0;
 
-  // Tier 1: source counters + aggregate triggered edges — every row.
+  // Tier 1: source counters + the risk exponent-sum fold — every row.
+  // Both are pure functions of ledger rows (verdict, anomaly, timestamp), so
+  // they stay in attrs and inside the canonicalDump determinism contract.
+  const weight = eventWeight({
+    verdict: row.firewall_result,
+    anomaly,
+    pipelineError: indicators.includes('pipeline_error'),
+    anomalyThreshold: DEFAULT_ANOMALY_THRESHOLD,
+  });
   updateAttrs(sourceId, (attrs) => {
     bump(attrs, 'scan_count');
     if (row.firewall_result === 'ALLOW') bump(attrs, 'allow_count');
     if (row.firewall_result === 'BLOCK') bump(attrs, 'block_count');
     if (row.firewall_result === 'QUARANTINE') bump(attrs, 'quarantine_count');
+    // Raw type/identifier so the sweep's counter query can't be defeated by a
+    // truncated node key.
+    attrs.src_type = row.source_type;
+    attrs.src_id = row.source_identifier;
+    // Fold weighted events only — a zero-weight ALLOW is a no-op for the risk.
+    if (weight > 0) {
+      const prev: RiskState | null =
+        typeof attrs.risk_sum === 'number' && typeof attrs.risk_ref_ts === 'string'
+          ? {
+              sum: attrs.risk_sum,
+              refTs: Date.parse(attrs.risk_ref_ts),
+              windowStart: typeof attrs.risk_win_start === 'string' ? Date.parse(attrs.risk_win_start) : Date.parse(attrs.risk_ref_ts),
+              windowWeight: typeof attrs.risk_win_weight === 'number' ? attrs.risk_win_weight : 0,
+            }
+          : null;
+      const folded = foldEvent(prev, Date.parse(ts), weight, {
+        halfLifeMs: DEFAULT_HALF_LIFE_MS,
+        rateCap: RATE_CAP,
+        rateWindowMs: RATE_WINDOW_MS,
+      });
+      attrs.risk_sum = folded.sum;
+      attrs.risk_ref_ts = new Date(folded.refTs).toISOString();
+      attrs.risk_win_start = new Date(folded.windowStart).toISOString();
+      attrs.risk_win_weight = folded.windowWeight;
+    }
   });
 
   const patternIds = new Map<string, number>();
@@ -287,9 +333,56 @@ export function rebuildThreatGraph(
   assertNotInTransaction('rebuild');
   const db = getDatabase();
   ensureStateRow();
+
+  // Snapshot each source's risk sum BEFORE clearing. Replaying a
+  // retention-purged ledger yields a lower sum than the incrementally-built
+  // one (fewer events), which would grant risk amnesty — the doc's Retention
+  // rule forbids it. After replay we restore the snapshot for any source that
+  // still exists, taking the larger sum rebased to a common reference. A
+  // source with NO surviving ledger row keeps no node and its risk lapses
+  // (nothing in the retained ledger supports it — the intended behaviour).
+  const snapshot = db.prepare(`
+    SELECT key,
+           json_extract(attrs,'$.risk_sum') AS risk_sum,
+           json_extract(attrs,'$.risk_ref_ts') AS risk_ref_ts,
+           json_extract(attrs,'$.risk_win_start') AS risk_win_start,
+           json_extract(attrs,'$.risk_win_weight') AS risk_win_weight
+    FROM threat_nodes
+    WHERE kind = 'source' AND json_extract(attrs,'$.risk_sum') IS NOT NULL
+  `).all() as Array<{ key: string; risk_sum: number; risk_ref_ts: string; risk_win_start: string | null; risk_win_weight: number | null }>;
+
   clearGraph();
 
   const result = projectToCompletion(options);
+
+  if (snapshot.length > 0) {
+    const H = options?.halfLifeMs ?? DEFAULT_HALF_LIFE_MS;
+    const reseed = db.transaction(() => {
+      for (const snap of snapshot) {
+        const node = db.prepare("SELECT id, attrs FROM threat_nodes WHERE kind = 'source' AND key = ?")
+          .get(snap.key) as { id: number; attrs: string } | undefined;
+        if (!node) continue; // no surviving row → risk lapses
+        let attrs: Record<string, unknown>;
+        try { attrs = JSON.parse(node.attrs) as Record<string, unknown>; } catch { continue; }
+
+        const replayedSum = typeof attrs.risk_sum === 'number' ? attrs.risk_sum : 0;
+        const replayedRef = typeof attrs.risk_ref_ts === 'string' ? Date.parse(attrs.risk_ref_ts) : Date.parse(snap.risk_ref_ts);
+        const snapRef = Date.parse(snap.risk_ref_ts);
+        // Rebase both to the later reference and keep the larger.
+        const target = Math.max(replayedRef, snapRef);
+        const replayedAt = replayedSum * Math.pow(2, -(target - replayedRef) / H);
+        const snapAt = snap.risk_sum * Math.pow(2, -(target - snapRef) / H);
+        if (snapAt > replayedAt) {
+          attrs.risk_sum = snapAt;
+          attrs.risk_ref_ts = new Date(target).toISOString();
+          if (snap.risk_win_start) attrs.risk_win_start = snap.risk_win_start;
+          if (typeof snap.risk_win_weight === 'number') attrs.risk_win_weight = snap.risk_win_weight;
+          db.prepare('UPDATE threat_nodes SET attrs = ? WHERE id = ?').run(JSON.stringify(attrs), node.id);
+        }
+      }
+    });
+    reseed.immediate();
+  }
   if (options?.realtimeDir) {
     for (;;) {
       const rt = projectRealtimeLedger({ dir: options.realtimeDir });
@@ -392,6 +485,16 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
       ? projectRealtimeLedger({ dir: options.realtimeDir })
       : null;
     if (realtime) runErrors.push(...realtime.errors);
+
+    // Idle decay sweep — recompute source_risk for EVERY source each pass, so
+    // an idle source's risk heals on schedule instead of freezing at peak.
+    // Runs unconditionally (even when no rows projected): decay is a function
+    // of wall-clock `now`, which advances between ticks.
+    try {
+      runRiskSweep({ nowMs: now, halfLifeMs: options?.halfLifeMs });
+    } catch (e) {
+      runErrors.push(`risk sweep: ${e instanceof Error ? e.message : String(e)}`);
+    }
 
     succeeded = true;
     return { ran: true, audit, realtime };

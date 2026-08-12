@@ -844,6 +844,12 @@ export function runMigrations(database: Database.Database): void {
       if (!auditColNames.has('risk_modifier')) {
         database.exec('ALTER TABLE defence_audit ADD COLUMN risk_modifier REAL');
       }
+      // Serves the threat-graph risk sweep's 28-day windowed counters
+      // (per-source range scan); without it the sweep degrades to repeated
+      // partial scans across up to 5,000 sources.
+      database.exec(
+        'CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp)'
+      );
     }
   } catch (err) {
     logIfUnexpectedDdlError(err, 'defence_audit provenance columns (operation, content_hash, source_attested, risk_modifier)');

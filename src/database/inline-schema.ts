@@ -262,6 +262,7 @@ export function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
     CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
     CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation);
+    CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp);
 
     -- Cumulative audit aggregate (single row, id=1) — retention rollup target.
     -- See schema.sql for the rationale.
