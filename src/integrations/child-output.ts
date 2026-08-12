@@ -63,6 +63,22 @@ export interface SummariseOptions {
   env?: NodeJS.ProcessEnv;
   /** Injected for tests; defaults to the real home directory. */
   home?: string;
+  /**
+   * `failure` (default) ranks signal-bearing lines and drops reassurance.
+   * `plain` preserves source order — for the output of a command that
+   * SUCCEEDED, where there is no failure to find and failure-biased ranking
+   * picks the wrong line (it promoted "Removed 1 conflicting entry" over
+   * "Installed …@4.47.39", because "conflict" reads as signal).
+   */
+  mode?: 'failure' | 'plain';
+  /**
+   * Drop `[plugins] …` lines as foreign chatter. Correct when summarising a
+   * command that merely happened to load plugins; WRONG when the command IS a
+   * `plugins` subcommand, where those lines are its own output — filtering
+   * them there produced an empty summary, i.e. a failure with no stated
+   * reason, which is the class of defect this module exists to remove.
+   */
+  dropPluginChatter?: boolean;
 }
 
 /** Read no more than this from either stream before doing regex work. */
@@ -118,7 +134,10 @@ const REASSURANCE_PATTERN = /\bstill (run|work|available)|\bunaffected\b|no acti
  * about itself — real, but never the answer to "why did OUR command fail".
  */
 const NOISE_PATTERN =
-  /^(npm notice|npm warn|npm WARN|added \d+ package|found \d+ vulnerabilit|up to date|audited \d+ package|\[plugins\]\s)/i;
+  /^(npm notice|npm warn|npm WARN|added \d+ package|found \d+ vulnerabilit|up to date|audited \d+ package)/i;
+
+/** Another plugin telling us about itself — see `dropPluginChatter`. */
+const PLUGIN_CHATTER_PATTERN = /^\[plugins\]\s/i;
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
 
@@ -169,14 +188,15 @@ function scrubHome(text: string, home: string): string {
   return text.split(home).join('~');
 }
 
-function cleanLines(raw: string): string[] {
+function cleanLines(raw: string, dropPluginChatter: boolean): string[] {
   return raw
     .replace(ANSI_PATTERN, '')
     .replace(/\r/g, '')
     .split('\n')
     .map(line => line.trimEnd())
     .filter(line => line.trim().length > 0)
-    .filter(line => !NOISE_PATTERN.test(line.trim()));
+    .filter(line => !NOISE_PATTERN.test(line.trim()))
+    .filter(line => !(dropPluginChatter && PLUGIN_CHATTER_PATTERN.test(line.trim())));
 }
 
 /**
@@ -214,10 +234,14 @@ export function summariseCommandOutput(
     allowlist: ['sha512-', 'sha1-', 'sha256-'],
   });
 
-  const all = cleanLines(scrubHome(redacted, home));
+  const all = cleanLines(scrubHome(redacted, home), opts.dropPluginChatter ?? true);
   if (all.length === 0) return { lines: [], truncated };
 
-  const signal = all.filter(line => SIGNAL_PATTERN.test(line) && !REASSURANCE_PATTERN.test(line));
+  // `plain` skips ranking entirely: for output of a command that succeeded there
+  // is no cause to hunt for, and the failure heuristics pick the wrong line.
+  const signal = (opts.mode ?? 'failure') === 'plain'
+    ? []
+    : all.filter(line => SIGNAL_PATTERN.test(line) && !REASSURANCE_PATTERN.test(line));
   const usedSignal = signal.length > 0;
   // Strongest cause first, original order preserved within each band — the
   // EARLIEST signal line is not reliably the most informative one.
@@ -225,7 +249,12 @@ export function summariseCommandOutput(
     ? [...signal.filter(l => STRONG_SIGNAL_PATTERN.test(l)), ...signal.filter(l => !STRONG_SIGNAL_PATTERN.test(l))]
     : all;
 
-  let picked = usedSignal ? ranked.slice(0, maxLines) : ranked.slice(-maxLines);
+  // plain: keep the head (the primary outcome line comes first).
+  // failure+signal: ranked head. failure+no-signal: tail, where a stack trace's
+  // most specific frame sits.
+  let picked = usedSignal || (opts.mode ?? 'failure') === 'plain'
+    ? ranked.slice(0, maxLines)
+    : ranked.slice(-maxLines);
   if (picked.length < all.length) truncated = true;
 
   picked = picked.map(line =>

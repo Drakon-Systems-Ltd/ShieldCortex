@@ -297,7 +297,19 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     // "Audit, status, health, logs, tasks list/audit, and doctor commands still
     // run with invalid config." — so the reported reason was the sign-off and
     // the actual cause, printed first, was discarded.
-    const summary = summariseCommandOutput(r.output, { maxLines: 1 }).lines[0] ?? '';
+    //
+    // `dropPluginChatter: false` because THIS command is a `plugins`
+    // subcommand: `[plugins] …` lines are its own output, not a third party's,
+    // and filtering them left a failed step with a blank reason. `mode` follows
+    // the outcome — failure ranking on a successful command promotes whichever
+    // line happens to contain a word like "conflict".
+    const summarised = summariseCommandOutput(r.output, {
+      maxLines: 1,
+      dropPluginChatter: false,
+      mode: ok ? 'plain' : 'failure',
+    });
+    // Never report a failure with no reason — that is the defect, not the fix.
+    const summary = summarised.lines[0] ?? r.output.trim().split('\n')[0]?.trim() ?? '';
     stepResults.push({ kind: step.kind, ok, detail: summary });
     if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${summary}`);
   }

@@ -25,7 +25,7 @@ const DOCTOR = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'do
 
 /** Commands OpenClaw refuses outright while its config is invalid. */
 const BLOCKED_COMMAND =
-  /(openclaw plugins |openclaw skills |shieldcortex openclaw (skill install|repair|install))/;
+  /(openclaw plugins |openclaw skills |openclaw config patch|shieldcortex openclaw (skill install|repair|install))/;
 
 /** How far after a remediation line the tag may sit before we call it absent. */
 const TAG_WINDOW = 14;
@@ -60,9 +60,9 @@ describe('#221 — every blocked remediation in doctor.ts carries the tag', () =
     const source = readFileSync(DOCTOR, 'utf-8');
     const tags = source.match(/needsOpenClawCli: \{[^}]*\}/g) ?? [];
 
-    expect(tags.length).toBeGreaterThanOrEqual(17);
+    expect(tags.length).toBeGreaterThanOrEqual(18);
     for (const tag of tags) {
-      expect(tag).toMatch(/subcommand: '(plugins|skills)'/);
+      expect(tag).toMatch(/subcommand: '(plugins|skills|config)'/);
     }
   });
 });

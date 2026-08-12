@@ -88,6 +88,17 @@ export const VALIDATE_ARGV = ['config', 'validate'] as const;
  */
 const SAYS_INVALID = /config is invalid|"valid"\s*:\s*false|^\s*[×✗]\s/m;
 
+/**
+ * The CLI rejecting the COMMAND, as opposed to judging the config. This VETOES
+ * the invalid verdict outright, because a bullet is weak evidence and a refusal
+ * is strong: unrelated plugin stderr routinely carries `✗ …` lines, and one
+ * landing alongside "Unknown command" would otherwise convict a healthy config
+ * on an OpenClaw that simply does not have `config validate`.
+ *
+ * Checked BEFORE `SAYS_INVALID`, never after — the whole point is that it wins.
+ */
+const SAYS_REFUSED = /unknown command|too many arguments|unknown option|unrecognized (command|option)|could ?not start the cli/i;
+
 export function defaultConfigPath(home: string): string {
   return process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(home, '.openclaw', 'openclaw.json');
 }
@@ -182,7 +193,7 @@ export function validateOpenClawConfig(
   // argument applies to the subcommand itself. So: require OpenClaw to SAY the
   // config is invalid. Anything else fails open.
   const blob = `${r.stderr}\n${r.stdout}`;
-  if (!SAYS_INVALID.test(blob)) {
+  if (SAYS_REFUSED.test(blob) || !SAYS_INVALID.test(blob)) {
     return {
       state: 'indeterminate',
       reason: '`openclaw config validate` is not supported by this OpenClaw',

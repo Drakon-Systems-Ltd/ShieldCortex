@@ -214,6 +214,46 @@ describe('#221 — the gate must not over-reach', () => {
    * ShieldCortex purely as MCP memory, whose OpenClaw has some third-party
    * plugin's dangling entry, must not start failing its pipeline over it.
    */
+  /**
+   * A TAG IS NOT A FAULT.
+   *
+   * `checkOpenClawSkillVersion` returns this exact tagged `info` row whenever
+   * the skill is not installed — the DEFAULT for every host not using the
+   * OpenClaw integration. Counting tags rather than faults kept the config row
+   * at `fail`, so `shieldcortex doctor` exited 1 on hosts with nothing wrong,
+   * over a third party's config. The row must still be annotated: it does not
+   * vote on severity, but it is still advice that cannot be followed.
+   */
+  it('an optional info row does not make doctor fail, but is still annotated', () => {
+    const results: CheckResult[] = [
+      { label: OPENCLAW_CONFIG_LABEL, status: 'fail', message: 'invalid', openClawCliBlocked: true },
+      {
+        label: 'OpenClaw skill version',
+        status: 'info',
+        message: 'skill not installed (optional) — `shieldcortex openclaw skill install` adds it',
+        needsOpenClawCli: { subcommand: 'skills' },
+      },
+    ];
+
+    const gated = applyOpenClawCliGate(results);
+
+    expect(gated[0].status).toBe('warn');
+    expect(gated[1].message).toContain('remedy blocked');
+  });
+
+  it('a real fault alongside an info row still fails', () => {
+    const results: CheckResult[] = [
+      { label: OPENCLAW_CONFIG_LABEL, status: 'fail', message: 'invalid', openClawCliBlocked: true },
+      { label: 'OpenClaw skill version', status: 'info', message: 'optional', needsOpenClawCli: { subcommand: 'skills' } },
+      { label: 'OpenClaw plugin loaded', status: 'fail', message: 'UNPROTECTED', fix: 'f', needsOpenClawCli: { subcommand: 'plugins' } },
+    ];
+
+    const gated = applyOpenClawCliGate(results);
+
+    expect(gated[0].status).toBe('fail');
+    expect(gated[2].fix).toBeUndefined();
+  });
+
   it('downgrades to warn when no remedy of ours is actually blocked', () => {
     const results: CheckResult[] = [
       { label: OPENCLAW_CONFIG_LABEL, status: 'fail', message: 'invalid', openClawCliBlocked: true },

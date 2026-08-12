@@ -122,6 +122,32 @@ describe('#221 — a non-zero exit is not proof of an invalid config', () => {
     expect(v.state).toBe('indeterminate');
   });
 
+  /**
+   * A REFUSAL VETOES A BULLET. Unrelated plugin stderr routinely carries `✗ …`
+   * lines, and one landing beside "Unknown command" would otherwise convict a
+   * healthy config on an OpenClaw that simply lacks `config validate` —
+   * reopening the inverted case with an extra step.
+   */
+  it('a refusal plus an unrelated ✗ line is still indeterminate', () => {
+    const v = validateOpenClawConfig(HOME, deps({
+      run: () => outcome({
+        status: 1,
+        stderr: '✗ ekho-adapter: telemetry endpoint unreachable\n[openclaw] Reason: Unknown command: openclaw config validate.',
+      }),
+    }));
+    expect(v.state).toBe('indeterminate');
+  });
+
+  it('a usage dump plus an unrelated × line is still indeterminate', () => {
+    const v = validateOpenClawConfig(HOME, deps({
+      run: () => outcome({
+        status: 1,
+        stderr: 'Too many arguments for this command.\n  × unrelated plugin load failed',
+      }),
+    }));
+    expect(v.state).toBe('indeterminate');
+  });
+
   it('but a JSON invalid body IS invalid', () => {
     const v = validateOpenClawConfig(HOME, deps({
       run: () => outcome({ status: 1, stdout: '{"valid":false,"path":"/x","issues":[{"path":"a","message":"b"}]}' }),

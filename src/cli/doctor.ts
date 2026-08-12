@@ -102,7 +102,7 @@ export interface CheckResult {
    * No substring can tell those two apart, so a text-matching gate would
    * delete the one piece of advice that still helps.
    */
-  needsOpenClawCli?: { subcommand: 'plugins' | 'skills'; fallbackFix?: string };
+  needsOpenClawCli?: { subcommand: 'plugins' | 'skills' | 'config'; fallbackFix?: string };
   /**
    * Set by `checkOpenClawConfigValid` when the config is PROVEN invalid, so
    * `applyOpenClawCliGate` keys on the fact rather than on the severity.
@@ -140,17 +140,35 @@ export function applyOpenClawCliGate(results: CheckResult[]): CheckResult[] {
   // Keyed on the explicit marker, never on severity — see `openClawCliBlocked`.
   if (!results.some(r => r.openClawCliBlocked)) return results;
 
-  // Nothing of ours is actually blocked: report it, do not fail the run.
-  if (!results.some(r => r.needsOpenClawCli)) {
-    return results.map(r =>
-      r.openClawCliBlocked
-        ? { ...r, status: 'warn' as const, message: `${r.message}\n      (no ShieldCortex remedy on this host depends on it)` }
-        : r);
-  }
+  // Nothing of ours is actually BROKEN by it: report, do not fail the run.
+  //
+  // "Has a tag" is not the same as "is a problem". The optional-skill notice is
+  // an `info` row that is tagged and is present by DEFAULT on every host not
+  // using the OpenClaw skill — so counting tags alone kept the config row at
+  // `fail`, and `doctor` exited 1, on hosts with nothing wrong. Only a row that
+  // is itself a fault (fail/warn) justifies failing the run; info rows are
+  // still annotated below, they just do not vote.
+  const blockedFault = results.some(
+    r => r.needsOpenClawCli && (r.status === 'fail' || r.status === 'warn'),
+  );
 
   const note = ' [remedy blocked — fix the OpenClaw config first, see "OpenClaw config" above]';
   return results.map((r) => {
+    // The config row is the only one whose severity may move, and only down.
+    if (r.openClawCliBlocked) {
+      return blockedFault
+        ? r
+        : {
+            ...r,
+            status: 'warn' as const,
+            message: `${r.message}\n      (no ShieldCortex remedy on this host depends on it)`,
+          };
+    }
+
     if (!r.needsOpenClawCli) return r;
+    // Annotation runs regardless of `blockedFault` — an info row does not vote
+    // on severity, but it is still unfollowable advice and must say so.
+    //
     // One site carries its remediation in `message` rather than `fix` (the
     // optional-skill notice). A gate that only rewrote `fix` would sail past
     // it and leave it as the single piece of unfollowable advice on the page —
@@ -938,6 +956,14 @@ export async function checkOpenClawApprovalButtons(
     status: 'info',
     message: `Telegram approval prompts fall back to "/approve" text (inlineButtons: ${scope ?? 'unset → allowlist'})`,
     fix: "Make approvals tappable: set channels.telegram.capabilities.inlineButtons to 'all' (or 'dm'/'group' for a tighter surface) via `openclaw config patch`, then restart the gateway.",
+    // MEASURED, not assumed: `openclaw config patch` is refused under an
+    // invalid config too (exit 1, "OpenClaw config is invalid"). It was
+    // initially left untagged on the theory that a *config* subcommand would be
+    // the operator's escape hatch — it is not. Hand-editing the file is.
+    needsOpenClawCli: {
+      subcommand: 'config',
+      fallbackFix: "Make approvals tappable: set channels.telegram.capabilities.inlineButtons to 'all' (or 'dm'/'group') by editing ~/.openclaw/openclaw.json directly — `openclaw config patch` is refused while the config is invalid — then restart the gateway.",
+    },
   }];
 }
 
