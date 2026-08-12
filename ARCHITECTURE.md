@@ -163,6 +163,76 @@ Entities and relationships automatically extracted from memories:
 - Subject-predicate-object triples
 - Graph traversal and path finding
 
+This is a **recall aid** (one of three signals fused by the RRF ranker), not a
+security surface. It is built from attacker-influenceable memory content, so it
+carries no trust weight. Not to be confused with the Threat Graph below.
+
+## Threat Graph (`src/threat-graph/`)
+
+A **security event graph** — the subsystem that makes ShieldCortex *learn*.
+Where the Knowledge Graph indexes memory content, the Threat Graph is a
+deterministic projection of the **defence audit ledgers** (`defence_audit` +
+the OpenClaw gateway's realtime JSONL) into `threat_nodes` / `threat_edges`.
+Full design: [`docs/design/2026-08-11-threat-graph.md`](docs/design/2026-08-11-threat-graph.md).
+
+**Core principle:** the ledgers are truth; the graph is a derived view,
+rebuildable byte-for-byte (up to surrogate ids) from the ledger at any time
+via `shieldcortex threat-graph rebuild`. Nothing in the graph is authoritative
+on its own, so there is no separate "graph tampering" surface to defend — graph
+integrity reduces to audit integrity plus projector determinism.
+
+**The projector** (`projector.ts`) runs on the brain-worker light tick (both
+profiles) under a single-writer lease, in atomic claim-and-advance batches. It
+two-tiers volume: aggregate counters/edges for the bulk of scans, event nodes
+only for *notable* rows (BLOCK / QUARANTINE / high-anomaly). A
+`PROJECTOR_VERSION` bump forces a from-zero rebuild on upgrade.
+
+Three learning loops sit on top, in dependency order:
+
+1. **Per-source risk** (`risk.ts`, Loop 1) — a decayed severity sum per source
+   (BLOCK 1.0 / QUARANTINE 0.5 / high-anomaly ALLOW 0.1; `pipeline_error`
+   rows weight 0 so a wedged install can't inflate itself). The raw exponent
+   sum lives in node `attrs` (ledger-derived, deterministic); the decayed
+   output lives in `source_risk` (wall-clock, recomputed by an idle sweep so
+   risk heals on schedule). **Accrual is gated on attestation** — an attacker
+   writing under a victim's name (which resolves *unattested*) can never enter
+   the risk sum the enforcement path consumes. Accrual is rate-capped so no
+   identity saturates risk in a burst.
+2. **Advisory trust modifier** (`risk.ts` + `defence/pipeline.ts`, Loop 2) —
+   the one hot-path touch: an O(1), guarded, fail-to-zero read of `source_risk`
+   after trust scoring. Subtracts `min(risk × 0.3, 0.3)` from trust
+   (additive-tightening — never raises trust). **Default mode is `advisory`**:
+   computed and recorded on the audit row, *not applied*. `enforce` applies it,
+   and only for attested identities. Operators can dispute a poisoned score
+   with `shieldcortex threat-graph reset-source`.
+3. **Operator allowances** (`decision.ts` + `allowance.ts`, Loop 3) — the
+   system learns from *your review decisions*. Each individual quarantine
+   approve/reject lands a structured decision row; the projector derives
+   `source —allows→ pattern` allowances from 3 qualifying approvals (distinct
+   days, distinct content, individually reviewed — bulk never counts).
+   Optional **auto-release** (`threatGraph.autoRelease`, default **off**)
+   admits a would-be-quarantined item only when *every* detection is an active
+   allowance and the title+content exactly matches an approved exemplar; it
+   never releases a BLOCK, is per-source per-day capped, and **fails closed**.
+
+**Invariants** (why this can *learn* without becoming *trainable*): the ledger
+is truth; every automatic effect is additive-tightening; operators are the only
+loosening force and they loosen narrowly and expiringly; the hot path reads
+only O(1) precomputed values and can never be harmed by a graph fault; node
+identity is class-typed (only system vocabulary is trusted); everything is
+bounded (caps, decay half-life, retention).
+
+**Honest state:** every learning effect ships **advisory or off** by default.
+The false-positive rate is unmeasured (#182), and the design requires an
+advisory soak before any deployment moves the trust modifier to `enforce`.
+Run on a fleet's own audit history, the top "risks" are the fleet's own trusted
+infrastructure processing security content — which is exactly why advisory is
+the default. Local-only: no threat-graph data is synced to the cloud.
+
+Surfaces: `threat_graph` MCP tool (`sources` / `source` / `events` /
+`allowances` views, row+byte capped) · `shieldcortex threat-graph
+rebuild|status|reset-source` · a `doctor` freshness check.
+
 ## Database Schema
 
 SQLite with FTS5 full-text search. Location: `~/.shieldcortex/memories.db`
