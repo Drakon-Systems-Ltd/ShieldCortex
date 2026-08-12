@@ -6,7 +6,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-**The Threat Graph — the subsystem that makes ShieldCortex *learn*. Landed advisory/off; not yet in a release.**
+## [4.48.0] - 2026-08-12
+
+**Two secret-handling defects closed, the CI blind spot that hid a third, and the Threat Graph ships — advisory and off by default.**
+
+### Fixed — secret handling
+
+- **Redaction covered only the FIRST occurrence of a repeated secret.** `redactCredentials` returned *successfully* with the secret still in its output: three occurrences produced one finding and left two raw copies; a value echoed twice inside a JSON body left one. `extractHighEntropyTokens` de-duplicated candidates on the token string, so occurrences 2..N never produced a redaction range, and `buildRedactedContent` cannot redact a range it was never given. Specific to the entropy net — the layer that exists for secrets whose shape we do not recognise, so nothing else was covering these; the pattern layer was clean throughout. It is also the shared primitive behind tool-response redaction, so a repeated secret could reach any consumer of "redacted" content verbatim. A redaction primitive that reports success while leaking gives the caller no signal at all. Extraction now returns every occurrence and the caller adds a range for each, while still reporting one finding per distinct secret — reporting volume is deliberately unchanged, because `medium > 0` drops the audit grade to C and exits 1. (#256)
+
+### Fixed — checks that declined a verdict they could give
+
+- **`doctor` reported "OpenClaw version UNKNOWN" on any global install.** The capability probe searched one layout — the managed node-runtime under `~/.openclaw/tools/` — so a plain `npm i -g openclaw` (`~/.npm-global`, `/usr/local`, nvm, volta) made `readdirSync` throw and the probe return `null`, forever, while the version sat readable beside the binary. It now follows the binary through `realpathSync` and walks up a bounded four levels, so every prefix layout falls out without hardcoding any of them; highest version wins, and a genuinely absent install still returns `null` rather than a guess. (#254, #255)
+
+### Added — CI
+
+- **The suite now runs on macOS.** Every job ran on Linux, which made a whole class of defect invisible by construction: anything assuming `/proc` semantics. The case that bought it — found in review, not in production — was a change replacing `appendFileSync` with a no-follow write whose symlink check called `readlinkSync('/dev/fd/N')`: correct on Linux, `EINVAL` on macOS, failing to a bare `return`. The result was an audit file created with **zero bytes**, exit 0, nothing on stderr — a silently empty Action Guard trail on every Mac, on the fail-closed hot path. Paired with `hook-audit-write-smoke.test.ts`, which spawns the real hook as a real process and asserts a row actually landed: it tests the outcome on whatever platform it runs on, not the mechanism. (#250)
+
+### Added — the Threat Graph (advisory / off by default)
+
+**The subsystem that makes ShieldCortex *learn*. Every learning effect is advisory or off by default; installing this release changes no scan behaviour.**
+
+Phases 0 and A–D. Phase E (relation-channel conflict detection) is deliberately **not** in this release — it is in review with open findings.
+
+**The false-positive rate remains unmeasured (#182), and the design calls for an advisory soak before any deployment moves the trust modifier to `enforce`. Treat the defaults as the supported configuration.**
+
+**The Threat Graph — the subsystem that makes ShieldCortex *learn*. Landed advisory/off.**
 
 A deterministic projection of the defence audit ledgers into a per-source security event graph (`threat_nodes` / `threat_edges`), with three learning loops on top. Every learning effect ships **advisory or off by default** — merging to `main` changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md`; overview in `ARCHITECTURE.md`.
 
@@ -24,7 +48,7 @@ A deterministic projection of the defence audit ledgers into a per-source securi
 
 ### Notes
 
-- **Not released deliberately.** The false-positive rate is unmeasured (#182) and the design requires an advisory soak before any deployment moves the trust modifier to `enforce`. Local-only: no threat-graph data is synced to the cloud. Existing installs cold-start (enforcement risk builds forward from attested writes; historical counters are preserved).
+- **Shipped dormant, on purpose.** The false-positive rate is unmeasured (#182) and the design requires an advisory soak before any deployment moves the trust modifier to `enforce` — so it ships with every learning effect advisory or off, and the defaults are the supported configuration. Local-only: no threat-graph data is synced to the cloud. Existing installs cold-start (enforcement risk builds forward from attested writes; historical counters are preserved).
 ## [4.47.40] - 2026-08-12
 
 **Docs-only release: the published README described a pipeline that does not exist.**
