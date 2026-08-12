@@ -944,6 +944,10 @@ ${bold}DOCS${reset}
       console.log(`  last run: ${state?.last_run_at ?? 'never'}`);
       if (state?.last_error) console.log(`  last error: ${state.last_error}`);
       for (const row of counts) console.log(`  ${row.kind}: ${row.c}`);
+      const { listAllowances } = await import('./threat-graph/allowance.js');
+      const allowances = listAllowances(Date.now());
+      const active = allowances.filter(a => a.active).length;
+      console.log(`  allowances: ${allowances.length} (${active} active)`);
     } else if (action === 'reset-source') {
       const key = process.argv[4];
       if (!key) {

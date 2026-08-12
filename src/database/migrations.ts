@@ -851,8 +851,15 @@ export function runMigrations(database: Database.Database): void {
         'CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp)'
       );
     }
+    // Threat-graph Phase C (Loop 3): allowance bookkeeping on the `allows`
+    // edge (approvals, exemplar hashes, strikes). Guarded — the threat_edges
+    // table may not exist yet on an install that hasn't opened the graph.
+    const edgeCols = database.prepare("PRAGMA table_info(threat_edges)").all() as { name: string }[];
+    if (edgeCols.length > 0 && !edgeCols.some((c) => c.name === 'attrs')) {
+      database.exec("ALTER TABLE threat_edges ADD COLUMN attrs TEXT NOT NULL DEFAULT '{}'");
+    }
   } catch (err) {
-    logIfUnexpectedDdlError(err, 'defence_audit provenance columns (operation, content_hash, source_attested, risk_modifier)');
+    logIfUnexpectedDdlError(err, 'defence_audit provenance columns + threat_edges.attrs');
   }
 
   if (!columnNames.has('content_hash')) {

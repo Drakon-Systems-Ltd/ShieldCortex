@@ -129,6 +129,7 @@ describe('API route mutation regressions', () => {
         getDefenceMode: () => 'balanced',
         getStrictSourceMode: () => false,
         getTrustModifierMode: () => 'advisory',
+        isAutoReleaseEnabled: () => false,
         getVerifyConfig: () => ({
           verifyEnabled: false,
           verifyMode: 'advisory',

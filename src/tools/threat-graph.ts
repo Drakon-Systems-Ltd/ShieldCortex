@@ -7,9 +7,10 @@
  */
 
 import { getDatabase } from '../database/init.js';
+import { listAllowances } from '../threat-graph/allowance.js';
 
 export interface ThreatGraphQueryArgs {
-  view: 'sources' | 'source' | 'events' | 'campaigns';
+  view: 'sources' | 'source' | 'events' | 'campaigns' | 'allowances';
   /** Node key for view 'source' (e.g. 'agent:jarvis'). */
   key?: string;
   /** Filter events by originating project. */
@@ -128,6 +129,15 @@ export function handleThreatGraphQuery(
         ORDER BY last_seen DESC, key ASC LIMIT @limit
       `).all({ project: args.project ?? null, since, limit }) as any[];
       return boundedPayload({ view: 'events', limit }, 'events', rows.map(nodeView), byteCap);
+    }
+
+    case 'allowances': {
+      // Operator allowances (Loop 3): (source, pattern) pairs an operator has
+      // approved enough to auto-release near-dup repeats. `now` is not
+      // available deterministically here, so the active flag is evaluated at
+      // read time — acceptable for a display surface.
+      const rows = listAllowances(Date.now(), limit);
+      return boundedPayload({ view: 'allowances', limit }, 'allowances', rows, byteCap);
     }
 
     case 'campaigns': {

@@ -7,6 +7,10 @@
 
 import { randomUUID } from 'crypto';
 import { getDatabase, isDatabaseInitialized, withTransaction } from '../database/init.js';
+import { sourceKey } from '../threat-graph/keys.js';
+import { shouldAutoRelease, recordAutoRelease } from '../threat-graph/allowance.js';
+import { detectionKeys, exemplarHash } from '../threat-graph/decision.js';
+import { isAutoReleaseEnabled } from '../cloud/config.js';
 import {
   Memory,
   MemoryInput,
@@ -498,6 +502,35 @@ export function addMemory(
   });
 
   if (disposition.action === 'quarantine') {
+    // Auto-release (threat-graph Loop 3): if this detector firing is a
+    // standing operator allowance for this source AND the content
+    // near-duplicates an approved exemplar, admit instead of hold. Default
+    // off; fails CLOSED — any error keeps the item quarantined.
+    let autoReleased = false;
+    // Never even attempt release on a hard BLOCK (invariant 2). resolveDisposition
+    // maps BOTH BLOCK and QUARANTINE to action='quarantine', so the verdict must
+    // be checked explicitly here — not the disposition action.
+    if (isAutoReleaseEnabled() && disposition.firewallResult === 'QUARANTINE') {
+      try {
+        const key = sourceKey(effectiveSource.type, effectiveSource.identifier);
+        const hash = exemplarHash(input.title, input.content);
+        // The COMPLETE detection set — patterns AND indicators — must all be
+        // allowed, or an item with an unlisted detection would slip through.
+        const patterns = detectionKeys(
+          defenceResult.firewall.blockedPatterns ?? [],
+          defenceResult.firewall.threatIndicators ?? [],
+        );
+        const now = Date.now();
+        if (shouldAutoRelease({ sourceKey: key, patterns, contentHash: hash, verdict: 'QUARANTINE', nowMs: now }).release) {
+          recordAutoRelease({ sourceKey: key, patterns, contentHash: hash, nowMs: now });
+          autoReleased = true;
+        }
+      } catch {
+        autoReleased = false;
+      }
+    }
+
+    if (!autoReleased) {
     // Reflect the resolved verdict/reason back so quarantineMemory + audit record it.
     defenceResult.allowed = false;
     defenceResult.firewall.result = disposition.firewallResult;
@@ -528,6 +561,15 @@ export function addMemory(
 
     quarantineMemory(input, effectiveSource, defenceResult);
     throw new MemoryBlockedError(defenceResult.firewall.reason);
+    }
+    // auto-released → fall through to normal storage. Stamp the verdict ALLOW
+    // (and a distinguishing reason) so the stored memory's defence_verdict is
+    // not left reading 'quarantine'/'block' — the normal store path reads
+    // defenceResult for the stamped verdict. The auto_release audit row above
+    // is the reviewable record of why.
+    defenceResult.allowed = true;
+    defenceResult.firewall.result = 'ALLOW';
+    defenceResult.firewall.reason = `auto-released against a standing operator allowance (was: ${defenceResult.firewall.reason})`;
   }
 
   const db = getDatabase();

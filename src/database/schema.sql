@@ -264,6 +264,7 @@ CREATE TABLE IF NOT EXISTS threat_edges (
   writer TEXT NOT NULL CHECK(writer IN ('projector','operator','backfill')),
   confidence REAL NOT NULL DEFAULT 1.0,
   evidence TEXT NOT NULL DEFAULT '[]',
+  attrs TEXT NOT NULL DEFAULT '{}',   -- allowance bookkeeping (Loop 3): approvals, exemplar hashes, strikes
   UNIQUE(src, predicate, dst)
 );
 CREATE INDEX IF NOT EXISTS idx_threat_edges_src ON threat_edges(src);

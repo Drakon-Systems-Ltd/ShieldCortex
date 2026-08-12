@@ -473,6 +473,19 @@ export function getTrustModifierMode(raw?: Record<string, unknown>): 'off' | 'ad
 }
 
 /**
+ * Auto-release gate (docs/design/2026-08-11-threat-graph.md, Loop 3).
+ * `threatGraph.autoRelease`: default OFF. When on, a would-be-quarantined item
+ * whose every detection is an active allowance for its source and whose
+ * content near-duplicates an approved exemplar is admitted instead of held.
+ */
+export function isAutoReleaseEnabled(raw?: Record<string, unknown>): boolean {
+  const source = raw ?? readRawConfig();
+  const block = source.threatGraph;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+  return (block as Record<string, unknown>).autoRelease === true;
+}
+
+/**
  * Threat-graph feature gate (docs/design/2026-08-11-threat-graph.md).
  * Enabled unless config sets `threatGraph.enabled: false` explicitly.
  * Pass `raw` for tests; production callers omit it and read the live config.

@@ -501,12 +501,20 @@ Allowance consumption:
   content is dissimilar from the approved exemplars, so the annotation
   informs rather than nudges the next approval.
 - **Auto-release** (`threatGraph.autoRelease`, default **false**): releases a
-  QUARANTINE-severity item only when (a) its *only* detection is the allowed
-  pair, **and (b) its content is a near-duplicate of an approved exemplar**
-  (normalised-hash match against the approvals that earned the allowance).
-  Novel payloads tripping the same detector still quarantine. BLOCK verdicts
-  are never auto-released. Auto-releases are capped per source per day, and
-  every one lands its own audit row for after-the-fact review.
+  QUARANTINE-severity item only when (a) **every** detection in its complete
+  set (`blocked_patterns` ∪ `threat_indicators`) is an active allowance for
+  the source, **and (b) its title+content exactly matches an approved
+  exemplar** (SHA-256 of title+content — the implementation is exact, not
+  fuzzy; any byte change misses and the item stays quarantined). Novel
+  payloads tripping the same detector still quarantine. **BLOCK verdicts are
+  never auto-released** — the check keys on the resolved verdict, never on the
+  shared `quarantine` disposition action. Auto-releases are capped per source
+  per day (one row per released item), and every one lands its own
+  `auto_release` audit row for after-the-fact review. Implementation notes:
+  the exemplar hash binds the title (hashing content alone would admit an
+  unreviewed attacker-controlled title on approved content); the detection set
+  is the union, not `blocked_patterns` alone (credential/privilege/restricted
+  detections surface only as indicators).
 
 Revocation with memory: rejecting an item from an allowed pair sets
 `valid_to = now` immediately (one strike) — and the strike is *remembered*:
@@ -675,7 +683,7 @@ following the `actionGuard` block pattern):
 | `enabled` | `true` | A | projector runs; graph populates |
 | `trustModifier` | `'advisory'` | B | `off` / `advisory` / `enforce` (enforce requires attested identity per Loop 2). Top-level `strictSourceMode: true` also attests every resolution. |
 | `halfLifeDays` | `14` | B | risk decay half-life (constant for now; wired as `halfLifeMs` override) |
-| `autoRelease` | `false` | C | allowance auto-release (near-dup only) |
+| `autoRelease` | `false` | C | allowance auto-release: admit a would-be-quarantined item whose every detection is an active (source,pattern) allowance and whose content near-duplicates an approved exemplar. Per-source per-day capped; fails closed; each release lands a reviewable `auto_release` audit row. |
 | `campaignAlerts` | `'digest'` | D | `off` / `digest` / `each` (each still budget-capped) |
 
 Batch size, caps, rate limits are constants, not config — fewer knobs on a

@@ -205,6 +205,7 @@ export function getInlineSchema(): string {
       writer TEXT NOT NULL CHECK(writer IN ('projector','operator','backfill')),
       confidence REAL NOT NULL DEFAULT 1.0,
       evidence TEXT NOT NULL DEFAULT '[]',
+      attrs TEXT NOT NULL DEFAULT '{}',
       UNIQUE(src, predicate, dst)
     );
 

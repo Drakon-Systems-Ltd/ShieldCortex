@@ -49,6 +49,13 @@ import {
   type RiskState,
 } from './risk.js';
 import {
+  applyApproval,
+  applyRejection,
+  freshAllowance,
+  type AllowanceState,
+} from './allowance.js';
+import { parseQuarantineDecision } from './decision.js';
+import {
   assertNotInTransaction,
   cachedStmt,
   evictEdgeOverflow,
@@ -61,8 +68,9 @@ import {
 
 /** Bump when projection rules change to force a rebuild on the next run.
  *  v2 (Phase B): risk exponent-sum fold, attestation-gated accrual,
- *  src_type/src_id attrs, and risk_reset review-row consumption. */
-export const PROJECTOR_VERSION = 2;
+ *  src_type/src_id attrs, and risk_reset review-row consumption.
+ *  v3 (Phase C): quarantine_decision consumption → operator allowance edges. */
+export const PROJECTOR_VERSION = 3;
 
 export interface ProjectorOptions {
   /** Rows per claim-and-advance batch. */
@@ -166,6 +174,71 @@ function resolveSourceNode(
     return upsertNode('source', 'overflow', ts);
   }
   return upsertNode('source', key, ts);
+}
+
+/**
+ * Fold one operator quarantine decision into the (source, pattern) allowance
+ * edges (Loop 3). The `allows` edge is writer='operator', its attrs the pure
+ * AllowanceState — a deterministic function of the ledger's decision rows, so
+ * a rebuild reproduces every allowance. valid_to tracks the active window (or
+ * the revocation instant) for at-a-glance queries.
+ */
+function applyQuarantineDecision(
+  decision: import('./decision.js').QuarantineDecision,
+  tsIso: string,
+  opts: Required<ProjectorOptions>,
+): void {
+  const db = getDatabase();
+  const day = tsIso.slice(0, 10);
+
+  // Look up nodes WITHOUT creating them — a no-op decision (a bulk approve, or
+  // a reject of a never-approved pair) must not mint phantom source/pattern
+  // nodes or a phantom edge.
+  const srcRow = db.prepare("SELECT id FROM threat_nodes WHERE kind = 'source' AND key = ?")
+    .get(decision.source_key) as { id: number } | undefined;
+
+  for (const rawPattern of decision.patterns) {
+    const patternKey = rawPattern.slice(0, opts.sourceKeyMaxLength);
+    const patRow = db.prepare("SELECT id FROM threat_nodes WHERE kind = 'pattern' AND key = ?")
+      .get(patternKey) as { id: number } | undefined;
+    const edge = (srcRow && patRow)
+      ? db.prepare("SELECT id, attrs FROM threat_edges WHERE src = ? AND predicate = 'allows' AND dst = ?")
+          .get(srcRow.id, patRow.id) as { id: number; attrs: string } | undefined
+      : undefined;
+
+    let state: AllowanceState;
+    try {
+      state = edge ? (JSON.parse(edge.attrs) as AllowanceState) : freshAllowance();
+    } catch {
+      state = freshAllowance();
+    }
+
+    state = decision.decision === 'approve'
+      ? applyApproval(state, { ts: tsIso, day, hash: decision.content_hash, bulk: decision.bulk })
+      : applyRejection(state, { ts: tsIso });
+
+    // No-op → nothing to persist; create no nodes/edge.
+    if (!edge &&
+        state.approvals.length === 0 && !state.active && state.strikes === 0 && !state.disabled) {
+      continue;
+    }
+
+    // Persisting: now materialise the nodes.
+    const sourceId = srcRow?.id ?? upsertNode('source', decision.source_key, tsIso);
+    const patternId = patRow?.id ?? upsertNode('pattern', patternKey, tsIso);
+    const validTo = state.active && state.expires ? state.expires : tsIso;
+    const attrsJson = JSON.stringify(state);
+
+    if (edge) {
+      db.prepare('UPDATE threat_edges SET attrs = ?, valid_to = ?, last_seen = ?, count = count + 1 WHERE id = ?')
+        .run(attrsJson, validTo, tsIso, edge.id);
+    } else {
+      db.prepare(`
+        INSERT INTO threat_edges (src, predicate, dst, count, first_seen, last_seen, valid_to, writer, evidence, attrs)
+        VALUES (?, 'allows', ?, 1, ?, ?, ?, 'operator', '[]', ?)
+      `).run(sourceId, patternId, tsIso, tsIso, validTo, attrsJson);
+    }
+  }
 }
 
 function projectRow(row: AuditRow, opts: Required<ProjectorOptions>, errors: string[]): { eventMinted: boolean } {
@@ -290,6 +363,14 @@ export function projectAuditLedger(options?: ProjectorOptions): ProjectResult {
             applyRiskReset(reset.source_key, toIso(row.timestamp));
           } catch (e) {
             result.errors.push(`audit:${row.id} risk_reset: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        const decision = parseQuarantineDecision(row.reason);
+        if (decision) {
+          try {
+            applyQuarantineDecision(decision, toIso(row.timestamp), opts);
+          } catch (e) {
+            result.errors.push(`audit:${row.id} decision: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
         result.cursor = row.id;
@@ -573,7 +654,7 @@ export function canonicalDump(): string {
   const edges = db.prepare(`
     SELECT s.kind AS src_kind, s.key AS src_key, e.predicate,
            d.kind AS dst_kind, d.key AS dst_key,
-           e.count, e.first_seen, e.last_seen, e.valid_to, e.writer, e.confidence, e.evidence
+           e.count, e.first_seen, e.last_seen, e.valid_to, e.writer, e.confidence, e.evidence, e.attrs
     FROM threat_edges e
     JOIN threat_nodes s ON s.id = e.src
     JOIN threat_nodes d ON d.id = e.dst
