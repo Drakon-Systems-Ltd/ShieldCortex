@@ -38,6 +38,9 @@ import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 import { sendHeartbeat } from '../cloud/sync.js';
 import { refreshCloudIronDome, applyCachedCloudPatterns } from '../cloud/iron-dome-sync.js';
 import { purgeOldAuditEntries, purgeAuditUnderSizePressure } from '../defence/audit/retention.js';
+import { runProjectorWithLease } from '../threat-graph/projector.js';
+import { defaultRealtimeAuditDir } from '../threat-graph/shared.js';
+import { isThreatGraphEnabled } from '../cloud/config.js';
 import {
   purgeOldSessionEvents,
   purgeSessionEventsUnderSizePressure,
@@ -346,6 +349,28 @@ export class BrainWorker {
         }
       } catch (sessionErr) {
         console.error('[BrainWorker] Session-capture retention failed:', sessionErr);
+      }
+
+      // 3c. Threat-graph projector — runs on BOTH profiles (mcp-only installs
+      // are exactly the deployments that only scan; hosting this on the
+      // full-only medium tick would leave their graph permanently empty — the
+      // audit-retention precedent above). Cross-process exactly-once comes
+      // from the single-writer lease inside runProjectorWithLease, so N
+      // concurrent workers are safe; a held lease no-ops cheaply.
+      if (isThreatGraphEnabled()) {
+        try {
+          const projection = await runProjectorWithLease({
+            realtimeDir: this.config.threatGraphRealtimeDir ?? defaultRealtimeAuditDir(),
+          });
+          if (projection.ran && ((projection.audit?.processed ?? 0) > 0 || (projection.realtime?.processed ?? 0) > 0)) {
+            console.error(
+              `[BrainWorker] Threat graph projected ${projection.audit?.processed ?? 0} audit rows, ` +
+              `${projection.realtime?.processed ?? 0} realtime lines`
+            );
+          }
+        } catch (threatErr) {
+          console.error('[BrainWorker] Threat-graph projection failed:', threatErr);
+        }
       }
 
       // 4. Sync retry queue — drains on BOTH profiles. MCP-only installs have

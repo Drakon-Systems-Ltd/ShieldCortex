@@ -37,7 +37,7 @@ shieldcortex quickstart
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing](#-licensing) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Environment Firewall](#-environment-firewall) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing](#-licensing) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Threat Graph](#%EF%B8%8F-threat-graph) · [Environment Firewall](#-environment-firewall) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -433,6 +433,23 @@ Iron Dome profiles, but dashboard write actions still go through the same
 announcement and confirmation tiers as CLI or MCP actions. High-risk REST
 mutations like config changes, SQL writes, quarantine review, and memory
 deletes are no longer advisory-only.
+
+<br>
+
+## 🕸️ Threat Graph
+
+Turns the defence audit trail into memory. Every scan ShieldCortex runs is already recorded; the Threat Graph projects that history into a per-source security event graph so the system can *learn* which sources are risky, remember your review decisions, and correlate activity — without ever trusting attacker-controlled content.
+
+```bash
+shieldcortex threat-graph rebuild     # backfill from your retained audit history
+shieldcortex threat-graph status      # sources, patterns, events, allowances
+```
+
+- 📉 **Per-source threat history** — a decayed risk score per source, built only from what the scanners already caught. Spoof-safe: risk from an identity written under a trusted agent's name can never count against the real agent.
+- 🎚️ **Advisory trust modifier** — high-risk sources can lose trust on future scans. **Advisory by default** (computed and shown, not applied); enforcement is opt-in and only for verified identities.
+- ✅ **Operator allowances** — repeatedly, individually approving the same detector's firings from a source teaches ShieldCortex to stop re-holding near-identical repeats. Narrow, expiring, revocable — and auto-release is **off by default** and never releases a hard block.
+
+Deterministic and local-only: the graph is a rebuildable view of your own audit ledger, never synced to the cloud. Learning only ever *tightens* automatically — the only thing that loosens is your explicit, remembered review decisions.
 
 <br>
 

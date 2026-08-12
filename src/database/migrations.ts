@@ -833,9 +833,38 @@ export function runMigrations(database: Database.Database): void {
       if (!auditColNames.has('content_hash')) {
         database.exec('ALTER TABLE defence_audit ADD COLUMN content_hash TEXT');
       }
+      // Threat-graph Phase B (docs/design/2026-08-11-threat-graph.md):
+      // source_attested = the resolution was system-derived or strict-mode
+      // (NULL on legacy rows and unplumbed paths); risk_modifier = the
+      // advisory trust modifier computed for this scan (NULL until the
+      // modifier ships/fires). Local-only until declared as egress.
+      if (!auditColNames.has('source_attested')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN source_attested INTEGER');
+      }
+      if (!auditColNames.has('risk_modifier')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN risk_modifier REAL');
+      }
+      // Serves the threat-graph risk sweep's 28-day windowed counters
+      // (per-source range scan); without it the sweep degrades to repeated
+      // partial scans across up to 5,000 sources.
+      database.exec(
+        'CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp)'
+      );
+    }
+    // Threat-graph Phase C (Loop 3): allowance bookkeeping on the `allows`
+    // edge (approvals, exemplar hashes, strikes). Guarded — the threat_edges
+    // table may not exist yet on an install that hasn't opened the graph.
+    const edgeCols = database.prepare("PRAGMA table_info(threat_edges)").all() as { name: string }[];
+    if (edgeCols.length > 0 && !edgeCols.some((c) => c.name === 'attrs')) {
+      database.exec("ALTER TABLE threat_edges ADD COLUMN attrs TEXT NOT NULL DEFAULT '{}'");
+    }
+    // Threat-graph Phase D (Loop 4): campaign-detection throttle timestamp.
+    const stateCols = database.prepare("PRAGMA table_info(threat_graph_state)").all() as { name: string }[];
+    if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_campaign_at')) {
+      database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_campaign_at TEXT");
     }
   } catch (err) {
-    logIfUnexpectedDdlError(err, 'defence_audit provenance columns (operation, content_hash)');
+    logIfUnexpectedDdlError(err, 'defence_audit provenance columns + threat_edges.attrs');
   }
 
   if (!columnNames.has('content_hash')) {

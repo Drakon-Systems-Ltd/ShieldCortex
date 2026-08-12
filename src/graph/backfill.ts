@@ -3,7 +3,7 @@ import { extractFromMemory } from './extract.js';
 import { replaceMemoryGraph } from './resolve.js';
 
 /** Bump this when extract.ts logic changes to force re-extraction */
-const EXTRACTION_VERSION = 3;
+const EXTRACTION_VERSION = 4;
 
 export interface BackfillResult {
   entities: number;
@@ -15,6 +15,19 @@ export interface BackfillResult {
 export function backfillGraph(options?: { force?: boolean }): BackfillResult {
   const db = getDatabase();
   const force = options?.force ?? false;
+
+  // Heal for v1.13.0–v2.9.x databases: the pre-STOPWORDS extractor persisted
+  // 'project' → prefers/avoids/implements triples. Later extractors could
+  // neither recreate nor reach them (the per-memory replace never touches
+  // triples whose source memory is gone), so they linger indefinitely without
+  // this. These predicates were only ever emitted with the 'project' subject.
+  // Idempotent: no-ops on healthy databases.
+  db.prepare("DELETE FROM triples WHERE predicate IN ('prefers', 'avoids', 'implements')").run();
+  db.prepare(`
+    DELETE FROM entities WHERE name = 'project'
+      AND NOT EXISTS (SELECT 1 FROM memory_entities me WHERE me.entity_id = entities.id)
+      AND NOT EXISTS (SELECT 1 FROM triples t WHERE t.subject_id = entities.id OR t.object_id = entities.id)
+  `).run();
 
   // Check whether the graph_extraction_version column exists
   let hasVersionColumn = true;

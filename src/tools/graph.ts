@@ -40,7 +40,7 @@ export function handleGraphQuery(args: {
 
   // Find entity
   const entityRow = db.prepare(
-    'SELECT * FROM entities WHERE LOWER(name) = LOWER(?)'
+    'SELECT * FROM entities WHERE name = ? COLLATE NOCASE'
   ).get(args.entity) as any;
 
   if (!entityRow) {
@@ -54,7 +54,17 @@ export function handleGraphQuery(args: {
     memoryCount: entityRow.memory_count ?? 0,
   };
 
-  // BFS
+  // BFS. Each entity is emitted at most once, at its shallowest depth — the
+  // visited check gates emission as well as expansion (emitting first re-listed
+  // the root as its own depth-2 neighbour once per neighbour, and hubs once per
+  // incident edge).
+  const selectOutgoing = db.prepare(
+    'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?'
+  );
+  const selectIncoming = db.prepare(
+    'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?'
+  );
+
   const connections: Connection[] = [];
   const visited = new Set<number>([entityRow.id]);
   let frontier: number[] = [entityRow.id];
@@ -63,41 +73,35 @@ export function handleGraphQuery(args: {
     const nextFrontier: number[] = [];
 
     for (const nodeId of frontier) {
-      // Outgoing
-      const outgoing = db.prepare(
-        'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?'
-      ).all(nodeId) as any[];
+      const outgoing = selectOutgoing.all(nodeId) as any[];
 
       for (const row of outgoing) {
         if (predicateFilter && !predicateFilter.includes(row.predicate)) continue;
-        connections.push({
-          predicate: row.predicate,
-          direction: 'outgoing',
-          entity: { id: row.object_id, name: row.name, type: row.type },
-          depth: d,
-        });
         if (!visited.has(row.object_id)) {
           visited.add(row.object_id);
           nextFrontier.push(row.object_id);
+          connections.push({
+            predicate: row.predicate,
+            direction: 'outgoing',
+            entity: { id: row.object_id, name: row.name, type: row.type },
+            depth: d,
+          });
         }
       }
 
-      // Incoming
-      const incoming = db.prepare(
-        'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?'
-      ).all(nodeId) as any[];
+      const incoming = selectIncoming.all(nodeId) as any[];
 
       for (const row of incoming) {
         if (predicateFilter && !predicateFilter.includes(row.predicate)) continue;
-        connections.push({
-          predicate: row.predicate,
-          direction: 'incoming',
-          entity: { id: row.subject_id, name: row.name, type: row.type },
-          depth: d,
-        });
         if (!visited.has(row.subject_id)) {
           visited.add(row.subject_id);
           nextFrontier.push(row.subject_id);
+          connections.push({
+            predicate: row.predicate,
+            direction: 'incoming',
+            entity: { id: row.subject_id, name: row.name, type: row.type },
+            depth: d,
+          });
         }
       }
     }
@@ -169,7 +173,7 @@ export function handleGraphExplain(args: {
 
   // Resolve entities
   const fromRow = db.prepare(
-    'SELECT * FROM entities WHERE LOWER(name) = LOWER(?)'
+    'SELECT * FROM entities WHERE name = ? COLLATE NOCASE'
   ).get(args.from) as any;
 
   if (!fromRow) {
@@ -177,7 +181,7 @@ export function handleGraphExplain(args: {
   }
 
   const toRow = db.prepare(
-    'SELECT * FROM entities WHERE LOWER(name) = LOWER(?)'
+    'SELECT * FROM entities WHERE name = ? COLLATE NOCASE'
   ).get(args.to) as any;
 
   if (!toRow) {
@@ -200,6 +204,13 @@ export function handleGraphExplain(args: {
   const visited = new Map<number, BFSNode>();
   visited.set(fromRow.id, { id: fromRow.id, name: fromRow.name, parentId: null, predicate: '', sourceMemoryId: null });
 
+  const selectOutgoingHop = db.prepare(
+    'SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?'
+  );
+  const selectIncomingHop = db.prepare(
+    'SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?'
+  );
+
   let frontier: number[] = [fromRow.id];
   let found = false;
 
@@ -208,9 +219,7 @@ export function handleGraphExplain(args: {
 
     for (const nodeId of frontier) {
       // Outgoing
-      const outgoing = db.prepare(
-        'SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?'
-      ).all(nodeId) as any[];
+      const outgoing = selectOutgoingHop.all(nodeId) as any[];
 
       for (const row of outgoing) {
         if (!visited.has(row.next_id)) {
@@ -228,9 +237,7 @@ export function handleGraphExplain(args: {
       if (found) break;
 
       // Incoming
-      const incoming = db.prepare(
-        'SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?'
-      ).all(nodeId) as any[];
+      const incoming = selectIncomingHop.all(nodeId) as any[];
 
       for (const row of incoming) {
         if (!visited.has(row.next_id)) {

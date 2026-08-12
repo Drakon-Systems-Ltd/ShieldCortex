@@ -47,7 +47,15 @@ export const rememberSchema = z.object({
   workspaceDir: z.string().optional().describe('Optional workspace/source path'),
 });
 
-export type RememberInput = z.infer<typeof rememberSchema>;
+export type RememberInput = z.infer<typeof rememberSchema> & {
+  /**
+   * INTERNAL — set by the server handler from resolveToolSource, never from
+   * caller args (it is deliberately absent from rememberSchema so MCP
+   * callers cannot self-attest; the handler assigns it after spreading
+   * args). Threat-graph Phase B.
+   */
+  sourceAttested?: boolean;
+};
 
 /**
  * Execute the remember tool
@@ -196,7 +204,12 @@ export async function executeRemember(input: RememberInput): Promise<{
       memoryInput.salience = Math.min(effective, AUTO_EXTRACT_SALIENCE_CAP);
     }
 
-    const memory = addMemory(memoryInput, undefined, derivedSource ?? { type: 'cli', identifier: 'mcp' });
+    const memory = addMemory(
+      memoryInput,
+      undefined,
+      derivedSource ?? { type: 'cli', identifier: 'mcp' },
+      { sourceAttested: input.sourceAttested },
+    );
 
     // Auto-detect and create relationships with existing memories
     let linksCreated = 0;

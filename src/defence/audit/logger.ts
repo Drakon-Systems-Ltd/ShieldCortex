@@ -20,12 +20,14 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
         memory_id, project, timestamp, source_type, source_identifier,
         trust_score, sensitivity_level, firewall_result, operation, content_hash,
         anomaly_score, threat_indicators, blocked_patterns,
-        reason, fragmentation_score, pipeline_duration_ms
+        reason, fragmentation_score, pipeline_duration_ms,
+        source_attested, risk_modifier
       ) VALUES (
         @memory_id, @project, @timestamp, @source_type, @source_identifier,
         @trust_score, @sensitivity_level, @firewall_result, @operation, @content_hash,
         @anomaly_score, @threat_indicators, @blocked_patterns,
-        @reason, @fragmentation_score, @pipeline_duration_ms
+        @reason, @fragmentation_score, @pipeline_duration_ms,
+        @source_attested, @risk_modifier
       )
     `);
 
@@ -46,6 +48,8 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
       reason: entry.reason ?? null,
       fragmentation_score: entry.fragmentation_score ?? null,
       pipeline_duration_ms: entry.pipeline_duration_ms ?? null,
+      source_attested: entry.source_attested ?? null,
+      risk_modifier: entry.risk_modifier ?? null,
     });
 
     return Number(result.lastInsertRowid);

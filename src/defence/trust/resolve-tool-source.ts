@@ -14,12 +14,56 @@
 import type { DefenceSource } from '../types.js';
 import { clampSourceToCeiling } from './env-detector.js';
 import { logAudit } from '../audit/logger.js';
+import { getStrictSourceMode } from '../../cloud/config.js';
 
 export interface ResolveToolSourceOptions {
   /** Tool name (e.g. 'remember', 'recall') — recorded in the audit reason. */
   toolName: string;
   /** Active project scope, recorded on the audit row. */
   project: string | null;
+  /** Test seam / override; defaults to the config-file strictSourceMode. */
+  strict?: boolean;
+}
+
+export interface ResolvedToolSource {
+  source: DefenceSource;
+  /**
+   * True when the resolved identity is SYSTEM-derived (no declaration, a
+   * clamped over-claim, or a declaration the environment independently
+   * confirms) or the deployment runs strictSourceMode. Deliberately NOT a
+   * field on DefenceSource — that type is caller-suppliable through the
+   * scan-only/SDK surfaces, and attestation must never be self-served.
+   */
+  attested: boolean;
+  clamped: boolean;
+}
+
+/**
+ * Pure attestation derivation (exported for exhaustive unit testing).
+ *
+ * strictSourceMode does not verify identities — it is the operator's opt-in
+ * to hardened consequences (unknown sources score 0.3, sub-trust writes
+ * auto-quarantine), so risk-based trust penalties keyed on claimed
+ * identities are part of the posture they chose.
+ */
+export function deriveAttested(input: {
+  declared: DefenceSource | undefined;
+  resolved: DefenceSource;
+  clamped: boolean;
+  strict: boolean;
+  envInferred?: DefenceSource;
+}): boolean {
+  if (input.strict) return true;
+  if (!input.declared) return true;
+  if (input.clamped) return true;
+  if (
+    input.envInferred &&
+    input.declared.type === input.envInferred.type &&
+    input.declared.identifier === input.envInferred.identifier
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -32,9 +76,17 @@ export interface ResolveToolSourceOptions {
 export function resolveToolSource(
   declaredSource: DefenceSource | undefined,
   options: ResolveToolSourceOptions,
-): DefenceSource {
+): ResolvedToolSource {
   const clampResult = clampSourceToCeiling(declaredSource);
   const { source, clamped, declaredScore, ceilingScore, detection } = clampResult;
+  const strict = options.strict ?? getStrictSourceMode();
+  const attested = deriveAttested({
+    declared: declaredSource,
+    resolved: source,
+    clamped,
+    strict,
+    envInferred: detection.source,
+  });
 
   if (clamped && declaredSource) {
     try {
@@ -62,7 +114,7 @@ export function resolveToolSource(
     } catch {
       // Audit logging must never break tool execution.
     }
-    return source;
+    return { source, attested, clamped };
   }
 
   // No declared source — inferred from environment. Preserve the existing
@@ -94,5 +146,5 @@ export function resolveToolSource(
     }
   }
 
-  return source;
+  return { source, attested, clamped };
 }

@@ -447,6 +447,57 @@ export function readRawConfig(): Record<string, unknown> {
   return readRawConfigState().data;
 }
 
+/**
+ * Strict source mode (DefenceConfig.strictSourceMode's config-file wire —
+ * previously defined but consumed nowhere). Read from the top-level
+ * `strictSourceMode` key, mirroring `defenceMode`. Default false.
+ */
+export function getStrictSourceMode(): boolean {
+  return readRawConfig().strictSourceMode === true;
+}
+
+/**
+ * Threat-graph trust-modifier mode (docs/design/2026-08-11-threat-graph.md,
+ * Loop 2). `threatGraph.trustModifier`: 'off' | 'advisory' | 'enforce'.
+ * Default 'advisory' — computed and recorded on the audit row, not applied —
+ * so real-world false-positive data accrues before anything changes scan
+ * behaviour (#182). Any other value falls back to advisory.
+ */
+export function getTrustModifierMode(raw?: Record<string, unknown>): 'off' | 'advisory' | 'enforce' {
+  const source = raw ?? readRawConfig();
+  const block = source.threatGraph;
+  if (block && typeof block === 'object' && !Array.isArray(block)) {
+    const mode = (block as Record<string, unknown>).trustModifier;
+    if (mode === 'off' || mode === 'enforce') return mode;
+  }
+  return 'advisory';
+}
+
+/**
+ * Auto-release gate (docs/design/2026-08-11-threat-graph.md, Loop 3).
+ * `threatGraph.autoRelease`: default OFF. When on, a would-be-quarantined item
+ * whose every detection is an active allowance for its source and whose
+ * content near-duplicates an approved exemplar is admitted instead of held.
+ */
+export function isAutoReleaseEnabled(raw?: Record<string, unknown>): boolean {
+  const source = raw ?? readRawConfig();
+  const block = source.threatGraph;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+  return (block as Record<string, unknown>).autoRelease === true;
+}
+
+/**
+ * Threat-graph feature gate (docs/design/2026-08-11-threat-graph.md).
+ * Enabled unless config sets `threatGraph.enabled: false` explicitly.
+ * Pass `raw` for tests; production callers omit it and read the live config.
+ */
+export function isThreatGraphEnabled(raw?: Record<string, unknown>): boolean {
+  const source = raw ?? readRawConfig();
+  const block = source.threatGraph;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return true;
+  return (block as Record<string, unknown>).enabled !== false;
+}
+
 function invalidateRawConfigCache(): void {
   cachedRawConfig = null;
   cachedRawConfigFile = null;

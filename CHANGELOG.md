@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [Unreleased]
+
+**The Threat Graph — the subsystem that makes ShieldCortex *learn*. Landed advisory/off; not yet in a release.**
+
+A deterministic projection of the defence audit ledgers into a per-source security event graph (`threat_nodes` / `threat_edges`), with three learning loops on top. Every learning effect ships **advisory or off by default** — merging to `main` changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md`; overview in `ARCHITECTURE.md`.
+
+### Added
+
+- **Per-source threat history (Loop 1).** A decayed severity sum per source (14-day half-life; BLOCK/QUARANTINE/high-anomaly weighted; `pipeline_error` rows weight 0). The raw sum is ledger-derived and deterministic; the decayed output is refreshed by an idle sweep so risk heals on schedule. Accrual is **attestation-gated** — a source identity spoofed under a trusted agent's name (which resolves unattested) can never enter the enforcement risk sum — and rate-capped so no identity saturates in a burst.
+- **Advisory trust modifier (Loop 2).** One guarded, O(1), fail-to-zero read of per-source risk after trust scoring, subtracting `min(risk × 0.3, 0.3)` (additive-tightening — never raises trust). **Default `advisory`**: computed and recorded on the audit row, not applied; `enforce` applies it and only for attested identities. `shieldcortex threat-graph reset-source` is the operator dispute path.
+- **Operator allowances (Loop 3).** The system learns from individual quarantine review decisions: 3 qualifying approvals (distinct days, distinct content, individually reviewed — bulk never counts) of a (source, pattern) pair earn a 30-day allowance; a reject revokes with a remembered strike. Optional **auto-release** (`threatGraph.autoRelease`, default **off**) admits a would-be-quarantined item only when *every* detection is an active allowance and its title+content exactly matches an approved exemplar — never a BLOCK, per-source per-day capped, fails closed.
+- **Campaign detection (Loop 4).** Attribution of *caught* events — JS union-find clustering activity that spans ≥2 sources or ≥2 sessions through a shared non-hub pivot ("these blocks across three sessions are one actor"). Hub and pooled pivots (a source/session/pattern linking ≥10 counterparties, or `overflow`/`conversation:*`) are excluded so it clusters signal, not noise. A throttled (~daily) job mints `campaign` nodes + `part_of` edges; queryable via the tool's `campaigns` view and `shieldcortex threat-graph campaigns`. Detection-only: the alert digest + per-week cap are deferred. Not a discovery of quiet campaigns — a sub-threshold success mints no event and never clusters.
+- **Surfaces.** `threat_graph` MCP tool (`sources` / `source` / `events` / `allowances` / `campaigns` views, row+byte capped, emergency-stop guarded); `shieldcortex threat-graph rebuild|status|reset-source|campaigns` CLI (rebuild backfills from retained audit history); a `doctor` freshness check. New config block `threatGraph.{enabled, trustModifier, autoRelease}` — all default to the safe setting. New columns: `defence_audit.{source_attested, risk_modifier}`, `threat_edges.attrs`, `threat_graph_state.last_campaign_at`; new index `idx_audit_source_ident_ts`.
+
+### Fixed
+
+- **Knowledge-graph (`src/graph/`) hardening.** `graph_query` deduplicated emission (it re-listed the root as its own neighbour and hubs once per edge, and could emit an unbounded blob at depth 3+); prepared statements hoisted out of BFS loops; entity lookup switched to a `COLLATE NOCASE` index instead of an index-defeating `LOWER()`; extraction junk filters (code-identifier suffixes, doc-placeholder paths, pronouns, ops verbs); the silently-dropped `prefers`/`avoids`/`implements` triples fixed; `server.ts ↔ server.js` no longer silently fuzzy-merged into one entity.
+
+### Notes
+
+- **Not released deliberately.** The false-positive rate is unmeasured (#182) and the design requires an advisory soak before any deployment moves the trust modifier to `enforce`. Local-only: no threat-graph data is synced to the cloud. Existing installs cold-start (enforcement risk builds forward from attested writes; historical counters are preserved).
 ## [4.47.40] - 2026-08-12
 
 **Docs-only release: the published README described a pipeline that does not exist.**

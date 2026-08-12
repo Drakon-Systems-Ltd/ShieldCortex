@@ -146,6 +146,7 @@ export function getInlineSchema(): string {
     );
 
     CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+    CREATE INDEX IF NOT EXISTS idx_entities_name_nocase ON entities(name COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
 
     CREATE TABLE IF NOT EXISTS triples (
@@ -175,6 +176,65 @@ export function getInlineSchema(): string {
       PRIMARY KEY (memory_id, entity_id)
     );
 
+    CREATE TABLE IF NOT EXISTS threat_nodes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK(kind IN
+        ('source','session','pattern','indicator','event','campaign','operator','entity_ref')),
+      key TEXT NOT NULL,
+      label TEXT,
+      attrs TEXT NOT NULL DEFAULT '{}',
+      first_seen TEXT NOT NULL,
+      last_seen TEXT NOT NULL,
+      UNIQUE(kind, key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_threat_nodes_kind ON threat_nodes(kind);
+    CREATE INDEX IF NOT EXISTS idx_threat_nodes_last_seen ON threat_nodes(last_seen);
+
+    CREATE TABLE IF NOT EXISTS threat_edges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      src INTEGER NOT NULL REFERENCES threat_nodes(id) ON DELETE CASCADE,
+      predicate TEXT NOT NULL CHECK(predicate IN
+        ('triggered','observed_in','from_source','in_session','matched',
+         'mentions','decided','allows','part_of','conflicts_with')),
+      dst INTEGER NOT NULL REFERENCES threat_nodes(id) ON DELETE CASCADE,
+      count INTEGER NOT NULL DEFAULT 1,
+      first_seen TEXT NOT NULL,
+      last_seen TEXT NOT NULL,
+      valid_to TEXT,
+      writer TEXT NOT NULL CHECK(writer IN ('projector','operator','backfill')),
+      confidence REAL NOT NULL DEFAULT 1.0,
+      evidence TEXT NOT NULL DEFAULT '[]',
+      attrs TEXT NOT NULL DEFAULT '{}',
+      UNIQUE(src, predicate, dst)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_threat_edges_src ON threat_edges(src);
+    CREATE INDEX IF NOT EXISTS idx_threat_edges_dst ON threat_edges(dst);
+    CREATE INDEX IF NOT EXISTS idx_threat_edges_pred ON threat_edges(predicate);
+
+    CREATE TABLE IF NOT EXISTS threat_graph_state (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      last_audit_id INTEGER NOT NULL DEFAULT 0,
+      last_rt_cursor TEXT NOT NULL DEFAULT '',
+      projector_version INTEGER NOT NULL DEFAULT 1,
+      lease_expires_at TEXT,
+      lease_token TEXT,
+      last_run_at TEXT,
+      last_campaign_at TEXT,
+      last_error TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS source_risk (
+      source_key TEXT PRIMARY KEY,
+      risk REAL NOT NULL DEFAULT 0.0,
+      attested INTEGER NOT NULL DEFAULT 0,
+      block_count_28d INTEGER NOT NULL DEFAULT 0,
+      quarantine_count_28d INTEGER NOT NULL DEFAULT 0,
+      scan_count_28d INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS defence_audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       memory_id INTEGER,
@@ -193,6 +253,8 @@ export function getInlineSchema(): string {
       reason TEXT,
       fragmentation_score REAL,
       pipeline_duration_ms INTEGER,
+      source_attested INTEGER,
+      risk_modifier REAL,
       FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
     );
 
@@ -202,6 +264,7 @@ export function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
     CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
     CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation);
+    CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp);
 
     -- Cumulative audit aggregate (single row, id=1) — retention rollup target.
     -- See schema.sql for the rationale.

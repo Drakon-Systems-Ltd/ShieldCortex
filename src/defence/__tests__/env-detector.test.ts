@@ -173,12 +173,15 @@ describe('Environment-Based Source Inference', () => {
     it('drops a caller-claimed user:direct under a sub-agent env and writes SOURCE_ELEVATION_BLOCKED', () => {
       process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
 
-      const source = resolveToolSource(
+      const resolved = resolveToolSource(
         { type: 'user', identifier: 'direct' },
         { toolName: 'remember', project: 'test-project' },
       );
 
-      expect(source).toEqual({ type: 'agent', identifier: 'agent-spawned' });
+      expect(resolved.source).toEqual({ type: 'agent', identifier: 'agent-spawned' });
+      // A rejected over-claim resolves to the env identity — attested.
+      expect(resolved.attested).toBe(true);
+      expect(resolved.clamped).toBe(true);
       expect(logAudit).toHaveBeenCalledTimes(1);
       const entry = logAudit.mock.calls[0][0] as {
         firewall_result: string;
@@ -198,24 +201,29 @@ describe('Environment-Based Source Inference', () => {
       process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
       const declared = { type: 'agent' as const, identifier: 'user-spawned>task-1' };
 
-      const source = resolveToolSource(declared, {
+      const resolved = resolveToolSource(declared, {
         toolName: 'recall',
         project: null,
+        strict: false,
       });
 
-      expect(source).toEqual(declared);
+      expect(resolved.source).toEqual(declared);
+      // An accepted self-declaration is honoured but not attested.
+      expect(resolved.attested).toBe(false);
       expect(logAudit).not.toHaveBeenCalled();
     });
 
     it('writes a SOURCE_MISSING audit row when no source is declared', () => {
       process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
 
-      const source = resolveToolSource(undefined, {
+      const resolved = resolveToolSource(undefined, {
         toolName: 'recall',
         project: null,
       });
 
-      expect(source).toEqual({ type: 'cli', identifier: 'mcp' });
+      expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+      // Env-inferred identity — attested.
+      expect(resolved.attested).toBe(true);
       expect(logAudit).toHaveBeenCalledTimes(1);
       const entry = logAudit.mock.calls[0][0] as { firewall_result: string; reason: string };
       expect(entry.firewall_result).toBe('ALLOW');
