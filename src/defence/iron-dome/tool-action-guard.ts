@@ -2252,10 +2252,12 @@ const FILE_WRITE_SINK =
  * the literal travelling by stdout instead of by file, and each was a
  * catastrophic block before #217 relaxed this path.
  *
- * `> /dev/null` and fd-numbered redirects (`2>/dev/null`, `2>&1`) are exempt:
- * they discard or re-point diagnostics rather than carrying the output
- * anywhere, and `node probe.mjs 2>/dev/null` is exactly the shape #217 exists
- * to keep relieved.
+ * A discard (`> /dev/null`, `2>/dev/null`) or a genuine fd-to-fd redirect
+ * (`2>&1`) is exempt: it discards or re-points diagnostics rather than
+ * carrying the output anywhere, and `node probe.mjs 2>/dev/null` is exactly
+ * the shape #217 exists to keep relieved. An fd NUMBER prefix alone (`1>`,
+ * `2>`) is not exempt — `1>/tmp/x.sh` and `2>/tmp/x.sh` write to a real file
+ * exactly like a bare `>`, just with the fd spelled out.
  */
 /**
  * Write targets that cannot become executable content. Everything else is
@@ -2274,20 +2276,119 @@ const FILE_WRITE_SINK =
 const INERT_WRITE_TARGET =
   /\.(?:json|jsonl|ndjson|txt|md|csv|tsv|log|ya?ml|xml|html?|png|jpe?g|svg|lock)$/i;
 
+/** Write-sink function names. Arguments are extracted by a tiny balanced
+ * scanner below, not by `[^)]*`: nested helper calls such as
+ * `writeFileSync(resolve('/tmp/report.json'), '/tmp/stage2')` must not truncate
+ * the call at `resolve(...)` and accidentally let a later non-inert argument
+ * disappear.
+ */
+const WRITE_CALL_NAME_RE =
+  /\b(writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream|fs\.write\w*|writeSync|openSync|open|write_text|write_bytes|os\.(?:write|open)|shutil\.(?:copy|move)\w*|file_put_contents|IO\.write|File\.write|File\.open)\s*\(/g;
+
+type WriteCall = { name: string; args: string | null };
+
+function writeCalls(body: string): WriteCall[] {
+  const out: WriteCall[] = [];
+  WRITE_CALL_NAME_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = WRITE_CALL_NAME_RE.exec(body)) !== null) {
+    const start = WRITE_CALL_NAME_RE.lastIndex;
+    let depth = 1;
+    let quote: '"' | "'" | '`' | null = null;
+    let escaped = false;
+    let i = start;
+    for (; i < body.length; i++) {
+      const ch = body[i];
+      if (quote) {
+        if (escaped) { escaped = false; continue; }
+        if (ch === '\\') { escaped = true; continue; }
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+      if (ch === '(') { depth++; continue; }
+      if (ch === ')') {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (depth === 0) {
+      out.push({ name: m[1], args: body.slice(start, i) });
+      WRITE_CALL_NAME_RE.lastIndex = i + 1;
+    } else {
+      // Malformed/unbalanced write call: do not try to prove it inert.
+      out.push({ name: m[1], args: null });
+      WRITE_CALL_NAME_RE.lastIndex = start;
+    }
+  }
+  return out;
+}
+
+function splitTopLevelArgs(args: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: '"' | "'" | '`' | null = null;
+  let escaped = false;
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i];
+    if (quote) {
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') { depth = Math.max(0, depth - 1); continue; }
+    if (ch === ',' && depth === 0) {
+      out.push(args.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(args.slice(start).trim());
+  return out;
+}
+
+function targetArgIndexes(name: string): number[] {
+  if (/^(?:shutil\.(?:copy|move)\w*)$/.test(name)) return [0, 1];
+  if (/^(?:writeSync|fs\.write\w*|os\.write)$/.test(name)) return [];
+  return [0];
+}
+
+function targetExprIsProvablyInert(expr: string): boolean {
+  const trimmed = expr.trim();
+  const m = /^(['"])([^'"\n]*)\1$/.exec(trimmed);
+  if (!m) return false;
+  return INERT_WRITE_TARGET.test(m[2]);
+}
+
 function fileWriteIsSink(body: string): boolean {
   if (!FILE_WRITE_SINK.test(body)) return false;
-  const literals = body.match(/['"][^'"\n]*\.[A-Za-z0-9]{1,6}['"]/g) ?? [];
-  // No visible target — a path built at runtime. Assume it can execute.
-  if (literals.length === 0) return true;
-  return !literals.every(l => INERT_WRITE_TARGET.test(l.slice(1, -1)));
+  const calls = writeCalls(body);
+  // Sink vocabulary matched, but no call shape this extraction can see
+  // inside — a path built at runtime, most likely. Assume it can execute.
+  if (calls.length === 0) return true;
+  // Per call, and only on target-bearing argument positions: a data string or
+  // encoding (`'utf8'`) is not a filename and must not turn a JSON/log write
+  // back into a shell sink. Unproven/dynamic targets still fail closed.
+  return calls.some(call => {
+    if (call.args === null) return true;
+    const args = splitTopLevelArgs(call.args);
+    const targets = targetArgIndexes(call.name).map(i => args[i]).filter((v): v is string => v !== undefined);
+    if (targets.length === 0) return true;
+    return targets.some(t => !targetExprIsProvablyInert(t));
+  });
 }
 
 function outputEscapesToShell(text: string, outFile: string): boolean {
   const esc = outFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // After the file name, on the same statement: a single `|` (not `||`), or a
-  // `>`/`>>` not preceded by a digit or `&`, targeting something other than a
-  // discard.
-  const re = new RegExp(`${esc}[^\\n;&]*?(?:\\|(?!\\|)|(?<![0-9&])>>?\\s*(?!(?:/dev/null|&\\d)))`);
+  // `>`/`>>` — with or without a leading fd number — whose target is not a
+  // discard (`/dev/null`) or a fd-to-fd redirect (`&1`, `&2`, …). The fd
+  // number itself confers no exemption: `1>/tmp/x.sh` and `2>/tmp/x.sh` write
+  // to a real file exactly like a bare `>` does.
+  const re = new RegExp(`${esc}[^\\n;&]*?(?:\\|(?!\\|)|>>?\\s*(?!(?:/dev/null|&\\d)))`);
   return re.test(text);
 }
 

@@ -115,6 +115,16 @@ describe('#217 — output transport is a sink, not just body vocabulary', () => 
     ['stdout appended to a shell rc', `${gen(`console.log("${RMRF} ~/");`)}node /tmp/g.mjs >> ~/.zshrc`],
     ['stdout redirected into a script then run', `${gen(`console.log("${RMRF} ~/");`)}node /tmp/g.mjs > /tmp/x.sh && bash /tmp/x.sh`],
     ['python twin, piped', `cat > /tmp/g.py <<'PY'\nprint("${RMRF} ~/")\nPY\npython3 /tmp/g.py | bash`],
+    /**
+     * The fd-numbered-redirect bypass: `outputEscapesToShell` exempted any `>`
+     * preceded by a digit or `&`, on the theory that fd-prefixed redirects are
+     * diagnostics plumbing like `2>&1`. `1>/tmp/x.sh` and `2>/tmp/x.sh` are
+     * fd-prefixed too, but they target a REAL FILE, not another fd — the exact
+     * write-then-exec shape this describe block exists to catch, just spelled
+     * with an explicit fd number.
+     */
+    ['stdout redirected via explicit fd 1 into a script then run', `${gen(`console.log("${RMRF} ~/");`)}node /tmp/g.mjs 1>/tmp/x.sh && bash /tmp/x.sh`],
+    ['stderr redirected via fd 2 into a script then run', `${gen(`console.error("${RMRF} ~/");`)}node /tmp/g.mjs 2>/tmp/x.sh && bash /tmp/x.sh`],
   ])('still blocks: %s', (_name, cmd) => {
     expect(decide(cmd).decision).toBe('block');
   });
@@ -165,5 +175,41 @@ describe('#217 — a file write is a sink by where it lands', () => {
       + `data = open('/tmp/audit.jsonl', 'r').read()\nprint(PATTERNS, len(data))\nPY\npython3 /tmp/probe.py`,
     );
     expect(v.decision).not.toBe('block');
+  });
+
+  it('an extensionless executable write target blocks even beside an inert decoy', () => {
+    // `fileWriteIsSink` only ever extracted DOTTED literals, so an
+    // extensionless target like `/tmp/stage2` never entered the `literals`
+    // array at all — it was invisible to the "every literal inert" check.
+    // Pairing it with a genuinely inert `/tmp/report.json` write let the dotted
+    // decoy satisfy `every()` while the real, unprovable target went unseen.
+    const v = decide(
+      `cat > /tmp/g8.mjs <<'EOF'\nimport { writeFileSync } from 'node:fs';\n`
+      + `writeFileSync('/tmp/stage2', "${RMRF} /");\n`
+      + `writeFileSync('/tmp/report.json', JSON.stringify({ ok: true }));\nEOF\nnode /tmp/g8.mjs`,
+    );
+    expect(v.decision).toBe('block');
+  });
+
+  it('benign JSON/log writes stay inert when they include data and encoding strings', () => {
+    const v = decide(
+      `cat > /tmp/probe2.mjs <<'EOF'\nimport { writeFileSync, appendFileSync } from 'node:fs';\n`
+      + `const P = { danger: "${RMRF} /" };\n`
+      + `writeFileSync('/tmp/audit.log', JSON.stringify(P) + '\\n', 'utf8');\n`
+      + `appendFileSync('/tmp/report.jsonl', 'line\\n', 'utf8');\nEOF\nnode /tmp/probe2.mjs`,
+    );
+    expect(v.decision).not.toBe('block');
+  });
+
+  it('a dynamic target expression cannot be cleared by an inert literal decoy inside the expression', () => {
+    // The target argument itself must be provably inert. A decoy literal inside
+    // `('/tmp/report.json', target)` is not proof: the comma expression returns
+    // `target`, which may be executable-shaped.
+    const v = decide(
+      `cat > /tmp/g9.mjs <<'EOF'\nimport { writeFileSync } from 'node:fs';\n`
+      + `const target = '/tmp/stage2';\n`
+      + `writeFileSync(('/tmp/report.json', target), "${RMRF} /");\nEOF\nnode /tmp/g9.mjs`,
+    );
+    expect(v.decision).toBe('block');
   });
 });
