@@ -44,6 +44,7 @@ import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
+import type { TripleProvenance } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { resolveDisposition } from '../defence/disposition.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
@@ -668,7 +669,14 @@ export function addMemory(
   try {
     const extraction = extractFromMemory(input.title, truncationResult.content, category);
     if (extraction.entities.length > 0) {
-      processExtractionResult(extraction, memory.id);
+      // Phase E: stamp write-time provenance so relation-channel conflicts can be
+      // adjudicated by writer + trust. writer_trust is capped for unattested
+      // (claimed) sources at store time inside processExtractionResult.
+      processExtractionResult(extraction, memory.id, {
+        writerSource: sourceKey(effectiveSource.type, effectiveSource.identifier),
+        writerTrust: defenceResult.trust.score,
+        attested: options?.sourceAttested ?? false,
+      });
       if (isFeatureEnabled('cloud_sync')) {
         syncGraphForMemoryToCloud(memory.id);
       }
@@ -844,6 +852,17 @@ function refreshEmbeddingAsync(memoryId: number, title: string, content: string)
 /**
  * Update a memory
  */
+/**
+ * Provenance for triples re-extracted on an update/merge (Phase E). Uses the
+ * memory's own stored source/trust, always treated as unattested — the update
+ * re-scan runs unattributed, so writer_trust is conservatively capped. Returns
+ * undefined when the memory has no recorded source (→ NULL provenance).
+ */
+function updateProvenance(memory: Memory): TripleProvenance | undefined {
+  if (!memory.source) return undefined;
+  return { writerSource: memory.source, writerTrust: memory.trustScore, attested: false };
+}
+
 export function updateMemory(
   id: number,
   updates: Partial<MemoryInput>
@@ -1001,7 +1020,11 @@ export function updateMemory(
         updatedMemory.content,
         updatedMemory.category,
       );
-      replaceMemoryGraph(updatedMemory.id, extraction);
+      // Phase E: an update is a write. Re-extracted triples carry the memory's
+      // own source/trust as provenance, treated as unattested (the update
+      // re-scan runs unattributed) so a claimed identity can't refresh into
+      // high conflict-trust.
+      replaceMemoryGraph(updatedMemory.id, extraction, updateProvenance(updatedMemory));
     } catch (e) {
       console.error('[shieldcortex] Entity extraction refresh failed:', e);
     }
@@ -1189,7 +1212,7 @@ export function mergeMemories(
         updatedMemory.content,
         updatedMemory.category,
       );
-      replaceMemoryGraph(updatedMemory.id, extraction);
+      replaceMemoryGraph(updatedMemory.id, extraction, updateProvenance(updatedMemory));
     } catch (e) {
       console.error('[shieldcortex] Entity extraction refresh failed after merge:', e);
     }

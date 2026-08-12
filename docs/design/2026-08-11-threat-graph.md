@@ -843,6 +843,87 @@ pinned so they are decisions not surprises:
   throttle so a rebuild re-mints on the next tick. `PROJECTOR_VERSION` → 4 for
   the realtime `tainted` attr.
 
+## Phase E — implementation notes (2026-08-12)
+
+The ShadowMerge defence landed. The spec left several mechanics implicit; these
+are the decisions taken, pinned so they are decisions not surprises:
+
+- **Detection lives in the projector, not the memory write.** The spec says "the
+  projector then detects." `resolve.ts` stays a pure memory-graph writer — its
+  only Phase-E job is stamping write-time provenance (below). Conflict detection
+  is a throttled, **stateless idempotent pass** (`src/threat-graph/conflict.ts`,
+  `detectRelationConflicts`) run from the lease runner and force-run inside
+  `rebuildThreatGraph` — the same shape as campaign detection. Consequence:
+  disputes are eventually-consistent (flagged on the next tick, not synchronously
+  at write), which matches the advisory/async posture of every other loop. A new
+  `last_conflict_at` throttle column on `threat_graph_state` paces it.
+- **Provenance columns + a fifth: `disputed`.** The spec's ALTER list is
+  `valid_from, valid_to, writer_source, writer_trust`. Implementation adds
+  `disputed INTEGER NOT NULL DEFAULT 0` — the interim flag the prose requires has
+  to live somewhere queryable, and a column on the contested triple is its
+  natural home. Classification: `confidence`, `writer_source`, `writer_trust`,
+  `valid_from` are **write-time facts** (never reset). `valid_to` is an
+  **operator fact** (set only by a "keep one"/"reject both" resolution; the
+  projector never writes it). `disputed` is **projector-derived** — reset to 0 in
+  `clearGraph` and fully recomputed each detection pass, so incremental and
+  rebuilt graphs converge.
+- **`writer_trust` is stored already-capped.** `writer_trust = attested ? raw :
+  min(raw, 0.7)` at write time (attestation from `addMemory`'s `sourceAttested`).
+  Storing the capped value keeps detection a pure function of the triples' own
+  columns — no cross-table attestation lookup, fully deterministic and
+  rebuild-safe. The `user:approved` disqualification is a *separate* guard,
+  derived from the stored `writer_source` string at detection time (approval
+  admits content, it never crowns a fact as the higher-trust side).
+- **The margin is a lower-bound gate (`≥ 0.3`).** "Contradicting … across a
+  writer-trust margin (0.3)" is read as: a channel is disputed only when it holds
+  ≥2 distinct open objects on a single-valued predicate **and** the effective
+  writer-trust spread across the contenders is ≥ 0.3. Below the margin the
+  writers are peers and a genuine multi-value ("React uses TS *and* JS") is the
+  likelier truth — left as benign coexistence, no operator burden. At/above it,
+  the asymmetry is the ShadowMerge signature and earns review. Single-valued set
+  is exactly `{uses, depends_on, configures, replaces}`; `related_to` (and every
+  other multi-valued predicate: `fixes`, `extends`, `preferred_over`) is never a
+  conflict channel.
+- **The conflict node *is* the review item.** A conflicted channel mints one
+  `event` node keyed `conflict:<subject_id>:<predicate>` whose `attrs` carry every
+  contender (object, triple id, writer, trust, time, source memory) + `status`.
+  It is NOT pushed into the memory `quarantine` table — that table holds held
+  *content*, not relation disputes. Operators list and resolve conflicts through
+  the threat-graph tool (`view:'conflicts'`), the CLI, and `doctor`. Conflict
+  nodes are EXCLUDED from `canonicalDump` (by the `conflict:` key prefix), same as
+  campaign nodes — a throttled derived layer outside the determinism contract. No
+  `conflicts_with` edges are minted; that predicate stays reserved.
+- **Resolution is symmetric and ledger-sourced.** Every resolution is an
+  `operation='review'` audit row (the truth), applied immediately for operator
+  UX: **keep one** → `valid_to` on the losers, disputed clears; **reject both** →
+  `valid_to` on all; **keep both** → nothing suspended, the audit row records the
+  covered object-set and the detection pass reads it back to suppress re-flagging
+  (a *new* contender outside the covered set re-opens the channel). Neither edge
+  is ever auto-suspended by the projector. The projector's own ledger loop treats
+  a `conflict_resolution` review row as a harmless no-op (it is neither a
+  `risk_reset` nor a `quarantine_decision`); the conflict detector is its only
+  consumer. Resolution is an operator action wired to the CLI
+  (`threat-graph resolve-conflict`) ONLY — there is no MCP mutation path, so an
+  agent cannot resolve (or self-clear) a conflict. `PROJECTOR_VERSION` → 5.
+- **Cloud egress — provenance stays local (decided).** The new `triples`
+  columns (`writer_source`, `writer_trust`, `valid_from`, `valid_to`,
+  `disputed`) are NOT added to `SyncedGraphTripleRecord`; `mapTripleRow` maps a
+  fixed field set, so despite its `SELECT t.*` the columns never leave the
+  machine (verified). Conflict detection is a local feature; the SaaS needs none
+  of it. `confidence` continues to egress exactly as before — it was already in
+  the envelope; it now merely varies by rule. No new data class crosses the
+  boundary (the v4.29.0 realtime-egress lesson, honoured).
+- **Known limits (accepted).** (1) The margin gate is precision-first: a
+  contradiction between two *similarly*-trusted writers is left as benign
+  coexistence, so close-trust poison is not surfaced by this layer (the risk
+  model, campaign detection, and rate-limiting are the other layers). (2) The
+  conflict review *node* counts toward the event-node cap and can be evicted
+  under pressure — but the `disputed` flag on the triples persists, and the next
+  detection pass re-mints the node, so the "there is a dispute" signal is never
+  lost, only the transient review item. (3) `NULL` writer_trust (legacy/backfill
+  triples) is treated as neutral 0.5, so legacy triples never manufacture a
+  spread against one another.
+
 ## Phase B — known limits and pre-enforce items (2026-08-12 review)
 
 The B implementation was adversarially reviewed (3 lenses). Two majors were

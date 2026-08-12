@@ -125,7 +125,9 @@ describe('before-keyword verb filter', () => {
 describe('"chose X over Y" triples persist with real subjects', () => {
   it('emits a direct preferred_over triple instead of a project-subject triple', () => {
     const { triples } = extractFromMemory('Decision', 'We chose PostgreSQL over MySQL for JSON support.', 'note');
-    expect(triples).toContainEqual({ subject: 'PostgreSQL', predicate: 'preferred_over', object: 'MySQL' });
+    expect(triples).toContainEqual(
+      expect.objectContaining({ subject: 'PostgreSQL', predicate: 'preferred_over', object: 'MySQL' }),
+    );
   });
 
   it('never emits triples with the unresolvable subject "project"', () => {

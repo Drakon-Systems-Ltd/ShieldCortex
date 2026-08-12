@@ -442,12 +442,15 @@ Turns the defence audit trail into memory. Every scan ShieldCortex runs is alrea
 
 ```bash
 shieldcortex threat-graph rebuild     # backfill from your retained audit history
-shieldcortex threat-graph status      # sources, patterns, events, allowances
+shieldcortex threat-graph status      # sources, patterns, events, allowances, conflicts
+shieldcortex threat-graph conflicts   # relation-channel disputes awaiting review
 ```
 
 - 📉 **Per-source threat history** — a decayed risk score per source, built only from what the scanners already caught. Spoof-safe: risk from an identity written under a trusted agent's name can never count against the real agent.
 - 🎚️ **Advisory trust modifier** — high-risk sources can lose trust on future scans. **Advisory by default** (computed and shown, not applied); enforcement is opt-in and only for verified identities.
 - ✅ **Operator allowances** — repeatedly, individually approving the same detector's firings from a source teaches ShieldCortex to stop re-holding near-identical repeats. Narrow, expiring, revocable — and auto-release is **off by default** and never releases a hard block.
+- 🧩 **Campaign detection** — correlates *caught* activity that spans multiple sources or sessions through a shared rare signal, so a coordinated push reads as one actor instead of scattered noise.
+- ⚔️ **Relation-conflict detection (ShadowMerge defence)** — when two memory writes assert contradictory single-valued facts about the same subject across a trust gap, both are flagged `disputed` and raised for your review — **neither is silently merged, neither auto-deleted**. You resolve: keep one, keep both, or reject both. Approving content into memory never crowns it as fact.
 
 Deterministic and local-only: the graph is a rebuildable view of your own audit ledger, never synced to the cloud. Learning only ever *tightens* automatically — the only thing that loosens is your explicit, remembered review decisions.
 

@@ -210,6 +210,12 @@ CREATE TABLE IF NOT EXISTS triples (
   source_memory_id INTEGER,
   confidence REAL DEFAULT 0.8,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  -- Phase E (ShadowMerge defence): write-time provenance + dispute flag.
+  valid_from TEXT,       -- when the assertion became live (NULL = created_at)
+  valid_to TEXT,         -- NULL = open; set only by an operator conflict resolution
+  writer_source TEXT,    -- canonical source tuple of the memory write
+  writer_trust REAL,     -- trust at write time, stored already-capped (min 0.7 unless attested)
+  disputed INTEGER NOT NULL DEFAULT 0, -- 1 when the projector flags a relation-channel conflict
   FOREIGN KEY (subject_id) REFERENCES entities(id) ON DELETE CASCADE,
   FOREIGN KEY (object_id) REFERENCES entities(id) ON DELETE CASCADE,
   FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE SET NULL,
@@ -281,6 +287,7 @@ CREATE TABLE IF NOT EXISTS threat_graph_state (
   lease_token TEXT,
   last_run_at TEXT,
   last_campaign_at TEXT,
+  last_conflict_at TEXT,
   last_error TEXT
 );
 

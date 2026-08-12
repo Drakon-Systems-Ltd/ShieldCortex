@@ -15,6 +15,21 @@ export interface ExtractedTriple {
   subject: string;
   predicate: string;
   object: string;
+  /**
+   * How the triple was derived (Phase E). Verb-pattern rules ("X uses Y") are
+   * high-confidence assertions; co-occurrence (`related_to`) is a weak signal.
+   * Consumers use this to discriminate — a co-occurrence must never carry the
+   * weight of an asserted relation.
+   */
+  confidence: number;
+}
+
+/** Co-occurrence (`related_to`) is a weak signal; verb patterns assert. */
+export const RELATED_TO_CONFIDENCE = 0.3;
+export const VERB_PATTERN_CONFIDENCE = 0.8;
+
+function confidenceForPredicate(predicate: string): number {
+  return predicate === 'related_to' ? RELATED_TO_CONFIDENCE : VERB_PATTERN_CONFIDENCE;
 }
 
 export interface ExtractionResult {
@@ -249,7 +264,7 @@ export function extractFromMemory(title: string, content: string, category: stri
     const key = `${subject}|${predicate}|${object}`;
     if (!tripleSet.has(key)) {
       tripleSet.add(key);
-      triples.push({ subject, predicate, object });
+      triples.push({ subject, predicate, object, confidence: confidenceForPredicate(predicate) });
       // Ensure referenced entities exist in entityMap
       ensureEntity(subject);
       ensureEntity(object);
