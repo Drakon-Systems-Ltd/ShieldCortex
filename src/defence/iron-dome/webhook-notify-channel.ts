@@ -22,12 +22,17 @@
  */
 import { createHmac } from 'node:crypto';
 import type {
+  ActionGuardOutcomeNotification,
   AnyOperatorNotification,
   ConversationThreatNotification,
   NotifyChannel,
   OperatorNotification,
 } from './operator-notify.js';
-import { formatOperatorNotification, isConversationThreatNotification } from './operator-notify.js';
+import {
+  formatOperatorNotification,
+  isActionGuardOutcomeNotification,
+  isConversationThreatNotification,
+} from './operator-notify.js';
 
 export interface WebhookNotifyChannelOptions {
   /** Already validated by notify-config.ts's `normaliseWebhookUrl` — this
@@ -48,6 +53,8 @@ export interface WebhookNotifyChannelOptions {
 function eventOf(n: AnyOperatorNotification): string {
   if (n.event === 'denied_no_prompt_surface') return 'denied_no_prompt_surface';
   if (n.event === 'conversation_threat') return 'conversation_threat';
+  if (n.event === 'action_guard_denial') return 'action_guard_denial';
+  if (n.event === 'action_guard_warning') return 'action_guard_warning';
   return 'approval_requested';
 }
 
@@ -76,7 +83,24 @@ function buildConversationPayload(n: ConversationThreatNotification): Record<str
 
 function buildPayload(n: AnyOperatorNotification): Record<string, unknown> {
   if (isConversationThreatNotification(n)) return buildConversationPayload(n);
+  if (isActionGuardOutcomeNotification(n)) return buildActionGuardPayload(n);
   return buildApprovalPayload(n);
+}
+
+function buildActionGuardPayload(n: ActionGuardOutcomeNotification): Record<string, unknown> {
+  return {
+    event: eventOf(n),
+    outcome: n.outcome,
+    tool: n.tool,
+    surface: n.surface,
+    signals: n.signals,
+    severity: n.severity,
+    reason: n.reason,
+    ...(n.correlationId ? { correlationId: n.correlationId } : {}),
+    detectedAt: n.detectedAt,
+    text: formatOperatorNotification(n),
+    ts: new Date().toISOString(),
+  };
 }
 
 function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> {

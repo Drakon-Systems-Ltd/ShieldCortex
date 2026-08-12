@@ -202,10 +202,10 @@ describe('#249 round 4: a split header/detail must not lose the cause', () => {
     // `.find()` stopped at the first stream that matched — the header — and
     // reported `OpenClaw config is invalid:` alone, which names no cause and
     // leaves the operator exactly where #221 left them.
-    const v = run('  × channels.telegram: bad key\n', 'OpenClaw config is invalid:\n');
+    const v = run('  × channels.pager: bad key\n', 'OpenClaw config is invalid:\n');
     expect(v.state).toBe('invalid');
     const detail = v.detail?.join('\n') ?? '';
-    expect(detail).toContain('channels.telegram');
+    expect(detail).toContain('channels.pager');
     expect(detail).toContain('config is invalid');
   });
 

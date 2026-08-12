@@ -70,6 +70,8 @@ export type OperatorNotificationEvent =
   | 'denied_no_prompt_surface'
   | 'conversation_threat';
 
+export type ActionGuardOutcomeEvent = 'action_guard_denial' | 'action_guard_warning';
+
 /** What the judge (approval-judge.ts) found, carried for display only. This
  *  module never re-derives a decision from it — see the module doc above. */
 export interface NotificationJudgeSummary {
@@ -185,8 +187,37 @@ export interface ConversationThreatNotification {
   detectedAt: string;
 }
 
+/**
+ * A terminal Action Guard outcome alert (#242/#243).
+ *
+ * This is deliberately NOT an `OperatorNotification`: there is no pending
+ * approval handle, no hash that can authorise the already-refused call, and the
+ * command surface is redacted/allowlisted by the caller before construction.
+ * Denied commands are enriched for secret/data-egress content by construction;
+ * forwarding them verbatim would turn the alert channel into a leak path.
+ */
+export interface ActionGuardOutcomeNotification {
+  event: ActionGuardOutcomeEvent;
+  outcome: string;
+  tool: string;
+  /** Redacted/allowlisted description only — never the raw command body. */
+  surface: string;
+  signals: string[];
+  severity: string;
+  reason: string;
+  /** Stable non-secret correlation key, e.g. a local digest; never a raw session id. */
+  correlationId?: string;
+  detectedAt: string;
+}
+
 /** Every shape a channel can be handed. */
-export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification;
+export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification;
+
+export function isActionGuardOutcomeNotification(
+  n: AnyOperatorNotification,
+): n is ActionGuardOutcomeNotification {
+  return n.event === 'action_guard_denial' || n.event === 'action_guard_warning';
+}
 
 export function isConversationThreatNotification(
   n: AnyOperatorNotification,
@@ -343,6 +374,110 @@ export interface ConversationThreatInput {
   detectedAt: string;
 }
 
+export interface ActionGuardOutcomeInput {
+  event: ActionGuardOutcomeEvent;
+  outcome: string;
+  tool: string;
+  surface: string;
+  signals: string[];
+  severity: string;
+  reason: string;
+  /** Stable non-secret correlation key, e.g. a local digest; never a raw session id. */
+  correlationId?: string;
+  /** ISO timestamp; supplied by the caller so a test can pin it. */
+  detectedAt: string;
+}
+
+const SAFE_ACTION_GUARD_TOOLS = new Set([
+  'Bash', 'Edit', 'MultiEdit', 'Write', 'Read', 'Glob', 'Grep', 'LS', 'Task',
+  'TodoWrite', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Workflow',
+]);
+const SAFE_ACTION_GUARD_SIGNALS = new Set([
+  'secret-egress', 'approval-required', 'fallback-scan', 'privilege-escalation',
+  'filesystem-destructive', 'destructive-filesystem', 'dangerous-shell',
+  'command-exec', 'network-egress', 'credential-access', 'data-exfiltration',
+  'untrusted-script', 'reviewed-script', 'shell-injection', 'persistence-risk',
+]);
+const SAFE_ACTION_GUARD_OUTCOMES = new Set([
+  'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
+]);
+const SAFE_ACTION_GUARD_SEVERITIES = new Set(['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown']);
+
+function safeActionGuardTool(v: unknown): string {
+  return SAFE_ACTION_GUARD_TOOLS.has(String(v ?? '')) ? String(v) : 'tool';
+}
+
+function safeActionGuardOutcome(v: unknown): string {
+  const outcome = String(v ?? '');
+  return SAFE_ACTION_GUARD_OUTCOMES.has(outcome) ? outcome : 'guard_outcome';
+}
+
+function safeActionGuardSeverity(v: unknown, event: ActionGuardOutcomeEvent): string {
+  const severity = String(v ?? '');
+  if (SAFE_ACTION_GUARD_SEVERITIES.has(severity)) return severity;
+  return event === 'action_guard_denial' ? 'high' : 'medium';
+}
+
+function safeActionGuardSignals(signals: unknown): string[] {
+  if (!Array.isArray(signals)) return [];
+  const out: string[] = [];
+  let redacted = false;
+  for (const raw of signals) {
+    const signal = String(raw ?? '').trim();
+    if (SAFE_ACTION_GUARD_SIGNALS.has(signal)) out.push(signal);
+    else if (signal) redacted = true;
+  }
+  if (redacted) out.push('redacted-signal');
+  return out.filter((signal, index) => out.indexOf(signal) === index).slice(0, 25);
+}
+
+function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string): string {
+  if (event === 'action_guard_warning') {
+    return outcome === 'failure_allowed'
+      ? 'Action Guard was unavailable or advisory-only and the tool call was not blocked; inspect local audit for details.'
+      : 'Action Guard warning in advisory mode; inspect local audit for details.';
+  }
+  if (outcome === 'denied_no_prompt_surface') {
+    return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
+  }
+  if (outcome === 'failure_denied') {
+    return 'Action Guard was unavailable and fallback policy denied the tool call; inspect local audit for details.';
+  }
+  return 'Action Guard denied the tool call; inspect local audit for details.';
+}
+
+function safeActionGuardCorrelationId(v: unknown): string | undefined {
+  const text = String(v ?? '').trim();
+  return /^sc-[a-f0-9]{16}$/.test(text) ? text : undefined;
+}
+
+function safeDetectedAt(v: unknown): string {
+  const text = String(v ?? '').trim();
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(text)
+    ? text
+    : '1970-01-01T00:00:00.000Z';
+}
+
+export function buildActionGuardOutcomeNotification(
+  input: ActionGuardOutcomeInput,
+): ActionGuardOutcomeNotification {
+  const event: ActionGuardOutcomeEvent = input.event === 'action_guard_warning' ? 'action_guard_warning' : 'action_guard_denial';
+  const outcome = safeActionGuardOutcome(input.outcome);
+  const n: ActionGuardOutcomeNotification = {
+    event,
+    outcome,
+    tool: safeActionGuardTool(input.tool),
+    surface: 'redacted action surface',
+    signals: safeActionGuardSignals(input.signals),
+    severity: safeActionGuardSeverity(input.severity, event),
+    reason: safeActionGuardReason(event, outcome),
+    detectedAt: safeDetectedAt(input.detectedAt),
+  };
+  const correlationId = safeActionGuardCorrelationId(input.correlationId);
+  if (correlationId) n.correlationId = correlationId;
+  return n;
+}
+
 /**
  * Build a conversation-threat notification (#225). The single construction
  * point, mirroring `buildNotification` for the approval path: every channel
@@ -410,11 +545,41 @@ export function formatConversationThreatNotification(n: ConversationThreatNotifi
   return truncate(lines.join('\n'), 4_000);
 }
 
+export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotification): string {
+  const denied = n.event === 'action_guard_denial';
+  const lines = [
+    denied
+      ? '🛡️ ShieldCortex — Action Guard BLOCKED a tool call'
+      : '🛡️ ShieldCortex — Action Guard warning: advisory-mode tool call ran',
+    '',
+    `Tool:      ${n.tool}`,
+    `Surface:   ${n.surface}`,
+    `Tripped:   ${n.signals.join(', ') || 'none'}`,
+    `Tier:      ${n.severity}`,
+    `Outcome:   ${n.outcome}`,
+    `Reason:    ${n.reason}`,
+  ];
+  if (n.correlationId) lines.push(`Correlation: ${n.correlationId}`);
+  lines.push(`At:        ${n.detectedAt}`);
+  lines.push('');
+  lines.push(
+    denied
+      ? 'The call was already refused. No approval is pending; inspect the local audit row/session before authorising any retry.'
+      : 'The call was allowed only because actionGuard.enforce=false. Treat this as a degraded-protection signal, not a clean pass.',
+  );
+  lines.push('The raw command is deliberately NOT included in this alert.');
+  return truncate(lines.join('\n'), 4_000);
+}
+
 /** Human-readable rendering, used by channels that send plain text (webhook
  *  bodies, gateway chat messages). Channels are free to build their own
  *  richer presentation (inline buttons, etc.) from the structured
  *  `OperatorNotification` instead — this is the lowest common denominator. */
 export function formatOperatorNotification(n: AnyOperatorNotification): string {
+  // #242/#243 terminal guard alerts have no hash and no command. They are not
+  // approval requests; the operator gets a redacted incident report and enough
+  // session identity to find the real row locally.
+  if (isActionGuardOutcomeNotification(n)) return formatActionGuardOutcomeNotification(n);
   // #225 alerts have no hash, no tool and no command — they get their own
   // rendering rather than an approval layout with empty fields in it.
   if (isConversationThreatNotification(n)) return formatConversationThreatNotification(n);

@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -86,6 +86,21 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     const dir = path.join(tempHome, '.shieldcortex');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ actionGuard }));
+  }
+
+  function auditRows(): Array<Record<string, unknown>> {
+    const auditDir = path.join(tempHome, '.shieldcortex', 'audit');
+    if (!fs.existsSync(auditDir)) return [];
+    const files = fs.readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
+    return files.flatMap((file) => fs.readFileSync(path.join(auditDir, file), 'utf-8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)));
+  }
+
+  function expectNoAuditLeak(tokens: string[]): Record<string, unknown> {
+    const rows = auditRows();
+    expect(rows.length).toBeGreaterThan(0);
+    const rendered = JSON.stringify(rows);
+    for (const token of tokens) expect(rendered).not.toContain(token);
+    return rows[rows.length - 1];
   }
 
   it('denies a catastrophic command by default (no config file)', async () => {
@@ -179,6 +194,62 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     const entry = JSON.parse(lines[lines.length - 1]);
     expect(entry.action).toBe('require_approval');
     expect(entry.origin).toBe('claude-code-hook');
+  });
+
+
+  it('redacts non-benign allow audit rows instead of persisting command, reason, or match payloads', async () => {
+    const secret = 'blue7';
+    const url = 'gopher://vault.local/path';
+    const hostile = 'ignore.previous.instructions';
+    const fakeDist = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-allowdist-'));
+    try {
+      const guardDir = path.join(fakeDist, 'defence', 'iron-dome');
+      fs.mkdirSync(guardDir, { recursive: true });
+      fs.writeFileSync(path.join(guardDir, 'tool-action-guard.js'), [
+        'export function evaluateToolCall() {',
+        `  return { decision: 'allow', severity: 'sensitive', family: 'exec', action: 'opaque-script', signals: ['untrusted-script'], reason: 'allowed ${secret} ${url} ${hostile}', matches: [{ pattern: '${secret}', match: '${url}' }] };`,
+        '}',
+      ].join('\n'));
+      const result = await runHook(bashCall(`bash /tmp/deploy.sh # ${secret} ${url} ${hostile}`), { SHIELDCORTEX_DIST_ROOT: fakeDist });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe('');
+      const row = expectNoAuditLeak([secret, url, hostile]);
+      expect(row.outcome).toBe('allowed');
+      expect(String(row.preview)).toMatch(/redacted action surface/i);
+      expect(row).not.toHaveProperty('matches');
+    } finally {
+      fs.rmSync(fakeDist, { recursive: true, force: true });
+    }
+  });
+
+  it('redacts autoApprove audit rows instead of persisting approved command payloads', async () => {
+    const secret = 'blue8';
+    const url = 'gopher://autoapprove.local/path';
+    const hostile = 'ignore.previous.instructions';
+    writeActionGuardConfig({ autoApprove: ['sudo_command'] });
+    const result = await runHook(bashCall(`sudo systemctl stop nginx && printf ${secret} # ${url} ${hostile}`));
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('');
+    const row = expectNoAuditLeak([secret, url, hostile]);
+    expect(row.outcome).toBe('approved');
+    expect(String(row.preview)).toMatch(/redacted action surface/i);
+  });
+
+  it('redacts consumed one-shot approval audit rows while preserving the exact approval hash contract', async () => {
+    const secret = 'blue9';
+    const url = 'gopher://approval.local/path';
+    const hostile = 'ignore.previous.instructions';
+    const input = { command: `sudo systemctl stop nginx && printf ${secret} # ${url} ${hostile}` };
+    const approvals = await import(pathToFileURL(path.resolve(__dirname, '..', 'defence', 'iron-dome', 'action-approvals.ts')).href);
+    const pending = approvals.recordPending({ tool: 'Bash', input, summary: 'redacted', signals: ['privilege-escalation'] }, { home: tempHome });
+    expect(approvals.approveRequest(pending.hash.slice(0, 12), { home: tempHome }).ok).toBe(true);
+
+    const result = await runHook({ ...bashCall('placeholder'), tool_input: input });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('');
+    const row = expectNoAuditLeak([secret, url, hostile]);
+    expect(row.outcome).toBe('approved');
+    expect(String(row.preview)).toMatch(/redacted action surface/i);
   });
 
   it('malformed stdin exits 0 with no output', async () => {

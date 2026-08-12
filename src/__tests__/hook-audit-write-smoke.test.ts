@@ -42,7 +42,14 @@ function runHook(home: string): Promise<HookRun> {
   return new Promise((res, reject) => {
     const child = spawn(process.execPath, [HOOK_PATH], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: home },
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'),
+        SHIELDCORTEX_DIST_ROOT: resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist'),
+        SHIELDCORTEX_SESSION_SALT: undefined,
+      },
     });
     let stdout = '';
     let stderr = '';

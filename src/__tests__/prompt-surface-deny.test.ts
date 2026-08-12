@@ -93,6 +93,13 @@ describe('Action Guard hook — prompt-surface rule', () => {
     return JSON.parse(lines[lines.length - 1]);
   }
 
+  function localDenials(): Array<Record<string, unknown>> {
+    const file = path.join(tempHome, '.shieldcortex', 'denials.jsonl');
+    return fs.existsSync(file)
+      ? fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+  }
+
   describe('modes that can raise a prompt → ask', () => {
     it.each(['default', 'manual', 'acceptEdits', 'plan', 'auto'])('%s asks', async (mode) => {
       const result = await runHook(call(DANGEROUS_COMMAND, mode));
@@ -119,6 +126,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
       // carry both the original verdict and a way forward.
       expect(decision.permissionDecisionReason).toMatch(/ShieldCortex Action Guard/);
       expect(decision.permissionDecisionReason).toMatch(/autoApprove|enforce/);
+      expect(decision.permissionDecisionReason).not.toMatch(/shieldcortex approve [0-9a-f]{12}/);
     });
 
     it('denies when the harness sends no permission_mode at all', async () => {
@@ -137,6 +145,55 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(entry.outcome).toBe('denied_no_prompt_surface');
       expect(entry.permissionMode).toBe('bypassPermissions');
       expect(String(entry.noPromptSurfaceReason)).toMatch(/no prompt/i);
+    });
+
+    it('records a zero-config local denial event when no webhook notification is configured', async () => {
+      const secret = 'PRIVATE_ZERO_CONFIG_DENIAL_SENTINEL';
+      const result = await runHook(call(`${DANGEROUS_COMMAND} # ${secret}`, 'bypassPermissions'));
+
+      expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
+      expect(result.stderr).toMatch(/denials\.jsonl/);
+      const rows = localDenials();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        event: 'action_guard_denial',
+        outcome: 'denied_no_prompt_surface',
+        tool: 'Bash',
+      });
+      expect(String(rows[0].surface)).toMatch(/redacted action surface/i);
+      expect(JSON.stringify(rows[0])).not.toContain(DANGEROUS_COMMAND);
+      expect(JSON.stringify(rows[0])).not.toContain(secret);
+      expect(String(rows[0].correlationId)).toMatch(/^sc-[a-f0-9]{16}$/);
+    });
+
+    it('records the local denial before notify loading, even when the configured dist root is unusable', async () => {
+      writeActionGuardConfig({ notify: { enabled: true, webhookUrl: 'http://127.0.0.1:1/hook', timeoutMs: 600 } });
+      const badDist = path.join(tempHome, 'missing-dist-root');
+      const result = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'), {
+        SHIELDCORTEX_DIST_ROOT: badDist,
+      });
+
+      expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
+      const rows = localDenials();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        event: 'action_guard_denial',
+        outcome: 'denied_no_prompt_surface',
+        tool: 'Bash',
+      });
+    });
+
+    it('does not write local denials through a symlinked .shieldcortex directory', async () => {
+      const outside = path.join(tempHome, 'outside-shieldcortex');
+      fs.mkdirSync(outside);
+      fs.symlinkSync(outside, path.join(tempHome, '.shieldcortex'));
+
+      const result = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
+
+      expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
+      expect(result.stderr).toMatch(/local action-guard outcome sink UNWRITABLE/);
+      expect(fs.existsSync(path.join(outside, 'denials.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(outside, 'audit'))).toBe(false);
     });
 
     it('separates a prompt-surface deny from a catastrophic auto-deny', async () => {
@@ -257,7 +314,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
       return JSON.parse(deliveries[0].body);
     }
 
-    it('delivers a denied_no_prompt_surface event naming the reason, the session and the cwd', async () => {
+    it('delivers a redacted action_guard_denial event naming safe session and cwd', async () => {
       writeNotifyConfig();
       const payload = call(DANGEROUS_COMMAND, 'bypassPermissions');
       payload.session_id = 'nightly-backup-42';
@@ -269,16 +326,17 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
 
       const body = delivered();
-      expect(deliveries[0].headers['x-shieldcortex-event']).toBe('denied_no_prompt_surface');
-      expect(body.event).toBe('denied_no_prompt_surface');
-      expect(String(body.deniedReason)).toMatch(/bypassPermissions mode shows no prompt/);
-      expect(body.sessionId).toBe('nightly-backup-42');
-      expect(body.cwd).toBe('/home/ubuntu/backups');
-      // The wording is true at the moment it arrives, and the retry is still
-      // authorisable — but nothing is offered that would do nothing.
+      expect(deliveries[0].headers['x-shieldcortex-event']).toBe('action_guard_denial');
+      expect(body.event).toBe('action_guard_denial');
+      expect(body.outcome).toBe('denied_no_prompt_surface');
+      expect(body.correlationId).toMatch(/^sc-[a-f0-9]{16}$/);
+      expect(body.sessionId).toBeUndefined();
+      expect(body.cwd).toBeUndefined();
+      expect(String(body.surface)).toMatch(/redacted action surface/i);
+      expect(JSON.stringify(body)).not.toContain(DANGEROUS_COMMAND);
       expect(String(body.text)).toMatch(/BLOCKED/);
-      expect(String(body.text)).toMatch(/did NOT run/i);
-      expect(String(body.approveCommand)).toMatch(/shieldcortex approve [0-9a-f]{12}/);
+      expect(String(body.text)).toMatch(/raw command is deliberately NOT included/i);
+      expect(body.approveCommand).toBeUndefined();
       expect(body.denyCommand).toBeUndefined();
     });
 
@@ -309,31 +367,36 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(String(body.text)).toContain('approval needed');
     });
 
-    it('the notification carries the SAME hash the denial reason offers for the retry', async () => {
-      writeNotifyConfig();
-      const result = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
-      const reason = String(decisionOf(result.stdout).permissionDecisionReason);
-      expect(String(delivered().shortHash)).toBe(reason.match(/shieldcortex approve ([0-9a-f]{12})/)![1]);
-    });
-
-    it('the approve command it offers really does authorise the retry', async () => {
-      // The denial text tells the operator that approving unblocks the NEXT
-      // attempt. That is only true because the pending record is written
-      // before the prompt-surface branch — pin it, or the message becomes a
-      // promise the guard does not keep.
+    it('the denied notification has no approve/deny commands because no held action remains', async () => {
       writeNotifyConfig();
       await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
-      const shortHash = String(delivered().shortHash);
+      const body = delivered();
+      expect(body.shortHash).toBeUndefined();
+      expect(body.hash).toBeUndefined();
+      expect(body.approveCommand).toBeUndefined();
+      expect(body.denyCommand).toBeUndefined();
+    });
 
-      const { approveRequest } = await import(
-        pathToFileURL(path.join(REPO_ROOT, 'dist', 'defence', 'iron-dome', 'action-approvals.js')).href
-      ) as { approveRequest: (h: string, o: { home: string }) => { ok: boolean } };
-      expect(approveRequest(shortHash, { home: tempHome }).ok).toBe(true);
+    it('omits unsafe session and cwd context from terminal denial notifications and audit rows', async () => {
+      const secret = 'DO_NOT_PERSIST_CONTEXT_VALUE_1234567890';
+      writeNotifyConfig();
+      const payload = call(`${DANGEROUS_COMMAND} # ${secret}`, 'bypassPermissions');
+      payload.session_id = `nightly-${secret}`;
+      payload.cwd = `/tmp/${secret}/https://example.invalid/token`;
+      payload.permission_mode = `weird-${secret}`;
 
-      // The retry now defers to the harness's own permission system: no
-      // decision emitted at all, exactly as #118 has always behaved.
-      const retry = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
-      expect(retry.stdout).toBe('');
+      const result = await runHook(payload);
+
+      expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
+      const body = delivered();
+      expect(body.event).toBe('action_guard_denial');
+      expect(body.sessionId).toBeUndefined();
+      expect(body.cwd).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain(secret);
+      expect(JSON.stringify(lastAudit())).not.toContain(secret);
+      expect(result.stdout).not.toContain(secret);
+      expect(result.stdout).not.toContain('https://example.invalid');
+      expect(result.stderr).not.toContain(secret);
     });
 
     // ── the property that matters most ──────────────────────────────────────
