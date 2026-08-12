@@ -99,6 +99,16 @@ const SAYS_INVALID = /config is invalid|"valid"\s*:\s*false|^\s*[×✗]\s/m;
  */
 const SAYS_REFUSED = /unknown command|too many arguments|unknown option|unrecognized (command|option)|could ?not start the cli/i;
 
+/**
+ * OpenClaw stating a VERDICT, as opposed to a bullet that merely looks like
+ * one. These are proof that `config validate` ran and judged — the refusal veto
+ * must not override them, or unrelated plugin stderr containing "unknown
+ * option" (which OpenClaw's own plugin loader emits routinely) turns a proven
+ * invalid config into `indeterminate` and the operator is told nothing is
+ * wrong. The veto exists to discount the WEAK `×`/`✗` bullet evidence only.
+ */
+const SAYS_INVALID_STRONG = /config is invalid|"valid"\s*:\s*false/i;
+
 export function defaultConfigPath(home: string): string {
   return process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(home, '.openclaw', 'openclaw.json');
 }
@@ -193,7 +203,8 @@ export function validateOpenClawConfig(
   // argument applies to the subcommand itself. So: require OpenClaw to SAY the
   // config is invalid. Anything else fails open.
   const blob = `${r.stderr}\n${r.stdout}`;
-  if (SAYS_REFUSED.test(blob) || !SAYS_INVALID.test(blob)) {
+  // Strong proof wins over the refusal veto; the veto only discounts bullets.
+  if ((SAYS_REFUSED.test(blob) && !SAYS_INVALID_STRONG.test(blob)) || !SAYS_INVALID.test(blob)) {
     return {
       state: 'indeterminate',
       reason: '`openclaw config validate` is not supported by this OpenClaw',

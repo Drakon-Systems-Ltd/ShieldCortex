@@ -77,8 +77,26 @@ export interface SummariseOptions {
    * `plugins` subcommand, where those lines are its own output — filtering
    * them there produced an empty summary, i.e. a failure with no stated
    * reason, which is the class of defect this module exists to remove.
+   *
+   * Keeping them does NOT promote them: a retained `[plugins] …` line ranks
+   * below every non-plugin line in its band, so another plugin's TypeError
+   * cannot outrank the real `npm error … EAI_AGAIN` that actually failed the
+   * step. Last resort, not equal citizen.
    */
   dropPluginChatter?: boolean;
+  /**
+   * Guarantee a non-empty result whenever the raw output had ANY content, by
+   * re-admitting noise lines when the filters would otherwise leave nothing.
+   *
+   * The caller's need is real — a failed step must never report a blank
+   * reason. It must be served HERE rather than by the call site falling back
+   * to `output.split('\n')[0]`, because every safety guarantee of this module
+   * (env-value redaction, credential patterns, home scrubbing, line and char
+   * caps) lives on this path and none of it exists on a raw string. A probe
+   * with `NPM_TOKEN` set proved the call-site fallback emitted the token
+   * verbatim, plus the absolute home path, whenever output was all `npm warn`.
+   */
+  neverEmpty?: boolean;
 }
 
 /** Read no more than this from either stream before doing regex work. */
@@ -188,15 +206,34 @@ function scrubHome(text: string, home: string): string {
   return text.split(home).join('~');
 }
 
-function cleanLines(raw: string, dropPluginChatter: boolean): string[] {
+function cleanLines(raw: string, dropPluginChatter: boolean, keepNoise = false): string[] {
   return raw
     .replace(ANSI_PATTERN, '')
     .replace(/\r/g, '')
     .split('\n')
     .map(line => line.trimEnd())
     .filter(line => line.trim().length > 0)
-    .filter(line => !NOISE_PATTERN.test(line.trim()))
+    .filter(line => keepNoise || !NOISE_PATTERN.test(line.trim()))
     .filter(line => !(dropPluginChatter && PLUGIN_CHATTER_PATTERN.test(line.trim())));
+}
+
+/**
+ * Plugin chatter last, source order preserved within each band.
+ *
+ * Only reachable when `dropPluginChatter` is false, i.e. when the command IS a
+ * plugins subcommand. Its own `[plugins]` lines must remain available as a
+ * reason of last resort without being allowed to outrank the actual failure.
+ */
+function pluginsLast(lines: string[], takeHead: boolean): string[] {
+  const chatter = (line: string) => PLUGIN_CHATTER_PATTERN.test(line.trim());
+  const own = lines.filter(l => !chatter(l));
+  const theirs = lines.filter(chatter);
+  // "Last resort" is a statement about the PICK, not about array order: the
+  // head paths slice from the front, the no-signal failure path slices from the
+  // tail. Demoting chatter therefore means pushing it to the opposite end from
+  // wherever the slice is taken — sorting it to the back unconditionally would
+  // hand the tail path nothing BUT chatter.
+  return takeHead ? [...own, ...theirs] : [...theirs, ...own];
 }
 
 /**
@@ -234,7 +271,16 @@ export function summariseCommandOutput(
     allowlist: ['sha512-', 'sha1-', 'sha256-'],
   });
 
-  const all = cleanLines(scrubHome(redacted, home), opts.dropPluginChatter ?? true);
+  const scrubbed = scrubHome(redacted, home);
+  const dropPluginChatter = opts.dropPluginChatter ?? true;
+  let all = cleanLines(scrubbed, dropPluginChatter);
+  if (all.length === 0 && opts.neverEmpty) {
+    // Everything was noise. Re-admit it rather than hand the caller nothing —
+    // still redacted, scrubbed and capped, because it comes back through the
+    // same path.
+    all = cleanLines(scrubbed, dropPluginChatter, true);
+    if (all.length > 0) truncated = true;
+  }
   if (all.length === 0) return { lines: [], truncated };
 
   // `plain` skips ranking entirely: for output of a command that succeeded there
@@ -243,18 +289,21 @@ export function summariseCommandOutput(
     ? []
     : all.filter(line => SIGNAL_PATTERN.test(line) && !REASSURANCE_PATTERN.test(line));
   const usedSignal = signal.length > 0;
-  // Strongest cause first, original order preserved within each band — the
-  // EARLIEST signal line is not reliably the most informative one.
-  const ranked = usedSignal
-    ? [...signal.filter(l => STRONG_SIGNAL_PATTERN.test(l)), ...signal.filter(l => !STRONG_SIGNAL_PATTERN.test(l))]
-    : all;
-
   // plain: keep the head (the primary outcome line comes first).
   // failure+signal: ranked head. failure+no-signal: tail, where a stack trace's
   // most specific frame sits.
-  let picked = usedSignal || (opts.mode ?? 'failure') === 'plain'
-    ? ranked.slice(0, maxLines)
-    : ranked.slice(-maxLines);
+  const takeHead = usedSignal || (opts.mode ?? 'failure') === 'plain';
+  // Strongest cause first, original order preserved within each band — the
+  // EARLIEST signal line is not reliably the most informative one. Retained
+  // plugin chatter sinks away from the end being picked.
+  const ranked = pluginsLast(
+    usedSignal
+      ? [...signal.filter(l => STRONG_SIGNAL_PATTERN.test(l)), ...signal.filter(l => !STRONG_SIGNAL_PATTERN.test(l))]
+      : all,
+    takeHead,
+  );
+
+  let picked = takeHead ? ranked.slice(0, maxLines) : ranked.slice(-maxLines);
   if (picked.length < all.length) truncated = true;
 
   picked = picked.map(line =>

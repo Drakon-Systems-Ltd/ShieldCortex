@@ -303,13 +303,18 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     // and filtering them left a failed step with a blank reason. `mode` follows
     // the outcome — failure ranking on a successful command promotes whichever
     // line happens to contain a word like "conflict".
+    // `neverEmpty` rather than a fallback here: a raw `r.output` fallback at
+    // this call site skipped env-value redaction, home scrubbing and the line
+    // caps, and a probe with NPM_TOKEN set proved it emitted the token verbatim
+    // whenever the output was all `npm warn`. The guarantee belongs on the path
+    // that owns the redaction.
     const summarised = summariseCommandOutput(r.output, {
       maxLines: 1,
       dropPluginChatter: false,
       mode: ok ? 'plain' : 'failure',
+      neverEmpty: true,
     });
-    // Never report a failure with no reason — that is the defect, not the fix.
-    const summary = summarised.lines[0] ?? r.output.trim().split('\n')[0]?.trim() ?? '';
+    const summary = summarised.lines[0] ?? '';
     stepResults.push({ kind: step.kind, ok, detail: summary });
     if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${summary}`);
   }
