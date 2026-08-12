@@ -131,7 +131,7 @@ export function scanForCredentials(
   }
 
   const findings: CredentialFinding[] = [];
-  const matchedRanges: Array<{ start: number; end: number; replacement: string }> = [];
+  let matchedRanges: Array<{ start: number; end: number; replacement: string }> = [];
 
   const patterns = [...ALL_CREDENTIAL_PATTERNS, ...cfg.customPatterns];
 
@@ -197,17 +197,21 @@ export function scanForCredentials(
     const start = token.position;
     const end = start + token.token.length;
 
-    // Skip if already caught by pattern matching
-    if (matchedRanges.some(r =>
-      (start >= r.start && start < r.end) ||
-      (end > r.start && end <= r.end),
-    )) continue;
+    // Skip only when an earlier pattern already covers the ENTIRE entropy
+    // token. A low-confidence pattern can match just the repeated filler prefix
+    // of a padded secret (`aaaa...` as a generic hex/Azure key). Treating that
+    // partial overlap as "already caught" left the real high-entropy suffix raw
+    // in redacted output — exactly the #257 bypass shape.
+    if (matchedRanges.some(r => start >= r.start && end <= r.end)) continue;
 
     // Skip allowlisted
     if (isAllowlisted(token.token, cfg.allowlist)) continue;
 
     // Range FIRST, and unconditionally — a repeat must still be redacted even
-    // though it will not produce a second finding below.
+    // though it will not produce a second finding below. Drop narrower pattern
+    // ranges contained inside this entropy token so a filler-only match cannot
+    // split or shrink the redaction span.
+    matchedRanges = matchedRanges.filter(r => !(r.start >= start && r.end <= end));
     matchedRanges.push({ start, end, replacement: '[REDACTED-high_entropy]' });
 
     if (reportedEntropyTokens.has(token.token)) continue;

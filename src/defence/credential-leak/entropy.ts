@@ -40,6 +40,84 @@ export const MIN_ENTROPY_LENGTH = 20;
 /** Entropy threshold — strings above this are flagged */
 export const ENTROPY_THRESHOLD = 4.5;
 
+/** A repeated unit of up to this many chars counts as filler, e.g. the 'aaaa-' in 'aaaa-aaaa-...'. */
+const FILLER_MAX_UNIT_LENGTH = 8;
+
+/** A unit must repeat at least this many times back-to-back to count as filler, not coincidence. */
+const FILLER_MIN_REPEATS = 3;
+
+/**
+ * Strip a repeated-unit low-entropy run from the START of a string. Every
+ * candidate unit length is tried once and the one covering the MOST characters
+ * wins — a short unit reliably present (e.g. "a" x4) must not pre-empt a
+ * longer one that actually covers the whole filler run (e.g. "aaaa-" x12).
+ *
+ * This is deliberately single-pass over the token for each unit length. The
+ * scanner runs on untrusted content; repeated strip/rescan loops invite
+ * avoidable hot-path cost on long low-entropy padding.
+ */
+function stripLeadingFiller(s: string): string {
+  let bestCoverage = 0;
+  for (let unit = 1; unit <= FILLER_MAX_UNIT_LENGTH; unit++) {
+    if (s.length < unit * FILLER_MIN_REPEATS) continue;
+    const chunk = s.slice(0, unit);
+    let reps = 1;
+    while (s.slice(reps * unit, (reps + 1) * unit) === chunk) reps++;
+    if (reps >= FILLER_MIN_REPEATS) bestCoverage = Math.max(bestCoverage, unit * reps);
+  }
+  return bestCoverage === 0 ? s : s.slice(bestCoverage);
+}
+
+/**
+ * Strip a repeated low-entropy filler run from both ends of a token, e.g.
+ * "aaaa-aaaa-aaaa-<secret>" → "<secret>". This is the direct fix for #257:
+ * padding a secret with repeated filler dilutes WHOLE-TOKEN entropy below
+ * ENTROPY_THRESHOLD, so `checkHighEntropy` went silent even though the secret
+ * itself, scored on its own, is well above threshold.
+ *
+ * Deliberately narrow — this defeats REPEATED-unit filler specifically, not
+ * arbitrary low-entropy affixes (a non-repeating low-entropy prefix like a
+ * dictionary word is a harder, attacker-adaptive problem tracked as a known
+ * limitation of the entropy net, not fixed here). A sliding fixed-size window
+ * was tried first and rejected: measured against random secrets, a 24-32 char
+ * window's empirical entropy is biased low by sample size (birthday-style
+ * collisions in a short window under-count true alphabet diversity), missing
+ * a large fraction of genuine padded secrets — see #257 discussion. Rescoring
+ * the full stripped remainder keeps the same sample size — and therefore the
+ * same statistical reliability — as the existing bare-secret path.
+ */
+function stripRepeatedFillerAffixes(token: string): string {
+  const stripped = stripLeadingFiller(token);
+  const reversed = stripLeadingFiller([...stripped].reverse().join(''));
+  return [...reversed].reverse().join('');
+}
+
+/**
+ * Entropy of a string, accounting for repeated-filler padding (#257): if the
+ * whole string scores below a padded secret's true entropy because low-entropy
+ * filler dilutes the average, this also scores the filler-stripped core and
+ * returns whichever is higher.
+ *
+ * This is the SINGLE source of truth for "how high-entropy is this token,
+ * really" — every gate that decides whether a token looks like a secret based
+ * on its entropy (the confidence check below, and the npm-specifier false-
+ * positive filter in `isLikelyFalsePositive`) must call this, not
+ * `shannonEntropy` directly, or it re-opens the same padding bypass from a
+ * different gate.
+ */
+export function effectiveEntropy(str: string): number {
+  const whole = shannonEntropy(str);
+  if (whole >= ENTROPY_THRESHOLD) return whole;
+
+  // Only pay for the strip-and-rescore when the fast path already failed, so
+  // ordinary content (the common case) stays on the cheap single-call path.
+  const core = stripRepeatedFillerAffixes(str);
+  if (core.length === str.length || core.length < MIN_ENTROPY_LENGTH) return whole;
+
+  const coreEntropy = shannonEntropy(core);
+  return Math.max(whole, coreEntropy);
+}
+
 /**
  * Check if a string looks like a high-entropy secret.
  * Returns confidence score (0-1) or null if not suspicious.
@@ -47,7 +125,7 @@ export const ENTROPY_THRESHOLD = 4.5;
 export function checkHighEntropy(str: string): { entropy: number; confidence: number } | null {
   if (str.length < MIN_ENTROPY_LENGTH) return null;
 
-  const entropy = shannonEntropy(str);
+  const entropy = effectiveEntropy(str);
   if (entropy < ENTROPY_THRESHOLD) return null;
 
   // Confidence scales with entropy above threshold
@@ -155,9 +233,14 @@ function isLikelyFalsePositive(token: string): boolean {
   // an OpenAI project key stayed invisible in all contexts (VDP 2026-08-05).
   // A genuine package specifier is low-entropy; key material is not, so
   // entropy is the discriminator that keeps the rule's intent without the hole.
+  //
+  // Uses effectiveEntropy, not raw shannonEntropy: this shape (dash-separated,
+  // no slashes) is exactly what 'aaaa-'.repeat(n) + <secret> tokenises to, so
+  // a raw whole-token check here reopens the #257 padding bypass one gate
+  // earlier than `checkHighEntropy` — the token never even reaches it.
   if (
     /^@?[a-z][a-z0-9._-]*(?:\/[a-z][a-z0-9._-]*)?$/i.test(token) &&
-    shannonEntropy(token) < ENTROPY_THRESHOLD
+    effectiveEntropy(token) < ENTROPY_THRESHOLD
   )
     return true;
 
