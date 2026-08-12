@@ -2,7 +2,7 @@
 
 *A second brain with a defence system built in.*
 
-Status anchor: **v4.45.2** · 2026-07-01 · claims proven: **12/12** (`docs/CLAIMS-PROOF.md`)
+Status anchor: **v4.47.39** · 2026-08-12 · claims proven: **12/12** (`docs/CLAIMS-PROOF.md`)
 
 ---
 
@@ -60,6 +60,9 @@ where thought meets the outside world.
 → `lifecycle` (decay, compaction/VACUUM, retention).
 
 ### The immune system (defence) — five guard pillars + a ledger
+
+(Memory, Recall/ACL, Iron Dome, Environment Firewall, Overseer — plus Forensics, which is
+the cross-cutting ledger rather than a sixth guard.)
 Each pillar guards a distinct surface. The project already names them; this scope matures
 them, it does not invent them.
 
