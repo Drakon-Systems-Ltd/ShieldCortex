@@ -2203,12 +2203,49 @@ function foldScriptSources(
 // its `PATTERNS = {'recursive-force-delete': r'rm -rf'}` is a dict of strings and
 // its `at = tok['access_token']` is an assignment. Locate those bodies so the
 // span classifier can treat them as the interpreter source they are.
+/**
+ * Writing a FILE is a sink too, once the body's language is being trusted (#217).
+ *
+ * `SHELL_OUT_SINK` knows process sinks. A written-then-executed body that only
+ * writes a file looks inert to it, so its literals get masked as data — but
+ *
+ *     cat > gen.mjs <<'EOF'
+ *     writeFileSync('/tmp/g.sh', 'rm -rf /');
+ *     EOF
+ *     node gen.mjs && bash /tmp/g.sh
+ *
+ * is the write-then-execute threat (#160) one level deeper: the literal IS the
+ * command, it just travels via a file. Caught by the must-not-break fixture
+ * while building the #217 fix, which had made this exact case allow.
+ *
+ * Deliberately broad and used ONLY on this path. A false "has sink" costs
+ * nothing but the pre-#217 behaviour — the body stays scanned as shell, which
+ * is what it did before — whereas a miss re-opens #160.
+ */
+const FILE_WRITE_SINK =
+  /\bwriteFile(?:Sync)?\b|\bappendFile(?:Sync)?\b|\bcreateWriteStream\b|\bfs\.write\b|\bopen\s*\([^)]*['"][waxr]\+?['"]|\bwrite_text\b|\bwrite_bytes\b|\bos\.write\b|\bshutil\.(?:copy|move)\w*|\bfile_put_contents\b|\bIO\.write\b|\bFile\.(?:write|open)\b|>\s*\S+\.(?:sh|bash|zsh|py|mjs|cjs|js|rb|pl|php)\b/;
+
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n([\s\S]*?)(?:\n[ \t]*\2\b|$)/g;
 const HEREDOC_INTERP_TOKEN = /\b(bash|sh|zsh|ksh|dash|python[\d.]*|node|nodejs|ruby|perl|php)\b(?![\w/-])/gi;
 
 function interpreterHeredocRegions(text: string): ScanRegion[] {
   if (!text.includes('<<')) return [];
   const found: Array<{ region: ScanRegion; outFile: string | null }> = [];
+  /**
+   * #217 — heredocs with NO interpreter on the intro line whose body is written
+   * to a file: `cat > probe.mjs <<'EOF' … EOF; node probe.mjs`.
+   *
+   * The body is re-armed (correctly — the file IS executed), but it was then
+   * scanned with SHELL rules, so a JavaScript string literal `"rm -rf /"` read
+   * as a live command and hard-blocked at the catastrophic tier. The language
+   * of such a body is decided by whatever later RUNS the file, which is not
+   * knowable on the intro line, so these are resolved in a second pass below.
+   *
+   * The asymmetry this removes, measured: `python3 - <<'PY' … PY` (interpreter
+   * consumes the heredoc) returned benign, while the same literals written to a
+   * file and executed returned catastrophic.
+   */
+  const written: Array<{ start: number; end: number; body: string; outFile: string }> = [];
   const candidateFiles: string[] = [];
   ANY_HEREDOC_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -2216,7 +2253,18 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const lineStart = text.lastIndexOf('\n', m.index) + 1;
     const introLine = text.slice(lineStart, m.index);
     const interp = introLine.match(HEREDOC_INTERP_TOKEN);
-    if (!interp) continue;                              // nothing executes it as code
+    const nlEarly = m[0].indexOf('\n');
+    if (!interp) {
+      // No interpreter here, but if the body lands in a file the second pass
+      // may still find one that runs it.
+      const target = heredocOutputFile(introLine + m[0].slice(0, nlEarly + 1));
+      const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
+      if (cleaned) {
+        const s = m.index + nlEarly + 1;
+        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned });
+      }
+      continue;                                         // nothing executes it as code
+    }
     const lang = langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase()));
     if (lang === 'sh') continue;                        // a shell heredoc IS shell — unchanged
     const nl = m[0].indexOf('\n');
@@ -2234,9 +2282,50 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
       outFile: clean,
     });
   }
-  if (found.length === 0) return [];
+  // #217 second pass: resolve each written-then-executed body by the language of
+  // whatever actually runs it. `detectScriptInvocations` is the single
+  // definition of program position in this file — it skips flags, understands
+  // inline-program flags and recurses into `bash -c` — and it already carries
+  // the lang, so reuse it rather than add a second, divergent notion of which
+  // interpreter runs what (the recurring root cause in this file is a rule
+  // implemented twice).
+  const carved: ScanRegion[] = [];
+  if (written.length > 0) {
+    const invoked = detectScriptInvocations(text);
+    // At the detection cap a later real invocation may not have been reached,
+    // so claim nothing and leave every body scanned as shell — fail closed.
+    if (invoked.length < MAX_DETECTED_SCRIPTS) {
+      for (const w of written) {
+        const run = invoked.find(({ path }) =>
+          path === w.outFile
+          || path.endsWith(`/${w.outFile}`)
+          || w.outFile.endsWith(`/${path}`)
+          || path === `./${w.outFile}`);
+        // Executed by a shell, or not executed at all: unchanged. The former is
+        // the write-then-execute case #86.2/#160 exist to catch — that body
+        // really is the source of a command.
+        if (!run || run.lang === 'sh') continue;
+        carved.push({
+          start: w.start,
+          end: w.end,
+          lang: run.lang,
+          // A body that can reach a process — `child_process`, `execSync` — or
+          // that can WRITE a file another command then runs, keeps its literals
+          // live, exactly as the inline-program path does. Only the provably
+          // sink-free case is relaxed.
+          hasSink: SHELL_OUT_SINK.test(w.body) || FILE_WRITE_SINK.test(w.body),
+          folded: false,
+        });
+      }
+    }
+  }
+
+  if (found.length === 0) return carved;
   const executedFiles = findInterpreterRunFiles(text, candidateFiles);
-  return found.filter(f => !(f.outFile && executedFiles.has(f.outFile))).map(f => f.region);
+  return [
+    ...found.filter(f => !(f.outFile && executedFiles.has(f.outFile))).map(f => f.region),
+    ...carved,
+  ];
 }
 
 /**
