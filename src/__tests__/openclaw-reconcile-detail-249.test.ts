@@ -1,8 +1,13 @@
 /**
- * Round-2 review regressions on #249 (PR review 4913640155).
+ * Review regressions on #249 (PR reviews 4913640155 and the round-3 follow-up).
  *
- * All three were reproduced against built code before being fixed; each test
- * below fails on the previous commit.
+ * Every finding was reproduced against built code before being fixed, and each
+ * test that pins a fix fails on the commit preceding it. The remainder are
+ * guard cases asserting behaviour that must NOT change, and pass either side.
+ *
+ * The theme, twice over: a third party's chatter on our streams must carry no
+ * authority. Round 2 stopped it VETOING a real verdict; round 3 stopped it
+ * MANUFACTURING one. Fixing either direction alone leaves the mirror open.
  */
 import { summariseCommandOutput } from '../integrations/child-output.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
@@ -98,5 +103,43 @@ describe('#249: retained plugin chatter is a last resort, not a promotion', () =
       maxLines: 1, dropPluginChatter: false, mode: 'failure', home: HOME,
     });
     expect(r.lines[0]).toContain('x.js');
+  });
+});
+
+describe('#249: only validator-owned lines may reach a verdict', () => {
+  const run = (stdout: string, stderr: string) => validateOpenClawConfig(HOME, {
+    exists: () => true,
+    resolveBin: () => '/usr/bin/openclaw',
+    run: () => ({ status: 1, stdout, stderr } as never),
+  });
+
+  it('plugin chatter cannot MANUFACTURE strong proof under an explicit refusal', () => {
+    // The mirror of the round-2 finding: having stopped chatter vetoing a real
+    // verdict, it must not be able to supply a fake one either.
+    const v = run('[plugins] acme migration failed: cached config is invalid\nUnknown command: config validate\n', '');
+    expect(v.state).toBe('indeterminate');
+  });
+
+  it('plugin chatter cannot manufacture the JSON verdict form either', () => {
+    const v = run('[plugins] acme: last run reported "valid": false\nUnknown command: config validate\n', '');
+    expect(v.state).toBe('indeterminate');
+  });
+
+  it('plugin chatter cannot supply a REFUSAL that vetoes a real verdict', () => {
+    const v = run('OpenClaw config is invalid:\n  × bad key\n', '[plugins] acme: unknown option --x\n');
+    expect(v.state).toBe('invalid');
+  });
+
+  it('detail comes from the stream carrying the verdict, not merely from stderr', () => {
+    const v = run('OpenClaw config is invalid:\n  × channels.telegram: bad key\n', '[plugins] acme: noisy chatter\n');
+    expect(v.state).toBe('invalid');
+    expect(v.detail?.join('\n')).toContain('bad key');
+    expect(v.detail?.join('\n')).not.toMatch(/exited 1/);
+  });
+
+  it('still reports invalid from stderr in the normal inverted case', () => {
+    const v = run('', 'OpenClaw config is invalid:\n  × agents.main: unknown field\n');
+    expect(v.state).toBe('invalid');
+    expect(v.detail?.join('\n')).toContain('unknown field');
   });
 });

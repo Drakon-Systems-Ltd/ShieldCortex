@@ -109,6 +109,33 @@ const SAYS_REFUSED = /unknown command|too many arguments|unknown option|unrecogn
  */
 const SAYS_INVALID_STRONG = /config is invalid|"valid"\s*:\s*false/i;
 
+/**
+ * Another plugin narrating its own troubles on our streams. Removed BEFORE any
+ * verdict classification, in both directions:
+ *
+ * - it must not manufacture proof — `[plugins] acme migration failed: cached
+ *   config is invalid` alongside `Unknown command: config validate` otherwise
+ *   convicts a config on an OpenClaw that plainly refused the command, which is
+ *   #221 inverted and the exact failure this module's fail-open contract exists
+ *   to prevent;
+ * - and it must not supply a refusal — an `unknown option` from a plugin loader
+ *   would otherwise veto a verdict OpenClaw really did give.
+ *
+ * Only lines OpenClaw itself owns get a vote. Note this is a stricter rule than
+ * the summariser's `dropPluginChatter`, which may legitimately KEEP such lines
+ * as a reason of last resort; they may be worth showing an operator while still
+ * carrying no authority over the verdict.
+ */
+const PLUGIN_CHATTER_LINE = /^\s*\[plugins\]\s/i;
+
+/** Drop third-party chatter so only validator-owned lines classify. */
+function validatorOwnedLines(stream: string): string {
+  return stream
+    .split('\n')
+    .filter(line => !PLUGIN_CHATTER_LINE.test(line))
+    .join('\n');
+}
+
 export function defaultConfigPath(home: string): string {
   return process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(home, '.openclaw', 'openclaw.json');
 }
@@ -202,7 +229,11 @@ export function validateOpenClawConfig(
   // module's header already rejects `--json` for this exact reason; the same
   // argument applies to the subcommand itself. So: require OpenClaw to SAY the
   // config is invalid. Anything else fails open.
-  const blob = `${r.stderr}\n${r.stdout}`;
+  // Classify on validator-owned lines only — a third party's chatter can
+  // neither convict nor acquit. See `PLUGIN_CHATTER_LINE`.
+  const ownStderr = validatorOwnedLines(r.stderr ?? '');
+  const ownStdout = validatorOwnedLines(r.stdout ?? '');
+  const blob = `${ownStderr}\n${ownStdout}`;
   // Strong proof wins over the refusal veto; the veto only discounts bullets.
   if ((SAYS_REFUSED.test(blob) && !SAYS_INVALID_STRONG.test(blob)) || !SAYS_INVALID.test(blob)) {
     return {
@@ -212,8 +243,13 @@ export function validateOpenClawConfig(
   }
 
   // Invalid: stdout is empty and everything goes to stderr, inverted from the
-  // valid case — so prefer stderr but do not assume it.
-  const { lines } = summariseCommandOutput(r.stderr || r.stdout, { maxLines: 4 });
+  // valid case — so prefer stderr but do not assume it. Prefer whichever stream
+  // actually carries the verdict, though: "prefer stderr" alone reported the
+  // generic exit-code fallback when stderr held nothing but plugin chatter and
+  // the real `× bad key` sat in stdout.
+  const verdictStream = [ownStderr, ownStdout].find(s => SAYS_INVALID.test(s))
+    ?? (ownStderr.trim() ? ownStderr : ownStdout);
+  const { lines } = summariseCommandOutput(verdictStream, { maxLines: 4 });
   return {
     state: 'invalid',
     detail: lines.length > 0 ? lines : [`\`openclaw config validate\` exited ${r.status}`],
