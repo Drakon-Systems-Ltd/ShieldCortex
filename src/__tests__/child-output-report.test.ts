@@ -65,6 +65,83 @@ describe('#221 — output is destined for a pasted report, so it is redacted', (
   });
 });
 
+describe('#221 — the strongest cause wins, not the earliest line', () => {
+  /**
+   * Measured on a real fleet host: `openclaw <unknown-command>` emits two
+   * `[plugins] codex failed during register …: TypeError …` lines from an
+   * unrelated third-party plugin BEFORE OpenClaw's own reason. Both match on
+   * the word "failed", so taking the first signal line reported someone else's
+   * TypeError as the cause — one misleading headline swapped for another.
+   */
+  it('drops other plugins\' registration chatter and leads with the real reason', () => {
+    const real = [
+      "[plugins] codex failed during register from /x/dist/index.js: TypeError: Cannot read properties of undefined (reading 'openSyncKeyedStore')",
+      '[plugins] codex failed during register from /x/dist/index.js: TypeError: Cannot read properties of undefined',
+      '[openclaw] Could not start the CLI.',
+      '[openclaw] Reason: Unknown command: openclaw plugins install.',
+    ].join('\n');
+
+    const { lines } = summariseCommandOutput(real, { maxLines: 3, env: {} });
+
+    expect(lines.join('\n')).not.toContain('codex failed');
+    expect(lines[0]).toContain('Unknown command');
+  });
+
+  /**
+   * The char-fit loop used to `shift()` unconditionally. On the signal path the
+   * list is ranked most-important-first, so shifting deleted the line naming
+   * WHICH config file was invalid and promoted a sibling issue to `reason`.
+   */
+  it('trims from the end when lines are ranked, keeping the header', () => {
+    const long = '/Users/x/.openclaw/npm/projects/some-quite-long-vendor-plugin-directory-name/node_modules';
+    const out = [
+      'OpenClaw config is invalid: /Users/x/.openclaw/openclaw.json',
+      `  × plugins.load.paths[0]: plugin path not found: ${long}-alpha`,
+      `  × plugins.load.paths[1]: plugin path not found: ${long}-bravo`,
+      `  × plugins.entries.foo.path: plugin path not found: ${long}-charlie`,
+    ].join('\n');
+
+    const { lines, truncated } = summariseCommandOutput(out, { maxLines: 4, maxChars: 400, env: {} });
+
+    expect(lines[0]).toContain('OpenClaw config is invalid');
+    expect(truncated).toBe(true);
+  });
+
+  it('keeps the head when output exceeds the input cap', () => {
+    // The cap used to take the tail, discarding a diagnosis printed first
+    // before the signal filter could ever see it.
+    const out = 'OpenClaw config is invalid: /Users/x/.openclaw/openclaw.json\n' + 'filler line\n'.repeat(6000);
+
+    const { lines, truncated } = summariseCommandOutput(out, { maxLines: 2, env: {} });
+
+    expect(lines.join('\n')).toContain('OpenClaw config is invalid');
+    expect(truncated).toBe(true);
+  });
+});
+
+describe('#221 — the operator\'s identity does not travel with the report', () => {
+  it('abbreviates the home directory, as every other doctor path site does', () => {
+    const home = '/Users/somebody';
+    const { lines } = summariseCommandOutput(
+      `error: plugin path not found: ${home}/.openclaw/npm/projects/acme-client-plugin/dist/index.js`,
+      { home, env: {} },
+    );
+
+    const text = lines.join('\n');
+    expect(text).not.toContain(home);
+    expect(text).toContain('~/.openclaw');
+  });
+
+  it('redacts the longer of two secrets that share a prefix', () => {
+    // Visiting the shorter first left the tail of the longer one in cleartext,
+    // and the second pass then found nothing intact to replace.
+    const env = { MY_TOKEN: 'abcdefgh', MY_TOKEN_LONG: 'abcdefghIJKLMNOP' };
+    const { lines } = summariseCommandOutput('error: rejected token abcdefghIJKLMNOP', { env, home: '/nowhere' });
+
+    expect(lines.join('\n')).not.toContain('IJKLMNOP');
+  });
+});
+
 describe('#221 — the empty-output ladder never yields a bare "failed"', () => {
   const err = (over: Partial<CapturedError>): CapturedError =>
     Object.assign(new Error('exit 1: openclaw plugins install'), over) as CapturedError;
@@ -80,6 +157,25 @@ describe('#221 — the empty-output ladder never yields a bare "failed"', () => 
     const r = describeRunFailure(err({ exitCode: null, timedOut: true, command: 'openclaw plugins install' }));
     expect(r.timedOut).toBe(true);
     expect(r.reason).toContain('timed out');
+  });
+
+  /**
+   * How the process ENDED outranks whatever it managed to print. A step killed
+   * at the 120s wall usually has a plausible network line in its buffer;
+   * reporting that alone tells the operator to retry a transient blip when the
+   * real fact is a SIGTERM mid-flight and a possibly half-applied install.
+   */
+  it('a killed process is not reported as whatever it last printed', () => {
+    const r = describeRunFailure(err({
+      timedOut: true,
+      exitCode: null,
+      command: 'openclaw plugins install',
+      stderr: 'npm error network request to https://registry.npmjs.org/x failed, reason: socket hang up',
+    }));
+
+    expect(r.reason).toContain('timed out');
+    // The partial output is still available, just not masquerading as the cause.
+    expect(r.detail.join('\n')).toContain('socket hang up');
   });
 
   it('reports a missing binary distinctly from a non-zero exit', () => {

@@ -55,6 +55,8 @@ interface StepResult {
    * that was previously thrown away.
    */
   detail?: string[];
+  /** True when `detail` is a reduction of longer output (#221). */
+  truncated?: boolean;
 }
 
 async function step(
@@ -104,6 +106,9 @@ async function step(
     // failed>" and a message naming the config key to fix.
     for (const line of result.detail ?? []) {
       process.stdout.write(`     ${paint('gray', line)}\n`);
+    }
+    if (result.truncated) {
+      process.stdout.write(`     ${paint('gray', '… output truncated — run the command directly for the full text')}\n`);
     }
     return result;
   } catch (err) {
@@ -373,6 +378,7 @@ export async function stepOpenClawPlugin(
         status: 'warn' as const,
         summary: `update failed — ${report.reason}`,
         detail: report.detail,
+        truncated: report.truncated,
       };
     }
   });
@@ -416,6 +422,7 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
         status: 'warn' as const,
         summary: `reinstall failed — ${report.reason}`,
         detail: report.detail,
+        truncated: report.truncated,
       };
     }
   });

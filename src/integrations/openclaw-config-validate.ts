@@ -64,7 +64,7 @@ export interface ValidateDeps {
   resolveBin?: (home: string) => string | null;
   configPath?: (home: string) => string;
   exists?: (target: string) => boolean;
-  run?: (bin: string) => SpawnOutcome;
+  run?: (bin: string, home: string) => SpawnOutcome;
 }
 
 /**
@@ -75,15 +75,33 @@ export interface ValidateDeps {
  */
 export const VALIDATE_TIMEOUT_MS = 10_000;
 
+/**
+ * The argv, exported so a test can pin it. `--json` must never be added: an
+ * OpenClaw that does not know the flag exits non-zero with a usage dump.
+ */
+export const VALIDATE_ARGV = ['config', 'validate'] as const;
+
+/**
+ * OpenClaw positively asserting that the config is bad, in each shape it uses:
+ * the human header, the JSON body, and a per-issue bullet. A non-zero exit
+ * WITHOUT one of these is a CLI that did not understand us, not a broken config.
+ */
+const SAYS_INVALID = /config is invalid|"valid"\s*:\s*false|^\s*[×✗]\s/m;
+
 export function defaultConfigPath(home: string): string {
   return process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(home, '.openclaw', 'openclaw.json');
 }
 
-function defaultRun(bin: string): SpawnOutcome {
-  const r = spawnSync(bin, ['config', 'validate'], {
+function defaultRun(bin: string, home: string): SpawnOutcome {
+  const r = spawnSync(bin, [...VALIDATE_ARGV], {
     encoding: 'utf-8',
     timeout: VALIDATE_TIMEOUT_MS,
+    // stdin closed: a child that decided to prompt gets EOF rather than
+    // blocking doctor forever.
     stdio: ['ignore', 'pipe', 'pipe'],
+    // HOME threaded through, like every sibling spawn in the codebase — the
+    // verdict must describe the same account the checks it gates are about.
+    env: { ...process.env, HOME: home },
   });
   return {
     status: r.status,
@@ -126,7 +144,7 @@ export function validateOpenClawConfig(
 
   let r: SpawnOutcome;
   try {
-    r = (deps.run ?? defaultRun)(bin);
+    r = (deps.run ?? defaultRun)(bin, home);
   } catch (err) {
     return {
       state: 'indeterminate',
@@ -144,9 +162,32 @@ export function validateOpenClawConfig(
     return { state: 'indeterminate', reason: '`openclaw config validate` did not report an exit code' };
   }
 
-  // Exit code IS the verdict. Output is never inspected to reach it — that is
-  // what keeps a warnings-but-valid config (exit 0) out of the invalid arm.
+  // Exit 0 is ALWAYS valid, whatever the output says. That one-way rule is what
+  // keeps a warnings-but-valid config out of the invalid arm, and it is not
+  // weakened below: output is consulted only to DOWNGRADE a non-zero result.
   if (r.status === 0) return { state: 'valid' };
+
+  // A non-zero exit is not proof of an invalid config.
+  //
+  // Measured on 2026.7.1-2: `openclaw config <unknown-sub>` exits 1 with
+  // "Too many arguments for this command.", and `openclaw <unknown-cmd>` exits
+  // 1 with "Unknown command: …". An OpenClaw predating `config validate`
+  // answers exactly like that — so keying on the exit code alone would report a
+  // HEALTHY host as config-broken and then strip every remedy doctor has,
+  // including the one on a check whose own message says the gateway is running
+  // with no memory firewall and no action guard.
+  //
+  // That is #221 inverted, and strictly worse than the bug it fixes. This
+  // module's header already rejects `--json` for this exact reason; the same
+  // argument applies to the subcommand itself. So: require OpenClaw to SAY the
+  // config is invalid. Anything else fails open.
+  const blob = `${r.stderr}\n${r.stdout}`;
+  if (!SAYS_INVALID.test(blob)) {
+    return {
+      state: 'indeterminate',
+      reason: '`openclaw config validate` is not supported by this OpenClaw',
+    };
+  }
 
   // Invalid: stdout is empty and everything goes to stderr, inverted from the
   // valid case — so prefer stderr but do not assume it.

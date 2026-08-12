@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
+import { validateOpenClawConfig, VALIDATE_ARGV } from '../integrations/openclaw-config-validate.js';
 import type { SpawnOutcome, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 
 /**
@@ -67,12 +67,83 @@ describe('#221 — genuinely invalid', () => {
     expect(v.detail.join('\n')).toContain('plugin path not found');
   });
 
-  it('never yields an empty detail, even with no output', () => {
-    const v = validateOpenClawConfig(HOME, deps({ run: () => outcome({ status: 1 }) }));
+  it('never yields an empty detail', () => {
+    // The marker is present, so this IS invalid — but summarising could still
+    // come back empty, and a suppression with no stated cause is unarguable.
+    const v = validateOpenClawConfig(HOME, deps({
+      run: () => outcome({ status: 1, stderr: 'config is invalid' }),
+    }));
+
     expect(v.state).toBe('invalid');
     if (v.state !== 'invalid') throw new Error('unreachable');
     expect(v.detail.length).toBeGreaterThan(0);
-    expect(v.detail.join(' ')).toContain('exited 1');
+  });
+
+  it('exit 1 with NO output at all is indeterminate, not invalid', () => {
+    // Nothing said the config is bad. Silence is not evidence, and the cost of
+    // guessing wrong here is stripping every remedy from a healthy host.
+    const v = validateOpenClawConfig(HOME, deps({ run: () => outcome({ status: 1 }) }));
+    expect(v.state).toBe('indeterminate');
+  });
+});
+
+describe('#221 — a non-zero exit is not proof of an invalid config', () => {
+  /**
+   * THE INVERTED-#221 CASE, and the worst thing this module could do.
+   *
+   * An OpenClaw predating `config validate` answers an unknown subcommand with
+   * exit 1. Measured on 2026.7.1-2: `openclaw config <unknown>` exits 1 with
+   * "Too many arguments for this command." If that reads as "config invalid",
+   * a HEALTHY host gets a red config row AND has every remedy stripped —
+   * including the one on the check whose message says the gateway is running
+   * with no memory firewall and no action guard.
+   */
+  it('an OpenClaw that does not know the subcommand is indeterminate', () => {
+    const v = validateOpenClawConfig(HOME, deps({
+      run: () => outcome({
+        status: 1,
+        stdout: '',
+        stderr: 'Too many arguments for this command.\nTry: openclaw config validate --help',
+      }),
+    }));
+
+    expect(v.state).toBe('indeterminate');
+    if (v.state !== 'indeterminate') throw new Error('unreachable');
+    expect(v.reason).toContain('not supported');
+  });
+
+  it('an OpenClaw that does not know the command at all is indeterminate', () => {
+    const v = validateOpenClawConfig(HOME, deps({
+      run: () => outcome({
+        status: 1,
+        stderr: '[openclaw] Could not start the CLI.\n[openclaw] Reason: Unknown command: openclaw config validate.',
+      }),
+    }));
+    expect(v.state).toBe('indeterminate');
+  });
+
+  it('but a JSON invalid body IS invalid', () => {
+    const v = validateOpenClawConfig(HOME, deps({
+      run: () => outcome({ status: 1, stdout: '{"valid":false,"path":"/x","issues":[{"path":"a","message":"b"}]}' }),
+    }));
+    expect(v.state).toBe('invalid');
+  });
+
+  it('and a bullet-marked issue IS invalid', () => {
+    const v = validateOpenClawConfig(HOME, deps({
+      run: () => outcome({ status: 1, stderr: '  × plugins.load.paths: plugin path not found: /nope' }),
+    }));
+    expect(v.state).toBe('invalid');
+  });
+});
+
+describe('#221 — the argv must never grow a flag', () => {
+  it('is exactly `config validate`', () => {
+    // `--json` is tidier and was deliberately rejected: an OpenClaw that does
+    // not know the flag exits non-zero with a usage dump, manufacturing the
+    // false red this module exists to avoid.
+    expect([...VALIDATE_ARGV]).toEqual(['config', 'validate']);
+    expect(VALIDATE_ARGV.some(a => a.startsWith('-'))).toBe(false);
   });
 });
 

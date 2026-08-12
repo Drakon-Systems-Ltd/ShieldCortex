@@ -184,7 +184,58 @@ describe('#221 — the gate must not over-reach', () => {
     expect(applyOpenClawCliGate(results)).toEqual(results);
   });
 
-  it('never changes severity — the host is exactly as broken as before', async () => {
+  /**
+   * The gate keys on `openClawCliBlocked`, never on `status === 'fail'`.
+   * Keying on severity would mean any later adjustment to this check's status
+   * silently switches the whole suppression feature off with no test failing —
+   * the coupling that produced #222 and #103.
+   */
+  it('still suppresses when the config row is a warn, not a fail', () => {
+    const results: CheckResult[] = [
+      { label: OPENCLAW_CONFIG_LABEL, status: 'warn', message: 'invalid', openClawCliBlocked: true },
+      { label: 'A', status: 'fail', message: 'm', fix: 'f', needsOpenClawCli: { subcommand: 'plugins' } },
+    ];
+
+    expect(applyOpenClawCliGate(results)[1].fix).toBeUndefined();
+  });
+
+  it('does not suppress on a fail row that lacks the marker', () => {
+    const results: CheckResult[] = [
+      { label: OPENCLAW_CONFIG_LABEL, status: 'fail', message: 'some other failure' },
+      { label: 'A', status: 'fail', message: 'm', fix: 'f', needsOpenClawCli: { subcommand: 'plugins' } },
+    ];
+
+    expect(applyOpenClawCliGate(results)[1].fix).toBe('f');
+  });
+
+  /**
+   * `doctor` exits 1 on any fail with no --strict opt-in, and the enforcement
+   * contract reserves that for states ShieldCortex owns. A host using
+   * ShieldCortex purely as MCP memory, whose OpenClaw has some third-party
+   * plugin's dangling entry, must not start failing its pipeline over it.
+   */
+  it('downgrades to warn when no remedy of ours is actually blocked', () => {
+    const results: CheckResult[] = [
+      { label: OPENCLAW_CONFIG_LABEL, status: 'fail', message: 'invalid', openClawCliBlocked: true },
+      { label: 'Database', status: 'pass', message: 'healthy' },
+    ];
+
+    const gated = applyOpenClawCliGate(results);
+
+    expect(gated[0].status).toBe('warn');
+    expect(gated[0].message).toContain('no ShieldCortex remedy');
+  });
+
+  it('keeps the fail when something of ours IS blocked', () => {
+    const results: CheckResult[] = [
+      { label: OPENCLAW_CONFIG_LABEL, status: 'fail', message: 'invalid', openClawCliBlocked: true },
+      { label: 'A', status: 'fail', message: 'm', fix: 'f', needsOpenClawCli: { subcommand: 'plugins' } },
+    ];
+
+    expect(applyOpenClawCliGate(results)[0].status).toBe('fail');
+  });
+
+  it('never changes severity of any OTHER check', async () => {
     const results: CheckResult[] = [
       await blockingRow(),
       { label: 'A', status: 'fail', message: 'm', fix: 'f', needsOpenClawCli: { subcommand: 'plugins' } },

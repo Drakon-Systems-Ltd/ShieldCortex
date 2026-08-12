@@ -103,25 +103,50 @@ export interface CheckResult {
    * delete the one piece of advice that still helps.
    */
   needsOpenClawCli?: { subcommand: 'plugins' | 'skills'; fallbackFix?: string };
+  /**
+   * Set by `checkOpenClawConfigValid` when the config is PROVEN invalid, so
+   * `applyOpenClawCliGate` keys on the fact rather than on the severity.
+   *
+   * Keying the gate on `status === 'fail'` would mean any future adjustment to
+   * this check's severity silently switches the whole suppression feature off
+   * with no test failing — the class of coupling that produced #222 and #103.
+   */
+  openClawCliBlocked?: true;
 }
 
-/** The `OpenClaw config` check's label — the gate keys on it, so it is shared. */
+/** The `OpenClaw config` check's label. */
 export const OPENCLAW_CONFIG_LABEL = 'OpenClaw config';
 
 /**
  * Strip remedies that cannot execute (#221).
  *
- * Severity is deliberately untouched: the host is exactly as broken as it was,
- * so the pass/warn/fail counts and the exit code must not move. Only the
- * instruction changes — a wrong verdict must never make a host look healthier.
+ * Every OTHER check's severity is deliberately untouched: the host is exactly
+ * as broken as it was, so its counts and the exit code must not move. A wrong
+ * verdict must never make a blocked host look healthier.
+ *
+ * The config row itself is the one exception, and only downwards. `doctor`
+ * exits 1 on any `fail`, with no `--strict` opt-in — and the enforcement
+ * contract above `doctorExitCode` reserves that for states ShieldCortex owns.
+ * An invalid OpenClaw config with NOTHING of ours blocked by it (a host using
+ * ShieldCortex purely for MCP memory, whose OpenClaw has some third-party
+ * plugin's dangling entry) is a real finding but not our failure, so it warns.
+ * The moment it actually blocks one of our remedies, it fails.
  *
  * Fail-open. Anything short of a proven-invalid config leaves every fix alone,
  * because a doctor that hides working advice when it could not reach `openclaw`
  * is a worse bug than the one being fixed here.
  */
 export function applyOpenClawCliGate(results: CheckResult[]): CheckResult[] {
-  const blocked = results.some(r => r.label === OPENCLAW_CONFIG_LABEL && r.status === 'fail');
-  if (!blocked) return results;
+  // Keyed on the explicit marker, never on severity — see `openClawCliBlocked`.
+  if (!results.some(r => r.openClawCliBlocked)) return results;
+
+  // Nothing of ours is actually blocked: report it, do not fail the run.
+  if (!results.some(r => r.needsOpenClawCli)) {
+    return results.map(r =>
+      r.openClawCliBlocked
+        ? { ...r, status: 'warn' as const, message: `${r.message}\n      (no ShieldCortex remedy on this host depends on it)` }
+        : r);
+  }
 
   const note = ' [remedy blocked — fix the OpenClaw config first, see "OpenClaw config" above]';
   return results.map((r) => {
@@ -1357,6 +1382,7 @@ export async function checkOpenClawConfigValid(
       return {
         label,
         status: 'fail',
+        openClawCliBlocked: true,
         message:
           'OpenClaw REFUSES every `plugins` and `skills` command until this validates — it reports '
           + 'them as "Unknown command", so remediation looks like it ran and silently did nothing (#221). '
@@ -2692,9 +2718,16 @@ export async function checkOpenClawHookFreshness(
         status: 'warn',
         message: 'cortex-memory hook is out of date (installed copy differs from packaged version)',
         fix: 'Run `shieldcortex openclaw install` to refresh the hook',
-        // The hook copy itself is filesystem work, but the same command's
-        // plugin step is refused, so the command as a whole reports failure.
-        needsOpenClawCli: { subcommand: 'plugins' },
+        needsOpenClawCli: {
+          subcommand: 'plugins',
+          // The hook refresh is a file copy that happens BEFORE OpenClaw is
+          // invoked at all (copyHookFiles at openclaw.ts:1276, installPlugin at
+          // :1320), and `--no-plugins` skips the OpenClaw half outright. So the
+          // useful work lands even on a blocked host — withdrawing this outright
+          // would leave the operator on a stale memory-capture hook with no
+          // action, which is the same withheld-advice failure #221 is about.
+          fallbackFix: 'Run `shieldcortex openclaw install --no-plugins` to refresh the hook (a file copy — this half still works). Refreshing the plugin needs a valid OpenClaw config first.',
+        },
       };
     }
 

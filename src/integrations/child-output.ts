@@ -29,6 +29,8 @@
  * report an operator may paste into a GitHub issue. Env-value redaction runs
  * first and does not depend on a pattern matching the token's shape.
  */
+import os from 'os';
+
 import { redactCredentials } from '../defence/credential-leak/index.js';
 
 /** A rejected `runQuiet` error, with the fields it attaches. */
@@ -59,6 +61,8 @@ export interface SummariseOptions {
   maxChars?: number;
   /** Injected for tests; defaults to the real environment. */
   env?: NodeJS.ProcessEnv;
+  /** Injected for tests; defaults to the real home directory. */
+  home?: string;
 }
 
 /** Read no more than this from either stream before doing regex work. */
@@ -79,7 +83,23 @@ const MIN_SECRET_VALUE_CHARS = 8;
  * operator the cause, whereas a false positive costs one line of noise.
  */
 const SIGNAL_PATTERN =
-  /(error|invalid|refus|denied|missing|conflict|unknown command|EACCES|EPERM|ENOENT|EOVERRIDE|EEXIST|E40[134]|ETIMEDOUT|ENOTFOUND|not found|failed|cannot|unable|✗|×)/i;
+  /(error|invalid|refus|denied|missing|conflict|unknown command|EACCES|EPERM|ENOENT|EOVERRIDE|EEXIST|E40[134]|ETIMEDOUT|ENOTFOUND|not found|failed|cannot|could ?not|unable|✗|×)/i;
+
+/**
+ * Lines that name the failure ITSELF, as opposed to merely containing a word
+ * like "failed". Ranked ahead of generic matches, because the first
+ * signal-bearing line is not reliably the important one.
+ *
+ * Measured: on this fleet `openclaw <unknown-command>` emits two
+ * `[plugins] codex failed during register …: TypeError …` lines from an
+ * unrelated third-party plugin BEFORE its own "Could not start the CLI /
+ * Reason: Unknown command". Taking the earliest match reported someone else's
+ * TypeError as the cause — swapping one misleading headline for another.
+ */
+const STRONG_SIGNAL_PATTERN =
+  /(config is invalid|unknown command|unknown option|too many arguments|refus|denied|EACCES|EPERM|ENOENT|EOVERRIDE|E40[134]|^\s*[×✗])/i;
+// Note "could not start the CLI" is deliberately NOT strong: it is a header,
+// and the `Reason: …` line beneath it carries the actual cause.
 
 /**
  * Prose about what STILL WORKS. Never the cause of a failure, and actively
@@ -92,9 +112,13 @@ const SIGNAL_PATTERN =
  */
 const REASSURANCE_PATTERN = /\bstill (run|work|available)|\bunaffected\b|no action (is )?(required|needed)/i;
 
-/** npm chatter that is never the cause. */
+/**
+ * Chatter that is never the cause: npm's own noise, and OTHER plugins'
+ * registration failures. The `[plugins] …` prefix is a third party telling us
+ * about itself — real, but never the answer to "why did OUR command fail".
+ */
 const NOISE_PATTERN =
-  /^(npm notice|npm warn|npm WARN|added \d+ package|found \d+ vulnerabilit|up to date|audited \d+ package)/i;
+  /^(npm notice|npm warn|npm WARN|added \d+ package|found \d+ vulnerabilit|up to date|audited \d+ package|\[plugins\]\s)/i;
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
 
@@ -112,14 +136,37 @@ function escapeRegExp(value: string): string {
  * environment.
  */
 function redactEnvValues(text: string, env: NodeJS.ProcessEnv): string {
+  // LONGEST FIRST. When one secret is a prefix of another — two tokens minted
+  // from the same base, say — replacing the short one first leaves the tail of
+  // the long one in cleartext, and the second pass then finds nothing to do
+  // because its value no longer appears intact.
+  const secrets = Object.entries(env)
+    .filter(([key, value]) =>
+      typeof value === 'string' && value.length >= MIN_SECRET_VALUE_CHARS && SECRET_KEY_PATTERN.test(key))
+    .sort((a, b) => (b[1] as string).length - (a[1] as string).length);
+
   let out = text;
-  for (const [key, value] of Object.entries(env)) {
-    if (!value || value.length < MIN_SECRET_VALUE_CHARS) continue;
-    if (!SECRET_KEY_PATTERN.test(key)) continue;
-    if (!out.includes(value)) continue;
-    out = out.replace(new RegExp(escapeRegExp(value), 'g'), `[redacted:$${key}]`);
+  for (const [key, value] of secrets) {
+    if (!out.includes(value as string)) continue;
+    out = out.replace(new RegExp(escapeRegExp(value as string), 'g'), `[redacted:$${key}]`);
   }
   return out;
+}
+
+/**
+ * Replace the operator's home directory with `~`.
+ *
+ * Every other path-printing site in doctor.ts already does this. This output is
+ * bound for reports pasted into public issues, and OpenClaw's config errors
+ * quote absolute plugin paths — which carry the OS username and, through
+ * project directory names, client and vendor names. OpenClaw abbreviates on its
+ * success path but not on its failure path.
+ *
+ * Runs AFTER redaction so it cannot split a secret mid-match.
+ */
+function scrubHome(text: string, home: string): string {
+  if (!home || home === '/' || home.length < 2) return text;
+  return text.split(home).join('~');
 }
 
 function cleanLines(raw: string): string[] {
@@ -146,12 +193,20 @@ export function summariseCommandOutput(
   const maxLines = opts.maxLines ?? DEFAULT_MAX_LINES;
   const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
   const env = opts.env ?? process.env;
+  const home = opts.home ?? os.homedir();
 
   if (!output || !output.trim()) return { lines: [], truncated: false };
 
   // Cap before any regex work — a failed `npm install -g` emits megabytes.
-  const capped = output.length > MAX_INPUT_BYTES ? output.slice(-MAX_INPUT_BYTES) : output;
-  let truncated = capped.length < output.length;
+  // BOTH ENDS, not the tail: the diagnosis is printed first and the noise
+  // follows, so a tail-only cap discards the cause before the signal filter
+  // ever sees it — the very mistake this module exists to correct, moved one
+  // stage earlier where nothing downstream can compensate.
+  const half = Math.floor(MAX_INPUT_BYTES / 2);
+  const capped = output.length > MAX_INPUT_BYTES
+    ? `${output.slice(0, half)}\n…\n${output.slice(-half)}`
+    : output;
+  let truncated = output.length > MAX_INPUT_BYTES;
 
   const redacted = redactCredentials(redactEnvValues(capped, env), {
     // npm integrity hashes are high-entropy but not secrets; without this the
@@ -159,21 +214,30 @@ export function summariseCommandOutput(
     allowlist: ['sha512-', 'sha1-', 'sha256-'],
   });
 
-  const all = cleanLines(redacted);
+  const all = cleanLines(scrubHome(redacted, home));
   if (all.length === 0) return { lines: [], truncated };
 
   const signal = all.filter(line => SIGNAL_PATTERN.test(line) && !REASSURANCE_PATTERN.test(line));
-  let picked = signal.length > 0 ? signal.slice(0, maxLines) : all.slice(-maxLines);
+  const usedSignal = signal.length > 0;
+  // Strongest cause first, original order preserved within each band — the
+  // EARLIEST signal line is not reliably the most informative one.
+  const ranked = usedSignal
+    ? [...signal.filter(l => STRONG_SIGNAL_PATTERN.test(l)), ...signal.filter(l => !STRONG_SIGNAL_PATTERN.test(l))]
+    : all;
+
+  let picked = usedSignal ? ranked.slice(0, maxLines) : ranked.slice(-maxLines);
   if (picked.length < all.length) truncated = true;
 
   picked = picked.map(line =>
     line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS - 1)}…` : line,
   );
 
-  // Drop from the front until the block fits — the last kept line is the most
-  // specific one when the fallback tail is in play.
+  // Trim from the END on the signal path (lines are ranked, so the first is the
+  // most important) and from the FRONT on the tail path (where the last line is
+  // the most specific). Dropping from the front of a ranked list would delete
+  // the very line that was selected as the cause.
   while (picked.length > 1 && picked.join('\n').length > maxChars) {
-    picked.shift();
+    if (usedSignal) picked.pop(); else picked.shift();
     truncated = true;
   }
   if (picked.length === 1 && picked[0].length > maxChars) {
@@ -211,17 +275,25 @@ export function describeRunFailure(err: unknown, opts: SummariseOptions = {}): R
 
   const { lines, truncated } = summariseCommandOutput(chosen, opts);
 
+  // How the process ENDED outranks whatever it managed to print. A step killed
+  // at the 120s wall often has a plausible-looking network line in its buffer;
+  // reporting that alone tells the operator to retry a transient blip when the
+  // real fact is a half-applied install. Partial output is still surfaced, but
+  // as detail behind the terminal condition, never in place of it.
+  const sanitise = (text: string): string =>
+    scrubHome(redactEnvValues(text, opts.env ?? process.env), opts.home ?? os.homedir());
+
   let reason: string;
-  if (lines.length > 0) {
-    reason = firstSentence(lines[0]);
-  } else if (spawnFailed) {
-    reason = firstSentence(`command not found${command}`);
+  if (spawnFailed) {
+    reason = firstSentence(sanitise(`command not found${command}`));
   } else if (timedOut) {
-    reason = firstSentence(`timed out${command}`);
+    reason = firstSentence(sanitise(`timed out${command}`));
+  } else if (lines.length > 0) {
+    reason = firstSentence(lines[0]);
   } else if (exitCode !== null) {
-    reason = firstSentence(`exited ${exitCode} with no output${command}`);
+    reason = firstSentence(sanitise(`exited ${exitCode} with no output${command}`));
   } else {
-    reason = firstSentence(e.message || 'failed with no output');
+    reason = firstSentence(sanitise(e.message || 'failed with no output'));
   }
 
   return { reason, detail: lines, exitCode, timedOut, spawnFailed, truncated };
