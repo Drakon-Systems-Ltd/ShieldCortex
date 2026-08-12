@@ -125,14 +125,49 @@ const SAYS_INVALID_STRONG = /config is invalid|"valid"\s*:\s*false/i;
  * the summariser's `dropPluginChatter`, which may legitimately KEEP such lines
  * as a reason of last resort; they may be worth showing an operator while still
  * carrying no authority over the verdict.
+ *
+ * A plain `^\[plugins\]` anchor is NOT enough, and the gap is not theoretical —
+ * all three of these manufactured an `invalid` verdict against an OpenClaw that
+ * had explicitly refused the command:
+ *
+ *   [plugins] acme migration failed:      ← tag on THIS line
+ *     cached config is invalid            ← evidence on the NEXT one
+ *   2026-08-12T07:00:00Z [plugins] acme: cached config is invalid
+ *   \x1b[32m[plugins]\x1b[0m acme: cached config is invalid
+ *
+ * So ownership is tracked as a BLOCK, not per line, and the tag is matched
+ * after ANSI removal and past common logger prefixes. Broad stripping was the
+ * alternative and is worse: it would swallow OpenClaw's own indented `×` issue
+ * bullets, which is how the operator learns what is actually wrong.
  */
-const PLUGIN_CHATTER_LINE = /^\s*\[plugins\]\s/i;
+const PLUGIN_CHATTER_LINE =
+  /^\s*(?:(?:\[?\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?\]?|\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\]|(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL))\s+)*\[plugins\]\s/i;
 
-/** Drop third-party chatter so only validator-owned lines classify. */
+/** A line indented under whatever came before it, i.e. a continuation. */
+const CONTINUATION_LINE = /^\s+\S/;
+
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+/**
+ * Drop third-party chatter so only validator-owned lines classify.
+ *
+ * Continuation lines inherit the OWNER of the block they sit in, which is the
+ * whole point: OpenClaw's own bullets are indented too, so indentation alone
+ * says nothing about provenance. A non-indented line always re-decides
+ * ownership, so a plugin block ends the moment OpenClaw speaks again.
+ */
 function validatorOwnedLines(stream: string): string {
+  let insidePluginBlock = false;
   return stream
     .split('\n')
-    .filter(line => !PLUGIN_CHATTER_LINE.test(line))
+    .filter((line) => {
+      const bare = line.replace(ANSI, '');
+      // Blank lines carry no evidence and end nothing — a wrapped message may
+      // legitimately contain one.
+      if (!bare.trim()) return true;
+      if (!CONTINUATION_LINE.test(bare)) insidePluginBlock = PLUGIN_CHATTER_LINE.test(bare);
+      return !insidePluginBlock;
+    })
     .join('\n');
 }
 
@@ -242,14 +277,19 @@ export function validateOpenClawConfig(
     };
   }
 
-  // Invalid: stdout is empty and everything goes to stderr, inverted from the
-  // valid case — so prefer stderr but do not assume it. Prefer whichever stream
-  // actually carries the verdict, though: "prefer stderr" alone reported the
-  // generic exit-code fallback when stderr held nothing but plugin chatter and
-  // the real `× bad key` sat in stdout.
-  const verdictStream = [ownStderr, ownStdout].find(s => SAYS_INVALID.test(s))
-    ?? (ownStderr.trim() ? ownStderr : ownStdout);
-  const { lines } = summariseCommandOutput(verdictStream, { maxLines: 4 });
+  // MERGE the streams rather than choosing one.
+  //
+  // Two failed attempts are recorded here because each looked right and lost
+  // the operator's actual answer. "Prefer stderr" reported the generic exit
+  // code when the verdict sat in stdout. Picking the first stream that matches
+  // then split a header from its own cause: OpenClaw wrote `OpenClaw config is
+  // invalid:` to stderr and `  × channels.telegram: bad key` to stdout, and the
+  // detail became the header alone — true, and useless.
+  //
+  // Nothing needs to be chosen. Both streams are validator-owned by this point;
+  // concatenating them lets the summariser rank across the whole evidence.
+  const evidence = [ownStderr, ownStdout].map(s => s.trim()).filter(Boolean).join('\n');
+  const { lines } = summariseCommandOutput(evidence, { maxLines: 4 });
   return {
     state: 'invalid',
     detail: lines.length > 0 ? lines : [`\`openclaw config validate\` exited ${r.status}`],
