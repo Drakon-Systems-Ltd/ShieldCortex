@@ -30,7 +30,7 @@ const SCHEMA_PATH = path.resolve(__dirname, '..', 'database', 'schema.sql');
 
 interface SeedOptions {
   entities: Array<{ name: string; type: string; aliases?: string[] }>;
-  triples: Array<{ subject: string; predicate: string; object: string; confidence?: number }>;
+  triples: Array<{ subject: string; predicate: string; object: string; confidence?: number; validTo?: string | null }>;
   memories: Array<{
     title: string;
     content: string;
@@ -72,7 +72,7 @@ function makeTestDb(seed: SeedOptions): Database.Database {
   }
 
   const insertTriple = db.prepare(
-    'INSERT INTO triples (subject_id, predicate, object_id, confidence) VALUES (?, ?, ?, ?)',
+    'INSERT INTO triples (subject_id, predicate, object_id, confidence, valid_to) VALUES (?, ?, ?, ?, ?)',
   );
   for (const t of seed.triples) {
     const sid = entityIdByName.get(t.subject);
@@ -80,7 +80,7 @@ function makeTestDb(seed: SeedOptions): Database.Database {
     if (sid === undefined || oid === undefined) {
       throw new Error(`unknown triple endpoint: ${t.subject} or ${t.object}`);
     }
-    insertTriple.run(sid, t.predicate, oid, t.confidence ?? 0.8);
+    insertTriple.run(sid, t.predicate, oid, t.confidence ?? 0.8, t.validTo ?? null);
   }
 
   return db;
@@ -186,6 +186,21 @@ describe('graphRankFromQuery', () => {
     // maxHops=1 should NOT reach edge (which is 2 hops from auth).
     const results = graphRankFromQuery('auth', db, { maxHops: 1 });
     expect(results).toEqual([]);
+  });
+
+  it('does not expand through suspended triples when ranking graph-recalled memories', async () => {
+    const { graphRankFromQuery } = await import('../memory/ranker/graph-rank.js');
+    db = makeTestDb({
+      entities: [
+        { name: 'auth', type: 'concept' },
+        { name: 'poisoned', type: 'concept' },
+      ],
+      triples: [
+        { subject: 'auth', predicate: 'uses', object: 'poisoned', validTo: '2026-08-12T00:00:00.000Z' },
+      ],
+      memories: [{ title: 'poisoned note', content: '...', mentions: ['poisoned'] }],
+    });
+    expect(graphRankFromQuery('auth', db, { maxHops: 1 })).toEqual([]);
   });
 
   it('scales score by triple confidence', async () => {

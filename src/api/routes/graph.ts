@@ -128,6 +128,8 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
       }
       focal.aliases = parseAliases(focal.aliases);
 
+      // valid_to IS NULL: the neighbourhood view renders the live graph, so a
+      // suspended (operator-rejected) edge must not still appear connected.
       const triplesAll = db.prepare(`
         SELECT t.id, t.subject_id, t.object_id, t.predicate,
                s.name as subject_name, s.type as subject_type, s.memory_count as subject_count,
@@ -135,7 +137,7 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
         FROM triples t
         JOIN entities s ON s.id = t.subject_id
         JOIN entities o ON o.id = t.object_id
-        WHERE (t.subject_id = ? OR t.object_id = ?)
+        WHERE (t.subject_id = ? OR t.object_id = ?) AND t.valid_to IS NULL
         ORDER BY
           CASE WHEN t.predicate != 'related_to' THEN 0 ELSE 1 END,
           CASE WHEN t.subject_id = ? THEN o.memory_count ELSE s.memory_count END DESC
@@ -312,7 +314,7 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
         const nextFrontier: number[] = [];
         for (const nodeId of frontier) {
           const outgoing = db.prepare(
-            'SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?',
+            'SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ? AND t.valid_to IS NULL',
           ).all(nodeId) as Array<{ next_id: number; predicate: string; source_memory_id: number | null; name: string }>;
           for (const row of outgoing) {
             if (!visited.has(row.next_id)) {
@@ -333,7 +335,7 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
           if (found) break;
 
           const incoming = db.prepare(
-            'SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?',
+            'SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ? AND t.valid_to IS NULL',
           ).all(nodeId) as Array<{ next_id: number; predicate: string; source_memory_id: number | null; name: string }>;
           for (const row of incoming) {
             if (!visited.has(row.next_id)) {

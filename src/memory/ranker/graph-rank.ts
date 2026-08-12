@@ -169,16 +169,18 @@ function expandHops(
     if (frontier.size === 0) break;
     const ids = Array.from(frontier);
     const placeholders = ids.map(() => '?').join(',');
+    // valid_to IS NULL: a suspended (operator-rejected) edge must not steer
+    // graph-based recall ranking, mirroring the BFS tools' agent-facing reads.
     const rows = db
       .prepare(
         `
         SELECT subject_id AS src, object_id AS dst, confidence
         FROM triples
-        WHERE subject_id IN (${placeholders})
+        WHERE subject_id IN (${placeholders}) AND valid_to IS NULL
         UNION ALL
         SELECT object_id AS src, subject_id AS dst, confidence
         FROM triples
-        WHERE object_id IN (${placeholders})
+        WHERE object_id IN (${placeholders}) AND valid_to IS NULL
         `,
       )
       .all(...ids, ...ids) as Array<{ src: number; dst: number; confidence: number }>;

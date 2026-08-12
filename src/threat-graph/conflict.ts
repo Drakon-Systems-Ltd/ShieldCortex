@@ -34,14 +34,25 @@ import { logAudit } from '../defence/audit/logger.js';
  */
 export const SINGLE_VALUED_PREDICATES = ['uses', 'depends_on', 'configures', 'replaces'] as const;
 
-/** Minimum writer-trust spread across contenders for a channel to be flagged. */
-export const CONFLICT_TRUST_MARGIN = 0.3;
+/**
+ * Minimum writer-trust spread across contenders for a channel to be flagged.
+ *
+ * 0.2, not 0.3: the unattested cap (`cappedWriterTrust`, src/graph/resolve.ts)
+ * collapses every claimed identity above 0.7 — `user`, `cli`, `hook` — down to
+ * the same 0.7 ceiling, while a poisoned `tool_response`/`agent` write stores
+ * at its raw 0.5. That pairing is a real ShadowMerge shape (a legitimate
+ * owner/CLI write next to a poisoned low-trust write, both unattested) and it
+ * lands at EXACTLY 0.2 apart — a 0.3 margin let it through silently.
+ */
+export const CONFLICT_TRUST_MARGIN = 0.2;
 
 /**
  * Float tolerance for the (inclusive) margin gate. IEEE-754 subtraction lands
- * some exactly-0.3-apart pairs just below 0.3 (`0.7 - 0.4 === 0.2999999999…`),
- * and 0.7 is the single most common stored writer_trust (the unattested cap),
- * so without this the most common boundary conflict is silently missed.
+ * some exactly-0.2-apart pairs just below 0.2 (`0.7 - 0.5 === 0.19999999999999998`),
+ * and 0.7/0.5 are the most common stored writer_trust values (the unattested
+ * cap and the tool_response/agent type score), so without this the most
+ * common boundary conflict — the named ShadowMerge shape above — is silently
+ * missed.
  */
 const MARGIN_EPSILON = 1e-9;
 
@@ -339,7 +350,7 @@ export function detectRelationConflicts(options?: { nowMs?: number }): ConflictD
       const effs = group.map((g) => effTrust(g.writer_trust));
       const spread = Math.max(...effs) - Math.min(...effs);
       // Inclusive >= margin; the epsilon absorbs IEEE-754 boundary artefacts
-      // (e.g. 0.7 - 0.4) so an exactly-0.3-apart pair is not silently dropped.
+      // (e.g. 0.7 - 0.5) so an exactly-0.2-apart pair is not silently dropped.
       if (spread < CONFLICT_TRUST_MARGIN - MARGIN_EPSILON) continue; // benign multi-value coexistence
 
       // Respect a standing keep_both resolution covering the current open set.
