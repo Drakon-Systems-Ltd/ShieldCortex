@@ -48,7 +48,8 @@
  * exit codes, so a crash can't masquerade as a verdict.
  */
 
-import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
+import { mkdirSecure } from './lib/state-perms.mjs';
 import { basename, dirname, join, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -511,7 +512,6 @@ function readExistingSessionSalt(file) {
 
 function fdPathForDescriptor(fd) {
   if (existsSync('/proc/self/fd')) return `/proc/self/fd/${fd}`;
-  if (existsSync('/dev/fd')) return `/dev/fd/${fd}`;
   return null;
 }
 
@@ -777,25 +777,47 @@ function terminalDecisionReason(verdict, outcome, event) {
   return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
 }
 
-async function alertGuardOutcome(notify, { toolName, toolInput, verdict, outcome, event, sessionKey }) {
+function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey }) {
+  const context = notificationContext(sessionKey);
+  return {
+    event,
+    outcome,
+    tool: safeToolName(toolName),
+    surface: redactedActionSurface(toolName, toolInput),
+    signals: safeSignalList(verdict.signals),
+    severity: verdict.severity === 'catastrophic' ? 'critical' : String(verdict.severity ?? 'unknown'),
+    reason: safeGuardOutcomeReason(verdict, outcome, event),
+    ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+    detectedAt: new Date().toISOString(),
+  };
+}
+
+function recordLocalGuardOutcome(outcome) {
+  const file = join(homedir(), '.shieldcortex', 'denials.jsonl');
+  if (appendFileNoFollow(file, JSON.stringify(outcome) + '\n')) {
+    console.error(`[shieldcortex] action-guard outcome recorded locally: ~/.shieldcortex/denials.jsonl (${outcome.event}/${outcome.outcome}).`);
+    return true;
+  }
+  console.error('[shieldcortex] ⚠️ local action-guard outcome sink UNWRITABLE (~/.shieldcortex/denials.jsonl).');
+  return false;
+}
+
+async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey }) {
+  const localOutcome = buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey });
+  recordLocalGuardOutcome(localOutcome);
+  let notify = null;
+  try {
+    notify = typeof notifyOrPromise?.then === 'function' ? await notifyOrPromise : notifyOrPromise;
+  } catch {
+    notify = null;
+  }
   if (
     !notify?.denialChannel ||
     typeof notify.deliverOperatorNotification !== 'function' ||
     typeof notify.buildActionGuardOutcomeNotification !== 'function'
   ) return null;
   try {
-    const context = notificationContext(sessionKey);
-    const notification = notify.buildActionGuardOutcomeNotification({
-      event,
-      outcome,
-      tool: safeToolName(toolName),
-      surface: redactedActionSurface(toolName, toolInput),
-      signals: safeSignalList(verdict.signals),
-      severity: verdict.severity === 'catastrophic' ? 'critical' : String(verdict.severity ?? 'unknown'),
-      reason: safeGuardOutcomeReason(verdict, outcome, event),
-      correlationId: context.correlationId,
-      detectedAt: new Date().toISOString(),
-    });
+    const notification = notify.buildActionGuardOutcomeNotification(localOutcome);
     const result = await notify.deliverOperatorNotification(notification, {
       channels: [notify.denialChannel],
       timeoutMs: notify.config.timeoutMs,
@@ -1047,7 +1069,7 @@ function ensureDirectoryNoSymlink(dir) {
       if (!st.isDirectory() || st.isSymbolicLink()) return false;
     } catch {
       try {
-        mkdirSync(current);
+        mkdirSecure(current);
         const st = lstatSync(current);
         if (!st.isDirectory() || st.isSymbolicLink()) return false;
       } catch {
@@ -1076,13 +1098,25 @@ function testOnlyPausePostAppendValidation() {
 
 function fdMatchesExpectedPath(fd, file) {
   try {
-    const fdPath = fdPathForDescriptor(fd);
-    if (!fdPath) return true;
-    const actual = readlinkSync(fdPath);
-    return actual === resolve(file);
+    const actual = fstatSync(fd);
+    const expected = lstatSync(file);
+    return expected.isFile()
+      && !expected.isSymbolicLink()
+      && actual.dev === expected.dev
+      && actual.ino === expected.ino;
   } catch {
     return false;
   }
+}
+
+function cleanLogToken(value, max = 120) {
+  return String(value ?? 'unknown').replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, max);
+}
+
+function noteAuditSinkFailure(detail) {
+  console.error(
+    `[shieldcortex] ⚠️ audit sink UNWRITABLE (~/.shieldcortex/audit): ${cleanLogToken(detail, 160)} — this audit entry was DROPPED.`,
+  );
 }
 
 function appendFileNoFollow(file, line) {
@@ -1126,7 +1160,10 @@ function appendSessionGuardIndex(auditDir, entry) {
 function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
   try {
     const auditDir = join(homedir(), '.shieldcortex', 'audit');
-    if (!ensureDirectoryNoSymlink(auditDir)) return;
+    if (!ensureDirectoryNoSymlink(auditDir)) {
+      noteAuditSinkFailure('audit directory is unsafe or outside the state tree');
+      return;
+    }
     const date = new Date().toISOString().slice(0, 10);
     const entry = {
       type: 'intercept',
@@ -1162,16 +1199,17 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       // #139 adds `permissionMode` + its outcome the same way.
       ...extra,
     };
-    if (!appendFileNoFollow(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n')) return;
+    if (!appendFileNoFollow(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n')) {
+      noteAuditSinkFailure(`append failed for realtime-${date}.jsonl`);
+      return;
+    }
     appendSessionGuardIndex(auditDir, entry);
   } catch (err) {
     // Best-effort — never block on audit failure, but never silent either
     // (issue #95). This hook is one process per tool call, so a per-failure
     // stderr note IS the once-per-process warning; kept in sync with the
     // plugin interceptor's noteAuditSinkFailure.
-    console.error(
-      `[shieldcortex] ⚠️ audit sink UNWRITABLE (~/.shieldcortex/audit): ${err?.message ?? err} — this audit entry was DROPPED.`,
-    );
+    noteAuditSinkFailure(err?.message ?? err);
   }
 }
 
@@ -1361,11 +1399,15 @@ process.stdin.on('end', async () => {
     const permissionMode = hookData.permission_mode;
     if (!toolName) process.exit(0);
     const baseExtra = hookSessionExtras(hookData, permissionMode);
-    const notify = await loadNotify(cfg.notify);
+    let notifyPromise;
+    const getNotify = () => {
+      if (!notifyPromise) notifyPromise = loadNotify(cfg.notify).catch(() => null);
+      return notifyPromise;
+    };
 
     const guard = await loadGuard();
     if (!guard) {
-      await handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode, notify, baseExtra); // always exits
+      await handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
 
@@ -1389,7 +1431,7 @@ process.stdin.on('end', async () => {
           : undefined,
       );
     } catch (err) {
-      await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, notify, baseExtra); // always exits
+      await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
 
@@ -1406,7 +1448,7 @@ process.stdin.on('end', async () => {
     // Catastrophic — hard deny, always enforced while the guard is enabled.
     if (verdict.decision === 'block') {
       writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'auto_deny', 'auto_denied', 'action_guard_denial', baseExtra);
-      const notified = await alertGuardOutcome(notify, {
+      const notified = await alertGuardOutcome(getNotify(), {
         toolName,
         toolInput,
         verdict,
@@ -1440,7 +1482,7 @@ process.stdin.on('end', async () => {
 
     if (!cfg.enforce) {
       writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
-      const notified = await alertGuardOutcome(notify, {
+      const notified = await alertGuardOutcome(getNotify(), {
         toolName,
         toolInput,
         verdict,
@@ -1486,7 +1528,7 @@ process.stdin.on('end', async () => {
     if (brokered?.outcome === 'harden') {
       const brokerAudit = safeBrokerAudit(brokered.audit);
       writeTerminalOutcomeAudit(toolName, { ...verdict, reason: brokered.reason ?? verdict.reason }, toolInput, 'require_approval', 'auto_denied', 'action_guard_denial', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
-      const notified = await alertGuardOutcome(notify, {
+      const notified = await alertGuardOutcome(getNotify(), {
         toolName,
         toolInput,
         verdict: { ...verdict, reason: brokered.reason ?? verdict.reason },
@@ -1556,7 +1598,7 @@ process.stdin.on('end', async () => {
       // the same permissionMode below and remains the sole owner of the
       // decision — nothing here can change it.
       if (fullHash) {
-        const result = await pingOperator(notify, {
+        const result = await pingOperator(await getNotify(), {
           toolName,
           toolInput,
           verdict,
@@ -1587,7 +1629,7 @@ process.stdin.on('end', async () => {
       'require_approval',
       message,
       brokered?.audit,
-      notify,
+      await getNotify(),
       baseExtra,
     );
     process.exit(0);

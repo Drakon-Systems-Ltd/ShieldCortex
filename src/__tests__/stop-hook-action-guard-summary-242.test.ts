@@ -66,8 +66,8 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     });
   }
 
-  function runStopHookWithoutEnvSalt(payload: Record<string, unknown>) {
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex') };
+  function runStopHookWithoutEnvSalt(payload: Record<string, unknown>, opts: { env?: Record<string, string> } = {}) {
+    const env: NodeJS.ProcessEnv = { ...process.env, ...(opts.env ?? {}), HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex') };
     delete env.SHIELDCORTEX_SESSION_SALT;
     return spawnSync(process.execPath, [STOP_HOOK], {
       input: JSON.stringify(payload),
@@ -107,8 +107,8 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     });
   }
 
-  function runPreToolWithoutEnvSalt(payload: Record<string, unknown>) {
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex') };
+  function runPreToolWithoutEnvSalt(payload: Record<string, unknown>, opts: { env?: Record<string, string> } = {}) {
+    const env: NodeJS.ProcessEnv = { ...process.env, ...(opts.env ?? {}), HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex') };
     delete env.SHIELDCORTEX_SESSION_SALT;
     return spawnSync(process.execPath, [PRE_TOOL_HOOK], {
       input: JSON.stringify(payload),
@@ -247,6 +247,32 @@ describe('stop hook — Action Guard run summary (#242)', () => {
   });
 
 
+
+  it('persists audit rows, session salt, and degraded summary without the removed /dev/fd fallback', () => {
+    const session = 'no-dev-fd-cron-1';
+    const pre = runPreToolWithoutEnvSalt({
+      session_id: session,
+      cwd: '/tmp',
+      permission_mode: 'bypassPermissions',
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'sudo systemctl stop nginx' },
+    });
+
+    expect(pre.status).toBe(0);
+    expect(pre.stdout).toContain('"permissionDecision":"deny"');
+    const salt = readFileSync(join(home, '.shieldcortex', 'action-guard-session-salt'), 'utf8').trim();
+    expect(salt).toMatch(/^[a-f0-9]{64}$/);
+    const key = sessionKey(session, salt);
+    let rows = readFileSync(auditFile(), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(rows.some((r) => r.sessionKey === key && r.outcome === 'denied_no_prompt_surface')).toBe(true);
+
+    const stop = runStopHookWithoutEnvSalt({ session_id: session });
+
+    expect(stop.status).toBe(0);
+    rows = readFileSync(auditFile(), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(rows.some((r) => r.type === 'session_summary' && r.sessionKey === key && r.outcome === 'action_guard_degraded')).toBe(true);
+  });
 
   it('publishes generated session salt atomically so concurrent pre-tool and stop-hook processes stay correlated', async () => {
     const session = 'concurrent-salt-session-1';
@@ -569,6 +595,7 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     });
 
     expect(pre.status).toBe(0);
+    expect(pre.stderr).toMatch(/audit sink UNWRITABLE/);
     expect(readFileSync(outside, 'utf8')).toBe('outside-start\n');
 
     const oldFile = auditFileForDate('2026-08-10');
@@ -576,6 +603,7 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     const stop = runStopHook({ session_id: 'primary-symlink-stop-1' });
 
     expect(stop.status).toBe(0);
+    expect(stop.stderr).toMatch(/audit sink UNWRITABLE/);
     expect(readFileSync(outside, 'utf8')).toBe('outside-start\n');
     const oldRows = readFileSync(oldFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     expect(oldRows.some((r) => r.outcome === 'auto_denied')).toBe(true);
@@ -586,9 +614,9 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     const auditDir = join(home, '.shieldcortex', 'audit');
     mkdirSync(auditDir, { recursive: true });
     const outside = join(home, 'outside-recovery-source.jsonl');
-    writeFileSync(outside, `${guardRowJson('fifo-skip-cron-1', 'warned', '2026-08-12T10:00:00.000Z')}\n`);
-    symlinkSync(outside, join(auditDir, 'realtime-2026-08-13.jsonl'));
-    const fifoPath = join(auditDir, 'realtime-2026-08-12.jsonl');
+    writeFileSync(outside, `${guardRowJson('fifo-skip-cron-1', 'warned', '2099-08-12T10:00:00.000Z')}\n`);
+    symlinkSync(outside, join(auditDir, 'realtime-2099-08-13.jsonl'));
+    const fifoPath = join(auditDir, 'realtime-2099-08-12.jsonl');
     const fifo = spawnSync('mkfifo', [fifoPath]);
     expect(fifo.status).toBe(0);
     writeFileSync(auditFileForDate('2026-08-11'), `${guardRowJson('fifo-skip-cron-1', 'auto_denied', '2026-08-11T10:00:00.000Z')}\n`);

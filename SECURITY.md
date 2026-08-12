@@ -40,7 +40,7 @@ We support the latest two major versions of the `shieldcortex` npm package. Olde
 ## In Scope
 
 - The published `shieldcortex` npm package (latest two majors)
-- The bundled local dashboard server (port 3838)
+- The bundled local dashboard (port 3030) and its local API server (port 3001)
 - The SaaS API at `api.shieldcortex.ai`
 - The dedicated OpenClaw plugin `@drakon-systems/shieldcortex-realtime`
 - Defence pipeline correctness issues (false negatives on documented attack classes)

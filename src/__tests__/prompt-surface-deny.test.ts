@@ -93,6 +93,13 @@ describe('Action Guard hook — prompt-surface rule', () => {
     return JSON.parse(lines[lines.length - 1]);
   }
 
+  function localDenials(): Array<Record<string, unknown>> {
+    const file = path.join(tempHome, '.shieldcortex', 'denials.jsonl');
+    return fs.existsSync(file)
+      ? fs.readFileSync(file, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+  }
+
   describe('modes that can raise a prompt → ask', () => {
     it.each(['default', 'manual', 'acceptEdits', 'plan', 'auto'])('%s asks', async (mode) => {
       const result = await runHook(call(DANGEROUS_COMMAND, mode));
@@ -138,6 +145,55 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(entry.outcome).toBe('denied_no_prompt_surface');
       expect(entry.permissionMode).toBe('bypassPermissions');
       expect(String(entry.noPromptSurfaceReason)).toMatch(/no prompt/i);
+    });
+
+    it('records a zero-config local denial event when no webhook notification is configured', async () => {
+      const secret = 'PRIVATE_ZERO_CONFIG_DENIAL_SENTINEL';
+      const result = await runHook(call(`${DANGEROUS_COMMAND} # ${secret}`, 'bypassPermissions'));
+
+      expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
+      expect(result.stderr).toMatch(/denials\.jsonl/);
+      const rows = localDenials();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        event: 'action_guard_denial',
+        outcome: 'denied_no_prompt_surface',
+        tool: 'Bash',
+      });
+      expect(String(rows[0].surface)).toMatch(/redacted action surface/i);
+      expect(JSON.stringify(rows[0])).not.toContain(DANGEROUS_COMMAND);
+      expect(JSON.stringify(rows[0])).not.toContain(secret);
+      expect(String(rows[0].correlationId)).toMatch(/^sc-[a-f0-9]{16}$/);
+    });
+
+    it('records the local denial before notify loading, even when the configured dist root is unusable', async () => {
+      writeActionGuardConfig({ notify: { enabled: true, webhookUrl: 'http://127.0.0.1:1/hook', timeoutMs: 600 } });
+      const badDist = path.join(tempHome, 'missing-dist-root');
+      const result = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'), {
+        SHIELDCORTEX_DIST_ROOT: badDist,
+      });
+
+      expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
+      const rows = localDenials();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        event: 'action_guard_denial',
+        outcome: 'denied_no_prompt_surface',
+        tool: 'Bash',
+      });
+    });
+
+    it('does not write local denials through a symlinked .shieldcortex directory', async () => {
+      const outside = path.join(tempHome, 'outside-shieldcortex');
+      fs.mkdirSync(outside);
+      fs.symlinkSync(outside, path.join(tempHome, '.shieldcortex'));
+
+      const result = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
+
+      expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
+      expect(result.stderr).toMatch(/local action-guard outcome sink UNWRITABLE/);
+      expect(fs.existsSync(path.join(outside, 'denials.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(outside, 'audit'))).toBe(false);
     });
 
     it('separates a prompt-surface deny from a catastrophic auto-deny', async () => {

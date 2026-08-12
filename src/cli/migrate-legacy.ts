@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
@@ -960,7 +961,7 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
 
     // 5. Per-rewrite JSON log under ~/.shieldcortex/logs/.
     const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
-    fs.mkdirSync(logsDir, { recursive: true });
+    mkdirSecure(logsDir);
     const logPath = path.join(
       logsDir,
       `project-key-repair-${new Date().toISOString().replace(/[:.]/g, '-')}.json`

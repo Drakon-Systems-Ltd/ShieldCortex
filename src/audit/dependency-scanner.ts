@@ -20,6 +20,7 @@
  */
 
 import { readdirSync, readFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import { join, resolve } from 'path';
 import { execSync } from 'child_process';
 import { homedir } from 'os';
@@ -306,7 +307,7 @@ export function quarantinePackage(
   const destDir = join(quarantineBase, `${safeName}-${timestamp}`);
   const pkgDestDir = join(destDir, 'pkg');
 
-  mkdirSync(destDir, { recursive: true });
+  mkdirSecure(destDir);
 
   // Move the package directory
   renameSync(srcPath, pkgDestDir);

@@ -9,8 +9,8 @@ file and watch every promise get validated.
 npm test -- claims-proof
 ```
 
-- **Claims source:** `README.md` + `skills/shieldcortex/SKILL.md` (v4.43.0)
-- **Proof:** `src/__tests__/claims-proof.test.ts` — 14 tests, 91 assertions, all green
+- **Claims source:** `README.md` + `skills/shieldcortex/SKILL.md` (v4.47.39)
+- **Proof:** `src/__tests__/claims-proof.test.ts` — 17 tests, 108 assertions, all green
 - **Pillars:** 🧠 Memory (what it *stores*) · 🔓 Recall/ACL (what it *releases*) · 🛡️ Iron Dome (what it *does*) · 🌐 Environment Firewall (what it *sees*) · 🧾 Forensics
 
 ## Traceability matrix
@@ -18,10 +18,10 @@ npm test -- claims-proof
 | # | Public claim | Source | Proof — `claims-proof.test.ts` | Status |
 |---|--------------|--------|--------------------------------|:------:|
 | 1 | 6-layer pipeline blocks/quarantines poisoning before durable memory; nothing silently dropped | README "Stop bad memory before it spreads"; "Blocked content goes to quarantine… nothing is silently dropped" | A·claim 1 — BLOCK at a web source, QUARANTINE at an api source, and a real auto-extract injection is kept out of `memories` with a `defence_audit` row | ✅ |
-| 2 | Pattern detection catches known injection + encoding/obfuscation tricks | README firewall layers ("Pattern Detection → injection patterns, encoding tricks") | A·claim 2 — regex injection, homoglyph/confusables, and zero-width-char obfuscation all blocked | ✅ |
+| 2 | Firewall detectors catch known injection + encoding/obfuscation tricks | README firewall layer ("Firewall → 7 detectors: instruction injection, privilege escalation, encoding/obfuscation …") plus the confusable-folding note beneath it | A·claim 2 — regex injection, homoglyph/confusables, and zero-width-char obfuscation all blocked | ✅ |
 | 3 | Semantic analysis catches paraphrased attacks the regexes miss | README "Semantic Analysis … catches paraphrased attacks the regexes miss" | A·claim 3 — a paraphrase the regex layer **misses** (`detected=false`) is flagged by semantic similarity (`flagged=true`); benign text not flagged | ✅ |
-| 4 | Behavioural scoring (entropy/anomaly) flags anomalous content | README "Behavioural Scoring — entropy analysis, anomaly detection" | A·claim 4 — anomalous content scores above benign and above threshold | ✅ |
-| 5 | Credential-leak detection blocks high-confidence keys/tokens (25+ patterns, 11 providers) | README/SKILL "Credential Leak Detection — 25+ patterns, 11 providers" | A·claim 5 — ≥4 distinct providers caught as `critical` and blocked at write; git SHA / UUID not false-flagged | ✅ |
+| 4 | The anomaly detector (entropy/behavioural scoring) flags anomalous content | README firewall layer ("Firewall → 7 detectors: … anomaly"); ARCHITECTURE "Anomaly Scorer — entropy analysis, length anomalies, repetition patterns" | A·claim 4 — anomalous content scores above benign and above threshold | ✅ |
+| 5 | Credential-leak detection blocks high-confidence keys/tokens (49 patterns, 25 providers) | README/SKILL "Credential Leak Detection — 49 patterns, 25 providers" | A·claim 5 — ≥4 distinct providers caught as `critical` and blocked at write; git SHA / UUID not false-flagged | ✅ |
 | 6 | Skill threat patterns block at memory-WRITE time, not just file scans | SKILL "Skill threat patterns … block at memory-write time, not just on skill-file scans" | A·claim 6 — tool-injection, scope-escalation, data-exfiltration, persistence, supply-chain, agent-manipulation, stealth-instruction all detected; the write is blocked | ✅ |
 | 7 | Contradiction detection flags a conflicting new memory | README "Contradiction detection" | A·claim 7 — a conflicting memory scores ≥ threshold; an unrelated one returns null | ✅ |
 | 8 | RESTRICTED isolation + own-only for low-trust callers, applied before recall reaches the agent | SKILL "trust/ACL-filters recalled memory (RESTRICTED isolation, own-only…) before it reaches the agent" | B·claim 8 — source trust scoring, ACL `checkAccess`, the MCP `get_memory` tool, related-recall, and the recall path all exclude RESTRICTED / low-trust | ✅ |

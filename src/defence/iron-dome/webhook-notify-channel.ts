@@ -89,7 +89,7 @@ function buildPayload(n: AnyOperatorNotification): Record<string, unknown> {
 
 function buildActionGuardPayload(n: ActionGuardOutcomeNotification): Record<string, unknown> {
   return {
-    event: n.event,
+    event: eventOf(n),
     outcome: n.outcome,
     tool: n.tool,
     surface: n.surface,

@@ -10,6 +10,7 @@
  */
 
 import fs from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
 import os from 'os';
 
@@ -72,7 +73,7 @@ function incrementUsage(): void {
 
   const dir = path.dirname(USAGE_FILE);
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    mkdirSecure(dir);
   }
   fs.writeFileSync(USAGE_FILE, JSON.stringify(usage));
 }

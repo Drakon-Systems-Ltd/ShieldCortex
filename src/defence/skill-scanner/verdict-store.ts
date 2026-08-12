@@ -14,6 +14,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { mkdirSecure } from '../../setup/state-permissions.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -43,7 +44,7 @@ const STORE_VERSION = 1;
 
 function getDataDir(): string {
   const dir = process.env.SHIELDCORTEX_CONFIG_DIR || join(homedir(), '.shieldcortex');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) mkdirSecure(dir);
   return dir;
 }
 

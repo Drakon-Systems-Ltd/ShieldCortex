@@ -17,7 +17,8 @@
  */
 
 import Database from 'better-sqlite3';
-import { constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, closeSync, statSync, writeFileSync, readFileSync, readlinkSync, readdirSync, unlinkSync } from 'fs';
+import { constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, closeSync, statSync, writeFileSync, readFileSync, readdirSync, unlinkSync } from 'fs';
+import { mkdirSecure } from './lib/state-perms.mjs';
 import { basename, dirname, join, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { createHash, createHmac, randomBytes } from 'crypto';
@@ -56,7 +57,7 @@ function logDisabledOnceForSession(sessionId, reason) {
     return;
   }
   try {
-    mkdirSync(STOP_DISABLED_SENTINEL_DIR, { recursive: true });
+    mkdirSecure(STOP_DISABLED_SENTINEL_DIR);
     const sentinel = join(STOP_DISABLED_SENTINEL_DIR, sessionId.replace(/[^a-zA-Z0-9_.-]/g, '_'));
     if (existsSync(sentinel)) return;
     writeFileSync(sentinel, new Date().toISOString(), { mode: 0o600 });
@@ -201,7 +202,6 @@ function readExistingSessionSalt(file) {
 
 function fdPathForDescriptor(fd) {
   if (existsSync('/proc/self/fd')) return `/proc/self/fd/${fd}`;
-  if (existsSync('/dev/fd')) return `/dev/fd/${fd}`;
   return null;
 }
 
@@ -333,7 +333,7 @@ function ensureDirectoryNoSymlink(dir) {
       if (!st.isDirectory() || st.isSymbolicLink()) return false;
     } catch {
       try {
-        mkdirSync(current);
+        mkdirSecure(current);
         const st = lstatSync(current);
         if (!st.isDirectory() || st.isSymbolicLink()) return false;
       } catch {
@@ -362,13 +362,21 @@ function testOnlyPausePostAppendValidation() {
 
 function fdMatchesExpectedPath(fd, file) {
   try {
-    const fdPath = fdPathForDescriptor(fd);
-    if (!fdPath) return true;
-    const actual = readlinkSync(fdPath);
-    return actual === resolve(file);
+    const actual = fstatSync(fd);
+    const expected = lstatSync(file);
+    return expected.isFile()
+      && !expected.isSymbolicLink()
+      && actual.dev === expected.dev
+      && actual.ino === expected.ino;
   } catch {
     return false;
   }
+}
+
+function noteAuditSinkFailure(detail) {
+  console.error(
+    `[shieldcortex stop-hook] audit sink UNWRITABLE (~/.shieldcortex/audit): ${cleanLogToken(detail, 160)} — action_guard_degraded evidence was DROPPED.`,
+  );
 }
 
 function appendFileNoFollow(file, line) {
@@ -834,16 +842,20 @@ function recordActionGuardSessionOutcome(rawSessionId) {
       ts: new Date().toISOString(),
     };
     try {
-      if (!ensureDirectoryNoSymlink(AUDIT_DIR)) return { recorded: false, count: rows.length, sessionKey };
+      if (!ensureDirectoryNoSymlink(AUDIT_DIR)) {
+        noteAuditSinkFailure('audit directory is unsafe or outside the state tree');
+        return { recorded: false, count: rows.length, sessionKey };
+      }
       const date = new Date().toISOString().slice(0, 10);
       if (!appendFileNoFollow(join(AUDIT_DIR, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n')) {
+        noteAuditSinkFailure(`append failed for realtime-${date}.jsonl`);
         return { recorded: false, count: rows.length, sessionKey };
       }
       appendSessionGuardSummary(sessionKey, entry);
       console.error(`[shieldcortex stop-hook] action_guard_degraded sessionKey=${sessionKey} guardOutcomes=${rows.length}`);
       return { recorded: true, count: rows.length, sessionKey };
     } catch (err) {
-      console.error('[shieldcortex stop-hook] failed to record action_guard_degraded');
+      noteAuditSinkFailure(err?.message ?? err);
       return { recorded: false, count: rows.length, sessionKey };
     }
   } finally {
