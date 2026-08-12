@@ -74,28 +74,91 @@ export function evaluateEnforcementSupport(hostVersion: string | null): Conversa
 }
 
 /**
- * Read the installed OpenClaw version. The managed install lives under a
- * node-version-specific directory (`tools/node-v24.15.0/lib/node_modules`),
- * so the path is discovered rather than assumed. Never throws — an unreadable
- * install yields `unknown`, never a confident answer.
+ * Managed-runtime candidates: `~/.openclaw/tools/<node>/lib/node_modules/openclaw`.
+ * The node directory is version-specific, so it is discovered rather than assumed.
  */
-export function readOpenClawHostVersion(home: string): string | null {
+function managedLayoutCandidates(home: string): string[] {
   const toolsDir = path.join(home, '.openclaw', 'tools');
-  let candidates: string[] = [];
   try {
-    candidates = fs
+    return fs
       .readdirSync(toolsDir)
       .map((d) => path.join(toolsDir, d, 'lib', 'node_modules', 'openclaw', 'package.json'));
   } catch {
-    return null;
+    // No managed runtime on this host. NOT a reason to stop looking — a plain
+    // `npm i -g openclaw` never creates this directory (#254).
+    return [];
   }
+}
+
+/**
+ * Global-install candidates, resolved from PATH.
+ *
+ * A global npm install puts a symlink in some `bin/` and the package itself in
+ * a sibling `lib/node_modules/openclaw` — the prefix varies by installer
+ * (`~/.npm-global`, `/usr/local`, nvm, volta), so the only portable anchor is
+ * the binary on PATH. Follow it to its real location and walk up to the
+ * `package.json` that owns it.
+ *
+ * The name check matters: the walk must not accept the first package.json it
+ * meets. A differently-named package shipping an `openclaw` bin would
+ * otherwise donate its version number to the verdict.
+ */
+function pathLayoutCandidates(pathEnv: string): string[] {
+  const found: string[] = [];
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of ['openclaw', 'openclaw.mjs', 'openclaw.js']) {
+      const bin = path.join(dir, name);
+      let real: string;
+      try {
+        real = fs.realpathSync(bin);
+      } catch {
+        continue; // absent, dangling symlink, or unreadable PATH entry
+      }
+      let cursor = path.dirname(real);
+      // Bounded walk: a package root is never far above its own bin script.
+      for (let depth = 0; depth < 4; depth++) {
+        found.push(path.join(cursor, 'package.json'));
+        const parent = path.dirname(cursor);
+        if (parent === cursor) break;
+        cursor = parent;
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Read the installed OpenClaw version, across BOTH install layouts — the
+ * managed runtime and a plain global npm install on PATH.
+ *
+ * Never throws. Returns null only when no readable install exists anywhere, so
+ * `unknown` means "genuinely could not find it" rather than "did not look
+ * there" (#254: searching only the managed layout made every globally
+ * installed host report UNKNOWN forever, with the version sitting readable
+ * beside the binary).
+ *
+ * `pathEnv` is injectable so the discovery itself is testable without
+ * depending on the machine running the suite.
+ */
+export function readOpenClawHostVersion(
+  home: string,
+  pathEnv: string = process.env.PATH ?? '',
+): string | null {
+  const candidates = [...managedLayoutCandidates(home), ...pathLayoutCandidates(pathEnv)];
 
   // Prefer the highest version found: a box can carry more than one managed
-  // node runtime, and a stale one must not decide the verdict.
+  // node runtime — and now a global install alongside them — and a stale one
+  // must not decide the verdict.
   let best: string | null = null;
   for (const file of candidates) {
     try {
-      const v = (JSON.parse(fs.readFileSync(file, 'utf-8')) as { version?: unknown }).version;
+      const pkg = JSON.parse(fs.readFileSync(file, 'utf-8')) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      if (pkg.name !== 'openclaw') continue;
+      const v = pkg.version;
       if (typeof v !== 'string') continue;
       const coerced = semver.valid(semver.coerce(v) ?? '');
       if (!coerced) continue;
