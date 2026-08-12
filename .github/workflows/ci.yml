@@ -7,6 +7,46 @@ on:
     branches: [main]
 
 jobs:
+  # ── macOS ────────────────────────────────────────────────────────────────
+  # Every other job here runs on Linux, which makes a whole class of defect
+  # invisible BY CONSTRUCTION: anything that assumes `/proc` semantics.
+  #
+  # The case that bought this job: a change replaced `appendFileSync` with an
+  # `appendFileNoFollow` whose symlink check called `readlinkSync('/dev/fd/N')`.
+  # Correct on Linux, where `/proc/self/fd/N` is a symlink — EINVAL on macOS,
+  # where `/dev/fd/N` is not. The failure path returned false, the caller was a
+  # bare `return`, and the result was an audit file created with ZERO bytes,
+  # exit 0, nothing on stderr. A silently empty audit trail on every Mac in the
+  # fleet, on the fail-closed hot path of a security product — and a 1,133-line
+  # test suite went green because it only ever ran on Linux.
+  #
+  # One Node version, not the matrix: this exists to catch PLATFORM defects, and
+  # the Node-version axis is already covered on Linux. macOS runners bill at a
+  # multiple of Linux minutes, so the dashboard build/lint is deliberately not
+  # duplicated here either — it is pure JS and platform-independent.
+  macos-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build:ts
+
+      # The whole suite, because platform assumptions are not confined to the
+      # tests that look filesystem-shaped. `hook-audit-write-smoke.test.ts` in
+      # particular spawns the real hook as a real process and asserts a row
+      # actually landed — the assertion that would have caught the above.
+      - name: Test
+        run: npm test
+
   build-and-test:
     runs-on: ubuntu-latest
     strategy:

@@ -6,9 +6,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-**The Threat Graph — the subsystem that makes ShieldCortex *learn*. Landed advisory/off; not yet in a release.**
+**Threat Graph Phase E — relation-channel conflict detection (the ShadowMerge defence).** In review (PR #258) on top of 4.48.0; advisory/off like the rest of the threat graph, so it changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md` ("Policing the memory graph").
 
-A deterministic projection of the defence audit ledgers into a per-source security event graph (`threat_nodes` / `threat_edges`), with four learning loops plus a write-time relation-conflict defence on top. Every learning effect ships **advisory or off by default** — merging to `main` changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md`; overview in `ARCHITECTURE.md`.
+### Added
+
+- **Relation-channel conflict detection (Phase E — the ShadowMerge defence).** Write-time provenance on the memory-graph `triples` (`writer_source`, `writer_trust` stored already-capped, `valid_from`/`valid_to`, per-rule `confidence`: verb-pattern 0.8 vs co-occurrence 0.3). A throttled (hourly), stateless projector pass flags a **relation-channel conflict** when a single-valued predicate (`uses`/`depends_on`/`configures`/`replaces` — never `related_to`) holds ≥2 distinct open objects whose writers differ in trust by ≥0.3. Resolution is **symmetric**: both edges carry a `disputed` flag, *neither* is auto-suspended, and one `conflict` review node is minted; the operator resolves (keep one / keep both / reject both) as a replay-reproducible `operation='review'` ledger row, replayed on every pass so an edit/merge can't silently revert it. `user:approved` provenance can never be crowned the authoritative side. No new data class egresses to the cloud — the provenance columns are local-only. To my knowledge no shipping product does write-time relation-conflict detection on agent memory; it is gated last and off the sync hot path.
+- **Surfaces + schema (Phase E).** `threat_graph` MCP tool gains a `conflicts` view; `shieldcortex threat-graph conflicts|resolve-conflict` CLI; `doctor` surfaces the open-conflict review count. New columns `triples.{valid_from, valid_to, writer_source, writer_trust, disputed}` and `threat_graph_state.last_conflict_at`. `PROJECTOR_VERSION` → 5 (forces a one-time graph rebuild on upgrade).
+
+### Fixed
+
+- **Phase E adversarial-review fixes (5-lens review).** Conflict review nodes are excluded from the event-node eviction cap (they reuse `kind='event'` but are outside the determinism dump — counting them let an incremental tick evict real nodes a rebuild kept, diverging `canonicalDump`). The `≥0.3` margin gate absorbs IEEE-754 boundary artefacts (`0.7 - 0.4`). Content-derived conflict-node labels get the standard cap-256/strip-control hygiene; `resolveConflict` rejects non-single-valued predicates. Security + invariants lenses returned no findings.
+
+## [4.48.0] - 2026-08-12
+
+**Two secret-handling defects closed, the CI blind spot that hid a third, and the Threat Graph ships — advisory and off by default.**
+
+### Fixed — secret handling
+
+- **Redaction covered only the FIRST occurrence of a repeated secret.** `redactCredentials` returned *successfully* with the secret still in its output: three occurrences produced one finding and left two raw copies; a value echoed twice inside a JSON body left one. `extractHighEntropyTokens` de-duplicated candidates on the token string, so occurrences 2..N never produced a redaction range, and `buildRedactedContent` cannot redact a range it was never given. Specific to the entropy net — the layer that exists for secrets whose shape we do not recognise, so nothing else was covering these; the pattern layer was clean throughout. It is also the shared primitive behind tool-response redaction, so a repeated secret could reach any consumer of "redacted" content verbatim. A redaction primitive that reports success while leaking gives the caller no signal at all. Extraction now returns every occurrence and the caller adds a range for each, while still reporting one finding per distinct secret — reporting volume is deliberately unchanged, because `medium > 0` drops the audit grade to C and exits 1. (#256)
+
+### Fixed — checks that declined a verdict they could give
+
+- **`doctor` reported "OpenClaw version UNKNOWN" on any global install.** The capability probe searched one layout — the managed node-runtime under `~/.openclaw/tools/` — so a plain `npm i -g openclaw` (`~/.npm-global`, `/usr/local`, nvm, volta) made `readdirSync` throw and the probe return `null`, forever, while the version sat readable beside the binary. It now follows the binary through `realpathSync` and walks up a bounded four levels, so every prefix layout falls out without hardcoding any of them; highest version wins, and a genuinely absent install still returns `null` rather than a guess. (#254, #255)
+
+### Added — CI
+
+- **The suite now runs on macOS.** Every job ran on Linux, which made a whole class of defect invisible by construction: anything assuming `/proc` semantics. The case that bought it — found in review, not in production — was a change replacing `appendFileSync` with a no-follow write whose symlink check called `readlinkSync('/dev/fd/N')`: correct on Linux, `EINVAL` on macOS, failing to a bare `return`. The result was an audit file created with **zero bytes**, exit 0, nothing on stderr — a silently empty Action Guard trail on every Mac, on the fail-closed hot path. Paired with `hook-audit-write-smoke.test.ts`, which spawns the real hook as a real process and asserts a row actually landed: it tests the outcome on whatever platform it runs on, not the mechanism. (#250)
+
+### Added — the Threat Graph (advisory / off by default)
+
+**The subsystem that makes ShieldCortex *learn*. Every learning effect is advisory or off by default; installing this release changes no scan behaviour.**
+
+Phases 0 and A–D. Phase E (relation-channel conflict detection) is deliberately **not** in this release — it is in review with open findings.
+
+**The false-positive rate remains unmeasured (#182), and the design calls for an advisory soak before any deployment moves the trust modifier to `enforce`. Treat the defaults as the supported configuration.**
+
+**The Threat Graph — the subsystem that makes ShieldCortex *learn*. Landed advisory/off.**
+
+A deterministic projection of the defence audit ledgers into a per-source security event graph (`threat_nodes` / `threat_edges`), with three learning loops on top. Every learning effect ships **advisory or off by default** — merging to `main` changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md`; overview in `ARCHITECTURE.md`.
 
 ### Added
 
@@ -16,8 +51,7 @@ A deterministic projection of the defence audit ledgers into a per-source securi
 - **Advisory trust modifier (Loop 2).** One guarded, O(1), fail-to-zero read of per-source risk after trust scoring, subtracting `min(risk × 0.3, 0.3)` (additive-tightening — never raises trust). **Default `advisory`**: computed and recorded on the audit row, not applied; `enforce` applies it and only for attested identities. `shieldcortex threat-graph reset-source` is the operator dispute path.
 - **Operator allowances (Loop 3).** The system learns from individual quarantine review decisions: 3 qualifying approvals (distinct days, distinct content, individually reviewed — bulk never counts) of a (source, pattern) pair earn a 30-day allowance; a reject revokes with a remembered strike. Optional **auto-release** (`threatGraph.autoRelease`, default **off**) admits a would-be-quarantined item only when *every* detection is an active allowance and its title+content exactly matches an approved exemplar — never a BLOCK, per-source per-day capped, fails closed.
 - **Campaign detection (Loop 4).** Attribution of *caught* events — JS union-find clustering activity that spans ≥2 sources or ≥2 sessions through a shared non-hub pivot ("these blocks across three sessions are one actor"). Hub and pooled pivots (a source/session/pattern linking ≥10 counterparties, or `overflow`/`conversation:*`) are excluded so it clusters signal, not noise. A throttled (~daily) job mints `campaign` nodes + `part_of` edges; queryable via the tool's `campaigns` view and `shieldcortex threat-graph campaigns`. Detection-only: the alert digest + per-week cap are deferred. Not a discovery of quiet campaigns — a sub-threshold success mints no event and never clusters.
-- **Relation-channel conflict detection (Phase E — the ShadowMerge defence).** Write-time provenance on the memory-graph `triples` (`writer_source`, `writer_trust` stored already-capped, `valid_from`/`valid_to`, per-rule `confidence`: verb-pattern 0.8 vs co-occurrence 0.3). A throttled (hourly), stateless projector pass flags a **relation-channel conflict** when a single-valued predicate (`uses`/`depends_on`/`configures`/`replaces` — never `related_to`) holds ≥2 distinct open objects whose writers differ in trust by ≥0.3. Resolution is **symmetric**: both edges carry a `disputed` flag, *neither* is auto-suspended, and one `conflict` review node is minted; the operator resolves (keep one / keep both / reject both) as a replay-reproducible `operation='review'` ledger row. `user:approved` provenance can never be crowned the authoritative side. No new data class egresses to the cloud — the provenance columns are local-only. To my knowledge no shipping product does write-time relation-conflict detection on agent memory; it is gated last and off the sync hot path.
-- **Surfaces.** `threat_graph` MCP tool (`sources` / `source` / `events` / `allowances` / `campaigns` / `conflicts` views, row+byte capped, emergency-stop guarded); `shieldcortex threat-graph rebuild|status|reset-source|campaigns|conflicts|resolve-conflict` CLI (rebuild backfills from retained audit history); a `doctor` freshness check that also surfaces the open-conflict review count. New config block `threatGraph.{enabled, trustModifier, autoRelease}` — all default to the safe setting. New columns: `defence_audit.{source_attested, risk_modifier}`, `threat_edges.attrs`, `threat_graph_state.{last_campaign_at, last_conflict_at}`, `triples.{valid_from, valid_to, writer_source, writer_trust, disputed}`; new index `idx_audit_source_ident_ts`. `PROJECTOR_VERSION` 5.
+- **Surfaces.** `threat_graph` MCP tool (`sources` / `source` / `events` / `allowances` / `campaigns` views, row+byte capped, emergency-stop guarded); `shieldcortex threat-graph rebuild|status|reset-source|campaigns` CLI (rebuild backfills from retained audit history); a `doctor` freshness check. New config block `threatGraph.{enabled, trustModifier, autoRelease}` — all default to the safe setting. New columns: `defence_audit.{source_attested, risk_modifier}`, `threat_edges.attrs`, `threat_graph_state.last_campaign_at`; new index `idx_audit_source_ident_ts`.
 
 ### Fixed
 
@@ -25,7 +59,7 @@ A deterministic projection of the defence audit ledgers into a per-source securi
 
 ### Notes
 
-- **Not released deliberately.** The false-positive rate is unmeasured (#182) and the design requires an advisory soak before any deployment moves the trust modifier to `enforce`. Local-only: no threat-graph data is synced to the cloud. Existing installs cold-start (enforcement risk builds forward from attested writes; historical counters are preserved).
+- **Shipped dormant, on purpose.** The false-positive rate is unmeasured (#182) and the design requires an advisory soak before any deployment moves the trust modifier to `enforce` — so it ships with every learning effect advisory or off, and the defaults are the supported configuration. Local-only: no threat-graph data is synced to the cloud. Existing installs cold-start (enforcement risk builds forward from attested writes; historical counters are preserved).
 ## [4.47.40] - 2026-08-12
 
 **Docs-only release: the published README described a pipeline that does not exist.**
