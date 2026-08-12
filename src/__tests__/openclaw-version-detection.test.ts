@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { isRealtimePluginRegistered } from '../cli/update.js';
+import { isRealtimePluginRegistered, readRealtimePluginRegistration } from '../cli/update.js';
 import { checkOpenClawPluginVersion } from '../cli/doctor.js';
 
 /**
@@ -73,6 +73,67 @@ describe('update — isRealtimePluginRegistered (registry detection)', () => {
     fs.mkdirSync(pluginsDir, { recursive: true });
     fs.writeFileSync(path.join(pluginsDir, 'installs.json'), '{ not valid json');
     expect(isRealtimePluginRegistered(home)).toBe(false);
+  });
+});
+
+/**
+ * #248 item 2 — an unreadable/malformed registry must be distinguishable from
+ * a genuine "not installed" host. `isRealtimePluginRegistered` stays a plain
+ * boolean (unreadable reads as `false` there, same as before), but callers
+ * that must not report a false-green skip use this tri-state reader instead.
+ */
+describe('update — readRealtimePluginRegistration (unreadable vs not-installed)', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ocreg-tri-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('reports registered:true, unreadable:false for a registry-managed install', () => {
+    writeInstalls(home, { installRecords: { 'shieldcortex-realtime': REALTIME_RECORD } });
+    expect(readRealtimePluginRegistration(home)).toEqual({ registered: true, unreadable: false });
+  });
+
+  it('reports registered:false, unreadable:false when there is no installs.json at all', () => {
+    expect(readRealtimePluginRegistration(home)).toEqual({ registered: false, unreadable: false });
+  });
+
+  it('reports registered:false, unreadable:false when the registry has no shieldcortex-realtime entry', () => {
+    writeInstalls(home, { installRecords: { brave: {} } });
+    expect(readRealtimePluginRegistration(home)).toEqual({ registered: false, unreadable: false });
+  });
+
+  it('reports unreadable:true (not a plain not-installed) on malformed JSON', () => {
+    const pluginsDir = path.join(home, '.openclaw', 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginsDir, 'installs.json'), '{ not valid json');
+    const r = readRealtimePluginRegistration(home);
+    expect(r.registered).toBe(false);
+    expect(r.unreadable).toBe(true);
+    expect(r.detail).toBeTruthy();
+  });
+
+  it('reports unreadable:true on a permission-denied registry file', () => {
+    const pluginsDir = path.join(home, '.openclaw', 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const file = path.join(pluginsDir, 'installs.json');
+    fs.writeFileSync(file, JSON.stringify({ installRecords: {} }));
+    fs.chmodSync(file, 0o000);
+    try {
+      const r = readRealtimePluginRegistration(home);
+      // Root (and some CI containers) can read a 0-mode file anyway — only
+      // assert the distinguishing behaviour when the permission actually bites.
+      if (r.unreadable) {
+        expect(r.registered).toBe(false);
+        expect(r.detail).toBeTruthy();
+      }
+    } finally {
+      fs.chmodSync(file, 0o644);
+    }
   });
 });
 
