@@ -893,17 +893,23 @@ are the decisions taken, pinned so they are decisions not surprises:
   nodes are EXCLUDED from `canonicalDump` (by the `conflict:` key prefix), same as
   campaign nodes — a throttled derived layer outside the determinism contract. No
   `conflicts_with` edges are minted; that predicate stays reserved.
-- **Resolution is symmetric and ledger-sourced.** Every resolution is an
+- **Resolution is symmetric and fully ledger-replayable.** Every resolution is an
   `operation='review'` audit row (the truth), applied immediately for operator
   UX: **keep one** → `valid_to` on the losers, disputed clears; **reject both** →
   `valid_to` on all; **keep both** → nothing suspended, the audit row records the
-  covered object-set and the detection pass reads it back to suppress re-flagging
-  (a *new* contender outside the covered set re-opens the channel). Neither edge
-  is ever auto-suspended by the projector. The projector's own ledger loop treats
-  a `conflict_resolution` review row as a harmless no-op (it is neither a
-  `risk_reset` nor a `quarantine_decision`); the conflict detector is its only
-  consumer. Resolution is an operator action wired to the CLI
-  (`threat-graph resolve-conflict`) ONLY — there is no MCP mutation path, so an
+  covered object-set. On EVERY detection pass the detector replays ALL standing
+  resolutions from the ledger (`loadResolutions` → `replayOperatorSuspensions`):
+  keep_both coverage suppresses re-flagging, and keep_one/reject_both re-suspend
+  any covered loser that has become open again — e.g. after the source memory was
+  edited/merged and its triples were re-extracted with `valid_to = NULL`. Without
+  that replay a normal memory edit would silently resurrect an operator-rejected
+  edge for up to one throttle interval (a review-found durability gap, now
+  closed). A *new* contender outside the covered set re-opens the channel. Neither
+  edge is ever auto-suspended by the projector; replay only re-applies an explicit
+  operator decision. The projector's own ledger loop treats a
+  `conflict_resolution` review row as a harmless no-op (neither a `risk_reset` nor
+  a `quarantine_decision`); the detector is its only consumer. Resolution is wired
+  to the CLI (`threat-graph resolve-conflict`) ONLY — no MCP mutation path, so an
   agent cannot resolve (or self-clear) a conflict. `PROJECTOR_VERSION` → 5.
 - **Cloud egress — provenance stays local (decided).** The new `triples`
   columns (`writer_source`, `writer_trust`, `valid_from`, `valid_to`,
@@ -913,16 +919,21 @@ are the decisions taken, pinned so they are decisions not surprises:
   of it. `confidence` continues to egress exactly as before — it was already in
   the envelope; it now merely varies by rule. No new data class crosses the
   boundary (the v4.29.0 realtime-egress lesson, honoured).
-- **Known limits (accepted).** (1) The margin gate is precision-first: a
-  contradiction between two *similarly*-trusted writers is left as benign
-  coexistence, so close-trust poison is not surfaced by this layer (the risk
-  model, campaign detection, and rate-limiting are the other layers). (2) The
-  conflict review *node* counts toward the event-node cap and can be evicted
-  under pressure — but the `disputed` flag on the triples persists, and the next
-  detection pass re-mints the node, so the "there is a dispute" signal is never
-  lost, only the transient review item. (3) `NULL` writer_trust (legacy/backfill
-  triples) is treated as neutral 0.5, so legacy triples never manufacture a
-  spread against one another.
+- **Margin gate is inclusive `≥ 0.3` with a float tolerance.** The gate uses
+  `spread < 0.3 - 1e-9` so IEEE-754 boundary artefacts don't silently drop an
+  exactly-0.3-apart pair — `0.7 - 0.4 === 0.2999…`, and `0.7` (the unattested
+  cap) is the most common stored `writer_trust`, so the boundary case is common
+  (review-found). Still precision-first: a contradiction between two *similarly*-
+  trusted writers below the margin is left as benign coexistence, so close-trust
+  poison is not surfaced by THIS layer (the risk model, campaign detection, and
+  rate-limiting are the others).
+- **Known limits (accepted).** (1) `NULL` writer_trust (legacy/backfill triples)
+  is treated as neutral 0.5, so legacy triples never manufacture a spread against
+  one another. (2) Conflict review *nodes* are excluded from the event-node cap
+  (review-found determinism fix — counting them let an incremental tick evict real
+  event nodes a rebuild would keep, diverging `canonicalDump`). They are inherently
+  bounded (one per conflicted channel) and re-minted each pass, so exclusion is
+  safe; the durable `disputed` signal lives on the triples regardless.
 
 ## Phase B — known limits and pre-enforce items (2026-08-12 review)
 

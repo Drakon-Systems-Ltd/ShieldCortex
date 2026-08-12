@@ -97,6 +97,19 @@ describe('Phase E — relation-channel conflict detection', () => {
     expect(attrs.contenders).toHaveLength(2);
   });
 
+  it('flags a pair exactly 0.3 apart despite float subtraction (0.7 vs 0.4)', () => {
+    // 0.7 - 0.4 === 0.29999999999999993 in IEEE-754; the inclusive gate must
+    // still catch it. 0.7 is the most common stored writer_trust (unattested cap).
+    const a = entity('svc-fp');
+    const b = entity('b-fp');
+    const c = entity('c-fp');
+    triple({ subject: a, predicate: 'uses', object: b, writerSource: 'agent:x', writerTrust: 0.7 });
+    triple({ subject: a, predicate: 'uses', object: c, writerSource: 'agent:y', writerTrust: 0.4 });
+
+    const res = detectRelationConflicts({ nowMs: NOW });
+    expect(res.conflicts).toBe(1);
+  });
+
   it('does NOT flag a close-trust disagreement (benign multi-value)', () => {
     const a = entity('react');
     const ts = entity('typescript');

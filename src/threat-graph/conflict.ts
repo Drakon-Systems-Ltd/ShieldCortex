@@ -38,6 +38,14 @@ export const SINGLE_VALUED_PREDICATES = ['uses', 'depends_on', 'configures', 're
 export const CONFLICT_TRUST_MARGIN = 0.3;
 
 /**
+ * Float tolerance for the (inclusive) margin gate. IEEE-754 subtraction lands
+ * some exactly-0.3-apart pairs just below 0.3 (`0.7 - 0.4 === 0.2999999999…`),
+ * and 0.7 is the single most common stored writer_trust (the unattested cap),
+ * so without this the most common boundary conflict is silently missed.
+ */
+const MARGIN_EPSILON = 1e-9;
+
+/**
  * Effective trust for a triple with no recorded provenance (backfilled/legacy).
  * Neutral 0.5 — unknown provenance is neither trusted nor distrusted, so legacy
  * triples never manufacture an artificial spread against one another, while a
@@ -90,6 +98,17 @@ export function effTrust(writerTrust: number | null): number {
 }
 
 /**
+ * Cap + strip content-derived display strings before they land in a threat node
+ * label/attrs — the same hygiene invariant 5 prescribes for content-derived
+ * labels across the threat graph. Entity names are already regex-bounded, so
+ * this is defence-in-depth + consistency, not a load-bearing control.
+ */
+function safeLabel(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return (s || '').replace(/[\u0000-\u001F\u007F]/g, ' ').slice(0, 256);
+}
+
+/**
  * A resolution recorded in the operation='review' ledger. `keep_both` is the
  * only one the detector must remember — `keep_one`/`reject_both` suspend their
  * losers via valid_to, so those channels resolve themselves in the open query.
@@ -130,27 +149,67 @@ export function parseConflictResolution(reason: string | null | undefined): Conf
   };
 }
 
+interface ChannelResolution {
+  subjectId: number;
+  predicate: string;
+  resolution: 'keep_one' | 'keep_both' | 'reject_both';
+  covered: Set<number>;
+  keptObjectId?: number;
+  /** Ledger timestamp — used as valid_to when replaying a suspension. */
+  ts: string;
+}
+
 /**
- * Latest standing `keep_both` coverage per channel. A later keep_one/reject_both
- * clears it (the operator changed their mind); the valid_to suspensions those
- * apply are already reflected in the open-triple query.
+ * Latest standing resolution per channel, replayed from the operation='review'
+ * ledger (the truth). Last-writer-wins by row id, so an operator changing their
+ * mind is honoured. The `reason LIKE` prefilter keeps this off the other
+ * review-row writers (risk_reset / auto_release / quarantine_decision), which
+ * otherwise grow unbounded with audit history.
  */
-function loadKeepBothCoverage(db: Database): Map<string, Set<number>> {
+function loadResolutions(db: Database): Map<string, ChannelResolution> {
   const rows = db
-    .prepare("SELECT reason FROM defence_audit WHERE operation = 'review' ORDER BY id ASC")
-    .all() as Array<{ reason: string | null }>;
-  const map = new Map<string, Set<number>>();
+    .prepare(
+      "SELECT reason, timestamp FROM defence_audit WHERE operation = 'review' AND reason LIKE '%conflict_resolution%' ORDER BY id ASC",
+    )
+    .all() as Array<{ reason: string | null; timestamp: string }>;
+  const map = new Map<string, ChannelResolution>();
   for (const r of rows) {
     const res = parseConflictResolution(r.reason);
     if (!res) continue;
-    const channelKey = `${res.subject_id}:${res.predicate}`;
-    if (res.resolution === 'keep_both') {
-      map.set(channelKey, new Set(res.covered_object_ids));
-    } else {
-      map.delete(channelKey);
-    }
+    map.set(`${res.subject_id}:${res.predicate}`, {
+      subjectId: res.subject_id,
+      predicate: res.predicate,
+      resolution: res.resolution,
+      covered: new Set(res.covered_object_ids),
+      keptObjectId: res.kept_object_id,
+      ts: r.timestamp,
+    });
   }
   return map;
+}
+
+/**
+ * Re-apply operator suspensions (keep_one/reject_both) to any covered loser that
+ * has become open again — e.g. the source memory was edited/merged and its
+ * triples were re-extracted with valid_to = NULL. This makes ALL resolutions
+ * ledger-durable (uniform with keep_both's coverage replay), closing the gap
+ * where an operator-rejected edge would silently go live after an unrelated
+ * edit. It only ever SUSPENDS a covered loser per an explicit operator decision
+ * — never loosens, never touches an object outside the covered set (a genuinely
+ * new contender re-opens the channel instead).
+ */
+function replayOperatorSuspensions(db: Database, resolutions: Map<string, ChannelResolution>): void {
+  const suspend = db.prepare(
+    `UPDATE triples SET valid_to = ?, disputed = 0
+     WHERE subject_id = ? AND predicate = ? AND object_id = ? AND valid_to IS NULL`,
+  );
+  for (const res of resolutions.values()) {
+    if (res.resolution === 'keep_both') continue;
+    for (const objectId of res.covered) {
+      if (res.resolution === 'keep_one' && objectId === res.keptObjectId) continue;
+      suspend.run(res.ts, res.subjectId, res.predicate, objectId);
+    }
+  }
 }
 
 function upsertConflictNode(
@@ -166,7 +225,7 @@ function upsertConflictNode(
   const contenders: ConflictContender[] = group.map((g) => ({
     triple_id: g.triple_id,
     object_id: g.object_id,
-    object: g.object_name,
+    object: safeLabel(g.object_name),
     writer_source: g.writer_source,
     writer_trust: g.writer_trust,
     eff_trust: effTrust(g.writer_trust),
@@ -185,18 +244,19 @@ function upsertConflictNode(
   }
 
   const effs = contenders.map((c) => c.eff_trust);
+  const subjectName = safeLabel(group[0].subject_name);
   const attrs = {
     type: 'conflict',
     subject_id: subjectId,
-    subject: group[0].subject_name,
+    subject: subjectName,
     predicate,
     status: 'open',
-    detected_margin: Math.max(...effs) - Math.min(...effs),
+    detected_margin: Number((Math.max(...effs) - Math.min(...effs)).toFixed(4)),
     authoritative_object_id: authoritativeObjectId,
     contenders,
   };
 
-  const label = `conflict: ${group[0].subject_name} ${predicate} (${contenders.length} contenders)`;
+  const label = `conflict: ${subjectName} ${predicate} (${contenders.length} contenders)`;
   // Upsert preserving first_seen (when the conflict was first detected).
   db.prepare(
     `INSERT INTO threat_nodes (kind, key, label, attrs, first_seen, last_seen)
@@ -234,6 +294,12 @@ export function detectRelationConflicts(options?: { nowMs?: number }): ConflictD
     //    triple, then re-set only the ones still in conflict below.
     db.prepare(`UPDATE triples SET disputed = 0 WHERE disputed = 1 AND predicate IN (${ph})`).run(...preds);
 
+    // 1b. Replay operator suspensions from the ledger BEFORE reading the open set,
+    //     so a keep_one/reject_both loser resurrected by a memory edit/merge is
+    //     re-suspended and excluded below (uniform with keep_both's coverage).
+    const resolutions = loadResolutions(db);
+    replayOperatorSuspensions(db, resolutions);
+
     // 2. Open single-valued triples with entity names.
     const rows = db
       .prepare(
@@ -257,7 +323,11 @@ export function detectRelationConflicts(options?: { nowMs?: number }): ConflictD
       else groups.set(channelKey, [r]);
     }
 
-    const keepBoth = loadKeepBothCoverage(db);
+    // keep_both coverage suppresses re-flagging while the open set stays within it.
+    const keepBoth = new Map<string, Set<number>>();
+    for (const [channelKey, res] of resolutions) {
+      if (res.resolution === 'keep_both') keepBoth.set(channelKey, res.covered);
+    }
     const setDisputed = db.prepare('UPDATE triples SET disputed = 1 WHERE id = ?');
     const openChannels: string[] = [];
     let disputedCount = 0;
@@ -268,7 +338,9 @@ export function detectRelationConflicts(options?: { nowMs?: number }): ConflictD
 
       const effs = group.map((g) => effTrust(g.writer_trust));
       const spread = Math.max(...effs) - Math.min(...effs);
-      if (spread < CONFLICT_TRUST_MARGIN) continue; // benign multi-value coexistence
+      // Inclusive >= margin; the epsilon absorbs IEEE-754 boundary artefacts
+      // (e.g. 0.7 - 0.4) so an exactly-0.3-apart pair is not silently dropped.
+      if (spread < CONFLICT_TRUST_MARGIN - MARGIN_EPSILON) continue; // benign multi-value coexistence
 
       // Respect a standing keep_both resolution covering the current open set.
       const covered = keepBoth.get(channelKey);
@@ -322,6 +394,15 @@ export function resolveConflict(
   const db = getDatabase();
   const nowIso = new Date(options?.nowMs ?? Date.now()).toISOString();
   const channelKey = `${input.subjectId}:${input.predicate}`;
+
+  // Defence-in-depth: only single-valued channels can be in conflict, so a
+  // suspension must never land on a multi-valued (e.g. related_to) edge. The
+  // shipped CLI can't reach here with another predicate (it resolves an existing
+  // conflict node, only minted for single-valued channels), but a future caller
+  // of this exported function could.
+  if (!(SINGLE_VALUED_PREDICATES as readonly string[]).includes(input.predicate)) {
+    throw new Error(`resolveConflict: '${input.predicate}' is not a single-valued conflict predicate`);
+  }
 
   return db.transaction(() => {
     const open = db

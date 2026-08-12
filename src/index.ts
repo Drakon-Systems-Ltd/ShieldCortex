@@ -1032,8 +1032,16 @@ ${bold}DOCS${reset}
         keptObjectId = match[0].object_id;
       }
       const reviewedBy = process.env.USER || process.env.LOGNAME || 'operator';
-      const res = resolveConflict({ subjectId, predicate, resolution, keptObjectId }, reviewedBy);
-      console.log(`Resolved ${res.channelKey} as ${res.resolution} — ${res.suspended} edge(s) suspended. Recorded as an operator review by ${reviewedBy}.`);
+      try {
+        const res = resolveConflict({ subjectId, predicate, resolution, keptObjectId }, reviewedBy);
+        console.log(`Resolved ${res.channelKey} as ${res.resolution} — ${res.suspended} edge(s) suspended. Recorded as an operator review by ${reviewedBy}.`);
+      } catch (e) {
+        // The open set can shift between listing and resolving (a fresh detection
+        // pass, a concurrent edit). Surface the guided message, not a stack trace.
+        console.error(`Could not resolve '${key}': ${e instanceof Error ? e.message : String(e)}`);
+        console.error('Re-list current conflicts with: shieldcortex threat-graph conflicts');
+        process.exit(1);
+      }
     }
     return;
   }

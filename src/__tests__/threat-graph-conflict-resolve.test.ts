@@ -180,6 +180,47 @@ describe('Phase E — conflict resolution', () => {
     expect(result.errors).toEqual([]);
   });
 
+  it('re-suspends a keep_one loser resurrected by a memory edit (re-extraction)', () => {
+    const a = entity('deploy-re');
+    const good = entity('good-re');
+    const evil = entity('evil-re');
+    triple(a, 'uses', good, 'cli:m', 0.95);
+    const tEvil = triple(a, 'uses', evil, 'agent:x', 0.3);
+    detectRelationConflicts({ nowMs: NOW });
+    resolveConflict({ subjectId: a, predicate: 'uses', resolution: 'keep_one', keptObjectId: good }, 'michael', { nowMs: NOW + 1000 });
+    expect(row(tEvil).valid_to).toBeTruthy();
+
+    // Simulate updateMemory/mergeMemories re-extraction: the loser's triple is
+    // deleted and re-inserted fresh (valid_to NULL, disputed 0).
+    getDatabase().prepare('DELETE FROM triples WHERE id = ?').run(tEvil);
+    const tEvil2 = triple(a, 'uses', evil, 'agent:x', 0.3);
+    expect(row(tEvil2).valid_to).toBeNull();
+
+    // The next detection pass replays the operator's keep_one from the ledger
+    // and re-suspends the resurrected loser — no conflict re-raised.
+    const again = detectRelationConflicts({ nowMs: NOW + 2000 });
+    expect(again.conflicts).toBe(0);
+    expect(row(tEvil2).valid_to).toBeTruthy();
+    expect(conflictNodeCount()).toBe(0);
+  });
+
+  it('re-suspends every reject_both contender after re-extraction', () => {
+    const a = entity('svc-rb');
+    const b = entity('b-rb');
+    const c = entity('c-rb');
+    const tb = triple(a, 'uses', b, 'cli:m', 0.95);
+    triple(a, 'uses', c, 'agent:x', 0.2);
+    detectRelationConflicts({ nowMs: NOW });
+    resolveConflict({ subjectId: a, predicate: 'uses', resolution: 'reject_both' }, 'michael', { nowMs: NOW + 1000 });
+
+    // Re-extract one contender.
+    getDatabase().prepare('DELETE FROM triples WHERE id = ?').run(tb);
+    const tb2 = triple(a, 'uses', b, 'cli:m', 0.95);
+
+    detectRelationConflicts({ nowMs: NOW + 2000 });
+    expect(row(tb2).valid_to).toBeTruthy(); // re-suspended by replay
+  });
+
   it('keep_one rejects a kept object that is not on the channel', () => {
     const a = entity('svc3');
     const b = entity('b3');

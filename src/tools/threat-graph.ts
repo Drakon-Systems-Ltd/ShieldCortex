@@ -122,8 +122,10 @@ export function handleThreatGraphQuery(
     }
 
     case 'events': {
+      // Conflict review nodes reuse kind='event' but have their own 'conflicts'
+      // view — keep them out of the generic events list.
       const rows = db.prepare(`
-        SELECT * FROM threat_nodes WHERE kind = 'event'
+        SELECT * FROM threat_nodes WHERE kind = 'event' AND key NOT LIKE 'conflict:%'
         ${args.project ? "AND json_extract(attrs, '$.project') = @project" : ''}
         ${since ? 'AND last_seen >= @since' : ''}
         ORDER BY last_seen DESC, key ASC LIMIT @limit
