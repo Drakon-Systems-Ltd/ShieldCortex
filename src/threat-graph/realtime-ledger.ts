@@ -205,6 +205,10 @@ export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeR
       if (typeof row.model === 'string') attrs.model = row.model.slice(0, 128);
       if (typeof row.chars === 'number') attrs.chars = row.chars;
       if (typeof row.contentSha256 === 'string') attrs.contentSha256 = row.contentSha256.slice(0, 64);
+      // Session taint state at scan time (Phase D): the gateway records whether
+      // this detection tainted the session, so attribution can distinguish a
+      // taint-raising event. Forward-compatible — absent on older rows.
+      if (typeof row.tainted === 'boolean') attrs.tainted = row.tainted;
       db.prepare('UPDATE threat_nodes SET attrs = ? WHERE id = ?').run(JSON.stringify(attrs), eventId);
 
       const sourceId = upsertNode('source', `conversation:${hook}`, ts);

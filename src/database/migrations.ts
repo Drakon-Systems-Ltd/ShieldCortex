@@ -858,6 +858,11 @@ export function runMigrations(database: Database.Database): void {
     if (edgeCols.length > 0 && !edgeCols.some((c) => c.name === 'attrs')) {
       database.exec("ALTER TABLE threat_edges ADD COLUMN attrs TEXT NOT NULL DEFAULT '{}'");
     }
+    // Threat-graph Phase D (Loop 4): campaign-detection throttle timestamp.
+    const stateCols = database.prepare("PRAGMA table_info(threat_graph_state)").all() as { name: string }[];
+    if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_campaign_at')) {
+      database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_campaign_at TEXT");
+    }
   } catch (err) {
     logIfUnexpectedDdlError(err, 'defence_audit provenance columns + threat_edges.attrs');
   }

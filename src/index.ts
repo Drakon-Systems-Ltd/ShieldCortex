@@ -912,8 +912,8 @@ ${bold}DOCS${reset}
   // Handle "threat-graph" subcommand (docs/design/2026-08-11-threat-graph.md)
   if (process.argv[2] === 'threat-graph') {
     const action = process.argv[3];
-    if (action !== 'rebuild' && action !== 'status' && action !== 'reset-source') {
-      console.error('Unknown threat-graph command. Available: rebuild, status, reset-source');
+    if (action !== 'rebuild' && action !== 'status' && action !== 'reset-source' && action !== 'campaigns') {
+      console.error('Unknown threat-graph command. Available: rebuild, status, reset-source, campaigns');
       process.exit(1);
     }
     const { initDatabase } = await import('./database/init.js');
@@ -948,6 +948,22 @@ ${bold}DOCS${reset}
       const allowances = listAllowances(Date.now());
       const active = allowances.filter(a => a.active).length;
       console.log(`  allowances: ${allowances.length} (${active} active)`);
+      const campaignCount = (db.prepare("SELECT COUNT(*) AS c FROM threat_nodes WHERE kind = 'campaign'").get() as { c: number }).c;
+      console.log(`  campaigns: ${campaignCount}`);
+    } else if (action === 'campaigns') {
+      const { getDatabase } = await import('./database/init.js');
+      const { runCampaignDetection } = await import('./threat-graph/campaign.js');
+      const r = runCampaignDetection({ nowMs: Date.now() });
+      console.log(`Detected ${r.campaigns} campaign(s) across ${r.events} recent events.`);
+      const db = getDatabase();
+      const camps = db.prepare("SELECT key, label, attrs FROM threat_nodes WHERE kind = 'campaign' ORDER BY last_seen DESC").all() as Array<{ key: string; label: string; attrs: string }>;
+      for (const c of camps) {
+        const a = JSON.parse(c.attrs);
+        console.log(`  ${c.key}  ${c.label}${a.entity_overlap ? ' · entity-corroborated' : ''}`);
+        console.log(`    sources: ${a.sources.join(', ')}`);
+        if (a.sessions?.length) console.log(`    sessions: ${a.sessions.join(', ')}`);
+        if (a.patterns?.length) console.log(`    patterns: ${a.patterns.join(', ')}`);
+      }
     } else if (action === 'reset-source') {
       const key = process.argv[4];
       if (!key) {

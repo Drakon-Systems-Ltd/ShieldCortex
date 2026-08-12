@@ -814,6 +814,35 @@ built on facts, not the doc's assumptions. They amend the sections above.
    unattested identities are enforcement-inert anyway) — weights for
    conversation detections are decided in Phase D with campaign detection.
 
+## Phase D — implementation notes (2026-08-12 review)
+
+Campaign detection landed after a three-lens review. Deviations and deferrals,
+pinned so they are decisions not surprises:
+
+- **Hub exclusion applies to ALL three axes, not just patterns.** The spec
+  named pattern hubs; the review found that source and session pivots with no
+  cap collapse pooled/non-attributable identities into giant false campaigns —
+  in particular `conversation:<hook>` (every conversation detection on a hook)
+  and the `overflow` bucket. A pivot linking ≥ `hubThreshold` (10) distinct
+  counterparties, or a pooled source key (`overflow` / `conversation:*`), is
+  excluded as a connector. The boundary is inclusive (`≥`). Consequence:
+  conversation events do not currently form cross-session campaigns — the
+  realtime rows carry no cross-session actor identity, and the design's honest
+  limits already concede that. The session/taint plumbing is forward-ready.
+- **Alert budget is DEFERRED — Phase D is detection-only.** The digest +
+  per-week cap and the `threatGraph.campaignAlerts` config key are not wired;
+  nothing emits alerts, so there is no flooding surface. Any future
+  dashboard/webhook consumer of campaign nodes MUST land the per-week cap +
+  digest first. Campaign truncation past the per-run cap is recorded in
+  `last_error` and ranked by breadth (not oldest-anchored) so a real campaign
+  is never silently dropped for noise.
+- **Determinism.** Campaign nodes + `part_of` edges are a wall-clock-relative
+  derived layer (like `source_risk`), recomputed each throttled run and
+  EXCLUDED from the canonicalDump contract. Detection runs in the lease runner,
+  never in `projectToCompletion`/`rebuildThreatGraph`. `clearGraph` resets the
+  throttle so a rebuild re-mints on the next tick. `PROJECTOR_VERSION` → 4 for
+  the realtime `tainted` attr.
+
 ## Phase B — known limits and pre-enforce items (2026-08-12 review)
 
 The B implementation was adversarially reviewed (3 lenses). Two majors were

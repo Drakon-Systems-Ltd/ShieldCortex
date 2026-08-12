@@ -2319,6 +2319,10 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
           model: event.model, reason: result.summary,
           chars: text.length,
           contentSha256: createHash('sha256').update(text).digest('hex').slice(0, 16),
+          // Whether this detection tainted the session (threat-graph Phase D:
+          // lets the threat graph attribute taint-raising events). Metadata
+          // only — no content, same as the fields above.
+          tainted: trust.mayTaint,
           ts: new Date().toISOString(),
         };
         await auditLog(entry);

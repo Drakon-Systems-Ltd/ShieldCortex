@@ -221,6 +221,7 @@ export function getInlineSchema(): string {
       lease_expires_at TEXT,
       lease_token TEXT,
       last_run_at TEXT,
+      last_campaign_at TEXT,
       last_error TEXT
     );
 

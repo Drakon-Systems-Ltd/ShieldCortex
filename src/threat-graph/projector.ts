@@ -55,6 +55,10 @@ import {
   type AllowanceState,
 } from './allowance.js';
 import { parseQuarantineDecision } from './decision.js';
+import { runCampaignDetection } from './campaign.js';
+
+/** Campaign detection throttle: run at most this often (design says ~daily). */
+const DEFAULT_CAMPAIGN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 import {
   assertNotInTransaction,
   cachedStmt,
@@ -69,8 +73,9 @@ import {
 /** Bump when projection rules change to force a rebuild on the next run.
  *  v2 (Phase B): risk exponent-sum fold, attestation-gated accrual,
  *  src_type/src_id attrs, and risk_reset review-row consumption.
- *  v3 (Phase C): quarantine_decision consumption → operator allowance edges. */
-export const PROJECTOR_VERSION = 3;
+ *  v3 (Phase C): quarantine_decision consumption → operator allowance edges.
+ *  v4 (Phase D): realtime `tainted` attr on conversation event nodes. */
+export const PROJECTOR_VERSION = 4;
 
 export interface ProjectorOptions {
   /** Rows per claim-and-advance batch. */
@@ -429,7 +434,7 @@ function clearGraph(): void {
     db.prepare('DELETE FROM source_risk').run();
     db.prepare(`
       UPDATE threat_graph_state
-      SET last_audit_id = 0, last_rt_cursor = '', last_error = NULL, projector_version = ?
+      SET last_audit_id = 0, last_rt_cursor = '', last_campaign_at = NULL, last_error = NULL, projector_version = ?
       WHERE id = 1
     `).run(PROJECTOR_VERSION);
   }).immediate();
@@ -516,6 +521,10 @@ export interface LeaseRunOptions extends ProjectorOptions {
   realtimeDir?: string;
   /** Max claim-and-advance batches per run (bounds a single tick's work). */
   maxBatches?: number;
+  /** Campaign-detection throttle interval (ms); test seam. */
+  campaignIntervalMs?: number;
+  /** Set false to skip campaign detection this run (test seam). */
+  campaignDetection?: boolean;
 }
 
 export interface LeaseRunResult {
@@ -608,6 +617,25 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
       runErrors.push(`risk sweep: ${e instanceof Error ? e.message : String(e)}`);
     }
 
+    // Campaign detection — throttled (~daily) since it is a windowed analysis,
+    // not per-row projection. Clears + recomputes the campaign layer.
+    try {
+      const campaignIntervalMs = options?.campaignIntervalMs ?? DEFAULT_CAMPAIGN_INTERVAL_MS;
+      const last = (db.prepare('SELECT last_campaign_at FROM threat_graph_state WHERE id = 1')
+        .get() as { last_campaign_at: string | null }).last_campaign_at;
+      const due = !last || now - Date.parse(last) >= campaignIntervalMs;
+      if (due && options?.campaignDetection !== false) {
+        const camp = runCampaignDetection({ nowMs: now });
+        if (camp.truncated) runErrors.push(camp.truncated);
+        // Token-guarded like the lease release, so a stale overrun holder can't
+        // reset the throttle from under the current holder.
+        db.prepare('UPDATE threat_graph_state SET last_campaign_at = ? WHERE id = 1 AND lease_token = ?')
+          .run(new Date(now).toISOString(), token);
+      }
+    } catch (e) {
+      runErrors.push(`campaign detection: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     succeeded = true;
     return { ran: true, audit, realtime };
   } catch (e) {
@@ -647,9 +675,12 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
  */
 export function canonicalDump(): string {
   const db = getDatabase();
+  // Campaign nodes + part_of edges are a wall-clock-relative derived analysis
+  // (like source_risk), recomputed each tick and outside the determinism
+  // contract — excluded here so incremental and rebuild dumps still match.
   const nodes = db.prepare(`
     SELECT kind, key, label, attrs, first_seen, last_seen
-    FROM threat_nodes ORDER BY kind, key
+    FROM threat_nodes WHERE kind != 'campaign' ORDER BY kind, key
   `).all() as Array<Record<string, unknown>>;
   const edges = db.prepare(`
     SELECT s.kind AS src_kind, s.key AS src_key, e.predicate,
@@ -658,6 +689,7 @@ export function canonicalDump(): string {
     FROM threat_edges e
     JOIN threat_nodes s ON s.id = e.src
     JOIN threat_nodes d ON d.id = e.dst
+    WHERE e.predicate != 'part_of'
     ORDER BY s.kind, s.key, e.predicate, d.kind, d.key
   `).all() as Array<Record<string, unknown>>;
   return JSON.stringify({ nodes, edges });

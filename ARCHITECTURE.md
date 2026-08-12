@@ -256,6 +256,16 @@ Three learning loops sit on top, in dependency order:
    admits a would-be-quarantined item only when *every* detection is an active
    allowance and the title+content exactly matches an approved exemplar; it
    never releases a BLOCK, is per-source per-day capped, and **fails closed**.
+4. **Campaign detection** (`campaign.ts`, Loop 4) — attribution of *caught*
+   events (not discovery of quiet ones): JS union-find over shared
+   source/session/non-hub-pattern pivots, clustering "these blocks across
+   three sessions are one actor". Hub and pooled pivots (`overflow`,
+   `conversation:*`, or any pivot linking ≥10 counterparties) are excluded as
+   connectors so it doesn't cluster noise. A throttled (~daily) job that
+   (re)mints `campaign` nodes + `part_of` edges — a derived, wall-clock layer
+   excluded from the determinism dump, like `source_risk`. Detection-only in
+   this phase: the alert digest + per-week cap are deferred until a consumer
+   is wired.
 
 **Invariants** (why this can *learn* without becoming *trainable*): the ledger
 is truth; every automatic effect is additive-tightening; operators are the only

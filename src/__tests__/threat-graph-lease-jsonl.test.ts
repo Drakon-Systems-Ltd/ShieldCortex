@@ -144,6 +144,17 @@ describe('realtime JSONL ledger', () => {
     expect(db.prepare("SELECT COUNT(*) as c FROM threat_nodes WHERE kind = 'session'").get()).toEqual({ c: 2 });
   });
 
+  it('carries the session taint state into the event attrs (Phase D)', () => {
+    const dir = makeRealtimeDir({
+      'realtime-2026-08-11.jsonl': [{ ...THREAT_ROW, tainted: true }],
+    });
+    projectRealtimeLedger({ dir });
+    const attrs = JSON.parse((getDatabase().prepare(
+      "SELECT attrs FROM threat_nodes WHERE kind = 'event' AND key = 'rt:realtime-2026-08-11.jsonl:1'"
+    ).get() as { attrs: string }).attrs);
+    expect(attrs.tainted).toBe(true);
+  });
+
   it('advances across day files in name order', () => {
     const dir = makeRealtimeDir({
       'realtime-2026-08-10.jsonl': [{ ...THREAT_ROW, ts: '2026-08-10T09:00:00.000Z' }],
