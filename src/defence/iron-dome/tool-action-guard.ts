@@ -1968,8 +1968,17 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
-    if (found.some(f => f.path === clean) || found.length >= MAX_DETECTED_SCRIPTS) return;
-    found.push({ path: clean, lang: lang ?? langFromPath(clean) });
+    const resolved = lang ?? langFromPath(clean);
+    // De-duplicate on path AND language. Keying on path alone discarded a
+    // SECOND invocation of the same file by a different interpreter, so
+    // `node p.mjs` followed by `bash p.mjs` reported only `node` — which the
+    // #217 region carve then trusted, relabelling a shell script as JavaScript
+    // and turning a catastrophic block into an allow. Keeping both is strictly
+    // more entries and every consumer treats extra invocations as more
+    // dangerous, not less, so this only ever moves fail-closed.
+    if (found.some(f => f.path === clean && f.lang === resolved)) return;
+    if (found.length >= MAX_DETECTED_SCRIPTS) return;
+    found.push({ path: clean, lang: resolved });
   };
 
   for (const stmt of splitCommandStatements(surface)) {
@@ -2203,12 +2212,207 @@ function foldScriptSources(
 // its `PATTERNS = {'recursive-force-delete': r'rm -rf'}` is a dict of strings and
 // its `at = tok['access_token']` is an assignment. Locate those bodies so the
 // span classifier can treat them as the interpreter source they are.
+/**
+ * Writing a FILE is a sink too, once the body's language is being trusted (#217).
+ *
+ * `SHELL_OUT_SINK` knows process sinks. A written-then-executed body that only
+ * writes a file looks inert to it, so its literals get masked as data — but
+ *
+ *     cat > gen.mjs <<'EOF'
+ *     writeFileSync('/tmp/g.sh', 'rm -rf /');
+ *     EOF
+ *     node gen.mjs && bash /tmp/g.sh
+ *
+ * is the write-then-execute threat (#160) one level deeper: the literal IS the
+ * command, it just travels via a file. Caught by the must-not-break fixture
+ * while building the #217 fix, which had made this exact case allow.
+ *
+ * Deliberately broad and used ONLY on this path. A false "has sink" costs
+ * nothing but the pre-#217 behaviour — the body stays scanned as shell, which
+ * is what it did before — whereas a miss re-opens #160.
+ */
+const FILE_WRITE_SINK =
+  /\bwriteFile(?:Sync)?\b|\bappendFile(?:Sync)?\b|\bcreateWriteStream\b|\bfs\.write|\bwriteSync\b|\bopenSync\s*\(|\bopen\s*\([^)]*['"](?:[wax]\+?|r\+)['"]|\bwrite_text\b|\bwrite_bytes\b|\bos\.(?:write|open)\b|\bshutil\.(?:copy|move)\w*|\bfile_put_contents\b|\bIO\.write\b|\bFile\.write\b|\bFile\.open\s*\([^)]*['"][wax]/;
+
+/**
+ * The executed file's OUTPUT escaping into the shell — a pipe, or a redirect
+ * into anything but a discard.
+ *
+ * The sink test above is BODY-local, and that is only half the threat. What
+ * matters is where the process's output GOES:
+ *
+ *     cat > g.mjs <<'EOF'
+ *     console.log("<destructive command>");
+ *     EOF
+ *     node g.mjs | bash
+ *
+ * has no sink token in the body at all — the pipe IS the sink, and it lives in
+ * the surrounding shell. Same for `>> ~/.zshrc`, `| tee -a`, and
+ * `> gen.sh && bash gen.sh`. Each is the #160 write-then-execute threat with
+ * the literal travelling by stdout instead of by file, and each was a
+ * catastrophic block before #217 relaxed this path.
+ *
+ * A discard (`> /dev/null`, `2>/dev/null`) or a genuine fd-to-fd redirect
+ * (`2>&1`) is exempt: it discards or re-points diagnostics rather than
+ * carrying the output anywhere, and `node probe.mjs 2>/dev/null` is exactly
+ * the shape #217 exists to keep relieved. An fd NUMBER prefix alone (`1>`,
+ * `2>`) is not exempt — `1>/tmp/x.sh` and `2>/tmp/x.sh` write to a real file
+ * exactly like a bare `>`, just with the fd spelled out.
+ */
+/**
+ * Write targets that cannot become executable content. Everything else is
+ * assumed to be able to — including a path we cannot see.
+ *
+ * A file write is only a sink when what it writes can later RUN. Gating on
+ * "does something else in this command run a script" was wrong twice over: it
+ * missed a body appending to `~/.zshrc` (executed at the next login, outside
+ * this command entirely), and it fired on a probe writing `/tmp/report.json`
+ * because `detectScriptInvocations` had parsed the report path out of the body
+ * text as a spurious invocation.
+ *
+ * Default-armed, relaxed only on proof: the write is inert only when EVERY
+ * path-shaped literal in the body carries a data extension.
+ */
+const INERT_WRITE_TARGET =
+  /\.(?:json|jsonl|ndjson|txt|md|csv|tsv|log|ya?ml|xml|html?|png|jpe?g|svg|lock)$/i;
+
+/** Write-sink function names. Arguments are extracted by a tiny balanced
+ * scanner below, not by `[^)]*`: nested helper calls such as
+ * `writeFileSync(resolve('/tmp/report.json'), '/tmp/stage2')` must not truncate
+ * the call at `resolve(...)` and accidentally let a later non-inert argument
+ * disappear.
+ */
+const WRITE_CALL_NAME_RE =
+  /\b(writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream|fs\.write\w*|writeSync|openSync|open|write_text|write_bytes|os\.(?:write|open)|shutil\.(?:copy|move)\w*|file_put_contents|IO\.write|File\.write|File\.open)\s*\(/g;
+
+type WriteCall = { name: string; args: string | null };
+
+function writeCalls(body: string): WriteCall[] {
+  const out: WriteCall[] = [];
+  WRITE_CALL_NAME_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = WRITE_CALL_NAME_RE.exec(body)) !== null) {
+    const start = WRITE_CALL_NAME_RE.lastIndex;
+    let depth = 1;
+    let quote: '"' | "'" | '`' | null = null;
+    let escaped = false;
+    let i = start;
+    for (; i < body.length; i++) {
+      const ch = body[i];
+      if (quote) {
+        if (escaped) { escaped = false; continue; }
+        if (ch === '\\') { escaped = true; continue; }
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+      if (ch === '(') { depth++; continue; }
+      if (ch === ')') {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (depth === 0) {
+      out.push({ name: m[1], args: body.slice(start, i) });
+      WRITE_CALL_NAME_RE.lastIndex = i + 1;
+    } else {
+      // Malformed/unbalanced write call: do not try to prove it inert.
+      out.push({ name: m[1], args: null });
+      WRITE_CALL_NAME_RE.lastIndex = start;
+    }
+  }
+  return out;
+}
+
+function splitTopLevelArgs(args: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: '"' | "'" | '`' | null = null;
+  let escaped = false;
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i];
+    if (quote) {
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') { depth = Math.max(0, depth - 1); continue; }
+    if (ch === ',' && depth === 0) {
+      out.push(args.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(args.slice(start).trim());
+  return out;
+}
+
+function targetArgIndexes(name: string): number[] {
+  if (/^(?:shutil\.(?:copy|move)\w*)$/.test(name)) return [0, 1];
+  if (/^(?:writeSync|fs\.write\w*|os\.write)$/.test(name)) return [];
+  return [0];
+}
+
+function targetExprIsProvablyInert(expr: string): boolean {
+  const trimmed = expr.trim();
+  const m = /^(['"])([^'"\n]*)\1$/.exec(trimmed);
+  if (!m) return false;
+  return INERT_WRITE_TARGET.test(m[2]);
+}
+
+function fileWriteIsSink(body: string): boolean {
+  if (!FILE_WRITE_SINK.test(body)) return false;
+  const calls = writeCalls(body);
+  // Sink vocabulary matched, but no call shape this extraction can see
+  // inside — a path built at runtime, most likely. Assume it can execute.
+  if (calls.length === 0) return true;
+  // Per call, and only on target-bearing argument positions: a data string or
+  // encoding (`'utf8'`) is not a filename and must not turn a JSON/log write
+  // back into a shell sink. Unproven/dynamic targets still fail closed.
+  return calls.some(call => {
+    if (call.args === null) return true;
+    const args = splitTopLevelArgs(call.args);
+    const targets = targetArgIndexes(call.name).map(i => args[i]).filter((v): v is string => v !== undefined);
+    if (targets.length === 0) return true;
+    return targets.some(t => !targetExprIsProvablyInert(t));
+  });
+}
+
+function outputEscapesToShell(text: string, outFile: string): boolean {
+  const esc = outFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // After the file name, on the same statement: a single `|` (not `||`), or a
+  // `>`/`>>` — with or without a leading fd number — whose target is not a
+  // discard (`/dev/null`) or a fd-to-fd redirect (`&1`, `&2`, …). The fd
+  // number itself confers no exemption: `1>/tmp/x.sh` and `2>/tmp/x.sh` write
+  // to a real file exactly like a bare `>` does.
+  const re = new RegExp(`${esc}[^\\n;&]*?(?:\\|(?!\\|)|>>?\\s*(?!(?:/dev/null|&\\d)))`);
+  return re.test(text);
+}
+
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n([\s\S]*?)(?:\n[ \t]*\2\b|$)/g;
 const HEREDOC_INTERP_TOKEN = /\b(bash|sh|zsh|ksh|dash|python[\d.]*|node|nodejs|ruby|perl|php)\b(?![\w/-])/gi;
 
 function interpreterHeredocRegions(text: string): ScanRegion[] {
   if (!text.includes('<<')) return [];
   const found: Array<{ region: ScanRegion; outFile: string | null }> = [];
+  /**
+   * #217 — heredocs with NO interpreter on the intro line whose body is written
+   * to a file: `cat > probe.mjs <<'EOF' … EOF; node probe.mjs`.
+   *
+   * The body is re-armed (correctly — the file IS executed), but it was then
+   * scanned with SHELL rules, so a JavaScript string literal `"rm -rf /"` read
+   * as a live command and hard-blocked at the catastrophic tier. The language
+   * of such a body is decided by whatever later RUNS the file, which is not
+   * knowable on the intro line, so these are resolved in a second pass below.
+   *
+   * The asymmetry this removes, measured: `python3 - <<'PY' … PY` (interpreter
+   * consumes the heredoc) returned benign, while the same literals written to a
+   * file and executed returned catastrophic.
+   */
+  const written: Array<{ start: number; end: number; body: string; outFile: string }> = [];
   const candidateFiles: string[] = [];
   ANY_HEREDOC_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -2216,7 +2420,18 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const lineStart = text.lastIndexOf('\n', m.index) + 1;
     const introLine = text.slice(lineStart, m.index);
     const interp = introLine.match(HEREDOC_INTERP_TOKEN);
-    if (!interp) continue;                              // nothing executes it as code
+    const nlEarly = m[0].indexOf('\n');
+    if (!interp) {
+      // No interpreter here, but if the body lands in a file the second pass
+      // may still find one that runs it.
+      const target = heredocOutputFile(introLine + m[0].slice(0, nlEarly + 1));
+      const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
+      if (cleaned) {
+        const s = m.index + nlEarly + 1;
+        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned });
+      }
+      continue;                                         // nothing executes it as code
+    }
     const lang = langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase()));
     if (lang === 'sh') continue;                        // a shell heredoc IS shell — unchanged
     const nl = m[0].indexOf('\n');
@@ -2234,9 +2449,71 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
       outFile: clean,
     });
   }
-  if (found.length === 0) return [];
+  // #217 second pass: resolve each written-then-executed body by the language of
+  // whatever actually runs it. `detectScriptInvocations` is the single
+  // definition of program position in this file — it skips flags, understands
+  // inline-program flags and recurses into `bash -c` — and it already carries
+  // the lang, so reuse it rather than add a second, divergent notion of which
+  // interpreter runs what (the recurring root cause in this file is a rule
+  // implemented twice).
+  const carved: ScanRegion[] = [];
+  if (written.length > 0) {
+    const invoked = detectScriptInvocations(text);
+    // At the detection cap a later real invocation may not have been reached,
+    // so claim nothing and leave every body scanned as shell — fail closed.
+    if (invoked.length < MAX_DETECTED_SCRIPTS) {
+      for (const w of written) {
+        const runs = invoked.filter(({ path }) =>
+          path === w.outFile
+          || path.endsWith(`/${w.outFile}`)
+          || w.outFile.endsWith(`/${path}`)
+          || path === `./${w.outFile}`);
+
+        // EVERY invocation must agree, and none may be a shell.
+        //
+        // Taking the FIRST match was a bypass: `detectScriptInvocations` used to
+        // de-duplicate on path alone, so `node p.mjs` followed by `bash p.mjs`
+        // resolved to `node`, relabelled a shell script as JavaScript, and
+        // turned a catastrophic block into an allow. One prefixed token did it,
+        // and `node p.mjs; bash p.mjs` is an ordinary thing to type.
+        //
+        // Note the direction. `findInterpreterRunFiles` uses this same matching
+        // to NARROW its set, which can only keep more bodies scanned — fail
+        // closed. Reusing it to WIDEN a relaxation makes the identical
+        // imprecision fail OPEN, so ambiguity here must resolve the other way.
+        if (runs.length === 0 || runs.some(r => r.lang === 'sh')) continue;
+        const langs = new Set(runs.map(r => r.lang));
+        if (langs.size > 1) continue;                     // disagreement is ambiguity
+
+        carved.push({
+          start: w.start,
+          end: w.end,
+          lang: runs[0].lang,
+          // Literals stay live when the body can reach a process
+          // (`child_process`, `execSync`), when it can WRITE a file another
+          // command runs, or when the RUN STATEMENT's own wiring carries the
+          // output into the shell (`| bash`, `>> ~/.zshrc`). The last is not a
+          // property of the body at all, which is exactly why the body-local
+          // test missed it.
+          hasSink: SHELL_OUT_SINK.test(w.body)
+            // A file write matters when what it writes can later RUN — see
+            // `fileWriteIsSink`. `writeFileSync('/tmp/report.json', …)` in a
+            // probe is data; `'/tmp/g.sh'` or `~/.zshrc` is a command in
+            // transit, whether or not this command is the thing that runs it.
+            || fileWriteIsSink(w.body)
+            || outputEscapesToShell(text, w.outFile),
+          folded: false,
+        });
+      }
+    }
+  }
+
+  if (found.length === 0) return carved;
   const executedFiles = findInterpreterRunFiles(text, candidateFiles);
-  return found.filter(f => !(f.outFile && executedFiles.has(f.outFile))).map(f => f.region);
+  return [
+    ...found.filter(f => !(f.outFile && executedFiles.has(f.outFile))).map(f => f.region),
+    ...carved,
+  ];
 }
 
 /**
