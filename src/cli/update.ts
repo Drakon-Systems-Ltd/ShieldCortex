@@ -17,6 +17,8 @@ import path from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
+import { describeRunFailure } from '../integrations/child-output.js';
+import type { CapturedError } from '../integrations/child-output.js';
 
 // ── ANSI ────────────────────────────────────────────────────
 
@@ -46,6 +48,13 @@ const LABEL_WIDTH = 24;
 interface StepResult {
   status: 'ok' | 'warn' | 'skip';
   summary?: string;
+  /**
+   * What the failing child process actually said (#221). `summary` is padded
+   * onto a single line, so anything multi-line has to live here or it destroys
+   * the layout — and a cause that does not fit on one line is exactly the kind
+   * that was previously thrown away.
+   */
+  detail?: string[];
 }
 
 async function step(
@@ -89,6 +98,12 @@ async function step(
       process.stdout.write(
         `  ${result.status === 'ok' ? '✓' : result.status === 'warn' ? '⚠' : '·'}  ${label}: ${result.summary ?? 'done'} (${elapsed})\n`,
       );
+    }
+    // #221: print what the child actually said, indented under its step. This
+    // is the difference between "update failed — run <the command that just
+    // failed>" and a message naming the config key to fix.
+    for (const line of result.detail ?? []) {
+      process.stdout.write(`     ${paint('gray', line)}\n`);
     }
     return result;
   } catch (err) {
@@ -151,21 +166,33 @@ function runQuiet(cmd: string, args: string[], opts: RunOpts = {}): Promise<{ st
 
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);
-      reject(err);
+      // #221: a spawn failure is a DIFFERENT thing from a non-zero exit, and
+      // reporting them identically is how "openclaw is not installed" reads as
+      // "openclaw rejected the command".
+      const e = err as CapturedError;
+      e.spawnFailed = true;
+      e.exitCode = null;
+      e.command = `${cmd} ${args.join(' ')}`;
+      reject(e);
     });
 
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       if (timedOut) {
-        const err = new Error(`timeout: ${cmd} ${args.join(' ')}`) as Error & { stdout?: string; stderr?: string };
+        const err = new Error(`timeout: ${cmd} ${args.join(' ')}`) as CapturedError;
         err.stdout = stdout;
         err.stderr = stderr;
+        err.timedOut = true;
+        err.exitCode = null;
+        err.command = `${cmd} ${args.join(' ')}`;
         return reject(err);
       }
       if (typeof code === 'number' && code !== 0) {
-        const err = new Error(`exit ${code}: ${cmd} ${args.join(' ')}`) as Error & { stdout?: string; stderr?: string };
+        const err = new Error(`exit ${code}: ${cmd} ${args.join(' ')}`) as CapturedError;
         err.stdout = stdout;
         err.stderr = stderr;
+        err.exitCode = code;
+        err.command = `${cmd} ${args.join(' ')}`;
         return reject(err);
       }
       resolve({ stdout, stderr });
@@ -301,7 +328,12 @@ export function isRealtimePluginRegistered(home: string): boolean {
   }
 }
 
-async function stepOpenClawPlugin(home: string): Promise<StepResult> {
+/** `run` is injectable so the failure path can be tested without a real spawn. */
+export async function stepOpenClawPlugin(
+  home: string,
+  deps: { run?: typeof runQuiet } = {},
+): Promise<StepResult> {
+  const run = deps.run ?? runQuiet;
   const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
   const legacy = fs.existsSync(extDir);
   const registered = isRealtimePluginRegistered(home);
@@ -320,7 +352,7 @@ async function stepOpenClawPlugin(home: string): Promise<StepResult> {
       // spec (observed 2026-06-09: the index pinned @4.30.2 → "up to date" while
       // npm had 4.31.0). A forced @latest install reliably advances the plugin
       // AND rewrites the tracked spec to @latest so future updates work.
-      await runQuiet('openclaw', ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'],
+      await run('openclaw', ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'],
         { timeout: 120000, env: { ...process.env, HOME: home } });
       // Report the ACTUAL on-disk transition, not just command success — the old
       // "updated via openclaw" was printed even when the version never moved.
@@ -328,9 +360,20 @@ async function stepOpenClawPlugin(home: string): Promise<StepResult> {
       if (before && after && before !== after) return `${before} → ${after}`;
       if (after) return `up to date (v${after})`;
       return 'reinstalled';
-    } catch {
+    } catch (err) {
       // Don't propagate — surface as warn instead of failing the whole flow.
-      return { status: 'warn' as const, summary: 'update failed — run `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest`' };
+      //
+      // #221: this used to restate the command that had just failed and throw
+      // the reason away. When OpenClaw's config is invalid it says so exactly,
+      // names the offending key and gives the repair — and an operator chased
+      // this line for five days because that message was discarded here while
+      // `runQuiet` had it in hand the whole time.
+      const report = describeRunFailure(err);
+      return {
+        status: 'warn' as const,
+        summary: `update failed — ${report.reason}`,
+        detail: report.detail,
+      };
     }
   });
 }
@@ -363,8 +406,17 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
       const dirs = findInstalledSkillDirs(home);
       const v = dirs.length > 0 ? readInstalledSkillVersion(dirs[0]) : null;
       return v ? `v${v} installed` : { status: 'warn' as const, summary: 'installed but version unreadable' };
-    } catch {
-      return { status: 'warn' as const, summary: 'reinstall failed — run `shieldcortex openclaw skill install`' };
+    } catch (err) {
+      // #221: same defect as the plugin step, and worse here — ClawHub skill
+      // installs fail for several distinct reasons (moderation lag, the
+      // acknowledge flag, an invalid OpenClaw config) and all of them read
+      // identically once the reason is dropped.
+      const report = describeRunFailure(err);
+      return {
+        status: 'warn' as const,
+        summary: `reinstall failed — ${report.reason}`,
+        detail: report.detail,
+      };
     }
   });
 }

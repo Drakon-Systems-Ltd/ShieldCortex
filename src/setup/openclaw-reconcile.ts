@@ -16,6 +16,7 @@ import { runPluginSelfCheck, type SelfCheckRunResult } from './openclaw-selfchec
 import { waitForGatewayReady } from './gateway-readiness.js';
 import { summariseRepair, renderRepairHeadline } from './repair-verdict.js';
 import { resolveRepairConsent } from './repair-consent.js';
+import { summariseCommandOutput } from '../integrations/child-output.js';
 
 /**
  * The #74 metadata reconciler orchestrator.
@@ -291,8 +292,14 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     // openclaw-* command steps.
     const r = runCommand(step.command ?? []);
     const ok = r.status === 0;
-    stepResults.push({ kind: step.kind, ok, detail: r.output.trim().split('\n').slice(-1)[0] ?? '' });
-    if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${r.output.trim().split('\n').slice(-1)[0] ?? ''}`);
+    // #221: was `split('\n').slice(-1)[0]` — the LAST line. When OpenClaw
+    // refuses because its config is invalid, its last line is the reassurance
+    // "Audit, status, health, logs, tasks list/audit, and doctor commands still
+    // run with invalid config." — so the reported reason was the sign-off and
+    // the actual cause, printed first, was discarded.
+    const summary = summariseCommandOutput(r.output, { maxLines: 1 }).lines[0] ?? '';
+    stepResults.push({ kind: step.kind, ok, detail: summary });
+    if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${summary}`);
   }
 
   // #145: re-read the state AFTER remediation. The pre-remediation snapshot is
