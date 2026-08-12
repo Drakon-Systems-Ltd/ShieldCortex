@@ -673,8 +673,8 @@ following the `actionGuard` block pattern):
 | Key | Default | Phase | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `true` | A | projector runs; graph populates |
-| `trustModifier` | `'advisory'` | B | `off` / `advisory` / `enforce` (enforce requires attested identity per Loop 2) |
-| `halfLifeDays` | `14` | B | risk decay half-life |
+| `trustModifier` | `'advisory'` | B | `off` / `advisory` / `enforce` (enforce requires attested identity per Loop 2). Top-level `strictSourceMode: true` also attests every resolution. |
+| `halfLifeDays` | `14` | B | risk decay half-life (constant for now; wired as `halfLifeMs` override) |
 | `autoRelease` | `false` | C | allowance auto-release (near-dup only) |
 | `campaignAlerts` | `'digest'` | D | `off` / `digest` / `each` (each still budget-capped) |
 
@@ -805,6 +805,40 @@ built on facts, not the doc's assumptions. They amend the sections above.
 8. **Realtime rows accrue no risk in B** (no verdict field; pooled
    unattested identities are enforcement-inert anyway) — weights for
    conversation detections are decided in Phase D with campaign detection.
+
+## Phase B — known limits and pre-enforce items (2026-08-12 review)
+
+The B implementation was adversarially reviewed (3 lenses). Two majors were
+fixed and are now the design of record: **risk accrues only from attested
+rows** (an unattested spoof under a victim's name can never enter the sum the
+enforced modifier consumes — the earlier "read gate only" was insufficient),
+and the **rate window tumbles forward only** (a descending-timestamp burst,
+e.g. a backward clock step, no longer re-arms the cap). The operator reset is
+**ledger-reproducible**: it writes a structured `risk_reset` review row the
+projector consumes on replay, so a rebuild reproduces the dispute. These
+carry a `PROJECTOR_VERSION` bump (1 → 2), so A→B upgrades rebuild and backfill
+risk from retained history.
+
+Deferred, tracked here so they are decisions not surprises:
+
+- **Enforce-mode × sub-agent hold band.** Subtracting the modifier can move a
+  clean-content score into or through the [0.5, 0.7) sub-agent quarantine
+  band non-monotonically (a larger penalty can land *below* the band). This is
+  inert under the `advisory` default (modifier recorded, not applied). Before
+  promoting any deployment to `enforce`, decide the intended interaction —
+  most likely: an enforce-applied modifier marks the source at-least-quarantine
+  at the disposition layer regardless of the resulting score. Do not promote
+  to enforce until this is resolved and the advisory soak has FP data (#182).
+- **>200-char identifier collision.** Two distinct identifiers sharing a
+  200-char prefix collide onto one source node (merged risk sum; counters and
+  attestation from the last-projected full id). Bounded and rare (deep agent
+  hierarchies); accepted for B. A later phase can disambiguate by appending a
+  short hash of the full identifier when length exceeds the cap.
+- **Cold-start honesty.** On A→B upgrade the rebuild backfills the enforcement
+  sum only from rows carrying `source_attested = 1`; historical rows predating
+  the attestation plumbing (NULL) contribute counters but not enforced risk.
+  Enforced risk therefore builds forward from attested writes — the annotation
+  counters still reflect full history.
 
 ## Open questions
 

@@ -41,8 +41,10 @@ import {
   DEFAULT_HALF_LIFE_MS,
   RATE_CAP,
   RATE_WINDOW_MS,
+  applyRiskReset,
   eventWeight,
   foldEvent,
+  parseRiskReset,
   runRiskSweep,
   type RiskState,
 } from './risk.js';
@@ -57,8 +59,10 @@ import {
   upsertNode,
 } from './shared.js';
 
-/** Bump when projection rules change to force a rebuild on the next run. */
-export const PROJECTOR_VERSION = 1;
+/** Bump when projection rules change to force a rebuild on the next run.
+ *  v2 (Phase B): risk exponent-sum fold, attestation-gated accrual,
+ *  src_type/src_id attrs, and risk_reset review-row consumption. */
+export const PROJECTOR_VERSION = 2;
 
 export interface ProjectorOptions {
   /** Rows per claim-and-advance batch. */
@@ -104,9 +108,12 @@ interface AuditRow {
   source_type: string;
   source_identifier: string;
   firewall_result: 'ALLOW' | 'BLOCK' | 'QUARANTINE';
+  operation: string | null;
   anomaly_score: number | null;
   threat_indicators: string | null;
   blocked_patterns: string | null;
+  source_attested: number | null;
+  reason: string | null;
 }
 
 function parseJsonArray(raw: string | null): string[] {
@@ -186,8 +193,13 @@ function projectRow(row: AuditRow, opts: Required<ProjectorOptions>, errors: str
     // truncated node key.
     attrs.src_type = row.source_type;
     attrs.src_id = row.source_identifier;
-    // Fold weighted events only — a zero-weight ALLOW is a no-op for the risk.
-    if (weight > 0) {
+    // Fold weighted events only, AND only when the row is provably attested
+    // (source_attested === 1). Gating ACCRUAL — not just the read — is what
+    // makes the victim-poisoning defence real: an attacker declaring rows
+    // under a victim's name resolves unattested (source_attested=0), so their
+    // BLOCKs never enter the sum the enforced modifier consumes. NULL (legacy/
+    // unplumbed) rows are conservatively excluded from enforcement risk.
+    if (weight > 0 && row.source_attested === 1) {
       const prev: RiskState | null =
         typeof attrs.risk_sum === 'number' && typeof attrs.risk_ref_ts === 'string'
           ? {
@@ -259,12 +271,31 @@ export function projectAuditLedger(options?: ProjectorOptions): ProjectResult {
     const state = db.prepare('SELECT last_audit_id FROM threat_graph_state WHERE id = 1').get() as { last_audit_id: number };
     const rows = cachedStmt(`
       SELECT id, project, timestamp, source_type, source_identifier,
-             firewall_result, anomaly_score, threat_indicators, blocked_patterns
+             firewall_result, operation, anomaly_score, threat_indicators,
+             blocked_patterns, source_attested, reason
       FROM defence_audit WHERE id > ? ORDER BY id ASC LIMIT ?
     `).all(state.last_audit_id, opts.batchSize) as AuditRow[];
 
     result.cursor = state.last_audit_id;
     for (const row of rows) {
+      // Operator review rows (reset-source, Phase C decisions) are ledger
+      // facts, not scans — they never accrue risk or mint source nodes. A
+      // risk_reset payload clears the target source's accrued sum AT this
+      // ledger position, so a rebuild reproduces the operator's dispute
+      // (invariant 3). Later weighted rows for that source re-accrue.
+      if (row.operation === 'review') {
+        const reset = parseRiskReset(row.reason);
+        if (reset) {
+          try {
+            applyRiskReset(reset.source_key, toIso(row.timestamp));
+          } catch (e) {
+            result.errors.push(`audit:${row.id} risk_reset: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        result.cursor = row.id;
+        result.processed++;
+        continue;
+      }
       try {
         const { eventMinted } = projectRow(row, opts, result.errors);
         if (eventMinted) result.eventNodes++;

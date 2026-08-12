@@ -456,6 +456,23 @@ export function getStrictSourceMode(): boolean {
 }
 
 /**
+ * Threat-graph trust-modifier mode (docs/design/2026-08-11-threat-graph.md,
+ * Loop 2). `threatGraph.trustModifier`: 'off' | 'advisory' | 'enforce'.
+ * Default 'advisory' — computed and recorded on the audit row, not applied —
+ * so real-world false-positive data accrues before anything changes scan
+ * behaviour (#182). Any other value falls back to advisory.
+ */
+export function getTrustModifierMode(raw?: Record<string, unknown>): 'off' | 'advisory' | 'enforce' {
+  const source = raw ?? readRawConfig();
+  const block = source.threatGraph;
+  if (block && typeof block === 'object' && !Array.isArray(block)) {
+    const mode = (block as Record<string, unknown>).trustModifier;
+    if (mode === 'off' || mode === 'enforce') return mode;
+  }
+  return 'advisory';
+}
+
+/**
  * Threat-graph feature gate (docs/design/2026-08-11-threat-graph.md).
  * Enabled unless config sets `threatGraph.enabled: false` explicitly.
  * Pass `raw` for tests; production callers omit it and read the live config.

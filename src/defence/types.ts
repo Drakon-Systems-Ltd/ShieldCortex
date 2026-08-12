@@ -178,7 +178,7 @@ export interface QuarantineEntry {
 }
 
 /** Operation that produced an audit row (provenance ledger discriminator). */
-export type AuditOperation = 'write' | 'read' | 'delete' | 'update' | 'revoke';
+export type AuditOperation = 'write' | 'read' | 'delete' | 'update' | 'revoke' | 'review';
 
 export interface AuditEntry {
   id: number;

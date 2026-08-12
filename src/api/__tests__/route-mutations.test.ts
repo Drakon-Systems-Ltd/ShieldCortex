@@ -128,6 +128,7 @@ describe('API route mutation regressions', () => {
         getDeviceName: () => 'edith',
         getDefenceMode: () => 'balanced',
         getStrictSourceMode: () => false,
+        getTrustModifierMode: () => 'advisory',
         getVerifyConfig: () => ({
           verifyEnabled: false,
           verifyMode: 'advisory',

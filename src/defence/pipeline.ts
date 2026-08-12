@@ -28,7 +28,8 @@ import { persistEvent } from '../api/events.js';
 import { syncToCloud } from '../cloud/sync.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
-import { getDefenceMode } from '../cloud/config.js';
+import { getDefenceMode, getTrustModifierMode } from '../cloud/config.js';
+import { computeRiskModifier, type TrustModifierMode } from '../threat-graph/risk.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getEnabledFirewallRules, ruleMatches } from './custom-rules/store.js';
 import { getEnabledCustomPatterns } from './custom-patterns/store.js';
@@ -50,6 +51,11 @@ export interface PipelineRunOptions {
    * DefenceSource — that type is caller-suppliable.
    */
   sourceAttested?: boolean;
+  /**
+   * Trust-modifier mode override (threat-graph Loop 2). Defaults to the
+   * config-file `threatGraph.trustModifier` (advisory). Test seam.
+   */
+  trustModifierMode?: TrustModifierMode;
 }
 
 export function runDefencePipeline(
@@ -68,8 +74,15 @@ export function runDefencePipeline(
     const sanitisation = sanitiseInput(content);
     const cleanContent = sanitisation.sanitised;
 
-    // 2. Score trust
+    // 2. Score trust, then apply the threat-graph risk modifier (Loop 2).
+    // The read is guarded + fail-to-zero inside computeRiskModifier; here we
+    // only ever SUBTRACT (additive-tightening), and only in enforce mode.
     const trust: TrustScore = scoreSource(source);
+    const modMode: TrustModifierMode = options?.trustModifierMode ?? getTrustModifierMode();
+    const riskMod = computeRiskModifier(source, modMode);
+    if (riskMod.applied) {
+      trust.score = Math.max(0, trust.score - riskMod.modifier);
+    }
 
     // 3. Run firewall (on sanitised content). Pass the strip categories so the
     // firewall can account for zero-width/bidi bytes the sanitiser already
@@ -256,6 +269,7 @@ export function runDefencePipeline(
       fragmentation_score: fragmentation?.score ?? null,
       pipeline_duration_ms: durationMs,
       source_attested: options?.sourceAttested === undefined ? null : (options.sourceAttested ? 1 : 0),
+      risk_modifier: modMode === 'off' ? null : riskMod.modifier,
     });
 
     // 7. Emit defence event for real-time dashboard alerts (BLOCK/QUARANTINE only)

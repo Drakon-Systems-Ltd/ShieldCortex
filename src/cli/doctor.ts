@@ -386,10 +386,11 @@ async function checkDatabase(): Promise<CheckResult> {
  * DB file read-only like every other doctor check.
  */
 export async function checkThreatGraph(
-  opts: { lagWarnThreshold?: number; enabled?: boolean } = {},
+  opts: { lagWarnThreshold?: number; enabled?: boolean; nowMs?: number; sweepStaleMs?: number } = {},
 ): Promise<CheckResult> {
   const label = 'Threat graph';
   const lagWarnThreshold = opts.lagWarnThreshold ?? 1000;
+  const sweepStaleMs = opts.sweepStaleMs ?? 6 * 60 * 60 * 1000; // 6h default
 
   // Config gate first: a deliberately disabled projector accrues lag by
   // design and must not WARN forever. `opts.enabled` is a test seam only.
@@ -463,6 +464,30 @@ export async function checkThreatGraph(
           (state?.last_run_at ? `, last ran ${state.last_run_at}` : ', never ran'),
         fix: 'ensure a worker is running (MCP server or dashboard), or: shieldcortex threat-graph rebuild',
       };
+    }
+
+    // Idle-sweep freshness: source_risk drives the (advisory/enforce) trust
+    // modifier, and a stalled sweep means stale risk feeding it. Warn when the
+    // most-recent source_risk.updated_at is older than the budget. Only
+    // meaningful once the table has rows.
+    const hasRiskTable = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='source_risk'"
+    ).get();
+    if (hasRiskTable) {
+      const newest = db.prepare('SELECT MAX(updated_at) AS m FROM source_risk').get() as { m: string | null };
+      if (newest.m) {
+        const nowMs = opts.nowMs ?? Date.now();
+        const ageMs = nowMs - Date.parse(newest.m);
+        if (ageMs > sweepStaleMs) {
+          return {
+            label,
+            status: 'warn',
+            message: `risk sweep is stale — source_risk last refreshed ${newest.m} ` +
+              `(${Math.round(ageMs / 3_600_000)}h ago); the trust modifier is reading stale risk`,
+            fix: 'ensure a worker is running (MCP server or dashboard), or: shieldcortex threat-graph rebuild',
+          };
+        }
+      }
     }
 
     return {

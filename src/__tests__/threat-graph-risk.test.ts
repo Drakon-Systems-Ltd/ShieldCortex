@@ -86,6 +86,14 @@ describe('foldEvent + decayedRisk', () => {
     expect(s.sum).toBeCloseTo(RATE_CAP, 6);
   });
 
+  it('holds the cap under a descending-timestamp burst (backward clock / out-of-order)', () => {
+    // A backward clock step: 200 BLOCKs at monotonically DECREASING timestamps.
+    // The window must not re-arm on merely-earlier rows.
+    let s = foldEvent(null, 200_000, 1.0, opts);
+    for (let i = 1; i < 200; i++) s = foldEvent(s, 200_000 - i, 1.0, opts);
+    expect(s.sum).toBeLessThanOrEqual(RATE_CAP + 1e-6);
+  });
+
   it('reopens the rate window after it elapses', () => {
     let s = foldEvent(null, 0, 1.0, opts);
     for (let i = 0; i < 9; i++) s = foldEvent(s, 0, 1.0, opts); // capped at 2.0
@@ -152,6 +160,34 @@ describe('runRiskSweep (DB)', () => {
     const row = getDatabase().prepare("SELECT attested FROM source_risk WHERE source_key = 'agent:jarvis'")
       .get() as { attested: number };
     expect(row.attested).toBe(0);
+  });
+
+  it('does NOT accrue enforcement risk from unattested (spoofed) rows', () => {
+    const db = getDatabase();
+    // Attacker writes BLOCKs under the victim's name — declared, so unattested.
+    insertAudit({ verdict: 'BLOCK', ts: '2026-08-01T00:00:00.000Z', attested: 0 });
+    insertAudit({ verdict: 'BLOCK', ts: '2026-08-02T00:00:00.000Z', attested: 0 });
+    // The victim then does one legitimate attested BLOCK (latest attestation).
+    insertAudit({ verdict: 'BLOCK', ts: '2026-08-03T00:00:00.000Z', attested: 1 });
+    projectToCompletion();
+
+    // Only the single attested BLOCK is in the enforcement sum (≈ 1.0), not
+    // the attacker's two (which would push it toward ~2.7).
+    const sum = (db.prepare(
+      "SELECT json_extract(attrs,'$.risk_sum') AS s FROM threat_nodes WHERE key = 'agent:jarvis'"
+    ).get() as { s: number }).s;
+    expect(sum).toBeLessThan(1.2);
+    expect(sum).toBeGreaterThan(0.8);
+  });
+
+  it('a purely-spoofed source accrues zero enforcement risk', () => {
+    insertAudit({ verdict: 'BLOCK', ts: '2026-08-01T00:00:00.000Z', attested: 0 });
+    insertAudit({ verdict: 'BLOCK', ts: '2026-08-02T00:00:00.000Z', attested: 0 });
+    projectToCompletion();
+    runRiskSweep({ nowMs: Date.parse('2026-08-02T00:00:00.000Z') });
+    const row = getDatabase().prepare("SELECT risk FROM source_risk WHERE source_key = 'agent:jarvis'")
+      .get() as { risk: number } | undefined;
+    expect(row?.risk ?? 0).toBe(0);
   });
 
   it('is idempotent and refreshes decay for idle sources (risk falls as now advances)', () => {
