@@ -87,3 +87,83 @@ describe('#217 — the relaxation stops at the sink', () => {
     expect(v.decision).not.toBe('block');
   });
 });
+
+/**
+ * THE BYPASSES THE FIRST VERSION OF THIS FIX OPENED.
+ *
+ * Every case below was `block` on main and `allow` on the first implementation
+ * — five catastrophic-tier verdicts inverted. They are pinned here because the
+ * root causes were not one bug but two habits:
+ *
+ *  1. The sink test was BODY-LOCAL, while the threat is about where the
+ *     executed process's OUTPUT goes. Having found that a literal can travel by
+ *     file, the obvious next question — what else can it travel by — went
+ *     unasked. A pipe needs no sink token in the body at all.
+ *
+ *  2. Language was resolved with `find` (first match wins) over a list that
+ *     de-duplicated on path alone, so a second invocation by a different
+ *     interpreter was discarded. `findInterpreterRunFiles` uses that same
+ *     matching to NARROW, which fails closed; reusing it to WIDEN made the
+ *     identical imprecision fail OPEN.
+ */
+describe('#217 — output transport is a sink, not just body vocabulary', () => {
+  const gen = (body: string, file = '/tmp/g.mjs') => `cat > ${file} <<'EOF'\n${body}\nEOF\n`;
+
+  it.each([
+    ['stdout piped to bash', `${gen(`console.log("${RMRF} ~/");`)}node /tmp/g.mjs | bash`],
+    ['stdout piped to sh', `${gen(`console.log("${RMRF} ~/");`)}node /tmp/g.mjs | sh`],
+    ['stdout appended to a shell rc', `${gen(`console.log("${RMRF} ~/");`)}node /tmp/g.mjs >> ~/.zshrc`],
+    ['stdout redirected into a script then run', `${gen(`console.log("${RMRF} ~/");`)}node /tmp/g.mjs > /tmp/x.sh && bash /tmp/x.sh`],
+    ['python twin, piped', `cat > /tmp/g.py <<'PY'\nprint("${RMRF} ~/")\nPY\npython3 /tmp/g.py | bash`],
+  ])('still blocks: %s', (_name, cmd) => {
+    expect(decide(cmd).decision).toBe('block');
+  });
+
+  it('but a discard redirect keeps the #217 relief', () => {
+    // `2>/dev/null` on a probe is the shape this fix exists to allow.
+    const v = decide(`cat > /tmp/p.mjs <<'EOF'\n${PROBE_BODY}\nEOF\nnode /tmp/p.mjs 2>/dev/null`);
+    expect(v.decision).not.toBe('block');
+  });
+});
+
+describe('#217 — ambiguous language resolution fails closed', () => {
+  const BODY_SHELL = `eval "${RMRF} /"`;
+
+  it.each([
+    ['same path run by node THEN bash', `cat > /tmp/p.mjs <<'EOF'\n${BODY_SHELL}\nEOF\nnode /tmp/p.mjs\nbash /tmp/p.mjs`],
+    ['a decoy node invocation prefixed', `node /tmp/p.mjs --lint\ncat > /tmp/p.mjs <<'EOF'\n${BODY_SHELL}\nEOF\nbash /tmp/p.mjs`],
+  ])('still blocks: %s', (_name, cmd) => {
+    expect(decide(cmd).decision).toBe('block');
+  });
+});
+
+describe('#217 — a file write is a sink by where it lands', () => {
+  it('writing a shell rc through the fd API still blocks', () => {
+    const v = decide(
+      `cat > /tmp/g7.mjs <<'EOF'\nimport { openSync, writeSync } from "node:fs";\n`
+      + `const fd = openSync(process.env.HOME + "/.zshrc", "a");\nwriteSync(fd, "${RMRF} ~/");\nEOF\nnode /tmp/g7.mjs`,
+    );
+    expect(v.decision).toBe('block');
+  });
+
+  it('but writing a JSON report does not', () => {
+    // Most diagnostic probes write a report. Treating any write as a sink
+    // re-blocked them, which is most of what #217 is for.
+    const v = decide(
+      `cat > /tmp/probe.mjs <<'EOF'\nimport { writeFileSync } from 'node:fs';\n`
+      + `const P = { danger: "${RMRF} /" };\nwriteFileSync('/tmp/report.json', JSON.stringify(P));\nEOF\nnode /tmp/probe.mjs`,
+    );
+    expect(v.decision).not.toBe('block');
+  });
+
+  it('and a probe that merely READS a file does not', () => {
+    // `open(path, 'r')` matched the write-sink pattern because the `+` was
+    // optional — so reading back the guard's own audit log to investigate a
+    // denial produced another denial, the #190 loop this issue exists to break.
+    const v = decide(
+      `cat > /tmp/probe.py <<'PY'\nPATTERNS = {'x': r'${RMRF} /'}\n`
+      + `data = open('/tmp/audit.jsonl', 'r').read()\nprint(PATTERNS, len(data))\nPY\npython3 /tmp/probe.py`,
+    );
+    expect(v.decision).not.toBe('block');
+  });
+});

@@ -1968,8 +1968,17 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
-    if (found.some(f => f.path === clean) || found.length >= MAX_DETECTED_SCRIPTS) return;
-    found.push({ path: clean, lang: lang ?? langFromPath(clean) });
+    const resolved = lang ?? langFromPath(clean);
+    // De-duplicate on path AND language. Keying on path alone discarded a
+    // SECOND invocation of the same file by a different interpreter, so
+    // `node p.mjs` followed by `bash p.mjs` reported only `node` — which the
+    // #217 region carve then trusted, relabelling a shell script as JavaScript
+    // and turning a catastrophic block into an allow. Keeping both is strictly
+    // more entries and every consumer treats extra invocations as more
+    // dangerous, not less, so this only ever moves fail-closed.
+    if (found.some(f => f.path === clean && f.lang === resolved)) return;
+    if (found.length >= MAX_DETECTED_SCRIPTS) return;
+    found.push({ path: clean, lang: resolved });
   };
 
   for (const stmt of splitCommandStatements(surface)) {
@@ -2223,7 +2232,64 @@ function foldScriptSources(
  * is what it did before — whereas a miss re-opens #160.
  */
 const FILE_WRITE_SINK =
-  /\bwriteFile(?:Sync)?\b|\bappendFile(?:Sync)?\b|\bcreateWriteStream\b|\bfs\.write\b|\bopen\s*\([^)]*['"][waxr]\+?['"]|\bwrite_text\b|\bwrite_bytes\b|\bos\.write\b|\bshutil\.(?:copy|move)\w*|\bfile_put_contents\b|\bIO\.write\b|\bFile\.(?:write|open)\b|>\s*\S+\.(?:sh|bash|zsh|py|mjs|cjs|js|rb|pl|php)\b/;
+  /\bwriteFile(?:Sync)?\b|\bappendFile(?:Sync)?\b|\bcreateWriteStream\b|\bfs\.write|\bwriteSync\b|\bopenSync\s*\(|\bopen\s*\([^)]*['"](?:[wax]\+?|r\+)['"]|\bwrite_text\b|\bwrite_bytes\b|\bos\.(?:write|open)\b|\bshutil\.(?:copy|move)\w*|\bfile_put_contents\b|\bIO\.write\b|\bFile\.write\b|\bFile\.open\s*\([^)]*['"][wax]/;
+
+/**
+ * The executed file's OUTPUT escaping into the shell — a pipe, or a redirect
+ * into anything but a discard.
+ *
+ * The sink test above is BODY-local, and that is only half the threat. What
+ * matters is where the process's output GOES:
+ *
+ *     cat > g.mjs <<'EOF'
+ *     console.log("<destructive command>");
+ *     EOF
+ *     node g.mjs | bash
+ *
+ * has no sink token in the body at all — the pipe IS the sink, and it lives in
+ * the surrounding shell. Same for `>> ~/.zshrc`, `| tee -a`, and
+ * `> gen.sh && bash gen.sh`. Each is the #160 write-then-execute threat with
+ * the literal travelling by stdout instead of by file, and each was a
+ * catastrophic block before #217 relaxed this path.
+ *
+ * `> /dev/null` and fd-numbered redirects (`2>/dev/null`, `2>&1`) are exempt:
+ * they discard or re-point diagnostics rather than carrying the output
+ * anywhere, and `node probe.mjs 2>/dev/null` is exactly the shape #217 exists
+ * to keep relieved.
+ */
+/**
+ * Write targets that cannot become executable content. Everything else is
+ * assumed to be able to — including a path we cannot see.
+ *
+ * A file write is only a sink when what it writes can later RUN. Gating on
+ * "does something else in this command run a script" was wrong twice over: it
+ * missed a body appending to `~/.zshrc` (executed at the next login, outside
+ * this command entirely), and it fired on a probe writing `/tmp/report.json`
+ * because `detectScriptInvocations` had parsed the report path out of the body
+ * text as a spurious invocation.
+ *
+ * Default-armed, relaxed only on proof: the write is inert only when EVERY
+ * path-shaped literal in the body carries a data extension.
+ */
+const INERT_WRITE_TARGET =
+  /\.(?:json|jsonl|ndjson|txt|md|csv|tsv|log|ya?ml|xml|html?|png|jpe?g|svg|lock)$/i;
+
+function fileWriteIsSink(body: string): boolean {
+  if (!FILE_WRITE_SINK.test(body)) return false;
+  const literals = body.match(/['"][^'"\n]*\.[A-Za-z0-9]{1,6}['"]/g) ?? [];
+  // No visible target — a path built at runtime. Assume it can execute.
+  if (literals.length === 0) return true;
+  return !literals.every(l => INERT_WRITE_TARGET.test(l.slice(1, -1)));
+}
+
+function outputEscapesToShell(text: string, outFile: string): boolean {
+  const esc = outFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // After the file name, on the same statement: a single `|` (not `||`), or a
+  // `>`/`>>` not preceded by a digit or `&`, targeting something other than a
+  // discard.
+  const re = new RegExp(`${esc}[^\\n;&]*?(?:\\|(?!\\|)|(?<![0-9&])>>?\\s*(?!(?:/dev/null|&\\d)))`);
+  return re.test(text);
+}
 
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n([\s\S]*?)(?:\n[ \t]*\2\b|$)/g;
 const HEREDOC_INTERP_TOKEN = /\b(bash|sh|zsh|ksh|dash|python[\d.]*|node|nodejs|ruby|perl|php)\b(?![\w/-])/gi;
@@ -2296,24 +2362,45 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     // so claim nothing and leave every body scanned as shell — fail closed.
     if (invoked.length < MAX_DETECTED_SCRIPTS) {
       for (const w of written) {
-        const run = invoked.find(({ path }) =>
+        const runs = invoked.filter(({ path }) =>
           path === w.outFile
           || path.endsWith(`/${w.outFile}`)
           || w.outFile.endsWith(`/${path}`)
           || path === `./${w.outFile}`);
-        // Executed by a shell, or not executed at all: unchanged. The former is
-        // the write-then-execute case #86.2/#160 exist to catch — that body
-        // really is the source of a command.
-        if (!run || run.lang === 'sh') continue;
+
+        // EVERY invocation must agree, and none may be a shell.
+        //
+        // Taking the FIRST match was a bypass: `detectScriptInvocations` used to
+        // de-duplicate on path alone, so `node p.mjs` followed by `bash p.mjs`
+        // resolved to `node`, relabelled a shell script as JavaScript, and
+        // turned a catastrophic block into an allow. One prefixed token did it,
+        // and `node p.mjs; bash p.mjs` is an ordinary thing to type.
+        //
+        // Note the direction. `findInterpreterRunFiles` uses this same matching
+        // to NARROW its set, which can only keep more bodies scanned — fail
+        // closed. Reusing it to WIDEN a relaxation makes the identical
+        // imprecision fail OPEN, so ambiguity here must resolve the other way.
+        if (runs.length === 0 || runs.some(r => r.lang === 'sh')) continue;
+        const langs = new Set(runs.map(r => r.lang));
+        if (langs.size > 1) continue;                     // disagreement is ambiguity
+
         carved.push({
           start: w.start,
           end: w.end,
-          lang: run.lang,
-          // A body that can reach a process — `child_process`, `execSync` — or
-          // that can WRITE a file another command then runs, keeps its literals
-          // live, exactly as the inline-program path does. Only the provably
-          // sink-free case is relaxed.
-          hasSink: SHELL_OUT_SINK.test(w.body) || FILE_WRITE_SINK.test(w.body),
+          lang: runs[0].lang,
+          // Literals stay live when the body can reach a process
+          // (`child_process`, `execSync`), when it can WRITE a file another
+          // command runs, or when the RUN STATEMENT's own wiring carries the
+          // output into the shell (`| bash`, `>> ~/.zshrc`). The last is not a
+          // property of the body at all, which is exactly why the body-local
+          // test missed it.
+          hasSink: SHELL_OUT_SINK.test(w.body)
+            // A file write matters when what it writes can later RUN — see
+            // `fileWriteIsSink`. `writeFileSync('/tmp/report.json', …)` in a
+            // probe is data; `'/tmp/g.sh'` or `~/.zshrc` is a command in
+            // transit, whether or not this command is the thing that runs it.
+            || fileWriteIsSink(w.body)
+            || outputEscapesToShell(text, w.outFile),
           folded: false,
         });
       }
