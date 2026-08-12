@@ -16,6 +16,7 @@ import { runPluginSelfCheck, type SelfCheckRunResult } from './openclaw-selfchec
 import { waitForGatewayReady } from './gateway-readiness.js';
 import { summariseRepair, renderRepairHeadline } from './repair-verdict.js';
 import { resolveRepairConsent } from './repair-consent.js';
+import { summariseCommandOutput } from '../integrations/child-output.js';
 
 /**
  * The #74 metadata reconciler orchestrator.
@@ -291,8 +292,31 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     // openclaw-* command steps.
     const r = runCommand(step.command ?? []);
     const ok = r.status === 0;
-    stepResults.push({ kind: step.kind, ok, detail: r.output.trim().split('\n').slice(-1)[0] ?? '' });
-    if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${r.output.trim().split('\n').slice(-1)[0] ?? ''}`);
+    // #221: was `split('\n').slice(-1)[0]` — the LAST line. When OpenClaw
+    // refuses because its config is invalid, its last line is the reassurance
+    // "Audit, status, health, logs, tasks list/audit, and doctor commands still
+    // run with invalid config." — so the reported reason was the sign-off and
+    // the actual cause, printed first, was discarded.
+    //
+    // `dropPluginChatter: false` because THIS command is a `plugins`
+    // subcommand: `[plugins] …` lines are its own output, not a third party's,
+    // and filtering them left a failed step with a blank reason. `mode` follows
+    // the outcome — failure ranking on a successful command promotes whichever
+    // line happens to contain a word like "conflict".
+    // `neverEmpty` rather than a fallback here: a raw `r.output` fallback at
+    // this call site skipped env-value redaction, home scrubbing and the line
+    // caps, and a probe with NPM_TOKEN set proved it emitted the token verbatim
+    // whenever the output was all `npm warn`. The guarantee belongs on the path
+    // that owns the redaction.
+    const summarised = summariseCommandOutput(r.output, {
+      maxLines: 1,
+      dropPluginChatter: false,
+      mode: ok ? 'plain' : 'failure',
+      neverEmpty: true,
+    });
+    const summary = summarised.lines[0] ?? '';
+    stepResults.push({ kind: step.kind, ok, detail: summary });
+    if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${summary}`);
   }
 
   // #145: re-read the state AFTER remediation. The pre-remediation snapshot is
