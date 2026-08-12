@@ -24,6 +24,47 @@ A deterministic projection of the defence audit ledgers into a per-source securi
 ### Notes
 
 - **Not released deliberately.** The false-positive rate is unmeasured (#182) and the design requires an advisory soak before any deployment moves the trust modifier to `enforce`. Local-only: no threat-graph data is synced to the cloud. Existing installs cold-start (enforcement risk builds forward from attested writes; historical counters are preserved).
+## [4.47.40] - 2026-08-12
+
+**Docs-only release: the published README described a pipeline that does not exist.**
+
+No code changed. This ships the documentation corrections from `ee8091b0` to npmjs.com,
+where the package page renders the README from the tarball rather than from GitHub — so
+the errors below stayed visible on the listing page after being fixed in the repo.
+
+### Documentation
+
+- **The six pipeline layers were named wrongly.** The README listed "Pattern Detection",
+  "Structural Validation" and "Behavioural Scoring" — none of which exist in `src/`. The
+  real order is input sanitisation → trust scoring → firewall → sensitivity classification
+  → fragmentation detection → credential-leak detection. The "6-layer" count was always
+  correct; only the names were invented.
+- **The firewall detector list was wrong in both directions.** It was assembled from the
+  files in `defence/firewall/`, which listed `confusables.ts` as a detector (it is a shared
+  utility imported *by* the instruction and encoding detectors) and missed
+  `detectSkillThreats` entirely (it lives in `../skill-scanner/`). Now taken from what
+  `analyzeFirewall()` actually dispatches.
+- **Credential leak coverage was understated by more than half** — documented as "25+
+  patterns, 11 providers" since the v-era entry that was accurate at the time. It is
+  **49 patterns across 25 providers**.
+- **Cortex was marked "Pro licence required".** Pro was retired on 2026-07-04; Cortex is
+  free like every local feature. This contradicted the licensing section of the same file.
+- **The Python example called a `scan()` function that does not exist.** The PyPI package
+  is a client for the hosted API and needs a cloud key — now stated, with the working
+  `ShieldCortex(api_key=...)` form.
+- **`SKILL.md` shipped four commands that fail as written**: `cortex capture` took
+  `--task/--mistake/--fix` (the real flags are `--category/--what/--why/--rule`), and all
+  three integrations were documented as `setup` when the subcommand is `install`. It also
+  advertised MCP tools named `store`/`search`/`graph`, none of which exist, and described
+  the source as MIT-0 when the repository is MIT.
+- **Dashboard port corrected to 3030** in `SECURITY.md` (was 3838) and `SKILL.md` (was
+  3001, which is the API).
+- `ARCHITECTURE.md` trust table completed (`file` 0.6, `tool_response` 0.5, `email` 0.4 were
+  missing; unrecognised types score 0, not 0.1) and the reason `file:import` is pinned to
+  0.4 — below the auto-quarantine band, so restoring a backup does not quarantine every
+  row — is now recorded.
+- `docs/CLAIMS-PROOF.md` re-anchored to the new README wording so the 1:1 claim-to-test
+  mapping holds; counts corrected to 17 tests / 108 assertions by running the suite.
 
 ## [4.47.39] - 2026-08-11
 

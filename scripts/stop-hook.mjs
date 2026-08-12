@@ -17,6 +17,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { mkdirSecure } from './lib/state-perms.mjs';
 import { existsSync, mkdirSync, openSync, readSync, closeSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -55,7 +56,7 @@ function logDisabledOnceForSession(sessionId, reason) {
     return;
   }
   try {
-    mkdirSync(STOP_DISABLED_SENTINEL_DIR, { recursive: true });
+    mkdirSecure(STOP_DISABLED_SENTINEL_DIR);
     const sentinel = join(STOP_DISABLED_SENTINEL_DIR, sessionId.replace(/[^a-zA-Z0-9_.-]/g, '_'));
     if (existsSync(sentinel)) return;
     writeFileSync(sentinel, new Date().toISOString(), { mode: 0o600 });

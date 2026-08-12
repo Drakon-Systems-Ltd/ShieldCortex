@@ -63,3 +63,8 @@ benchmark/longmemeval/report.json
 .superpowers/
 :memory:
 :memory:.lock
+
+# Transient agent working notes (briefs/reports/batch scratch)
+.batch-*.md
+BRIEF-*.md
+REPORT-*.md

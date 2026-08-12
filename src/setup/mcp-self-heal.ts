@@ -21,6 +21,7 @@
  */
 
 import fs from 'fs';
+import { mkdirSecure } from './state-permissions.js';
 import path from 'path';
 import os from 'os';
 import {
@@ -114,7 +115,7 @@ export async function selfHealMcpNativeBinding(
   let breadcrumbPath: string | undefined;
   try {
     const target = logsDir();
-    fs.mkdirSync(target, { recursive: true });
+    mkdirSecure(target);
     breadcrumbPath = path.join(target, MCP_SPAWN_ERROR_LOG);
     const body = [
       `[${now()}] ShieldCortex MCP server spawn failed (better-sqlite3 native-module load).`,

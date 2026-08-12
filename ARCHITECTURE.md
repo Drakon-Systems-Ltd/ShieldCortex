@@ -2,13 +2,15 @@
 
 ## Overview
 
-ShieldCortex is a security layer and brain-like memory system for AI agents. It protects **three surfaces**: what the agent *stores* (the memory-write defence pipeline below), what it *does* (the Iron Dome Action Guard, which gates tool calls at runtime), and what it *sees* (the Environment Firewall, which scrubs fetched/tool content before it becomes authority). It runs in two agent runtimes — **OpenClaw** (an in-process plugin on the `before_tool_call` bus) and **Hermes** (a `pre_tool_call` plugin via the local REST API) — both advisory-first and fail-open.
+ShieldCortex is a security layer and brain-like memory system for AI agents. It protects **three surfaces**: what the agent *stores* (the memory-write defence pipeline below), what it *does* (the Iron Dome Action Guard, which gates tool calls at runtime), and what it *sees* (the Environment Firewall, which scrubs fetched/tool content before it becomes authority). It runs in two agent runtimes — **OpenClaw** (an in-process plugin on the `before_tool_call` bus) and **Hermes** (a `pre_tool_call` plugin via the local REST API) — both advisory-first, and fail-open at the transport so a down guard never wedges the agent.
 
 ```
 Agent → ShieldCortex → Memory Store (SQLite)
          ↓
     Tier 1 (sync, 1-5ms):
-    Trust → Firewall → Sensitivity → Fragmentation → Credential → Audit
+    Sanitise → Trust → Firewall → Sensitivity → Fragmentation → Credential
+         ↓
+    decision → Audit → dashboard event → cloud sync (fire-and-forget)
          ↓ (if QUARANTINE + verify enabled)
     Tier 2 (async, 500-2000ms):
     Cloud LLM Verification → verdict → optional QUARANTINE→BLOCK upgrade
@@ -57,53 +59,93 @@ Base salience: 0.25. Deletion threshold: 0.2.
 
 Every `addMemory()` call runs through a tiered defence pipeline:
 
-### 1. Trust Scorer (`src/defence/trust/`)
+### 1. Input Sanitisation (`src/defence/input-sanitisation/`)
+
+Runs first, before any analysis. Strips control characters and null bytes so that
+no later layer is fed a string the detectors and the storage layer would read
+differently. The categories it stripped are passed on to the firewall, so a
+sanitised-away payload still counts as a signal rather than vanishing silently.
+
+### 2. Trust Scorer (`src/defence/trust/`)
 Scores the source of the memory write:
 
-| Source | Trust Score |
+| Source type | Trust Score |
 |--------|------------|
 | user | 1.0 |
 | cli | 0.9 |
 | hook | 0.8 |
 | api | 0.7 |
-| agent | 0.5 |
+| file | 0.6 |
+| tool_response | 0.5 |
+| agent | 0.5 (delegates to the hierarchy scorer) |
+| email | 0.4 |
 | web | 0.3 |
-| unknown | 0.1 |
+| *unrecognised type* | 0.0 |
 
-Low trust (< 0.5) escalates detections to BLOCK in balanced mode.
+Exact `type:identifier` keys override the type score:
 
-### 2. Memory Firewall (`src/defence/firewall/`)
+| Key | Trust Score | Why |
+|--------|------------|---|
+| `user:direct` | 1.0 | |
+| `user:approved` | 0.9 | Approved by the operator, not authored by them |
+| `file:import` | 0.4 | Pinned **below** the 0.5–0.7 auto-quarantine band so a benign backup restore succeeds, while imported rows stay scanned and low-trust until reviewed |
 
-Four detection modules run in parallel:
+Low trust (< 0.5) escalates detections to BLOCK in balanced mode. Note `tool_response`
+and `agent` both sit at 0.5 — the top of the auto-quarantine band — so agent writes and
+tool output are quarantined for review rather than trusted.
+
+### 3. Memory Firewall (`src/defence/firewall/`)
+
+Seven detection modules run over the sanitised content, all dispatched from
+`analyzeFirewall()`:
 
 - **Instruction Detector** — prompt injection, fake system prompts, hidden instructions, social engineering, delimiter attacks, frontmatter injection
 - **Privilege Detector** — credential references, system commands, destructive filesystem ops, network exfiltration, external URLs
 - **Encoding Detector** — base64, hex (including plain continuous hex), URL encoding, zero-width chars, RTL override, Unicode homoglyphs
+- **Markdown-Image Detector** — image and link syntax used to exfiltrate content to an attacker-controlled URL on render
+- **Credential-Exfil Detector** — content that pairs a secret with an egress path
 - **Anomaly Scorer** — entropy analysis, length anomalies, repetition patterns
+- **Skill-Threat Detector** (`../skill-scanner/patterns.js`) — skill/hook-format threat patterns, applied at memory-**write** time and not only on file scans
+
+`confusables.ts` is **not** a detector — it is a shared utility (`foldConfusables`,
+`hasConfusables`) imported *by* the instruction and encoding detectors, so a
+homoglyph-smuggled keyword is caught by the detector it was trying to evade. Don't
+list it as an eighth module.
+
+When the encoding detector decodes an embedded payload, the decoded snippet is
+re-scanned through the instruction, privilege, skill-threat, anomaly, and
+credential-leak checks — so obfuscation buys an attacker nothing.
 
 **Modes:**
 - `strict` — any detection → BLOCK
 - `balanced` — context-aware: instruction injection → QUARANTINE (low trust → BLOCK), encoding decoded and re-scanned, zero-width/RTL always quarantined
 - `permissive` — allow all, populate indicators only
 
-### 3. Sensitivity Classifier (`src/defence/sensitivity/`)
+### 4. Sensitivity Classifier (`src/defence/sensitivity/`)
 
 Classifies content as PUBLIC / INTERNAL / CONFIDENTIAL / RESTRICTED. Detects passwords, API keys, PII, credentials. RESTRICTED content is blocked. CONFIDENTIAL is redacted on recall.
 
-### 4. Fragmentation Detector (`src/defence/fragmentation/`)
+### 5. Fragmentation Detector (`src/defence/fragmentation/`)
 
-Cross-references new memories with recent ones to catch multi-step assembly attacks:
+Cross-references new memories with recent ones to catch multi-step assembly attacks. Skipped when the firewall has already blocked:
 - Entity extraction from content
 - Temporal analysis of related memories
 - Assembly pattern detection (fragments that combine into exploits)
 
-### 5. Audit Logger (`src/defence/audit/`)
-
-Full forensic trail of every memory operation: source, trust score, firewall result, sensitivity level, anomaly score, threat indicators, blocked patterns, duration.
-
 ### 6. Credential Leak Detection (`src/defence/credential-leak/`)
 
-Scans content for 25+ credential patterns across 11 providers (AWS, GitHub, Stripe, etc.). Entropy analysis catches generic secrets. Blocked credentials upgrade the firewall result to BLOCK.
+Scans content for **49 credential patterns across 25 providers** (AWS, GitHub, Stripe, OpenAI, Anthropic, Azure, Google, HashiCorp, MongoDB, Postgres, Redis, SSH/RSA/EC private keys, and more — see `credential-leak/patterns.ts`). Entropy analysis catches generic secrets that match no known pattern. Blocked credentials upgrade the firewall result to BLOCK.
+
+> Counts drift as providers are added. Regenerate rather than trusting this line:
+> `grep -oE "provider:\s*'[^']+'" src/defence/credential-leak/patterns.ts | sort -u | wc -l`
+
+### 7. Audit Logger (`src/defence/audit/`)
+
+Runs *after* the decision, not as a gate on it. Full forensic trail of every memory operation: source, trust score, firewall result, sensitivity level, anomaly score, threat indicators, blocked patterns, duration. A BLOCK or QUARANTINE additionally emits a dashboard event and a fire-and-forget cloud sync — neither can delay or change the verdict.
+
+### Semantic Analysis (`src/defence/semantic/`) — async path only
+
+Not one of the six synchronous layers. On `runDefencePipelineWithVerify()` and during deep skill scans, content is embedded and compared by cosine similarity against a curated corpus of attack phrasings, catching paraphrased injections the regexes miss. Escalation is additive — a clear match raises the verdict to at least QUARANTINE and never downgrades a BLOCK. Threshold is tunable via `SEMANTIC_SIMILARITY_THRESHOLD`. When no embedding model is installed the layer is a silent no-op and every other layer still runs.
 
 ### Tier 2: LLM Verification (`src/cloud/verify.ts`)
 
@@ -153,7 +195,7 @@ Protects what the agent *sees*. Runs the firewall over fetched web pages and too
 | OpenClaw | `before_tool_call` (typed-hook bus) + `llm_input` / `llm_output` | `@drakon-systems/shieldcortex-realtime` (npm) |
 | Hermes | `pre_tool_call` → REST `POST /api/v1/scan` | `plugins/hermes/shieldcortex/` (repo) |
 
-Both integrations are **advisory-first** and **fail-open**: an unreachable or erroring guard never wedges the agent.
+Both integrations are **advisory-first** and **fail-open at the transport**: an unreachable or erroring guard never wedges the agent. That is a statement about the *plumbing*, not about every verdict — when the guard does run, the catastrophic action class hard-blocks and cannot be configured open (see Iron Dome above). Everything below that class is advisory by default.
 
 ## Knowledge Graph (`src/graph/`)
 
@@ -269,7 +311,9 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(
 ```
 shieldcortex/
 ├── src/
-│   ├── index.ts                    # MCP server entry point
+│   ├── index.ts                    # CLI entry + command dispatch; re-exports lib.ts
+│   ├── lib.ts                      # Public programmatic API → `shieldcortex/lib`
+│   ├── scan-only.ts                # Light sync scan, no DB/ML → `shieldcortex/scan`
 │   ├── server.ts                   # MCP server setup, tool definitions
 │   ├── database/
 │   │   └── init.ts                 # SQLite setup, schema, transactions
@@ -290,14 +334,21 @@ shieldcortex/
 │   ├── defence/
 │   │   ├── pipeline.ts             # Orchestrates all layers (sync + async verify)
 │   │   ├── types.ts                # Defence type definitions
+│   │   ├── disposition.ts          # Verdict resolution
+│   │   ├── input-sanitisation/     # Layer 1 — strip control chars / null bytes
 │   │   ├── firewall/
 │   │   │   ├── index.ts            # Firewall orchestrator
 │   │   │   ├── instruction-detector.ts
 │   │   │   ├── privilege-detector.ts
 │   │   │   ├── encoding-detector.ts
+│   │   │   ├── confusables.ts
+│   │   │   ├── markdown-image-detector.ts
+│   │   │   ├── credential-exfil-detector.ts
 │   │   │   └── anomaly-scorer.ts
 │   │   ├── trust/
 │   │   │   ├── source-scorer.ts    # Trust hierarchy
+│   │   │   ├── agent-scorer.ts     # Sub-agent hierarchy (0.7× decay per level)
+│   │   │   ├── access-control.ts   # Read/write/delete ACL engine
 │   │   │   └── recall-filter.ts    # Filter by trust on recall
 │   │   ├── sensitivity/
 │   │   │   ├── classifier.ts       # PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED
@@ -309,6 +360,18 @@ shieldcortex/
 │   │   │   └── assembly-detector.ts
 │   │   ├── credential-leak/
 │   │   │   └── index.ts            # 25+ credential patterns, entropy analysis
+│   │   ├── semantic/               # Async deep-scan embedding layer
+│   │   ├── iron-dome/              # Action Guard — gates what the agent does
+│   │   ├── overseer/               # Approval-path guard (advisory)
+│   │   ├── skill-scanner/          # Scan installed agent skills/hooks
+│   │   ├── custom-patterns/        # User-defined injection patterns (DB-backed)
+│   │   ├── custom-rules/           # User-defined firewall rules (DB-backed)
+│   │   ├── quarantine/             # Quarantine store + 7-day auto-expire
+│   │   ├── judge/                  # Optional LLM judge
+│   │   ├── explainer/              # Human-readable verdict explanations
+│   │   ├── hidden-web-injection.ts # Hidden-content detection for fetched pages
+│   │   ├── tool-response-scanner.ts# Scan tool output before it becomes context
+│   │   ├── tool-response-enforce.ts# Enforce/redact mode for the above
 │   │   ├── audit/
 │   │   │   ├── logger.ts           # Write audit entries
 │   │   │   └── queries.ts          # Query audit trail
@@ -316,7 +379,10 @@ shieldcortex/
 │   │       └── scan-existing.ts    # Retroactive memory scanner
 │   ├── integrations/
 │   │   ├── langchain.ts            # ShieldCortexMemory + ShieldCortexGuard
+│   │   ├── openclaw.ts             # OpenClaw integration surface
+│   │   ├── universal.ts            # Framework-agnostic wrapper
 │   │   └── index.ts
+│   ├── environment/                # Environment Firewall → `shieldcortex/environment`
 │   ├── graph/
 │   │   ├── extract.ts              # Entity/triple extraction
 │   │   ├── resolve.ts              # Entity resolution
@@ -349,7 +415,11 @@ shieldcortex/
 │   └── stop-hook.mjs               # Check last response (opt-in)
 ├── hooks/
 │   └── openclaw/cortex-memory/     # OpenClaw hook
-├── dashboard/                      # Next.js 3D brain visualization
+├── plugins/
+│   ├── openclaw/                   # @drakon-systems/shieldcortex-realtime
+│   └── hermes/shieldcortex/        # Hermes pre_tool_call plugin
+├── skills/shieldcortex/            # Canonical SKILL.md (ClawHub source)
+├── dashboard/                      # Next.js — CIC terminal, graph, audit, shield, dome, cloud
 ├── package.json
 ├── tsconfig.json
 └── README.md

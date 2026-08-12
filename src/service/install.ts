@@ -8,6 +8,7 @@
  */
 
 import fs from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
@@ -40,7 +41,7 @@ function detectDefaultServiceMode(platform: Platform): ServiceMode {
 
 function getServiceConfig(mode: ServiceMode): ServiceConfig {
   const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
+  mkdirSecure(logsDir);
 
   return {
     nodePath: process.execPath,

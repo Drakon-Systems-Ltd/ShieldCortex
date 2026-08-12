@@ -3,6 +3,7 @@ import { join } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import type { RankerConfig, RankerEngine, RankerWeights } from '../memory/types.js';
+import { mkdirSecure } from '../setup/state-permissions.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -100,7 +101,7 @@ function getIntegrityKey(): string {
   } catch { /* ignore */ }
   // Generate new key on first run
   const key = randomBytes(32).toString('hex');
-  mkdirSync(configDir, { recursive: true });
+  mkdirSecure(configDir);
   writeFileSync(integrityKeyFile, key, { mode: 0o600 });
   try { chmodSync(integrityKeyFile, 0o600); } catch { /* best-effort */ }
   cachedIntegrityKey = key;
@@ -514,7 +515,7 @@ function invalidateRawConfigCache(): void {
 function writeRawConfig(raw: Record<string, unknown>): void {
   const configDir = getConfigDir();
   const configFile = getConfigFile();
-  mkdirSync(configDir, { recursive: true });
+  mkdirSecure(configDir);
 
   // Never carry an inbound `_sig` through; we always recompute it.
   const { _sig: _ignored, ...rest } = raw;

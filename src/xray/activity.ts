@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import os from 'os';
 import path from 'path';
 
@@ -73,7 +74,7 @@ export interface XRayWatchSessionEntry {
 
 function ensureXRayDir(): void {
   if (!fs.existsSync(XRAY_DIR)) {
-    fs.mkdirSync(XRAY_DIR, { recursive: true });
+    mkdirSecure(XRAY_DIR);
   }
 }
 
