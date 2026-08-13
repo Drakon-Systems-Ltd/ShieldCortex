@@ -77,6 +77,11 @@ export const SAFE_CORPUS: GuardCorpusEntry[] = [
   sh('git log --grep="branch -D"', 'allow', 'search pattern mentioning branch -D is not a delete'),
   sh('git diff branch -- -D', 'allow', '`branch` is a revision, `-D` a pathspec — `diff` is the subcommand, not a delete'),
   sh('echo if git branch -D x', 'allow', 'echo prints the words; git is an argument, not at command position'),
+  sh('echo "git branch -D victim && git push -f"', 'allow', 'a `&&` inside quotes is literal text — echo prints it, runs nothing'),
+  sh('printf "%s" "git push --force origin main"', 'allow', 'quoted command as printf data, not an invocation'),
+  sh('git commit -m "ran $(date); then git push --force"', 'allow', 'commit message quoting a command — `commit` is the subcommand; the $ is in a message, not a push flag'),
+  sh('git push origin "$BRANCH"', 'allow', 'the ubiquitous push-a-variable-branch pattern — a $-arg is not treated as a hidden flag'),
+  sh('git branch -d "$stale_branch"', 'allow', 'scripted merged-branch cleanup — bare -d, variable target'),
 
   // ── npm / node / JS tooling ──
   sh('npm install', 'allow', 'workspace-local install (no -g)'),
@@ -195,6 +200,8 @@ export const DANGEROUS_CORPUS: GuardCorpusEntry[] = [
   sh('if git branch -D victim; then echo done; fi', 'gate', 'git after a shell keyword IS a real invocation'),
   sh('while git push origin --delete main; do :; done', 'gate', 'git after `while` still gates'),
   sh("bash -O extglob -c 'git branch -D victim'", 'gate', 'inline shell with a value-taking option before -c'),
+  sh('timeout 5 git push --force origin main', 'gate', 'a wrapper with a bare numeric value before git is still a real invocation'),
+  sh('nice -n 10 git branch -D victim', 'gate', 'nice -n <N> git … — the value is the wrapper argument, git is the command'),
   // scheduler mutation
   sh('crontab -e', 'gate', 'edit the crontab (persistence)'),
   sh('at now + 1 minute', 'gate', 'schedule a one-shot job'),

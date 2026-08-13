@@ -538,11 +538,18 @@ const GIT_GLOBAL_VALUE_OPT = /^(?:-c|-C|--git-dir|--work-tree|--namespace|--exec
  * command and `git` is a printed argument).
  */
 function gitAtCommandPosition(tokens: readonly string[], i: number): boolean {
+  let sawWrapper = false;
   for (let k = 0; k < i; k++) {
     const t = tokens[k];
     const base = commandBaseName(t);
-    if (CMD_PREFIX_KEYWORD.test(base) || COMMAND_WRAPPER.test(base)) continue;
+    if (COMMAND_WRAPPER.test(base)) { sawWrapper = true; continue; }
+    if (CMD_PREFIX_KEYWORD.test(base)) continue;
     if (/^\w+=/.test(t) || t.startsWith('-')) continue;   // assignment, or a wrapper/keyword flag
+    // A wrapper's bare VALUE argument — `timeout 5 git …`, `nice -n 10 git …`,
+    // `ionice -c 3 git …`: a duration/number after a wrapper. Scoped to that so
+    // `sudo echo git branch -D` (echo is the command, git a printed arg) and a
+    // bare `5 git …` (no wrapper) are still rejected.
+    if (sawWrapper && /^\d+[smhd]?$/.test(t)) continue;
     return false;                                          // a bare word → git is an argument
   }
   return true;
@@ -564,6 +571,43 @@ function gitSubcommandArgs(args: readonly string[]): { sub: string; rest: string
 }
 
 /**
+ * Statement split for the git disposers. Splits on `;`/`&`/`|`/newlines only
+ * OUTSIDE quotes — a separator inside a quoted argument is literal text, so
+ * quoting/echoing a command no longer over-splits into fake `git …` statements
+ * (#182 residual). Command substitutions ($(…)/backticks) and subshell parens
+ * still break out wherever they appear, because they EXECUTE and expose an inner
+ * command that must be scanned (the old blunt splitCommandStatements did this;
+ * the only change is that `;&|` is now quote-aware). Strictly more precise than
+ * splitCommandStatements — it splits a subset of the same points.
+ */
+function disposerStatements(text: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '\\' && quote !== "'" && i + 1 < text.length) { cur += c + text[++i]; continue; }
+    // Command substitutions / subshells break out regardless of surrounding quotes.
+    if (c === '`' || c === '(' || c === ')' || (c === '$' && text[i + 1] === '(')) {
+      if (cur) out.push(cur);
+      cur = '';
+      if (c === '$') i++;   // consume the '(' of $(
+      continue;
+    }
+    if (quote) { cur += c; if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; cur += c; continue; }
+    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') {
+      if (cur) out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/**
  * Shared invocation walker for the git disposers (#195, #182). Both the
  * force-push rule and the branch/ref-delete rule PROPOSE on vocabulary; this
  * confirms a genuine `git <subcommand>` INVOCATION and hands (subcommand, args)
@@ -573,16 +617,34 @@ function gitSubcommandArgs(args: readonly string[]): { sub: string; rest: string
  * Tokenised (a quoted arg is one token, never a subcommand — kills the prose FP);
  * command-position aware via gitAtCommandPosition (keywords + wrappers, not
  * `echo … git …`); recurses into `bash -c '…'` stepping over value-taking options;
- * fails closed on `eval`/`$` (returns true — keep the gate).
+ * fails closed on `eval` and a `$`-hidden verb (returns true — keep the gate).
  */
 function gitInvocationDisposer(
   text: string,
   matcher: (sub: string, args: readonly string[]) => boolean,
   depth = 0,
 ): boolean {
-  for (const stmt of splitCommandStatements(text)) {
+  // disposerStatements, NOT the blunt splitCommandStatements: a `;`/`&`/`|`
+  // inside a quoted argument is literal text, so echoing/quoting a command
+  // (`echo "git branch -D && git push -f"`, a PR-comment body) no longer
+  // over-splits into fake `git …` statements the disposer would confirm (#182
+  // residual). Command substitutions ($(…)/backticks) DO still break out — they
+  // execute and expose an inner command that must be scanned (a zx
+  // `await $`git push --force`` template, #143).
+  //
+  // KNOWN RESIDUAL — a `$`-hidden force/delete FLAG is not gated, whether it
+  // stands alone (`git push $FORCE` — the proposer never fires, no literal dash)
+  // or rides beside a benign literal flag (`git push -v $FORCE` — the proposer
+  // fires but the argv parser cannot read the variable's contents). This is not
+  // closable without gating the ubiquitous `git push origin $BRANCH` /
+  // `git branch -d "$stale"` (indistinguishable after quote-stripping), and it
+  // adds no attacker capability: the no-dash form was never gated in any version,
+  // so anyone who controls the variable already has that bypass. A `$`-hidden
+  // VERB or SUBCOMMAND (`$GIT push -f`, `git $SUB`) IS caught below, and a
+  // dangerous `git push $(rm -rf /)` is caught by the rm detector.
+  for (const stmt of disposerStatements(text)) {
     if (!/\bgit\b/i.test(stmt)) continue;
-    if (/\beval\b/.test(stmt) || stmt.includes('$')) return true;   // unreadable → keep the gate
+    if (/\beval\b/.test(stmt)) return true;                         // reconstitutes a command → keep the gate
     const tokens = tokeniseStatement(stmt);
     // Recurse into an inline shell program (`bash -c '…'`), stepping over any
     // value-taking option so the `-c` is still reached (`bash -O extglob -c …`).
@@ -601,10 +663,17 @@ function gitInvocationDisposer(
       }
     }
     for (let i = 0; i < tokens.length; i++) {
+      // A command-position token that is itself an expansion (`$GIT push -f`,
+      // `sudo $GIT …`) hides the verb — fail closed (#195 "a variable hides the
+      // verb"). A `$` in an ARGUMENT position (`git push origin $BRANCH`) does
+      // not reach this and is not gated.
+      if (tokens[i].startsWith('$') && gitAtCommandPosition(tokens, i)) return true;
       if (commandBaseName(tokens[i]).toLowerCase() !== 'git') continue;
       if (!gitAtCommandPosition(tokens, i)) continue;
       const sc = gitSubcommandArgs(tokens.slice(i + 1));
-      if (sc && matcher(sc.sub, sc.rest)) return true;
+      if (!sc) continue;
+      if (sc.sub.includes('$')) return true;   // `git $SUB …` — the subcommand itself is an expansion
+      if (matcher(sc.sub, sc.rest)) return true;
     }
   }
   return false;
