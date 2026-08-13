@@ -215,6 +215,16 @@ export const DANGEROUS_CORPUS: GuardCorpusEntry[] = [
   sh('kill 01', 'gate', 'PID 1 in a leading-zero spelling — the shell resolves it to init'),
   sh('timeout 5 git push --force origin main', 'gate', 'a wrapper with a bare numeric value before git is still a real invocation'),
   sh('nice -n 10 git branch -D victim', 'gate', 'nice -n <N> git … — the value is the wrapper argument, git is the command'),
+  // Fail-closed lock: a substitution used as a git global-opt VALUE, or a
+  // forgotten wrapper, must not tear the outer invocation apart and strip the
+  // signal. These were gated on released main and went allow on #263 HEAD.
+  sh('git -C "$(pwd)" branch -D victim', 'gate', 'substitution as a git -C value must not tear the outer force-delete apart'),
+  sh('git --git-dir="$(pwd)/.git" branch -D victim', 'gate', 'substitution as a --git-dir value is still a real force-delete'),
+  sh('git "$(printf push)" origin --delete main', 'gate', 'quoted substitution occupying the subcommand slot — fail closed'),
+  sh('timeout 5 git $(printf push) origin --delete main', 'gate', 'wrapper + substitution-assembled push --delete'),
+  sh('setsid git branch -D victim', 'gate', 'setsid is a transparent wrapper, same as env/timeout'),
+  sh('git -C "$(pwd)" push --force origin main', 'gate', 'same -C substitution shape on force-push (pre-existing #195 hole)'),
+  sh('echo $(git branch -D victim)', 'gate', 'substitution body executes a force-delete — recurse, do not discard the outer statement'),
   // scheduler mutation
   sh('crontab -e', 'gate', 'edit the crontab (persistence)'),
   sh('at now + 1 minute', 'gate', 'schedule a one-shot job'),
