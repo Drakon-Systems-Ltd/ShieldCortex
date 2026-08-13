@@ -173,4 +173,31 @@ describe('dashboard graph routes exclude suspended triples from live views', () 
     const pathBody = path.body as { path: unknown[]; message?: string };
     expect(pathBody.path).toHaveLength(0);
   });
+
+  it('omits suspended edges from the entity-triples list and the triples browser', async () => {
+    const from = entity('dash2-from');
+    const kept = entity('dash2-kept');
+    const suspended = entity('dash2-suspended');
+    triple(from, 'uses', kept, 'cli:michael', 0.95);
+    const suspendedTriple = triple(from, 'uses', suspended, 'agent:x', 0.2);
+    getDatabase().prepare('UPDATE triples SET valid_to = ? WHERE id = ?')
+      .run('2026-08-12T00:00:00.000Z', suspendedTriple);
+
+    const app = captureRoute();
+    registerGraphRoutes(app as never, (_req, _res, next) => next());
+
+    // GET /api/graph/entities/:id/triples — a suspended edge must not be listed.
+    const entTriples = await invokeRoute(app.handler('/api/graph/entities/:id/triples'), { id: String(from) });
+    expect(entTriples.statusCode).toBe(200);
+    const entBody = entTriples.body as { triples: Array<{ object_name: string }> };
+    expect(entBody.triples.map((t) => t.object_name)).toContain('dash2-kept');
+    expect(entBody.triples.map((t) => t.object_name)).not.toContain('dash2-suspended');
+
+    // GET /api/graph/triples — the browser list + total exclude the suspended edge.
+    const browser = await invokeRoute(app.handler('/api/graph/triples'), {});
+    expect(browser.statusCode).toBe(200);
+    const browserBody = browser.body as { triples: Array<{ object_name: string }>; total: number };
+    expect(browserBody.triples.map((t) => t.object_name)).not.toContain('dash2-suspended');
+    expect(browserBody.total).toBe(1); // only the live edge, not both
+  });
 });
