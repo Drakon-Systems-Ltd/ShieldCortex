@@ -133,7 +133,10 @@ export async function step(
     const report = describeRunFailure(err, { neverEmpty: true });
     process.stderr.write('\n' + paint('gray', '── output ─────────────────────────────────────────') + '\n');
     process.stderr.write(report.reason + '\n');
-    for (const line of report.detail) process.stderr.write(line + '\n');
+    // When the reason was derived from detail[0], printing both duplicates the
+    // headline on the common failure path — skip the line the reason already is.
+    const detailLines = report.reasonFromDetail ? report.detail.slice(1) : report.detail;
+    for (const line of detailLines) process.stderr.write(line + '\n');
     if (report.truncated) {
       process.stderr.write(paint('gray', '… output truncated — run the command directly for the full text') + '\n');
     }
@@ -375,12 +378,19 @@ export function readRealtimePluginRegistration(home: string): RegistryReadResult
   if (resolveRealtimePluginInstallPath(home)) return { registered: true, unreadable: false };
 
   const installsPath = path.join(home, '.openclaw', 'plugins', 'installs.json');
-  if (!fs.existsSync(installsPath)) return { registered: false, unreadable: false };
 
+  // No existsSync pre-check: it swallows a traversal EACCES on the plugins
+  // DIRECTORY into a plain `false`, rendering the exact false-green "not
+  // installed" skip #248 exists to kill — at directory level instead of file
+  // level (sudo-damaged perms under user dirs are a documented fleet failure
+  // mode). Read directly and branch on the errno; this also removes the
+  // exists→read TOCTOU.
   let raw: string;
   try {
     raw = fs.readFileSync(installsPath, 'utf-8');
   } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { registered: false, unreadable: false };
     return {
       registered: false,
       unreadable: true,

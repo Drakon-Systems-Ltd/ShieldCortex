@@ -50,6 +50,11 @@ export interface RunFailureReport {
   reason: string;
   /** Redacted detail lines, most informative first. */
   detail: string[];
+  /**
+   * True when `reason` was derived from `detail[0]` — a caller printing both
+   * should skip the first detail line or the headline appears twice.
+   */
+  reasonFromDetail: boolean;
   exitCode: number | null;
   timedOut: boolean;
   spawnFailed: boolean;
@@ -254,24 +259,39 @@ export function summariseCommandOutput(
 
   if (!output || !output.trim()) return { lines: [], truncated: false };
 
+  // Env-value redaction FIRST, on the UNCAPPED text. It is an exact-match
+  // String.replace — cheap even on megabytes — and running it after the cap
+  // let a secret split at the cap boundary escape the exact match entirely;
+  // the surviving 40-hex prefix then read as a git SHA to the entropy
+  // allowlist. Everything regex-shaped stays behind the cap below.
+  const envRedacted = redactEnvValues(output, env);
+
   // Cap before any regex work — a failed `npm install -g` emits megabytes.
   // BOTH ENDS, not the tail: the diagnosis is printed first and the noise
   // follows, so a tail-only cap discards the cause before the signal filter
   // ever sees it — the very mistake this module exists to correct, moved one
   // stage earlier where nothing downstream can compensate.
   const half = Math.floor(MAX_INPUT_BYTES / 2);
-  const capped = output.length > MAX_INPUT_BYTES
-    ? `${output.slice(0, half)}\n…\n${output.slice(-half)}`
-    : output;
-  let truncated = output.length > MAX_INPUT_BYTES;
+  const capped = envRedacted.length > MAX_INPUT_BYTES
+    ? `${envRedacted.slice(0, half)}\n…\n${envRedacted.slice(-half)}`
+    : envRedacted;
+  let truncated = envRedacted.length > MAX_INPUT_BYTES;
 
-  const redacted = redactCredentials(redactEnvValues(capped, env), {
+  // Same ordering as sanitiseForReport, for the same reasons: home-scrub
+  // before token-shaped redaction (a legitimate `~/...` path must not read as
+  // an entropy token because a temp home contains random bytes), then the
+  // credential-FRAGMENT pass — child output quotes credential-shaped path
+  // segments, and this sink previously lacked the pass while the hand-built-
+  // string sink had it: the strongest redaction guarded the least dangerous
+  // sink — then the whole-text pattern/entropy pass.
+  const homeScrubbed = scrubHome(capped, home);
+  const protectedPaths = protectReportPathLiterals(homeScrubbed);
+  const fragmentRedacted = redactCredentialFragments(protectedPaths.text);
+  const scrubbed = protectedPaths.restore(redactCredentials(fragmentRedacted, {
     // npm integrity hashes are high-entropy but not secrets; without this the
     // entropy pass eats them and the real message drowns in [REDACTED].
     allowlist: ['sha512-', 'sha1-', 'sha256-'],
-  });
-
-  const scrubbed = scrubHome(redacted, home);
+  }));
   const dropPluginChatter = opts.dropPluginChatter ?? true;
   let all = cleanLines(scrubbed, dropPluginChatter);
   if (all.length === 0 && opts.neverEmpty) {
@@ -416,17 +436,19 @@ export function describeRunFailure(err: unknown, opts: SummariseOptions = {}): R
   const sanitise = (text: string): string => sanitiseForReport(text, opts);
 
   let reason: string;
+  let reasonFromDetail = false;
   if (spawnFailed) {
     reason = firstSentence(sanitise(`command not found${command}`));
   } else if (timedOut) {
     reason = firstSentence(sanitise(`timed out${command}`));
   } else if (lines.length > 0) {
     reason = firstSentence(lines[0]);
+    reasonFromDetail = true;
   } else if (exitCode !== null) {
     reason = firstSentence(sanitise(`exited ${exitCode} with no output${command}`));
   } else {
     reason = firstSentence(sanitise(e.message || 'failed with no output'));
   }
 
-  return { reason, detail: lines, exitCode, timedOut, spawnFailed, truncated };
+  return { reason, detail: lines, reasonFromDetail, exitCode, timedOut, spawnFailed, truncated };
 }
