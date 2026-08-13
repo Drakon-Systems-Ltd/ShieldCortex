@@ -861,6 +861,26 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "freeze"/"unfreeze"/"lease" (#227) — the session action lease's
+  // operator surface. freeze/unfreeze are TTY-gated inside the command (no
+  // env escape hatch — an agent must not lift the freeze that binds it);
+  // `lease status` is read-only and ungated.
+  if (process.argv[2] === 'freeze') {
+    const { runFreezeCommand } = await import('./cli/freeze.js');
+    process.exitCode = runFreezeCommand(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'unfreeze') {
+    const { runUnfreezeCommand } = await import('./cli/freeze.js');
+    process.exitCode = runUnfreezeCommand(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'lease') {
+    const { runLeaseStatusCommand } = await import('./cli/freeze.js');
+    process.exitCode = runLeaseStatusCommand();
+    return;
+  }
+
   // Handle "status" subcommand
   if (process.argv[2] === 'status') {
     const { handleStatusCommand } = await import('./setup/status.js');

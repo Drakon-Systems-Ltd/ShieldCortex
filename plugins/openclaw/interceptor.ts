@@ -438,6 +438,8 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string }> = [
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
   // Guard's own approval store (#118): agent-side writes here mint approvals.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
+  // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
+  { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
@@ -770,6 +772,24 @@ interface InterceptorOptions {
    *  (or throwing) means no escalation — a broken scanner must never become a
    *  new source of denials. */
   sessionTaint?: (sessionId: string | undefined) => { reason: string } | null;
+  /** #227: session action lease — injected from `shieldcortex/defence` at
+   *  runtime (evaluateToolCallLease). Null for unscoped calls (the common
+   *  case); a non-allow decision for a scoped call is a refusal that must
+   *  precede every approval affordance. A THROW is treated as no-lease; state
+   *  unreadability fails closed INSIDE the implementation. */
+  checkActionLease?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionId: string | undefined,
+  ) => {
+    scope: string;
+    decision: { verdict: string; reason: string };
+    acquired?: boolean;
+    ledgerChanged?: { fromHash: string; toHash: string };
+  } | null;
+  /** #227: release a lease this call minted early, when the guard then blocks
+   *  the action. Best-effort; a hold self-heals at its TTL if this is absent. */
+  releaseActionLease?: (toolName: string, args: Record<string, unknown>, sessionId: string | undefined) => void;
   /** Approval broker (#143), injected from `shieldcortex/defence` at runtime.
    *  Absent, or present with `config.enabled: false`, means no model is ever
    *  consulted and the guard behaves exactly as it did before #143. */
@@ -983,6 +1003,38 @@ export function createInterceptor(
   async function runActionGuard(context: ToolCallContext): Promise<void> {
     if (!actionGuardCfg.enabled) return;
 
+    // Session action lease (#227) — EARLY, before the guard evaluator (which may
+    // be unwired or throw). A freeze is a HARD control and must bind regardless
+    // of the guard's own state; running it only after a successful evaluation
+    // would let a frozen action through the guard-unavailable path. Unscoped
+    // calls return null and cost nothing; a THROW is treated as no-lease (a
+    // broken lease layer must not deny everything); state unreadability fails
+    // closed to 'unknown' inside the store.
+    let leaseGate: {
+      scope: string; decision: { verdict: string; reason: string };
+      acquired?: boolean; ledgerChanged?: { fromHash: string; toHash: string };
+    } | null = null;
+    try {
+      leaseGate = options?.checkActionLease?.(context.toolName, context.arguments || {}, context.sessionId) ?? null;
+      if (leaseGate?.ledgerChanged) {
+        log.warn(
+          `[shieldcortex] DECISIONS.md changed since last read (${leaseGate.ledgerChanged.fromHash.slice(0, 12)} → ${leaseGate.ledgerChanged.toHash.slice(0, 12)}) — tamper evidence, review the ledger`,
+        );
+      }
+      if (leaseGate && leaseGate.decision.verdict !== 'allow') {
+        emitAudit({
+          ...guardAuditBase(context.toolName, { decision: 'block', severity: 'high', family: 'exec', action: `session-lease:${leaseGate.scope}`, reason: leaseGate.decision.reason, signals: ['session-lease', leaseGate.decision.verdict] } as ToolGuardVerdictLike, `${context.toolName} :: ${summariseToolArgs(context.arguments)}`),
+          action: 'auto_deny', outcome: 'auto_denied',
+        });
+        log.warn(`[shieldcortex] action-guard SESSION-LEASE refused ${context.toolName} [${leaseGate.scope}/${leaseGate.decision.verdict}]: ${leaseGate.decision.reason}`);
+        throw new Error(`ShieldCortex: tool call blocked — ${leaseGate.decision.reason}`);
+      }
+    } catch (err) {
+      // A ShieldCortex refusal must propagate; a lease-layer malfunction must not.
+      if (err instanceof Error && err.message.startsWith('ShieldCortex:')) throw err;
+      leaseGate = null;
+    }
+
     if (typeof evaluateToolCall !== 'function') {
       handleGuardUnavailable(context, 'evaluateToolCall not wired');
       return;
@@ -1065,6 +1117,11 @@ export function createInterceptor(
 
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
     if (v.decision === 'block') {
+      // #227: release any lease this call minted early — a blocked action must
+      // not leave a hold on that scope (self-heals at TTL if release fails).
+      if (leaseGate?.acquired) {
+        try { options?.releaseActionLease?.(context.toolName, context.arguments || {}, context.sessionId); } catch { /* self-heals */ }
+      }
       emitAudit({ ...base, action: 'auto_deny', outcome: 'auto_denied' });
       // Surface the block to the gateway log (journald). Blocks are recorded in
       // the ShieldCortex audit jsonl, but were otherwise invisible to an operator

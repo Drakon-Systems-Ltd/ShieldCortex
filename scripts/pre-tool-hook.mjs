@@ -230,6 +230,24 @@ async function loadApprovals() {
 }
 
 /**
+ * Load the session action lease (#227). Null when the dist build predates it —
+ * an old install simply has no lease plane, which the freeze CLI's capability
+ * report states rather than hides. State unreadability is NOT handled here:
+ * the store itself fails closed (verdict 'unknown') for scoped actions.
+ */
+async function loadLease() {
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'session-lease-store.js')).href
+    );
+    return typeof mod.evaluateToolCallLease === 'function' ? mod : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Load the AI-assisted approval broker (#143). Returns null when the broker is
  * not switched on, or when the dist build predates it.
  *
@@ -997,6 +1015,8 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
   // Guard's own approval store (#118): agent-side writes here mint approvals.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
+  // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
+  { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
@@ -1405,6 +1425,42 @@ process.stdin.on('end', async () => {
       return notifyPromise;
     };
 
+    // Session action lease (#227) — EARLY, before the guard even loads. A
+    // freeze is a HARD control and must bind regardless of the guard's own
+    // state: if it ran only after a successful guard evaluation, a missing/
+    // stale `dist` (an upgrade window) would let a frozen action through the
+    // degraded fallback, which does not know the freeze. So it runs here,
+    // before loadGuard, before every approval affordance. Unscoped calls (the
+    // overwhelming majority) return null without touching disk. A THROW or a
+    // missing module is treated as no-lease — a broken lease layer must never
+    // become a new way to deny everything — while state UNreadability fails
+    // closed to 'unknown' inside the store itself.
+    const leaseSelf = baseExtra.sessionKey || `ppid:${process.ppid}`;
+    let leaseGate = null;
+    try {
+      const lease = await loadLease();
+      if (lease) {
+        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf });
+        if (leaseGate && leaseGate.ledgerChanged) {
+          console.error(
+            `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
+          );
+        }
+        if (leaseGate && leaseGate.decision.verdict !== 'allow') {
+          writeAuditEntry(safeToolName(toolName), {
+            decision: 'block', severity: 'dangerous', family: 'exec',
+            action: `session-lease:${leaseGate.scope}`, reason: leaseGate.decision.reason,
+            signals: ['session-lease', leaseGate.decision.verdict],
+          }, redactedAuditArgs(toolName, toolInput), 'auto_deny', 'auto_denied', baseExtra);
+          console.error(`[shieldcortex] action-guard SESSION-LEASE refused ${safeToolName(toolName)} [${leaseGate.scope}/${leaseGate.decision.verdict}]`);
+          emitDecision('deny', `ShieldCortex Action Guard: ${leaseGate.decision.reason}`);
+          process.exit(0);
+        }
+      }
+    } catch {
+      leaseGate = null;
+    }
+
     const guard = await loadGuard();
     if (!guard) {
       await handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode, await getNotify(), baseExtra); // always exits
@@ -1447,6 +1503,12 @@ process.stdin.on('end', async () => {
 
     // Catastrophic — hard deny, always enforced while the guard is enabled.
     if (verdict.decision === 'block') {
+      // #227: the action is refused, so release any lease this call minted
+      // early — a blocked action must not leave a hold on that scope. (A
+      // frozen scope was already refused above and acquired nothing.)
+      if (leaseGate?.acquired) {
+        try { (await loadLease())?.releaseToolCallLease(toolName, toolInput, { self: leaseSelf }); } catch { /* self-heals at TTL */ }
+      }
       writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'auto_deny', 'auto_denied', 'action_guard_denial', baseExtra);
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
