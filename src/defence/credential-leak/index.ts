@@ -131,7 +131,7 @@ export function scanForCredentials(
   }
 
   const findings: CredentialFinding[] = [];
-  const matchedRanges: Array<{ start: number; end: number; replacement: string }> = [];
+  let matchedRanges: Array<{ start: number; end: number; replacement: string }> = [];
 
   const patterns = [...ALL_CREDENTIAL_PATTERNS, ...cfg.customPatterns];
 
@@ -193,25 +193,59 @@ export function scanForCredentials(
   //               telling the operator anything they did not already know.
   const entropyTokens = extractHighEntropyTokens(content);
   const reportedEntropyTokens = new Set<string>();
+  // Snapshot the pattern layer's ranges BEFORE the entropy loop mutates
+  // matchedRanges: finding-emission (below) discriminates against these, and
+  // entropy ranges pushed for earlier tokens must never suppress later ones.
+  // Merged into disjoint intervals so two overlapping pattern matches cannot
+  // double-subtract coverage in the uncovered-length arithmetic.
+  const patternRanges = matchedRanges
+    .map(r => ({ start: r.start, end: r.end }))
+    .sort((a, b) => a.start - b.start)
+    .reduce<Array<{ start: number; end: number }>>((merged, r) => {
+      const last = merged[merged.length - 1];
+      if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+      else merged.push({ ...r });
+      return merged;
+    }, []);
   for (const token of entropyTokens) {
     const start = token.position;
     const end = start + token.token.length;
 
-    // Skip if already caught by pattern matching
-    if (matchedRanges.some(r =>
-      (start >= r.start && start < r.end) ||
-      (end > r.start && end <= r.end),
-    )) continue;
+    // Skip only when an earlier pattern already covers the ENTIRE entropy
+    // token. A low-confidence pattern can match just the repeated filler prefix
+    // of a padded secret (`aaaa...` as a generic hex/Azure key). Treating that
+    // partial overlap as "already caught" left the real high-entropy suffix raw
+    // in redacted output — exactly the #257 bypass shape.
+    if (matchedRanges.some(r => start >= r.start && end <= r.end)) continue;
 
     // Skip allowlisted
     if (isAllowlisted(token.token, cfg.allowlist)) continue;
 
     // Range FIRST, and unconditionally — a repeat must still be redacted even
-    // though it will not produce a second finding below.
+    // though it will not produce a second finding below. Drop narrower pattern
+    // ranges contained inside this entropy token so a filler-only match cannot
+    // split or shrink the redaction span.
+    matchedRanges = matchedRanges.filter(r => !(r.start >= start && r.end <= end));
     matchedRanges.push({ start, end, replacement: '[REDACTED-high_entropy]' });
 
     if (reportedEntropyTokens.has(token.token)) continue;
     reportedEntropyTokens.add(token.token);
+
+    // #256 invariant: one finding per DISTINCT secret. An env-style assignment
+    // (`FOO=<secret>`) tokenises key+secret into one entropy token that extends
+    // past the pattern match by a few boilerplate chars, so it is not "fully
+    // nested" above — but it is still the SAME secret the pattern already
+    // reported. Emit a second finding only when the pattern layer leaves ≥ 20
+    // uncovered chars of this token (the tokeniser's own minimum secret
+    // length — anything smaller cannot be a distinct secret by the net's own
+    // definition). The redaction RANGE above is recorded unconditionally
+    // either way: #257 completeness and #256 reporting are separate concerns.
+    let uncovered = end - start;
+    for (const r of patternRanges) {
+      const overlap = Math.min(end, r.end) - Math.max(start, r.start);
+      if (overlap > 0) uncovered -= overlap;
+    }
+    if (uncovered < 20 && uncovered < end - start) continue;
 
     const severity: CredentialSeverity = token.confidence >= 0.8 ? 'medium' : 'low';
     const action = actionForSeverity(severity, cfg);
@@ -266,13 +300,63 @@ function buildRedactedContent(
   content: string,
   ranges: Array<{ start: number; end: number; replacement: string }>,
 ): string {
+  const merged = mergeOverlappingRanges(ranges);
   // Sort by start position descending to replace from end to start
-  const sorted = [...ranges].sort((a, b) => b.start - a.start);
+  const sorted = [...merged].sort((a, b) => b.start - a.start);
   let result = content;
   for (const range of sorted) {
     result = result.slice(0, range.start) + range.replacement + result.slice(range.end);
   }
   return result;
+}
+
+/**
+ * Collapse overlapping (not just nested) ranges into a single span before
+ * replacement.
+ *
+ * `buildRedactedContent` replaces right-to-left on the assumption that ranges
+ * never overlap, using offsets computed against the ORIGINAL content. A
+ * PARTIAL overlap — e.g. a pattern match whose captured charset stops short
+ * of a longer entropy token, so the pattern's end falls strictly inside the
+ * entropy token's span while neither range contains the other — breaks that
+ * assumption: replacing the first range shrinks/reshapes the working string,
+ * and the second range's original-content `end` then lands on the wrong
+ * position in that already-mutated string, silently truncating or duplicating
+ * output. The two-range-removal dance in `scanForCredentials` only handles
+ * the fully-NESTED case (one range wholly inside another); it does not — and
+ * structurally cannot, since it only sees one new range at a time — catch a
+ * crossing overlap. Merging here makes "ranges never overlap" true by
+ * construction for every caller, instead of relying on every producer of
+ * `matchedRanges` to keep it true by hand.
+ */
+function mergeOverlappingRanges(
+  ranges: Array<{ start: number; end: number; replacement: string }>,
+): Array<{ start: number; end: number; replacement: string }> {
+  if (ranges.length <= 1) return ranges;
+
+  const sorted = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number; replacement: string }> = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const next = sorted[i];
+    const last = merged[merged.length - 1];
+    if (next.start < last.end) {
+      // Overlapping (or one nested in the other) — union the span. Keep
+      // whichever replacement corresponds to the wider original range: it
+      // covers strictly more of the underlying secret and is the more
+      // complete redaction of the two.
+      const wider = next.end - next.start > last.end - last.start ? next : last;
+      merged[merged.length - 1] = {
+        start: last.start,
+        end: Math.max(last.end, next.end),
+        replacement: wider.replacement,
+      };
+    } else {
+      merged.push(next);
+    }
+  }
+
+  return merged;
 }
 
 // Re-export types and utilities
