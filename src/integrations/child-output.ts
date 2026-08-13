@@ -329,14 +329,56 @@ export function summariseCommandOutput(
 /**
  * Sanitise a string that was NOT produced by `summariseCommandOutput` — a
  * caller's own hand-built report string (an `err.message`, a path) — through
- * the same env-value redaction and home-scrubbing every other reported
- * string gets. `describeRunFailure` needed this for its own empty-output
- * fallbacks; callers assembling report strings outside a captured child
- * process (#248's `update.ts` registry-read errors) need the identical
- * guarantee, so it is exported rather than kept as a private closure.
+ * the same env-value redaction, credential-shape redaction, and home-scrubbing
+ * every other reported string gets. Env-value redaction runs before home
+ * scrubbing because it needs exact secret values; home scrubbing runs before
+ * pattern redaction so a legitimate `~/.openclaw/...` path is not mistaken for
+ * a high-entropy token just because the temp home directory contains random
+ * bytes.
  */
+const REPORT_PATH_SENTINELS: Array<[string, string]> = [
+  ['~/.openclaw/extensions/shieldcortex-realtime', '__shieldcortex_report_path_ext__'],
+  ['~/.openclaw/plugins/installs.json', '__shieldcortex_report_path_registry__'],
+  ['~/plugins/installs.json', '__shieldcortex_report_path_plugins_registry__'],
+];
+
+function redactCredentialFragments(text: string): string {
+  return text.replace(/[A-Za-z0-9\-_+=]{20,}/g, fragment =>
+    redactCredentials(fragment, {
+      allowlist: ['sha512-', 'sha1-', 'sha256-'],
+    }));
+}
+
+function protectReportPathLiterals(text: string): { text: string; restore: (value: string) => string } {
+  let protectedText = text;
+  for (const [literal, sentinel] of REPORT_PATH_SENTINELS) {
+    protectedText = protectedText.split(literal).join(sentinel);
+  }
+  return {
+    text: protectedText,
+    restore(value: string): string {
+      let out = value;
+      for (const [literal, sentinel] of REPORT_PATH_SENTINELS) {
+        out = out.split(sentinel).join(literal);
+      }
+      return out;
+    },
+  };
+}
+
 export function sanitiseForReport(text: string, opts: SummariseOptions = {}): string {
-  return scrubHome(redactEnvValues(text, opts.env ?? process.env), opts.home ?? os.homedir());
+  const envRedacted = redactEnvValues(text, opts.env ?? process.env);
+  const homeScrubbed = scrubHome(envRedacted, opts.home ?? os.homedir());
+  const protectedPaths = protectReportPathLiterals(homeScrubbed);
+  const fragmentRedacted = redactCredentialFragments(protectedPaths.text);
+  const credentialRedacted = redactCredentials(fragmentRedacted, {
+    // Match summariseCommandOutput: npm integrity hashes are high-entropy but
+    // not secrets, and otherwise bury the real failure in [REDACTED]. Do NOT
+    // allowlist `~/.openclaw/` as a broad prefix: a credential-shaped child
+    // path segment under that directory must still be redacted.
+    allowlist: ['sha512-', 'sha1-', 'sha256-'],
+  });
+  return protectedPaths.restore(credentialRedacted);
 }
 
 function firstSentence(value: string, limit = MAX_REASON_CHARS): string {

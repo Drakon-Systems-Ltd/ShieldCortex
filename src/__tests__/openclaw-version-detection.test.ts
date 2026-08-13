@@ -117,6 +117,14 @@ describe('update — readRealtimePluginRegistration (unreadable vs not-installed
     expect(r.detail).toBeTruthy();
   });
 
+  it('reports unreadable:true on valid JSON with an invalid registry shape', () => {
+    writeInstalls(home, null);
+    const r = readRealtimePluginRegistration(home);
+    expect(r.registered).toBe(false);
+    expect(r.unreadable).toBe(true);
+    expect(r.detail).toMatch(/invalid registry shape/i);
+  });
+
   it('reports unreadable:true on a permission-denied registry file', () => {
     const pluginsDir = path.join(home, '.openclaw', 'plugins');
     fs.mkdirSync(pluginsDir, { recursive: true });

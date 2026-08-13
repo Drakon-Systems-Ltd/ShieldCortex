@@ -38,6 +38,20 @@ describe('#248 — sanitiseForReport is exported from child-output.ts', () => {
     expect(out).not.toContain(env.NPM_TOKEN);
     expect(out).toContain('[redacted:$NPM_TOKEN]');
   });
+
+  it('redacts credential-shaped text even when it is not present in the environment', () => {
+    const token = 'X7fQ2mZp9RtL4vNc8KwB3JhD6sYgA1eU5oXiTbMr0PlWnQzVfKjSxE9uYwGdTpAaCvBn';
+    const out = sanitiseForReport(`registry failed with token ${token}`, { env: {} });
+    expect(out).not.toContain(token);
+    expect(out).toContain('[REDACTED-');
+  });
+
+  it('does not broadly allowlist credential-shaped child path segments under ~/.openclaw', () => {
+    const token = 'X7fQ2mZp9RtL4vNc8KwB3JhD6sYgA1eU5oXiTbMr0PlWnQzVfKjSxE9uYwGdTpAaCvBn';
+    const out = sanitiseForReport(`failed at ~/.openclaw/extensions/${token}/state.json`, { env: {} });
+    expect(out).not.toContain(token);
+    expect(out).toContain('[REDACTED-');
+  });
 });
 
 describe('#248 — a malformed installs.json never echoes the raw parse error', () => {

@@ -391,7 +391,7 @@ export function readRealtimePluginRegistration(home: string): RegistryReadResult
     };
   }
 
-  let json: { installRecords?: Record<string, unknown>; plugins?: Array<{ pluginId?: string }> };
+  let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch {
@@ -407,10 +407,19 @@ export function readRealtimePluginRegistration(home: string): RegistryReadResult
     };
   }
 
-  if (json.installRecords && Object.prototype.hasOwnProperty.call(json.installRecords, 'shieldcortex-realtime')) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    return {
+      registered: false,
+      unreadable: true,
+      detail: 'installs.json has invalid registry shape',
+    };
+  }
+  const registry = json as { installRecords?: Record<string, unknown>; plugins?: Array<{ pluginId?: string }> };
+
+  if (registry.installRecords && Object.prototype.hasOwnProperty.call(registry.installRecords, 'shieldcortex-realtime')) {
     return { registered: true, unreadable: false };
   }
-  const registered = Array.isArray(json.plugins) && json.plugins.some((p) => p?.pluginId === 'shieldcortex-realtime');
+  const registered = Array.isArray(registry.plugins) && registry.plugins.some((p) => p?.pluginId === 'shieldcortex-realtime');
   return { registered, unreadable: false };
 }
 
