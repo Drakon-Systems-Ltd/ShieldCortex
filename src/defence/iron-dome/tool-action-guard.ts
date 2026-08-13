@@ -338,6 +338,15 @@ const DANGEROUS: Pattern[] = [
   // approval. Any command that so much as names the store path goes to the
   // operator — who is the only party with a legitimate reason to touch it.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
+  // The session-lease ledger + lease store (#227). A freeze an agent can edit
+  // or delete is not a freeze: DECISIONS.md is lifted by the OPERATOR (TTY-
+  // gated `shieldcortex unfreeze`), never by the agent it binds. Same
+  // reasoning — and the same rule shape — as the approvals store above. This
+  // is tamper RESISTANCE on the tool-call surface plus tamper EVIDENCE in the
+  // lease layer (ledger hash audit), not proof: a same-uid write outside tool
+  // calls cannot be prevented from userspace, and claiming otherwise would be
+  // the over-claiming this feature was review-blocked for.
+  { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
@@ -1303,7 +1312,7 @@ interface ClassifiedMatch { signal: string; span: string; tier: MatchTier; }
  * keep the two purely-textual exemptions above it — a path inside a URL, or in
  * a quoted data argument — because those genuinely are references, not access.
  */
-const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store']);
+const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger']);
 
 
 /**

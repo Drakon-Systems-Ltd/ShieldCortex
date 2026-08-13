@@ -41,10 +41,10 @@ export const SECURE_DIR_MODE = 0o700;
 export const SECURE_FILE_MODE = 0o600;
 
 /** Subdirectories of the state dir that must be owner-only. */
-export const SECURE_SUBDIRS = ['audit', 'approvals', 'logs', 'quarantine', 'recall-log', 'precompact-log'];
+export const SECURE_SUBDIRS = ['audit', 'approvals', 'logs', 'quarantine', 'recall-log', 'precompact-log', 'leases'];
 
 /** Files that must be owner-only, by exact name or by prefix. */
-const SECURE_FILE_PREFIXES = ['memories.db', 'config.json', 'worker.json', 'integrity'];
+const SECURE_FILE_PREFIXES = ['memories.db', 'config.json', 'worker.json', 'integrity', 'DECISIONS.md'];
 
 /**
  * #218 — create state-tree paths already owner-only, at CREATION.

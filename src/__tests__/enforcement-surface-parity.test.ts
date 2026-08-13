@@ -203,3 +203,25 @@ describe('#189 — the two reviewed-script-check copies are held together the sa
     }
   });
 });
+
+describe('#227 — both enforcement surfaces consult the session action lease', () => {
+  it('the Claude Code hook calls evaluateToolCallLease before the allow branch', () => {
+    expect(hookSrc).toMatch(/evaluateToolCallLease/);
+    // The refusal must precede every approval affordance: the lease CALL SITE
+    // (not the loader definitions) has to appear in the main flow BEFORE the
+    // one-shot approvals consumption call site.
+    expect(hookSrc.indexOf('lease.evaluateToolCallLease(')).toBeGreaterThan(0);
+    expect(hookSrc.indexOf('lease.evaluateToolCallLease(')).toBeLessThan(hookSrc.indexOf('approvals.consumeApproval('));
+  });
+
+  it('the OpenClaw interceptor applies checkActionLease before the allow branch', () => {
+    expect(pluginSrc).toMatch(/checkActionLease/);
+    expect(pluginSrc.indexOf('checkActionLease?.(')).toBeLessThan(pluginSrc.indexOf("if (v.decision === 'allow')"));
+  });
+
+  it('both surfaces protect the decisions ledger in their pattern tables', () => {
+    expect(hookSrc).toMatch(/touch-decisions-ledger/);
+    const guardSrc = fs.readFileSync(path.join(repoRoot, 'src', 'defence', 'iron-dome', 'tool-action-guard.ts'), 'utf-8');
+    expect(guardSrc).toMatch(/touch-decisions-ledger/);
+  });
+});

@@ -3431,6 +3431,18 @@ export default {
             const rec = sessionId ? sessionTaint.get(sessionId) : null;
             return rec ? { reason: rec.reason } : null;
           },
+          // #227: session action lease — the fs-backed shared implementation,
+          // injected through the same runtime seam as evaluateToolCall. Older
+          // installed packages without the export simply leave the option
+          // undefined (no lease plane — the capability-honesty surface says so).
+          checkActionLease: typeof (defenceMod as any).evaluateToolCallLease === 'function'
+            ? (toolName, args, sessionId) =>
+                (defenceMod as any).evaluateToolCallLease(toolName, args, { self: sessionId ?? '' })
+            : undefined,
+          releaseActionLease: typeof (defenceMod as any).releaseToolCallLease === 'function'
+            ? (toolName, args, sessionId) =>
+                (defenceMod as any).releaseToolCallLease(toolName, args, { self: sessionId ?? '' })
+            : undefined,
           onAuditEntry: (entry) => syncInterceptEvent(entry, {
             cloudApiKey: (scConfig as any).cloudApiKey ?? '',
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
