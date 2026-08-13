@@ -384,4 +384,15 @@ describe('#92 must-fix 1 — ReDoS timing regression (quadratic pipe/find patter
     expect(v.decision).toBe('require_approval'); // 'aaa...a' is not a critical path
     expect(v.signals).toContain('recursive-find-delete');
   });
+
+  // #182: the `kill <pid>` numeric carve-out's first form, `[0-9]*[1-9][0-9]*`,
+  // was correct but backtracked QUADRATICALLY — `kill <49k digits> x` hung this
+  // synchronous guard ~8.6s. The `(?!0+\b)[0-9]+` form is linear. Trigger needs
+  // a long non-zero digit run that fails the end-of-statement terminator.
+  it('kill numeric-PID carve-out stays fast on a ~49k-digit non-terminating run', () => {
+    const command = 'kill ' + '1'.repeat(49000) + ' x';
+    const { v, elapsedMs } = timed(command);
+    expect(elapsedMs).toBeLessThan(TIME_BUDGET_MS);
+    expect(v.signals).toContain('stop-process-or-service'); // trailing ` x` → not a pure PID → gates
+  });
 });

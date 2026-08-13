@@ -88,6 +88,16 @@ jobs:
       - name: Check dist for ESM-unsafe require()
         run: npm run test:dist
 
+      # #182 — the Action Guard precision gate. Runs the curated corpus of safe
+      # vs dangerous command shapes and fails the build on ANY false positive
+      # (safe command gated) or false negative (dangerous command allowed). Its
+      # own named, fail-fast step so a precision regression is legible in the CI
+      # log without reading the full suite. Platform-independent (pure regex
+      # classifier), so it runs here on the Linux matrix, not the billed macOS
+      # runner. Also covered by `npm test` below — this is the visible gate.
+      - name: Guard precision gate (#182 — no Action Guard false positives)
+        run: npm run guard:precision
+
       - name: Test
         run: npm test
 
