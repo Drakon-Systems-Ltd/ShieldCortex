@@ -193,6 +193,20 @@ export function scanForCredentials(
   //               telling the operator anything they did not already know.
   const entropyTokens = extractHighEntropyTokens(content);
   const reportedEntropyTokens = new Set<string>();
+  // Snapshot the pattern layer's ranges BEFORE the entropy loop mutates
+  // matchedRanges: finding-emission (below) discriminates against these, and
+  // entropy ranges pushed for earlier tokens must never suppress later ones.
+  // Merged into disjoint intervals so two overlapping pattern matches cannot
+  // double-subtract coverage in the uncovered-length arithmetic.
+  const patternRanges = matchedRanges
+    .map(r => ({ start: r.start, end: r.end }))
+    .sort((a, b) => a.start - b.start)
+    .reduce<Array<{ start: number; end: number }>>((merged, r) => {
+      const last = merged[merged.length - 1];
+      if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+      else merged.push({ ...r });
+      return merged;
+    }, []);
   for (const token of entropyTokens) {
     const start = token.position;
     const end = start + token.token.length;
@@ -216,6 +230,22 @@ export function scanForCredentials(
 
     if (reportedEntropyTokens.has(token.token)) continue;
     reportedEntropyTokens.add(token.token);
+
+    // #256 invariant: one finding per DISTINCT secret. An env-style assignment
+    // (`FOO=<secret>`) tokenises key+secret into one entropy token that extends
+    // past the pattern match by a few boilerplate chars, so it is not "fully
+    // nested" above — but it is still the SAME secret the pattern already
+    // reported. Emit a second finding only when the pattern layer leaves ≥ 20
+    // uncovered chars of this token (the tokeniser's own minimum secret
+    // length — anything smaller cannot be a distinct secret by the net's own
+    // definition). The redaction RANGE above is recorded unconditionally
+    // either way: #257 completeness and #256 reporting are separate concerns.
+    let uncovered = end - start;
+    for (const r of patternRanges) {
+      const overlap = Math.min(end, r.end) - Math.max(start, r.start);
+      if (overlap > 0) uncovered -= overlap;
+    }
+    if (uncovered < 20 && uncovered < end - start) continue;
 
     const severity: CredentialSeverity = token.confidence >= 0.8 ? 'medium' : 'low';
     const action = actionForSeverity(severity, cfg);

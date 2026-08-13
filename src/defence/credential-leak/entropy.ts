@@ -100,7 +100,12 @@ function stripLeadingFiller(s: string): string {
  * Deliberately narrow — this defeats REPEATED-unit filler specifically, not
  * arbitrary low-entropy affixes (a non-repeating low-entropy prefix like a
  * dictionary word is a harder, attacker-adaptive problem tracked as a known
- * limitation of the entropy net, not fixed here). Within that scope there is
+ * limitation of the entropy net, not fixed here). Repeated filler placed
+ * INSIDE a token (`<half1><filler…><half2>`) is likewise NOT covered — only
+ * start/end affixes are stripped, so interior filler that drags whole-token
+ * entropy under threshold still evades; fixing it means the sliding-window
+ * FP/cost trade-off rejected below, so it is a named limitation, not an
+ * oversight. Within the affix scope there is
  * no cap on the unit's length — see `repeatedFillerPrefixLength` — so this is
  * not "narrow" in the sense of being evadable by picking a longer unit.
  * A sliding fixed-size window
@@ -278,8 +283,19 @@ function isLikelyFalsePositive(token: string): boolean {
   // Repeated character sequences (aaaaaaa...)
   if (/^(.)\1{10,}$/.test(token)) return true;
 
-  // Common base64 padding pattern (just padding)
-  if (/^=+$/.test(token) || /^[A-Za-z0-9+/]*={3,}$/.test(token)) return true;
+  // Common base64 padding pattern (just padding). Same over-greedy-wildcard
+  // hazard as the npm-specifier rule above: `[A-Za-z0-9+/]*` happily eats an
+  // entire high-entropy secret and `={3,}` its appended padding, classifying
+  // `SECRET===` as "just padding" one gate before the entropy check runs.
+  // Valid base64 never carries ≥3 trailing `=`, so gating on the stripped
+  // core's entropy cannot reclassify genuine base64 — it only stops the
+  // one-keystroke `===` evasion of the very bypass #257 is about.
+  if (/^=+$/.test(token)) return true;
+  if (
+    /^[A-Za-z0-9+/]*={3,}$/.test(token) &&
+    effectiveEntropy(token.replace(/=+$/, '')) < ENTROPY_THRESHOLD
+  )
+    return true;
 
   // Long runs of a single character class with low variety
   const uniqueChars = new Set(token).size;

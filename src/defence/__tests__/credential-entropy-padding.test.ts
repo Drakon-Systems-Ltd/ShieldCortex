@@ -194,3 +194,45 @@ describe('#257 — entropy detector silently bypassed by low-entropy padding', (
     });
   });
 });
+
+describe('review regressions — base64-padding FP rule must not swallow secrets', () => {
+  it('SECRET + "===" is flagged and redacted (the sibling padding vector)', () => {
+    const content = `${UNKNOWN_SHAPE_SECRET}===`;
+    const result = scanForCredentials(content);
+    expect(result.findings.some((f) => f.type === 'high_entropy')).toBe(true);
+    expect(leaksRawSecret(content, UNKNOWN_SHAPE_SECRET)).toBe(false);
+  });
+
+  it('pure padding junk is still not flagged', () => {
+    expect(scanForCredentials('='.repeat(24)).findings).toHaveLength(0);
+    // low-entropy core + >=3 equals: the rule's real target, still clean
+    expect(scanForCredentials(`${'abcd'.repeat(5)}====`).findings).toHaveLength(0);
+  });
+});
+
+describe('review regressions — one finding per distinct secret (#256 invariant)', () => {
+  it('ENV_VAR=<pattern-known secret> yields exactly ONE finding, still redacted', () => {
+    // Concatenated per house convention so the synthetic fixture never appears
+    // as a contiguous key to GitHub push protection (same as credential-leak.test.ts).
+    const stripeKey = 'sk_live_' + '4eC39HqLyjWDarjtT1zdp7dc';
+    const content = `FOO=${stripeKey}`;
+    const result = scanForCredentials(content);
+    expect(result.findings).toHaveLength(1);
+    const redacted = result.redactedContent ?? content;
+    expect(redacted).not.toContain(stripeKey);
+  });
+
+  it('two distinct secrets fused into one token still yield two findings', () => {
+    // A BOUNDED pattern (AWS AKIA…{16}) covers only its own 20 chars; the
+    // uncovered remainder is itself a full secret (>= the tokeniser's 20-char
+    // minimum) and must keep its own entropy finding. (An open-ended pattern
+    // like stripe's {24,} greedily fuses the whole blob into ONE match — that
+    // case is one finding by construction and is not what this guards.)
+    const content = `FOO=AKIAIOSFODNN7EXAMPLE${UNKNOWN_SHAPE_SECRET}`;
+    const result = scanForCredentials(content);
+    expect(result.findings.length).toBeGreaterThanOrEqual(2);
+    const redacted = result.redactedContent ?? content;
+    expect(redacted).not.toContain(UNKNOWN_SHAPE_SECRET);
+    expect(redacted).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+});
