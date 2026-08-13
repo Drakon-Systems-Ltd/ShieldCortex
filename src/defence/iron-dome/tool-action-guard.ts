@@ -284,6 +284,13 @@ const DANGEROUS: Pattern[] = [
   // quoted `-m "…git branch --delete --force…"` message is disposed as prose.
   // `git branch` with no flag (a plain listing/create) does not propose.
   { re: /\bgit\b[^|;&\n]*\b(?:branch\b[^|;&\n]*[-'"]|push\b[^|;&\n]*[-'":])/i, signal: 'git-delete-branch' },
+  // Verb-hiding shape: git whose SUBCOMMAND is a substitution/expansion
+  // (`git $(getcmd) origin --delete`, `git $VERB -D x`, `git `cmd` --force`) —
+  // no literal `branch`/`push` fires the proposer above, but a destructive flag
+  // is present. Propose here; gitDeleteBranchInvoked fails closed (its
+  // GIT_SUBCOMMAND_SUBSTITUTION / `$`-subcommand checks). A destructive flag is
+  // required so a benign `git $(echo status)` / `git $CMD log` is untouched.
+  { re: /(?:^|[;&|(\n`]|\$\()\s*(?:sudo\s+)?git\s+(?:-\S+\s+)*(?:\$[({]|`|\$\w)[^;&|\n]*(?:--force\b|--delete\b|[\s'"]-[A-Za-z]*[DFf][A-Za-z]*\b|\s[+:]\S)/i, signal: 'git-delete-branch' },
   // The process verbs here are the SHELL commands, not a language's process API
   // (issue #165). `process.kill(process.pid, sig)` in a build script forwards a
   // signal to ITSELF, and `child.kill()` is a method call — neither stops
@@ -303,9 +310,10 @@ const DANGEROUS: Pattern[] = [
   // A targeted `kill <pid>` of literal POSITIVE numeric PIDs (optionally after a
   // signal flag) is also carved out: an injection cannot weaponise a PID it does
   // not know, and killing a process the agent itself started by PID is the
-  // single most common legitimate case. Only positive integers to end-of-
-  // statement qualify (`(?!0+\b)[0-9]+` — a single quantifier that rejects an
-  // all-zero token; the earlier `[0-9]*[1-9][0-9]*` form was correct but its
+  // single most common legitimate case. Only positive integers ≥2 to end-of-
+  // statement qualify (`(?!0*[01]\b)[0-9]+` — a single quantifier that rejects a
+  // 0 or 1 token in any zero-padded spelling; the earlier `[0-9]*[1-9][0-9]*`
+  // form was correct but its
   // ambiguous overlap backtracked QUADRATICALLY on a long crafted digit run and
   // hung this synchronous guard, a DoS vector — see the ReDoS note below).
   // `kill $(pgrep x)`, `kill $PID`, `kill %1`, `kill 4021 -1` (broadcast),
@@ -313,11 +321,16 @@ const DANGEROUS: Pattern[] = [
   // gated (their own rule re-catches a lethal follow-on). Crucially PID `0` and
   // `-9 0` stay gated: `kill 0` signals the WHOLE process group (the agent's own
   // shell, sibling sessions, ShieldCortex itself) and needs no privilege — it is
-  // the defence-disruption shape this rule exists for, not a targeted kill. A
-  // negative target (`kill -1`) never matches the digit class either. ReDoS:
-  // `(?!0+\b)[0-9]+` is a single greedy quantifier separated from its repeats by
-  // required whitespace, so a long digit run is linear, not quadratic.
-  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|(?<![.\w])(?:(?:pkill|killall)\b|kill\b(?!\s+-l\b)(?!\s+(?:-[A-Za-z0-9]+\s+)?(?!0+\b)[0-9]+(?:\s+(?!0+\b)[0-9]+)*\s*(?=$|[;&|\n])))/i, signal: 'stop-process-or-service' },
+  // the defence-disruption shape this rule exists for, not a targeted kill.
+  // PID `1` stays gated too: init is UNIVERSALLY known, so it breaks the carve's
+  // "an injection cannot know the PID" premise, and in a container the agent may
+  // own PID 1 — killing it takes down the container/supervisor. A negative target
+  // (`kill -1`) never matches the digit class either. `(?!0*[01]\b)` excludes
+  // 0 and 1 AND their leading-zero spellings (`01`, `001`, `00`) — the shell
+  // resolves `kill 01` to PID 1, so padding a zero must not defeat the gate.
+  // ReDoS: `(?!0*[01]\b)[0-9]+` is a single greedy quantifier separated from its
+  // repeats by required whitespace, so a long digit run is linear, not quadratic.
+  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|(?<![.\w])(?:(?:pkill|killall)\b|kill\b(?!\s+-l\b)(?!\s+(?:-[A-Za-z0-9]+\s+)?(?!0*[01]\b)[0-9]+(?:\s+(?!0*[01]\b)[0-9]+)*\s*(?=$|[;&|\n])))/i, signal: 'stop-process-or-service' },
   { re: /\b(iptables|ufw|nft|netplan|firewall-cmd)\b/i, signal: 'modify-network-firewall' },
   // Package installs split by blast radius (issue #73.3). System package managers
   // and language *global* installs mutate the host → approval. A workspace-local
@@ -529,6 +542,14 @@ const BASH_VALUE_OPTION = /^(?:-O|\+O|--rcfile|--init-file)$/;
 // git GLOBAL options (before the subcommand) that consume the next token, so the
 // real subcommand is found past them (`git -c k=v -C dir branch -D`).
 const GIT_GLOBAL_VALUE_OPT = /^(?:-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix)$/;
+// A command substitution AT THE SUBCOMMAND position — `git $(printf push) …`,
+// `git `printf branch` …` — assembles the git verb at runtime. disposerStatements
+// breaks the substitution into its own fragment, so the disposer can no longer
+// read the subcommand; detect it on the raw surface and fail closed. Command-
+// position anchored (same openers as the scheduler rule), so a substitution in
+// an ARGUMENT (`git commit -m "$(date)"`, `git branch --list $(echo x)`) — where
+// the real subcommand is a literal — does not match.
+const GIT_SUBCOMMAND_SUBSTITUTION = /(?:^|[;&|(\n`]|\$\()\s*(?:sudo\s+)?git\s+(?:-\S+\s+)*(?:\$\(|`)/i;
 
 /**
  * Is the `git` token at index `i` in COMMAND position? Every token before it
@@ -539,17 +560,21 @@ const GIT_GLOBAL_VALUE_OPT = /^(?:-c|-C|--git-dir|--work-tree|--namespace|--exec
  */
 function gitAtCommandPosition(tokens: readonly string[], i: number): boolean {
   let sawWrapper = false;
+  let prevWasFlag = false;   // a wrapper flag can take the next bare token as its value
   for (let k = 0; k < i; k++) {
     const t = tokens[k];
     const base = commandBaseName(t);
-    if (COMMAND_WRAPPER.test(base)) { sawWrapper = true; continue; }
-    if (CMD_PREFIX_KEYWORD.test(base)) continue;
-    if (/^\w+=/.test(t) || t.startsWith('-')) continue;   // assignment, or a wrapper/keyword flag
-    // A wrapper's bare VALUE argument — `timeout 5 git …`, `nice -n 10 git …`,
-    // `ionice -c 3 git …`: a duration/number after a wrapper. Scoped to that so
-    // `sudo echo git branch -D` (echo is the command, git a printed arg) and a
-    // bare `5 git …` (no wrapper) are still rejected.
-    if (sawWrapper && /^\d+[smhd]?$/.test(t)) continue;
+    if (COMMAND_WRAPPER.test(base)) { sawWrapper = true; prevWasFlag = false; continue; }
+    if (CMD_PREFIX_KEYWORD.test(base)) { prevWasFlag = false; continue; }
+    if (/^\w+=/.test(t)) { prevWasFlag = false; continue; }   // VAR=value assignment
+    if (t.startsWith('-')) { prevWasFlag = true; continue; }  // a flag (which MAY take a value)
+    // A wrapper's bare VALUE argument: the value of a preceding wrapper flag
+    // (`env -u FOO git …`, `nice -n 10 git …`) or a bare numeric/duration
+    // positional (`timeout 5 git …`, `timeout 1.5 git …` — timeout takes a
+    // FRACTIONAL duration). Scoped to a wrapper context, so `sudo echo git
+    // branch -D` (echo is the command, git a printed arg) and a bare `5 git …`
+    // (no wrapper) are still rejected.
+    if (sawWrapper && (prevWasFlag || /^\d+(?:\.\d+)?[smhd]?$/.test(t))) { prevWasFlag = false; continue; }
     return false;                                          // a bare word → git is an argument
   }
   return true;
@@ -624,6 +649,9 @@ function gitInvocationDisposer(
   matcher: (sub: string, args: readonly string[]) => boolean,
   depth = 0,
 ): boolean {
+  // A substitution occupying the SUBCOMMAND slot hides the verb the way `$GIT`
+  // does — fail closed before the splitter breaks it apart (#codex-P1).
+  if (GIT_SUBCOMMAND_SUBSTITUTION.test(text)) return true;
   // disposerStatements, NOT the blunt splitCommandStatements: a `;`/`&`/`|`
   // inside a quoted argument is literal text, so echoing/quoting a command
   // (`echo "git branch -D && git push -f"`, a PR-comment body) no longer
@@ -944,6 +972,13 @@ function deleteTargetsAreWorkspaceConfined(text: string): boolean {
       // Never gamble on anything that can expand or climb.
       if (/[$`*?~]/.test(tok)) return false;
       if (tok.includes('..')) return false;
+      // The WHOLE current directory is not an innocuous confined subdir — it is
+      // every entry in cwd (`.git`, source, uncommitted work), the same blast
+      // radius as `./*`. Any token that is only dots and slashes normalises to
+      // cwd (`.`, `./`, `./.`, `.//`, `././`) — and the quote strip above means
+      // `'.'` / `"."` reach here as `.`. A NAMED relative dir (`.next`, `./build`)
+      // has a non-dot/slash char and stays confined. (#182 residual — Grok.)
+      if (/^\.[.\/]*$/.test(tok)) return false;
       if (tok.startsWith('/')) {
         if (!CONFINED_TEMP_TARGET_RE.test(tok)) return false;
         continue;

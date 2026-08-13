@@ -13,10 +13,11 @@
  *     of them has a hole — a FALSE NEGATIVE — and fails the gate.
  *
  * Discipline for editing this file:
- *   - Only add entries whose correct verdict is UNAMBIGUOUS. Contested judgement
- *     calls (e.g. `rm -rf .` confined-delete, `kill <pid>` targeted numeric kill)
- *     are deliberately ABSENT — encoding a contested call as "correct" would let
- *     the gate cement an argument nobody settled. Settle it first, then add it.
+ *   - Only add entries whose correct verdict is SETTLED. Several once-contested
+ *     calls have since been decided by the operator and ARE encoded here — a
+ *     targeted numeric `kill <pid>` is allowed (carve-out), `rm -rf .` gates
+ *     (whole-cwd wipe). What stays out is a call nobody has settled yet; encoding
+ *     one as "correct" would let the gate cement an argument still in the air.
  *   - `gate` means `decision !== 'allow'` (require_approval OR block). The corpus
  *     asserts the guard STOPS the action; the block-vs-approve tier split is the
  *     job of the per-rule unit tests, not this precision gate.
@@ -77,6 +78,9 @@ export const SAFE_CORPUS: GuardCorpusEntry[] = [
   sh('git log --grep="branch -D"', 'allow', 'search pattern mentioning branch -D is not a delete'),
   sh('git diff branch -- -D', 'allow', '`branch` is a revision, `-D` a pathspec — `diff` is the subcommand, not a delete'),
   sh('echo if git branch -D x', 'allow', 'echo prints the words; git is an argument, not at command position'),
+  sh('git branch --list $(echo x)', 'allow', 'the substitution is an ARG; `branch --list` is a read-only subcommand'),
+  sh('git $(echo status)', 'allow', 'substitution subcommand but NO destructive flag — benign, not gated'),
+  sh('git $CMD log --oneline', 'allow', 'expansion subcommand, read-only flags — not gated'),
   sh('echo "git branch -D victim && git push -f"', 'allow', 'a `&&` inside quotes is literal text — echo prints it, runs nothing'),
   sh('printf "%s" "git push --force origin main"', 'allow', 'quoted command as printf data, not an invocation'),
   sh('git commit -m "ran $(date); then git push --force"', 'allow', 'commit message quoting a command — `commit` is the subcommand; the $ is in a message, not a push flag'),
@@ -172,6 +176,9 @@ export const DANGEROUS_CORPUS: GuardCorpusEntry[] = [
   sh('rm -rf ./*', 'gate', 'wildcard recursive delete of cwd contents'),
   sh('rm -rf .', 'gate', 'wipe ALL of the current directory — same blast radius as `./*`, which already blocks'),
   sh('rm -rf ./', 'gate', 'wipe all of cwd (trailing-slash form)'),
+  sh("rm -rf '.'", 'gate', 'quoted whole-cwd wipe — the confined-delete exemption rejects cwd identity'),
+  sh('rm -rf ./.', 'gate', 'cwd via a dot-slash-dot alias'),
+  sh('rm -rf .///', 'gate', 'cwd via redundant slashes'),
   sh('chmod -R 777 /etc', 'gate', 'recursive perms on a system dir'),
   sh('chown -R root /usr', 'gate', 'recursive ownership change on a system dir'),
   sh('dd of=/dev/sda if=/dev/zero', 'gate', 'raw disk overwrite'),
@@ -200,6 +207,12 @@ export const DANGEROUS_CORPUS: GuardCorpusEntry[] = [
   sh('if git branch -D victim; then echo done; fi', 'gate', 'git after a shell keyword IS a real invocation'),
   sh('while git push origin --delete main; do :; done', 'gate', 'git after `while` still gates'),
   sh("bash -O extglob -c 'git branch -D victim'", 'gate', 'inline shell with a value-taking option before -c'),
+  sh('git $(printf push) origin --delete main', 'gate', 'the subcommand is assembled by a substitution — fail closed'),
+  sh('git $VERB -D victim', 'gate', 'the subcommand is a variable expansion + a destructive flag — fail closed'),
+  sh('env -u FOO git branch -D victim', 'gate', 'a wrapper flag with a NONnumeric value (env -u NAME) before git'),
+  sh('timeout 1.5 git push --force origin main', 'gate', 'timeout takes a FRACTIONAL duration before the command'),
+  sh('kill -9 1', 'gate', 'PID 1 (init) is universally known and may be the container supervisor — gated like PID 0'),
+  sh('kill 01', 'gate', 'PID 1 in a leading-zero spelling — the shell resolves it to init'),
   sh('timeout 5 git push --force origin main', 'gate', 'a wrapper with a bare numeric value before git is still a real invocation'),
   sh('nice -n 10 git branch -D victim', 'gate', 'nice -n <N> git … — the value is the wrapper argument, git is the command'),
   // scheduler mutation
