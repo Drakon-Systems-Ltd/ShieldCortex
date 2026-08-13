@@ -326,6 +326,19 @@ export function summariseCommandOutput(
   return { lines: picked, truncated };
 }
 
+/**
+ * Sanitise a string that was NOT produced by `summariseCommandOutput` — a
+ * caller's own hand-built report string (an `err.message`, a path) — through
+ * the same env-value redaction and home-scrubbing every other reported
+ * string gets. `describeRunFailure` needed this for its own empty-output
+ * fallbacks; callers assembling report strings outside a captured child
+ * process (#248's `update.ts` registry-read errors) need the identical
+ * guarantee, so it is exported rather than kept as a private closure.
+ */
+export function sanitiseForReport(text: string, opts: SummariseOptions = {}): string {
+  return scrubHome(redactEnvValues(text, opts.env ?? process.env), opts.home ?? os.homedir());
+}
+
 function firstSentence(value: string, limit = MAX_REASON_CHARS): string {
   const single = value.replace(/\s+/g, ' ').trim();
   return single.length > limit ? `${single.slice(0, limit - 1)}…` : single;
@@ -358,8 +371,7 @@ export function describeRunFailure(err: unknown, opts: SummariseOptions = {}): R
   // reporting that alone tells the operator to retry a transient blip when the
   // real fact is a half-applied install. Partial output is still surfaced, but
   // as detail behind the terminal condition, never in place of it.
-  const sanitise = (text: string): string =>
-    scrubHome(redactEnvValues(text, opts.env ?? process.env), opts.home ?? os.homedir());
+  const sanitise = (text: string): string => sanitiseForReport(text, opts);
 
   let reason: string;
   if (spawnFailed) {

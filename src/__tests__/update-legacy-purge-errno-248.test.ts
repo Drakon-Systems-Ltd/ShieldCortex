@@ -38,7 +38,11 @@ describe('#248 — a denied legacy purge is surfaced, not swallowed', () => {
     expect(r.status).toBe('warn');
     const shown = [r.summary ?? '', ...(r.detail ?? [])].join('\n');
     expect(shown).toContain('EPERM');
-    expect(shown).toContain(extDir);
+    // #248 review — the raw absolute `extDir` (which embeds `home`, and on a
+    // real box the operator's username) must never reach output that gets
+    // pasted into an issue; only the scrubbed `~/...` form is allowed.
+    expect(shown).not.toContain(extDir);
+    expect(shown).toContain('~/.openclaw/extensions/shieldcortex-realtime');
   });
 
   it('folds the purge denial into the failure report when the install ALSO fails', async () => {
@@ -50,6 +54,8 @@ describe('#248 — a denied legacy purge is surfaced, not swallowed', () => {
     expect(r.status).toBe('warn');
     const shown = [r.summary ?? '', ...(r.detail ?? [])].join('\n');
     expect(shown).toContain('EPERM');
+    expect(shown).not.toContain(extDir);
+    expect(shown).toContain('~/.openclaw/extensions/shieldcortex-realtime');
   });
 
   it('stays quiet about the purge when it succeeds (no behaviour change on the happy path)', async () => {
