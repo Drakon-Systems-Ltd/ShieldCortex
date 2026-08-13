@@ -39,16 +39,27 @@ describe('#165 — a language process API is not the shell kill verb', () => {
       .not.toContain('stop-process-or-service');
   });
 
-  // ── the shell verb must still gate, in every shape ──
+  // ── the shell verb must still gate, in its dangerous shapes ──
+  // As of #182 a TARGETED numeric-PID kill (`kill 1234`) is carved out — an
+  // injection cannot weaponise a PID it does not know — but the name/pattern/
+  // dynamic shapes #165 cared about, where an attacker CAN name the target,
+  // still gate. The `process.kill` / `.kill()` distinction above is unchanged.
 
-  it('a bare kill still gates', () => {
-    expect(decide('kill 1234').signals ?? []).toContain('stop-process-or-service');
+  it('a bare or dynamic shell kill still gates', () => {
+    expect(decide('kill').signals ?? []).toContain('stop-process-or-service');
+    expect(decide('kill -9 $(pgrep node)').signals ?? []).toContain('stop-process-or-service');
+    expect(decide('kill %1').signals ?? []).toContain('stop-process-or-service');
+  });
+
+  it('a targeted numeric-PID kill is allowed (#182 carve-out)', () => {
+    expect(decide('kill 1234').signals ?? []).not.toContain('stop-process-or-service');
+    expect(decide('kill -9 4242').signals ?? []).not.toContain('stop-process-or-service');
   });
 
   it('sudo pkill / killall / piped and chained forms still gate', () => {
     expect(decide('sudo pkill -f node').signals ?? []).toContain('stop-process-or-service');
     expect(decide('killall -9 node').signals ?? []).toContain('stop-process-or-service');
-    expect(decide('echo x; kill -9 4242').signals ?? []).toContain('stop-process-or-service');
+    expect(decide('echo x; killall node').signals ?? []).toContain('stop-process-or-service');
     expect(decide('ps aux | grep node | xargs kill').signals ?? []).toContain('stop-process-or-service');
   });
 

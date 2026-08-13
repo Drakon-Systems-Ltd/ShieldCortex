@@ -141,8 +141,14 @@ const CATASTROPHIC: Pattern[] = [
   // matched `-\w*r\w*f\w*` as if `-verify`/`-perf` were an `-rf` flag and
   // hard-blocked a plain single-file `rm` as catastrophic (field FP report).
   { re: /\brm\b[^|;&\n]*?(?:(?<![\w.\/-])-\w*r\w*f\w*|(?<![\w.\/-])-\w*f\w*r\w*|(?=[^|;&\n]*--recursive)(?=[^|;&\n]*--force))/i, signal: 'recursive-force-delete' },
-  // rm targeting a root-ish / home / wildcard path
-  { re: /\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:\/|~|\$HOME|\/\*|\*|\.\/\*)(?:\s|$)/i, signal: 'delete-root-or-home' },
+  // rm targeting a root-ish / home / wildcard path — or the WHOLE current
+  // directory. `.` and `./` wipe every entry in cwd (`.git`, source, uncommitted
+  // work) — the same blast radius as `./*` / `*`, which already block here — so
+  // they gate at the same tier. The trailing `(?:\s|$)` keeps this to the BARE
+  // whole-cwd target: a NAMED confined subdir (`.next`, `./build`, `.DS_Store`)
+  // has a non-space char after the dot and stays allowed via the confined-delete
+  // exemption. `..`/`../` climb out and are already caught by that exemption.
+  { re: /\brm\b[^|;&\n]*\s(?:-\w+\s+)*(?:\/|~|\$HOME|\/\*|\*|\.\/\*|\.\/|\.)(?:\s|$)/i, signal: 'delete-root-or-home' },
   // fork bomb  :(){ :|:& };:
   { re: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&?\s*\}\s*;\s*:/, signal: 'fork-bomb' },
   // filesystem creation / raw disk writes
@@ -248,8 +254,36 @@ const DANGEROUS: Pattern[] = [
   // options, and `git push -fq` slipped the word-boundary form entirely
   // (issue #195). The leading `(?:^|\s)` still requires a real shell word, so
   // #191's `trash old-f.tar.gz` stays clean.
-  { re: /\bgit\b[^|;&\n]*\bpush\b[^|;&\n]*(?:^|\s)(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b|\+\S)/i, signal: 'git-force-push' },
-  { re: /\bgit\b[^|;&\n]*\b(branch\s+-D|push\b[^|;&\n]*--delete|push\b[^|;&\n]*\s:)/i, signal: 'git-delete-branch' },
+  // Proposer only — `gitForcePushInvoked` disposes (tokenised, quotes stripped,
+  // command-position anchored). Deliberately LOOSE: it fires on any `git push`
+  // carrying a flag/quote/refspec-plus, and the argv parser makes the real
+  // decision. A precise quote-tolerant proposer kept missing interior-quote
+  // shapes (`git push -"f"`); a loose one cannot miss, and over-proposing only
+  // costs one disposer call that returns false. `git push origin main` (no
+  // flag) does not propose.
+  { re: /\bgit\b[^|;&\n]*\bpush\b[^|;&\n]*[-+'"]/i, signal: 'git-force-push' },
+  // git branch-delete gates on force INTENT, not letter case. Force-deleting an
+  // UNMERGED branch (real data loss) has many spellings, ALL verified in real
+  // git: canonical `-D`, and any lowercase delete flag (`-d`/`--delete`) paired
+  // with a force flag (`-f`/`--force`) — separated (`-d -f`, `-d --force`,
+  // `--delete --force`) OR clustered into one token (`-df`, `-fd`). A BARE
+  // `-d`/`--delete` (no force) deletes only a MERGED branch — git refuses it
+  // otherwise — so it stays allowed (the #182 FP that started this).
+  // Case-SENSITIVE (no `/i`) so canonical `-D` and safe `-d` are distinguishable;
+  // the delete+force arm then re-catches the lowercase force combos that the old
+  // `/i` rule only ever caught by accident (folding `-D`→`-d`), and as a bonus
+  // closes the long-form `--delete --force` / clustered `-fd` gaps the accident
+  // never covered. Flag tokens are `\s-…\b` (a filename arg never starts `-`),
+  // and the delete/force lookaheads are single-pass over one statement — no
+  // nested quantifier, no backtracking blowup.
+  // Proposer only — `gitDeleteBranchInvoked` disposes. Deliberately LOOSE, same
+  // reasoning as the force-push proposer above: it fires on `git branch` with
+  // any flag/quote, or `git push` with any flag/quote/`:`-refspec, and the argv
+  // parser (which tokenises and strips ALL quoting) decides. So every quoting
+  // shape is PROPOSED — wrapped (`"-d"`), interior (`-"d"`), clustered — and a
+  // quoted `-m "…git branch --delete --force…"` message is disposed as prose.
+  // `git branch` with no flag (a plain listing/create) does not propose.
+  { re: /\bgit\b[^|;&\n]*\b(?:branch\b[^|;&\n]*[-'"]|push\b[^|;&\n]*[-'":])/i, signal: 'git-delete-branch' },
   // The process verbs here are the SHELL commands, not a language's process API
   // (issue #165). `process.kill(process.pid, sig)` in a build script forwards a
   // signal to ITSELF, and `child.kill()` is a method call — neither stops
@@ -260,7 +294,30 @@ const DANGEROUS: Pattern[] = [
   //
   // The lookbehind rejects only the member-access form. Every shell shape —
   // bare, sudo-prefixed, after a separator, via xargs — is untouched.
-  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|(?<![.\w])(kill|pkill|killall)\b/i, signal: 'stop-process-or-service' },
+  // `kill -l` is carved out (same read-only exemption as `crontab -l`/`at -l`):
+  // it prints the signal-name table and kills NOTHING (#182 corpus FP). Only
+  // `kill` takes `-l`; `pkill`/`killall` have no such option and stay
+  // unconditional. Name/pattern kill (`pkill -f`, `killall`) and every other
+  // `kill` shape (`kill <pid>`, `kill -9 <pid>`) remain gated — that is the
+  // attacker-weaponisable form and is intentionally NOT relaxed here.
+  // A targeted `kill <pid>` of literal POSITIVE numeric PIDs (optionally after a
+  // signal flag) is also carved out: an injection cannot weaponise a PID it does
+  // not know, and killing a process the agent itself started by PID is the
+  // single most common legitimate case. Only positive integers to end-of-
+  // statement qualify (`(?!0+\b)[0-9]+` — a single quantifier that rejects an
+  // all-zero token; the earlier `[0-9]*[1-9][0-9]*` form was correct but its
+  // ambiguous overlap backtracked QUADRATICALLY on a long crafted digit run and
+  // hung this synchronous guard, a DoS vector — see the ReDoS note below).
+  // `kill $(pgrep x)`, `kill $PID`, `kill %1`, `kill 4021 -1` (broadcast),
+  // name/pattern kill (`pkill`, `killall`) and any dynamic/compound form stay
+  // gated (their own rule re-catches a lethal follow-on). Crucially PID `0` and
+  // `-9 0` stay gated: `kill 0` signals the WHOLE process group (the agent's own
+  // shell, sibling sessions, ShieldCortex itself) and needs no privilege — it is
+  // the defence-disruption shape this rule exists for, not a targeted kill. A
+  // negative target (`kill -1`) never matches the digit class either. ReDoS:
+  // `(?!0+\b)[0-9]+` is a single greedy quantifier separated from its repeats by
+  // required whitespace, so a long digit run is linear, not quadratic.
+  { re: /\b(systemctl|service)\b[^|\n]*\b(stop|disable|mask)\b|(?<![.\w])(?:(?:pkill|killall)\b|kill\b(?!\s+-l\b)(?!\s+(?:-[A-Za-z0-9]+\s+)?(?!0+\b)[0-9]+(?:\s+(?!0+\b)[0-9]+)*\s*(?=$|[;&|\n])))/i, signal: 'stop-process-or-service' },
   { re: /\b(iptables|ufw|nft|netplan|firewall-cmd)\b/i, signal: 'modify-network-firewall' },
   // Package installs split by blast radius (issue #73.3). System package managers
   // and language *global* installs mutate the host → approval. A workspace-local
@@ -506,6 +563,80 @@ function gitForcePushInvoked(text: string, depth = 0): boolean {
       for (const a of args.slice(pushAt + 1)) {
         if (GIT_FORCE_FLAG.test(a)) return true;
         if (a.startsWith('+') && a.length > 1) return true;         // `+main:main` refspec
+      }
+    }
+  }
+  return false;
+}
+
+// Short-flag classifiers for a `git branch` delete. A branch flag is a single
+// dash cluster and git parses `-df`/`-fd` as delete+force together, so each
+// tests for the presence of its letter anywhere in the cluster. Case-sensitive:
+// `-D` (canonical force-delete) is distinct from `-d` (safe merged delete).
+const GIT_BRANCH_CANON_DELETE = /^-[A-Za-z]*D[A-Za-z]*$/;   // -D, -vD — force-delete of an unmerged branch
+const GIT_BRANCH_DELETE_FLAG = /^-[A-Za-z]*d[A-Za-z]*$/;    // -d, -df, -fd
+const GIT_BRANCH_FORCE_FLAG = /^-[A-Za-z]*f[A-Za-z]*$/;     // -f, -df, -fd
+
+/**
+ * True when a statement genuinely performs a DESTRUCTIVE git delete:
+ *   - `git branch` force-delete of an unmerged branch — `-D`, or a delete flag
+ *     (`-d`/`--delete`) paired with a force flag (`-f`/`--force`), separated or
+ *     clustered (`-df`/`-fd`). A bare `-d`/`--delete` (no force) deletes only a
+ *     MERGED branch — git refuses it otherwise — so it is NOT confirmed here.
+ *   - `git push` remote-branch delete — `--delete`, or a `:`-prefixed
+ *     (empty-source) refspec (`git push origin :main`).
+ *
+ * The disposer for `git-delete-branch`, same shape and reasoning as
+ * gitForcePushInvoked (#195): the regex proposes on vocabulary, this confirms an
+ * INVOCATION. Tokenised, so a quoted `-m "git branch --delete --force"` message
+ * is ONE token that is never the branch subcommand (kills the prose FP); quote
+ * stripping means `git branch "-d" "-f"` reads as the flags git actually sees
+ * (kills the quoting evasion). Command-position anchored, recurses into
+ * `bash -c '…'`, fails closed on `eval`/`$`.
+ */
+function gitDeleteBranchInvoked(text: string, depth = 0): boolean {
+  for (const stmt of splitCommandStatements(text)) {
+    if (!/\bgit\b/i.test(stmt) || !/\b(?:branch|push)\b/i.test(stmt)) continue;
+    if (/\beval\b/.test(stmt) || stmt.includes('$')) return true;   // unreadable → keep the gate
+    const tokens = tokeniseStatement(stmt);
+    // `bash -c 'git branch -D x'` — the verb is inside one token; recurse in
+    // (bounded), exactly as gitForcePushInvoked does, or the quote is a bypass.
+    if (depth < MAX_INLINE_RECURSION) {
+      for (let i = 0; i < tokens.length; i++) {
+        const b = commandBaseName(tokens[i]);
+        if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (!tokens[j].startsWith('-')) break;
+          if (isInlineProgramFlag(b, tokens[j])) {
+            if (gitDeleteBranchInvoked(tokens[j + 1] ?? '', depth + 1)) return true;
+            break;
+          }
+        }
+      }
+    }
+    for (let i = 0; i < tokens.length; i++) {
+      if (commandBaseName(tokens[i]).toLowerCase() !== 'git') continue;
+      const prev = i > 0 ? commandBaseName(tokens[i - 1]) : '';
+      const atCommand = i === 0
+        || COMMAND_WRAPPER.test(prev)
+        || /^\w+=/.test(tokens[i - 1])
+        || /^-/.test(tokens[i - 1]) && i > 1 && COMMAND_WRAPPER.test(commandBaseName(tokens[i - 2]));
+      if (!atCommand) continue;
+      const args = tokens.slice(i + 1);
+      const branchAt = args.findIndex(a => a.toLowerCase() === 'branch');
+      if (branchAt >= 0) {
+        const flags = args.slice(branchAt + 1);
+        const hasCanon = flags.some(a => GIT_BRANCH_CANON_DELETE.test(a));
+        const hasDelete = flags.some(a => a === '--delete' || GIT_BRANCH_DELETE_FLAG.test(a));
+        const hasForce = flags.some(a => a === '--force' || GIT_BRANCH_FORCE_FLAG.test(a));
+        if (hasCanon || (hasDelete && hasForce)) return true;
+      }
+      const pushAt = args.findIndex(a => a.toLowerCase() === 'push');
+      if (pushAt >= 0) {
+        for (const a of args.slice(pushAt + 1)) {
+          if (a === '--delete') return true;                        // `git push --delete`
+          if (a.startsWith(':') && a.length > 1) return true;       // `git push origin :branch`
+        }
       }
     }
   }
@@ -2878,6 +3009,13 @@ export function evaluateToolCall(
   // not performing one.
   if (dangerSignals.includes('git-force-push') && !gitForcePushInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'git-force-push');
+  }
+  // Same discipline for branch/ref deletes (#182): naming `git branch --delete
+  // --force` in a commit message or a `--grep` pattern is prose, not a delete.
+  // The argv parser also strips flag quoting, so the `git branch "-d" "-f"`
+  // evasion is confirmed rather than slipped.
+  if (dangerSignals.includes('git-delete-branch') && !gitDeleteBranchInvoked(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'git-delete-branch');
   }
   // Reading the firewall's state changes nothing (issue #193). The rule matched
   // the tool and never the verb, so a status sweep gated as hard as a flush.
