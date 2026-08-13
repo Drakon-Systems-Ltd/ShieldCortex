@@ -56,9 +56,13 @@ import {
 } from './allowance.js';
 import { parseQuarantineDecision } from './decision.js';
 import { runCampaignDetection } from './campaign.js';
+import { detectRelationConflicts } from './conflict.js';
 
 /** Campaign detection throttle: run at most this often (design says ~daily). */
 const DEFAULT_CAMPAIGN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** Conflict detection throttle: hourly — a relation dispute is more
+ *  time-sensitive than a campaign, but still not per-row work. */
+const DEFAULT_CONFLICT_INTERVAL_MS = 60 * 60 * 1000;
 import {
   assertNotInTransaction,
   cachedStmt,
@@ -74,8 +78,9 @@ import {
  *  v2 (Phase B): risk exponent-sum fold, attestation-gated accrual,
  *  src_type/src_id attrs, and risk_reset review-row consumption.
  *  v3 (Phase C): quarantine_decision consumption → operator allowance edges.
- *  v4 (Phase D): realtime `tainted` attr on conversation event nodes. */
-export const PROJECTOR_VERSION = 4;
+ *  v4 (Phase D): realtime `tainted` attr on conversation event nodes.
+ *  v5 (Phase E): relation-channel conflict detection + triple provenance. */
+export const PROJECTOR_VERSION = 5;
 
 export interface ProjectorOptions {
   /** Rows per claim-and-advance batch. */
@@ -432,9 +437,15 @@ function clearGraph(): void {
     db.prepare('DELETE FROM threat_edges').run();
     db.prepare('DELETE FROM threat_nodes').run();
     db.prepare('DELETE FROM source_risk').run();
+    // Phase E: `disputed` is a projector-derived flag on the memory-graph
+    // triples (the only derived state living outside the threat tables). Reset
+    // it so a rebuild re-derives conflicts from scratch. writer_source/
+    // writer_trust/valid_from/valid_to are write-time/operator facts — untouched.
+    db.prepare('UPDATE triples SET disputed = 0 WHERE disputed = 1').run();
     db.prepare(`
       UPDATE threat_graph_state
-      SET last_audit_id = 0, last_rt_cursor = '', last_campaign_at = NULL, last_error = NULL, projector_version = ?
+      SET last_audit_id = 0, last_rt_cursor = '', last_campaign_at = NULL,
+          last_conflict_at = NULL, last_error = NULL, projector_version = ?
       WHERE id = 1
     `).run(PROJECTOR_VERSION);
   }).immediate();
@@ -507,6 +518,18 @@ export function rebuildThreatGraph(
       if (rt.processed === 0) break;
     }
   }
+  // Phase E: re-derive relation-channel conflicts immediately on rebuild
+  // (disputed flags were reset in clearGraph). Unlike campaigns, conflicts carry
+  // a cross-table `disputed` flag, so a rebuild should leave it consistent
+  // rather than waiting for the next lease tick. Failure is non-fatal — the
+  // throttled lease pass re-derives.
+  try {
+    detectRelationConflicts();
+    db.prepare("UPDATE threat_graph_state SET last_conflict_at = ? WHERE id = 1")
+      .run(new Date().toISOString());
+  } catch (e) {
+    result.errors.push(`conflict detection: ${e instanceof Error ? e.message : String(e)}`);
+  }
   db.prepare('UPDATE threat_graph_state SET last_error = ? WHERE id = 1')
     .run(result.errors.length > 0 ? result.errors.join('; ').slice(0, 1000) : null);
   return result;
@@ -525,6 +548,10 @@ export interface LeaseRunOptions extends ProjectorOptions {
   campaignIntervalMs?: number;
   /** Set false to skip campaign detection this run (test seam). */
   campaignDetection?: boolean;
+  /** Conflict-detection throttle interval (ms); test seam. */
+  conflictIntervalMs?: number;
+  /** Set false to skip conflict detection this run (test seam). */
+  conflictDetection?: boolean;
 }
 
 export interface LeaseRunResult {
@@ -636,6 +663,23 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
       runErrors.push(`campaign detection: ${e instanceof Error ? e.message : String(e)}`);
     }
 
+    // Relation-channel conflict detection (Phase E — ShadowMerge defence).
+    // Throttled (hourly): a stateless recompute over single-valued triples, not
+    // per-row projection. Sets `disputed` + re-mints the conflict review nodes.
+    try {
+      const conflictIntervalMs = options?.conflictIntervalMs ?? DEFAULT_CONFLICT_INTERVAL_MS;
+      const last = (db.prepare('SELECT last_conflict_at FROM threat_graph_state WHERE id = 1')
+        .get() as { last_conflict_at: string | null }).last_conflict_at;
+      const due = !last || now - Date.parse(last) >= conflictIntervalMs;
+      if (due && options?.conflictDetection !== false) {
+        detectRelationConflicts({ nowMs: now });
+        db.prepare('UPDATE threat_graph_state SET last_conflict_at = ? WHERE id = 1 AND lease_token = ?')
+          .run(new Date(now).toISOString(), token);
+      }
+    } catch (e) {
+      runErrors.push(`conflict detection: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     succeeded = true;
     return { ran: true, audit, realtime };
   } catch (e) {
@@ -678,9 +722,14 @@ export function canonicalDump(): string {
   // Campaign nodes + part_of edges are a wall-clock-relative derived analysis
   // (like source_risk), recomputed each tick and outside the determinism
   // contract — excluded here so incremental and rebuild dumps still match.
+  // Conflict review nodes (kind='event', key `conflict:%`) are a throttled,
+  // wall-clock-relative derived layer like campaigns — excluded so incremental
+  // and rebuild dumps still match.
   const nodes = db.prepare(`
     SELECT kind, key, label, attrs, first_seen, last_seen
-    FROM threat_nodes WHERE kind != 'campaign' ORDER BY kind, key
+    FROM threat_nodes
+    WHERE kind != 'campaign' AND key NOT LIKE 'conflict:%'
+    ORDER BY kind, key
   `).all() as Array<Record<string, unknown>>;
   const edges = db.prepare(`
     SELECT s.kind AS src_kind, s.key AS src_key, e.predicate,

@@ -584,14 +584,27 @@ export async function checkThreatGraph(
       }
     }
 
+    // Open relation-channel conflicts (Phase E) are advisory review items, not
+    // a projector fault — surface the count in the healthy message so the
+    // operator knows there is a review queue without it reading as an error.
+    let conflictNote = '';
+    try {
+      const openConflicts = (db.prepare(
+        "SELECT COUNT(*) AS c FROM threat_nodes WHERE kind = 'event' AND key LIKE 'conflict:%'"
+      ).get() as { c: number }).c;
+      if (openConflicts > 0) {
+        conflictNote = `; ${openConflicts} relation-channel conflict(s) awaiting review (shieldcortex threat-graph conflicts)`;
+      }
+    } catch { /* conflicts are a display extra — never fail the check on them */ }
+
     return {
       label,
       status: 'pass',
-      message: maxAudit === 0
+      message: (maxAudit === 0
         ? 'nothing to project yet'
         : `caught up (cursor ${cursor} of ${maxAudit}` +
           `${state?.last_rt_cursor ? `, realtime at ${state.last_rt_cursor}` : ''}` +
-          `${state?.last_run_at ? `, last ran ${state.last_run_at}` : ''})`,
+          `${state?.last_run_at ? `, last ran ${state.last_run_at}` : ''})`) + conflictNote,
     };
   } catch (e) {
     return {

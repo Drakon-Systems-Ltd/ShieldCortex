@@ -863,8 +863,34 @@ export function runMigrations(database: Database.Database): void {
     if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_campaign_at')) {
       database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_campaign_at TEXT");
     }
+    // Threat-graph Phase E (ShadowMerge defence): conflict-detection throttle.
+    if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_conflict_at')) {
+      database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_conflict_at TEXT");
+    }
+    // Threat-graph Phase E: triple write-time provenance + dispute flag. The
+    // `triples` table exists from the ontology migration above, so these are
+    // unconditional adds (guarded by column presence). writer_source/writer_trust
+    // stay NULL on rows written before this migration (and on backfilled rows).
+    const tripleCols = database.prepare("PRAGMA table_info(triples)").all() as { name: string }[];
+    if (tripleCols.length > 0) {
+      if (!tripleCols.some((c) => c.name === 'valid_from')) {
+        database.exec('ALTER TABLE triples ADD COLUMN valid_from TEXT');
+      }
+      if (!tripleCols.some((c) => c.name === 'valid_to')) {
+        database.exec('ALTER TABLE triples ADD COLUMN valid_to TEXT');
+      }
+      if (!tripleCols.some((c) => c.name === 'writer_source')) {
+        database.exec('ALTER TABLE triples ADD COLUMN writer_source TEXT');
+      }
+      if (!tripleCols.some((c) => c.name === 'writer_trust')) {
+        database.exec('ALTER TABLE triples ADD COLUMN writer_trust REAL');
+      }
+      if (!tripleCols.some((c) => c.name === 'disputed')) {
+        database.exec('ALTER TABLE triples ADD COLUMN disputed INTEGER NOT NULL DEFAULT 0');
+      }
+    }
   } catch (err) {
-    logIfUnexpectedDdlError(err, 'defence_audit provenance columns + threat_edges.attrs');
+    logIfUnexpectedDdlError(err, 'defence_audit provenance columns + threat_edges.attrs + triples provenance');
   }
 
   if (!columnNames.has('content_hash')) {

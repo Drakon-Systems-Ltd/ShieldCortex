@@ -10,7 +10,7 @@ import { getDatabase } from '../database/init.js';
 import { listAllowances } from '../threat-graph/allowance.js';
 
 export interface ThreatGraphQueryArgs {
-  view: 'sources' | 'source' | 'events' | 'campaigns' | 'allowances';
+  view: 'sources' | 'source' | 'events' | 'campaigns' | 'allowances' | 'conflicts';
   /** Node key for view 'source' (e.g. 'agent:jarvis'). */
   key?: string;
   /** Filter events by originating project. */
@@ -122,8 +122,10 @@ export function handleThreatGraphQuery(
     }
 
     case 'events': {
+      // Conflict review nodes reuse kind='event' but have their own 'conflicts'
+      // view — keep them out of the generic events list.
       const rows = db.prepare(`
-        SELECT * FROM threat_nodes WHERE kind = 'event'
+        SELECT * FROM threat_nodes WHERE kind = 'event' AND key NOT LIKE 'conflict:%'
         ${args.project ? "AND json_extract(attrs, '$.project') = @project" : ''}
         ${since ? 'AND last_seen >= @since' : ''}
         ORDER BY last_seen DESC, key ASC LIMIT @limit
@@ -148,6 +150,20 @@ export function handleThreatGraphQuery(
         ORDER BY last_seen DESC LIMIT @limit
       `).all({ limit }) as any[];
       return boundedPayload({ view: 'campaigns', limit }, 'campaigns', rows.map(nodeView), byteCap);
+    }
+
+    case 'conflicts': {
+      // Relation-channel conflict review items (Phase E — ShadowMerge defence).
+      // Each node's attrs carry both contenders with full provenance. Resolution
+      // is an operator mutation via the CLI (`threat-graph resolve-conflict`),
+      // kept off this read surface deliberately.
+      const rows = db.prepare(`
+        SELECT * FROM threat_nodes
+        WHERE kind = 'event' AND key LIKE 'conflict:%'
+        ${since ? 'AND last_seen >= @since' : ''}
+        ORDER BY last_seen DESC, key ASC LIMIT @limit
+      `).all({ since, limit }) as any[];
+      return boundedPayload({ view: 'conflicts', limit }, 'conflicts', rows.map(nodeView), byteCap);
     }
 
     default:

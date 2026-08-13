@@ -221,11 +221,16 @@ function getMemoryScopedEnvelope(memoryId: number): GraphSyncEnvelope | null {
     ORDER BY e.memory_count DESC, e.name ASC
   `).all(memoryId) as Record<string, unknown>[];
 
+  // valid_to IS NULL: don't emit suspended (operator-rejected) edges to the
+  // cloud mirror, matching the local agent-facing readers. NOTE: this only
+  // prevents FORWARD propagation — a triple already synced before it was
+  // suspended stays in the cloud until a cloud-side retraction is wired (the
+  // cloud deliberately does not model conflict/suspension state today).
   const tripleRows = db.prepare(`
     SELECT t.*, m.uuid as source_memory_uuid
     FROM triples t
     LEFT JOIN memories m ON m.id = t.source_memory_id
-    WHERE t.source_memory_id = ?
+    WHERE t.source_memory_id = ? AND t.valid_to IS NULL
     ORDER BY t.id ASC
   `).all(memoryId) as Record<string, unknown>[];
 
@@ -287,10 +292,13 @@ export async function syncAllGraphToCloud(): Promise<{
   const allowedMemoryExternalIds = buildAllowedMemoryExternalIdSet(memoryRows);
 
   const entityRows = db.prepare('SELECT * FROM entities ORDER BY id ASC').all() as Record<string, unknown>[];
+  // valid_to IS NULL: exclude suspended (operator-rejected) edges from the full
+  // mirror too (forward-only — see getMemoryScopedEnvelope's note on retraction).
   const tripleRows = db.prepare(`
     SELECT t.*, m.uuid as source_memory_uuid
     FROM triples t
     LEFT JOIN memories m ON m.id = t.source_memory_id
+    WHERE t.valid_to IS NULL
     ORDER BY t.id ASC
   `).all() as Record<string, unknown>[];
   const memoryEntityRows = db.prepare(`

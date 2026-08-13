@@ -266,6 +266,19 @@ Three learning loops sit on top, in dependency order:
    excluded from the determinism dump, like `source_risk`. Detection-only in
    this phase: the alert digest + per-week cap are deferred until a consumer
    is wired.
+5. **Relation-channel conflict detection** (`conflict.ts`, Phase E — the
+   ShadowMerge defence) — the memory-graph `triples` gain write-time provenance
+   (`writer_source`, capped `writer_trust`, `valid_from`/`valid_to`, per-rule
+   `confidence`). A throttled (hourly), stateless, idempotent pass flags a
+   conflict when a *single-valued* channel (`uses`/`depends_on`/`configures`/
+   `replaces`, never `related_to`) holds ≥2 distinct open objects whose writers
+   differ in trust by ≥0.3. Resolution is **symmetric** — both edges get a
+   `disputed` flag, *neither* is auto-suspended, and one `conflict` review node
+   is minted; the operator resolves (keep one / keep both / reject both) as a
+   replay-reproducible `operation='review'` row. `user:approved` provenance can
+   never be crowned the authoritative side. Conflict nodes + `disputed` are a
+   derived layer (excluded from the determinism dump; reset + re-derived on
+   rebuild). Local-only — provenance never egresses to the cloud.
 
 **Invariants** (why this can *learn* without becoming *trainable*): the ledger
 is truth; every automatic effect is additive-tightening; operators are the only
@@ -282,8 +295,9 @@ infrastructure processing security content — which is exactly why advisory is
 the default. Local-only: no threat-graph data is synced to the cloud.
 
 Surfaces: `threat_graph` MCP tool (`sources` / `source` / `events` /
-`allowances` views, row+byte capped) · `shieldcortex threat-graph
-rebuild|status|reset-source` · a `doctor` freshness check.
+`allowances` / `campaigns` / `conflicts` views, row+byte capped) ·
+`shieldcortex threat-graph rebuild|status|reset-source|campaigns|conflicts|resolve-conflict`
+· a `doctor` freshness check (also surfaces the open-conflict review count).
 
 ## Database Schema
 

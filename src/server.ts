@@ -765,9 +765,9 @@ but you can use this tool to check for new contradictions at any time.`,
   // Threat Graph - query the security event graph (Phase A)
   server.tool(
     'threat_graph',
-    'Query the threat graph — the security event graph projected from the defence audit ledgers. Views: sources (per-source counters), source (one source with its triggered patterns + recent events), events (recent notable events), campaigns (Phase D, empty until then). Responses are row- and byte-capped with an explicit truncated flag.',
+    'Query the threat graph — the security event graph projected from the defence audit ledgers. Views: sources (per-source counters), source (one source with its triggered patterns + recent events), events (recent notable events), campaigns (coordinated-attack clusters), allowances (operator auto-release grants), conflicts (relation-channel disputes awaiting review). Responses are row- and byte-capped with an explicit truncated flag.',
     {
-      view: z.enum(['sources', 'source', 'events', 'campaigns', 'allowances']).describe('What to list'),
+      view: z.enum(['sources', 'source', 'events', 'campaigns', 'allowances', 'conflicts']).describe('What to list'),
       key: z.string().optional().describe("Source key for view 'source', e.g. 'agent:jarvis'"),
       project: z.string().optional().describe('Filter events by originating project'),
       since: z.string().optional().describe('ISO timestamp — only rows seen at/after this'),

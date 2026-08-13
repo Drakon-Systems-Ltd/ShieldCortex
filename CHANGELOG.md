@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+**Threat Graph Phase E — relation-channel conflict detection (the ShadowMerge defence).** In review (PR #258) on top of 4.48.0; advisory/off like the rest of the threat graph, so it changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md` ("Policing the memory graph").
+
+### Added
+
+- **Relation-channel conflict detection (Phase E — the ShadowMerge defence).** Write-time provenance on the memory-graph `triples` (`writer_source`, `writer_trust` stored already-capped, `valid_from`/`valid_to`, per-rule `confidence`: verb-pattern 0.8 vs co-occurrence 0.3). A throttled (hourly), stateless projector pass flags a **relation-channel conflict** when a single-valued predicate (`uses`/`depends_on`/`configures`/`replaces` — never `related_to`) holds ≥2 distinct open objects whose writers differ in trust by ≥0.3. Resolution is **symmetric**: both edges carry a `disputed` flag, *neither* is auto-suspended, and one `conflict` review node is minted; the operator resolves (keep one / keep both / reject both) as a replay-reproducible `operation='review'` ledger row, replayed on every pass so an edit/merge can't silently revert it. `user:approved` provenance can never be crowned the authoritative side. No new data class egresses to the cloud — the provenance columns are local-only. To my knowledge no shipping product does write-time relation-conflict detection on agent memory; it is gated last and off the sync hot path.
+- **Surfaces + schema (Phase E).** `threat_graph` MCP tool gains a `conflicts` view; `shieldcortex threat-graph conflicts|resolve-conflict` CLI; `doctor` surfaces the open-conflict review count. New columns `triples.{valid_from, valid_to, writer_source, writer_trust, disputed}` and `threat_graph_state.last_conflict_at`. `PROJECTOR_VERSION` → 5 (forces a one-time graph rebuild on upgrade).
+
+### Fixed
+
+- **Phase E adversarial-review fixes (5-lens review).** Conflict review nodes are excluded from the event-node eviction cap (they reuse `kind='event'` but are outside the determinism dump — counting them let an incremental tick evict real nodes a rebuild kept, diverging `canonicalDump`). The `≥0.3` margin gate absorbs IEEE-754 boundary artefacts (`0.7 - 0.4`). Content-derived conflict-node labels get the standard cap-256/strip-control hygiene; `resolveConflict` rejects non-single-valued predicates. Security + invariants lenses returned no findings.
+
 ## [4.48.0] - 2026-08-12
 
 **Two secret-handling defects closed, the CI blind spot that hid a third, and the Threat Graph ships — advisory and off by default.**

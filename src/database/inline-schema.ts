@@ -157,6 +157,11 @@ export function getInlineSchema(): string {
       source_memory_id INTEGER,
       confidence REAL DEFAULT 0.8,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      valid_from TEXT,
+      valid_to TEXT,
+      writer_source TEXT,
+      writer_trust REAL,
+      disputed INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (subject_id) REFERENCES entities(id) ON DELETE CASCADE,
       FOREIGN KEY (object_id) REFERENCES entities(id) ON DELETE CASCADE,
       FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE SET NULL,
@@ -222,6 +227,7 @@ export function getInlineSchema(): string {
       lease_token TEXT,
       last_run_at TEXT,
       last_campaign_at TEXT,
+      last_conflict_at TEXT,
       last_error TEXT
     );
 

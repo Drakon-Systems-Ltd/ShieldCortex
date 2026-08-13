@@ -179,12 +179,17 @@ export function upsertEdge(
  */
 export function evictEventOverflow(maxEventNodes: number): string | null {
   const db = getDatabase();
-  const count = (db.prepare("SELECT COUNT(*) as c FROM threat_nodes WHERE kind = 'event'").get() as { c: number }).c;
+  // Phase E conflict review nodes reuse kind='event' but are a throttled derived
+  // layer excluded from canonicalDump — so they must ALSO be excluded from the
+  // cap, or evicting real event nodes to make room for them makes the dump
+  // diverge between an incremental tick and a rebuild. They are inherently
+  // bounded (one per conflicted channel) and re-minted each detection pass.
+  const count = (db.prepare("SELECT COUNT(*) as c FROM threat_nodes WHERE kind = 'event' AND key NOT LIKE 'conflict:%'").get() as { c: number }).c;
   if (count <= maxEventNodes) return null;
   const excess = count - maxEventNodes;
   db.prepare(`
     DELETE FROM threat_nodes WHERE id IN (
-      SELECT id FROM threat_nodes WHERE kind = 'event'
+      SELECT id FROM threat_nodes WHERE kind = 'event' AND key NOT LIKE 'conflict:%'
       ORDER BY last_seen ASC, key ASC LIMIT ?
     )
   `).run(excess);
@@ -201,13 +206,15 @@ export function evictEdgeOverflow(maxEdges: number): string | null {
   const count = (db.prepare('SELECT COUNT(*) as c FROM threat_edges').get() as { c: number }).c;
   if (count <= maxEdges) return null;
   let evicted = 0;
-  // Shed oldest events in chunks until under the cap (or none remain).
+  // Shed oldest events in chunks until under the cap (or none remain). Conflict
+  // review nodes are excluded — they carry no aggregate edges, so evicting them
+  // sheds zero edges (and would perturb the determinism dump for nothing).
   for (let guard = 0; guard < 100; guard++) {
     const remaining = (db.prepare('SELECT COUNT(*) as c FROM threat_edges').get() as { c: number }).c;
     if (remaining <= maxEdges) break;
     const removed = db.prepare(`
       DELETE FROM threat_nodes WHERE id IN (
-        SELECT id FROM threat_nodes WHERE kind = 'event'
+        SELECT id FROM threat_nodes WHERE kind = 'event' AND key NOT LIKE 'conflict:%'
         ORDER BY last_seen ASC, key ASC LIMIT 500
       )
     `).run().changes;

@@ -58,11 +58,13 @@ export function handleGraphQuery(args: {
   // visited check gates emission as well as expansion (emitting first re-listed
   // the root as its own depth-2 neighbour once per neighbour, and hubs once per
   // incident edge).
+  // valid_to IS NULL: a suspended edge (operator conflict resolution) must
+  // stop steering BFS traversal, not just the conflict-review node.
   const selectOutgoing = db.prepare(
-    'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?'
+    'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ? AND t.valid_to IS NULL'
   );
   const selectIncoming = db.prepare(
-    'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?'
+    'SELECT t.*, e.name, e.type FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ? AND t.valid_to IS NULL'
   );
 
   const connections: Connection[] = [];
@@ -204,11 +206,12 @@ export function handleGraphExplain(args: {
   const visited = new Map<number, BFSNode>();
   visited.set(fromRow.id, { id: fromRow.id, name: fromRow.name, parentId: null, predicate: '', sourceMemoryId: null });
 
+  // valid_to IS NULL: a suspended edge must not be usable as a path hop.
   const selectOutgoingHop = db.prepare(
-    'SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ?'
+    'SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.object_id WHERE t.subject_id = ? AND t.valid_to IS NULL'
   );
   const selectIncomingHop = db.prepare(
-    'SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ?'
+    'SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name FROM triples t JOIN entities e ON e.id = t.subject_id WHERE t.object_id = ? AND t.valid_to IS NULL'
   );
 
   let frontier: number[] = [fromRow.id];
