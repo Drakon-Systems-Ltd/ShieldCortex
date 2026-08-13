@@ -100,6 +100,14 @@ type DefenceModule = {
     notification: unknown,
     deps: { channels: NotifyChannelLike[]; timeoutMs?: number },
   ) => Promise<{ deliveredVia: string | null; attempts: Array<{ channel: string; result: { delivered: boolean; reason?: string } }> }>;
+  /** #260 — session-guard index + degraded-run summary. Optional so an older
+   *  installed dist degrades to "no index" rather than crashing the hook. */
+  sessionKeyFor?: (value: string | undefined, opts?: { home?: string; salt?: string }) => string | null;
+  appendSessionGuardIndex?: (opts: { home?: string; entry: Record<string, unknown> }) => boolean;
+  recordActionGuardDegraded?: (
+    rawSessionId: string | undefined,
+    opts?: { home?: string; salt?: string; origin?: string },
+  ) => { recorded: boolean; count: number; sessionKey?: string; existing?: boolean };
 };
 
 let runtimePromise: Promise<OpenClawRuntime> | null = null;
@@ -321,6 +329,21 @@ export function __collectRuntimeCandidatesForTest(home?: string, from?: string):
 export function __setDefenceModuleForTest(mod: DefenceModule | null | undefined): void {
   _defenceModOverride = mod;
   _defenceModPromise = null;
+}
+
+/** #260 — emit action_guard_degraded for this session. Never throws, never
+ *  waits when the defence module is already injected (the test / in-process
+ *  path). A missing module is a silent no-op: session_end cannot block (#112). */
+function summariseGuardSession(sessionId: string | null, origin: string): void {
+  if (!sessionId) return;
+  const run = (mod: DefenceModule | null) => {
+    try { mod?.recordActionGuardDegraded?.(sessionId, { origin }); } catch { /* never wedge */ }
+  };
+  if (_defenceModOverride !== undefined) {
+    run(_defenceModOverride);
+    return;
+  }
+  void getDefenceModule().then(run).catch(() => {});
 }
 export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
   _runtimeOverride = runtime;
@@ -3443,6 +3466,17 @@ export default {
             ? (toolName, args, sessionId) =>
                 (defenceMod as any).releaseToolCallLease(toolName, args, { self: sessionId ?? '' })
             : undefined,
+          // #260: the session-guard index. Same formula as the Claude Code
+          // hook. Absent on an older dist — then emitAudit still stamps origin
+          // but does not write an index nobody would summarise.
+          sessionGuard: typeof defenceMod.sessionKeyFor === 'function' && typeof defenceMod.appendSessionGuardIndex === 'function'
+            ? {
+                keyFor: (sessionId) => defenceMod.sessionKeyFor!(sessionId),
+                index: (entry) => {
+                  defenceMod.appendSessionGuardIndex!({ entry: { ...entry } as Record<string, unknown> });
+                },
+              }
+            : undefined,
           onAuditEntry: (entry) => syncInterceptEvent(entry, {
             cloudApiKey: (scConfig as any).cloudApiKey ?? '',
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
@@ -3509,8 +3543,9 @@ export default {
     // `before_tool_call`: a registered approval hook changes how OpenClaw
     // resolves tool-call approvals for unattended Codex agents, so an
     // unattended turn waited 120s on a decision nobody could give. `session_end`
-    // is a notification — it cannot block, approve, or delay anything — and its
-    // handler here only frees local state.
+    // is a notification — it cannot block, approve, or delay anything. It frees
+    // local state and, since #260, best-effort summarises a degraded Action
+    // Guard session. That write is not a decision and cannot stall the host.
     try {
       api.on('session_end', (event?: { sessionId?: string; sessionKey?: string }, ctx?: AgentCtx) => {
         interceptorReady?.resetSession();
@@ -3523,9 +3558,26 @@ export default {
         // #233: a taint must not outlive the conversation that earned it. Same
         // per-session rule, for the same reason.
         if (endedSession) sessionTaint.clear(endedSession);
+        // #260: plane-native summariser. session_end cannot block (#112) —
+        // this is a notification hook. The write is best-effort and
+        // idempotent with agent_end below.
+        summariseGuardSession(endedSession, 'openclaw-session-end');
       });
     } catch {
       // session_end may not be a supported hook — TTL safety net handles this
+    }
+
+    // #260: agent_end exists on the engine floor (2026.5.7 already declared
+    // it). An unknown typed hook is warn-and-return, not a throw, so we still
+    // wrap registration. Same summariser as session_end — whichever fires
+    // first writes, the other is a no-op. Do not invent a third sink.
+    try {
+      api.on('agent_end', (event?: { sessionId?: string; sessionKey?: string }, ctx?: AgentCtx) => {
+        const endedSession = ctx?.sessionId ?? ctx?.sessionKey ?? event?.sessionId ?? event?.sessionKey ?? null;
+        summariseGuardSession(endedSession, 'openclaw-session-end');
+      });
+    } catch {
+      // Host predates agent_end — session_end is the load-bearing summariser.
     }
 
     // llm_input/llm_output are CONVERSATION hooks: OpenClaw drops them at

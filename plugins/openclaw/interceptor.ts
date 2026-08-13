@@ -202,6 +202,9 @@ export interface InterceptAuditEntry {
   escalated?: { by: 'session-taint'; from: string; to: string; reason: string };
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
+  /** #260 — plane origin so the session-guard summariser can find this row. */
+  origin?: 'openclaw-interceptor';
+  sessionKey?: string;
 }
 
 const WATCHED_TOOLS = ['remember', 'mcp__memory__remember'] as const;
@@ -798,6 +801,11 @@ interface InterceptorOptions {
    *  limit, so a looping or compromised agent must not be able to spend it
    *  without bound. Exhausting it yields no judge, which yields a hold. */
   maxJudgeCallsPerMinute?: number;
+  /** #260 — session-guard index. Injected from `shieldcortex/defence`. */
+  sessionGuard?: {
+    keyFor: (sessionId: string | undefined) => string | null;
+    index: (entry: InterceptAuditEntry) => void;
+  };
 }
 
 /** How many recent tool NAMES the judge is told about. Names only, never
@@ -820,6 +828,7 @@ export function createInterceptor(
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
+  let lastSessionId: string | undefined;
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
@@ -831,8 +840,15 @@ export function createInterceptor(
   const recentTools: string[] = [];
 
   function emitAudit(entry: InterceptAuditEntry): void {
-    writeAuditEntry(entry);
-    onAuditEntry?.(entry);
+    const sessionKey = options?.sessionGuard?.keyFor(lastSessionId) ?? undefined;
+    const bound: InterceptAuditEntry = {
+      ...entry,
+      origin: 'openclaw-interceptor',
+      ...(sessionKey ? { sessionKey } : {}),
+    };
+    writeAuditEntry(bound);
+    try { options?.sessionGuard?.index(bound); } catch { /* never wedge the turn */ }
+    onAuditEntry?.(bound);
   }
 
   function guardAuditBase(toolName: string, v: ToolGuardVerdictLike, preview: string): Omit<InterceptAuditEntry, 'action' | 'outcome'> {
@@ -1249,6 +1265,7 @@ export function createInterceptor(
   }
 
   async function handleToolCall(context: ToolCallContext): Promise<void> {
+    lastSessionId = context.sessionId;
     // Remember the NAME only. This is the entirety of what the approval broker's
     // judge will ever learn about the session — see buildSessionSummary.
     noteToolForSession(context.toolName);

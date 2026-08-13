@@ -80,6 +80,15 @@ export {
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
+export {
+  sessionKeyFor,
+  sessionKeySalt,
+  appendSessionGuardIndex,
+  recordActionGuardDegraded,
+  GUARD_DEGRADED_OUTCOMES,
+  isGuardIndexOrigin,
+  isSummaryOrigin,
+} from './iron-dome/session-guard.js';
 // Session action lease (#227) — the freeze that binds every self, not just the
 // careful one. Pure core + fs layer exported through the same runtime seam as
 // `evaluateToolCall` so both enforcement planes reach ONE implementation.

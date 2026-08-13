@@ -160,3 +160,42 @@ describe('doctor — Action Guard #209 alias resolution and migration', () => {
     expect(fix.changed).toBe(false);
   });
 });
+
+/**
+ * #242 Defect B / #260 — unattended enforcement with no notify channel is how
+ * eight days of backups vanished while lastRunStatus stayed ok. Doctor must
+ * WARN (not fail) when enforce is on and nothing can reach a human.
+ */
+describe('doctor — Action Guard notify channel (#242)', () => {
+  it('warns when enforce is on and notify.webhookUrl is unset (the default)', async () => {
+    writeConfig({});
+    const results = await checkActionGuard();
+    const warn = results.find((r) => r.status === 'warn' && /webhookUrl|notify/i.test(r.message));
+    expect(warn).toBeDefined();
+    expect(warn!.status).toBe('warn');
+    expect(warn!.message).toMatch(/webhookUrl/i);
+    expect(warn!.fix ?? '').toMatch(/notify/i);
+  });
+
+  it('does not warn when a webhook is configured and notify is enabled', async () => {
+    writeConfig({
+      actionGuard: {
+        notify: { enabled: true, webhookUrl: 'https://hooks.example.invalid/sc' },
+      },
+    });
+    const results = await checkActionGuard();
+    expect(results.find((r) => /webhookUrl|notify channel/i.test(r.message))).toBeUndefined();
+  });
+
+  it('does not warn when notify.openclaw is the configured channel', async () => {
+    writeConfig({ actionGuard: { notify: { enabled: true, openclaw: true } } });
+    const results = await checkActionGuard();
+    expect(results.find((r) => /webhookUrl|notify channel/i.test(r.message))).toBeUndefined();
+  });
+
+  it('does not warn about notify when the guard is not enforcing', async () => {
+    writeConfig({ actionGuard: { enforce: false } });
+    const results = await checkActionGuard();
+    expect(results.find((r) => /webhookUrl/i.test(r.message))).toBeUndefined();
+  });
+});

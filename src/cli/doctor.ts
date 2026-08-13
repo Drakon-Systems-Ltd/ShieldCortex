@@ -2145,6 +2145,30 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       });
     }
 
+    // #242 Defect B: enforce-on + no notify channel is how unattended denials
+    // vanished for eight days while lastRunStatus stayed ok. WARN, never fail
+    // — a missing webhook is a misconfiguration, not a broken evaluator.
+    // OpenClaw lastRunStatus is not ours to write (#242 Defect A / #260).
+    if (effective.enabled && effective.enforce) {
+      const notify = isBlock(merged.notify) ? merged.notify : {};
+      const notifyOn = notify.enabled === true;
+      const webhook = typeof notify.webhookUrl === 'string' ? notify.webhookUrl.trim() : '';
+      const openclaw = notify.openclaw === true;
+      if (!(notifyOn && (webhook || openclaw))) {
+        results.push({
+          label: `${label} notify`,
+          status: 'warn',
+          message:
+            `Action Guard is enforcing with no notify channel (actionGuard.notify.webhookUrl unset` +
+            `${notifyOn ? '' : ', notify.enabled is not true'}) — unattended denials stay in the ` +
+            `audit log and session-guard index only. The #242 cron incidents were this shape.`,
+          fix:
+            'Set `actionGuard.notify.enabled: true` and `actionGuard.notify.webhookUrl` to an https endpoint ' +
+            '(or `notify.openclaw: true`) so a denied cron reaches a human. OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
+        });
+      }
+    }
+
     if (alias) {
       const conflicts = top
         ? Object.keys(alias).filter(
