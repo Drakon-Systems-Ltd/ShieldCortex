@@ -146,4 +146,51 @@ describe('#257 — entropy detector silently bypassed by low-entropy padding', (
     const result = scanForCredentials(padded);
     expect(result.findings.some((f) => f.provider === 'openai')).toBe(true);
   });
+
+  describe('review follow-up — filler unit length must not be bounded (one-keystroke evasion)', () => {
+    it.each([
+      ['9-char unit (the reported blocker)', 'aaaaaaaa-'],
+      ['10-char unit', 'aaaaaaaaa-'],
+      ['13-char unit', 'aaaaaaaaaaaa-'],
+    ])('%s: still flags and redacts', (_label, unit) => {
+      const padded = unit.repeat(12) + UNKNOWN_SHAPE_SECRET;
+      const result = scanForCredentials(padded);
+      expect(result.findings.some((f) => f.type === 'high_entropy')).toBe(true);
+      expect(leaksRawSecret(padded, UNKNOWN_SHAPE_SECRET)).toBe(false);
+    });
+  });
+
+  describe('review follow-up — partial pattern/entropy range overlap must not corrupt or leak', () => {
+    it('a Basic Auth match that stops short of a longer entropy run does not corrupt the redaction', () => {
+      // Basic Auth's captured charset [A-Za-z0-9+/=] stops at '-', but entropy's
+      // charset includes '-', so entropy's contiguous run extends past where the
+      // pattern match ends. The pattern's full match (starting at "Authorization")
+      // also starts BEFORE the entropy run starts. Neither range contains the
+      // other — a genuine crossing overlap ([0,45) vs [21,114)), not the nested
+      // case `scanForCredentials` already de-dupes.
+      //
+      // Before the fix, `buildRedactedContent` replaced the [21,114) range
+      // first (against the original 114-char content), then replaced [0,45)
+      // against the ALREADY-SHRUNK ~44-char result — `result.slice(45)`
+      // clamped to '', silently discarding the "[REDACTED-high_entropy]"
+      // placeholder and the fact that most of the line had been redacted at
+      // all. The observed (wrong) output was exactly '[REDACTED-api_key]'.
+      const content = `Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l-${UNKNOWN_SHAPE_SECRET}`;
+      const result = scanForCredentials(content);
+      const redacted = result.redactedContent ?? content;
+
+      // Two independent findings are still reported (reporting is unaffected —
+      // only the redaction span construction is).
+      expect(result.findings).toHaveLength(2);
+      expect(result.findings.some((f) => f.type === 'api_key')).toBe(true);
+      expect(result.findings.some((f) => f.type === 'high_entropy')).toBe(true);
+
+      expect(redacted).not.toContain(UNKNOWN_SHAPE_SECRET);
+      expect(redacted).not.toMatch(/YWxhZGRpbjpvcGVuc2VzYW1l/);
+      // The overlapping ranges are merged into ONE span covering the whole
+      // line, labelled with the wider (entropy) replacement — not silently
+      // collapsed down to just the narrower pattern placeholder.
+      expect(redacted).toBe('[REDACTED-high_entropy]');
+    });
+  });
 });

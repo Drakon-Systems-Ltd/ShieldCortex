@@ -40,32 +40,54 @@ export const MIN_ENTROPY_LENGTH = 20;
 /** Entropy threshold — strings above this are flagged */
 export const ENTROPY_THRESHOLD = 4.5;
 
-/** A repeated unit of up to this many chars counts as filler, e.g. the 'aaaa-' in 'aaaa-aaaa-...'. */
-const FILLER_MAX_UNIT_LENGTH = 8;
-
 /** A unit must repeat at least this many times back-to-back to count as filler, not coincidence. */
 const FILLER_MIN_REPEATS = 3;
 
 /**
- * Strip a repeated-unit low-entropy run from the START of a string. Every
- * candidate unit length is tried once and the one covering the MOST characters
- * wins — a short unit reliably present (e.g. "a" x4) must not pre-empt a
- * longer one that actually covers the whole filler run (e.g. "aaaa-" x12).
+ * Length of the longest prefix of `s` that is a repeated unit — of ANY
+ * length, occurring >= FILLER_MIN_REPEATS times back-to-back. There is
+ * deliberately no cap on the unit's length: an earlier version bounded it at
+ * 8 chars, which just moved the attacker's cost of evading detection from
+ * "find a low-entropy filler" to "pick a 9-char filler unit" — a one-keystroke
+ * bypass (#257 follow-up review).
  *
- * This is deliberately single-pass over the token for each unit length. The
- * scanner runs on untrusted content; repeated strip/rescan loops invite
- * avoidable hot-path cost on long low-entropy padding.
+ * Uses the KMP failure/prefix function to find, in one O(n) pass over the
+ * whole string, the fundamental period of every prefix — the same
+ * "longest coverage wins" result the old per-unit-length loop computed, but
+ * without trying each unit length by hand. That matters here specifically:
+ * removing the cap without changing the algorithm would have made the loop
+ * O(n) unit lengths deep instead of a fixed 8, turning this into O(n^2) on a
+ * string an attacker fully controls the length of — an algorithmic-complexity
+ * hole on the redaction hot path, exactly the kind of cost trap that made
+ * bounding it tempting the first time.
+ */
+function repeatedFillerPrefixLength(s: string): number {
+  const n = s.length;
+  if (n < FILLER_MIN_REPEATS) return 0;
+
+  const pi = new Array<number>(n).fill(0);
+  let bestCoverage = 0;
+  for (let i = 1; i < n; i++) {
+    let k = pi[i - 1];
+    while (k > 0 && s[i] !== s[k]) k = pi[k - 1];
+    if (s[i] === s[k]) k++;
+    pi[i] = k;
+
+    const len = i + 1;
+    const period = len - k;
+    if (period > 0 && period < len && len % period === 0 && len / period >= FILLER_MIN_REPEATS) {
+      bestCoverage = len;
+    }
+  }
+  return bestCoverage;
+}
+
+/**
+ * Strip a repeated-unit low-entropy run from the START of a string.
  */
 function stripLeadingFiller(s: string): string {
-  let bestCoverage = 0;
-  for (let unit = 1; unit <= FILLER_MAX_UNIT_LENGTH; unit++) {
-    if (s.length < unit * FILLER_MIN_REPEATS) continue;
-    const chunk = s.slice(0, unit);
-    let reps = 1;
-    while (s.slice(reps * unit, (reps + 1) * unit) === chunk) reps++;
-    if (reps >= FILLER_MIN_REPEATS) bestCoverage = Math.max(bestCoverage, unit * reps);
-  }
-  return bestCoverage === 0 ? s : s.slice(bestCoverage);
+  const coverage = repeatedFillerPrefixLength(s);
+  return coverage === 0 ? s : s.slice(coverage);
 }
 
 /**
@@ -78,7 +100,10 @@ function stripLeadingFiller(s: string): string {
  * Deliberately narrow — this defeats REPEATED-unit filler specifically, not
  * arbitrary low-entropy affixes (a non-repeating low-entropy prefix like a
  * dictionary word is a harder, attacker-adaptive problem tracked as a known
- * limitation of the entropy net, not fixed here). A sliding fixed-size window
+ * limitation of the entropy net, not fixed here). Within that scope there is
+ * no cap on the unit's length — see `repeatedFillerPrefixLength` — so this is
+ * not "narrow" in the sense of being evadable by picking a longer unit.
+ * A sliding fixed-size window
  * was tried first and rejected: measured against random secrets, a 24-32 char
  * window's empirical entropy is biased low by sample size (birthday-style
  * collisions in a short window under-count true alphabet diversity), missing

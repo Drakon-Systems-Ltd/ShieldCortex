@@ -270,13 +270,63 @@ function buildRedactedContent(
   content: string,
   ranges: Array<{ start: number; end: number; replacement: string }>,
 ): string {
+  const merged = mergeOverlappingRanges(ranges);
   // Sort by start position descending to replace from end to start
-  const sorted = [...ranges].sort((a, b) => b.start - a.start);
+  const sorted = [...merged].sort((a, b) => b.start - a.start);
   let result = content;
   for (const range of sorted) {
     result = result.slice(0, range.start) + range.replacement + result.slice(range.end);
   }
   return result;
+}
+
+/**
+ * Collapse overlapping (not just nested) ranges into a single span before
+ * replacement.
+ *
+ * `buildRedactedContent` replaces right-to-left on the assumption that ranges
+ * never overlap, using offsets computed against the ORIGINAL content. A
+ * PARTIAL overlap — e.g. a pattern match whose captured charset stops short
+ * of a longer entropy token, so the pattern's end falls strictly inside the
+ * entropy token's span while neither range contains the other — breaks that
+ * assumption: replacing the first range shrinks/reshapes the working string,
+ * and the second range's original-content `end` then lands on the wrong
+ * position in that already-mutated string, silently truncating or duplicating
+ * output. The two-range-removal dance in `scanForCredentials` only handles
+ * the fully-NESTED case (one range wholly inside another); it does not — and
+ * structurally cannot, since it only sees one new range at a time — catch a
+ * crossing overlap. Merging here makes "ranges never overlap" true by
+ * construction for every caller, instead of relying on every producer of
+ * `matchedRanges` to keep it true by hand.
+ */
+function mergeOverlappingRanges(
+  ranges: Array<{ start: number; end: number; replacement: string }>,
+): Array<{ start: number; end: number; replacement: string }> {
+  if (ranges.length <= 1) return ranges;
+
+  const sorted = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number; replacement: string }> = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const next = sorted[i];
+    const last = merged[merged.length - 1];
+    if (next.start < last.end) {
+      // Overlapping (or one nested in the other) — union the span. Keep
+      // whichever replacement corresponds to the wider original range: it
+      // covers strictly more of the underlying secret and is the more
+      // complete redaction of the two.
+      const wider = next.end - next.start > last.end - last.start ? next : last;
+      merged[merged.length - 1] = {
+        start: last.start,
+        end: Math.max(last.end, next.end),
+        replacement: wider.replacement,
+      };
+    } else {
+      merged.push(next);
+    }
+  }
+
+  return merged;
 }
 
 // Re-export types and utilities
