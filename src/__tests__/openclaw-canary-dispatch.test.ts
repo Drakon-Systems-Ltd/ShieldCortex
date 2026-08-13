@@ -124,13 +124,21 @@ describe('dispatchCanaryThroughInstalledInterceptor — fail-closed orchestratio
 describe('active canary end-to-end through the REAL interceptor (hermetic, no gateway)', () => {
   let home: string;
   let homedirSpy: jest.SpiedFunction<typeof os.homedir>;
+  let previousAuditDir: string | undefined;
 
   beforeEach(() => {
     jest.resetModules();
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-canary-e2e-'));
     homedirSpy = jest.spyOn(os, 'homedir').mockReturnValue(home);
+    // #226: the interceptor now honours this process-level isolation seam.
+    // Point it at the same synthetic home that findFreshEnforcementEntry reads,
+    // rather than inheriting a suite-wide override aimed somewhere else.
+    previousAuditDir = process.env.SHIELDCORTEX_AUDIT_DIR;
+    process.env.SHIELDCORTEX_AUDIT_DIR = path.join(home, '.shieldcortex', 'audit');
   });
   afterEach(() => {
+    if (previousAuditDir === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;
+    else process.env.SHIELDCORTEX_AUDIT_DIR = previousAuditDir;
     homedirSpy.mockRestore();
     fs.rmSync(home, { recursive: true, force: true });
   });

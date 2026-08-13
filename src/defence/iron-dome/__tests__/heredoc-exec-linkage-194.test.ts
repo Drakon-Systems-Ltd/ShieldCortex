@@ -50,8 +50,38 @@ describe('#194 — naming a file is not running it', () => {
     ['run by relative path', `${write('p.sh')}\nbash ./p.sh`],
     ['sourced', `${write('p.sh')}\n. p.sh`],
     ['nested inside bash -c', `${write('/tmp/p.sh')}\nbash -c 'bash /tmp/p.sh'`],
-    ['python runs the written module', `${write('/tmp/p.py')}\npython3 /tmp/p.py`],
   ])('a genuine write-then-exec still blocks: %s', (_name, cmd) => {
+    expect(decide(cmd).decision).toBe('block');
+  });
+
+  /**
+   * SUPERSEDED BY #217, DELIBERATELY.
+   *
+   * This case previously sat in the block list above: writing a body and
+   * running it with `python3` was treated as write-then-exec, and the body was
+   * scanned with SHELL rules. #217 reports that as a precision defect, and it
+   * is the same one #188 already fixed for folded script source — a shell verb
+   * in interpreter CODE position is an identifier, and its vocabulary is only
+   * live if it can reach an exec sink.
+   *
+   * A SHELL target is unaffected and still blocks (the four cases above): that
+   * body really is the source of a command. What changed is only the non-shell
+   * target, and only when it is provably sink-free.
+   *
+   * The dangerous twin is pinned directly beneath, so the relaxation cannot
+   * widen past "no way to reach a process".
+   */
+  it('a sink-free body run by a non-shell interpreter is data, not command (#217)', () => {
+    const v = decide(`${write('/tmp/p.py')}\npython3 /tmp/p.py`);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('recursive-force-delete');
+  });
+
+  it.each([
+    ['python with a process sink', `cd /repo && cat > /tmp/s.py <<'EOF'\nimport os\nos.system("${RMRF} /")\nEOF\npython3 /tmp/s.py`],
+    ['node with a process sink', `cd /repo && cat > /tmp/s.mjs <<'EOF'\nimport { execSync } from 'node:child_process';\nexecSync("${RMRF} /");\nEOF\nnode /tmp/s.mjs`],
+    ['node that WRITES a shell script then runs it', `cd /repo && cat > /tmp/g.mjs <<'EOF'\nimport { writeFileSync } from 'node:fs';\nwriteFileSync('/tmp/g.sh', '${RMRF} /');\nEOF\nnode /tmp/g.mjs && bash /tmp/g.sh`],
+  ])('but a body that can reach a process still blocks: %s', (_name, cmd) => {
     expect(decide(cmd).decision).toBe('block');
   });
 

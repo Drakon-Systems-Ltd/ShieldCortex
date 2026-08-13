@@ -7,6 +7,10 @@
 
 import { randomUUID } from 'crypto';
 import { getDatabase, isDatabaseInitialized, withTransaction } from '../database/init.js';
+import { sourceKey } from '../threat-graph/keys.js';
+import { shouldAutoRelease, recordAutoRelease } from '../threat-graph/allowance.js';
+import { detectionKeys, exemplarHash } from '../threat-graph/decision.js';
+import { isAutoReleaseEnabled } from '../cloud/config.js';
 import {
   Memory,
   MemoryInput,
@@ -28,6 +32,7 @@ import {
   extractTags,
   analyzeSalienceFactors,
 } from './salience.js';
+import { resolveMemoryConfig } from './config.js';
 import { calculateDecayedScore } from './decay.js';
 import {
   emitMemoryCreated,
@@ -39,6 +44,7 @@ import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
+import type { TripleProvenance } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { resolveDisposition } from '../defence/disposition.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
@@ -443,8 +449,9 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
  */
 export function addMemory(
   input: MemoryInput,
-  config: MemoryConfig = DEFAULT_CONFIG,
-  source?: DefenceSource
+  config: MemoryConfig = resolveMemoryConfig(),
+  source?: DefenceSource,
+  options?: { sourceAttested?: boolean },
 ): Memory {
   // Check if memory creation is paused
   if (isPaused()) {
@@ -482,6 +489,7 @@ export function addMemory(
   const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
   const defenceResult: DefencePipelineResult = runDefencePipeline(
     input.content, input.title, effectiveSource, undefined, input.project,
+    { sourceAttested: options?.sourceAttested },
   );
 
   // P1/WS4: the ONE verdict→disposition mapping, shared with the hook path
@@ -495,6 +503,35 @@ export function addMemory(
   });
 
   if (disposition.action === 'quarantine') {
+    // Auto-release (threat-graph Loop 3): if this detector firing is a
+    // standing operator allowance for this source AND the content
+    // near-duplicates an approved exemplar, admit instead of hold. Default
+    // off; fails CLOSED — any error keeps the item quarantined.
+    let autoReleased = false;
+    // Never even attempt release on a hard BLOCK (invariant 2). resolveDisposition
+    // maps BOTH BLOCK and QUARANTINE to action='quarantine', so the verdict must
+    // be checked explicitly here — not the disposition action.
+    if (isAutoReleaseEnabled() && disposition.firewallResult === 'QUARANTINE') {
+      try {
+        const key = sourceKey(effectiveSource.type, effectiveSource.identifier);
+        const hash = exemplarHash(input.title, input.content);
+        // The COMPLETE detection set — patterns AND indicators — must all be
+        // allowed, or an item with an unlisted detection would slip through.
+        const patterns = detectionKeys(
+          defenceResult.firewall.blockedPatterns ?? [],
+          defenceResult.firewall.threatIndicators ?? [],
+        );
+        const now = Date.now();
+        if (shouldAutoRelease({ sourceKey: key, patterns, contentHash: hash, verdict: 'QUARANTINE', nowMs: now }).release) {
+          recordAutoRelease({ sourceKey: key, patterns, contentHash: hash, nowMs: now });
+          autoReleased = true;
+        }
+      } catch {
+        autoReleased = false;
+      }
+    }
+
+    if (!autoReleased) {
     // Reflect the resolved verdict/reason back so quarantineMemory + audit record it.
     defenceResult.allowed = false;
     defenceResult.firewall.result = disposition.firewallResult;
@@ -525,6 +562,15 @@ export function addMemory(
 
     quarantineMemory(input, effectiveSource, defenceResult);
     throw new MemoryBlockedError(defenceResult.firewall.reason);
+    }
+    // auto-released → fall through to normal storage. Stamp the verdict ALLOW
+    // (and a distinguishing reason) so the stored memory's defence_verdict is
+    // not left reading 'quarantine'/'block' — the normal store path reads
+    // defenceResult for the stamped verdict. The auto_release audit row above
+    // is the reviewable record of why.
+    defenceResult.allowed = true;
+    defenceResult.firewall.result = 'ALLOW';
+    defenceResult.firewall.reason = `auto-released against a standing operator allowance (was: ${defenceResult.firewall.reason})`;
   }
 
   const db = getDatabase();
@@ -623,7 +669,14 @@ export function addMemory(
   try {
     const extraction = extractFromMemory(input.title, truncationResult.content, category);
     if (extraction.entities.length > 0) {
-      processExtractionResult(extraction, memory.id);
+      // Phase E: stamp write-time provenance so relation-channel conflicts can be
+      // adjudicated by writer + trust. writer_trust is capped for unattested
+      // (claimed) sources at store time inside processExtractionResult.
+      processExtractionResult(extraction, memory.id, {
+        writerSource: sourceKey(effectiveSource.type, effectiveSource.identifier),
+        writerTrust: defenceResult.trust.score,
+        attested: options?.sourceAttested ?? false,
+      });
       if (isFeatureEnabled('cloud_sync')) {
         syncGraphForMemoryToCloud(memory.id);
       }
@@ -799,6 +852,17 @@ function refreshEmbeddingAsync(memoryId: number, title: string, content: string)
 /**
  * Update a memory
  */
+/**
+ * Provenance for triples re-extracted on an update/merge (Phase E). Uses the
+ * memory's own stored source/trust, always treated as unattested — the update
+ * re-scan runs unattributed, so writer_trust is conservatively capped. Returns
+ * undefined when the memory has no recorded source (→ NULL provenance).
+ */
+function updateProvenance(memory: Memory): TripleProvenance | undefined {
+  if (!memory.source) return undefined;
+  return { writerSource: memory.source, writerTrust: memory.trustScore, attested: false };
+}
+
 export function updateMemory(
   id: number,
   updates: Partial<MemoryInput>
@@ -956,7 +1020,11 @@ export function updateMemory(
         updatedMemory.content,
         updatedMemory.category,
       );
-      replaceMemoryGraph(updatedMemory.id, extraction);
+      // Phase E: an update is a write. Re-extracted triples carry the memory's
+      // own source/trust as provenance, treated as unattested (the update
+      // re-scan runs unattributed) so a claimed identity can't refresh into
+      // high conflict-trust.
+      replaceMemoryGraph(updatedMemory.id, extraction, updateProvenance(updatedMemory));
     } catch (e) {
       console.error('[shieldcortex] Entity extraction refresh failed:', e);
     }
@@ -1144,7 +1212,7 @@ export function mergeMemories(
         updatedMemory.content,
         updatedMemory.category,
       );
-      replaceMemoryGraph(updatedMemory.id, extraction);
+      replaceMemoryGraph(updatedMemory.id, extraction, updateProvenance(updatedMemory));
     } catch (e) {
       console.error('[shieldcortex] Entity extraction refresh failed after merge:', e);
     }
@@ -1234,7 +1302,7 @@ export function deleteMemory(
  */
 export function getProjectMemories(
   project: string,
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = resolveMemoryConfig()
 ): Memory[] {
   const db = getDatabase();
   const rows = db.prepare(`

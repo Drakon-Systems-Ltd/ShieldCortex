@@ -46,6 +46,31 @@ export const SECURE_SUBDIRS = ['audit', 'approvals', 'logs', 'quarantine', 'reca
 /** Files that must be owner-only, by exact name or by prefix. */
 const SECURE_FILE_PREFIXES = ['memories.db', 'config.json', 'worker.json', 'integrity'];
 
+/**
+ * #218 — create state-tree paths already owner-only, at CREATION.
+ *
+ * The audited set (this dir + SECURE_SUBDIRS + SECURE_FILE_PREFIXES) is
+ * hardened at install/update by `secureStatePermissions`. But `mkdir`'s mode
+ * binds only when the directory is CREATED and is IGNORED for one that already
+ * exists, and `open(2)` without a mode uses `0666 & ~umask` (644, or 664 under
+ * umask 002) — so ANY path a runtime recreates after the install-time pass
+ * (the lock file every gateway bounce, the log/audit dirs every hook run) lands
+ * loose again, and doctor fails on it after every restart.
+ *
+ * The fix is to stop relying on a later pass: create it secure the first time.
+ * `secureStatePermissions` still runs on install/update to retro-tighten the
+ * fleet's already-loose paths, because a create-mode cannot do that.
+ *
+ * These are the single source of truth for the two create modes; no state-tree
+ * creator should pass a bare `{ recursive: true }` or a mode-less `open`.
+ */
+export function mkdirSecure(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: SECURE_DIR_MODE });
+}
+
+/** Mode for openSync/writeFileSync of any file inside the state tree. */
+export const SECURE_OPEN_MODE = SECURE_FILE_MODE;   // 0o600
+
 export interface PermissionFinding {
   path: string;
   /** The mode we found, as an octal string (e.g. "644"). */

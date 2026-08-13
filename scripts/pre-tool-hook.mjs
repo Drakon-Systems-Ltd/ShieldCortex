@@ -48,10 +48,12 @@
  * exit codes, so a crash can't masquerade as a verdict.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
+import { mkdirSecure } from './lib/state-perms.mjs';
+import { basename, dirname, join, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { createHash, createHmac, randomBytes } from 'crypto';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -138,7 +140,7 @@ function noPromptSurfaceReason(permissionMode) {
   }
   if (PROMPTLESS_PERMISSION_MODES.has(permissionMode)) return `${permissionMode} mode shows no prompt`;
   if (PROMPTING_PERMISSION_MODES.has(permissionMode)) return null;
-  return `unrecognised permission_mode "${permissionMode}"`;
+  return 'unrecognised permission_mode';
 }
 
 // ==================== GUARD (lazy dist import) ====================
@@ -351,6 +353,12 @@ async function loadNotify(rawNotifyConfig) {
     return {
       config: normalised,
       requestOperatorApproval: notifyMod.requestOperatorApproval,
+      deliverOperatorNotification: typeof notifyMod.deliverOperatorNotification === 'function'
+        ? notifyMod.deliverOperatorNotification
+        : null,
+      buildActionGuardOutcomeNotification: typeof notifyMod.buildActionGuardOutcomeNotification === 'function'
+        ? notifyMod.buildActionGuardOutcomeNotification
+        : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
        *  is the honest outcome until a non-interactive gateway send path
@@ -391,45 +399,462 @@ async function loadNotify(rawNotifyConfig) {
  * message lands, so the operator is told a job died — not asked a question
  * nothing is waiting on (#143).
  */
-async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionId, cwd }) {
-  if (!notify) return;
+function approvalSurfaceUnsafe(value) {
+  let text = '';
+  try { text = JSON.stringify(value); } catch { text = String(value ?? ''); }
+  if (!text) return false;
+  if (/[\u0000-\u001f\u007f]/.test(text)) return true;
+  if (/https?:\/\//i.test(text)) return true;
+  if (/ignore\.previous\.instructions/i.test(text)) return true;
+  if (/DO_NOT_PERSIST|SECRET|TOKEN|PASSWORD/i.test(text)) return true;
+  if (/\b(?:bearer|authorization|password|passwd|token|api[_-]?key)\b\s*[:=]/i.test(text)) return true;
+  if (/\b(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-|ya29\.|eyJ)[A-Za-z0-9_.-]{6,}/i.test(text)) return true;
+  if (/[A-Za-z0-9_-]{40,}/.test(text)) return true;
+  return false;
+}
+
+function safeApprovalCommand(toolName, toolInput) {
+  return redactedActionSurface(toolName, toolInput);
+}
+
+function safeApprovalVerdict(verdict) {
+  const event = 'action_guard_warning';
+  return {
+    severity: safeSeverity(verdict?.severity, event),
+    decision: safeDecision(verdict?.decision, event),
+    signals: safeSignalList(verdict?.signals),
+    reason: 'Action Guard requires approval; inspect local audit for details.',
+  };
+}
+
+function safeDiagnosticApprovalReason(reason) {
+  const raw = String(reason ?? '');
+  const hashHint = raw.match(/shieldcortex approve [0-9a-f]{12}/)?.[0];
+  const degraded = /degraded|unavailable|could not scan|guard runtime/i.test(raw);
+  const lead = degraded
+    ? 'Action Guard is degraded/unavailable and requires approval; inspect local audit for details.'
+    : 'Action Guard requires approval; inspect local audit for details.';
+  return `${lead}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
+}
+
+async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey }) {
+  if (!notify) return null;
   const denied = typeof noPromptSurface === 'string' && noPromptSurface.length > 0;
   // A denial cannot go to an interactive Approve/Deny card — there is nothing
   // left to decide — so it takes the plain-message channel or no channel at
   // all. `deliveredVia: null` is a normal outcome here, exactly as it is when
   // nothing is configured.
   const channel = denied ? notify.denialChannel : notify.channel;
-  if (!channel) return;
+  if (!channel) return null;
   try {
+    const displayVerdict = safeApprovalVerdict(verdict);
+    const safeSessionId = notificationContext(sessionKey).correlationId;
     const result = await notify.requestOperatorApproval(
       {
         hash,
-        tool: toolName,
-        command: describeToolCall(toolName, toolInput),
-        signals: verdict.signals,
-        severity: verdict.severity,
-        reason: verdict.reason,
+        tool: safeToolName(toolName),
+        command: safeApprovalCommand(toolName, toolInput),
+        signals: displayVerdict.signals,
+        severity: displayVerdict.severity,
+        reason: displayVerdict.reason,
         event: denied ? 'denied_no_prompt_surface' : 'approval_requested',
         deniedReason: denied ? noPromptSurface : undefined,
-        // Which job. Straight off the harness payload, bounded and validated
-        // by buildNotification in operator-notify.ts.
-        sessionId,
-        cwd,
+        sessionId: safeSessionId,
+        cwd: undefined,
       },
       { channel, timeoutMs: notify.config.timeoutMs },
     );
     if (result?.deliveredVia) {
+      const via = safeNotifyLabel(result.deliveredVia) ?? 'redacted-channel';
       console.error(
         denied
-          ? `[shieldcortex] operator-notify: reported the DENIAL of ${toolName} via ${result.deliveredVia} (${hash.slice(0, 12)}).`
-          : `[shieldcortex] approval broker: pinged the operator via ${result.deliveredVia} (${hash.slice(0, 12)}).`,
+          ? `[shieldcortex] operator-notify: reported the DENIAL of ${safeToolName(toolName)} via ${via} (${hash.slice(0, 12)}).`
+          : `[shieldcortex] approval broker: pinged the operator via ${via} (${hash.slice(0, 12)}).`,
       );
     }
+    return result ?? null;
   } catch (err) {
     // A notify transport that throws must not change the guard's outcome —
     // it already recorded/is about to record the pending hash regardless.
-    console.error(`[shieldcortex] ⚠️ operator-notify error: ${err?.message ?? err} — falling back to the terminal hash only.`);
+    console.error('[shieldcortex] ⚠️ operator-notify error — falling back to the terminal hash only.');
+    return { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: safeDiagnosticReason(err?.message ?? err) } }] };
   }
+}
+
+const SAFE_TOOL_NAMES = new Set([
+  'Bash', 'Edit', 'MultiEdit', 'Write', 'Read', 'Glob', 'Grep', 'LS', 'Task',
+  'TodoWrite', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Workflow',
+]);
+const SAFE_SIGNALS = new Set([
+  'secret-egress', 'approval-required', 'fallback-scan', 'privilege-escalation',
+  'filesystem-destructive', 'destructive-filesystem', 'dangerous-shell',
+  'command-exec', 'network-egress', 'credential-access', 'data-exfiltration',
+  'untrusted-script', 'reviewed-script', 'shell-injection', 'persistence-risk',
+  'install-package', 'git-force-push', 'local-package-install', 'move-or-copy', 'file-delete', 'service-restart', 'exec-like',
+]);
+const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
+const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
+const SAFE_BROKER_OUTCOMES = new Set(['harden', 'pre_clear', 'hold', 'unavailable', 'not_brokerable']);
+const SAFE_JUDGE_ASSESSMENTS = new Set(['approve', 'deny', 'hold', 'uncertain', 'in_context', 'out_of_context', 'benign', 'unavailable']);
+
+function readExistingSessionSalt(file) {
+  try {
+    const st = lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink()) return null;
+    const salt = readFileSync(file, 'utf8').trim();
+    return /^[a-f0-9]{64}$/i.test(salt) ? salt.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+
+
+function fdPathForDescriptor(fd) {
+  if (existsSync('/proc/self/fd')) return `/proc/self/fd/${fd}`;
+  return null;
+}
+
+function withAnchoredDirectory(dir, fn) {
+  if (!ensureDirectoryNoSymlink(dir)) return false;
+  let dirFd;
+  try {
+    dirFd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    if (!ensureDirectoryNoSymlink(dir)) return false;
+    const fdPath = fdPathForDescriptor(dirFd);
+    if (!fdPath) return fn(dir);
+    return fn(fdPath);
+  } catch {
+    return false;
+  } finally {
+    if (dirFd !== undefined) {
+      try { closeSync(dirFd); } catch { /* ignore */ }
+    }
+  }
+}
+
+function publishFileAtomically(file, contents) {
+  const dir = dirname(file);
+  const tmpName = `${basename(file)}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
+  const finalName = basename(file);
+  return withAnchoredDirectory(dir, (dirPath) => {
+    const tmp = `${dirPath}/${tmpName}`;
+    const final = `${dirPath}/${finalName}`;
+    try {
+      writeFileSync(tmp, contents, { flag: 'wx', mode: 0o600 });
+      linkSync(tmp, final);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      try { unlinkSync(tmp); } catch { /* ignore */ }
+    }
+  });
+}
+
+function legacySessionSaltFiles(primary) {
+  return [primary, `${primary}.recovered`, `${primary}.recovered2`, `${primary}.recovered3`];
+}
+
+function discoveredSessionSaltFiles(primary) {
+  try {
+    const dir = dirname(primary);
+    const entries = [];
+    for (const name of readdirSync(dir)) {
+      const match = name.match(/^action-guard-session-salt\.recovered(\d+)$/);
+      if (!match) continue;
+      const slot = Number(match[1]);
+      if (!Number.isInteger(slot) || String(slot) !== match[1]) continue;
+      if (slot < 4 || slot >= 4 + MAX_SESSION_SALT_RECOVERY_ATTEMPTS) continue;
+      entries.push({ slot, file: join(dir, name) });
+    }
+    entries.sort((a, b) => a.slot - b.slot);
+    return entries.map((entry) => entry.file);
+  } catch {
+    return [];
+  }
+}
+
+function sessionKeySalt() {
+  const fromEnv = process.env.SHIELDCORTEX_SESSION_SALT;
+  if (typeof fromEnv === 'string' && /^[a-f0-9]{64}$/i.test(fromEnv)) return fromEnv.toLowerCase();
+  try {
+    const dir = join(homedir(), '.shieldcortex');
+    const primary = join(dir, 'action-guard-session-salt');
+    if (!ensureDirectoryNoSymlink(dir)) return undefined;
+    const readableFiles = [...legacySessionSaltFiles(primary), ...discoveredSessionSaltFiles(primary)];
+    for (const file of readableFiles) {
+      const existing = readExistingSessionSalt(file);
+      if (existing) return existing;
+    }
+    const salt = randomBytes(32).toString('hex');
+    for (const file of legacySessionSaltFiles(primary)) {
+      if (publishFileAtomically(file, `${salt}\n`)) return salt;
+      const raced = readExistingSessionSalt(file);
+      if (raced) return raced;
+    }
+    for (let i = 4; i < 4 + MAX_SESSION_SALT_RECOVERY_ATTEMPTS; i += 1) {
+      const file = `${primary}.recovered${i}`;
+      const existing = readExistingSessionSalt(file);
+      if (existing) return existing;
+      if (publishFileAtomically(file, `${salt}\n`)) return salt;
+      const raced = readExistingSessionSalt(file);
+      if (raced) return raced;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sessionKeyFor(value) {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const salt = sessionKeySalt();
+  if (!salt) return undefined;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+}
+
+function hookSessionExtras(hookData, permissionMode) {
+  const extra = {};
+  const rawSessionId = typeof hookData?.session_id === 'string' ? hookData.session_id : hookData?.sessionId;
+  const sessionKey = sessionKeyFor(rawSessionId);
+  if (sessionKey) extra.sessionKey = sessionKey;
+  const safeMode = safePermissionMode(permissionMode);
+  if (safeMode) extra.permissionMode = safeMode;
+  return extra;
+}
+
+function safeToolName(value) {
+  return SAFE_TOOL_NAMES.has(value) ? value : 'tool';
+}
+
+function safeSignalList(signals) {
+  if (!Array.isArray(signals)) return [];
+  const out = [];
+  let redacted = false;
+  for (const raw of signals) {
+    const signal = String(raw ?? '').trim();
+    if (SAFE_SIGNALS.has(signal)) out.push(signal);
+    else if (signal) redacted = true;
+  }
+  if (redacted) out.push('redacted-signal');
+  return [...new Set(out)].slice(0, 25);
+}
+
+function looksCredentialishNotifyLabel(text) {
+  const value = String(text ?? '').trim();
+  if (!value) return false;
+  if (/^[A-Za-z]+:\S+/.test(value)) return true;
+  if (/^(gh[pousr]_|github_pat_|sk-|xox[baprs]-|ya29\.|eyJ)/i.test(value)) return true;
+  if (/bearer[-_:]?[a-z0-9]{8,}/i.test(value)) return true;
+  if (/[A-Za-z0-9_-]{28,}/.test(value)) return true;
+  return false;
+}
+
+function safeNotifyLabel(value) {
+  const text = String(value ?? '').trim();
+  if (!/^[a-z0-9_.:-]{1,80}$/i.test(text)) return null;
+  return looksCredentialishNotifyLabel(text) ? null : text;
+}
+
+function safePermissionMode(value) {
+  return ['default', 'manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(value)
+    ? value
+    : null;
+}
+
+function notificationContext(sessionKey) {
+  return /^sc-[a-f0-9]{16}$/.test(String(sessionKey ?? '')) ? { correlationId: sessionKey } : {};
+}
+
+function safeBrokerAudit(audit) {
+  if (!audit || typeof audit !== 'object') return undefined;
+  const out = {};
+  const outcome = String(audit.outcome ?? '');
+  if (SAFE_BROKER_OUTCOMES.has(outcome)) out.outcome = outcome;
+  const judgeAssessment = String(audit.judgeAssessment ?? '');
+  if (SAFE_JUDGE_ASSESSMENTS.has(judgeAssessment)) out.judgeAssessment = judgeAssessment;
+  if (typeof audit.judgeConfidence === 'number' && Number.isFinite(audit.judgeConfidence)) {
+    out.judgeConfidence = Math.max(0, Math.min(1, audit.judgeConfidence));
+  } else if (audit.judgeConfidence === null) {
+    out.judgeConfidence = null;
+  }
+  if (typeof audit.injectionSuspected === 'boolean') out.injectionSuspected = audit.injectionSuspected;
+  if (typeof audit.inContext === 'boolean') out.inContext = audit.inContext;
+  const signals = safeSignalList(audit.signals);
+  if (signals.length > 0) out.signals = signals;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function redactedActionSurface(toolName, toolInput) {
+  const keys = ['command', 'script', 'file_path', 'path', 'url', 'pattern'];
+  const present = keys.filter((k) => toolInput?.[k] !== undefined && toolInput?.[k] !== null);
+  const suffix = present.length > 0 ? ` fields=${present.join(',')}` : ' no command field';
+  return `${safeToolName(toolName)}: [redacted action surface; inspect local audit]${suffix}`;
+}
+
+function redactedAuditArgs(toolName, toolInput) {
+  return { surface: redactedActionSurface(toolName, toolInput) };
+}
+
+function safeSeverity(value, event) {
+  if (value === 'catastrophic') return 'critical';
+  if (['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown'].includes(value)) return value;
+  return event === 'action_guard_denial' ? 'high' : 'medium';
+}
+
+function safeDecision(value, event) {
+  if (['block', 'require_approval', 'allow'].includes(value)) return value;
+  return event === 'action_guard_warning' ? 'require_approval' : 'block';
+}
+
+function terminalOutcomeAuditVerdict(verdict, outcome, event) {
+  return {
+    severity: safeSeverity(verdict?.severity, event),
+    decision: safeDecision(verdict?.decision, event),
+    signals: safeSignalList(verdict?.signals),
+    reason: safeGuardOutcomeReason(verdict, outcome, event),
+  };
+}
+
+
+function safeAllowAuditVerdict(verdict, outcome = 'allowed') {
+  return {
+    severity: safeSeverity(verdict?.severity, 'action_guard_warning'),
+    decision: safeDecision(verdict?.decision, 'action_guard_warning'),
+    signals: safeSignalList(verdict?.signals),
+    reason: outcome === 'approved'
+      ? 'Action Guard approval path was satisfied; inspect local audit for details.'
+      : 'Action Guard scanned and allowed this tool call; inspect local audit for details.',
+  };
+}
+
+function writeTerminalOutcomeAudit(toolName, verdict, toolInput, action, outcome, event, extra = {}) {
+  writeAuditEntry(
+    safeToolName(toolName),
+    terminalOutcomeAuditVerdict(verdict, outcome, event),
+    redactedAuditArgs(toolName, toolInput),
+    action,
+    outcome,
+    extra,
+  );
+}
+
+function safeDiagnosticReason(reason) {
+  const text = String(reason ?? 'delivery failed').toLowerCase();
+  if (text.includes('timed out') || text.includes('timeout')) return 'delivery timed out';
+  if (text.includes('malformed')) return 'channel returned malformed result';
+  if (text.includes('responded')) return 'channel returned non-success status';
+  if (text.includes('missing dist')) return 'guard runtime unavailable: missing dist build';
+  if (text.includes('evaluation error')) return 'guard runtime unavailable: evaluation error';
+  if (text.includes('unavailable')) return 'guard runtime unavailable';
+  return 'delivery failed';
+}
+
+function safeGuardOutcomeReason(verdict, outcome, event) {
+  if (event === 'action_guard_warning') {
+    return outcome === 'failure_allowed'
+      ? 'Action Guard was unavailable and advisory mode allowed a dangerous tool call; inspect local audit for details.'
+      : 'Action Guard warning in advisory mode; inspect local audit for details.';
+  }
+  if (outcome === 'denied_no_prompt_surface') {
+    return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
+  }
+  if (String(verdict?.reason ?? '').toLowerCase().includes('guard unavailable')) {
+    return 'Action Guard was unavailable and fallback policy denied the tool call; inspect local audit for details.';
+  }
+  return 'Action Guard denied the tool call; inspect local audit for details.';
+}
+
+function terminalDecisionReason(verdict, outcome, event) {
+  const signals = safeSignalList(verdict?.signals);
+  const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
+  const nextStep = outcome === 'denied_no_prompt_surface'
+    ? ' Configure actionGuard.autoApprove for this exact safe pattern or set actionGuard.enforce:false to downgrade dangerous-tier calls to warnings.'
+    : '';
+  const severity = safeSeverity(verdict?.severity, event);
+  const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
+  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
+}
+
+function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey }) {
+  const context = notificationContext(sessionKey);
+  return {
+    event,
+    outcome,
+    tool: safeToolName(toolName),
+    surface: redactedActionSurface(toolName, toolInput),
+    signals: safeSignalList(verdict.signals),
+    severity: verdict.severity === 'catastrophic' ? 'critical' : String(verdict.severity ?? 'unknown'),
+    reason: safeGuardOutcomeReason(verdict, outcome, event),
+    ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+    detectedAt: new Date().toISOString(),
+  };
+}
+
+function recordLocalGuardOutcome(outcome) {
+  const file = join(homedir(), '.shieldcortex', 'denials.jsonl');
+  if (appendFileNoFollow(file, JSON.stringify(outcome) + '\n')) {
+    console.error(`[shieldcortex] action-guard outcome recorded locally: ~/.shieldcortex/denials.jsonl (${outcome.event}/${outcome.outcome}).`);
+    return true;
+  }
+  console.error('[shieldcortex] ⚠️ local action-guard outcome sink UNWRITABLE (~/.shieldcortex/denials.jsonl).');
+  return false;
+}
+
+async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey }) {
+  const localOutcome = buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey });
+  recordLocalGuardOutcome(localOutcome);
+  let notify = null;
+  try {
+    notify = typeof notifyOrPromise?.then === 'function' ? await notifyOrPromise : notifyOrPromise;
+  } catch {
+    notify = null;
+  }
+  if (
+    !notify?.denialChannel ||
+    typeof notify.deliverOperatorNotification !== 'function' ||
+    typeof notify.buildActionGuardOutcomeNotification !== 'function'
+  ) return null;
+  try {
+    const notification = notify.buildActionGuardOutcomeNotification(localOutcome);
+    const result = await notify.deliverOperatorNotification(notification, {
+      channels: [notify.denialChannel],
+      timeoutMs: notify.config.timeoutMs,
+    });
+    if (result?.deliveredVia) {
+      const via = safeNotifyLabel(result.deliveredVia) ?? 'redacted-channel';
+      console.error(`[shieldcortex] operator-notify: reported ${outcome} for ${safeToolName(toolName)} via ${via}.`);
+    }
+    return result ?? null;
+  } catch (err) {
+    console.error('[shieldcortex] ⚠️ operator-notify error — guard outcome unchanged.');
+    return { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: safeDiagnosticReason(err?.message ?? err) } }] };
+  }
+}
+
+function notificationAudit(result) {
+  if (!result) return {};
+  return {
+    notify: {
+      deliveredVia: safeNotifyLabel(result.deliveredVia),
+      attempts: Array.isArray(result.attempts)
+        ? result.attempts.map((a) => ({
+            channel: safeNotifyLabel(a.channel) ?? 'redacted-channel',
+            delivered: a.result?.delivered === true,
+            reason: a.result?.delivered === true ? undefined : safeDiagnosticReason(a.result?.reason),
+          }))
+        : [],
+    },
+  };
+}
+
+function recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result) {
+  if (!result) return;
+  writeAuditEntry(safeToolName(toolName), { severity: safeSeverity(verdict?.severity, 'action_guard_warning'), decision: safeDecision(verdict?.decision, 'action_guard_warning'), signals: safeSignalList(verdict?.signals) }, { notification: 'redacted' }, 'notify', result.deliveredVia ? 'notified' : 'notify_failed', {
+    ...baseExtra,
+    ...notificationAudit(result),
+  });
 }
 
 /**
@@ -480,13 +905,47 @@ async function runBrokerPass(broker, toolName, toolInput, verdict) {
   }
 }
 
-/** One-line description of a refused call, for the operator's approve list. */
+/**
+ * Surfaces the operator is shown. `script` is the only expansion in #241:
+ * it is the explicitly reviewed non-exec command field for Workflow. Do not
+ * mirror extractCommand's broad detection heuristic here — arbitrary `code`
+ * or `input` fields may contain issue bodies or other sensitive payloads, and
+ * notification transport needs a separate redaction design before exporting
+ * them. Keep the established command/target fields otherwise unchanged.
+ */
+const DESCRIBE_KEYS = [
+  'command', 'file_path', 'path', 'url', 'pattern',
+];
+
+/**
+ * One-line description of a refused call, for the operator's approve list and
+ * for the notification's `command` field.
+ *
+ * INVARIANT: the operator must be shown the SAME surface the guard judged and
+ * the hash covers. A tool that carries its command under `script` (Workflow),
+ * `code` or `input` used to render as a bare tool name, so both
+ * `shieldcortex approve --list` and the notification said only "Workflow"
+ * while the hash being approved covered a force-push. That is the one thing a
+ * notification may never do (operator-notify.ts: "the exact command/target the
+ * guard flagged — never a paraphrase").
+ *
+ * DISPLAY ONLY: this never feeds `hashToolCall`, so widening what is shown
+ * cannot widen what an approval releases. Bounding lives downstream —
+ * `recordPending` caps the stored summary, `buildNotification` caps `command`.
+ */
 function describeToolCall(toolName, toolInput) {
   const input = toolInput ?? {};
-  const surface =
-    input.command ?? input.file_path ?? input.path ?? input.url ?? input.pattern ?? '';
-  const text = typeof surface === 'string' ? surface : JSON.stringify(surface);
-  return text ? `${toolName}: ${text}` : toolName;
+  const keys = String(toolName).trim().toLowerCase() === 'workflow'
+    ? ['command', 'script', ...DESCRIBE_KEYS.slice(1)]
+    : DESCRIBE_KEYS;
+  let surface = '';
+  for (const key of keys) {
+    const value = input[key];
+    if (value === undefined || value === null) continue;
+    surface = typeof value === 'string' ? value : JSON.stringify(value);
+    if (surface) break;
+  }
+  return surface ? `${toolName}: ${surface}` : toolName;
 }
 
 // ==================== FALLBACK (guard load/eval failure — WS2) ====================
@@ -595,27 +1054,131 @@ function summariseToolArgs(args) {
   return parts.join(' ').slice(0, 160);
 }
 
+
+
+function ensureDirectoryNoSymlink(dir) {
+  const root = resolve(homedir());
+  const target = resolve(dir);
+  if (target !== root && !target.startsWith(`${root}${sep}`)) return false;
+  let current = root;
+  const rest = target.slice(root.length).split(sep).filter(Boolean);
+  for (const part of rest) {
+    current = join(current, part);
+    try {
+      const st = lstatSync(current);
+      if (!st.isDirectory() || st.isSymbolicLink()) return false;
+    } catch {
+      try {
+        mkdirSecure(current);
+        const st = lstatSync(current);
+        if (!st.isDirectory() || st.isSymbolicLink()) return false;
+      } catch {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function testOnlyPauseAppendOpen() {
+  const ms = Number(process.env.SHIELDCORTEX_TEST_APPEND_OPEN_DELAY_MS ?? 0);
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(ms, 1000));
+  } catch { /* ignore */ }
+}
+
+function testOnlyPausePostAppendValidation() {
+  const ms = Number(process.env.SHIELDCORTEX_TEST_POST_APPEND_VALIDATION_DELAY_MS ?? 0);
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(ms, 1000));
+  } catch { /* ignore */ }
+}
+
+function fdMatchesExpectedPath(fd, file) {
+  try {
+    const actual = fstatSync(fd);
+    const expected = lstatSync(file);
+    return expected.isFile()
+      && !expected.isSymbolicLink()
+      && actual.dev === expected.dev
+      && actual.ino === expected.ino;
+  } catch {
+    return false;
+  }
+}
+
+function cleanLogToken(value, max = 120) {
+  return String(value ?? 'unknown').replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, max);
+}
+
+function noteAuditSinkFailure(detail) {
+  console.error(
+    `[shieldcortex] ⚠️ audit sink UNWRITABLE (~/.shieldcortex/audit): ${cleanLogToken(detail, 160)} — this audit entry was DROPPED.`,
+  );
+}
+
+function appendFileNoFollow(file, line) {
+  let fd;
+  try {
+    if (!ensureDirectoryNoSymlink(dirname(file))) return false;
+    testOnlyPauseAppendOpen();
+    if (!ensureDirectoryNoSymlink(dirname(file))) return false;
+    testOnlyPausePostAppendValidation();
+    if (!ensureDirectoryNoSymlink(dirname(file))) return false;
+    fd = openSync(file, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink > 1 || !fdMatchesExpectedPath(fd, file)) return false;
+    writeFileSync(fd, line);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+function appendSessionGuardIndex(auditDir, entry) {
+  if (!/^sc-[a-f0-9]{16}$/.test(String(entry.sessionKey ?? ''))) return;
+  if (!GUARD_DEGRADED_OUTCOMES.has(String(entry.outcome ?? ''))) return;
+  try {
+    const dir = join(auditDir, 'session-guard');
+    if (!ensureDirectoryNoSymlink(auditDir)) return;
+    if (!ensureDirectoryNoSymlink(dir)) return;
+    appendFileNoFollow(join(dir, `${entry.sessionKey}.jsonl`), JSON.stringify({ recordKind: 'guard', ...entry }) + '\n');
+  } catch {
+    // The primary audit row remains the canonical fallback; never alter the hook decision.
+  }
+}
+
 // `extra` carries whatever the call site needs on the row: #139's
 // permissionMode, #143's broker verdict. One slot rather than one parameter per
 // feature — the two landed independently and each had added its own.
 function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
   try {
     const auditDir = join(homedir(), '.shieldcortex', 'audit');
-    mkdirSync(auditDir, { recursive: true });
+    if (!ensureDirectoryNoSymlink(auditDir)) {
+      noteAuditSinkFailure('audit directory is unsafe or outside the state tree');
+      return;
+    }
     const date = new Date().toISOString().slice(0, 10);
     const entry = {
       type: 'intercept',
       origin: 'claude-code-hook',
       tool: toolName,
-      severity: verdict.severity === 'catastrophic' ? 'critical' : verdict.decision === 'allow' ? 'low' : 'high',
+      severity: verdict.severity === 'catastrophic' || verdict.severity === 'critical' ? 'critical' : verdict.decision === 'allow' ? 'low' : 'high',
       firewallResult: 'ACTION_GUARD',
-      threats: verdict.signals,
+      threats: safeSignalList(verdict.signals),
       anomalyScore: verdict.decision === 'block' ? 1 : verdict.decision === 'allow' ? 0.1 : 0.6,
       trustScore: 0,
       sensitivityLevel: 'INTERNAL',
       fragmentationScore: null,
       pipelineDurationMs: 0,
       preview: `${toolName} :: ${summariseToolArgs(args)}`.slice(0, 200),
+      auditEventId: randomBytes(16).toString('hex'),
       ts: new Date().toISOString(),
       action,
       outcome,
@@ -636,15 +1199,17 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       // #139 adds `permissionMode` + its outcome the same way.
       ...extra,
     };
-    appendFileSync(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n');
+    if (!appendFileNoFollow(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n')) {
+      noteAuditSinkFailure(`append failed for realtime-${date}.jsonl`);
+      return;
+    }
+    appendSessionGuardIndex(auditDir, entry);
   } catch (err) {
     // Best-effort — never block on audit failure, but never silent either
     // (issue #95). This hook is one process per tool call, so a per-failure
     // stderr note IS the once-per-process warning; kept in sync with the
     // plugin interceptor's noteAuditSinkFailure.
-    console.error(
-      `[shieldcortex] ⚠️ audit sink UNWRITABLE (~/.shieldcortex/audit): ${err?.message ?? err} — this audit entry was DROPPED.`,
-    );
+    noteAuditSinkFailure(err?.message ?? err);
   }
 }
 
@@ -670,30 +1235,46 @@ function emitDecision(permissionDecision, reason) {
  * differs — so `action` is unchanged and the distinction lives in `outcome`
  * plus the recorded `permissionMode`.
  */
-function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit) {
+async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit, notify = null, baseExtra = {}) {
   // `brokerAudit` rides along so a brokered call keeps its judge verdict on the
   // row whichever way this goes (#143 + #139): "was a model consulted, and did
   // the harness even have a prompt surface?" must both be answerable from one
   // audit line.
-  const broker = brokerAudit ? { broker: brokerAudit } : {};
+  const safeBroker = safeBrokerAudit(brokerAudit);
+  const broker = safeBroker ? { broker: safeBroker } : {};
   const noPromptSurface = noPromptSurfaceReason(permissionMode);
   if (!noPromptSurface) {
-    writeAuditEntry(toolName, auditVerdict, toolInput, action, 'asked', { permissionMode, ...broker });
-    emitDecision('ask', reason);
+    const displayVerdict = safeApprovalVerdict(auditVerdict);
+    writeAuditEntry(
+      safeToolName(toolName),
+      displayVerdict,
+      redactedAuditArgs(toolName, toolInput),
+      action,
+      'asked',
+      { ...baseExtra, ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}), ...broker },
+    );
+    emitDecision('ask', safeDiagnosticApprovalReason(reason));
     return;
   }
-  writeAuditEntry(toolName, auditVerdict, toolInput, action, 'denied_no_prompt_surface', {
-    permissionMode: typeof permissionMode === 'string' ? permissionMode : null,
+  writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, 'denied_no_prompt_surface', 'action_guard_denial', {
+    ...baseExtra,
+    ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
     noPromptSurfaceReason: noPromptSurface,
     ...broker,
   });
+  const notified = await alertGuardOutcome(notify, {
+    toolName,
+    toolInput,
+    verdict: { ...auditVerdict, reason },
+    outcome: 'denied_no_prompt_surface',
+    event: 'action_guard_denial',
+    sessionKey: baseExtra.sessionKey,
+  });
+  recordNotifyAudit(toolName, { ...auditVerdict, reason }, toolInput, baseExtra, notified);
   console.error(
-    `[shieldcortex] action-guard DENIED ${toolName}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
+    `[shieldcortex] action-guard DENIED ${safeToolName(toolName)}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
   );
-  emitDecision(
-    'deny',
-    `${reason} — this needs approval, but ${noPromptSurface}, so it is denied rather than left to an unanswerable prompt. Run it yourself, add an actionGuard.autoApprove entry for it, or set actionGuard.enforce:false to downgrade the dangerous tier to warnings.`,
-  );
+  emitDecision('deny', terminalDecisionReason({ ...auditVerdict, reason }, 'denied_no_prompt_surface', 'action_guard_denial'));
 }
 
 /**
@@ -709,16 +1290,27 @@ function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode,
  *                     wedge normal work) but leave a visible breadcrumb.
  * ALWAYS terminates the process — the caller need do nothing after.
  */
-function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permissionMode) {
+async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permissionMode, notify, baseExtra = {}) {
+  const failureSummary = safeDiagnosticReason(failureNote);
   // 1. Catastrophic — hard deny, always.
   if (fallbackCatastrophicMatch(toolInput)) {
-    writeAuditEntry(
+    const fallbackVerdict = { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'], reason: `Guard unavailable: ${failureSummary}; fallback catastrophic scan matched` };
+    writeTerminalOutcomeAudit(
       toolName,
-      { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'] },
-      toolInput, 'auto_deny', 'auto_denied',
+      fallbackVerdict,
+      toolInput, 'auto_deny', 'auto_denied', 'action_guard_denial', baseExtra,
     );
-    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) and fallback scan matched a catastrophic pattern — DENYING ${toolName} (fail-closed, WS2)`);
-    emitDecision('deny', `ShieldCortex Action Guard: ${failureNote}, fallback catastrophic scan matched — denying to fail closed`);
+    const notified = await alertGuardOutcome(notify, {
+      toolName,
+      toolInput,
+      verdict: fallbackVerdict,
+      outcome: 'auto_denied',
+      event: 'action_guard_denial',
+      sessionKey: baseExtra.sessionKey,
+    });
+    recordNotifyAudit(toolName, fallbackVerdict, toolInput, baseExtra, notified);
+    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureSummary}) and fallback scan matched a catastrophic pattern — DENYING ${safeToolName(toolName)} (fail-closed, WS2)`);
+    emitDecision('deny', terminalDecisionReason(fallbackVerdict, 'auto_denied', 'action_guard_denial'));
     process.exit(0);
   }
 
@@ -726,33 +1318,56 @@ function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permissionMo
   const dangerousSignal = fallbackDangerousMatch(toolInput);
   if (dangerousSignal) {
     if (!cfg.enforce) {
-      writeAuditEntry(
+      const fallbackWarnVerdict = { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal], reason: `Guard unavailable: ${failureSummary}; enforce:false advisory` };
+      writeTerminalOutcomeAudit(
         toolName,
-        { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal] },
-        toolInput, 'gate_degraded', 'failure_allowed',
+        fallbackWarnVerdict,
+        toolInput, 'gate_degraded', 'failure_allowed', 'action_guard_warning', baseExtra,
       );
-      console.error(`[shieldcortex] ⚠️ action-guard unavailable (${failureNote}) — advisory (enforce:false), allowing dangerous ${toolName} [${dangerousSignal}]`);
+      const notified = await alertGuardOutcome(notify, {
+        toolName,
+        toolInput,
+        verdict: fallbackWarnVerdict,
+        outcome: 'failure_allowed',
+        event: 'action_guard_warning',
+        sessionKey: baseExtra.sessionKey,
+      });
+      recordNotifyAudit(toolName, fallbackWarnVerdict, toolInput, baseExtra, notified);
+      console.error(`[shieldcortex] ⚠️ action-guard unavailable (${failureSummary}) — advisory (enforce:false), allowing dangerous ${safeToolName(toolName)} [${safeSignalList([dangerousSignal]).join(', ')}]`);
       process.exit(0);
     }
-    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureNote}) — gating DANGEROUS ${toolName} [${dangerousSignal}] (fail-closed)`);
-    emitApprovalRequired(
+    console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureSummary}) — gating DANGEROUS ${safeToolName(toolName)} [${safeSignalList([dangerousSignal]).join(', ')}] (fail-closed)`);
+    await emitApprovalRequired(
       toolName,
       { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal] },
       toolInput,
       permissionMode,
       'gate_degraded',
-      `ShieldCortex Action Guard: guard could not scan (${failureNote}); dangerous operation [${dangerousSignal}] gated — approve only if you trust it`,
+      `ShieldCortex Action Guard: guard could not scan (${failureSummary}); dangerous operation [${dangerousSignal}] gated — approve only if you trust it`,
+      undefined,
+      notify,
+      baseExtra,
     );
     process.exit(0);
   }
 
   // 3. No match — benign/unknown. Fail open, but never silently.
-  writeAuditEntry(
+  const fallbackOpenVerdict = { severity: 'benign', decision: 'allow', signals: ['fallback-scan'], reason: `Guard unavailable: ${failureSummary}; fallback matched nothing` };
+  writeTerminalOutcomeAudit(
     toolName,
-    { severity: 'benign', decision: 'allow', signals: ['fallback-scan'] },
-    toolInput, 'gate_degraded', 'failure_allowed',
+    fallbackOpenVerdict,
+    toolInput, 'gate_degraded', 'failure_allowed', 'action_guard_warning', baseExtra,
   );
-  console.error(`[shieldcortex] action-guard unavailable (${failureNote}) — allowing ${toolName} (fallback matched nothing; fail-open)`);
+  const notified = await alertGuardOutcome(notify, {
+    toolName,
+    toolInput,
+    verdict: fallbackOpenVerdict,
+    outcome: 'failure_allowed',
+    event: 'action_guard_warning',
+    sessionKey: baseExtra.sessionKey,
+  });
+  recordNotifyAudit(toolName, fallbackOpenVerdict, toolInput, baseExtra, notified);
+  console.error(`[shieldcortex] action-guard unavailable (${failureSummary}) — allowing ${safeToolName(toolName)} (fallback matched nothing; fail-open)`);
   process.exit(0);
 }
 
@@ -783,10 +1398,16 @@ process.stdin.on('end', async () => {
     // that as "cannot confirm a prompt surface", not as "prompting is fine".
     const permissionMode = hookData.permission_mode;
     if (!toolName) process.exit(0);
+    const baseExtra = hookSessionExtras(hookData, permissionMode);
+    let notifyPromise;
+    const getNotify = () => {
+      if (!notifyPromise) notifyPromise = loadNotify(cfg.notify).catch(() => null);
+      return notifyPromise;
+    };
 
     const guard = await loadGuard();
     if (!guard) {
-      handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode); // always exits
+      await handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
 
@@ -810,7 +1431,7 @@ process.stdin.on('end', async () => {
           : undefined,
       );
     } catch (err) {
-      handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode); // always exits
+      await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
 
@@ -819,18 +1440,27 @@ process.stdin.on('end', async () => {
       // can tell "scanned & allowed" from "never scanned". Benign allows stay
       // unaudited — volume discipline, mirrored with the plugin interceptor.
       if (verdict.severity !== 'benign' && cfg.auditAllows !== false) {
-        writeAuditEntry(toolName, verdict, toolInput, 'allow', 'allowed');
+        writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
       }
       process.exit(0);
     }
 
     // Catastrophic — hard deny, always enforced while the guard is enabled.
     if (verdict.decision === 'block') {
-      writeAuditEntry(toolName, verdict, toolInput, 'auto_deny', 'auto_denied');
+      writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'auto_deny', 'auto_denied', 'action_guard_denial', baseExtra);
+      const notified = await alertGuardOutcome(getNotify(), {
+        toolName,
+        toolInput,
+        verdict,
+        outcome: 'auto_denied',
+        event: 'action_guard_denial',
+        sessionKey: baseExtra.sessionKey,
+      });
+      recordNotifyAudit(toolName, verdict, toolInput, baseExtra, notified);
       console.error(
-        `[shieldcortex] action-guard BLOCKED ${toolName}: ${verdict.reason} [${verdict.signals.join(', ')}]`,
+        `[shieldcortex] action-guard BLOCKED ${safeToolName(toolName)}: ${safeGuardOutcomeReason(verdict, 'auto_denied', 'action_guard_denial')} [${safeSignalList(verdict.signals).join(', ')}]`,
       );
-      emitDecision('deny', `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`);
+      emitDecision('deny', terminalDecisionReason(verdict, 'auto_denied', 'action_guard_denial'));
       process.exit(0);
     }
 
@@ -845,14 +1475,23 @@ process.stdin.on('end', async () => {
         return hay.some((h) => h === n || h.includes(n));
       });
       if (matched) {
-        writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved');
+        writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', baseExtra);
         process.exit(0); // Defer to Claude Code's own permission system.
       }
     }
 
     if (!cfg.enforce) {
-      writeAuditEntry(toolName, verdict, toolInput, 'warn', 'warned');
-      console.error(`[shieldcortex] ⚠️ Action Guard: ${toolName} — ${verdict.reason}`);
+      writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
+      const notified = await alertGuardOutcome(getNotify(), {
+        toolName,
+        toolInput,
+        verdict,
+        outcome: 'warned',
+        event: 'action_guard_warning',
+        sessionKey: baseExtra.sessionKey,
+      });
+      recordNotifyAudit(toolName, verdict, toolInput, baseExtra, notified);
+      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')}`);
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
@@ -865,9 +1504,9 @@ process.stdin.on('end', async () => {
       try {
         const spent = approvals.consumeApproval(toolName, toolInput);
         if (spent) {
-          writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved');
+          writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', baseExtra);
           console.error(
-            `[shieldcortex] action-guard: consumed operator approval ${spent.hash.slice(0, 12)} for ${toolName} (single use).`,
+            `[shieldcortex] action-guard: consumed operator approval ${spent.hash.slice(0, 12)} for ${safeToolName(toolName)} (single use).`,
           );
           process.exit(0); // Defer to the harness's own permission system.
         }
@@ -887,25 +1526,40 @@ process.stdin.on('end', async () => {
     const brokered = broker ? await runBrokerPass(broker, toolName, toolInput, verdict) : null;
 
     if (brokered?.outcome === 'harden') {
-      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'auto_denied', { broker: brokered.audit });
-      console.error(`[shieldcortex] approval broker HARDENED ${toolName} to a denial: ${brokered.reason}`);
+      const brokerAudit = safeBrokerAudit(brokered.audit);
+      writeTerminalOutcomeAudit(toolName, { ...verdict, reason: brokered.reason ?? verdict.reason }, toolInput, 'require_approval', 'auto_denied', 'action_guard_denial', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
+      const notified = await alertGuardOutcome(getNotify(), {
+        toolName,
+        toolInput,
+        verdict: { ...verdict, reason: brokered.reason ?? verdict.reason },
+        outcome: 'auto_denied',
+        event: 'action_guard_denial',
+        sessionKey: baseExtra.sessionKey,
+      });
+      recordNotifyAudit(toolName, { ...verdict, reason: brokered.reason ?? verdict.reason }, toolInput, baseExtra, notified);
+      console.error(`[shieldcortex] approval broker HARDENED ${safeToolName(toolName)} to a denial: ${safeDiagnosticReason(brokered.reason)}`);
       // No approve-hash offered. Hardening exists precisely for the case where
       // the request is trying to talk somebody into saying yes.
-      emitDecision('deny', `ShieldCortex approval broker: ${brokered.reason}`);
+      emitDecision('deny', `ShieldCortex approval broker: injection-risk review hardened this request to a denial. [${safeSignalList(verdict.signals).join(', ')}]`);
       process.exit(0);
     }
 
     if (brokered?.outcome === 'pre_clear') {
-      writeAuditEntry(toolName, verdict, toolInput, 'require_approval', 'approved', { broker: brokered.audit });
-      console.error(`[shieldcortex] approval broker PRE-CLEARED ${toolName}: ${brokered.reason} [${verdict.signals.join(', ')}]`);
+      const brokerAudit = safeBrokerAudit(brokered.audit);
+      writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
+      console.error(`[shieldcortex] approval broker PRE-CLEARED ${safeToolName(toolName)}: ${safeDiagnosticReason(brokered.reason)} [${safeSignalList(verdict.signals).join(', ')}]`);
       // No decision emitted — the guard defers to Claude Code's own permission
       // system rather than answering "allow". ShieldCortex narrows or stays
       // neutral; it never WIDENS what the user's own settings permit.
       process.exit(0);
     }
 
-    // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact.
-    if (approvals) {
+    const noPromptSurfaceForHold = noPromptSurfaceReason(permissionMode);
+
+    // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact
+    // only when something can actually hold. Promptless denials are terminal:
+    // no pending approval, no retry hash, no operator affordance.
+    if (approvals && !noPromptSurfaceForHold) {
       try {
         approvals.recordPending({
           tool: toolName,
@@ -918,8 +1572,9 @@ process.stdin.on('end', async () => {
       }
     }
 
-    let message = `ShieldCortex Action Guard: ${verdict.reason} [${verdict.signals.join(', ')}]`;
-    if (approvals) {
+    const displayVerdict = safeApprovalVerdict(verdict);
+    let message = `ShieldCortex Action Guard: ${displayVerdict.reason} [${displayVerdict.signals.join(', ')}]`;
+    if (approvals && !noPromptSurfaceForHold) {
       let fullHash;
       try {
         fullHash = approvals.hashToolCall(toolName, toolInput);
@@ -943,18 +1598,17 @@ process.stdin.on('end', async () => {
       // the same permissionMode below and remains the sole owner of the
       // decision — nothing here can change it.
       if (fullHash) {
-        const notify = await loadNotify(cfg.notify);
-        await pingOperator(notify, {
+        const result = await pingOperator(await getNotify(), {
           toolName,
           toolInput,
           verdict,
           hash: fullHash,
-          noPromptSurface: noPromptSurfaceReason(permissionMode),
+          noPromptSurface: null,
           // Which job died. Absent on a harness that does not report them —
           // rendered only when present, never as "undefined".
-          sessionId: typeof hookData.session_id === 'string' ? hookData.session_id : undefined,
-          cwd: typeof hookData.cwd === 'string' ? hookData.cwd : undefined,
+          sessionKey: baseExtra.sessionKey,
         });
+        recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result);
       }
     }
     // #139: ask ONLY where a prompt can actually be raised. Under
@@ -967,7 +1621,7 @@ process.stdin.on('end', async () => {
     // Placed at the END of the chain on purpose: the one-shot approval (#118)
     // and the broker (#143) both get their say first, so an operator who
     // already approved, or a call the judge hardened, is unaffected by this.
-    emitApprovalRequired(
+    await emitApprovalRequired(
       toolName,
       verdict,
       toolInput,
@@ -975,6 +1629,8 @@ process.stdin.on('end', async () => {
       'require_approval',
       message,
       brokered?.audit,
+      await getNotify(),
+      baseExtra,
     );
     process.exit(0);
   } catch (error) {

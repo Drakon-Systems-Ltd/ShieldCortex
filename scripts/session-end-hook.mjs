@@ -22,6 +22,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { mkdirSecure } from './lib/state-perms.mjs';
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -183,7 +184,7 @@ process.stdin.on('end', async () => {
       if (conversationText && conversationText.length >= 100) {
         // Ensure database directory exists
         if (!existsSync(DB_DIR)) {
-          mkdirSync(DB_DIR, { recursive: true });
+          mkdirSecure(DB_DIR);
         }
 
         if (!existsSync(DB_PATH)) {

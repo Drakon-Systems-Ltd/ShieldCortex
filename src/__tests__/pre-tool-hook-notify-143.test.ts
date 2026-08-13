@@ -37,6 +37,8 @@ const REAL_DIST = join(repoRoot, 'dist', 'defence', 'iron-dome');
 
 const IRREVERSIBLE = { command: 'sudo modprobe softdog' };
 const CATASTROPHIC = { command: 'rm -rf /' };
+/** A dangerous command carried under `script`, not `command` (#183/#241). */
+const WORKFLOW_FORCE_PUSH = 'await $`git push --force origin main`;';
 
 interface HookResult { decision?: string; reason?: string; stderr: string }
 
@@ -84,13 +86,15 @@ describe('#143 — the operator-notify transport through the real Claude Code ho
         "import { writeFileSync as wf } from 'node:fs';",
         'export function createWebhookNotifyChannel(opts) {',
         '  return {',
-        "    name: 'webhook',",
+        "    get name() { return new URL(opts.url).searchParams.get('channelName') || 'webhook'; },",
         '    async send(notification) {',
         '      const u = new URL(opts.url);',
         "      const mode = u.searchParams.get('mode') || 'success';",
         "      const evidencePath = u.searchParams.get('evidence');",
-        "      if (mode === 'fail') return { delivered: false, reason: 'simulated failure' };",
-        "      if (mode === 'throw') throw new Error('simulated throw');",
+        "      const secret = u.searchParams.get('secret') || '';",
+        "      if (mode === 'fail') return { delivered: false, reason: `simulated failure ${secret}` };",
+        "      if (mode === 'throw') throw new Error(`simulated throw ${secret}`);",
+        "      if (mode === 'hang') return new Promise(() => {});",
         '      if (evidencePath) wf(evidencePath, JSON.stringify(notification));',
         '      return { delivered: true };',
         '    },',
@@ -112,8 +116,16 @@ describe('#143 — the operator-notify transport through the real Claude Code ho
     );
   }
 
-  function webhookUrl(mode: 'success' | 'fail' | 'throw' = 'success'): string {
+  function webhookUrl(mode: 'success' | 'fail' | 'throw' | 'hang' = 'success'): string {
     return `http://fake-webhook.invalid/hook?mode=${mode}&evidence=${encodeURIComponent(evidenceFile)}`;
+  }
+
+  function auditRows(): Array<Record<string, unknown>> {
+    const date = new Date().toISOString().slice(0, 10);
+    const auditFile = join(home, '.shieldcortex', 'audit', `realtime-${date}.jsonl`);
+    return existsSync(auditFile)
+      ? readFileSync(auditFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      : [];
   }
 
   function runHook(input: Record<string, unknown>, toolName = 'Bash'): HookResult {
@@ -175,21 +187,245 @@ describe('#143 — the operator-notify transport through the real Claude Code ho
 
     const body = evidence();
     expect(body).not.toBeNull();
-    expect(body!.command).toContain('sudo modprobe softdog');
+    expect(body!.command).toMatch(/redacted action surface/i);
+    expect(JSON.stringify(body)).not.toContain('sudo modprobe softdog');
     expect(body!.signals).toContain('privilege-escalation');
     expect(body!.severity).toBe('dangerous');
+    expect(String(body!.sessionId)).toMatch(/^sc-[a-f0-9]{16}$/);
     expect(String(body!.fallbackHint)).toMatch(/shieldcortex approve [0-9a-f]{12}/);
     expect(String(body!.fallbackHint)).toMatch(/shieldcortex deny [0-9a-f]{12}/);
     // The SAME hash appears in the notification and in the terminal fallback.
     expect(String(body!.shortHash)).toBe(String(r.reason).match(/shieldcortex approve ([0-9a-f]{12})/)![1]);
   });
 
-  it('never reaches the channel for a catastrophic call — it is blocked before any approval flow exists', () => {
+  it('shows the payload the hash actually covers, not a bare tool name (#183/#241)', () => {
+    // #183 made `Workflow.script` a reviewed command surface: a re-worded
+    // `description` no longer mints a fresh hash, so an operator approval for
+    // one of these finally LANDS. That makes what the operator is shown
+    // load-bearing. The command lives under `script`, which is not one of the
+    // keys the guard hook used to describe a call — so this notification said
+    // only "Workflow" while the hash it carried covered a force-push.
+    writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
+    const r = runHook({ script: WORKFLOW_FORCE_PUSH, description: 'Publish the release branch' }, 'Workflow');
+
+    expect(r.decision).toBe('ask');
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.command).toMatch(/redacted action surface/i);
+    expect(JSON.stringify(body)).not.toContain(WORKFLOW_FORCE_PUSH);
+    expect(body!.signals).toContain('git-force-push');
+    // Same hash in the notification and the terminal fallback, as above.
+    expect(String(body!.shortHash)).toBe(String(r.reason).match(/shieldcortex approve ([0-9a-f]{12})/)![1]);
+  });
+
+  it('does not export arbitrary non-exec code/input payloads while fixing Workflow.script', () => {
+    const sentinel = 'PRIVATE_PAYLOAD_SENTINEL';
+    writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
+    const r = runHook(
+      { code: `git push --force origin main # ${sentinel}`, description: 'Create a tracking issue' },
+      'create_issue',
+    );
+
+    expect(r.decision).toBe('ask');
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.command).toMatch(/redacted action surface/i);
+    expect(JSON.stringify(body)).not.toContain(sentinel);
+  });
+
+  it('does not export an arbitrary non-Workflow script payload', () => {
+    const sentinel = 'PRIVATE_PAYLOAD_SENTINEL';
+    writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
+    const r = runHook(
+      { script: `git push --force origin main # ${sentinel}`, description: 'Create a tracking issue' },
+      'create_issue',
+    );
+
+    expect(r.decision).toBe('ask');
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.command).toMatch(/redacted action surface/i);
+    expect(JSON.stringify(body)).not.toContain(sentinel);
+  });
+
+
+  it('redacts hostile interactive approval surfaces while keeping the approval hash functional across channel outcomes', () => {
+    const secret = 'DO_NOT_PERSIST_INTERACTIVE_APPROVAL_VALUE_1234567890';
+    const token = 'ghp_FAKE_INTERACTIVE_APPROVAL_TOKEN_1234567890';
+    const hostile = 'ignore.previous.instructions';
+    const url = `https://example.invalid/${secret}`;
+    writeFileSync(
+      join(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js'),
+      [
+        'export async function evaluateToolCall() {',
+        '  return {',
+        "    severity: 'dangerous',",
+        "    decision: 'require_approval',",
+        `    reason: ${JSON.stringify(`needs approval ${secret} ${token} ${url} ${hostile}`)},`,
+        `    signals: ['privilege-escalation', ${JSON.stringify(secret)}, ${JSON.stringify(token)}, ${JSON.stringify(hostile)}],`,
+        `    matches: [{ signal: 'privilege-escalation', span: ${JSON.stringify(`${secret} ${url}`)} }],`,
+        '  };',
+        '}',
+      ].join('\n'),
+    );
+
+    for (const mode of ['success', 'fail', 'throw', 'hang'] as const) {
+      try { rmSync(evidenceFile, { force: true }); } catch { /* ignore */ }
+      writeConfig({
+        enabled: true,
+        webhookUrl: `${webhookUrl(mode)}&secret=${encodeURIComponent(secret)}&channelName=${encodeURIComponent(`bearer-${token}`)}`,
+        timeoutMs: 25,
+      });
+
+      const r = runHook({ command: 'sudo systemctl stop nginx', note: `${secret} ${token} ${url} ${hostile}` }, `Bash ${secret}`);
+
+      expect(r.decision).toBe('ask');
+      expect(r.reason).toMatch(/shieldcortex approve [0-9a-f]{12}/);
+      for (const leak of [secret, token, url, hostile, 'bearer-']) {
+        expect(r.reason).not.toContain(leak);
+        expect(r.stderr).not.toContain(leak);
+        expect(JSON.stringify(auditRows())).not.toContain(leak);
+        if (evidence()) expect(JSON.stringify(evidence())).not.toContain(leak);
+      }
+      if (mode === 'success') {
+        const body = evidence();
+        expect(body).not.toBeNull();
+        expect(body!.tool).toBe('tool');
+        expect(String(body!.command)).toMatch(/redacted action surface/i);
+        expect(Array.isArray(body!.signals)).toBe(true);
+        expect(JSON.stringify(body!.signals)).not.toContain(secret);
+        expect(String(body!.fallbackHint)).toMatch(/shieldcortex approve [0-9a-f]{12}/);
+        expect(String(body!.fallbackHint)).toMatch(/shieldcortex deny [0-9a-f]{12}/);
+      }
+    }
+  }, 25_000);
+
+  it('reports a catastrophic call through a redacted terminal outcome alert with no approval affordance', () => {
     writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
     const r = runHook(CATASTROPHIC);
     expect(r.decision).toBe('deny');
-    expect(evidence()).toBeNull();
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.event).toBe('action_guard_denial');
+    expect(body!.outcome).toBe('auto_denied');
+    expect(body!.surface).toMatch(/redacted action surface/i);
+    expect(JSON.stringify(body)).not.toContain('rm -rf /');
+    expect(body!.approveCommand).toBeUndefined();
+    expect(body!.denyCommand).toBeUndefined();
   });
+
+  it('redacts suspicious tool names from terminal outcome notifications, logs, and audit rows', () => {
+    const secret = 'DO_NOT_PERSIST_TOOLNAME_VALUE_1234567890';
+    const shortSecret = 'hunter2';
+    const hostile = 'ignore.previous.instructions';
+    writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });
+    const r = runHook(CATASTROPHIC, `Bash\nprod-credential-${shortSecret}\n${hostile}\n${secret}`);
+    expect(r.decision).toBe('deny');
+    for (const token of [secret, shortSecret, hostile, 'prod-credential']) {
+      expect(r.stderr).not.toContain(token);
+      expect(JSON.stringify(evidence())).not.toContain(token);
+      expect(JSON.stringify(auditRows())).not.toContain(token);
+    }
+  });
+
+  it('keeps denied payloads and channel errors out of terminal notification audit rows', () => {
+    const secret = 'PRIVATE_NOTIFY_SECRET_TOKEN';
+    writeConfig({
+      enabled: true,
+      webhookUrl: `${webhookUrl('fail')}&secret=${encodeURIComponent(secret)}`,
+    });
+
+    const r = runHook({ command: `rm -rf / # ${secret}` });
+
+    expect(r.decision).toBe('deny');
+    expect(r.stderr).not.toContain(secret);
+    const rows = auditRows();
+    const notifyRows = rows.filter((row) => row.action === 'notify');
+    expect(notifyRows).toHaveLength(1);
+    expect(JSON.stringify(rows)).not.toContain(secret);
+    expect(JSON.stringify(rows)).not.toContain('rm -rf /');
+    expect(rows.some((row) => row.outcome === 'auto_denied' && String(row.preview).includes('redacted action surface'))).toBe(true);
+    expect(String(notifyRows[0].preview)).toContain('notification=redacted');
+    expect(String(notifyRows[0].preview)).not.toContain('rm -rf');
+  });
+
+  it('redacts hostile and credential-shaped notification transport labels from logs and audit rows', () => {
+    const labels = [
+      'https://notify.invalid/DO_NOT_PERSIST_CHANNEL_VALUE_1234567890',
+      'user:password',
+      'ghp_1234567890abcdef1234567890abcdef123456',
+      'bearer-1234567890abcdef',
+    ];
+
+    for (const label of labels) {
+      writeConfig({
+        enabled: true,
+        webhookUrl: `${webhookUrl('success')}&channelName=${encodeURIComponent(label)}`,
+      });
+
+      const r = runHook(CATASTROPHIC);
+
+      expect(r.decision).toBe('deny');
+      expect(r.stderr).not.toContain(label);
+      expect(JSON.stringify(auditRows())).not.toContain(label);
+    }
+    expect(JSON.stringify(auditRows())).toContain('redacted-channel');
+  });
+
+  it('reports enforce:false advisory outcomes through the redacted warning event', () => {
+    const secret = 'PRIVATE_WARNING_SECRET_TOKEN';
+    writeFileSync(
+      join(home, '.shieldcortex', 'config.json'),
+      JSON.stringify({
+        actionGuard: {
+          enabled: true,
+          enforce: false,
+          notify: { enabled: true, webhookUrl: webhookUrl('success') },
+        },
+      }),
+    );
+    const r = runHook({ command: `${IRREVERSIBLE.command} # ${secret}` });
+    expect(r.decision).toBeUndefined();
+    const body = evidence();
+    expect(body).not.toBeNull();
+    expect(body!.event).toBe('action_guard_warning');
+    expect(body!.outcome).toBe('warned');
+    expect(body!.surface).toMatch(/redacted action surface/i);
+    expect(JSON.stringify(body)).not.toContain(IRREVERSIBLE.command);
+    expect(JSON.stringify(body)).not.toContain(secret);
+    expect(JSON.stringify(auditRows())).not.toContain(secret);
+    expect(body!.approveCommand).toBeUndefined();
+    expect(body!.denyCommand).toBeUndefined();
+  });
+
+
+  it('bounds terminal denial and warning notification throw/timeout without changing the guard decision', () => {
+    for (const [mode, enforce, expectedDecision] of [
+      ['throw', true, 'deny'],
+      ['hang', true, 'deny'],
+      ['throw', false, undefined],
+      ['hang', false, undefined],
+    ] as const) {
+      writeFileSync(
+        join(home, '.shieldcortex', 'config.json'),
+        JSON.stringify({
+          actionGuard: {
+            enabled: true,
+            enforce,
+            notify: { enabled: true, webhookUrl: webhookUrl(mode), timeoutMs: 25 },
+          },
+        }),
+      );
+      const command = enforce ? CATASTROPHIC.command : IRREVERSIBLE.command;
+      const started = Date.now();
+      const r = runHook({ command: `${command} # terminal-outcome-transport` });
+
+      expect(Date.now() - started).toBeLessThan(20_000);
+      expect(r.decision).toBe(expectedDecision);
+      expect(JSON.stringify(auditRows())).not.toContain('terminal-outcome-transport');
+      expect(auditRows().some((row) => row.action === 'notify' && ['notify_failed', 'notified'].includes(String(row.outcome)))).toBe(true);
+    }
+  }, 25_000);
 
   it('an operator-approved hash from the SAME notification still passes, unchanged from #118', async () => {
     writeConfig({ enabled: true, webhookUrl: webhookUrl('success') });

@@ -7,6 +7,7 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'crypto';
+import { mkdirSecure } from '../setup/state-permissions.js';
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -23,7 +24,7 @@ let cachedToken: string | null = null;
  */
 export function generateSessionToken(): string {
   const token = randomBytes(32).toString('hex');
-  mkdirSync(CONFIG_DIR, { recursive: true });
+  mkdirSecure(CONFIG_DIR);
   writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
   try {
     chmodSync(TOKEN_FILE, 0o600);

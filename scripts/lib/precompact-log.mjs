@@ -19,6 +19,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { mkdirSecure } from './state-perms.mjs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -39,7 +40,7 @@ function logPath(index) {
 function ensureDir() {
   const dir = logDir();
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSecure(dir);
   }
 }
 

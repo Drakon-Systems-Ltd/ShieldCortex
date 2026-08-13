@@ -76,6 +76,7 @@ describe('scan-only entry (shieldcortex/scan)', () => {
       '/audit/',
       '/custom-rules/',
       '/custom-patterns/',
+      '/threat-graph/',
       '/embeddings/',
       '/defence/judge/',
     ];

@@ -88,7 +88,15 @@ describe('#112 follow-up — unattended Codex: interceptor disabled in host plug
     const { api, hooks } = makeApi(rootConfigWith({ interceptor: { enabled: false } }));
     plugin.register(api);
     expect(hooks['before_tool_call']).toBeUndefined();
-    expect(hooks['session_end']).toBeUndefined();
+    // #226: session_end IS registered now, and deliberately. What #112 is about
+    // is the APPROVAL pipeline: a registered `before_tool_call` changes how
+    // OpenClaw resolves tool-call approvals, so an unattended Codex turn waited
+    // 120s on a decision nobody could give. `session_end` is a notification —
+    // it cannot block, approve or delay anything — and the conversation gate
+    // (registered regardless of `interceptor.enabled`) keeps per-session state
+    // that needs freeing, so skipping it leaked a suppression window per
+    // session for the life of the gateway.
+    expect(typeof hooks['session_end']).toBe('function');
   });
 
   it('scanning stays live and the skip is logged', () => {

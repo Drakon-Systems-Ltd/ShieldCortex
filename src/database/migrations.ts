@@ -833,9 +833,64 @@ export function runMigrations(database: Database.Database): void {
       if (!auditColNames.has('content_hash')) {
         database.exec('ALTER TABLE defence_audit ADD COLUMN content_hash TEXT');
       }
+      // Threat-graph Phase B (docs/design/2026-08-11-threat-graph.md):
+      // source_attested = the resolution was system-derived or strict-mode
+      // (NULL on legacy rows and unplumbed paths); risk_modifier = the
+      // advisory trust modifier computed for this scan (NULL until the
+      // modifier ships/fires). Local-only until declared as egress.
+      if (!auditColNames.has('source_attested')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN source_attested INTEGER');
+      }
+      if (!auditColNames.has('risk_modifier')) {
+        database.exec('ALTER TABLE defence_audit ADD COLUMN risk_modifier REAL');
+      }
+      // Serves the threat-graph risk sweep's 28-day windowed counters
+      // (per-source range scan); without it the sweep degrades to repeated
+      // partial scans across up to 5,000 sources.
+      database.exec(
+        'CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp)'
+      );
+    }
+    // Threat-graph Phase C (Loop 3): allowance bookkeeping on the `allows`
+    // edge (approvals, exemplar hashes, strikes). Guarded — the threat_edges
+    // table may not exist yet on an install that hasn't opened the graph.
+    const edgeCols = database.prepare("PRAGMA table_info(threat_edges)").all() as { name: string }[];
+    if (edgeCols.length > 0 && !edgeCols.some((c) => c.name === 'attrs')) {
+      database.exec("ALTER TABLE threat_edges ADD COLUMN attrs TEXT NOT NULL DEFAULT '{}'");
+    }
+    // Threat-graph Phase D (Loop 4): campaign-detection throttle timestamp.
+    const stateCols = database.prepare("PRAGMA table_info(threat_graph_state)").all() as { name: string }[];
+    if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_campaign_at')) {
+      database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_campaign_at TEXT");
+    }
+    // Threat-graph Phase E (ShadowMerge defence): conflict-detection throttle.
+    if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_conflict_at')) {
+      database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_conflict_at TEXT");
+    }
+    // Threat-graph Phase E: triple write-time provenance + dispute flag. The
+    // `triples` table exists from the ontology migration above, so these are
+    // unconditional adds (guarded by column presence). writer_source/writer_trust
+    // stay NULL on rows written before this migration (and on backfilled rows).
+    const tripleCols = database.prepare("PRAGMA table_info(triples)").all() as { name: string }[];
+    if (tripleCols.length > 0) {
+      if (!tripleCols.some((c) => c.name === 'valid_from')) {
+        database.exec('ALTER TABLE triples ADD COLUMN valid_from TEXT');
+      }
+      if (!tripleCols.some((c) => c.name === 'valid_to')) {
+        database.exec('ALTER TABLE triples ADD COLUMN valid_to TEXT');
+      }
+      if (!tripleCols.some((c) => c.name === 'writer_source')) {
+        database.exec('ALTER TABLE triples ADD COLUMN writer_source TEXT');
+      }
+      if (!tripleCols.some((c) => c.name === 'writer_trust')) {
+        database.exec('ALTER TABLE triples ADD COLUMN writer_trust REAL');
+      }
+      if (!tripleCols.some((c) => c.name === 'disputed')) {
+        database.exec('ALTER TABLE triples ADD COLUMN disputed INTEGER NOT NULL DEFAULT 0');
+      }
     }
   } catch (err) {
-    logIfUnexpectedDdlError(err, 'defence_audit provenance columns (operation, content_hash)');
+    logIfUnexpectedDdlError(err, 'defence_audit provenance columns + threat_edges.attrs + triples provenance');
   }
 
   if (!columnNames.has('content_hash')) {

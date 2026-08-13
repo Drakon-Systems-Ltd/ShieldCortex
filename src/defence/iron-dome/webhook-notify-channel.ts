@@ -21,8 +21,18 @@
  *      answer only ever counts when it lands on the #118 approval store.
  */
 import { createHmac } from 'node:crypto';
-import type { NotifyChannel, OperatorNotification } from './operator-notify.js';
-import { formatOperatorNotification } from './operator-notify.js';
+import type {
+  ActionGuardOutcomeNotification,
+  AnyOperatorNotification,
+  ConversationThreatNotification,
+  NotifyChannel,
+  OperatorNotification,
+} from './operator-notify.js';
+import {
+  formatOperatorNotification,
+  isActionGuardOutcomeNotification,
+  isConversationThreatNotification,
+} from './operator-notify.js';
 
 export interface WebhookNotifyChannelOptions {
   /** Already validated by notify-config.ts's `normaliseWebhookUrl` — this
@@ -36,15 +46,64 @@ export interface WebhookNotifyChannelOptions {
   fetchImpl?: typeof fetch;
 }
 
-/** The event as a header/body value. Anything that is not exactly the denial
- *  reads as `approval_requested` — a receiver routing on this header must
- *  never see a value this module invented, and an older caller with no `event`
- *  at all keeps getting the header it has always got. */
-function eventOf(n: OperatorNotification): string {
-  return n.event === 'denied_no_prompt_surface' ? 'denied_no_prompt_surface' : 'approval_requested';
+/** The event as a header/body value. Anything that is not exactly one of the
+ *  two non-approval events reads as `approval_requested` — a receiver routing
+ *  on this header must never see a value this module invented, and an older
+ *  caller with no `event` at all keeps getting the header it has always got. */
+function eventOf(n: AnyOperatorNotification): string {
+  if (n.event === 'denied_no_prompt_surface') return 'denied_no_prompt_surface';
+  if (n.event === 'conversation_threat') return 'conversation_threat';
+  if (n.event === 'action_guard_denial') return 'action_guard_denial';
+  if (n.event === 'action_guard_warning') return 'action_guard_warning';
+  return 'approval_requested';
 }
 
-function buildPayload(n: OperatorNotification): Record<string, unknown> {
+/**
+ * The #225 conversation-alert body. Structurally incapable of carrying an
+ * approve/deny affordance: there is no hash on the notification to build one
+ * from, and this function does not invent one. A receiver that draws buttons
+ * from `approveCommand`/`denyCommand` therefore draws none for this event,
+ * rather than drawing a pair bound to `undefined`.
+ */
+function buildConversationPayload(n: ConversationThreatNotification): Record<string, unknown> {
+  return {
+    event: 'conversation_threat',
+    outcome: n.outcome,
+    posture: n.posture,
+    summary: n.summary,
+    reason: n.reason,
+    ...(n.sessionId ? { sessionId: n.sessionId } : {}),
+    ...(n.model ? { model: n.model } : {}),
+    ...(n.host ? { host: n.host } : {}),
+    detectedAt: n.detectedAt,
+    text: formatOperatorNotification(n),
+    ts: new Date().toISOString(),
+  };
+}
+
+function buildPayload(n: AnyOperatorNotification): Record<string, unknown> {
+  if (isConversationThreatNotification(n)) return buildConversationPayload(n);
+  if (isActionGuardOutcomeNotification(n)) return buildActionGuardPayload(n);
+  return buildApprovalPayload(n);
+}
+
+function buildActionGuardPayload(n: ActionGuardOutcomeNotification): Record<string, unknown> {
+  return {
+    event: eventOf(n),
+    outcome: n.outcome,
+    tool: n.tool,
+    surface: n.surface,
+    signals: n.signals,
+    severity: n.severity,
+    reason: n.reason,
+    ...(n.correlationId ? { correlationId: n.correlationId } : {}),
+    detectedAt: n.detectedAt,
+    text: formatOperatorNotification(n),
+    ts: new Date().toISOString(),
+  };
+}
+
+function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> {
   const event = eventOf(n);
   const denied = event === 'denied_no_prompt_surface';
   const payload: Record<string, unknown> = {

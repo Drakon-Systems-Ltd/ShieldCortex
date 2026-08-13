@@ -1,6 +1,7 @@
 import { getDatabase, withTransaction } from '../../database/init.js';
 import { addMemory, MemoryBlockedError } from '../../memory/store.js';
 import type { Memory, MemorySourceKind } from '../../memory/types.js';
+import { recordQuarantineDecision } from '../../threat-graph/decision.js';
 
 type QuarantineRow = {
   id: number;
@@ -11,7 +12,41 @@ type QuarantineRow = {
   source_identifier: string | null;
   reason: string | null;
   firewall_result: 'BLOCK' | 'QUARANTINE';
+  threat_indicators: string | null;
+  audit_id: number | null;
 };
+
+function parseIndicators(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const p = JSON.parse(raw) as unknown[];
+    return p.filter((x): x is string => typeof x === 'string');
+  } catch { return []; }
+}
+
+/** Ledger the operator's decision so the threat-graph allowance derivation
+ * (Loop 3) can consume it. `bulk` flags by-source/batch approvals, which never
+ * count toward an allowance. Best-effort; never throws into the review. */
+function ledgerDecision(row: QuarantineRow, decision: 'approve' | 'reject', reviewedBy: string, bulk: boolean): void {
+  // memory_file (and any non-DefenceSource source_type) never produces a
+  // consumable allowance — its key space doesn't match the scan pipeline's —
+  // so skip it rather than mint annotation-only noise.
+  if (row.source_type === 'memory_file') return;
+  recordQuarantineDecision({
+    quarantineId: row.id,
+    decision,
+    sourceType: row.source_type,
+    sourceIdentifier: row.source_identifier,
+    title: row.original_title,
+    content: row.original_content,
+    reason: row.reason,
+    auditId: row.audit_id,
+    threatIndicators: parseIndicators(row.threat_indicators),
+    reviewedBy,
+    bulk,
+    project: row.project,
+  });
+}
 
 export interface QuarantineReviewResult {
   id: number;
@@ -30,7 +65,8 @@ export interface QuarantineBulkReviewResult {
 function getPendingQuarantineRow(id: number): QuarantineRow | null {
   const db = getDatabase();
   const row = db.prepare(
-    `SELECT id, original_title, original_content, project, source_type, source_identifier, reason, firewall_result
+    `SELECT id, original_title, original_content, project, source_type, source_identifier,
+            reason, firewall_result, threat_indicators, audit_id
        FROM quarantine
       WHERE id = ? AND status = 'pending'`
   ).get(id) as QuarantineRow | undefined;
@@ -94,9 +130,10 @@ function markPendingRowReviewed(id: number, status: 'approved' | 'rejected', rev
   }
 }
 
-function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): QuarantineReviewResult {
+function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string, bulk = false): QuarantineReviewResult {
   if (row.source_type === 'memory_file') {
     markPendingRowReviewed(row.id, 'approved', reviewedBy);
+    ledgerDecision(row, 'approve', reviewedBy, bulk);
     return {
       id: row.id,
       status: 'approved',
@@ -107,6 +144,7 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): Quar
   // rejects it instead of laundering hard-rejected poison back into memory.
   if (row.firewall_result === 'BLOCK') {
     markPendingRowReviewed(row.id, 'rejected', reviewedBy);
+    ledgerDecision(row, 'reject', reviewedBy, bulk);
     return { id: row.id, status: 'rejected' };
   }
 
@@ -118,11 +156,13 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): Quar
   } catch (e) {
     if (e instanceof MemoryBlockedError) {
       markPendingRowReviewed(row.id, 'rejected', reviewedBy);
+      ledgerDecision(row, 'reject', reviewedBy, bulk);
       return { id: row.id, status: 'rejected' };
     }
     throw e;
   }
   markPendingRowReviewed(row.id, 'approved', reviewedBy);
+  ledgerDecision(row, 'approve', reviewedBy, bulk);
 
   return {
     id: row.id,
@@ -131,13 +171,14 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string): Quar
   };
 }
 
-function rejectPendingQuarantineRow(id: number, reviewedBy: string): QuarantineReviewResult | null {
+function rejectPendingQuarantineRow(id: number, reviewedBy: string, bulk = false): QuarantineReviewResult | null {
   const row = getPendingQuarantineRow(id);
   if (!row) {
     return null;
   }
 
   markPendingRowReviewed(row.id, 'rejected', reviewedBy);
+  ledgerDecision(row, 'reject', reviewedBy, bulk);
   return { id, status: 'rejected' };
 }
 
@@ -160,7 +201,9 @@ export function approveQuarantineItems(ids: number[], reviewedBy: string = 'dash
     for (const id of ids) {
       const row = getPendingQuarantineRow(id);
       if (!row) continue;
-      items.push(approveExistingPendingRow(row, reviewedBy));
+      // Batch approval is triage, not N independent judgements — flag bulk so
+      // these never earn an allowance (Loop 3's approve-farm guard).
+      items.push(approveExistingPendingRow(row, reviewedBy, true));
     }
 
     return {

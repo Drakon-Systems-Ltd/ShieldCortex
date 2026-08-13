@@ -1,7 +1,9 @@
 # OpenClaw Integration
 
 ShieldCortex integrates with [OpenClaw](https://openclaw.dev) in complement mode by default:
-- Real-time defence scanning is on
+- Real-time defence scanning is on — but on the conversation path it is
+  **observe-only by default**, and it runs at all only where the operator has
+  granted the plugin conversation access on that host
 - The before-tool-call Action Guard is on (catastrophic operations blocked; dangerous operations enforced by default)
 - Automatic memory writes are opt-in (off by default)
 
@@ -70,14 +72,29 @@ wrapper also installs both components:
 - Native `openclaw plugins install` puts it in OpenClaw's managed npm project
   tree (`~/.openclaw/npm/projects/…/node_modules/@drakon-systems/shieldcortex-realtime`,
   registered in `plugins/installs.json`); the wrapper's compatibility path
-  copies it to `~/.openclaw/extensions/shieldcortex-realtime/`
-- Hooks into `llm_input`, `llm_output`, `before_tool_call`, and `session_end`
+  copies it to `~/.openclaw/extensions/shieldcortex-realtime/`. Both are
+  first-class installs: `shieldcortex doctor` recognises an extensions copy
+  (`index.js` + `openclaw.plugin.json` present) as installed, and an empty or
+  half-copied directory as not installed
+- Hooks into `llm_input`, `llm_output`, `before_agent_run`, `before_tool_call`, and `session_end`
+- The conversation hooks are refused by OpenClaw unless the operator grants
+  conversation access on that box. `llm_input` and `llm_output` are gated that
+  way on every build; `before_agent_run` joins them in 2026.5.9-beta.1, the same
+  build that first declares the gate — see
+  [Conversation firewall](../plugins/openclaw/README.md#conversation-firewall)
 
 ## Default behavior (safe complement mode)
 
 Enabled by default:
 - Keyword triggers: saves when user explicitly says phrases like `remember this:`
-- `llm_input` scanning: real-time threat detection + audit logging
+- `llm_input` scanning: real-time threat detection + audit logging. This hook is
+  **observation only** — it cannot stop a turn. The conversation firewall's
+  enforcement point is `before_agent_run`, and its posture defaults to
+  `observe`: detections are audited and sent to the operator, turns are not
+  blocked until you set `interceptor.conversation.posture: "enforce"`.
+  `interceptor.conversation.posture: "off"` disables **both** hooks: no scan, no
+  audit row, no cloud forwarding. Neither hook's audit rows contain prompt text —
+  they record a length and a content digest only
 - `before_tool_call` Action Guard: catastrophic operations blocked, dangerous operations enforced (see the [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
 - `agent:bootstrap` lifecycle wiring: security-warning file handoff only — no context injection (removed v2026.2.26; OpenClaw's native Memory Search recalls context at session start)
 
@@ -162,6 +179,25 @@ Auto-memory not saving:
 1. Confirm `openclawAutoMemory` is enabled
 2. Check `~/.shieldcortex/config.json` for expected values
 3. Check plugin/hook logs for `shieldcortex` or `cortex-memory` messages
+
+### `doctor` and a deliberately disabled plugin
+
+`plugins.entries["shieldcortex-realtime"].enabled: false` is a sentence an
+operator typed, so `shieldcortex doctor` reports it as **⚠️ warn and exits 0**.
+The line still says plainly that the host is running without the memory firewall
+and the Action Guard — it simply is not called a fault, because reporting a
+human's own decision back as a red ❌ is how the check that catches the *real*
+failure gets ignored. A **wiped** stanza (no entry at all, which is what a bad
+installer run leaves behind) is a different state and still **fails**.
+
+For CI, the enforcement route is the flag, not the severity:
+
+```bash
+shieldcortex doctor --strict   # every ⚠️ becomes exit 1
+```
+
+Use that where "disabled anywhere in the fleet" must break the build. Plain
+`shieldcortex doctor` stays green for the operator who chose it.
 
 ## Uninstall
 

@@ -10,6 +10,7 @@
 
 import type Database from 'better-sqlite3';
 import { getDatabase, withTransaction } from '../database/init.js';
+import { resolveMemoryConfig } from './config.js';
 import { expireQuarantineItems } from '../defence/quarantine/auto-expire.js';
 import { guardReadRows } from '../defence/trust/read-guard.js';
 import type { DefenceSource } from '../defence/types.js';
@@ -62,7 +63,7 @@ import { computeEffectiveSalience } from '../../scripts/lib/salience.mjs';
  * This is like the brain's sleep consolidation - should be run periodically
  */
 export function consolidate(
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = resolveMemoryConfig()
 ): ConsolidationResult {
   // Wrap entire consolidation in a transaction for atomicity
   return withTransaction(() => {
@@ -547,10 +548,74 @@ export function clusterAndSummarise(options?: { minClusterSize?: number }): {
 }
 
 /**
- * Enforce maximum memory limits
- * Removes lowest-priority memories when limits are exceeded
+ * #236: a row created within this window is NEVER an eviction victim.
+ *
+ * Why this is load-bearing and not just polish: eviction used to order by raw
+ * `salience ASC`, and long-term salience is a forward-only ratchet (the decay
+ * pass is fed short-term rows only) — so a mature store is a solid wall of
+ * 1.0 and the newest sub-1.0 write is the unique global minimum. Field data
+ * over 16 days: 169 of 171 new sub-1.0 long-term writes were deleted within
+ * ~2s of insert, while `remember` had already returned success with their ID.
+ * `importance:"high"` maps to 0.8, so the memories most worth keeping were
+ * exactly the ones being dropped.
+ *
+ * Ranking smarter (below) is not sufficient on its own — a newborn has
+ * access_count 0, so against a wall of recently-touched rows it can still sort
+ * first. The grace window is state-independent: whatever the salience
+ * distribution says, a memory the store just accepted is not destroyed. A cap
+ * breach during the window becomes a temporary overshoot, reclaimed by the
+ * next enforcement pass once rows age past the hour.
  */
-export function enforceMemoryLimits(config: MemoryConfig = DEFAULT_CONFIG): number {
+const EVICTION_GRACE_WINDOW = "-1 hour";
+
+/**
+ * Choose cap-eviction victims for one memory type.
+ *
+ * Victims are ranked by the shared `computeEffectiveSalience` (recency ×
+ * access × pin × downvote penalty) — the same signal recall ranks by — because
+ * raw `salience` is saturated at 1.0 across mature long-term stores and
+ * carries no information (#236). Eviction and recall now agree about what is
+ * valuable: the stalest, least-consulted, most-downvoted rows go first.
+ *
+ * Exclusions, both state-independent:
+ *  - rows inside EVICTION_GRACE_WINDOW (see above — never eat a newborn);
+ *  - pinned rows, matching prune.ts ("pinned memories are never pruned").
+ *    If an operator pins more rows than the cap, the store stays over cap
+ *    rather than overriding an explicit keep.
+ *
+ * Ties (e.g. equal effective salience) break toward evicting the stalest row,
+ * then the least-accessed, then the oldest id — deterministic, and the exact
+ * opposite of the old `access_count ASC` tiebreak that anti-selected newborns.
+ */
+function pickEvictionVictims(
+  db: Database.Database,
+  type: 'short_term' | 'long_term',
+  toRemove: number
+): number[] {
+  const candidates = db.prepare(`
+    SELECT id, salience, last_accessed, access_count, pinned, downvote_count
+    FROM memories
+    WHERE type = ?
+      AND COALESCE(pinned, 0) = 0
+      AND created_at < datetime('now', ?)
+  `).all(type, EVICTION_GRACE_WINDOW) as Array<Record<string, unknown>>;
+
+  candidates.sort((a, b) =>
+    (effectiveSalienceOfRow(a) - effectiveSalienceOfRow(b)) ||
+    ((Date.parse(String(a.last_accessed ?? '')) || 0) - (Date.parse(String(b.last_accessed ?? '')) || 0)) ||
+    ((a.access_count as number ?? 0) - (b.access_count as number ?? 0)) ||
+    ((a.id as number) - (b.id as number))
+  );
+
+  return candidates.slice(0, toRemove).map((r) => r.id as number);
+}
+
+/**
+ * Enforce maximum memory limits.
+ * Removes the lowest-effective-salience eligible memories when limits are
+ * exceeded — never newborns, never pinned rows (see pickEvictionVictims/#236).
+ */
+export function enforceMemoryLimits(config: MemoryConfig = resolveMemoryConfig()): number {
   // Note: If called within consolidate(), this is already in a transaction
   // If called standalone, we wrap it for safety
   const db = getDatabase();
@@ -563,14 +628,7 @@ export function enforceMemoryLimits(config: MemoryConfig = DEFAULT_CONFIG): numb
 
   if (shortTermCount > config.maxShortTermMemories) {
     const toRemove = shortTermCount - config.maxShortTermMemories;
-    const lowPriority = db.prepare(`
-      SELECT id FROM memories
-      WHERE type = 'short_term'
-      ORDER BY salience ASC, last_accessed ASC
-      LIMIT ?
-    `).all(toRemove) as { id: number }[];
-
-    for (const { id } of lowPriority) {
+    for (const id of pickEvictionVictims(db, 'short_term', toRemove)) {
       deleteMemory(id);
       deleted++;
     }
@@ -583,14 +641,7 @@ export function enforceMemoryLimits(config: MemoryConfig = DEFAULT_CONFIG): numb
 
   if (longTermCount > config.maxLongTermMemories) {
     const toRemove = longTermCount - config.maxLongTermMemories;
-    const lowPriority = db.prepare(`
-      SELECT id FROM memories
-      WHERE type = 'long_term'
-      ORDER BY salience ASC, access_count ASC, last_accessed ASC
-      LIMIT ?
-    `).all(toRemove) as { id: number }[];
-
-    for (const { id } of lowPriority) {
+    for (const id of pickEvictionVictims(db, 'long_term', toRemove)) {
       deleteMemory(id);
       deleted++;
     }
@@ -690,12 +741,15 @@ const DOWNVOTE_SQL = `
  *   - combined ≥ 0.85  → DELETE (near-identical; content already in the kept row)
  *   - combined < 0.85  → DOWNVOTE (reversible; sinks via effective salience)
  *
- * Why the split exists at all: NO reaping path (decay.ts shouldDelete,
- * prune.ts, expiry.ts, enforceMemoryLimits) reads `downvote_count` or effective
- * salience — they all order by raw `salience`. So downvote-ONLY would leave the
- * store unbounded (the dups sink in recall but never get pruned). Deleting the
- * near-identical losers keeps the store bounded with zero information loss; the
- * moderate near-dups are preserved and merely demoted.
+ * Why the split exists at all: most reaping paths (decay.ts shouldDelete,
+ * prune.ts, expiry.ts) read raw `salience`, not `downvote_count`/effective
+ * salience — so downvote-ONLY would leave the store effectively unbounded
+ * there (the dups sink in recall but never get pruned). Deleting the
+ * near-identical losers keeps the store bounded with zero information loss;
+ * the moderate near-dups are preserved and merely demoted. (Since #236,
+ * enforceMemoryLimits is the exception: cap eviction ranks by effective
+ * salience, so downvoted dups are now also the PREFERRED cap victims — which
+ * strengthens this boundedness argument rather than relying on it.)
  *
  * Tags are unioned onto the kept row and access counts summed (metadata only,
  * non-lossy). STM→LTM promotion is handled separately by processDecay/

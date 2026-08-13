@@ -4,6 +4,198 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## [Unreleased]
+
+## [4.49.0] - 2026-08-12
+
+**Threat Graph Phase E — relation-channel conflict detection (the ShadowMerge defence). Advisory/off like the rest of the threat graph, so installing this changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md` ("Policing the memory graph").**
+
+### Added
+
+- **Relation-channel conflict detection (Phase E — the ShadowMerge defence).** Write-time provenance on the memory-graph `triples` (`writer_source`, `writer_trust` stored already-capped, `valid_from`/`valid_to`, per-rule `confidence`: verb-pattern 0.8 vs co-occurrence 0.3). A throttled (hourly), stateless projector pass flags a **relation-channel conflict** when a single-valued predicate (`uses`/`depends_on`/`configures`/`replaces` — never `related_to`) holds ≥2 distinct open objects whose writers differ in trust by **≥0.2** — calibrated to the real distribution the scorer produces (an unattested owner/CLI/hook write caps at 0.7, a poisoned agent/tool write sits at 0.5, so the canonical attack shape is exactly 0.2 apart). Resolution is **symmetric**: both edges carry a `disputed` flag, *neither* is auto-suspended, and one `conflict` review node is minted; the operator resolves (keep one / keep both / reject both) as a replay-reproducible `operation='review'` ledger row, replayed each pass so an edit/merge can't silently revert it. Suspended (rejected) edges are filtered from **every agent-facing reader** — `get_related`, path explanation, graph recall ranking, and the dashboard graph views — so a resolution actually changes what the agent sees. `user:approved` provenance can never be crowned the authoritative side. Local-only — provenance/conflict state never egresses to the cloud. No shipping product (to our knowledge) does write-time relation-conflict detection on agent memory.
+- **Surfaces + schema (Phase E).** `threat_graph` MCP tool gains a `conflicts` view; `shieldcortex threat-graph conflicts|resolve-conflict` CLI; `doctor` surfaces the open-conflict review count. New columns `triples.{valid_from, valid_to, writer_source, writer_trust, disputed}` and `threat_graph_state.last_conflict_at`. `PROJECTOR_VERSION` → 5 and `EXTRACTION_VERSION` → 5 — the latter forces a one-time re-extraction on upgrade so existing triples gain write-time provenance and the corrected `related_to` confidence.
+
+### Fixed
+
+- **Adversarial-review + release-blocker hardening.** A five-lens review closed a determinism bug (conflict review nodes counted toward the event-node eviction cap, diverging `canonicalDump` at the cap) and a resolution-durability gap (keep_one/reject_both are replayed from the ledger, so a memory edit can't resurrect a rejected edge). A follow-up pass recalibrated the margin (0.3 → 0.2; the old gate missed the canonical owner-vs-poison shape at exactly 0.2 apart), wired `valid_to` filtering into the graph readers (a resolution previously changed only the review node, not what the agent saw), and stopped `backfillGraph` from stripping write-time provenance. Security + invariants review lenses returned no findings. Known limitation: cloud-sync excludes suspended edges going forward but does not yet retract edges synced before suspension (cloud-side reconciliation is a follow-up).
+
+## [4.48.0] - 2026-08-12
+
+**Two secret-handling defects closed, the CI blind spot that hid a third, and the Threat Graph ships — advisory and off by default.**
+
+### Fixed — secret handling
+
+- **Redaction covered only the FIRST occurrence of a repeated secret.** `redactCredentials` returned *successfully* with the secret still in its output: three occurrences produced one finding and left two raw copies; a value echoed twice inside a JSON body left one. `extractHighEntropyTokens` de-duplicated candidates on the token string, so occurrences 2..N never produced a redaction range, and `buildRedactedContent` cannot redact a range it was never given. Specific to the entropy net — the layer that exists for secrets whose shape we do not recognise, so nothing else was covering these; the pattern layer was clean throughout. It is also the shared primitive behind tool-response redaction, so a repeated secret could reach any consumer of "redacted" content verbatim. A redaction primitive that reports success while leaking gives the caller no signal at all. Extraction now returns every occurrence and the caller adds a range for each, while still reporting one finding per distinct secret — reporting volume is deliberately unchanged, because `medium > 0` drops the audit grade to C and exits 1. (#256)
+
+### Fixed — checks that declined a verdict they could give
+
+- **`doctor` reported "OpenClaw version UNKNOWN" on any global install.** The capability probe searched one layout — the managed node-runtime under `~/.openclaw/tools/` — so a plain `npm i -g openclaw` (`~/.npm-global`, `/usr/local`, nvm, volta) made `readdirSync` throw and the probe return `null`, forever, while the version sat readable beside the binary. It now follows the binary through `realpathSync` and walks up a bounded four levels, so every prefix layout falls out without hardcoding any of them; highest version wins, and a genuinely absent install still returns `null` rather than a guess. (#254, #255)
+
+### Added — CI
+
+- **The suite now runs on macOS.** Every job ran on Linux, which made a whole class of defect invisible by construction: anything assuming `/proc` semantics. The case that bought it — found in review, not in production — was a change replacing `appendFileSync` with a no-follow write whose symlink check called `readlinkSync('/dev/fd/N')`: correct on Linux, `EINVAL` on macOS, failing to a bare `return`. The result was an audit file created with **zero bytes**, exit 0, nothing on stderr — a silently empty Action Guard trail on every Mac, on the fail-closed hot path. Paired with `hook-audit-write-smoke.test.ts`, which spawns the real hook as a real process and asserts a row actually landed: it tests the outcome on whatever platform it runs on, not the mechanism. (#250)
+
+### Added — the Threat Graph (advisory / off by default)
+
+**The subsystem that makes ShieldCortex *learn*. Every learning effect is advisory or off by default; installing this release changes no scan behaviour.**
+
+Phases 0 and A–D. Phase E (relation-channel conflict detection) is deliberately **not** in this release — it is in review with open findings.
+
+**The false-positive rate remains unmeasured (#182), and the design calls for an advisory soak before any deployment moves the trust modifier to `enforce`. Treat the defaults as the supported configuration.**
+
+**The Threat Graph — the subsystem that makes ShieldCortex *learn*. Landed advisory/off.**
+
+A deterministic projection of the defence audit ledgers into a per-source security event graph (`threat_nodes` / `threat_edges`), with three learning loops on top. Every learning effect ships **advisory or off by default** — merging to `main` changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md`; overview in `ARCHITECTURE.md`.
+
+### Added
+
+- **Per-source threat history (Loop 1).** A decayed severity sum per source (14-day half-life; BLOCK/QUARANTINE/high-anomaly weighted; `pipeline_error` rows weight 0). The raw sum is ledger-derived and deterministic; the decayed output is refreshed by an idle sweep so risk heals on schedule. Accrual is **attestation-gated** — a source identity spoofed under a trusted agent's name (which resolves unattested) can never enter the enforcement risk sum — and rate-capped so no identity saturates in a burst.
+- **Advisory trust modifier (Loop 2).** One guarded, O(1), fail-to-zero read of per-source risk after trust scoring, subtracting `min(risk × 0.3, 0.3)` (additive-tightening — never raises trust). **Default `advisory`**: computed and recorded on the audit row, not applied; `enforce` applies it and only for attested identities. `shieldcortex threat-graph reset-source` is the operator dispute path.
+- **Operator allowances (Loop 3).** The system learns from individual quarantine review decisions: 3 qualifying approvals (distinct days, distinct content, individually reviewed — bulk never counts) of a (source, pattern) pair earn a 30-day allowance; a reject revokes with a remembered strike. Optional **auto-release** (`threatGraph.autoRelease`, default **off**) admits a would-be-quarantined item only when *every* detection is an active allowance and its title+content exactly matches an approved exemplar — never a BLOCK, per-source per-day capped, fails closed.
+- **Campaign detection (Loop 4).** Attribution of *caught* events — JS union-find clustering activity that spans ≥2 sources or ≥2 sessions through a shared non-hub pivot ("these blocks across three sessions are one actor"). Hub and pooled pivots (a source/session/pattern linking ≥10 counterparties, or `overflow`/`conversation:*`) are excluded so it clusters signal, not noise. A throttled (~daily) job mints `campaign` nodes + `part_of` edges; queryable via the tool's `campaigns` view and `shieldcortex threat-graph campaigns`. Detection-only: the alert digest + per-week cap are deferred. Not a discovery of quiet campaigns — a sub-threshold success mints no event and never clusters.
+- **Surfaces.** `threat_graph` MCP tool (`sources` / `source` / `events` / `allowances` / `campaigns` views, row+byte capped, emergency-stop guarded); `shieldcortex threat-graph rebuild|status|reset-source|campaigns` CLI (rebuild backfills from retained audit history); a `doctor` freshness check. New config block `threatGraph.{enabled, trustModifier, autoRelease}` — all default to the safe setting. New columns: `defence_audit.{source_attested, risk_modifier}`, `threat_edges.attrs`, `threat_graph_state.last_campaign_at`; new index `idx_audit_source_ident_ts`.
+
+### Fixed
+
+- **Knowledge-graph (`src/graph/`) hardening.** `graph_query` deduplicated emission (it re-listed the root as its own neighbour and hubs once per edge, and could emit an unbounded blob at depth 3+); prepared statements hoisted out of BFS loops; entity lookup switched to a `COLLATE NOCASE` index instead of an index-defeating `LOWER()`; extraction junk filters (code-identifier suffixes, doc-placeholder paths, pronouns, ops verbs); the silently-dropped `prefers`/`avoids`/`implements` triples fixed; `server.ts ↔ server.js` no longer silently fuzzy-merged into one entity.
+
+### Notes
+
+- **Shipped dormant, on purpose.** The false-positive rate is unmeasured (#182) and the design requires an advisory soak before any deployment moves the trust modifier to `enforce` — so it ships with every learning effect advisory or off, and the defaults are the supported configuration. Local-only: no threat-graph data is synced to the cloud. Existing installs cold-start (enforcement risk builds forward from attested writes; historical counters are preserved).
+## [4.47.40] - 2026-08-12
+
+**Docs-only release: the published README described a pipeline that does not exist.**
+
+No code changed. This ships the documentation corrections from `ee8091b0` to npmjs.com,
+where the package page renders the README from the tarball rather than from GitHub — so
+the errors below stayed visible on the listing page after being fixed in the repo.
+
+### Documentation
+
+- **The six pipeline layers were named wrongly.** The README listed "Pattern Detection",
+  "Structural Validation" and "Behavioural Scoring" — none of which exist in `src/`. The
+  real order is input sanitisation → trust scoring → firewall → sensitivity classification
+  → fragmentation detection → credential-leak detection. The "6-layer" count was always
+  correct; only the names were invented.
+- **The firewall detector list was wrong in both directions.** It was assembled from the
+  files in `defence/firewall/`, which listed `confusables.ts` as a detector (it is a shared
+  utility imported *by* the instruction and encoding detectors) and missed
+  `detectSkillThreats` entirely (it lives in `../skill-scanner/`). Now taken from what
+  `analyzeFirewall()` actually dispatches.
+- **Credential leak coverage was understated by more than half** — documented as "25+
+  patterns, 11 providers" since the v-era entry that was accurate at the time. It is
+  **49 patterns across 25 providers**.
+- **Cortex was marked "Pro licence required".** Pro was retired on 2026-07-04; Cortex is
+  free like every local feature. This contradicted the licensing section of the same file.
+- **The Python example called a `scan()` function that does not exist.** The PyPI package
+  is a client for the hosted API and needs a cloud key — now stated, with the working
+  `ShieldCortex(api_key=...)` form.
+- **`SKILL.md` shipped four commands that fail as written**: `cortex capture` took
+  `--task/--mistake/--fix` (the real flags are `--category/--what/--why/--rule`), and all
+  three integrations were documented as `setup` when the subcommand is `install`. It also
+  advertised MCP tools named `store`/`search`/`graph`, none of which exist, and described
+  the source as MIT-0 when the repository is MIT.
+- **Dashboard port corrected to 3030** in `SECURITY.md` (was 3838) and `SKILL.md` (was
+  3001, which is the API).
+- `ARCHITECTURE.md` trust table completed (`file` 0.6, `tool_response` 0.5, `email` 0.4 were
+  missing; unrecognised types score 0, not 0.1) and the reason `file:import` is pinned to
+  0.4 — below the auto-quarantine band, so restoring a backup does not quarantine every
+  row — is now recorded.
+- `docs/CLAIMS-PROOF.md` re-anchored to the new README wording so the 1:1 claim-to-test
+  mapping holds; counts corrected to 17 tests / 108 assertions by running the suite.
+
+## [4.47.39] - 2026-08-11
+
+**The OpenClaw conversation firewall now reaches the real host path — and approvals bind to what the operator actually reviewed.**
+
+### Security
+
+- **Conversation threats can block the run they are steering (#225, #226).** The plugin now uses OpenClaw's real `before_agent_run` contract, returns the host's `{ outcome: "block", reason }` decision shape, and keeps older hosts honest: enforcement is supported only where the blocking hook exists (OpenClaw 2026.5.12+). `observe`, `enforce`, and `off` remain distinct; `off` returns before conversation inspection, owner input is scanned but not treated as hostile data, and external/unknown sources remain subject to enforcement.
+- **The consent and delivery paths are real, not inferred.** Conversation hooks require the operator's explicit `hooks.allowConversationAccess: true` grant; install, repair, doctor, manifest schema, and runtime status now agree on that boundary. Scanner/config/runtime unavailability is audited and rate-limited instead of silently becoming clean, notification delivery records transport truth rather than dispatch intent, and new conversation audit rows persist bounded hash/length metadata instead of raw prompts.
+- **Approval hashes bind to the reviewed payload (#183, #241).** Description-only retries for exec-family tools remain spendable, while unknown and non-exec tools retain full payload binding. `Workflow.script` is an explicit reviewed surface; namespaced look-alikes and unlisted-field mutations cannot reuse the grant. The operator-notification path exposes `script` only for exact `Workflow`, preventing unrelated tool payloads from leaking through the approval card or pending summary.
+
+### Fixed
+
+- **Doctor no longer claims a live protection plane without live evidence (#103, #226, #239).** A missing conversation grant warns without pretending conversation scanning is active, and “tool-call gating is live” appears only when the running gateway roster actually proves the plugin loaded. If roster evidence is unavailable, doctor says the gating state is not separately proven.
+- **OpenClaw registration repair is executable, not advice.** A wiped/disabled stanza is distinguished from an intentional opt-out or unreadable config; repair restores registration through the merge-preserving writer, reloads the gateway, and verifies the resulting state.
+
+## [4.47.38] - 2026-08-11
+
+**A full memory store no longer eats the memory you just saved.**
+
+Field origin: an outside report (#236) with sixteen days of evidence from a live box. Once `long_term` reached its 1000-row cap, every new write below salience 1.0 was deleted **milliseconds after `remember` returned success with its ID** — 169 of 171 such writes lost, while every write at exactly 1.0 survived. `importance:"high"` maps to 0.8, so the memories most worth keeping were precisely the ones being dropped, and nothing in the tool response distinguished a stored memory from a discarded one.
+
+### Fixed
+
+- **Cap eviction can no longer select a brand-new row (#236).** Root cause: eviction ordered by raw `salience ASC`, but long-term salience is a forward-only ratchet (the decay pass only ever processed short-term rows), so a mature store is a solid wall of 1.0 and a fresh write below it is the unique global minimum — always the victim, with the `access_count ASC` tiebreak anti-selecting newborns for good measure. Two independent fixes, both required:
+  - **A one-hour grace window, state-independent:** a row created within the last hour is never an eviction victim, whatever the salience distribution says. A cap breach during the window becomes a temporary overshoot — reclaimed on the next pass — rather than data loss. Overshoot is recoverable; deletion is not.
+  - **Eviction now ranks by effective salience** (recency × access × pin × downvote penalty) — the same signal recall ranks by — instead of a saturated raw value. Eviction and recall finally agree about what is valuable: the stalest, least-consulted, most-downvoted rows go first. A pleasant consequence: downvoted near-duplicates become the *preferred* cap victims.
+  - **Pinned rows are never cap-evicted**, matching `prune.ts`. Pinning more rows than the cap keeps them all; the store stays over cap rather than overriding an explicit keep.
+  - The `short_term` eviction query had the identical shape and received the identical fix.
+
+## [4.47.37] - 2026-08-11
+
+**Three checks that could only ever report success, and the first defence on the conversation path that does anything.**
+
+Field origin: a fresh-eyes pass over the fleet found that ShieldCortex was claiming protection it did not have in three separate places at once — and that the one place it *was* watching, it could not act. Every fix here is the same shape: a check whose trigger condition was destroyed by the very fault it existed to detect.
+
+### Fixed
+
+- **doctor no longer reports a healthy host with no protection on it (#222).** `reconcilePluginState` gated *every* unprotected verdict behind `enabledInConfig`. The #214 installer wipe deletes the plugin entry **and** drops it from `plugins.allow`, which sets that false — so all three fail rules were skipped and control fell through to `healthy`. The fault disabled the alarm built to catch it: on one box that was roughly an hour with no memory firewall and no action guard, green ticks throughout. Three causes that previously collapsed into one shape are now separated, because they need opposite responses: an unreadable `openclaw.json` **warns** (unknown is not a verdict), an explicit `enabled:false` is **info** (a deliberate opt-out is not damage), and a wiped stanza **fails**. A narrower case is preserved: a gateway still holding the plugin from a pre-wipe boot is protected *now* and loses it at the next restart — a warning with a deadline. Remediation is real rather than named: the new `re-register` action restores the registration through the merge-preserving writer, reloads the gateway and re-verifies, without reinstalling a package that is already correct.
+- **The plugin stops announcing conversation hooks OpenClaw refused (#225).** OpenClaw gates `llm_input`/`llm_output` behind an explicit per-plugin consent grant; without it the host drops the registration and says so in its own log. ShieldCortex logged `registered (llm_input + llm_output + …)` on exactly those hosts — on one box the gateway printed our success line and the two rejections on the following lines, six times in a day. The startup line now names only hooks that will actually be live, and `doctor` gains a **Conversation scanning** check reporting the true state with the exact config to add. Withholding the grant is a legitimate choice on a sensitive surface, so an ungranted host warns rather than reporting damage — and a *granted* host is reported as **observation only**, never as protected, because `llm_input` has no blocking contract.
+- **The release gate can fail, and says which failure it is (#200).** The publish workflow's ClawHub step emitted `::warning` on a version mismatch and exited 0, so the job went green while ClawHub served stale code — three times. It also could not distinguish "uploaded, waiting behind moderation" (which promotes itself, measured at ~26 minutes) from "the publish never landed" (which needs a human), so the standing advice was to republish a version that already existed. Both now fail, with different exit codes and different instructions. `--check` is read-only: a verification path must not mutate what it verifies.
+
+### Added
+
+- **Conversation enforcement: capability detection (#225).** `before_agent_run` is the only conversation hook that can block a run and did not exist before OpenClaw 2026.5.12, while the plugin manifest declares support from 2026.3.22 — and OpenClaw *warns and ignores* an unknown hook rather than rejecting it. `doctor` now reports whether enforcement is even possible on this host, so "enabled" can never quietly mean "enforcing nothing". Deliberately **not** an engine-floor bump: that would block installation for operators on older hosts, including for the Action Guard, which is not a conversation hook and works fine there.
+- **A conversation detection now changes what the agent may DO (#233).** Previously the scan path and the Action Guard shared no state whatsoever, so a detected injection at one turn had no influence on the tool call it was steering at the next. A detection now taints the session for 15 minutes and the Action Guard tightens by one notch: `sensitive` starts asking, `dangerous` stops. Benign work is untouched — an agent that cannot read a file is useless, and a control that halts ordinary work is one operators switch off. Deliberately *not* blocking the turn: that hook is fail-closed on a budget the host owns, so a slow or crashed scan would kill the user's message outright, and a false positive there is unrecoverable. This fails the other way — if it breaks, you lose extra caution, not your agent. Escalations are recorded structurally on the audit entry, so an escalated denial is tellable from a natively catastrophic one.
+- **Source trust: the human speaks instructions, everything else is data.** A detection in the operator's own message no longer tightens the guard — their typing is an instruction, not an attack, and gating it is the false alarm that gets a control switched off. Everything the agent was handed is data, **including messages from another agent on a trusted closed channel**: an agent relaying a page it read is a confused deputy with good transport, and the closed channel is what lets an injection spread. Trust comes from the sender, never the transport — a web page pasted into a trusted chat is untrusted content arriving through it. Trust gates the *consequence*, not the detection: owner content is still scanned, warned and audited. A host that does not report the sender is treated as data, so one absent field cannot disable escalation fleet-wide.
+
+## [4.47.36] - 2026-08-10
+
+**A denial now reaches the operator *as* a denial.**
+
+Field origin: scheduled work was dying silently, and the one notification that did fire made it harder to diagnose rather than easier. On a box with no prompt surface, the operator received a card worded *"approval needed"* for a call the guard had already refused — no session, no cwd, and no statement that a job had just died. Answering it did nothing, because there was nothing left to answer. Six scheduled jobs were killed in ~30 hours on one box (2 Aug), discovered only by reading `~/.shieldcortex/audit/realtime-*.jsonl` by hand; `scripts/email_pickup.py` was denied 15 consecutive times, every 30 minutes — roughly 7 hours of email triage silently dead while the job's own status reported nothing wrong. Eight more were reproduced independently on an *enforcing* 4.47.35 box with `notify.openclaw` *enabled*, so this was neither warn mode, missing config, nor a stale version.
+
+### Fixed
+
+- **A denial and a request are now different events (#143, #223).** `scripts/pre-tool-hook.mjs` pinged the operator *before* the code that chooses between `ask` and `deny`, so the notification could not know which had happened and always said "approval needed". Notifications now carry a discriminator, `OperatorNotificationEvent = 'approval_requested' | 'denied_no_prompt_surface'`. A denial renders as `🛡️ ShieldCortex — BLOCKED: this action did NOT run`, carries `Blocked:` / `Session:` / `Cwd:`, and offers the retry-authorising `shieldcortex approve <hash>` only — no Approve/Deny pair on a request that is already dead, and no `denyCommand`.
+- **Both channels carry the distinction.** Native OpenClaw approval cards and the webhook channel (`X-ShieldCortex-Event` header, `event` as the first body key), so a receiver can branch on outcome without parsing prose.
+- **Back-compatible by construction.** `event` defaults to `'approval_requested'` and every pre-existing caller produces a byte-identical notification; an unknown or missing event renders as the approval wording. A stale `dist` degrading to today's text is safe — degrading to a false "this was blocked" is not.
+
+### Added
+
+- **A webhook secret field**, so a fallback receiver can reject unsigned posts.
+
+### Pinned by test
+
+A broken notifier can never become a broken guard: a receiver returning 500, one that never responds (cut off at the deadline), and a refused connection each change the guard's decision by nothing.
+
+### Known gap, named rather than implied
+
+This closes the *notification* half of the unattended lane. It does **not** deliver durable pending approvals or action resumption — a denial still kills the job; the operator now learns that it happened and can authorise the retry. That remainder, and the broker itself, stay open on #143. Note also that per #183 the approval hash covers the whole tool-input blob, so a quoted hash is not always spendable by the operator who receives it.
+
+## [4.47.35] - 2026-08-09
+
+**Republish only: the 4.47.34 npm artifacts did not contain 4.47.34's features.**
+
+The 4.47.34 publish ran on a box with `ignore-scripts=true`, so `prepublishOnly` (version sync-check, build, `test:dist`) never fired and npm packed a `dist/` from before the #220 merge — a package claiming the reviewed-script allowlist and native approval cards while containing neither. Source was identical at both tags; this cut exists so the registry artifact matches its label. **4.47.34 is deprecated on npm for both packages** — install 4.47.35 or later. No source change from 4.47.34.
+
+## [4.47.34] - 2026-08-09
+
+**Standing trust for human-reviewed scripts, one-tap approvals on the operator's own channel, and the last two folded-source false positives retired.**
+
+### Added
+
+- **Reviewed-script allowlist (#189).** `shieldcortex allowlist add <path> [--note]` pins a human-reviewed script by canonical path *and* content sha256, and the guard stops folding that file's source into the scan surface. Any edit changes the hash and silently re-gates — the re-gate is the feature. `remove`, `list` and `verify` (exit 1 on drift) are included. TTY-gated on add/remove exactly like `approve`/`deny`, on #118's threat model: an agent must not be able to pin its own payload. Review never relieves the invoking command line (catastrophic tier included), inline `-c`/heredoc code, a moved or copied file (realpath both sides), or an edited one. The check runs hash-then-skip on the same resolved read, so there is no TOCTOU window between verifying and folding. Wired on both enforcement surfaces and held together by a parity drift test; exemptions are recorded on the verdict (`reviewedScripts`) and persisted by both audit writers, so an allow that leaned on review is tellable apart from an allow that scanned everything.
+- **Native approval cards on the operator's channel (#143, partial).** `actionGuard.notify: { enabled: true, openclaw: true }` delivers holds as OpenClaw plugin approvals — Approve/Deny buttons wherever the operator's gateway already reaches. The webhook channel remains the fallback and the default stays OFF. The gateway scopes a pending approval to the requesting connection, so a detached waiter owns the card end-to-end and maps only the two offered decisions onto the #118 store: timeout, junk, `allow-always` (never offered) and gateway errors all leave the store untouched. Silence is not a no.
+
+### Fixed
+
+- **An approval is spendable by the command it was granted for (#201).** An operator would approve a hash for a denied command, the agent would re-issue the *identical* command, and it would be denied again under a fresh hash — because the model re-words the advisory `description` (and often `timeout`) on each attempt, and both were hashed. `hashToolCall` now projects `description` and `timeout` out of the input for exec-family tools before hashing. Deliberately still moving the hash: `command` itself, `dangerouslyDisableSandbox`, `run_in_background` — confinement and supervision changes must never ride an existing approval — and the full input of every non-exec tool, where a `description` is payload rather than annotation.
+- **An installed CLI's shim is not the operator's command (#199).** `sleep 30 && /opt/homebrew/bin/openclaw gateway restart` was denied as `install-package-global`, because the guard folded the Homebrew shim's body and scanned the launcher plumbing as live shell — a class covering essentially every Homebrew- or npm-installed CLI. Spelling the full path to an installed executable must not be scarier than typing its bare name; the bare name never folds, so relieving the spelt path adds no exposure. Relief is narrow: extensionless files, in recognised install roots, in command position only. Files with extensions, project-local `./bin/` directories and interpreter-invoked files still fold, fail-closed.
+- **Audit rows keep the matched span (#192).** `ToolGuardVerdict.matches` carries `{signal, span}` for every verdict a pattern produced, and both audit writers persist it, so a folded-source denial is diagnosable from the durable row instead of needing a re-run on the reporter's box. Two boundaries hold: `secret-egress` never contributes a span (the span would be the secret), and spans stay bounded at 80 characters.
+
 ## [4.47.33] - 2026-08-08
 
 **The 4.47.32 installer could silently unregister the very plugin it was installing.**

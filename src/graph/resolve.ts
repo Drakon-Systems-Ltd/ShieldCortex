@@ -1,6 +1,31 @@
 import { getDatabase } from '../database/init.js';
 import type { EntityType, ExtractionResult } from './extract.js';
 
+/**
+ * Write-time provenance for a triple (Phase E — ShadowMerge defence). Captured
+ * at the memory write and stamped onto every triple the write produces, so the
+ * conflict detector can reason about relation-channel disputes without a
+ * cross-table lookup.
+ */
+export interface TripleProvenance {
+  /** Canonical source tuple of the writing memory (e.g. `agent:jarvis`). */
+  writerSource: string;
+  /** Trust score at write time (raw — capping is applied on store). */
+  writerTrust: number;
+  /** Whether the writing source was attested (an unattested claim is capped). */
+  attested: boolean;
+}
+
+/**
+ * Trust stored on a triple for conflict purposes. A claimed (unattested)
+ * identity cannot mint trust above 0.7 — invariant 5's classes. Attested
+ * sources keep their real trust. Stored already-capped so conflict detection is
+ * a pure function of the triples' own columns (deterministic, rebuild-safe).
+ */
+export function cappedWriterTrust(raw: number, attested: boolean): number {
+  return attested ? raw : Math.min(raw, 0.7);
+}
+
 export function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length;
   if (m === 0) return n;
@@ -49,8 +74,10 @@ export function resolveEntity(name: string, type: EntityType): number {
     }
   }
 
-  // 4. Fuzzy match (names > 5 chars)
-  if (name.length > 5) {
+  // 4. Fuzzy match (names > 5 chars). Never for files: Levenshtein ≤ 2
+  // silently merged distinct paths ('server.ts' ↔ 'server.js') into one
+  // entity, and the alias was permanent.
+  if (name.length > 5 && type !== 'file') {
     const candidates = db.prepare('SELECT id, name, aliases FROM entities WHERE type = ? AND LENGTH(name) BETWEEN ? AND ?')
       .all(type, name.length - 2, name.length + 2) as { id: number; name: string; aliases: string | null }[];
     for (const cand of candidates) {
@@ -105,7 +132,11 @@ export function mergeEntities(keepId: number, removeId: number): void {
   })();
 }
 
-function applyExtractionResult(result: ExtractionResult, memoryId: number): void {
+function applyExtractionResult(
+  result: ExtractionResult,
+  memoryId: number,
+  provenance?: TripleProvenance,
+): void {
   const db = getDatabase();
   const nameToId = new Map<string, number>();
 
@@ -122,13 +153,37 @@ function applyExtractionResult(result: ExtractionResult, memoryId: number): void
     insertMemEntity.run(memoryId, entityId, 'mention');
   }
 
-  // 3. Insert triples
-  const insertTriple = db.prepare('INSERT OR IGNORE INTO triples (subject_id, predicate, object_id, source_memory_id) VALUES (?, ?, ?, ?)');
+  // 3. Insert triples with write-time provenance (Phase E). valid_from is always
+  // stamped so temporal queries have a lower bound; writer_source/writer_trust
+  // stay NULL when no provenance is supplied (backfill). writer_trust is stored
+  // already-capped. INSERT OR IGNORE keeps the first writer's provenance for an
+  // identical (subject, predicate, object) assertion — conflicts are about
+  // *different* objects on the same channel, which are distinct rows.
+  const validFrom = new Date().toISOString();
+  const writerSource = provenance?.writerSource ?? null;
+  const writerTrust = provenance
+    ? cappedWriterTrust(provenance.writerTrust, provenance.attested)
+    : null;
+  const insertTriple = db.prepare(
+    `INSERT OR IGNORE INTO triples
+       (subject_id, predicate, object_id, source_memory_id, confidence,
+        valid_from, writer_source, writer_trust)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
   for (const triple of result.triples) {
     const subjectId = nameToId.get(triple.subject);
     const objectId = nameToId.get(triple.object);
     if (subjectId !== undefined && objectId !== undefined) {
-      insertTriple.run(subjectId, triple.predicate, objectId, memoryId);
+      insertTriple.run(
+        subjectId,
+        triple.predicate,
+        objectId,
+        memoryId,
+        triple.confidence ?? 0.8,
+        validFrom,
+        writerSource,
+        writerTrust,
+      );
     }
   }
 
@@ -208,7 +263,11 @@ export function removeMemoryGraph(memoryId: number): {
   return db.transaction(() => clearMemoryGraphSlice(memoryId))();
 }
 
-export function replaceMemoryGraph(memoryId: number, result: ExtractionResult): {
+export function replaceMemoryGraph(
+  memoryId: number,
+  result: ExtractionResult,
+  provenance?: TripleProvenance,
+): {
   removedEntityLinks: number;
   removedTriples: number;
   orphanEntitiesPruned: number;
@@ -217,13 +276,17 @@ export function replaceMemoryGraph(memoryId: number, result: ExtractionResult): 
   return db.transaction(() => {
     const cleared = clearMemoryGraphSlice(memoryId);
     if (result.entities.length > 0) {
-      applyExtractionResult(result, memoryId);
+      applyExtractionResult(result, memoryId, provenance);
     }
     return cleared;
   })();
 }
 
-export function processExtractionResult(result: ExtractionResult, memoryId: number): void {
+export function processExtractionResult(
+  result: ExtractionResult,
+  memoryId: number,
+  provenance?: TripleProvenance,
+): void {
   const db = getDatabase();
-  db.transaction(() => applyExtractionResult(result, memoryId))();
+  db.transaction(() => applyExtractionResult(result, memoryId, provenance))();
 }

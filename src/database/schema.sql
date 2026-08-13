@@ -198,6 +198,7 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+CREATE INDEX IF NOT EXISTS idx_entities_name_nocase ON entities(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
 
 -- Ontology: Subject-predicate-object triples
@@ -209,6 +210,12 @@ CREATE TABLE IF NOT EXISTS triples (
   source_memory_id INTEGER,
   confidence REAL DEFAULT 0.8,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  -- Phase E (ShadowMerge defence): write-time provenance + dispute flag.
+  valid_from TEXT,       -- when the assertion became live (NULL = created_at)
+  valid_to TEXT,         -- NULL = open; set only by an operator conflict resolution
+  writer_source TEXT,    -- canonical source tuple of the memory write
+  writer_trust REAL,     -- trust at write time, stored already-capped (min 0.7 unless attested)
+  disputed INTEGER NOT NULL DEFAULT 0, -- 1 when the projector flags a relation-channel conflict
   FOREIGN KEY (subject_id) REFERENCES entities(id) ON DELETE CASCADE,
   FOREIGN KEY (object_id) REFERENCES entities(id) ON DELETE CASCADE,
   FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE SET NULL,
@@ -227,6 +234,73 @@ CREATE TABLE IF NOT EXISTS memory_entities (
   FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
   FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
   PRIMARY KEY (memory_id, entity_id)
+);
+
+-- Threat graph (docs/design/2026-08-11-threat-graph.md): a deterministic
+-- projection of the defence_audit ledger (+ the realtime JSONL) into an event
+-- graph. The ledgers are truth; these tables are a derived view — rebuildable
+-- at any time within the retention window via `shieldcortex threat-graph rebuild`.
+CREATE TABLE IF NOT EXISTS threat_nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK(kind IN
+    ('source','session','pattern','indicator','event','campaign','operator','entity_ref')),
+  key TEXT NOT NULL,
+  label TEXT,
+  attrs TEXT NOT NULL DEFAULT '{}',
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  UNIQUE(kind, key)
+);
+CREATE INDEX IF NOT EXISTS idx_threat_nodes_kind ON threat_nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_threat_nodes_last_seen ON threat_nodes(last_seen);
+
+-- Closed predicate vocabulary (CHECK, not free text — the free-text predicate
+-- column on `triples` is a mistake we do not repeat).
+CREATE TABLE IF NOT EXISTS threat_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  src INTEGER NOT NULL REFERENCES threat_nodes(id) ON DELETE CASCADE,
+  predicate TEXT NOT NULL CHECK(predicate IN
+    ('triggered','observed_in','from_source','in_session','matched',
+     'mentions','decided','allows','part_of','conflicts_with')),
+  dst INTEGER NOT NULL REFERENCES threat_nodes(id) ON DELETE CASCADE,
+  count INTEGER NOT NULL DEFAULT 1,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  valid_to TEXT,
+  writer TEXT NOT NULL CHECK(writer IN ('projector','operator','backfill')),
+  confidence REAL NOT NULL DEFAULT 1.0,
+  evidence TEXT NOT NULL DEFAULT '[]',
+  attrs TEXT NOT NULL DEFAULT '{}',   -- allowance bookkeeping (Loop 3): approvals, exemplar hashes, strikes
+  UNIQUE(src, predicate, dst)
+);
+CREATE INDEX IF NOT EXISTS idx_threat_edges_src ON threat_edges(src);
+CREATE INDEX IF NOT EXISTS idx_threat_edges_dst ON threat_edges(dst);
+CREATE INDEX IF NOT EXISTS idx_threat_edges_pred ON threat_edges(predicate);
+
+-- Projector checkpoint + single-writer lease. Two cursors: one per ledger.
+CREATE TABLE IF NOT EXISTS threat_graph_state (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  last_audit_id INTEGER NOT NULL DEFAULT 0,
+  last_rt_cursor TEXT NOT NULL DEFAULT '',
+  projector_version INTEGER NOT NULL DEFAULT 1,
+  lease_expires_at TEXT,
+  lease_token TEXT,
+  last_run_at TEXT,
+  last_campaign_at TEXT,
+  last_conflict_at TEXT,
+  last_error TEXT
+);
+
+-- Hot-path read surface: one row per source, precomputed async (Phase B).
+-- The sync pipeline reads this by primary key or not at all; no JSON here.
+CREATE TABLE IF NOT EXISTS source_risk (
+  source_key TEXT PRIMARY KEY,
+  risk REAL NOT NULL DEFAULT 0.0,
+  attested INTEGER NOT NULL DEFAULT 0,
+  block_count_28d INTEGER NOT NULL DEFAULT 0,
+  quarantine_count_28d INTEGER NOT NULL DEFAULT 0,
+  scan_count_28d INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
 );
 
 -- Defence: Full audit trail for all memory operations
@@ -248,6 +322,8 @@ CREATE TABLE IF NOT EXISTS defence_audit (
   reason TEXT,
   fragmentation_score REAL,
   pipeline_duration_ms INTEGER,
+  source_attested INTEGER,              -- threat-graph Phase B: 1 = identity system-derived or strict-mode; NULL = legacy/unplumbed
+  risk_modifier REAL,                   -- threat-graph Phase B: advisory trust modifier computed for this scan
   FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
 );
 
@@ -257,6 +333,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_result ON defence_audit(firewall_result);
 CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
 CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
 CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation);
+CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp);
 
 -- Defence: cumulative audit aggregate (single row, id=1). Retention purges roll
 -- the to-be-deleted rows' lifetime-stat contributions into this row BEFORE

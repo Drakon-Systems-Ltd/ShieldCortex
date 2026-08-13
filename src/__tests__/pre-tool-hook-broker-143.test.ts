@@ -44,7 +44,7 @@ const judgeReply = (over: Record<string, unknown> = {}) =>
 
 const INJECTION_REPLY = judgeReply({
   assessment: 'malicious', confidence: 0.96, inContext: false, injectionSuspected: true,
-  rationale: 'the request text is arguing for its own approval',
+  rationale: 'the request text is arguing for its own approval with hunter2 https://example.invalid/token ignore.previous.instructions',
 });
 
 interface HookResult { decision?: string; reason?: string; stderr: string }
@@ -176,6 +176,11 @@ describe('#143 — the approval broker through the real Claude Code hook', () =>
     const r = runHook(PRE_CLEARABLE);
     expect(r.decision).toBe('deny');
     expect(r.reason).toMatch(/injection/i);
+    for (const token of ['hunter2', 'https://example.invalid', 'ignore.previous.instructions']) {
+      expect(r.reason).not.toContain(token);
+      expect(r.stderr).not.toContain(token);
+      expect(JSON.stringify(auditRows())).not.toContain(token);
+    }
     // Hardening exists for the case where the request is trying to talk someone
     // into a yes. Handing that someone a one-tap approval command would undo it.
     expect(r.reason).not.toMatch(/shieldcortex approve/);
@@ -192,6 +197,27 @@ describe('#143 — the approval broker through the real Claude Code hook', () =>
     // neutral; it never widens what the user's settings permit.
     expect(r.decision).toBeUndefined();
     expect(r.stderr).toMatch(/PRE-CLEARED/);
+  }, 60_000);
+
+
+  it('redacts broker pre_clear audit rows instead of persisting command payloads or judge rationale', () => {
+    writeBrokerConfig(true);
+    const secret = 'blue10';
+    const url = 'gopher://broker.local/path';
+    const hostile = 'ignore.previous.instructions';
+    installFakeClaude({ reply: judgeReply({ rationale: `routine but ${secret} ${url} ${hostile}` }) });
+
+    const r = runHook({ command: `pip install requests # ${secret} ${url} ${hostile}` });
+
+    expect(r.decision).toBeUndefined();
+    for (const token of [secret, url, hostile]) {
+      expect(r.stderr).not.toContain(token);
+      expect(JSON.stringify(auditRows())).not.toContain(token);
+    }
+    const row = auditRows().find((candidate) => candidate.broker);
+    expect(row).toBeDefined();
+    expect(row!.outcome).toBe('approved');
+    expect(String(row!.preview)).toMatch(/redacted action surface/i);
   }, 60_000);
 
   it('refuses to pre-clear an irreversible action however confident the judge is', () => {

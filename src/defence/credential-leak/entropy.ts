@@ -61,6 +61,19 @@ export function checkHighEntropy(str: string): { entropy: number; confidence: nu
  * Extract candidate high-entropy tokens from content.
  * Looks for long contiguous alphanumeric+special strings
  * that could be secrets.
+ *
+ * EVERY OCCURRENCE IS RETURNED, including repeats of the same token.
+ *
+ * This used to de-duplicate on the token string, which quietly made redaction
+ * incomplete: the caller derives its redaction ranges from these results, so
+ * occurrences 2..N had no range and survived verbatim into "redacted" output.
+ * `redactCredentials(S + ' ' + S + ' ' + S)` returned two raw copies of S. A
+ * redaction primitive that reports success while leaking is worse than one that
+ * fails loudly, and the pattern layer never had the bug — it was specific to
+ * the entropy net, which exists for secrets whose shape we do not know.
+ *
+ * De-duplication is a REPORTING concern and now lives with the caller, which is
+ * the only place that can tell a duplicate finding from a duplicate range.
  */
 export function extractHighEntropyTokens(
   content: string,
@@ -68,13 +81,10 @@ export function extractHighEntropyTokens(
   // Match long strings of alphanumeric + common secret chars
   const tokenRegex = /[A-Za-z0-9\-_./+=]{20,}/g;
   const results: Array<{ token: string; position: number; entropy: number; confidence: number }> = [];
-  const seen = new Set<string>();
 
   let match: RegExpExecArray | null;
   while ((match = tokenRegex.exec(content)) !== null) {
     const token = match[0];
-    if (seen.has(token)) continue;
-    seen.add(token);
 
     // Skip common false positives
     if (isLikelyFalsePositive(token)) continue;

@@ -30,6 +30,7 @@
  */
 
 import { createHash } from 'crypto';
+import { mkdirSecure } from '../../setup/state-permissions.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -94,12 +95,36 @@ export function shortHash(hash: string): string {
  */
 const EXEC_ADVISORY_KEYS = new Set(['description', 'timeout']);
 
+/**
+ * Reviewed non-exec tool contracts where `description` and `timeout` are
+ * advisory to the named command field. This must stay an exact allowlist:
+ * `extractCommand` deliberately treats broad keys such as `code` and `input`
+ * as detection surfaces, but those keys are payload on many non-exec tools.
+ * Using that heuristic here would let one approval cover changed payload.
+ */
+const NON_EXEC_COMMAND_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['workflow', new Set(['script'])],
+]);
+
+function hasReviewedCommandSurface(tool: string, input: Record<string, unknown>): boolean {
+  // Matched on the RAW tool name, deliberately NOT `normaliseToolName` (which
+  // classifyFamily above uses). Normalising would map `mcp__evil__workflow`
+  // onto this entry, letting any MCP server claim a relief that was reviewed
+  // for exactly one first-party tool contract. Only an exact name qualifies;
+  // a namespaced look-alike keeps its full input bound.
+  const fields = NON_EXEC_COMMAND_FIELDS.get(tool.trim().toLowerCase());
+  if (!fields) return false;
+  return [...fields].some((field) => typeof input[field] === 'string' && input[field].length > 0);
+}
+
 function projectForHash(tool: string, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
-  if (classifyFamily(tool) !== 'exec') return input;
+  const record = input as Record<string, unknown>;
+  // Unknown tools fail closed: keep their full input bound to the approval.
+  if (classifyFamily(tool) !== 'exec' && !hasReviewedCommandSurface(tool, record)) return input;
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(input as Record<string, unknown>)) {
-    if (!EXEC_ADVISORY_KEYS.has(key)) out[key] = (input as Record<string, unknown>)[key];
+  for (const key of Object.keys(record)) {
+    if (!EXEC_ADVISORY_KEYS.has(key)) out[key] = record[key];
   }
   return out;
 }
@@ -155,7 +180,7 @@ function readFile(home?: string): ApprovalFile {
 
 function writeFileAtomic(file: ApprovalFile, home?: string): void {
   const dir = approvalsDir(home);
-  mkdirSync(dir, { recursive: true });
+  mkdirSecure(dir);
   const target = approvalsPath(home);
   const tmp = `${target}.tmp`;
   writeFileSync(tmp, JSON.stringify(file, null, 2), { mode: 0o600 });

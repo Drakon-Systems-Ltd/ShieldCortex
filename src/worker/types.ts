@@ -51,6 +51,12 @@ export interface WorkerConfig {
 
   /** Worker profile - 'full' (default) or 'mcp' (lite, see WorkerProfile docs) */
   profile: WorkerProfile;
+
+  /**
+   * Realtime JSONL directory for the threat-graph projector's second ledger
+   * (default: ~/.shieldcortex/audit). Injectable for tests.
+   */
+  threatGraphRealtimeDir?: string;
 }
 
 /**

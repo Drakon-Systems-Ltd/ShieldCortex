@@ -29,6 +29,63 @@ function hasPackageJson(installPath: string): boolean {
 }
 
 /**
+ * The trusted-local-copy install: `~/.openclaw/extensions/shieldcortex-realtime`
+ * (#226).
+ *
+ * This is a FIRST-CLASS install path, not a curiosity. `installPlugin` falls
+ * back to it whenever the native `openclaw plugins install` route is
+ * unavailable — no `openclaw` binary on PATH, a package install that fails, an
+ * air-gapped box — and OpenClaw discovers plugins from this directory. On such
+ * a host there is no installs.json record, no SQLite index record and no npm
+ * project dir, so every layer the reconciler consulted said "nothing is
+ * installed" while the gateway was loading the plugin from disk. Combined with
+ * an enabled config stanza (which that same install writes), the verdict was
+ * `enabled-not-installed`: a red doctor FAIL claiming the box boots with no
+ * memory firewall and no action guard, on a correctly installed, protected box.
+ *
+ * WHAT COUNTS. Both `index.js` and `openclaw.plugin.json` must be present. A
+ * bare directory is not an install: OpenClaw refuses to load a plugin with no
+ * manifest, and an interrupted copy or a partially-reaped uninstall routinely
+ * leaves an empty or half-populated directory behind. Treating that as an
+ * install would trade this false FAIL for a false PASS, which is the worse of
+ * the two — it is the #222 shape.
+ */
+export function resolveLocalExtensionInstall(home: string): string | null {
+  const dir = path.join(home, '.openclaw', 'extensions', PLUGIN_ID);
+  try {
+    for (const required of ['index.js', 'openclaw.plugin.json']) {
+      if (!fs.existsSync(path.join(dir, required))) return null;
+    }
+    return dir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The version of a trusted-local-copy install, or null.
+ *
+ * Read from `openclaw.plugin.json` FIRST: the installer rewrites that file's
+ * `version` to the ShieldCortex package version on every copy, and it is the
+ * manifest OpenClaw itself loads. The sibling `package.json` the installer
+ * writes is a three-key ESM marker (`{name, type, private}`) with no version at
+ * all, so reading that alone would report a valid install as version-unknown.
+ */
+export function readLocalExtensionPluginVersion(home: string): string | null {
+  const dir = resolveLocalExtensionInstall(home);
+  if (!dir) return null;
+  for (const file of ['openclaw.plugin.json', 'package.json']) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8')) as { version?: unknown };
+      if (typeof parsed.version === 'string' && parsed.version.trim()) return parsed.version.trim();
+    } catch {
+      // unreadable/unparseable — try the next, then give up
+    }
+  }
+  return null;
+}
+
+/**
  * Resolve the realtime plugin's on-disk install directory (the one containing
  * its package.json), or null when no install can be found.
  */
@@ -66,9 +123,10 @@ export function resolveRealtimePluginInstallPath(home: string): string | null {
 
 /**
  * The realtime plugin's actually-installed version, read from the on-disk
- * package.json (ground truth). Falls back to the version recorded in
- * installs.json only when no on-disk install resolves. Returns null when the
- * plugin is neither installed nor registered.
+ * package.json (ground truth). Falls back to the trusted-local-copy install in
+ * `~/.openclaw/extensions` (#226), then to the version recorded in
+ * installs.json when no on-disk install resolves. Returns null when the plugin
+ * is neither installed nor registered.
  */
 export function readInstalledRealtimePluginVersion(home: string): string | null {
   const installPath = resolveRealtimePluginInstallPath(home);
@@ -80,6 +138,14 @@ export function readInstalledRealtimePluginVersion(home: string): string | null 
       // fall through to the recorded version
     }
   }
+
+  // #226: the trusted-local-copy install. Checked before installs.json because
+  // it is a REAL install of a REAL build, where the installs.json record is a
+  // registry entry that may be stale — and on a local-copy host there is no
+  // installs.json at all, which is exactly how this install path came to read
+  // as "not installed on this host".
+  const localVersion = readLocalExtensionPluginVersion(home);
+  if (localVersion) return localVersion;
 
   // Last resort: the version recorded in installs.json (may be stale on
   // OpenClaw >= 2026.6.1, but better than nothing on layouts we can't resolve).

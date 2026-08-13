@@ -909,6 +909,143 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "threat-graph" subcommand (docs/design/2026-08-11-threat-graph.md)
+  if (process.argv[2] === 'threat-graph') {
+    const action = process.argv[3];
+    const KNOWN = ['rebuild', 'status', 'reset-source', 'campaigns', 'conflicts', 'resolve-conflict'];
+    if (!KNOWN.includes(action)) {
+      console.error(`Unknown threat-graph command. Available: ${KNOWN.join(', ')}`);
+      process.exit(1);
+    }
+    const { initDatabase } = await import('./database/init.js');
+    const os = await import('os');
+    const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.shieldcortex', 'memories.db');
+    initDatabase(dbPath);
+
+    if (action === 'rebuild') {
+      const { rebuildThreatGraph } = await import('./threat-graph/projector.js');
+      const { defaultRealtimeAuditDir } = await import('./threat-graph/shared.js');
+      console.log('Rebuilding the threat graph from both audit ledgers...');
+      const result = rebuildThreatGraph({ realtimeDir: defaultRealtimeAuditDir() });
+      console.log(
+        `Done! Projected ${result.processed} audit rows (${result.eventNodes} notable events).` +
+        (result.errors.length > 0 ? ` ${result.errors.length} note(s) recorded — see doctor.` : '')
+      );
+    } else if (action === 'status') {
+      const { getDatabase } = await import('./database/init.js');
+      const db = getDatabase();
+      const state = db.prepare('SELECT * FROM threat_graph_state WHERE id = 1').get() as Record<string, unknown> | undefined;
+      const maxAudit = (db.prepare('SELECT COALESCE(MAX(id), 0) as m FROM defence_audit').get() as { m: number }).m;
+      const counts = db.prepare(
+        'SELECT kind, COUNT(*) as c FROM threat_nodes GROUP BY kind ORDER BY kind'
+      ).all() as Array<{ kind: string; c: number }>;
+      console.log('Threat graph status:');
+      console.log(`  cursor: ${state?.last_audit_id ?? 0} of ${maxAudit} audit rows`);
+      console.log(`  realtime cursor: ${state?.last_rt_cursor || '(none)'}`);
+      console.log(`  last run: ${state?.last_run_at ?? 'never'}`);
+      if (state?.last_error) console.log(`  last error: ${state.last_error}`);
+      for (const row of counts) console.log(`  ${row.kind}: ${row.c}`);
+      const { listAllowances } = await import('./threat-graph/allowance.js');
+      const allowances = listAllowances(Date.now());
+      const active = allowances.filter(a => a.active).length;
+      console.log(`  allowances: ${allowances.length} (${active} active)`);
+      const campaignCount = (db.prepare("SELECT COUNT(*) AS c FROM threat_nodes WHERE kind = 'campaign'").get() as { c: number }).c;
+      console.log(`  campaigns: ${campaignCount}`);
+      const conflictCount = (db.prepare("SELECT COUNT(*) AS c FROM threat_nodes WHERE kind = 'event' AND key LIKE 'conflict:%'").get() as { c: number }).c;
+      const disputedCount = (db.prepare('SELECT COUNT(*) AS c FROM triples WHERE disputed = 1').get() as { c: number }).c;
+      console.log(`  conflicts: ${conflictCount} open (${disputedCount} disputed triples)`);
+    } else if (action === 'campaigns') {
+      const { getDatabase } = await import('./database/init.js');
+      const { runCampaignDetection } = await import('./threat-graph/campaign.js');
+      const r = runCampaignDetection({ nowMs: Date.now() });
+      console.log(`Detected ${r.campaigns} campaign(s) across ${r.events} recent events.`);
+      const db = getDatabase();
+      const camps = db.prepare("SELECT key, label, attrs FROM threat_nodes WHERE kind = 'campaign' ORDER BY last_seen DESC").all() as Array<{ key: string; label: string; attrs: string }>;
+      for (const c of camps) {
+        const a = JSON.parse(c.attrs);
+        console.log(`  ${c.key}  ${c.label}${a.entity_overlap ? ' · entity-corroborated' : ''}`);
+        console.log(`    sources: ${a.sources.join(', ')}`);
+        if (a.sessions?.length) console.log(`    sessions: ${a.sessions.join(', ')}`);
+        if (a.patterns?.length) console.log(`    patterns: ${a.patterns.join(', ')}`);
+      }
+    } else if (action === 'reset-source') {
+      const key = process.argv[4];
+      if (!key) {
+        console.error("Usage: shieldcortex threat-graph reset-source '<source-key>'  (e.g. 'agent:jarvis')");
+        process.exit(1);
+      }
+      const { resetSourceRisk } = await import('./threat-graph/risk.js');
+      const reviewedBy = process.env.USER || process.env.LOGNAME || 'operator';
+      const result = resetSourceRisk(key, { reviewedBy });
+      console.log(result.found
+        ? `Reset accumulated risk for '${key}'. Recorded as an operator review by ${reviewedBy}. Risk re-accrues if the source keeps misbehaving.`
+        : `No source '${key}' found in the threat graph — nothing to reset.`);
+    } else if (action === 'conflicts') {
+      const { getDatabase } = await import('./database/init.js');
+      const { detectRelationConflicts } = await import('./threat-graph/conflict.js');
+      const r = detectRelationConflicts({ nowMs: Date.now() });
+      console.log(`${r.conflicts} open relation-channel conflict(s):`);
+      const db = getDatabase();
+      const nodes = db.prepare("SELECT key, attrs FROM threat_nodes WHERE kind = 'event' AND key LIKE 'conflict:%' ORDER BY last_seen DESC").all() as Array<{ key: string; attrs: string }>;
+      for (const n of nodes) {
+        const a = JSON.parse(n.attrs);
+        console.log(`\n  ${n.key}  —  ${a.subject} ${a.predicate} (margin ${Number(a.detected_margin).toFixed(2)})`);
+        for (const c of a.contenders as Array<Record<string, unknown>>) {
+          const star = c.object_id === a.authoritative_object_id ? ' *authoritative' : '';
+          console.log(`    → ${c.object}  [${c.writer_source ?? 'unknown'} @ trust ${c.eff_trust}]${star}`);
+        }
+      }
+      if (nodes.length > 0) {
+        console.log(`\nResolve with: shieldcortex threat-graph resolve-conflict '<key>' <keep-one|keep-both|reject-both> ['<object-to-keep>']`);
+      }
+    } else if (action === 'resolve-conflict') {
+      const { getDatabase } = await import('./database/init.js');
+      const { resolveConflict } = await import('./threat-graph/conflict.js');
+      const key = process.argv[4];
+      const modeArg = process.argv[5];
+      const keptName = process.argv[6];
+      const MODES: Record<string, 'keep_one' | 'keep_both' | 'reject_both'> = {
+        'keep-one': 'keep_one', 'keep-both': 'keep_both', 'reject-both': 'reject_both',
+      };
+      const resolution = MODES[modeArg ?? ''];
+      const m = /^conflict:(\d+):(.+)$/.exec(key ?? '');
+      if (!m || !resolution) {
+        console.error("Usage: shieldcortex threat-graph resolve-conflict '<conflict:SUBJECT_ID:predicate>' <keep-one|keep-both|reject-both> ['<object-to-keep>']");
+        process.exit(1);
+      }
+      const subjectId = Number(m[1]);
+      const predicate = m[2];
+      const db = getDatabase();
+      const node = db.prepare("SELECT attrs FROM threat_nodes WHERE kind = 'event' AND key = ?").get(key) as { attrs: string } | undefined;
+      if (!node) {
+        console.error(`No open conflict '${key}'. List them with: shieldcortex threat-graph conflicts`);
+        process.exit(1);
+      }
+      let keptObjectId: number | undefined;
+      if (resolution === 'keep_one') {
+        const contenders = (JSON.parse(node.attrs).contenders ?? []) as Array<{ object: string; object_id: number }>;
+        const match = contenders.filter(c => c.object === keptName);
+        if (!keptName || match.length !== 1) {
+          console.error(`keep-one needs exactly one matching object to keep. Contenders: ${contenders.map(c => c.object).join(', ')}`);
+          process.exit(1);
+        }
+        keptObjectId = match[0].object_id;
+      }
+      const reviewedBy = process.env.USER || process.env.LOGNAME || 'operator';
+      try {
+        const res = resolveConflict({ subjectId, predicate, resolution, keptObjectId }, reviewedBy);
+        console.log(`Resolved ${res.channelKey} as ${res.resolution} — ${res.suspended} edge(s) suspended. Recorded as an operator review by ${reviewedBy}.`);
+      } catch (e) {
+        // The open set can shift between listing and resolving (a fresh detection
+        // pass, a concurrent edit). Surface the guided message, not a stack trace.
+        console.error(`Could not resolve '${key}': ${e instanceof Error ? e.message : String(e)}`);
+        console.error('Re-list current conflicts with: shieldcortex threat-graph conflicts');
+        process.exit(1);
+      }
+    }
+    return;
+  }
+
   // Handle "license" subcommand (also "licence" for British spelling)
   if (process.argv[2] === 'license' || process.argv[2] === 'licence') {
     const { handleLicenseCommand } = await import('./license/cli.js');

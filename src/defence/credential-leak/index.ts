@@ -180,8 +180,19 @@ export function scanForCredentials(
     }
   }
 
-  // Run entropy-based detection for anything not already caught
+  // Run entropy-based detection for anything not already caught.
+  //
+  // `extractHighEntropyTokens` returns EVERY occurrence, so the two concerns
+  // are separated deliberately here:
+  //
+  //   redaction — every occurrence gets a range. Missing one leaves the secret
+  //               verbatim in output the caller believes is redacted.
+  //   reporting — one finding per distinct secret. Turning a repeat into N
+  //               findings would inflate audit counts and severity grades
+  //               (`medium > 0` drops the grade to C, which exits 1) without
+  //               telling the operator anything they did not already know.
   const entropyTokens = extractHighEntropyTokens(content);
+  const reportedEntropyTokens = new Set<string>();
   for (const token of entropyTokens) {
     const start = token.position;
     const end = start + token.token.length;
@@ -195,6 +206,13 @@ export function scanForCredentials(
     // Skip allowlisted
     if (isAllowlisted(token.token, cfg.allowlist)) continue;
 
+    // Range FIRST, and unconditionally — a repeat must still be redacted even
+    // though it will not produce a second finding below.
+    matchedRanges.push({ start, end, replacement: '[REDACTED-high_entropy]' });
+
+    if (reportedEntropyTokens.has(token.token)) continue;
+    reportedEntropyTokens.add(token.token);
+
     const severity: CredentialSeverity = token.confidence >= 0.8 ? 'medium' : 'low';
     const action = actionForSeverity(severity, cfg);
 
@@ -206,8 +224,6 @@ export function scanForCredentials(
       position: start,
       action,
     });
-
-    matchedRanges.push({ start, end, replacement: '[REDACTED-high_entropy]' });
   }
 
   // Sort findings by position

@@ -113,5 +113,72 @@ describe('the duplicated renderer stays in sync with operator-notify.ts', () => 
   });
 });
 
+// ── #225/#226: the conversation-firewall alert on the native seam ────────────
+// A conversation detection has no held call behind it: no hash, no tool, no
+// decision. The gateway message it produces must therefore carry no approve or
+// deny affordance — a button that changes nothing is how an operator learns
+// that these taps are optional.
+describe('#226 conversation-threat alerts on the gateway seam', () => {
+  const THREAT = {
+    event: 'conversation_threat' as const,
+    outcome: 'observed' as const,
+    posture: 'observe',
+    summary: 'HIGH (2 detections)',
+    reason: 'conversation threat: HIGH (2 detections)',
+    sessionId: 'sess-1',
+    model: 'claude-opus-5',
+    host: 'test-host',
+    detectedAt: '2026-08-10T12:00:00.000Z',
+  };
+
+  it('sends a message with no approve/deny commands and no undefined hash', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const channel = createGatewayNotifyChannel({
+      notifyOperator: async (msg) => { calls.push(msg as Record<string, unknown>); return { delivered: true }; },
+    })!;
+
+    const result = await channel.send(THREAT, { timeoutMs: 5_000 });
+
+    expect(result).toEqual({ delivered: true });
+    const message = calls[0];
+    expect(message.event).toBe('conversation_threat');
+    expect(message.outcome).toBe('observed');
+    expect(message.approveCommand).toBeUndefined();
+    expect(message.denyCommand).toBeUndefined();
+    expect(message.hash).toBeUndefined();
+    expect(String(message.text)).not.toMatch(/\[Approve\]|\[Deny\]|undefined/);
+  });
+
+  it('names what happened to the turn, and never carries the prompt', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const channel = createGatewayNotifyChannel({
+      notifyOperator: async (msg) => { calls.push(msg as Record<string, unknown>); return { delivered: true }; },
+    })!;
+
+    await channel.send({ ...THREAT, outcome: 'blocked' }, { timeoutMs: 5_000 });
+    await channel.send({ ...THREAT, outcome: 'unavailable' }, { timeoutMs: 5_000 });
+
+    expect(String(calls[0].text)).toMatch(/BLOCKED: this turn did NOT reach the model/);
+    expect(String(calls[1].text)).toMatch(/NOT SCANNED/);
+    for (const call of calls) {
+      expect(String(call.text)).toMatch(/The prompt itself is deliberately NOT included/);
+    }
+  });
+
+  it('the duplicated threat renderer stays in sync with operator-notify.ts', async () => {
+    const { formatOperatorNotification } = await import('../../../src/defence/iron-dome/operator-notify.js');
+    const calls: Array<{ text: string }> = [];
+    const channel = createGatewayNotifyChannel({
+      notifyOperator: async (msg) => { calls.push(msg as { text: string }); return { delivered: true }; },
+    })!;
+
+    for (const outcome of ['observed', 'blocked', 'unavailable'] as const) {
+      await channel.send({ ...THREAT, outcome }, { timeoutMs: 5_000 });
+      const canonical = formatOperatorNotification({ ...THREAT, outcome });
+      expect(calls[calls.length - 1].text).toBe(canonical);
+    }
+  });
+});
+
 // keep jest from complaining about an unused import in some ts configs
 expect(typeof jest).toBe('object');

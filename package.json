@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "4.47.35",
+  "version": "4.49.0",
   "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -76,6 +76,7 @@
     "audit:security": "npm audit --audit-level=moderate",
     "prepack": "node scripts/ensure-bin-executable.mjs",
     "release:clawhub": "node scripts/clawhub-sync.mjs",
+    "release:clawhub:check": "node scripts/clawhub-sync.mjs --check",
     "version": "node scripts/sync-plugin-version.mjs && git add plugins/openclaw/package.json plugins/openclaw/openclaw.plugin.json skills/shieldcortex/SKILL.md",
     "prepublishOnly": "node scripts/sync-plugin-version.mjs --check && npm run build && npm run test:dist"
   },

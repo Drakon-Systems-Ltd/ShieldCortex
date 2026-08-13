@@ -14,6 +14,8 @@
  */
 
 import { ensureNativeBinding } from '../setup/native-binding.js';
+import { secureStatePermissions } from '../setup/state-permissions.js';
+import { getConfigDir } from '../cloud/config.js';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -58,6 +60,46 @@ export async function runRepair(_args: string[] = []): Promise<void> {
   }
 
   await runPluginReconcilePass();
+  runStatePermissionPass();
+}
+
+/**
+ * Third repair pass: re-harden the state-tree permissions (#218).
+ *
+ * doctor's permission check fails after a gateway restart when a runtime
+ * recreates a lock file or a log dir under the default umask. The create-time
+ * modes (state-permissions.mkdirSecure / SECURE_OPEN_MODE) stop new paths
+ * landing loose, but a create-mode cannot retro-tighten a path that ALREADY
+ * exists — so a fleet box that was recreated loose once needs an explicit
+ * correction. `install`/`update` already run this; `repair` did not, which is
+ * exactly the gap doctor's own "run repair to reconcile" advice fell into.
+ * Now it does, so the fix doctor points at actually corrects what doctor fails.
+ */
+function runStatePermissionPass(): void {
+  process.stdout.write(`\n  ${c('90', 'Checking state-tree permissions…')}\n`);
+  try {
+    // getConfigDir() (honours SHIELDCORTEX_CONFIG_DIR) — the SAME resolver
+    // install/update pass to secureStatePermissions, so repair hardens exactly
+    // the tree they do rather than a hardcoded-homedir subset.
+    const findings = secureStatePermissions(getConfigDir());
+    const corrected = findings.filter(f => f.fixed);
+    const failed = findings.filter(f => !f.fixed);
+    if (findings.length === 0) {
+      process.stdout.write(`  ${c('32', '✓')}  Permissions: already owner-only\n`);
+    } else {
+      for (const f of corrected) {
+        process.stdout.write(`  ${c('32', '✓')}  Tightened ${f.path} (${f.found} → ${f.required})\n`);
+      }
+      for (const f of failed) {
+        process.stdout.write(`  ${c('31', '✗')}  Could not tighten ${f.path} (${f.found} → ${f.required})${f.error ? `: ${f.error}` : ''}\n`);
+      }
+      if (failed.length > 0) process.exitCode = 1;   // never report a false all-clear
+    }
+    process.stdout.write('\n');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`  ${c('90', `State-permission check skipped — ${msg}`)}\n\n`);
+  }
 }
 
 /**

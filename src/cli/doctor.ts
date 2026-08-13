@@ -19,7 +19,22 @@ import {
   findEoverrideRiskPins,
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
-import { gatherReconcileInput, reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
+import {
+  gatherReconcileInput,
+  reconcilePluginState,
+  REALTIME_PLUGIN_ID,
+  type ReconcileVerdict,
+} from '../integrations/openclaw-plugin-index.js';
+import {
+  readConversationAccess,
+  describeConversationAccess,
+  conversationAccessFix,
+} from '../integrations/openclaw-conversation-access.js';
+import {
+  readOpenClawHostVersion,
+  evaluateEnforcementSupport,
+  describeEnforcementSupport,
+} from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
@@ -41,6 +56,8 @@ import {
 // transport (cli-invoker.js) and the explainer (doctor-explainer.js) are
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
+import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
+import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
 
@@ -71,6 +88,98 @@ export interface CheckResult {
    * perfectly healthy first run (#129).
    */
   skipped?: 'db-uninitialised';
+  /**
+   * Set when this remedy is carried out by an OpenClaw `plugins`/`skills`
+   * subcommand. OpenClaw refuses ALL of them — reporting only "Unknown
+   * command" — while any config entry dangles, so the advice is a no-op an
+   * operator can follow for days without noticing (#221). `applyOpenClawCliGate`
+   * strips it, or swaps in `fallbackFix`, when the config does not validate.
+   *
+   * Declared per site rather than matched from the fix text, deliberately: the
+   * `installed-not-enabled` remedy also reads "shieldcortex repair" but routes
+   * to a pure JSON write (restore-registration) and keeps working when
+   * OpenClaw is blocked — and it is the ONLY remedy for an UNPROTECTED host.
+   * No substring can tell those two apart, so a text-matching gate would
+   * delete the one piece of advice that still helps.
+   */
+  needsOpenClawCli?: { subcommand: 'plugins' | 'skills' | 'config'; fallbackFix?: string };
+  /**
+   * Set by `checkOpenClawConfigValid` when the config is PROVEN invalid, so
+   * `applyOpenClawCliGate` keys on the fact rather than on the severity.
+   *
+   * Keying the gate on `status === 'fail'` would mean any future adjustment to
+   * this check's severity silently switches the whole suppression feature off
+   * with no test failing — the class of coupling that produced #222 and #103.
+   */
+  openClawCliBlocked?: true;
+}
+
+/** The `OpenClaw config` check's label. */
+export const OPENCLAW_CONFIG_LABEL = 'OpenClaw config';
+
+/**
+ * Strip remedies that cannot execute (#221).
+ *
+ * Every OTHER check's severity is deliberately untouched: the host is exactly
+ * as broken as it was, so its counts and the exit code must not move. A wrong
+ * verdict must never make a blocked host look healthier.
+ *
+ * The config row itself is the one exception, and only downwards. `doctor`
+ * exits 1 on any `fail`, with no `--strict` opt-in — and the enforcement
+ * contract above `doctorExitCode` reserves that for states ShieldCortex owns.
+ * An invalid OpenClaw config with NOTHING of ours blocked by it (a host using
+ * ShieldCortex purely for MCP memory, whose OpenClaw has some third-party
+ * plugin's dangling entry) is a real finding but not our failure, so it warns.
+ * The moment it actually blocks one of our remedies, it fails.
+ *
+ * Fail-open. Anything short of a proven-invalid config leaves every fix alone,
+ * because a doctor that hides working advice when it could not reach `openclaw`
+ * is a worse bug than the one being fixed here.
+ */
+export function applyOpenClawCliGate(results: CheckResult[]): CheckResult[] {
+  // Keyed on the explicit marker, never on severity — see `openClawCliBlocked`.
+  if (!results.some(r => r.openClawCliBlocked)) return results;
+
+  // Nothing of ours is actually BROKEN by it: report, do not fail the run.
+  //
+  // "Has a tag" is not the same as "is a problem". The optional-skill notice is
+  // an `info` row that is tagged and is present by DEFAULT on every host not
+  // using the OpenClaw skill — so counting tags alone kept the config row at
+  // `fail`, and `doctor` exited 1, on hosts with nothing wrong. Only a row that
+  // is itself a fault (fail/warn) justifies failing the run; info rows are
+  // still annotated below, they just do not vote.
+  const blockedFault = results.some(
+    r => r.needsOpenClawCli && (r.status === 'fail' || r.status === 'warn'),
+  );
+
+  const note = ' [remedy blocked — fix the OpenClaw config first, see "OpenClaw config" above]';
+  return results.map((r) => {
+    // The config row is the only one whose severity may move, and only down.
+    if (r.openClawCliBlocked) {
+      return blockedFault
+        ? r
+        : {
+            ...r,
+            status: 'warn' as const,
+            message: `${r.message}\n      (no ShieldCortex remedy on this host depends on it)`,
+          };
+    }
+
+    if (!r.needsOpenClawCli) return r;
+    // Annotation runs regardless of `blockedFault` — an info row does not vote
+    // on severity, but it is still unfollowable advice and must say so.
+    //
+    // One site carries its remediation in `message` rather than `fix` (the
+    // optional-skill notice). A gate that only rewrote `fix` would sail past
+    // it and leave it as the single piece of unfollowable advice on the page —
+    // the exact class of miss this issue is about. Annotating in place also
+    // avoids promoting it into Suggested fixes on healthy hosts.
+    if (!r.fix) return { ...r, message: r.message + note };
+    const { fallbackFix } = r.needsOpenClawCli;
+    return fallbackFix
+      ? { ...r, fix: fallbackFix, message: r.message + note }
+      : { ...r, message: r.message + note, fix: undefined };
+  });
 }
 
 /**
@@ -358,6 +467,156 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
 
 async function checkDatabase(): Promise<CheckResult> {
   return runDatabaseCheck(getDbPath());
+}
+
+/**
+ * Threat-graph projector freshness (docs/design/2026-08-11-threat-graph.md,
+ * Phase A). A stalled projector degrades to "no data" silently by design
+ * (invariant 4: a missing/stale value must never harm a scan) — this check is
+ * what makes a dead projector a finding instead of a silent regression, the
+ * #200/#222 lesson that a check that can only report success is not a check.
+ *
+ * Uses the initialised singleton when present (tests); otherwise opens the
+ * DB file read-only like every other doctor check.
+ */
+export async function checkThreatGraph(
+  opts: { lagWarnThreshold?: number; enabled?: boolean; nowMs?: number; sweepStaleMs?: number } = {},
+): Promise<CheckResult> {
+  const label = 'Threat graph';
+  const lagWarnThreshold = opts.lagWarnThreshold ?? 1000;
+  const sweepStaleMs = opts.sweepStaleMs ?? 6 * 60 * 60 * 1000; // 6h default
+
+  // Config gate first: a deliberately disabled projector accrues lag by
+  // design and must not WARN forever. `opts.enabled` is a test seam only.
+  const { isThreatGraphEnabled } = await import('../cloud/config.js');
+  const enabled = opts.enabled ?? isThreatGraphEnabled();
+  if (!enabled) {
+    return { label, status: 'info', message: 'disabled by config (threatGraph.enabled=false)' };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Database = require('better-sqlite3');
+  let db: any = null;
+  let opened = false;
+  try {
+    const { isDatabaseInitialized, getDatabase } = await import('../database/init.js');
+    if (isDatabaseInitialized()) {
+      db = getDatabase();
+    } else {
+      const dbPath = getDbPath();
+      const gate = databasePrerequisite(label, dbPath);
+      if (gate) return gate;
+      db = new Database(dbPath, { readonly: true });
+      opened = true;
+    }
+
+    const hasTable = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'threat_graph_state'"
+    ).get();
+    if (!hasTable) {
+      return {
+        label,
+        status: 'info',
+        message: 'threat-graph tables not present yet (created on next init after upgrade)',
+      };
+    }
+
+    const state = db.prepare(
+      'SELECT last_audit_id, last_rt_cursor, last_run_at, last_error FROM threat_graph_state WHERE id = 1'
+    ).get() as { last_audit_id: number; last_rt_cursor: string; last_run_at: string | null; last_error: string | null } | undefined;
+    const maxAudit = (db.prepare('SELECT COALESCE(MAX(id), 0) as m FROM defence_audit').get() as { m: number }).m;
+
+    if (state?.last_error) {
+      return {
+        label,
+        status: 'warn',
+        message: `last projector run recorded an error: ${state.last_error.slice(0, 200)}`,
+        fix: 'shieldcortex threat-graph rebuild',
+      };
+    }
+
+    const cursor = state?.last_audit_id ?? 0;
+    const lag = maxAudit - cursor;
+
+    // Never-ran is not "caught up". A small backlog on a fresh install is a
+    // friendly info (the next worker tick handles it); a backlog past the
+    // warn threshold with no run ever means no worker is projecting — warn.
+    const neverRan = (!state || !state.last_run_at) && cursor === 0;
+    if (neverRan && maxAudit > 0 && lag <= lagWarnThreshold) {
+      return {
+        label,
+        status: 'info',
+        message: `projector has not run yet (${maxAudit} audit rows waiting) — a worker tick or \`shieldcortex threat-graph rebuild\` will populate the graph`,
+      };
+    }
+
+    if (lag > lagWarnThreshold) {
+      return {
+        label,
+        status: 'warn',
+        message: `projector is ${lag} audit rows behind (cursor ${cursor} of ${maxAudit})` +
+          (state?.last_run_at ? `, last ran ${state.last_run_at}` : ', never ran'),
+        fix: 'ensure a worker is running (MCP server or dashboard), or: shieldcortex threat-graph rebuild',
+      };
+    }
+
+    // Idle-sweep freshness: source_risk drives the (advisory/enforce) trust
+    // modifier, and a stalled sweep means stale risk feeding it. Warn when the
+    // most-recent source_risk.updated_at is older than the budget. Only
+    // meaningful once the table has rows.
+    const hasRiskTable = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='source_risk'"
+    ).get();
+    if (hasRiskTable) {
+      const newest = db.prepare('SELECT MAX(updated_at) AS m FROM source_risk').get() as { m: string | null };
+      if (newest.m) {
+        const nowMs = opts.nowMs ?? Date.now();
+        const ageMs = nowMs - Date.parse(newest.m);
+        if (ageMs > sweepStaleMs) {
+          return {
+            label,
+            status: 'warn',
+            message: `risk sweep is stale — source_risk last refreshed ${newest.m} ` +
+              `(${Math.round(ageMs / 3_600_000)}h ago); the trust modifier is reading stale risk`,
+            fix: 'ensure a worker is running (MCP server or dashboard), or: shieldcortex threat-graph rebuild',
+          };
+        }
+      }
+    }
+
+    // Open relation-channel conflicts (Phase E) are advisory review items, not
+    // a projector fault — surface the count in the healthy message so the
+    // operator knows there is a review queue without it reading as an error.
+    let conflictNote = '';
+    try {
+      const openConflicts = (db.prepare(
+        "SELECT COUNT(*) AS c FROM threat_nodes WHERE kind = 'event' AND key LIKE 'conflict:%'"
+      ).get() as { c: number }).c;
+      if (openConflicts > 0) {
+        conflictNote = `; ${openConflicts} relation-channel conflict(s) awaiting review (shieldcortex threat-graph conflicts)`;
+      }
+    } catch { /* conflicts are a display extra — never fail the check on them */ }
+
+    return {
+      label,
+      status: 'pass',
+      message: (maxAudit === 0
+        ? 'nothing to project yet'
+        : `caught up (cursor ${cursor} of ${maxAudit}` +
+          `${state?.last_rt_cursor ? `, realtime at ${state.last_rt_cursor}` : ''}` +
+          `${state?.last_run_at ? `, last ran ${state.last_run_at}` : ''})`) + conflictNote,
+    };
+  } catch (e) {
+    return {
+      label,
+      status: 'warn',
+      message: `check failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  } finally {
+    if (opened && db) {
+      try { db.close(); } catch { /* readonly probe */ }
+    }
+  }
 }
 
 /**
@@ -847,6 +1106,14 @@ export async function checkOpenClawApprovalButtons(
     status: 'info',
     message: `Telegram approval prompts fall back to "/approve" text (inlineButtons: ${scope ?? 'unset → allowlist'})`,
     fix: "Make approvals tappable: set channels.telegram.capabilities.inlineButtons to 'all' (or 'dm'/'group' for a tighter surface) via `openclaw config patch`, then restart the gateway.",
+    // MEASURED, not assumed: `openclaw config patch` is refused under an
+    // invalid config too (exit 1, "OpenClaw config is invalid"). It was
+    // initially left untagged on the theory that a *config* subcommand would be
+    // the operator's escape hatch — it is not. Hand-editing the file is.
+    needsOpenClawCli: {
+      subcommand: 'config',
+      fallbackFix: "Make approvals tappable: set channels.telegram.capabilities.inlineButtons to 'all' (or 'dm'/'group') by editing ~/.openclaw/openclaw.json directly — `openclaw config patch` is refused while the config is invalid — then restart the gateway.",
+    },
   }];
 }
 
@@ -1258,6 +1525,52 @@ export async function checkLockFile(scDir: string = getShieldCortexDir()): Promi
   }
 }
 
+// ── Check 7.4: OpenClaw config validity (#221) ───────────
+/**
+ * Runs BEFORE every OpenClaw check, because it is the prerequisite for all of
+ * their remedies. An invalid OpenClaw config makes `plugins` and `skills`
+ * refuse — reporting "Unknown command", never naming the config — so the seven
+ * checks below produce accurate findings with unfollowable advice.
+ *
+ * Returns rather than throws on every path: the runDoctor catch renders
+ * `check crashed — …` with NO fix line, which is the same unactionable outcome
+ * this check exists to remove.
+ */
+export async function checkOpenClawConfigValid(
+  home: string = os.homedir(),
+  deps: ValidateDeps = {},
+): Promise<CheckResult> {
+  const label = OPENCLAW_CONFIG_LABEL;
+  let verdict: OpenClawConfigVerdict;
+  try {
+    verdict = validateOpenClawConfig(home, deps);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'info', message: `not checked — ${msg}` };
+  }
+
+  switch (verdict.state) {
+    case 'valid':
+      return { label, status: 'pass', message: 'validates — OpenClaw accepts plugins/skills commands' };
+    case 'indeterminate':
+      return { label, status: 'info', message: `not checked — ${verdict.reason}` };
+    case 'invalid':
+      return {
+        label,
+        status: 'fail',
+        openClawCliBlocked: true,
+        message:
+          'OpenClaw REFUSES every `plugins` and `skills` command until this validates — it reports '
+          + 'them as "Unknown command", so remediation looks like it ran and silently did nothing (#221). '
+          + `OpenClaw says:\n      ${verdict.detail.join('\n      ')}`,
+        fix:
+          'Fix the OpenClaw config FIRST — nothing else below can run until it validates: '
+          + '`openclaw doctor --fix` (or edit the keys quoted above), confirm with '
+          + '`openclaw config validate`, then re-run `shieldcortex doctor`.',
+      };
+  }
+}
+
 // ── Check 7.5: OpenClaw residue (orphans only) ───────────
 async function checkOpenClawResidue(): Promise<CheckResult> {
   const env = detectEnvironment();
@@ -1291,6 +1604,11 @@ async function checkOpenClawResidue(): Promise<CheckResult> {
       status: 'warn',
       message: `${report.orphanCount} orphan${report.orphanCount === 1 ? '' : 's'} — ${first}${suffix}`,
       fix: 'Run `shieldcortex uninstall --deep --confirm` to purge, or reinstall with `shieldcortex openclaw install`',
+      // Only the reinstall half needs OpenClaw; the purge is pure filesystem.
+      needsOpenClawCli: {
+        subcommand: 'plugins',
+        fallbackFix: 'Run `shieldcortex uninstall --deep --confirm` to purge the residue (pure filesystem — this half still works). Reinstalling needs a valid OpenClaw config first.',
+      },
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1379,6 +1697,12 @@ export async function checkOpenClawPluginPackage(
         fix:
           `Remove ${barePkgDir.replace(os.homedir(), '~')} then reinstall the supported plugin: ` +
           `\`openclaw plugins install @drakon-systems/shieldcortex-realtime\``,
+        needsOpenClawCli: {
+          subcommand: 'plugins',
+          fallbackFix:
+            `Remove ${barePkgDir.replace(os.homedir(), '~')} (pure filesystem — this half still works). ` +
+            `Reinstalling the supported plugin needs a valid OpenClaw config first.`,
+        },
       };
     }
   }
@@ -1595,6 +1919,9 @@ export async function checkOpenClawDuplicateInstalls(
       fix:
         `Run \`shieldcortex openclaw repair\` to safely reinstall via the canonical path ` +
         `and clean up the legacy locations (preserves your OpenClaw plugin config).`,
+      // `openclaw repair` → repairOpenClawPlugin → `plugins enable` +
+      // `plugins install --force`. No filesystem-only half to fall back to.
+      needsOpenClawCli: { subcommand: 'plugins' },
     };
   }
 
@@ -1618,6 +1945,10 @@ export async function checkOpenClawDuplicateInstalls(
         `round-trip needed to clear OpenClaw's sticky hook-pack tracking, while preserving ` +
         `your OpenClaw plugin config. (Plain \`rm -rf\` on the hooks/ copy reverts on the ` +
         `next \`plugins update\`.)`,
+      // The worst site to leave unguarded: its own text tells the operator the
+      // filesystem escape hatch does NOT work, so a blocked host is left with
+      // zero followable action.
+      needsOpenClawCli: { subcommand: 'plugins' },
     };
   }
 
@@ -1634,6 +1965,11 @@ export async function checkOpenClawDuplicateInstalls(
     fix:
       `Run \`shieldcortex openclaw repair\` (or remove manually: ${rmCmd}) and restart OpenClaw. ` +
       `The canonical npm install at ~/.openclaw/npm/ is the supported location.`,
+    needsOpenClawCli: {
+      subcommand: 'plugins',
+      // Non-sticky case, so the manual removal genuinely works on its own.
+      fallbackFix: `Remove manually: ${rmCmd}, then restart OpenClaw. The canonical npm install at ~/.openclaw/npm/ is the supported location.`,
+    },
   };
 }
 
@@ -2502,6 +2838,7 @@ export async function checkOpenClawManagedPinDrift(
       status: 'fail',
       message: `realtime plugin is DISABLED in OpenClaw config${detail} — threat telemetry is not flowing`,
       fix: 'Run `shieldcortex openclaw repair` to reconcile the managed pins, reinstall, and re-enable the plugin.',
+      needsOpenClawCli: { subcommand: 'plugins' },
     };
   }
 
@@ -2512,6 +2849,7 @@ export async function checkOpenClawManagedPinDrift(
       status: 'warn',
       message: `managed-pin drift will EOVERRIDE on the next \`openclaw update\`: ${list}`,
       fix: 'Run `shieldcortex openclaw repair` now to reconcile the pins before an update disables the plugin.',
+      needsOpenClawCli: { subcommand: 'plugins' },
     };
   }
 
@@ -2556,6 +2894,16 @@ export async function checkOpenClawHookFreshness(
         status: 'warn',
         message: 'cortex-memory hook is out of date (installed copy differs from packaged version)',
         fix: 'Run `shieldcortex openclaw install` to refresh the hook',
+        needsOpenClawCli: {
+          subcommand: 'plugins',
+          // The hook refresh is a file copy that happens BEFORE OpenClaw is
+          // invoked at all (copyHookFiles at openclaw.ts:1276, installPlugin at
+          // :1320), and `--no-plugins` skips the OpenClaw half outright. So the
+          // useful work lands even on a blocked host — withdrawing this outright
+          // would leave the operator on a stale memory-capture hook with no
+          // action, which is the same withheld-advice failure #221 is about.
+          fallbackFix: 'Run `shieldcortex openclaw install --no-plugins` to refresh the hook (a file copy — this half still works). Refreshing the plugin needs a valid OpenClaw config first.',
+        },
       };
     }
 
@@ -2610,6 +2958,7 @@ export async function checkOpenClawPluginVersion(
       status: 'warn',
       message: `realtime plugin v${installed} installed, v${expectedVersion} available`,
       fix: 'Run `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest` (reliable past a pinned spec), then restart the gateway',
+      needsOpenClawCli: { subcommand: 'plugins' },
     };
   }
 
@@ -2633,6 +2982,65 @@ export async function checkOpenClawPluginVersion(
  * reads OpenClaw's own loaded roster, so a silent drop cannot hide. `home` /
  * `expectedVersion` are injectable for tests.
  */
+/**
+ * #225 phase 1: report whether conversation scanning is actually happening.
+ *
+ * OpenClaw drops the conversation hooks (`llm_input`/`llm_output`) at
+ * registration unless a non-bundled plugin is granted
+ * `plugins.entries.<id>.hooks.allowConversationAccess = true`. On this fleet
+ * the gateway logged that drop six times in one day while ShieldCortex's own
+ * startup line announced both hooks as registered — protection claimed, not
+ * held.
+ *
+ * Two honest outcomes, and neither is a green tick for "protected":
+ *  - ungranted → WARN. Nothing is being scanned. Not a `fail`: withholding
+ *    conversation access is a legitimate operator choice on a sensitive
+ *    surface, and crying damage over a deliberate decision is how a check
+ *    earns the right to be ignored.
+ *  - granted → INFO, explicitly OBSERVATION ONLY. `llm_input` has no blocking
+ *    contract, so a pass tick here would be a fresh false green.
+ */
+export async function checkOpenClawConversationScanning(
+  home: string = os.homedir(),
+): Promise<CheckResult> {
+  const label = 'Conversation scanning';
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+
+  const state = readConversationAccess(home, REALTIME_PLUGIN_ID);
+  // #225 phase 2: the grant and the host's CAPABILITY are independent facts,
+  // and an operator needs both. Granting access on a host whose OpenClaw
+  // predates before_agent_run buys observation and nothing more — saying so up
+  // front is cheaper than discovering it after enabling enforcement.
+  const capability = evaluateEnforcementSupport(readOpenClawHostVersion(home));
+  const message = `${describeConversationAccess(state, REALTIME_PLUGIN_ID)}; ${describeEnforcementSupport(capability)}`;
+
+  if (!state.readable) {
+    return {
+      label,
+      status: 'warn',
+      message,
+      fix: 'Check that ~/.openclaw/openclaw.json exists and is valid JSON, then re-run `shieldcortex doctor`.',
+    };
+  }
+  if (!state.granted) {
+    return { label, status: 'warn', message, fix: conversationAccessFix(REALTIME_PLUGIN_ID) };
+  }
+  if (capability.support === 'unsupported') {
+    // Granted but incapable: scanning happens, enforcement never can. That is a
+    // real ceiling on this host, not a misconfiguration — warn, and name the
+    // version that lifts it.
+    return {
+      label,
+      status: 'warn',
+      message,
+      fix: `Upgrade OpenClaw to ${capability.minVersion} or later if you want conversation enforcement to become possible. Scanning and auditing work as-is.`,
+    };
+  }
+  return { label, status: 'info', message };
+}
+
 export async function checkOpenClawPluginLoadState(
   home: string = os.homedir(),
   expectedVersion: string = pkg.version,
@@ -2643,11 +3051,129 @@ export async function checkOpenClawPluginLoadState(
   }
 
   const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
+  const result = renderPluginLoadVerdict(verdict);
+
+  // #226: "loaded" is not "protecting the conversation". A plugin whose
+  // conversation-access grant is missing has had its llm_input/llm_output
+  // registrations refused by the host. Tool-call gating is live only when the
+  // running roster proves the plugin loaded; conversation scanning is absent
+  // either way. A green tick that says "loaded" and stops
+  // there is read as "protected", so the pass is downgraded — a WARN, matching
+  // the severity `checkOpenClawConversationScanning` uses for the same fact
+  // (#225/#230): withholding the grant is a legitimate operator choice, not
+  // damage. Only the pass is touched; every failing/warning state above owns
+  // its own message and must not have this stacked on top of it.
+  if (result.status === 'pass') {
+    const access = readConversationAccess(home, REALTIME_PLUGIN_ID);
+    if (access.readable && !access.granted) {
+      const toolCallStatus =
+        verdict.loadedInLiveRoster === true
+          ? 'tool-call gating is live'
+          : 'tool-call gating is NOT separately proven while live-roster evidence is unavailable';
+      return {
+        ...result,
+        status: 'warn',
+        message: `${result.message}. NOTE: conversation-hook access is NOT granted, so the gateway refuses this plugin's llm_input/llm_output hooks — ${toolCallStatus}; conversation scanning is NOT live`,
+        fix: conversationAccessFix(REALTIME_PLUGIN_ID),
+      };
+    }
+  }
+  return result;
+}
+
+/**
+ * Verdict → operator-facing check result. Split out of
+ * `checkOpenClawPluginLoadState` so every state can be asserted directly
+ * (#222): the bug there was not the classification but the RENDERING — a
+ * `default:` arm that returned `pass`, so any state this function did not
+ * explicitly recognise (including a newly added unprotected one) green-ticked.
+ * There is no catch-all pass here now; `healthy` is spelled out, and anything
+ * unrecognised warns.
+ */
+export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult {
+  const label = 'OpenClaw plugin loaded';
   const fix = 'Run `shieldcortex repair` to reconcile the plugin install metadata and verify it actually loads.';
 
   switch (verdict.state) {
     case 'not-installed':
       return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
+    case 'enabled-not-installed':
+      // openclaw.json turns on a plugin that is not on this host. Reporting it
+      // as "skipped (not installed)" — which is what the old default branch's
+      // sibling case did — describes the disk and hides the claim: every
+      // config-reading surface says protection is ON, and the gateway boots
+      // without an interceptor. Install state and claimed state disagree, and
+      // the operator's belief follows the claim.
+      return {
+        label,
+        status: 'fail',
+        message:
+          'openclaw.json ENABLES the realtime plugin but no package is installed on this host — the gateway boots with NO memory firewall and NO action guard while config reports it ON',
+        fix: 'Install the plugin: `openclaw plugins install @drakon-systems/shieldcortex-realtime@latest`, then restart the gateway (or run `shieldcortex repair`, which will do both).',
+        // Highest-severity unactionable site: BOTH offered routes spawn the
+        // refused subcommand, and the message says the gateway boots with no
+        // memory firewall and no action guard.
+        needsOpenClawCli: { subcommand: 'plugins' },
+      };
+    case 'config-unreadable':
+      // #11: cannot-read is not absent. A truncated or permission-denied
+      // openclaw.json used to collapse into "no entry", which the #222 rule
+      // then convicted as an unprotected wipe — a false red pointing an
+      // operator at a repair for a config that is merely half-written.
+      return {
+        label,
+        status: 'warn',
+        message:
+          '~/.openclaw/openclaw.json exists but could NOT be read or parsed — the plugin\'s enable state is INDETERMINATE. Neither protected nor unprotected is proven',
+        fix: 'Check the file: `node -e "JSON.parse(require(\'fs\').readFileSync(process.env.HOME+\'/.openclaw/openclaw.json\',\'utf8\'))"` — fix the JSON (or the permissions), then re-run doctor.',
+      };
+    case 'installed-not-enabled':
+      // #222/#228: the #214 installer wipe. The package is on disk and correct;
+      // the openclaw.json registration is gone. The old switch had no case for
+      // this state at all, so it fell to `default:` and printed the green
+      // "realtime plugin loaded (roster-confirmed)" tick — the unprotected
+      // state silencing the alarm built to catch it.
+      return {
+        label,
+        status: 'fail',
+        message:
+          'realtime plugin is installed on disk but NOT REGISTERED in openclaw.json (no entry, absent from plugins.allow) — the host is UNPROTECTED: the gateway will boot WITHOUT the interceptor, no memory firewall, no action guard' +
+          (verdict.loadedInLiveRoster === true
+            ? '. The RUNNING gateway still has it loaded from the pre-wipe config, so protection ends at the next restart'
+            : ''),
+        // Not `repair`'s reinstall: the package is already here and correct.
+        fix: 'Restore the registration for the EXISTING install: `shieldcortex repair` (writes plugins.allow + plugins.entries["shieldcortex-realtime"].enabled = true and reloads the gateway). Nothing is reinstalled.',
+      };
+    case 'disabled-by-operator':
+      // #12: an explicit `enabled: false` is an operator decision, not an
+      // incident. Reporting a human's own deliberate choice back to them as a
+      // red FAIL is how the check that catches the real wipe gets ignored. A
+      // WIPED stanza (no entry at all) is the case above, and it still fails.
+      //
+      // WARN IS DELIBERATE, AND SO IS THE EXIT CODE IT PRODUCES.
+      //
+      // Under `doctorExitCode`, ⚠️ is exit 0 and ❌ is exit 1, so an ordinary
+      // `shieldcortex doctor` on a deliberately-disabled host SUCCEEDS while
+      // printing this warning. That is the intended contract, not an oversight:
+      // an operator who turned the plugin off does not want their scripts to
+      // start failing because of it, and the state is fully described here.
+      //
+      // A fleet that wants "disabled anywhere is a build failure" has a
+      // supported route, and it is `--strict`: it escalates every ⚠️ to exit 1,
+      // so this line gates CI without changing what a human sees. Escalating the
+      // severity itself would take that choice away from both audiences at once
+      // — the operator loses a green run they are entitled to, and CI gains
+      // nothing it could not already have.
+      return {
+        label,
+        status: 'warn',
+        message:
+          'realtime plugin is installed but explicitly disabled in openclaw.json (enabled: false) — this host is running WITHOUT the memory firewall and action guard, which is what disabled means. An operator wrote that, so it is reported as a deliberate state rather than a fault' +
+          (verdict.loadedInLiveRoster === true
+            ? '. The RUNNING gateway still has it loaded from the pre-disable config, so it goes away at the next restart'
+            : ''),
+        fix: 'If that was not intentional, set plugins.entries["shieldcortex-realtime"].enabled = true in ~/.openclaw/openclaw.json and restart the gateway — the package is already installed, nothing needs reinstalling. To make a disabled host fail a pipeline, run `shieldcortex doctor --strict` (⚠️ becomes exit 1); plain `doctor` exits 0 on a deliberate disable by design.',
+      };
     case 'index-unreadable':
       // DIAGNOSTIC-UNAVAILABLE, not a security fail-open: a broken better-sqlite3
       // binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
@@ -2682,6 +3208,7 @@ export async function checkOpenClawPluginLoadState(
         message:
           'realtime plugin is enabled:true in config but NOT loaded (absent from OpenClaw\'s roster) — the host is UNPROTECTED while status reports ON',
         fix,
+        needsOpenClawCli: { subcommand: 'plugins' },
       };
     case 'version-regressed':
       return {
@@ -2689,6 +3216,8 @@ export async function checkOpenClawPluginLoadState(
         status: 'fail',
         message: `realtime plugin regressed to v${verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
         fix,
+        // The exact line the #221 operator chased for five days.
+        needsOpenClawCli: { subcommand: 'plugins' },
       };
     case 'conflicted-metadata':
       return {
@@ -2696,6 +3225,7 @@ export async function checkOpenClawPluginLoadState(
         status: 'warn',
         message: `installs.json and the SQLite index disagree on the realtime plugin — a toggle can silently drop it. ${verdict.reasons[verdict.reasons.length - 1] ?? ''}`.trim(),
         fix,
+        needsOpenClawCli: { subcommand: 'plugins' },
       };
     case 'duplicate-install':
       return {
@@ -2703,17 +3233,72 @@ export async function checkOpenClawPluginLoadState(
         status: 'warn',
         message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it`,
         fix,
+        needsOpenClawCli: { subcommand: 'plugins' },
       };
-    default:
+    // EXPLICIT, not `default:`. #222 was a state that fell through to a green
+    // tick because no branch claimed it, and a `default: → pass` arm is that
+    // hazard rebuilt: the next state added to PluginLoadState would inherit
+    // "healthy" silently. Only `healthy` may render a pass here; anything
+    // unrecognised lands in the arm below and warns.
+    case 'healthy': {
+      // #103: "roster-confirmed" is a claim about EVIDENCE, and this arm used to
+      // make it unconditionally. `reconcilePluginState` reaches `healthy` both
+      // when the running gateway's boot roster names the plugin AND when that
+      // roster could not be read at all — it records the difference in
+      // `reasons`, which this renderer discards. So on any host where the boot
+      // line was unreadable, doctor asserted roster confirmation it did not
+      // have: install state described as load state, which is the exact
+      // inversion #103 was filed for, rebuilt one layer up.
+      //
+      // Proven ⇒ pass with an evidence-backed roster claim. Unproven ⇒ pass
+      // with an explicit diagnostic gap, matching the reconciler's `ok` verdict
+      // without turning installation evidence into a live-load assertion.
+      const rosterProven = verdict.loadedInLiveRoster === true;
+      const version = verdict.onDiskVersion ?? verdict.expectedVersion;
+      if (!rosterProven) {
+        // Status stays `pass`: the reconciler classified this `severity: 'ok'`
+        // (installed, enabled, versions agree) and nothing is known to be
+        // wrong, so escalating here would both contradict the verdict and warn
+        // on every host whose gateway log is merely unreadable. What was wrong
+        // was the CLAIM, not the status — so the claim is what changes.
+        return {
+          label,
+          status: 'pass',
+          message:
+            `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
+            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+        };
+      }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
       // canary (that needs gateway consent) — so it must not claim "enforcing"
       // from roster presence alone (#74 attempt #3 was roster-present-but-not-
       // enforcing). Say "loaded (roster-confirmed)"; point at repair's canary. (#74 finding 6)
+      //
+      // "Loaded" does not mean "scanning conversations" either — that gap is
+      // owned by `checkOpenClawPluginLoadState`, which downgrades this tick when
+      // the conversation-access grant is missing (#226), and reported in full by
+      // `checkOpenClawConversationScanning` (#225/#230). This renderer is pure:
+      // it reads the verdict and nothing off disk.
       return {
         label,
         status: 'pass',
-        message: `realtime plugin loaded (roster-confirmed, v${verdict.onDiskVersion ?? verdict.expectedVersion}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+        message: `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
+    }
+    default: {
+      // A state the reconciler produced and this renderer does not know. It is
+      // reachable only by adding a PluginLoadState without a case here — which
+      // is exactly how #222 happened — so it reports the gap instead of
+      // inheriting a green tick. `state` is typed `never` here, so a new state
+      // also fails the typecheck before it can ever reach a user.
+      const unknown: never = verdict.state;
+      return {
+        label,
+        status: 'warn',
+        message: `plugin load state '${String(unknown)}' is not recognised by this version of doctor — cannot confirm the realtime plugin is loaded (this is a doctor gap, not proof of a problem)`,
+        fix,
+      };
+    }
   }
 }
 
@@ -2973,7 +3558,14 @@ export async function checkOpenClawSkillVersion(
   const { findInstalledSkillDirs, readInstalledSkillVersion } = await import('../setup/openclaw.js');
   const dirs = findInstalledSkillDirs(home);
   if (dirs.length === 0) {
-    return { label, status: 'info', message: 'skill not installed (optional) — `shieldcortex openclaw skill install` adds it' };
+    // Remediation lives in `message`, not `fix` — this is the only such site,
+    // and it is tagged so the gate annotates it too (#221).
+    return {
+      label,
+      status: 'info',
+      message: 'skill not installed (optional) — `shieldcortex openclaw skill install` adds it',
+      needsOpenClawCli: { subcommand: 'skills' },
+    };
   }
   const v = readInstalledSkillVersion(dirs[0]);
   if (!v) {
@@ -2981,6 +3573,7 @@ export async function checkOpenClawSkillVersion(
       label, status: 'warn',
       message: `skill present at ${dirs[0]} but its SKILL.md version is unreadable`,
       fix: 'Run shieldcortex openclaw skill install to reinstall a clean copy',
+      needsOpenClawCli: { subcommand: 'skills' },
     };
   }
   if (v === cliVersion) {
@@ -2990,6 +3583,7 @@ export async function checkOpenClawSkillVersion(
     label, status: 'warn',
     message: `skill v${v} does not match CLI v${cliVersion} — agents are reading stale instructions`,
     fix: 'Run shieldcortex openclaw skill install',
+    needsOpenClawCli: { subcommand: 'skills' },
   };
 }
 
@@ -3014,7 +3608,13 @@ export async function checkStatePermissions(stateDir: string = getShieldCortexDi
     message:
       `${findings.length} path(s) readable or writable beyond the owner (${worst}${findings.length > 4 ? ', …' : ''}) — ` +
       `the memory database and the audit trail must be owner-only`,
-    fix: 'Run `shieldcortex install` (it hardens on every run), or by hand: chmod 700 ~/.shieldcortex ~/.shieldcortex/{audit,approvals,logs} && chmod 600 ~/.shieldcortex/memories.db* ~/.shieldcortex/config.json*',
+    // #218: point at `repair` — it now re-hardens the state tree directly
+    // (runStatePermissionPass) without rewriting CLAUDE.md/hooks the way a full
+    // `install` does. The manual one-liner uses an explicit `audit approvals
+    // logs` list rather than a `{…}` brace expansion, because the guard's
+    // touch-approval-store rule gates the expanded form (approving our own
+    // printed advice would be its own paper cut).
+    fix: 'Run `shieldcortex repair` (it re-hardens the state tree), or by hand: chmod 700 ~/.shieldcortex && chmod 700 ~/.shieldcortex/audit ~/.shieldcortex/approvals ~/.shieldcortex/logs && chmod 600 ~/.shieldcortex/memories.db* ~/.shieldcortex/config.json*',
   };
 }
 
@@ -3205,6 +3805,13 @@ export async function runDoctorAiSection(
  * and a first run must not fail anyone's pipeline for being a first run.
  * `--strict` opts into escalating ⚠️ as well, for callers that want a
  * zero-tolerance gate.
+ *
+ * That split is the enforcement contract for every DELIBERATE-but-degraded
+ * state — an operator's `enabled: false` being the canonical one (#12/#226).
+ * Such a state warns and exits 0 for the human who chose it, and exits 1 under
+ * `--strict` for the fleet that has decided it is not acceptable. Neither
+ * audience needs the severity itself changed, and changing it would silently
+ * override the other one's policy.
  */
 export function doctorExitCode(results: CheckResult[], opts: { strict?: boolean } = {}): number {
   if (results.some(r => r.status === 'fail')) return 1;
@@ -3241,11 +3848,15 @@ export async function runDoctor(
     checkDiskUsage,
     checkStatePermissions,
     checkLockFile,
+    // #221: ahead of every OpenClaw check, so the root cause prints above the
+    // symptoms and its fix leads the Suggested-fixes block.
+    checkOpenClawConfigValid,
     checkOpenClawResidue,
     checkOpenClawHookFreshness,
     checkOpenClawPluginVersion,
     checkOpenClawSkillVersion,
     checkOpenClawPluginLoadState,
+    checkOpenClawConversationScanning,
     checkOpenClawRunningPluginVersion,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
@@ -3253,6 +3864,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkThreatGraph,
     checkClaudeCodeVersion,
     checkModelCache,
   ];
@@ -3321,10 +3933,16 @@ export async function runDoctor(
     }
   }
 
+  // #221: strip remedies that cannot execute while OpenClaw's config is
+  // invalid. Placed here because `results` is final and nothing has yet been
+  // printed, filtered, counted or exited on — and it must not disturb any of
+  // those. No-op unless the config check actually failed.
+  const gated = applyOpenClawCliGate(results);
+
   // Collapse the dependent "no database yet" checks into one dim note. On a
   // fresh install they added Schema/Write path/Memories lines that all restate
   // the same single fact already reported by the Database line (#129).
-  const { visible, suppressed } = partitionUninitialisedSkips(results);
+  const { visible, suppressed } = partitionUninitialisedSkips(gated);
 
   // Print results
   for (const r of visible) {
