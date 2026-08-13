@@ -2,7 +2,7 @@
  * Replay a corpus of real Action Guard stop events through `evaluateToolCall`
  * and report how many still stop.
  *
- * Usage:  npx tsx scripts/replay-guard-corpus.mts <corpus.json> [--by-threat] [--show <threat>]
+ * Usage:  npx tsx scripts/replay-guard-corpus.mts <corpus.json> [--by-threat] [--show <threat>] [--fp-intents]
  *
  * The corpus is a JSON array of audit records of the shape
  *   { ts, action, threats[], severity, preview }
@@ -18,6 +18,7 @@
 
 import { readFileSync } from 'node:fs';
 import { evaluateToolCall } from '../src/defence/iron-dome/tool-action-guard.js';
+import { actionKeyForToolCall } from '../src/defence/iron-dome/enforcement-binding.js';
 
 interface CorpusEvent {
   ts: string;
@@ -65,6 +66,7 @@ let stops = 0;
 let passes = 0;
 let unparsed = 0;
 const perThreat = new Map<string, { total: number; nowPasses: number }>();
+const perIntent = new Map<string, { total: number; stops: number }>();
 const escalations: Array<{ was: string; now: string; preview: string }> = [];
 const relaxed: string[] = [];
 const stillStopping: string[] = [];
@@ -75,6 +77,11 @@ for (const ev of corpus) {
   const v = evaluateToolCall(parsed.tool, parsed.args);
   const nowStops = v.decision !== 'allow';
   if (nowStops) stops++; else passes++;
+  const intent = actionKeyForToolCall(parsed.tool, parsed.args as Record<string, unknown>);
+  const intentSlot = perIntent.get(intent) ?? { total: 0, stops: 0 };
+  intentSlot.total++;
+  if (nowStops) intentSlot.stops++;
+  perIntent.set(intent, intentSlot);
   for (const t of ev.threats) {
     const e = perThreat.get(t) ?? { total: 0, nowPasses: 0 };
     e.total++;
@@ -101,6 +108,12 @@ const replayed = stops + passes;
 console.log(`corpus: ${corpus.length} events (${unparsed} unparseable, ${replayed} replayed)`);
 console.log(`still stops:  ${stops}  (${((stops / replayed) * 100).toFixed(1)}%)`);
 console.log(`now passes:   ${passes}  (${((passes / replayed) * 100).toFixed(1)}%)`);
+if (flags.includes('--fp-intents')) {
+  const intents = perIntent.size;
+  const intentStops = [...perIntent.values()].filter((e) => e.stops > 0).length;
+  console.log(`distinct intents: ${intents}  (records collapsed by actionKey)`);
+  console.log(`intents that still stop: ${intentStops}  (${intents ? ((intentStops / intents) * 100).toFixed(1) : '0.0'}%)`);
+}
 
 if (flags.includes('--by-threat')) {
   console.log('\nper original threat  (now-passes / events carrying that threat)');
