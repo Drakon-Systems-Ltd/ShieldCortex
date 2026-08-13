@@ -50,6 +50,11 @@ export interface RunFailureReport {
   reason: string;
   /** Redacted detail lines, most informative first. */
   detail: string[];
+  /**
+   * True when `reason` was derived from `detail[0]` — a caller printing both
+   * should skip the first detail line or the headline appears twice.
+   */
+  reasonFromDetail: boolean;
   exitCode: number | null;
   timedOut: boolean;
   spawnFailed: boolean;
@@ -254,24 +259,39 @@ export function summariseCommandOutput(
 
   if (!output || !output.trim()) return { lines: [], truncated: false };
 
+  // Env-value redaction FIRST, on the UNCAPPED text. It is an exact-match
+  // String.replace — cheap even on megabytes — and running it after the cap
+  // let a secret split at the cap boundary escape the exact match entirely;
+  // the surviving 40-hex prefix then read as a git SHA to the entropy
+  // allowlist. Everything regex-shaped stays behind the cap below.
+  const envRedacted = redactEnvValues(output, env);
+
   // Cap before any regex work — a failed `npm install -g` emits megabytes.
   // BOTH ENDS, not the tail: the diagnosis is printed first and the noise
   // follows, so a tail-only cap discards the cause before the signal filter
   // ever sees it — the very mistake this module exists to correct, moved one
   // stage earlier where nothing downstream can compensate.
   const half = Math.floor(MAX_INPUT_BYTES / 2);
-  const capped = output.length > MAX_INPUT_BYTES
-    ? `${output.slice(0, half)}\n…\n${output.slice(-half)}`
-    : output;
-  let truncated = output.length > MAX_INPUT_BYTES;
+  const capped = envRedacted.length > MAX_INPUT_BYTES
+    ? `${envRedacted.slice(0, half)}\n…\n${envRedacted.slice(-half)}`
+    : envRedacted;
+  let truncated = envRedacted.length > MAX_INPUT_BYTES;
 
-  const redacted = redactCredentials(redactEnvValues(capped, env), {
+  // Same ordering as sanitiseForReport, for the same reasons: home-scrub
+  // before token-shaped redaction (a legitimate `~/...` path must not read as
+  // an entropy token because a temp home contains random bytes), then the
+  // credential-FRAGMENT pass — child output quotes credential-shaped path
+  // segments, and this sink previously lacked the pass while the hand-built-
+  // string sink had it: the strongest redaction guarded the least dangerous
+  // sink — then the whole-text pattern/entropy pass.
+  const homeScrubbed = scrubHome(capped, home);
+  const protectedPaths = protectReportPathLiterals(homeScrubbed);
+  const fragmentRedacted = redactCredentialFragments(protectedPaths.text);
+  const scrubbed = protectedPaths.restore(redactCredentials(fragmentRedacted, {
     // npm integrity hashes are high-entropy but not secrets; without this the
     // entropy pass eats them and the real message drowns in [REDACTED].
     allowlist: ['sha512-', 'sha1-', 'sha256-'],
-  });
-
-  const scrubbed = scrubHome(redacted, home);
+  }));
   const dropPluginChatter = opts.dropPluginChatter ?? true;
   let all = cleanLines(scrubbed, dropPluginChatter);
   if (all.length === 0 && opts.neverEmpty) {
@@ -326,6 +346,61 @@ export function summariseCommandOutput(
   return { lines: picked, truncated };
 }
 
+/**
+ * Sanitise a string that was NOT produced by `summariseCommandOutput` — a
+ * caller's own hand-built report string (an `err.message`, a path) — through
+ * the same env-value redaction, credential-shape redaction, and home-scrubbing
+ * every other reported string gets. Env-value redaction runs before home
+ * scrubbing because it needs exact secret values; home scrubbing runs before
+ * pattern redaction so a legitimate `~/.openclaw/...` path is not mistaken for
+ * a high-entropy token just because the temp home directory contains random
+ * bytes.
+ */
+const REPORT_PATH_SENTINELS: Array<[string, string]> = [
+  ['~/.openclaw/extensions/shieldcortex-realtime', '__shieldcortex_report_path_ext__'],
+  ['~/.openclaw/plugins/installs.json', '__shieldcortex_report_path_registry__'],
+  ['~/plugins/installs.json', '__shieldcortex_report_path_plugins_registry__'],
+];
+
+function redactCredentialFragments(text: string): string {
+  return text.replace(/[A-Za-z0-9\-_+=]{20,}/g, fragment =>
+    redactCredentials(fragment, {
+      allowlist: ['sha512-', 'sha1-', 'sha256-'],
+    }));
+}
+
+function protectReportPathLiterals(text: string): { text: string; restore: (value: string) => string } {
+  let protectedText = text;
+  for (const [literal, sentinel] of REPORT_PATH_SENTINELS) {
+    protectedText = protectedText.split(literal).join(sentinel);
+  }
+  return {
+    text: protectedText,
+    restore(value: string): string {
+      let out = value;
+      for (const [literal, sentinel] of REPORT_PATH_SENTINELS) {
+        out = out.split(sentinel).join(literal);
+      }
+      return out;
+    },
+  };
+}
+
+export function sanitiseForReport(text: string, opts: SummariseOptions = {}): string {
+  const envRedacted = redactEnvValues(text, opts.env ?? process.env);
+  const homeScrubbed = scrubHome(envRedacted, opts.home ?? os.homedir());
+  const protectedPaths = protectReportPathLiterals(homeScrubbed);
+  const fragmentRedacted = redactCredentialFragments(protectedPaths.text);
+  const credentialRedacted = redactCredentials(fragmentRedacted, {
+    // Match summariseCommandOutput: npm integrity hashes are high-entropy but
+    // not secrets, and otherwise bury the real failure in [REDACTED]. Do NOT
+    // allowlist `~/.openclaw/` as a broad prefix: a credential-shaped child
+    // path segment under that directory must still be redacted.
+    allowlist: ['sha512-', 'sha1-', 'sha256-'],
+  });
+  return protectedPaths.restore(credentialRedacted);
+}
+
 function firstSentence(value: string, limit = MAX_REASON_CHARS): string {
   const single = value.replace(/\s+/g, ' ').trim();
   return single.length > limit ? `${single.slice(0, limit - 1)}…` : single;
@@ -358,21 +433,22 @@ export function describeRunFailure(err: unknown, opts: SummariseOptions = {}): R
   // reporting that alone tells the operator to retry a transient blip when the
   // real fact is a half-applied install. Partial output is still surfaced, but
   // as detail behind the terminal condition, never in place of it.
-  const sanitise = (text: string): string =>
-    scrubHome(redactEnvValues(text, opts.env ?? process.env), opts.home ?? os.homedir());
+  const sanitise = (text: string): string => sanitiseForReport(text, opts);
 
   let reason: string;
+  let reasonFromDetail = false;
   if (spawnFailed) {
     reason = firstSentence(sanitise(`command not found${command}`));
   } else if (timedOut) {
     reason = firstSentence(sanitise(`timed out${command}`));
   } else if (lines.length > 0) {
     reason = firstSentence(lines[0]);
+    reasonFromDetail = true;
   } else if (exitCode !== null) {
     reason = firstSentence(sanitise(`exited ${exitCode} with no output${command}`));
   } else {
     reason = firstSentence(sanitise(e.message || 'failed with no output'));
   }
 
-  return { reason, detail: lines, exitCode, timedOut, spawnFailed, truncated };
+  return { reason, detail: lines, reasonFromDetail, exitCode, timedOut, spawnFailed, truncated };
 }

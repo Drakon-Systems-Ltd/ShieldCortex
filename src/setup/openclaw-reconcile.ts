@@ -115,6 +115,45 @@ function defaultApply(): boolean {
   return resolveRepairConsent({ env: process.env, isTty: Boolean(process.stdin.isTTY) }).reconcile;
 }
 
+/** The subset of `spawnSync`'s return shape `describeSpawnOutcome` needs. */
+export interface RawSpawnResult {
+  status: number | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  error?: NodeJS.ErrnoException;
+  signal?: NodeJS.Signals | null;
+}
+
+/**
+ * Translate a raw spawnSync-shaped result into `{status, output}`, preserving
+ * WHY the command did not run cleanly (#248).
+ *
+ * `spawnSync` reports a missing binary AND a timeout identically —
+ * `status: null`, no stdout/stderr — and only `result.error.code` (ENOENT /
+ * ETIMEDOUT) or `result.signal` (the kill signal) tell them apart. The old
+ * `status: r.status ?? 1` collapsed both into "the command ran and exited 1",
+ * which sends an operator chasing a config problem that was never there —
+ * the same trap `validateOpenClawConfig` already avoids explicitly.
+ *
+ * Pulled out as its own function because `defaultRunCommand` cannot be driven
+ * through a real spawn under Jest — it is gated both by its own
+ * `JEST_WORKER_ID` check and by `resolveRepairConsent`, which is
+ * unconditionally hostile under Jest by design (repair-consent.ts). This
+ * seam is pure and needs neither.
+ */
+export function describeSpawnOutcome(command: string, r: RawSpawnResult): { status: number; output: string } {
+  if (r.error) {
+    const code = r.error.code;
+    if (code === 'ENOENT') return { status: 1, output: `openclaw binary not found (ENOENT): ${command}` };
+    if (code === 'ETIMEDOUT') return { status: 1, output: `openclaw command timed out: ${command}` };
+    return { status: 1, output: `spawn failed (${code ?? 'unknown error'}): ${command} — ${r.error.message}` };
+  }
+  if (r.signal) {
+    return { status: 1, output: `openclaw command killed by signal ${r.signal}: ${command}` };
+  }
+  return { status: r.status ?? 1, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
 /**
  * The default openclaw executor. GUARDED: never spawns under a Jest worker or
  * without the explicit reconcile consent env, mirroring the gateway-restart
@@ -133,7 +172,7 @@ export function defaultRunCommand(argv: string[]): { status: number; output: str
     timeout: 120000,
     env: { ...process.env },
   });
-  return { status: r.status ?? 1, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  return describeSpawnOutcome(`openclaw ${argv.join(' ')}`, r);
 }
 
 function defaultPruneDir(home: string, dirName: string): void {

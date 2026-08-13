@@ -450,6 +450,22 @@ export const CONNECTION_STRING_PATTERNS: CredentialPattern[] = [
     severity: 'critical',
     confidence: 0.93,
   },
+  {
+    // HTTP(S) basic-auth URLs — `https://user:pass@host`. Corporate npm
+    // registries (`registry=https://user:pass@host` in .npmrc) put exactly
+    // this in npm's 401 error output, and neither the DB-scheme rules above
+    // nor the entropy net can catch it (`:`/`@` break the token; short
+    // passwords are under the 20-char minimum). The user segment excludes
+    // `/` and `:` so `https://host:8080/path` and path/query `@`s
+    // (`/x@2x.png`, `?email=a@b.com`) never match — an `@` must directly
+    // follow the credential pair.
+    name: 'HTTP Basic-Auth URL',
+    type: 'connection_string',
+    provider: 'http',
+    regex: /https?:\/\/[^\s"'`/:@]+:[^\s"'`@/]+@[^\s"'`]+/g,
+    severity: 'high',
+    confidence: 0.9,
+  },
 ];
 
 // ── Environment Variable Patterns ──

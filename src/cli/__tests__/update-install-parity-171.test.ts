@@ -74,6 +74,17 @@ describe('#171 — update ends by verifying protection, like repair', () => {
 
   it('skips cleanly when no plugin is registered — a Claude-Code-only box is not an error', () => {
     const body = bodyOf('stepVerifyProtection');
-    expect(body).toMatch(/isRealtimePluginRegistered\(home\)/);
+    // #248: the plain `isRealtimePluginRegistered(home)` boolean collapsed
+    // "not installed" and "registry unreadable" into the same silent skip —
+    // the split-result read is what lets "not registered" stay a clean skip
+    // while "unreadable" gets its own surfaced branch.
+    expect(body).toMatch(/readRealtimePluginRegistration\(home\)/);
+    expect(body).toMatch(/!registration\.registered/);
+  });
+
+  it('surfaces (does not silently skip) when the registry could not be confirmed', () => {
+    const body = bodyOf('stepVerifyProtection');
+    expect(body).toMatch(/registration\.unreadable/);
+    expect(body).toMatch(/protection check skipped/);
   });
 });

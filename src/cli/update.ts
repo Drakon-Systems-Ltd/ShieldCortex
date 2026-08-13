@@ -17,7 +17,7 @@ import path from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
-import { describeRunFailure } from '../integrations/child-output.js';
+import { describeRunFailure, sanitiseForReport } from '../integrations/child-output.js';
 import type { CapturedError } from '../integrations/child-output.js';
 
 // ── ANSI ────────────────────────────────────────────────────
@@ -59,7 +59,7 @@ interface StepResult {
   truncated?: boolean;
 }
 
-async function step(
+export async function step(
   label: string,
   fn: () => Promise<StepResult | string | void>,
 ): Promise<StepResult> {
@@ -120,13 +120,27 @@ async function step(
     } else {
       process.stdout.write(`  ✗  ${label}: failed (${elapsed})\n`);
     }
-    const e = err as Error & { stdout?: string; stderr?: string };
-    const captured = (e.stderr || '') + (e.stdout || '');
-    if (captured.trim()) {
-      process.stderr.write('\n' + paint('gray', '── output ─────────────────────────────────────────') + '\n');
-      process.stderr.write(captured.trim() + '\n');
-      process.stderr.write(paint('gray', '───────────────────────────────────────────────────') + '\n');
+    // #248: this used to write `(e.stderr || '') + (e.stdout || '')` straight
+    // to the terminal. `runQuiet` hands the child `{...process.env}`, so
+    // NPM_TOKEN / CLAWHUB_TOKEN are values WE supplied — and npm echoes them
+    // back verbatim in a 401 body. Route through the same redaction #221
+    // built for the OpenClaw steps so a credential never reaches output that
+    // gets pasted into an issue or support thread.
+    // `neverEmpty` because a step that failed on noise-only output (or an
+    // ENOENT/timeout with nothing captured) must still show SOMETHING — the
+    // regression #248 was reopened against: `detail` alone is `[]` in exactly
+    // those cases, but `reason` is never empty.
+    const report = describeRunFailure(err, { neverEmpty: true });
+    process.stderr.write('\n' + paint('gray', '── output ─────────────────────────────────────────') + '\n');
+    process.stderr.write(report.reason + '\n');
+    // When the reason was derived from detail[0], printing both duplicates the
+    // headline on the common failure path — skip the line the reason already is.
+    const detailLines = report.reasonFromDetail ? report.detail.slice(1) : report.detail;
+    for (const line of detailLines) process.stderr.write(line + '\n');
+    if (report.truncated) {
+      process.stderr.write(paint('gray', '… output truncated — run the command directly for the full text') + '\n');
     }
+    process.stderr.write(paint('gray', '───────────────────────────────────────────────────') + '\n');
     throw err;
   }
 }
@@ -221,7 +235,7 @@ function header(currentVersion: string, latestVersion: string | null): void {
   }
 }
 
-function footer(totalMs: number, mainUpdated: boolean): void {
+export function footer(totalMs: number, mainUpdated: boolean, latest: LatestVersionResult): void {
   const elapsed = (totalMs / 1000).toFixed(1) + 's';
   process.stdout.write(
     `\n  ${paint('gray', '──────────────────────────────────────────────────────────────')}\n`,
@@ -230,6 +244,13 @@ function footer(totalMs: number, mainUpdated: boolean): void {
     process.stdout.write(
       `  ${paint('green', '✓')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed}`)}  ${paint('cyan', '·')}  ${paint('yellow', 'restart Claude Code / OpenClaw gateway')}\n\n`,
     );
+  } else if (latest.version === null) {
+    // #248: `mainUpdated` is false both when we ARE current AND when the
+    // registry lookup never resolved (E401, ENOTFOUND, timeout) — `header()`
+    // already tells the two apart; the footer must not close an E401/ENOTFOUND
+    // run with the same reassuring "already on latest" line as a real check.
+    const reason = latest.reason ? ` — ${latest.reason}` : '';
+    process.stdout.write(`  ${paint('yellow', '⚠')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed} · latest version unknown${reason}`)}\n\n`);
   } else {
     process.stdout.write(`  ${paint('green', '✓')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed} · already on latest`)}\n\n`);
   }
@@ -243,22 +264,38 @@ function readPackageVersion(): string {
   return JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version ?? 'unknown';
 }
 
-async function fetchLatestVersion(): Promise<string | null> {
+export interface LatestVersionResult {
+  version: string | null;
+  /**
+   * Why the lookup failed (#248). E401 (bad/expired token), ENOTFOUND
+   * (offline/DNS) and a proxy failure all used to collapse to a bare `null`,
+   * which the caller reported as "registry unreachable" — true for
+   * ENOTFOUND, actively wrong for a rejected token, and downstream a bare
+   * `null` reads as "already up to date".
+   */
+  reason?: string;
+}
+
+/** `run` is injectable so the failure path can be tested without a real spawn. */
+export async function fetchLatestVersion(deps: { run?: typeof runQuiet } = {}): Promise<LatestVersionResult> {
+  const run = deps.run ?? runQuiet;
   try {
-    const { stdout } = await runQuiet('npm', ['view', 'shieldcortex', 'version'], { timeout: 10000 });
-    return stdout.trim() || null;
-  } catch {
-    return null;
+    const { stdout } = await run('npm', ['view', 'shieldcortex', 'version'], { timeout: 10000 });
+    return { version: stdout.trim() || null };
+  } catch (err) {
+    return { version: null, reason: describeRunFailure(err).reason };
   }
 }
 
 async function stepNpmPackage(
   currentVersion: string,
-  latestVersion: string | null,
+  latest: LatestVersionResult,
   force: boolean,
 ): Promise<{ updated: boolean; result: StepResult }> {
+  const latestVersion = latest.version;
   if (!latestVersion) {
-    const result = await step('npm package', async () => ({ status: 'warn' as const, summary: 'registry unreachable' }));
+    const summary = latest.reason ? `registry check failed — ${latest.reason}` : 'registry unreachable';
+    const result = await step('npm package', async () => ({ status: 'warn' as const, summary }));
     return { updated: false, result };
   }
   if (latestVersion === currentVersion && !force) {
@@ -313,43 +350,129 @@ async function stepVerifyEngine(): Promise<{ remediation: string | null }> {
  * leaving the plugin stale while the npm package moved on. Read the registry
  * (the authoritative source `doctor` also trusts) instead.
  */
-export function isRealtimePluginRegistered(home: string): boolean {
-  // An on-disk install resolves even on boxes whose authoritative plugin state
-  // is SQLite-only (no legacy installs.json) — check that first.
-  if (resolveRealtimePluginInstallPath(home)) return true;
-  try {
-    const installsPath = path.join(home, '.openclaw', 'plugins', 'installs.json');
-    if (!fs.existsSync(installsPath)) return false;
-    const json = JSON.parse(fs.readFileSync(installsPath, 'utf-8')) as {
-      installRecords?: Record<string, unknown>;
-      plugins?: Array<{ pluginId?: string }>;
-    };
-    if (json.installRecords && Object.prototype.hasOwnProperty.call(json.installRecords, 'shieldcortex-realtime')) {
-      return true;
-    }
-    return Array.isArray(json.plugins) && json.plugins.some((p) => p?.pluginId === 'shieldcortex-realtime');
-  } catch {
-    return false; // unreadable registry → treat as not installed
-  }
+export interface RegistryReadResult {
+  registered: boolean;
+  /**
+   * True when `installs.json` exists but could not be read or parsed (#248).
+   * A permission-denied or truncated registry is NOT evidence the plugin is
+   * absent — it means the host's install state is unknown. Callers that
+   * would otherwise report "not installed" on `registered: false` must check
+   * this first, or an unreadable registry renders a false-green skip on a
+   * host that update never actually touched.
+   */
+  unreadable: boolean;
+  detail?: string;
 }
 
-/** `run` is injectable so the failure path can be tested without a real spawn. */
+/**
+ * Read whether the realtime plugin is registered with OpenClaw, distinguishing
+ * "genuinely not installed" from "installs.json exists but could not be
+ * confirmed" (#248). `isRealtimePluginRegistered` collapses both into `false`
+ * for callers that only need a yes/no; `stepOpenClawPlugin` needs the
+ * distinction so it never reports "not installed" on a registry it could not
+ * actually read.
+ */
+export function readRealtimePluginRegistration(home: string): RegistryReadResult {
+  // An on-disk install resolves even on boxes whose authoritative plugin state
+  // is SQLite-only (no legacy installs.json) — check that first.
+  if (resolveRealtimePluginInstallPath(home)) return { registered: true, unreadable: false };
+
+  const installsPath = path.join(home, '.openclaw', 'plugins', 'installs.json');
+
+  // No existsSync pre-check: it swallows a traversal EACCES on the plugins
+  // DIRECTORY into a plain `false`, rendering the exact false-green "not
+  // installed" skip #248 exists to kill — at directory level instead of file
+  // level (sudo-damaged perms under user dirs are a documented fleet failure
+  // mode). Read directly and branch on the errno; this also removes the
+  // exists→read TOCTOU.
+  let raw: string;
+  try {
+    raw = fs.readFileSync(installsPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { registered: false, unreadable: false };
+    return {
+      registered: false,
+      unreadable: true,
+      detail: sanitiseForReport(
+        `could not read installs.json: ${err instanceof Error ? err.message : String(err)}`,
+        { home },
+      ),
+    };
+  }
+
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    // #248: V8 embeds up to ~30 chars of the raw file in one of its two
+    // parse-error forms, so including `err.message` here would echo a
+    // corrupt registry's own head bytes to the terminal. The parse offset
+    // tells an operator nothing they cannot get by opening the file — drop
+    // it entirely rather than try to sanitise it.
+    return {
+      registered: false,
+      unreadable: true,
+      detail: 'installs.json is malformed JSON',
+    };
+  }
+
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    return {
+      registered: false,
+      unreadable: true,
+      detail: 'installs.json has invalid registry shape',
+    };
+  }
+  const registry = json as { installRecords?: Record<string, unknown>; plugins?: Array<{ pluginId?: string }> };
+
+  if (registry.installRecords && Object.prototype.hasOwnProperty.call(registry.installRecords, 'shieldcortex-realtime')) {
+    return { registered: true, unreadable: false };
+  }
+  const registered = Array.isArray(registry.plugins) && registry.plugins.some((p) => p?.pluginId === 'shieldcortex-realtime');
+  return { registered, unreadable: false };
+}
+
+export function isRealtimePluginRegistered(home: string): boolean {
+  return readRealtimePluginRegistration(home).registered;
+}
+
+/** `run`/`rm` are injectable so the failure paths can be tested without a real spawn or a root-owned dir. */
 export async function stepOpenClawPlugin(
   home: string,
-  deps: { run?: typeof runQuiet } = {},
+  deps: { run?: typeof runQuiet; rm?: typeof fs.rmSync } = {},
 ): Promise<StepResult> {
   const run = deps.run ?? runQuiet;
+  const rm = deps.rm ?? fs.rmSync;
   const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
   const legacy = fs.existsSync(extDir);
-  const registered = isRealtimePluginRegistered(home);
-  if (!legacy && !registered) {
+  const registration = readRealtimePluginRegistration(home);
+  // #248: an unreadable/malformed registry is not evidence the plugin is
+  // absent — reporting "not installed" here is a false-green skip on a host
+  // whose actual state we could not confirm.
+  if (!legacy && registration.unreadable) {
+    return await step('OpenClaw plugin', async () => ({
+      status: 'warn' as const,
+      summary: `plugin registry unreadable — ${registration.detail ?? 'could not confirm install state'}`,
+    }));
+  }
+  if (!legacy && !registration.registered) {
     return await step('OpenClaw plugin', async () => ({ status: 'skip' as const, summary: 'not installed' }));
   }
   return await step('OpenClaw plugin', async () => {
     // Drop any legacy file-copied extension so OpenClaw's registry copy is the
     // single source of truth (prevents the dup-install state doctor flags).
+    let purgeFailure: string | null = null;
     if (legacy) {
-      try { fs.rmSync(extDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      try {
+        rm(extDir, { recursive: true, force: true });
+      } catch (err) {
+        // #248: this used to be `catch { /* ignore */ }`. A denied purge
+        // (root-owned dir, EPERM) left the duplicate in place with no hint it
+        // was even attempted — the next `doctor` run reported a dup install
+        // as if nothing had tried to fix it.
+        purgeFailure = err instanceof Error ? err.message : String(err);
+      }
     }
     const before = readInstalledRealtimePluginVersion(home);
     try {
@@ -362,9 +485,18 @@ export async function stepOpenClawPlugin(
       // Report the ACTUAL on-disk transition, not just command success — the old
       // "updated via openclaw" was printed even when the version never moved.
       const after = readInstalledRealtimePluginVersion(home);
-      if (before && after && before !== after) return `${before} → ${after}`;
-      if (after) return `up to date (v${after})`;
-      return 'reinstalled';
+      const transition =
+        before && after && before !== after ? `${before} → ${after}` :
+        after ? `up to date (v${after})` :
+        'reinstalled';
+      if (purgeFailure) {
+        return {
+          status: 'warn' as const,
+          summary: `${transition} — legacy copy left behind`,
+          detail: [sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
+        };
+      }
+      return transition;
     } catch (err) {
       // Don't propagate — surface as warn instead of failing the whole flow.
       //
@@ -377,7 +509,9 @@ export async function stepOpenClawPlugin(
       return {
         status: 'warn' as const,
         summary: `update failed — ${report.reason}`,
-        detail: report.detail,
+        detail: purgeFailure
+          ? [...report.detail, sanitiseForReport(`also: could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })]
+          : report.detail,
         truncated: report.truncated,
       };
     }
@@ -553,8 +687,22 @@ async function stepStatePermissions(): Promise<StepResult> {
  * disk, so importing here loads the FRESHLY INSTALLED reconcile/self-check —
  * the new version verifies itself with its own logic, not last release's.
  */
-async function stepVerifyProtection(home: string): Promise<void> {
-  if (!isRealtimePluginRegistered(home)) return;
+export async function stepVerifyProtection(home: string): Promise<void> {
+  // #248: `isRealtimePluginRegistered` collapses "genuinely not installed"
+  // and "installs.json exists but could not be confirmed" into the same
+  // `false`, which made an unreadable registry return here silently — the
+  // protection self-check never ran, and the run still ended green with no
+  // hint it had been skipped. Read the split result so "unreadable" gets
+  // its own branch instead of falling through the same gate as "absent".
+  const registration = readRealtimePluginRegistration(home);
+  if (registration.unreadable) {
+    process.stdout.write('\n');
+    process.stdout.write(
+      `  ${paint('yellow', '!')}  ${paint('gray', `protection check skipped — plugin registry unreadable: ${registration.detail ?? 'could not confirm install state'}`)}\n`,
+    );
+    return;
+  }
+  if (!registration.registered) return;
   process.stdout.write('\n');
   try {
     const { reconcileOpenClawPluginState, formatReconcileReport } = await import('../setup/openclaw-reconcile.js');
@@ -567,7 +715,7 @@ async function stepVerifyProtection(home: string): Promise<void> {
     }
     if (result.applied && !result.ok) process.exitCode = 1;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = sanitiseForReport(err instanceof Error ? err.message : String(err), { home });
     process.stdout.write(`  ${paint('gray', `protection check skipped — ${msg}`)}\n`);
   }
 }
@@ -582,15 +730,15 @@ export async function runUpdate(): Promise<void> {
 
   // Header — show current version immediately, then update with latest once we know it.
   // (We resolve `latest` before drawing the arrow so the banner is correct.)
-  const latestVersion = await fetchLatestVersion();
-  header(currentVersion, latestVersion);
+  const latest = await fetchLatestVersion();
+  header(currentVersion, latest.version);
   if (force) {
     process.stdout.write(`  ${paint('yellow', '!')}  ${paint('gray', '--force: reinstall everything regardless of version')}\n\n`);
   }
 
   let mainUpdated = false;
   try {
-    const npmStep = await stepNpmPackage(currentVersion, latestVersion, force);
+    const npmStep = await stepNpmPackage(currentVersion, latest, force);
     mainUpdated = npmStep.updated;
   } catch {
     // npm failure already surfaced by step(); continue with reconcile.
@@ -605,7 +753,7 @@ export async function runUpdate(): Promise<void> {
   await stepClaudeHooks();
   await stepStatePermissions();
 
-  footer(Date.now() - flowStart, mainUpdated);
+  footer(Date.now() - flowStart, mainUpdated, latest);
 
   // The verdict comes AFTER the footer so the last thing on screen is the one
   // line that answers "am I protected?" — not a spinner summary.
