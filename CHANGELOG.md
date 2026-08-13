@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.50.0] - 2026-08-13
+
+**A fleet-governance control, two credential-redaction fixes, and an update path that stops swallowing failures.**
+
+### Added
+
+- **Session action lease — the freeze that binds every self, not just the careful one (#227).** One agent identity runs many concurrent processes that share a filesystem and a name but not a context window; a commitment made in one session's context binds nobody. This adds two questions the guard can now answer across sessions: is a **FREEZE** in force for a class of action, and is another live session holding it. The FREEZE (the hard control) lives in `~/.shieldcortex/DECISIONS.md` and is consulted by **both** enforcement planes (the Claude Code PreToolUse hook and the OpenClaw `before_tool_call` interceptor) **before the guard even loads** — so it binds during a mid-upgrade guard outage — and before every approval affordance. Operator surface: `shieldcortex freeze|unfreeze <scope>` (TTY-gated, no env escape hatch) and `shieldcortex lease` (reports which enforcement planes are BOUND / NOT-BOUND / UNKNOWN on **this host** — no fleet-wide claim it cannot deliver). The ledger is guard-protected against agent edits (`touch-decisions-ledger`) with a tamper-evidence hash. Honest limits, stated in code: the per-scope lease *file* is best-effort coordination between honest sessions (a tight cross-process race can double-hold) — the freeze is unaffected; and the integrity boundary is tamper *resistance + evidence*, not proof (a same-uid write outside a tool call cannot be prevented from userspace).
+
+### Fixed
+
+- **Credential entropy net: two padding-shaped bypasses + a reporting regression (#257).** Appending three `=` (`SECRET===`) let the base64 false-positive rule swallow an entire high-entropy secret before the entropy check ran — the same over-greedy-wildcard class already fixed one rule over; it now gates on the stripped core's entropy. And a narrowed nested-skip had begun emitting a *second* finding for `ENV_VAR=<secret>` shapes (grade-dropping medium-bucket inflation), breaking the deliberately-pinned one-finding-per-distinct-secret contract; finding emission and redaction-range recording are now decoupled so completeness and reporting volume are both preserved.
+- **Update path stopped swallowing failure reasons and over-sharing output (#248).** `shieldcortex update` now routes actual child stderr through the same credential-fragment redaction the hand-built report strings already had (the strong redaction had been guarding the *less*-dangerous sink), runs env-value redaction **before** the 32 KB output cap (so a secret split at the boundary can't leak its prefix), redacts HTTP basic-auth URLs (`https://user:pass@host` from corporate registries), prints the failure headline once instead of twice, and reports an unreadable plugins *directory* as unreadable rather than the false-green "not installed" skip.
+
 ## [4.49.0] - 2026-08-12
 
 **Threat Graph Phase E — relation-channel conflict detection (the ShadowMerge defence). Advisory/off like the rest of the threat graph, so installing this changes no scan behaviour. Full design: `docs/design/2026-08-11-threat-graph.md` ("Policing the memory graph").**
