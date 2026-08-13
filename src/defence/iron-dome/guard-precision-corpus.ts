@@ -75,6 +75,8 @@ export const SAFE_CORPUS: GuardCorpusEntry[] = [
   sh('git commit -m "git branch --delete --force"', 'allow', 'commit message that quotes the command is not the command'),
   sh('git commit -m "refactor branch deletion with -D"', 'allow', 'message mentioning -D is prose'),
   sh('git log --grep="branch -D"', 'allow', 'search pattern mentioning branch -D is not a delete'),
+  sh('git diff branch -- -D', 'allow', '`branch` is a revision, `-D` a pathspec — `diff` is the subcommand, not a delete'),
+  sh('echo if git branch -D x', 'allow', 'echo prints the words; git is an argument, not at command position'),
 
   // ── npm / node / JS tooling ──
   sh('npm install', 'allow', 'workspace-local install (no -g)'),
@@ -190,6 +192,9 @@ export const DANGEROUS_CORPUS: GuardCorpusEntry[] = [
   sh('git push "-f" origin main', 'gate', 'quoted short-flag evasion of force-push'),
   sh('git push -"f" origin main', 'gate', 'interior-quoted force-push flag'),
   sh('git push origin --delete main', 'gate', 'delete a remote branch'),
+  sh('if git branch -D victim; then echo done; fi', 'gate', 'git after a shell keyword IS a real invocation'),
+  sh('while git push origin --delete main; do :; done', 'gate', 'git after `while` still gates'),
+  sh("bash -O extglob -c 'git branch -D victim'", 'gate', 'inline shell with a value-taking option before -c'),
   // scheduler mutation
   sh('crontab -e', 'gate', 'edit the crontab (persistence)'),
   sh('at now + 1 minute', 'gate', 'schedule a one-shot job'),

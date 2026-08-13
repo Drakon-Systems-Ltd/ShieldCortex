@@ -518,55 +518,109 @@ const GIT_FORCE_FLAG = /^--force(?:-with-lease|-if-includes)?(?:=|$)|^-[A-Za-z]*
 /** Wrappers that still leave the next word a real command. */
 const COMMAND_WRAPPER = /^(?:sudo|doas|env|nohup|time|timeout|xargs|nice|ionice|stdbuf|command|builtin|exec)$/;
 
+// Shell keywords that can precede a command WITHOUT a statement separator, so a
+// `git` right after one is still at command position (`if git branch -D; then …`,
+// `while …`, `! git push --delete`). `{` opens a brace group. (Distinct from the
+// block-terminator SHELL_KEYWORD elsewhere — these are the command-PREFIX ones.)
+const CMD_PREFIX_KEYWORD = /^(?:if|then|elif|else|while|until|do|!|\{)$/;
+// bash options that CONSUME the next token as a value — the inline-program scan
+// must step over the value to reach `-c` (`bash -O extglob -c '…'`, #codex-P1).
+const BASH_VALUE_OPTION = /^(?:-O|\+O|--rcfile|--init-file)$/;
+// git GLOBAL options (before the subcommand) that consume the next token, so the
+// real subcommand is found past them (`git -c k=v -C dir branch -D`).
+const GIT_GLOBAL_VALUE_OPT = /^(?:-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix)$/;
+
 /**
- * True when a statement genuinely invokes `git push` with a force token.
- *
- * Fail-closed on anything it cannot read as argv: `eval` can reconstitute a
- * command from text, and a `$`-expansion can hide the verb, so a statement
- * carrying either keeps the signal rather than being vouched for.
+ * Is the `git` token at index `i` in COMMAND position? Every token before it
+ * must be a shell keyword, a transparent wrapper, a wrapper flag/value, or a
+ * `VAR=x` assignment — never a bare command word. This admits `if git …` /
+ * `sudo git …` while rejecting `echo if git branch -D` (where `echo` is the
+ * command and `git` is a printed argument).
  */
-function gitForcePushInvoked(text: string, depth = 0): boolean {
+function gitAtCommandPosition(tokens: readonly string[], i: number): boolean {
+  for (let k = 0; k < i; k++) {
+    const t = tokens[k];
+    const base = commandBaseName(t);
+    if (CMD_PREFIX_KEYWORD.test(base) || COMMAND_WRAPPER.test(base)) continue;
+    if (/^\w+=/.test(t) || t.startsWith('-')) continue;   // assignment, or a wrapper/keyword flag
+    return false;                                          // a bare word → git is an argument
+  }
+  return true;
+}
+
+/**
+ * git's actual SUBCOMMAND and the args that follow it, or null. The subcommand
+ * is the first token that is not a global option (or a global option's value),
+ * so a revision/branch-name argument (`git diff branch -- -D`) is NOT mistaken
+ * for the `branch` subcommand (#codex-P2).
+ */
+function gitSubcommandArgs(args: readonly string[]): { sub: string; rest: string[] } | null {
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (!a.startsWith('-')) return { sub: a.toLowerCase(), rest: args.slice(k + 1) };
+    if (GIT_GLOBAL_VALUE_OPT.test(a)) k++;                 // step over the option's value
+  }
+  return null;
+}
+
+/**
+ * Shared invocation walker for the git disposers (#195, #182). Both the
+ * force-push rule and the branch/ref-delete rule PROPOSE on vocabulary; this
+ * confirms a genuine `git <subcommand>` INVOCATION and hands (subcommand, args)
+ * to `matcher`. One home for the command-position, subcommand-identification and
+ * inline-shell recursion logic, so a fix lands for both rules at once.
+ *
+ * Tokenised (a quoted arg is one token, never a subcommand — kills the prose FP);
+ * command-position aware via gitAtCommandPosition (keywords + wrappers, not
+ * `echo … git …`); recurses into `bash -c '…'` stepping over value-taking options;
+ * fails closed on `eval`/`$` (returns true — keep the gate).
+ */
+function gitInvocationDisposer(
+  text: string,
+  matcher: (sub: string, args: readonly string[]) => boolean,
+  depth = 0,
+): boolean {
   for (const stmt of splitCommandStatements(text)) {
-    if (!/\bgit\b/i.test(stmt) || !/\bpush\b/i.test(stmt)) continue;
+    if (!/\bgit\b/i.test(stmt)) continue;
     if (/\beval\b/.test(stmt) || stmt.includes('$')) return true;   // unreadable → keep the gate
     const tokens = tokeniseStatement(stmt);
-    // `bash -c 'git push --force'` — the tokeniser keeps that program whole, so
-    // the verb is inside a single token. Recurse into it (bounded), exactly as
-    // detectScriptInvocations does, or the quote becomes a bypass.
+    // Recurse into an inline shell program (`bash -c '…'`), stepping over any
+    // value-taking option so the `-c` is still reached (`bash -O extglob -c …`).
     if (depth < MAX_INLINE_RECURSION) {
       for (let i = 0; i < tokens.length; i++) {
         const b = commandBaseName(tokens[i]);
         if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
         for (let j = i + 1; j < tokens.length; j++) {
-          if (!tokens[j].startsWith('-')) break;
           if (isInlineProgramFlag(b, tokens[j])) {
-            if (gitForcePushInvoked(tokens[j + 1] ?? '', depth + 1)) return true;
+            if (gitInvocationDisposer(tokens[j + 1] ?? '', matcher, depth + 1)) return true;
             break;
           }
+          if (BASH_VALUE_OPTION.test(tokens[j])) { j++; continue; }  // step over its value
+          if (!tokens[j].startsWith('-')) break;                    // the script FILE, not inline
         }
       }
     }
     for (let i = 0; i < tokens.length; i++) {
       if (commandBaseName(tokens[i]).toLowerCase() !== 'git') continue;
-      // `git` must be the command, or sit directly behind a wrapper that leaves
-      // it one (`sudo git …`, `xargs git …`), or behind `VAR=x` assignments.
-      const prev = i > 0 ? commandBaseName(tokens[i - 1]) : '';
-      const atCommand = i === 0
-        || COMMAND_WRAPPER.test(prev)
-        || /^\w+=/.test(tokens[i - 1])
-        || /^-/.test(tokens[i - 1]) && i > 1 && COMMAND_WRAPPER.test(commandBaseName(tokens[i - 2]));
-      if (!atCommand) continue;
-      const args = tokens.slice(i + 1);
-      const pushAt = args.findIndex(a => a.toLowerCase() === 'push');
-      if (pushAt < 0) continue;                                     // `git commit -m "… push …"`
-      // Only flags/refspecs BELONGING to this push count.
-      for (const a of args.slice(pushAt + 1)) {
-        if (GIT_FORCE_FLAG.test(a)) return true;
-        if (a.startsWith('+') && a.length > 1) return true;         // `+main:main` refspec
-      }
+      if (!gitAtCommandPosition(tokens, i)) continue;
+      const sc = gitSubcommandArgs(tokens.slice(i + 1));
+      if (sc && matcher(sc.sub, sc.rest)) return true;
     }
   }
   return false;
+}
+
+/**
+ * True when a statement genuinely invokes `git push` with a force token.
+ * Fail-closed on `eval`/`$` (see gitInvocationDisposer).
+ */
+function gitForcePushInvoked(text: string, depth = 0): boolean {
+  return gitInvocationDisposer(
+    text,
+    (sub, args) => sub === 'push'
+      && args.some(a => GIT_FORCE_FLAG.test(a) || (a.startsWith('+') && a.length > 1)),
+    depth,
+  );
 }
 
 // Short-flag classifiers for a `git branch` delete. A branch flag is a single
@@ -595,52 +649,22 @@ const GIT_BRANCH_FORCE_FLAG = /^-[A-Za-z]*f[A-Za-z]*$/;     // -f, -df, -fd
  * `bash -c '…'`, fails closed on `eval`/`$`.
  */
 function gitDeleteBranchInvoked(text: string, depth = 0): boolean {
-  for (const stmt of splitCommandStatements(text)) {
-    if (!/\bgit\b/i.test(stmt) || !/\b(?:branch|push)\b/i.test(stmt)) continue;
-    if (/\beval\b/.test(stmt) || stmt.includes('$')) return true;   // unreadable → keep the gate
-    const tokens = tokeniseStatement(stmt);
-    // `bash -c 'git branch -D x'` — the verb is inside one token; recurse in
-    // (bounded), exactly as gitForcePushInvoked does, or the quote is a bypass.
-    if (depth < MAX_INLINE_RECURSION) {
-      for (let i = 0; i < tokens.length; i++) {
-        const b = commandBaseName(tokens[i]);
-        if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
-        for (let j = i + 1; j < tokens.length; j++) {
-          if (!tokens[j].startsWith('-')) break;
-          if (isInlineProgramFlag(b, tokens[j])) {
-            if (gitDeleteBranchInvoked(tokens[j + 1] ?? '', depth + 1)) return true;
-            break;
-          }
-        }
+  return gitInvocationDisposer(
+    text,
+    (sub, args) => {
+      if (sub === 'branch') {
+        const hasCanon = args.some(a => GIT_BRANCH_CANON_DELETE.test(a));
+        const hasDelete = args.some(a => a === '--delete' || GIT_BRANCH_DELETE_FLAG.test(a));
+        const hasForce = args.some(a => a === '--force' || GIT_BRANCH_FORCE_FLAG.test(a));
+        return hasCanon || (hasDelete && hasForce);
       }
-    }
-    for (let i = 0; i < tokens.length; i++) {
-      if (commandBaseName(tokens[i]).toLowerCase() !== 'git') continue;
-      const prev = i > 0 ? commandBaseName(tokens[i - 1]) : '';
-      const atCommand = i === 0
-        || COMMAND_WRAPPER.test(prev)
-        || /^\w+=/.test(tokens[i - 1])
-        || /^-/.test(tokens[i - 1]) && i > 1 && COMMAND_WRAPPER.test(commandBaseName(tokens[i - 2]));
-      if (!atCommand) continue;
-      const args = tokens.slice(i + 1);
-      const branchAt = args.findIndex(a => a.toLowerCase() === 'branch');
-      if (branchAt >= 0) {
-        const flags = args.slice(branchAt + 1);
-        const hasCanon = flags.some(a => GIT_BRANCH_CANON_DELETE.test(a));
-        const hasDelete = flags.some(a => a === '--delete' || GIT_BRANCH_DELETE_FLAG.test(a));
-        const hasForce = flags.some(a => a === '--force' || GIT_BRANCH_FORCE_FLAG.test(a));
-        if (hasCanon || (hasDelete && hasForce)) return true;
+      if (sub === 'push') {
+        return args.some(a => a === '--delete' || (a.startsWith(':') && a.length > 1));
       }
-      const pushAt = args.findIndex(a => a.toLowerCase() === 'push');
-      if (pushAt >= 0) {
-        for (const a of args.slice(pushAt + 1)) {
-          if (a === '--delete') return true;                        // `git push --delete`
-          if (a.startsWith(':') && a.length > 1) return true;       // `git push origin :branch`
-        }
-      }
-    }
-  }
-  return false;
+      return false;
+    },
+    depth,
+  );
 }
 
 // ── Read-only firewall inspection (issue #193) ───────────────────────────────
