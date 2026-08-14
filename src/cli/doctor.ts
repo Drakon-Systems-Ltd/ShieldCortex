@@ -56,6 +56,7 @@ import {
 // transport (cli-invoker.js) and the explainer (doctor-explainer.js) are
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
+import { getConfigDir, readRawConfig, migrateInterceptorActionGuardAlias } from '../cloud/config.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
@@ -2116,7 +2117,10 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
   //    evaluates posture warnings against the EFFECTIVE config with per-key
   //    provenance, and flags the alias itself so operators migrate off it.
   try {
-    const configPath = path.join(getShieldCortexDir(), 'config.json');
+    // getConfigDir (not getShieldCortexDir): the posture must be judged
+    // against the SAME file the `shieldcortex config` setters write and the
+    // runtime accessors read — including the SHIELDCORTEX_CONFIG_DIR override.
+    const configPath = path.join(getConfigDir(), 'config.json');
     const raw = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
     const isBlock = (v: unknown): v is Record<string, unknown> =>
       !!v && typeof v === 'object' && !Array.isArray(v);
@@ -2163,8 +2167,10 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
             `${notifyOn ? '' : ', notify.enabled is not true'}) — unattended denials stay in the ` +
             `audit log and session-guard index only. The #242 cron incidents were this shape.`,
           fix:
-            'Set `actionGuard.notify.enabled: true` and `actionGuard.notify.webhookUrl` to an https endpoint ' +
-            '(or `notify.openclaw: true`) so a denied cron reaches a human. OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
+            'Run `shieldcortex config --action-guard-notify-webhook <https-url>` (or `shieldcortex config ' +
+            '--action-guard-notify-openclaw` for a native OpenClaw approval card) so a denied cron reaches a human. ' +
+            'The CLI writes a signed config — hand-editing config.json invalidates its integrity signature and ' +
+            'forces strict mode. OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
         });
       }
     }
@@ -2210,9 +2216,9 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
  * Backs up config.json first and removes an emptied `interceptor` block.
  */
 export function fixActionGuardConfig(): { changed: boolean; backupPath?: string; message: string } {
-  const configPath = path.join(getShieldCortexDir(), 'config.json');
+  const configPath = path.join(getConfigDir(), 'config.json');
   if (!fs.existsSync(configPath)) return { changed: false, message: 'no config file — nothing to migrate' };
-  const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  const raw = readRawConfig();
   const isBlock = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === 'object' && !Array.isArray(v);
   const alias = isBlock(raw?.interceptor) && isBlock(raw.interceptor.actionGuard)
@@ -2223,10 +2229,11 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
   const backupPath = `${configPath}.bak-fix-209-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   fs.copyFileSync(configPath, backupPath);
 
-  raw.actionGuard = { ...alias, ...(isBlock(raw.actionGuard) ? raw.actionGuard : {}) };
-  delete raw.interceptor.actionGuard;
-  if (Object.keys(raw.interceptor).length === 0) delete raw.interceptor;
-  fs.writeFileSync(configPath, JSON.stringify(raw, null, 2));
+  // The write goes through cloud/config's guarded mutate path (#275): the
+  // migrated file is re-signed with a fresh `_sig`. The previous bare
+  // fs.writeFileSync here carried the stale signature through, so running the
+  // fix ITSELF tripped the integrity check and forced strict mode.
+  migrateInterceptorActionGuardAlias();
   return {
     changed: true,
     backupPath,

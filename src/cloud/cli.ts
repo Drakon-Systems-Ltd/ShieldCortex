@@ -20,6 +20,8 @@ import {
   setToolResponseScanConfig,
   isRevokeBySourceEnabled,
   setRevokeBySourceEnabled,
+  getActionGuardNotifyConfig,
+  setActionGuardNotifyConfig,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -47,8 +49,13 @@ export function handleCloudConfig(args: string[]): void {
     const toolFirewall = getToolResponseScanConfig();
     const rankerOverridden = !!process.env.SHIELDCORTEX_RANKER;
     console.log('\nShieldCortex Configuration:');
+    const agNotify = getActionGuardNotifyConfig();
+    const agNotifyChannels = [agNotify.openclaw ? 'openclaw' : null, agNotify.webhookUrl ? 'webhook' : null]
+      .filter(Boolean)
+      .join(' + ');
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Tool-Output Firewall: ${toolFirewall.scanToolResponses ? toolFirewall.toolResponseMode : 'Off'}`);
+    console.log(`  Action Guard Notify: ${agNotify.enabled ? (agNotifyChannels || 'Enabled (no channel configured!)') : 'Off'}`);
     console.log(`  Revoke-by-source: ${isRevokeBySourceEnabled() ? 'Enabled (destructive)' : 'Disabled (default)'}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
     console.log(`  API Key:  ${config.cloudApiKey ? config.cloudApiKey.substring(0, 12) + '...' : 'Not set'}`);
@@ -284,6 +291,40 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  // ── Action Guard notify channel (#275) ──
+  // The SIGNED path for what doctor's "enforcing with no notify channel" warn
+  // prescribes. Hand-editing config.json for these keys invalidates the `_sig`
+  // HMAC and forces defenceMode strict — these flags exist so nobody has to.
+
+  if (args.includes('--action-guard-notify-openclaw')) {
+    setActionGuardNotifyConfig({ enabled: true, openclaw: true });
+    console.log('Action Guard notify enabled via the OpenClaw approval channel — denials raise an approval card on your gateway\'s channel.');
+    changed = true;
+  }
+
+  const agNotifyWebhookIdx = args.indexOf('--action-guard-notify-webhook');
+  if (agNotifyWebhookIdx !== -1) {
+    const url = args[agNotifyWebhookIdx + 1];
+    if (!url || url.startsWith('--')) {
+      console.error('Missing value for --action-guard-notify-webhook. Provide an https:// URL, e.g. https://hooks.example.com/shieldcortex.');
+      process.exit(1);
+    }
+    try {
+      setActionGuardNotifyConfig({ enabled: true, webhookUrl: url });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    console.log(`Action Guard notify enabled via webhook: ${url.trim()}`);
+    changed = true;
+  }
+
+  if (args.includes('--action-guard-notify-disable')) {
+    setActionGuardNotifyConfig({ enabled: false });
+    console.log('Action Guard notify disabled — unattended denials will only reach the audit log and session-guard index.');
+    changed = true;
+  }
+
   if (args.includes('--allow-revoke-by-source')) {
     setRevokeBySourceEnabled(true);
     console.log('Revoke-by-source ENABLED. `forget --fromSource` can now bulk-delete a source\'s memories (trust-hierarchy ACL still applies). Disable again with --disallow-revoke-by-source when done.');
@@ -329,6 +370,9 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
     console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
     console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
+    console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
+    console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
+    console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('');
     console.log('LLM Verification:');
