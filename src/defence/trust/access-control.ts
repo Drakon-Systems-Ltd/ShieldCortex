@@ -12,7 +12,7 @@
  */
 
 import type { DefenceSource } from '../types.js';
-import { scoreSource } from './source-scorer.js';
+import { isClaimStampedIdentifier, scoreSource } from './source-scorer.js';
 
 export interface AccessPolicy {
   canRead: boolean;
@@ -116,6 +116,11 @@ export function checkAccess(
     // rows by source.
     if (!memory.source || memorySource === '__system:unattributed') {
       return deny('Revoke denied: unattributed memories cannot be revoked by source');
+    }
+    // #283: cross-identity revoke is a host-attested privilege. A claim-stamped
+    // caller (unattested>/env-claim>/env-override>/unrecognised>) outranks nobody.
+    if (isClaimStampedIdentifier(source.identifier)) {
+      return deny('Revoke denied: self-declared identity cannot trust-hierarchy revoke (unattested claim)');
     }
     const targetTrust = scoreSource(parseStoredSource(memorySource)).score;
     if (targetTrust > 0 && trust >= 0.7 && trust > targetTrust) {

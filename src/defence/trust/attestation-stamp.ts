@@ -16,6 +16,11 @@
  * no, the identity keeps its declared type and score but is keyed into a
  * separate namespace, so it can only ever own what it wrote itself.
  *
+ * That namespace is not per-caller isolation. A later writer declaring the same
+ * `type:identifier` (or the already-stamped form) is keyed identically to the
+ * first claimant — unattested writers can wear each other's stamped names. The
+ * guarantee is only that a stamped identity cannot own a host-attested row.
+ *
  * Properties this stamp must hold (all covered in attestation-stamp.test.ts):
  * - it NEVER raises a score — `scoreSource` strips it before scoring, with one
  *   deliberate exception below;

@@ -256,6 +256,43 @@ describe('#283 ACL — a declared identity owns only what it wrote itself', () =
   });
 });
 
+describe('#283 ACL — claim-stamped identities cannot trust-hierarchy revoke', () => {
+  const LOWER_TRUST_TARGETS = ['agent:agent-spawned', 'file:notes', 'web:scrape'] as const;
+  const STAMP_REVOKE_REASON = /unattested|self-declared/;
+
+  it.each([false, true])(
+    'denies every below-ceiling rung against lower-trust targets (strict=%s)',
+    (strict) => {
+      process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+      for (const [declared] of BELOW_CEILING) {
+        const r = resolveToolSource(declared, { toolName: 'recall', project: null, strict });
+        expect(isUnattestedIdentifier(r.source.identifier)).toBe(true);
+        for (const target of LOWER_TRUST_TARGETS) {
+          const policy = checkAccess({ id: 1, source: target }, r.source, 'revoke');
+          expect(policy.canDelete).toBe(false);
+          expect(policy.reason).toMatch(STAMP_REVOKE_REASON);
+        }
+      }
+    },
+  );
+
+  it('host-attested cli:mcp 0.9 still revokes agent:agent-spawned 0.3', () => {
+    const host: DefenceSource = { type: 'cli', identifier: 'mcp' };
+    expect(scoreSource(host).score).toBe(0.9);
+    const policy = checkAccess({ id: 1, source: 'agent:agent-spawned' }, host, 'revoke');
+    expect(policy.canDelete).toBe(true);
+    expect(policy.reason).toMatch(/Trust-hierarchy revoke/);
+  });
+
+  it('stamped caller still revokes its own rows', () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+    const r = resolveToolSource({ type: 'hook', identifier: 'session-end' },
+      { toolName: 'recall', project: null, strict: false });
+    const ownKey = `${r.source.type}:${r.source.identifier}`;
+    expect(checkAccess({ id: 1, source: ownKey }, r.source, 'revoke').canDelete).toBe(true);
+  });
+});
+
 describe('#283 destructive floor', () => {
   it('keeps hierarchy revoke off the wire: forget derives its identity from the environment', () => {
     // `forget`/revoke-by-source is the only route to cross-identity deletion, and
