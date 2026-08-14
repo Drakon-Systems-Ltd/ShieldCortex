@@ -93,14 +93,19 @@ function isAllowlisted(value: string, allowlist: string[]): boolean {
  *
  * ENV_SECRET patterns match `API_KEY=…` assignments at 0.82–0.85 confidence.
  * Without a denylist they fire on every README (`your-api-key-here`,
- * `changeme_in_production`, `replace-with-your-token`). Conservative:
- * only obvious placeholder language, not real-looking random values.
+ * `changeme_in_production`, `replace-with-your-token`).
+ *
+ * Conservative on purpose (dual-review #280): only obvious template language.
+ * Do NOT match bare words like "change"/"replace"/"set" inside real values
+ * (`Spring-Change-2024`, `my-secret-prod-7f3a`). Prefer exacts + anchored
+ * phrase shapes with length caps.
  */
 export function isDocumentationPlaceholder(value: string): boolean {
-  const v = value.trim().toLowerCase();
+  const raw = value.trim();
+  const v = raw.toLowerCase();
   if (!v) return true;
 
-  // Exact common placeholders
+  // Exact common placeholders (whole value)
   const exact = new Set([
     'changeme',
     'change_me',
@@ -130,24 +135,56 @@ export function isDocumentationPlaceholder(value: string): boolean {
     'your_secret',
     'your_token',
     'your_api_key',
+    'your-api-key',
+    'your-api-key-here',
+    'your_api_key_here',
     'insert_here',
     'insert-here',
+    'replace-with-your-token',
+    'replace_with_your_token',
+    'replace-with-your-secret',
+    'replace_with_your_secret',
+    'replace-with-your-password',
+    'changeme_in_production',
+    'change_me_in_production',
+    'changeme-in-production',
   ]);
   if (exact.has(v)) return true;
 
-  // Phrase-shaped placeholders
-  if (/^(your|my|the)[-_ ]?(api[-_ ]?key|secret|token|password|passwd|key)\b/.test(v)) return true;
-  if (/\b(your|my)[-_ ]?(api[-_ ]?key|secret|token|password)\b/.test(v)) return true;
-  if (/\b(replace|insert|put|enter|set)[-_ ]?(with[-_ ]?)?(your|a|the)[-_ ]?/.test(v)) return true;
-  // changeme / change_me anywhere in a short value (changeme_in_production)
-  if (/(^|[^a-z])change[-_]?me([^a-z]|$)/.test(v) && v.length < 48) return true;
-  if (/\b(change|replace)[-_]?(me)?\b/.test(v) && v.length < 40) return true;
-  if (/\b(example|sample|dummy|placeholder|redacted|todo|fixme)\b/.test(v) && v.length < 48) return true;
-  if (/^(x{4,}|\*{4,}|\.{4,}|-{4,}|_{4,})$/i.test(value.trim())) return true;
-  if (/^<.*>$/.test(value.trim())) return true;
-  if (/^(xxx+|yyy+|zzz+|abc+|test|testing|asdf|qwerty)([0-9!@._-]*)?$/i.test(v)) return true;
-  // *_in_production / *_here / *_todo style template tails
-  if (/_(in_production|here|todo|example|sample|placeholder)$/.test(v) && v.length < 48) return true;
+  // Angle-bracket template tokens: <your-token>, <API_KEY>
+  if (/^<[^>]{1,40}>$/.test(raw)) return true;
+
+  // Pure mask runs
+  if (/^(x{4,}|\*{4,}|\.{4,}|-{4,}|_{4,})$/i.test(raw)) return true;
+  if (/^(xxx+|yyy+|zzz+|asdf|qwerty)([0-9!@._-]*)?$/i.test(v)) return true;
+
+  // Anchored "your/my … key/secret/token/password" whole-value templates.
+  // Requires a template tail (here|example|placeholder|xxx|sample) OR ends
+  // exactly at the credential noun — not "my-secret-prod-abc123".
+  if (
+    /^(your|my)[-_ ]+(api[-_ ]?key|secret|token|password|passwd|key)([-_ ]+(here|example|sample|placeholder|xxx+))?$/i.test(v)
+  ) {
+    return true;
+  }
+
+  // Anchored "replace/insert … with your …" whole-value templates only.
+  if (
+    v.length < 48
+    && /^(replace|insert)[-_ ]+(with[-_ ]+)?(your|my|a|the)[-_ ]+(api[-_ ]?key|secret|token|password|key|value)([-_ ]*(here)?)?$/.test(v)
+  ) {
+    return true;
+  }
+
+  // changeme / change_me as a PREFIX of a short template (changeme_in_production)
+  if (/^change[-_]?me([-_].{0,24})?$/.test(v) && v.length < 40) return true;
+
+  // *_in_production / *_here when the stem is a known placeholder word
+  if (
+    /^(change[-_]?me|password|secret|token|api[-_]?key|example|sample|dummy|placeholder|todo|fixme)[-_](in[-_]production|here|example|sample|placeholder|todo)$/.test(v)
+    && v.length < 48
+  ) {
+    return true;
+  }
 
   return false;
 }

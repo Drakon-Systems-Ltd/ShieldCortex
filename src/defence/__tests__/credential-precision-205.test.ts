@@ -80,11 +80,32 @@ describe('#205 credential pattern precision', () => {
       expect(result.findings.some((f) => f.type === 'env_secret')).toBe(true);
     });
 
-    it('isDocumentationPlaceholder covers the named issue examples', () => {
+    it.each([
+      // Dual-review FN cases: denylist must NOT swallow these.
+      ['API_KEY=my-secret-prod-a1b2c3d4'],
+      ['TOKEN=the-key-ops-7f3a9c'],
+      ['SECRET=Spring-Change-2024-rollout'],
+      ['PASSWORD=must-replace-oncall-91'],
+      ['API_TOKEN=todo-later-but-real-Xk9mQ2'],
+      ['DB_PASSWORD=set-the-db-password-now-8f'],
+    ])('STILL flags non-template env value: %s', (line) => {
+      const result = scanForCredentials(line);
+      expect(result.findings.some((f) => f.type === 'env_secret')).toBe(true);
+    });
+
+    it('isDocumentationPlaceholder covers the named issue examples only', () => {
       expect(isDocumentationPlaceholder('your-api-key-here')).toBe(true);
       expect(isDocumentationPlaceholder('replace-with-your-token')).toBe(true);
       expect(isDocumentationPlaceholder('changeme_in_production')).toBe(true);
       expect(isDocumentationPlaceholder('Kp9Wm2Qx7Lr4Nt8Vy1Zb5Fh6Jd')).toBe(false);
+      expect(isDocumentationPlaceholder('my-secret-prod-a1b2c3d4')).toBe(false);
+      expect(isDocumentationPlaceholder('Spring-Change-2024-rollout')).toBe(false);
+      expect(isDocumentationPlaceholder('must-replace-oncall-91')).toBe(false);
+    });
+
+    it('does not apply placeholder denylist to connection strings containing example hosts', () => {
+      const result = scanForCredentials('redis://default:s3cr3tPassw0rd99@redis.example.com:6379');
+      expect(result.findings.some((f) => f.provider === 'redis')).toBe(true);
     });
   });
 
