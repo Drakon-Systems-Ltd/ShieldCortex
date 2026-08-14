@@ -916,6 +916,15 @@ function classifyNotifyStatus(notifyMod, result) {
 
 async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId }) {
   const id = actionId || mintActionId();
+  // #284 dual-review blocker (SOL): write the denial row FIRST with notify pending,
+  // then attempt delivery and append/update status. A hang/crash during notify must
+  // not drop the forensics row that operators open first (denials.jsonl).
+  const pendingRow = buildLocalGuardOutcome({
+    toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
+    notify: { status: 'pending', deliveredVia: null },
+  });
+  recordLocalGuardOutcome(pendingRow);
+
   let notify = null;
   try {
     notify = typeof notifyOrPromise?.then === 'function' ? await notifyOrPromise : notifyOrPromise;
@@ -930,10 +939,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     typeof notify.buildActionGuardOutcomeNotification === 'function'
   ) {
     try {
-      const provisional = buildLocalGuardOutcome({
-        toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
-      });
-      const notification = notify.buildActionGuardOutcomeNotification(provisional);
+      const notification = notify.buildActionGuardOutcomeNotification(pendingRow);
       deliveryResult = await notify.deliverOperatorNotification(notification, {
         channels: [notify.denialChannel],
         timeoutMs: notify.config?.timeoutMs,
@@ -952,10 +958,15 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   }
 
   const notifyStatus = classifyNotifyStatus(notify, deliveryResult);
-  const localOutcome = buildLocalGuardOutcome({
-    toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id, notify: notifyStatus,
+  // Append a second denials.jsonl line with final notify status (same actionId)
+  // so operators can see both "denied" and "were they told" without losing the
+  // first row if delivery hangs.
+  const finalRow = buildLocalGuardOutcome({
+    toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
+    notify: notifyStatus,
   });
-  recordLocalGuardOutcome(localOutcome);
+  recordLocalGuardOutcome(finalRow);
+
   return {
     deliveredVia: deliveryResult?.deliveredVia ?? null,
     attempts: deliveryResult?.attempts ?? [],
@@ -963,6 +974,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     actionId: id,
   };
 }
+
 
 function notificationAudit(result) {
   if (!result) return {};

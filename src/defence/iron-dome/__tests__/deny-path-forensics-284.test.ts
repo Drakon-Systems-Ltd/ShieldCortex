@@ -109,9 +109,35 @@ describe('#284 deny-path forensics', () => {
       expect(res.status).toBe(0);
     }
     const denials = readJsonl(path.join(home, '.shieldcortex', 'denials.jsonl'));
+    // write-first records pending+final per call (same actionId); two calls → 2 unique ids.
+    expect(denials.length).toBeGreaterThanOrEqual(4);
+    const ids = [...new Set(denials.map((d) => d.actionId))];
+    expect(ids.length).toBe(2);
+    for (const id of ids) expect(String(id)).toMatch(/^act-[a-f0-9]{16}$/);
+  });
+
+
+  it('Face 4 write-first: denial row exists before notify settles (pending then final)', () => {
+    const res = runHook({
+      tool_name: 'Bash',
+      tool_input: { command: 'rm -rf /' },
+      session_id: 'cccccccccccccccccccccccccccccccc',
+      permission_mode: 'default',
+    }, home);
+    expect(res.status).toBe(0);
+    const denials = readJsonl(path.join(home, '.shieldcortex', 'denials.jsonl'));
+    // With no notify channel: pending + final(not_configured|no_channel)
     expect(denials.length).toBeGreaterThanOrEqual(2);
-    const ids = denials.map((d) => d.actionId);
-    expect(new Set(ids).size).toBe(ids.length);
+    const ids = new Set(denials.map((d) => d.actionId));
+    expect(ids.size).toBe(1);
+    const statuses = denials.map((d) => (d.notify as { status?: string } | undefined)?.status);
+    expect(statuses).toEqual(expect.arrayContaining(['pending']));
+    expect(statuses.some((s) => s && s !== 'pending')).toBe(true);
+    // Every row still carries forensics faces
+    for (const row of denials) {
+      expect(row.origin).toBe('claude-code-hook');
+      expect(row.signals).toEqual(expect.arrayContaining(['recursive-force-delete']));
+    }
   });
 
   it('operator-notify keeps recursive-force-delete and action correlation', () => {

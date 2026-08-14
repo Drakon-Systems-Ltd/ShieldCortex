@@ -160,19 +160,21 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
       expect(result.stderr).toMatch(/denials\.jsonl/);
       const rows = localDenials();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
+      // #284 write-first: pending + final notify status share one actionId.
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      const row = rows[rows.length - 1];
+      expect(row).toMatchObject({
         event: 'action_guard_denial',
         outcome: 'denied_no_prompt_surface',
         tool: 'Bash',
       });
-      expect(String(rows[0].surface)).toMatch(/redacted action surface/i);
-      expect(JSON.stringify(rows[0])).not.toContain(DANGEROUS_COMMAND);
-      expect(JSON.stringify(rows[0])).not.toContain(secret);
+      expect(String(row.surface)).toMatch(/redacted action surface/i);
+      expect(JSON.stringify(rows)).not.toContain(DANGEROUS_COMMAND);
+      expect(JSON.stringify(rows)).not.toContain(secret);
       // #284 Face 3 — correlationId is action-scoped; session identity is sessionId.
-      expect(String(rows[0].correlationId)).toMatch(/^act-[a-f0-9]{16}$/);
-      expect(rows[0].origin).toBe('claude-code-hook');
-      expect(String(rows[0].actionId)).toMatch(/^act-[a-f0-9]{16}$/);
+      expect(String(row.correlationId)).toMatch(/^act-[a-f0-9]{16}$/);
+      expect(row.origin).toBe('claude-code-hook');
+      expect(String(row.actionId)).toMatch(/^act-[a-f0-9]{16}$/);
     });
 
     it('records the local denial before notify loading, even when the configured dist root is unusable', async () => {
@@ -184,8 +186,8 @@ describe('Action Guard hook — prompt-surface rule', () => {
 
       expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
       const rows = localDenials();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      expect(rows[rows.length - 1]).toMatchObject({
         event: 'action_guard_denial',
         outcome: 'denied_no_prompt_surface',
         tool: 'Bash',
