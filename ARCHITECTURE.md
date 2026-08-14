@@ -193,7 +193,7 @@ Protects what the agent *sees*. Runs the firewall over fetched web pages and too
 | Runtime | Hook | Package |
 |---------|------|---------|
 | OpenClaw | `before_tool_call` (typed-hook bus) + `llm_input` / `llm_output` | `@drakon-systems/shieldcortex-realtime` (npm) |
-| Hermes | `pre_tool_call` → REST `POST /api/v1/scan` | `plugins/hermes/shieldcortex/` (repo) |
+| Hermes | `pre_tool_call` → REST `POST /api/v1/action-guard` | `plugins/hermes/shieldcortex/` (repo) |
 
 Both integrations are **advisory-first** and **fail-open at the transport**: an unreachable or erroring guard never wedges the agent. That is a statement about the *plumbing*, not about every verdict — when the guard does run, the catastrophic action class hard-blocks and cannot be configured open (see Iron Dome above). Everything below that class is advisory by default.
 

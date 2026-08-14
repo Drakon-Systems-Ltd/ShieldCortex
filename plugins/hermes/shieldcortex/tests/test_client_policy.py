@@ -13,8 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sc_client import Verdict, scan  # noqa: E402
-from policy import tool_call_decision, resolve_enforce  # noqa: E402
+from sc_client import ActionGuardVerdict, Verdict, evaluate_tool_call, scan  # noqa: E402
+from policy import action_guard_decision, resolve_enforce, tool_call_decision  # noqa: E402
 
 
 def fake_opener(response: dict | None, *, raises: Exception | None = None):
@@ -38,6 +38,59 @@ def capturing_opener(captured: dict, response: dict):
         yield io.BytesIO(json.dumps(response).encode("utf-8"))
 
     return _opener
+
+
+class TestActionGuardClient(unittest.TestCase):
+    def test_parses_evaluateToolCall_shape(self):
+        v = evaluate_tool_call(
+            "Bash",
+            {"command": "rm -rf /"},
+            opener=fake_opener({"decision": "block", "signals": ["recursive-force-delete"], "reason": "wipe"}),
+        )
+        self.assertEqual(v.decision, "block")
+        self.assertEqual(v.signals, ["recursive-force-delete"])
+        self.assertTrue(v.available)
+
+    def test_posts_to_action_guard_not_scan(self):
+        captured = {}
+
+        @contextmanager
+        def opener(req, timeout=None):
+            captured["url"] = req.full_url
+            yield io.BytesIO(json.dumps({"decision": "allow", "signals": []}).encode("utf-8"))
+
+        evaluate_tool_call("Bash", {"command": "git status"}, opener=opener)
+        self.assertTrue(captured["url"].endswith("/api/v1/action-guard"))
+
+    def test_unreachable_is_unavailable(self):
+        v = evaluate_tool_call("Bash", {"command": "ls"}, opener=fake_opener(None, raises=ConnectionRefusedError("down")))
+        self.assertFalse(v.available)
+
+
+class TestActionGuardPolicy(unittest.TestCase):
+    def test_block_always_blocks(self):
+        d = action_guard_decision(ActionGuardVerdict("block", ["x"], "wipe"), enforce=True)
+        self.assertEqual(d["action"], "block")
+
+    def test_require_approval_blocks_when_enforcing(self):
+        d = action_guard_decision(ActionGuardVerdict("require_approval", ["sudo"], "ask"), enforce=True)
+        self.assertEqual(d["action"], "block")
+
+    def test_require_approval_allows_in_advisory(self):
+        self.assertIsNone(
+            action_guard_decision(ActionGuardVerdict("require_approval", ["sudo"], "ask"), enforce=False)
+        )
+
+    def test_allow_is_none(self):
+        self.assertIsNone(action_guard_decision(ActionGuardVerdict("allow", [], ""), enforce=True))
+
+    def test_unavailable_plus_fallback_blocks(self):
+        d = action_guard_decision(
+            ActionGuardVerdict("allow", [], "down", available=False),
+            enforce=True,
+            fallback_blocked=True,
+        )
+        self.assertEqual(d["action"], "block")
 
 
 class TestScanClient(unittest.TestCase):

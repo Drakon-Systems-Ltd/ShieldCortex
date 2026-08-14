@@ -1,10 +1,11 @@
 """
 ShieldCortex defence client for the Hermes plugin.
 
-Calls ShieldCortex's local REST API (`POST /api/v1/scan`, the documented
-"Python via REST" surface) to run content through the defence pipeline and
-returns a normalised verdict. Hermes is Python; ShieldCortex is Node — REST is
-the clean cross-runtime boundary (no CLI text-scraping, no in-process bridge).
+Calls ShieldCortex's local REST API. Tool calls go through
+`POST /api/v1/action-guard` (the same `evaluateToolCall` the Claude hook and
+OpenClaw interceptor run). Content scanning stays on `POST /api/v1/scan`.
+Hermes is Python; ShieldCortex is Node — REST is the clean cross-runtime
+boundary (no CLI text-scraping, no in-process bridge).
 
 Auth: the API requires a Bearer token (the server writes it to
 `~/.shieldcortex/.api-token`, 0600). We read it from `SHIELDCORTEX_API_TOKEN`
@@ -167,6 +168,60 @@ def _post(url, body: bytes, timeout: float, opener, headers: dict):
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with opener(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+class ActionGuardVerdict:
+    """Normalised result of POST /api/v1/action-guard (evaluateToolCall)."""
+
+    __slots__ = ("decision", "signals", "reason", "available")
+
+    def __init__(self, decision: str, signals, reason: str, available: bool = True):
+        self.decision = (decision or "allow").lower()  # allow | require_approval | block
+        self.signals = list(signals or [])
+        self.reason = reason or ""
+        self.available = available
+
+    def __repr__(self) -> str:
+        return (
+            f"ActionGuardVerdict(decision={self.decision!r}, "
+            f"signals={self.signals!r}, available={self.available})"
+        )
+
+
+def evaluate_tool_call(
+    tool: str,
+    args: dict | None = None,
+    *,
+    base_url: str | None = None,
+    timeout: float = 4.0,
+    opener=urllib.request.urlopen,
+) -> ActionGuardVerdict:
+    """Ask ShieldCortex's Action Guard for a verdict. Never raises."""
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    body = json.dumps(
+        {
+            "tool": tool,
+            "args": args if isinstance(args, dict) else {},
+            "source": {"type": "tool", "identifier": "hermes"},
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        data = _post(f"{base}/api/v1/action-guard", body, timeout, opener, headers)
+    except Exception as exc:
+        return ActionGuardVerdict("allow", [], f"scanner unreachable: {exc}", available=False)
+
+    decision = str((data or {}).get("decision") or "allow").lower()
+    if decision not in ("allow", "require_approval", "block"):
+        decision = "allow"
+    signals = (data or {}).get("signals") or []
+    if not isinstance(signals, list):
+        signals = []
+    reason = (data or {}).get("reason") or ""
+    return ActionGuardVerdict(decision, signals, reason, available=True)
 
 
 def scan(

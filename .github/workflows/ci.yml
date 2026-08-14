@@ -96,7 +96,7 @@ jobs:
       # classifier), so it runs here on the Linux matrix, not the billed macOS
       # runner. Also covered by `npm test` below — this is the visible gate.
       - name: Guard precision gate (#182 — no Action Guard false positives)
-        run: npm run guard:precision
+        run: npm run guard:precision -- --planes
 
       - name: Test
         run: npm test

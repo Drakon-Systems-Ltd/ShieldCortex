@@ -31,6 +31,7 @@ import { BrainWorker } from '../worker/brain-worker.js';
 import { isPaused, isKillSwitchActive, getKillSwitchMeta, activateKillSwitch, deactivateKillSwitch } from './control.js';
 import { getRunningVersion } from './version.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
+import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAgentOperations } from '../defence/audit/queries.js';
@@ -291,6 +292,41 @@ export function handleV1ScanBatch(req: Request, res: Response): void {
     });
 
     res.json({ results, total: results.length });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+}
+
+/**
+ * Handler for `POST /api/v1/action-guard`.
+ *
+ * The cross-runtime Action Guard surface. Hermes is Python; the classifier
+ * is Node. This is the evaluateToolCall equivalent of `/api/v1/scan` — tool
+ * name + args in, the same decision + signal set the Claude hook and OpenClaw
+ * interceptor already share. Content scanning stays on `/api/v1/scan`.
+ *
+ * Exported for unit tests.
+ */
+export function handleV1ActionGuard(req: Request, res: Response): void {
+  try {
+    const { tool, args } = req.body ?? {};
+    if (!tool || typeof tool !== 'string') {
+      res.status(400).json({ error: 'tool (string) is required' });
+      return;
+    }
+    if (args != null && (typeof args !== 'object' || Array.isArray(args))) {
+      res.status(400).json({ error: 'args must be an object' });
+      return;
+    }
+    const verdict = evaluateToolCall(tool, (args ?? {}) as Record<string, unknown>);
+    res.json({
+      decision: verdict.decision,
+      signals: verdict.signals,
+      severity: verdict.severity,
+      family: verdict.family,
+      action: verdict.action,
+      reason: verdict.reason,
+    });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
   }
@@ -840,6 +876,7 @@ export function startVisualizationServer(dbPath?: string): void {
 
   app.post('/api/v1/scan', handleV1Scan);
   app.post('/api/v1/scan/batch', handleV1ScanBatch);
+  app.post('/api/v1/action-guard', handleV1ActionGuard);
 
   const brainWorker = new BrainWorker();
   registerIncidentRoutes(app);
@@ -1142,6 +1179,7 @@ export function startVisualizationServer(dbPath?: string): void {
 ║  Defence API:                                                ║
 ║    POST /api/v1/scan             - Scan content              ║
 ║    POST /api/v1/scan/batch       - Batch scan                ║
+║    POST /api/v1/action-guard     - Evaluate a tool call      ║
 ║    GET  /api/v1/audit            - Query audit logs          ║
 ║    GET  /api/v1/audit/stats      - Audit statistics          ║
 ║    GET  /api/v1/quarantine       - List quarantined items    ║

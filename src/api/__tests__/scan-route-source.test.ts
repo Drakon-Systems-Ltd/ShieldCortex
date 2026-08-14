@@ -16,6 +16,7 @@ import { queryAuditLogs } from '../../defence/audit/queries.js';
 import {
   handleV1Scan,
   handleV1ScanBatch,
+  handleV1ActionGuard,
   normaliseDefenceSource,
   __test__,
 } from '../visualization-server.js';
@@ -162,6 +163,31 @@ describe('Fix #13 — /api/v1/scan source normalisation + tamper audit', () => {
 
       expect(rows.length).toBeGreaterThanOrEqual(1);
       expect(rows[0].source_type).toBe('api');
+    });
+  });
+
+  describe('handleV1ActionGuard (route handler)', () => {
+    it('returns the same decision + signals as evaluateToolCall', () => {
+      const { res, json } = createResponseMock();
+      handleV1ActionGuard(makeReq({ tool: 'Bash', args: { command: 'rm -rf /' } }), res);
+      expect(json).toHaveBeenCalledWith(expect.objectContaining({
+        decision: 'block',
+        signals: expect.arrayContaining(['recursive-force-delete']),
+      }));
+    });
+
+    it('rejects a missing tool', () => {
+      const { res, status, json } = createResponseMock();
+      handleV1ActionGuard(makeReq({ args: { command: 'ls' } }), res);
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({ error: 'tool (string) is required' });
+    });
+
+    it('rejects a non-object args', () => {
+      const { res, status, json } = createResponseMock();
+      handleV1ActionGuard(makeReq({ tool: 'Bash', args: 'rm -rf /' }), res);
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({ error: 'args must be an object' });
     });
   });
 });

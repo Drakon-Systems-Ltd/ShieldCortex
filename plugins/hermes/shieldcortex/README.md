@@ -7,9 +7,11 @@ OpenClaw, so this is a Hermes-native plugin, not a shim.
 ## Phase 1 (this)
 
 `register(ctx)` registers a **`pre_tool_call`** gate. Before every Hermes tool
-execution it scans the tool + args through ShieldCortex (`POST /api/v1/scan`) and
-**hard-blocks** a BLOCK/QUARANTINE verdict by returning
-`{"action": "block", "message": …}` (Hermes honours first-block-wins).
+execution it asks Action Guard (`POST /api/v1/action-guard`, the same
+`evaluateToolCall` the Claude hook and OpenClaw interceptor run) and
+**hard-blocks** `block` / `require_approval` by returning
+`{"action": "block", "message": …}` (Hermes honours first-block-wins; it has
+no approval prompt).
 
 - **Enforce by default (v4.47.2).** The gate blocks out of the box. To watch what
   *would* be blocked without blocking (advisory / warn-only), opt out explicitly
