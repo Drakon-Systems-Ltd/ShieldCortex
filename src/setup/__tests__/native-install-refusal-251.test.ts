@@ -196,7 +196,7 @@ describe('install/repair surfaces native refusal (#251)', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  it('does not claim native-link success when load.paths already has the plugin but THIS run refused', async () => {
+  it('does not claim native-link success when load.paths already has the plugin but THIS run refused config-invalid', async () => {
     writeConfig({
       plugins: {
         allow: [PLUGIN],
@@ -217,12 +217,38 @@ describe('install/repair surfaces native refusal (#251)', () => {
 
     const warnings = warnLines.join('\n');
     expect(warnings).toMatch(/native plugin install refused/i);
-    expect(warnings).toMatch(/Not claiming native success|Pre-existing load\.paths/i);
+    expect(warnings).toMatch(/Not claiming native success|config is invalid/i);
     const summary = logLines.join('\n');
     expect(summary).not.toMatch(/Installed through native OpenClaw linked plugin records/);
     // Mode is skipped (not native-link); summary must say refused.
     expect(summary).toMatch(/skipped after native install refused/i);
     expect(process.exitCode).toBe(1);
+  });
+
+  it('keeps native-link when load.paths pre-exists and refusal is non-config-invalid (already exists)', async () => {
+    writeConfig({
+      plugins: {
+        allow: [PLUGIN],
+        load: { paths: [path.join(tempHome, '.openclaw', 'extensions', PLUGIN)] },
+        entries: { [PLUGIN]: { enabled: true } },
+      },
+    });
+    __setLastNativePluginInstallRefusalForTest({
+      reason: 'Error: plugin already exists',
+      detail: ['Error: plugin already exists'],
+      configInvalid: false,
+      truncated: false,
+      label: 'package install',
+    });
+    __setNativePluginInstallForTest(() => null);
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    const summary = logLines.join('\n');
+    expect(summary).toMatch(/Installed through native OpenClaw linked plugin records/);
+    expect(summary).not.toMatch(/skipped after native install refused/);
+    // Soft warning only — pre-existing registration is still valid.
+    expect(process.exitCode).not.toBe(1);
   });
 
   it('clears the refusal state when native install succeeds', async () => {

@@ -1026,11 +1026,26 @@ function findExtensionsDir(): string | null {
   const home = resolveUserHome();
   const openclawDir = path.join(home, '.openclaw');
   if (!fs.existsSync(openclawDir)) return null;
+  // ~/.openclaw must be a directory — a file there means we cannot host extensions.
+  try {
+    if (!fs.statSync(openclawDir).isDirectory()) return null;
+  } catch {
+    return null;
+  }
 
   const extensionsDir = path.join(openclawDir, 'extensions');
   if (!fs.existsSync(extensionsDir)) {
     try {
       fs.mkdirSync(extensionsDir, { recursive: true });
+    } catch {
+      return null;
+    }
+  } else {
+    // #251: if `extensions` exists as a plain file, existsSync is true and the
+    // old code returned that path — copy then failed in catch. Treat non-dir
+    // as unavailable so the refusal hard-fail branch can fire cleanly.
+    try {
+      if (!fs.statSync(extensionsDir).isDirectory()) return null;
     } catch {
       return null;
     }
@@ -1108,23 +1123,29 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
   // Native install (--link) registers via load.paths — skip the extensions
   // copy to avoid duplicate plugin ID warnings.
   //
-  // #251: if THIS run's native install was refused, a pre-existing load.paths
-  // entry is NOT a native success for this run. Returning bare 'native-link'
-  // lied to every caller/doctor that trusts PluginInstallMode. Keep the skip
-  // (no duplicate copy), surface the pre-existing registration, hard-fail on
-  // config-invalid, and return 'skipped' so the mode is not a native success.
+  // #251: config-invalid refusal means OpenClaw will not honour native
+  // management — do not report bare 'native-link' success for THIS run, and
+  // hard-fail. Non-config-invalid refusals (e.g. "plugin already exists") with
+  // a pre-existing load.paths entry are still a valid native-link registration;
+  // warn about the refused attempt but keep the mode honest.
   if (isPluginInLoadPaths()) {
-    if (lastNativePluginInstallRefusal) {
+    if (lastNativePluginInstallRefusal?.configInvalid) {
       console.warn(
         '  Note: plugin is already on plugins.load.paths from a previous install — ' +
-        'this run\'s native OpenClaw install still refused (see above). Not claiming native success.',
+        'this run\'s native OpenClaw install still refused because the config is invalid. ' +
+        'Not claiming native success.',
       );
-      if (lastNativePluginInstallRefusal.configInvalid) {
-        process.exitCode = 1;
-      }
+      process.exitCode = 1;
       return 'skipped';
     }
-    console.log('Plugin already registered via load.paths, skipping extensions copy.');
+    if (lastNativePluginInstallRefusal) {
+      console.warn(
+        `  Note: native OpenClaw install attempt refused (${lastNativePluginInstallRefusal.reason}) — ` +
+        'keeping pre-existing load.paths registration (native-link).',
+      );
+    } else {
+      console.log('Plugin already registered via load.paths, skipping extensions copy.');
+    }
     return 'native-link';
   }
 
