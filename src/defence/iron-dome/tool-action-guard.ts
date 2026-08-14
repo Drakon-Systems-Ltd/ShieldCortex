@@ -54,8 +54,22 @@ export interface ToolGuardVerdict {
    * a denial without re-running the command on the reporter's box. Absent on
    * clean allows. `secret-egress` deliberately never contributes a span — the
    * span would be the secret, and the audit log must not store credentials.
+   *
+   * #184: when the match came from folded script source (not the command the
+   * operator typed), `source` / `line` / `chain` name the file and invocation
+   * path so the operator is not left reading a parent script that does not
+   * contain the matched pattern.
    */
-  matches?: Array<{ signal: string; span: string }>;
+  matches?: Array<{
+    signal: string;
+    span: string;
+    /** Absolute or as-invoked path of the folded file that produced the match. */
+    source?: string;
+    /** 1-based line within that source file (best-effort). */
+    line?: number;
+    /** Invocation chain, e.g. `scripts/github-backup.sh → resilience/sync-code-backup.sh`. */
+    chain?: string;
+  }>;
   /**
    * Scripts whose source was exempted from folding by the reviewed-script
    * allowlist (#189). Present only when an exemption actually fired, so its
@@ -1339,6 +1353,16 @@ interface ScanRegion {
    * keeps its literals `executed` exactly as before (#84's adversarial floor).
    */
   folded: boolean;
+  /**
+   * #184 — path of the folded file this region was read from (as invoked /
+   * resolved). Absent for inline command / heredoc / -c program regions.
+   */
+  sourcePath?: string;
+  /**
+   * #184 — invocation chain from the root command's script to this file,
+   * e.g. `scripts/github-backup.sh → resilience/sync-code-backup.sh`.
+   */
+  chain?: string;
 }
 
 /** Comment and string-literal CONTENT ranges inside one interpreter-source region. */
@@ -1649,7 +1673,48 @@ function classifyWithCtx(
 }
 
 type MatchTier = 'executed' | 'payload';
-interface ClassifiedMatch { signal: string; span: string; tier: MatchTier; }
+interface ClassifiedMatch {
+  signal: string;
+  span: string;
+  tier: MatchTier;
+  /** #184 — present when the match sits inside a folded file region. */
+  source?: string;
+  line?: number;
+  chain?: string;
+}
+
+/**
+ * #184 — locate the folded ScanRegion that owns `at` and compute a 1-based
+ * line number within that region's text. Inline/heredoc regions have no path.
+ */
+function provenanceAt(
+  text: string,
+  at: number,
+  regions: readonly ScanRegion[],
+): { source?: string; line?: number; chain?: string } {
+  for (const r of regions) {
+    if (!r.folded || !r.sourcePath) continue;
+    if (at < r.start || at >= r.end) continue;
+    const before = text.slice(r.start, at);
+    const line = before.split('\n').length; // 1-based within region
+    return {
+      source: r.sourcePath,
+      line,
+      chain: r.chain ?? r.sourcePath,
+    };
+  }
+  return {};
+}
+
+function withProvenance(
+  match: { signal: string; span: string; tier: MatchTier },
+  text: string,
+  at: number,
+  regions: readonly ScanRegion[],
+): ClassifiedMatch {
+  const p = provenanceAt(text, at, regions);
+  return p.source ? { ...match, ...p } : match;
+}
 
 /** Like matchSpans, but a pattern's signal survives only if at least one of its
  *  occurrences is classified 'executed' or 'payload' — mention-only matches
@@ -1742,15 +1807,21 @@ function matchSpansClassified(
     const s0 = m0.index ?? 0;
     const c0 = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget);
     if (c0 === 'executed') {
-      out.push({ signal: p.signal, span: fmtSpan(m0[0]), tier: 'executed' });
+      out.push(withProvenance(
+        { signal: p.signal, span: fmtSpan(m0[0]), tier: 'executed' },
+        text, s0, regions,
+      ));
       continue;
     }
-    let best: { span: string; tier: MatchTier } | null =
-      c0 === 'payload' ? { span: m0[0], tier: 'payload' } : null;
+    let best: { span: string; tier: MatchTier; at: number } | null =
+      c0 === 'payload' ? { span: m0[0], tier: 'payload', at: s0 } : null;
     if (sharedBudget <= 0) {
       // Out of re-scan budget: fail CLOSED — keep the signal at the executed
       // tier rather than spend unbounded time proving it is a mention.
-      out.push({ signal: p.signal, span: fmtSpan(m0[0]), tier: 'executed' });
+      out.push(withProvenance(
+        { signal: p.signal, span: fmtSpan(m0[0]), tier: 'executed' },
+        text, s0, regions,
+      ));
       continue;
     }
     const g = p.re.global ? p.re : new RegExp(p.re.source, p.re.flags + 'g');
@@ -1758,12 +1829,20 @@ function matchSpansClassified(
     for (const m of text.matchAll(g)) {
       const s = m.index ?? 0;
       const c = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget);
-      if (c === 'executed') { best = { span: m[0], tier: 'executed' }; break; }
-      if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload' };
+      if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
+      if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
       sharedBudget--;
-      if (++iters >= MAX_CLASSIFY_ITERS || sharedBudget <= 0) { best = { span: m[0], tier: 'executed' }; break; }  // fail-closed
+      if (++iters >= MAX_CLASSIFY_ITERS || sharedBudget <= 0) {
+        best = { span: m[0], tier: 'executed', at: s };
+        break;
+      }  // fail-closed
     }
-    if (best !== null) out.push({ signal: p.signal, span: fmtSpan(best.span), tier: best.tier });
+    if (best !== null) {
+      out.push(withProvenance(
+        { signal: p.signal, span: fmtSpan(best.span), tier: best.tier },
+        text, best.at, regions,
+      ));
+    }
   }
   return out;
 }
@@ -1791,12 +1870,62 @@ const REMEDIATION: Record<string, string> = {
 };
 
 /** Compose a reason string that names the rule, the matched span, and a fix hint. */
-function buildReason(prefix: string, signals: string[], span?: string): string {
+function buildReason(
+  prefix: string,
+  signals: string[],
+  span?: string,
+  provenance?: { source?: string; line?: number; chain?: string },
+): string {
   const parts = [`rule: ${signals.join(', ')}`];
   if (span) parts.push(`matched: "${span}"`);
+  // #184: name the folded file + invocation chain when the match is not in the
+  // command the operator typed. Without this the EDITH case is unfalsifiable —
+  // operator opens github-backup.sh, finds no rm, and concludes the guard is broken.
+  if (provenance?.source) {
+    const where = provenance.line != null
+      ? `${provenance.source}:${provenance.line}`
+      : provenance.source;
+    if (provenance.chain && provenance.chain !== provenance.source) {
+      parts.push(`in: ${where} (via ${provenance.chain})`);
+    } else {
+      parts.push(`in: ${where}`);
+    }
+  }
   const hint = REMEDIATION[signals[0]];
   if (hint) parts.push(`fix: ${hint}`);
   return `${prefix} [${parts.join('; ')}]`;
+}
+
+/**
+ * #184 dual-review: bind the displayed span and the `in:` provenance to the
+ * SAME match. Prefer the first match that carries a folded source; otherwise
+ * fall back to matches[0] for span-only (inline) evidence.
+ */
+function reasonEvidence(
+  matches: readonly ClassifiedMatch[],
+): { span?: string; provenance?: { source?: string; line?: number; chain?: string } } {
+  if (matches.length === 0) return {};
+  const withSource = matches.find(m => m.source);
+  const pick = withSource ?? matches[0];
+  const provenance = pick.source
+    ? { source: pick.source, line: pick.line, chain: pick.chain }
+    : undefined;
+  return { span: pick.span, provenance };
+}
+
+function matchEvidence(
+  matches: readonly ClassifiedMatch[],
+): Array<{ signal: string; span: string; source?: string; line?: number; chain?: string }> {
+  return matches.map(m => {
+    const row: { signal: string; span: string; source?: string; line?: number; chain?: string } = {
+      signal: m.signal,
+      span: m.span,
+    };
+    if (m.source) row.source = m.source;
+    if (m.line != null) row.line = m.line;
+    if (m.chain) row.chain = m.chain;
+    return row;
+  });
 }
 
 // `find <path> -delete` / `find <path> -exec rm …` recursively deletes every
@@ -2471,8 +2600,9 @@ function foldScriptSources(
   if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [] };
 
   const visited = new Set<string>();
-  const queue: Array<{ path: string; lang: ScriptLang; depth: number }> =
-    roots.map(r => ({ path: r.path, lang: r.lang, depth: 1 }));
+  // #184: carry the invocation chain so a nested match can name every hop.
+  const queue: Array<{ path: string; lang: ScriptLang; depth: number; chain: string[] }> =
+    roots.map(r => ({ path: r.path, lang: r.lang, depth: 1, chain: [r.path] }));
   const parts: string[] = [];
   const regions: ScanRegion[] = [];
   const reviewed: string[] = [];
@@ -2548,7 +2678,11 @@ function foldScriptSources(
       const nestedOfReviewed = next.lang === 'sh' ? detectScriptInvocations(reviewedScan) : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
-        else for (const n of nestedOfReviewed) if (!visited.has(n.path)) queue.push({ ...n, depth: next.depth + 1 });
+        else for (const n of nestedOfReviewed) {
+          if (!visited.has(n.path)) {
+            queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
+          }
+        }
       }
       continue;
     }
@@ -2556,7 +2690,16 @@ function foldScriptSources(
     const scan = reviewedScan;
     total += src.length;
     if (parts.length > 0) cursor += 1;                  // the '\n' join separator
-    regions.push({ start: cursor, end: cursor + scan.length, lang: next.lang, hasSink: SHELL_OUT_SINK.test(scan), folded: true });
+    regions.push({
+      start: cursor,
+      end: cursor + scan.length,
+      lang: next.lang,
+      hasSink: SHELL_OUT_SINK.test(scan),
+      folded: true,
+      // #184: path + chain so a match inside this region names its origin.
+      sourcePath: next.path,
+      chain: next.chain.join(' → '),
+    });
     cursor += scan.length;
     parts.push(scan);
 
@@ -2565,7 +2708,11 @@ function foldScriptSources(
     const nested = next.lang === 'sh' ? detectScriptInvocations(scan) : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
-      else for (const n of nested) if (!visited.has(n.path)) queue.push({ ...n, depth: next.depth + 1 });
+      else for (const n of nested) {
+        if (!visited.has(n.path)) {
+          queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
+        }
+      }
     }
   }
 
@@ -3107,10 +3254,11 @@ export function evaluateToolCall(
   const catastrophicExecuted = catastrophicMatches.filter(m => m.tier === 'executed');
   if (catastrophicExecuted.length > 0) {
     const catastrophicSignals = catastrophicExecuted.map(m => m.signal);
+    const ev = reasonEvidence(catastrophicExecuted);
     return withReview(verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
-      buildReason('catastrophic operation blocked', catastrophicSignals, catastrophicExecuted[0].span),
+      buildReason('catastrophic operation blocked', catastrophicSignals, ev.span, ev.provenance),
       [...catastrophicSignals, ...opaqueSignals],
-      catastrophicExecuted.map(m => ({ signal: m.signal, span: m.span }))));
+      matchEvidence(catastrophicExecuted)));
   }
   // A catastrophic pattern that only appears as a PAYLOAD LITERAL inside
   // interpreter source that shells out somewhere is not proven inert (so it is
@@ -3210,15 +3358,18 @@ export function evaluateToolCall(
   // #192: evidence for the final verdict, keyed by signal so the filters below
   // (container-confined, force-push-invoked, firewall-read-only) drop a
   // signal's evidence simply by dropping the signal.
-  const dangerEvidence = new Map<string, string>();
-  for (const m of dangerMatches) if (!dangerEvidence.has(m.signal)) dangerEvidence.set(m.signal, m.span);
+  // #184: keep full provenance (source/line/chain) alongside the span.
+  const dangerEvidence = new Map<string, ClassifiedMatch>();
+  for (const m of dangerMatches) if (!dangerEvidence.has(m.signal)) dangerEvidence.set(m.signal, m);
   // A pip install scoped to a venv / an explicit target prefix mutates that
   // prefix, not the host (issue #89 class 4) — it falls through to the
   // sensitive-but-allowed tier below, exactly like a workspace-local npm install.
   if (hasUnscopedPipInstall(scanSurface) && !dangerSignals.includes('install-package')) {
     dangerSignals.push('install-package');
     dangerSpan = dangerSpan ?? 'pip install';
-    if (!dangerEvidence.has('install-package')) dangerEvidence.set('install-package', 'pip install');
+    if (!dangerEvidence.has('install-package')) {
+      dangerEvidence.set('install-package', { signal: 'install-package', span: 'pip install', tier: 'executed' });
+    }
   }
   // A system install confined to a sealed throwaway container mutates that
   // container, not the host (issue #128) — drop the host-mutation signal. The
@@ -3253,7 +3404,11 @@ export function evaluateToolCall(
   if (egress && looksExternal(url, scanSurface) && hasOutboundData(args, scanSurface)) {
     dangerSignals.push('external-egress');
     dangerSpan = dangerSpan ?? (url || 'external host');
-    dangerEvidence.set('external-egress', fmtSpan(url || 'external host'));
+    dangerEvidence.set('external-egress', {
+      signal: 'external-egress',
+      span: fmtSpan(url || 'external host'),
+      tier: 'executed',
+    });
   }
   // A structured delete tool is inherently a delete, even with no "rm" in any arg.
   if (family === 'delete' && !dangerSignals.includes('file-delete')) dangerSignals.push('file-delete');
@@ -3270,7 +3425,11 @@ export function evaluateToolCall(
   if (findDeleteMatch && !findDeleteIsFiltered && !dangerSignals.includes('recursive-find-delete')) {
     dangerSignals.push('recursive-find-delete');
     dangerSpan = dangerSpan ?? findDeleteMatch[0].trim().replace(/\s+/g, ' ').slice(0, 80);
-    dangerEvidence.set('recursive-find-delete', fmtSpan(findDeleteMatch[0]));
+    dangerEvidence.set('recursive-find-delete', {
+      signal: 'recursive-find-delete',
+      span: fmtSpan(findDeleteMatch[0]),
+      tier: 'executed',
+    });
   }
   // npx/bunx (issue #92 must-fix, ALSO item): only an explicit remote-fetch
   // shape counts as registry-code-exec — see isGatedNpxBunx for the boundary.
@@ -3279,7 +3438,11 @@ export function evaluateToolCall(
   if (isGatedNpxBunx(scanSurface) && !dangerSignals.includes('registry-code-exec')) {
     dangerSignals.push('registry-code-exec');
     dangerSpan = dangerSpan ?? (scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0]?.trim() ?? 'npx/bunx');
-    dangerEvidence.set('registry-code-exec', fmtSpan(scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0] ?? 'npx/bunx'));
+    dangerEvidence.set('registry-code-exec', {
+      signal: 'registry-code-exec',
+      span: fmtSpan(scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0] ?? 'npx/bunx'),
+      tier: 'executed',
+    });
   }
   // An anomalously long command is worth a human nod on its own (issue
   // #86-redos) — flagged here, after every catastrophic check above has
@@ -3288,17 +3451,25 @@ export function evaluateToolCall(
   if (command.length > OVERSIZED_COMMAND_LENGTH) {
     dangerSignals.push('oversized-command');
     dangerSpan = dangerSpan ?? `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`;
-    dangerEvidence.set('oversized-command', `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`);
+    dangerEvidence.set('oversized-command', {
+      signal: 'oversized-command',
+      span: `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`,
+      tier: 'executed',
+    });
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
+    const surviving = [...new Set(dangerSignals)]
+      .map(s => dangerEvidence.get(s))
+      .filter((m): m is ClassifiedMatch => m !== undefined);
+    const ev = reasonEvidence(surviving);
+    // Prefer classified span/provenance; fall back to first-write dangerSpan
+    // when evidence was synthetic (no ClassifiedMatch).
+    const spanForReason = ev.span ?? dangerSpan;
     return withReview(verdict('require_approval', 'dangerous', family, action,
-      buildReason('recognised dangerous operation requires approval', dangerSignals, dangerSpan),
+      buildReason('recognised dangerous operation requires approval', dangerSignals, spanForReason, ev.provenance),
       [...dangerSignals, ...opaqueSignals],
-      [...new Set(dangerSignals)].flatMap(s => {
-        const span = dangerEvidence.get(s);
-        return span !== undefined ? [{ signal: s, span }] : [];
-      })));
+      matchEvidence(surviving)));
   }
 
   // 3) Sensitive-but-routine — allow, but tag so the interceptor can announce.
@@ -3311,14 +3482,20 @@ export function evaluateToolCall(
       [sensitiveSignal, ...payloadSignals, ...opaqueSignals]));
   }
   if (payloadSignals.length > 0) {
+    const payloadMatches = payloadSignals.flatMap(s => {
+      const m = dangerPayloadOnly.find(x => x.signal === s);
+      return m ? [m] : [];
+    });
+    const ev = reasonEvidence(payloadMatches);
     return withReview(verdict('allow', 'sensitive', family, canonical,
-      buildReason('dangerous vocabulary appears only as data inside folded script source',
-        payloadSignals, dangerPayloadOnly[0].span),
+      buildReason(
+        'dangerous vocabulary appears only as data inside folded script source',
+        payloadSignals,
+        ev.span ?? dangerPayloadOnly[0]?.span,
+        ev.provenance,
+      ),
       [...payloadSignals, ...opaqueSignals],
-      payloadSignals.flatMap(s => {
-        const m = dangerPayloadOnly.find(x => x.signal === s);
-        return m ? [{ signal: s, span: m.span }] : [];
-      })));
+      matchEvidence(payloadMatches)));
   }
 
   // 3a) A script invocation whose contents could NOT be read (issue #4). Allowed
@@ -3398,7 +3575,7 @@ function verdict(
   action: string,
   reason: string,
   signals: string[],
-  matches?: Array<{ signal: string; span: string }>,
+  matches?: Array<{ signal: string; span: string; source?: string; line?: number; chain?: string }>,
 ): ToolGuardVerdict {
   return matches && matches.length > 0
     ? { decision, severity, family, action, reason, signals, matches }
