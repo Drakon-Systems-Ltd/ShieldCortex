@@ -4,10 +4,12 @@
  * MCP callers can self-declare any source they like. This module:
  * 1. Always computes the environment-inferred trust ceiling first.
  * 2. Clamps any over-claimed declared source down to that ceiling.
- * 3. Writes a `SOURCE_ELEVATION_BLOCKED` row to defence_audit when a clamp
+ * 3. Drops a same-score identity that the environment did not confirm
+ *    (owner spoof / operator spoof). A genuine trust downgrade is kept.
+ * 4. Writes a `SOURCE_ELEVATION_BLOCKED` row to defence_audit when a clamp
  *    happens, so operators can spot prompt-injection trying to escalate
- *    its own trust.
- * 4. Writes a `SOURCE_MISSING` row when no source was declared, preserving
+ *    its own trust or wear another agent's name.
+ * 5. Writes a `SOURCE_MISSING` row when no source was declared, preserving
  *    the existing visibility into unconfigured callers.
  */
 
@@ -81,33 +83,31 @@ export function resolveToolSource(
   const { declaredScore, ceilingScore, detection } = clampResult;
   let { source, clamped } = clampResult;
   const strict = options.strict ?? getStrictSourceMode();
-  let attested = deriveAttested({
+
+  // Score clamp only rejects a declaration that OUTSCORES the ceiling.
+  // A same-score different identity is not a downgrade — it is spoofing
+  // (`user:approved` or `cli:openclaw-jarvis` against env `cli:mcp`, all 0.9).
+  // Genuine downgrades (file:import 0.4 < cli:mcp 0.9) stay honoured.
+  const env = detection.source;
+  const identitySpoof = !!(
+    declaredSource
+    && !clamped
+    && declaredScore !== null
+    && declaredScore === ceilingScore
+    && (declaredSource.type !== env.type || declaredSource.identifier !== env.identifier)
+  );
+  if (identitySpoof) {
+    source = env;
+    clamped = true;
+  }
+
+  const attested = deriveAttested({
     declared: declaredSource,
     resolved: source,
     clamped,
     strict,
-    envInferred: detection.source,
+    envInferred: env,
   });
-
-  // The OPERATOR identity is a privilege BOUNDARY, not just a trust tier (#269).
-  //
-  // clampSourceToCeiling compares SCORES, so a same-score TYPE elevation slipped
-  // through: `user:approved` scores 0.9 and a normal MCP caller infers as
-  // `cli:mcp`, also 0.9 — not greater, so the declaration was honoured verbatim
-  // and the caller became `type: 'user'`. Once the ACL grants RESTRICTED reads to
-  // the operator, that is a full credential-isolation bypass by one argument.
-  //
-  // `user` may therefore only come from the environment. An unattested claim to
-  // it is dropped to the env-inferred identity and audited as an elevation
-  // attempt — the same treatment an over-scoring claim already gets. This is the
-  // module whose job is hardening a declared source, so every consumer benefits,
-  // not only the ACL that happened to surface the hole.
-  const operatorClaimBlocked = !attested && source.type === 'user';
-  if (operatorClaimBlocked) {
-    source = detection.source;
-    clamped = true;
-    attested = true; // what we return is now system-derived
-  }
 
   if (clamped && declaredSource) {
     try {
@@ -129,10 +129,10 @@ export function resolveToolSource(
           `declared=${declaredSource.type}:${declaredSource.identifier} (score=${declaredScore}), ` +
           `clamped=${source.type}:${source.identifier} (score=${ceilingScore}) ` +
           `via ${detection.method} (confidence: ${detection.confidence})` +
-          // Without this an operator-identity block reads as a contradiction in
-          // the ledger: the scores are EQUAL, yet the claim was rejected.
-          (operatorClaimBlocked
-            ? ' — reason: operator identity is not self-declarable (type elevation at equal score)'
+          // Without this a same-score identity drop reads as a contradiction:
+          // the scores are EQUAL, yet the claim was rejected.
+          (identitySpoof
+            ? ' — reason: same-score identity is not self-declarable'
             : ''),
         fragmentation_score: null,
         pipeline_duration_ms: null,

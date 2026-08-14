@@ -679,34 +679,44 @@ describe('F. Fleet isolation (cross-agent contamination)', () => {
     ).canRead).toBe(false);
   });
 
-  // The ACL grants RESTRICTED to the operator (`type: 'user'`), so the isolation
-  // is only as strong as the operator identity itself. A peer agent must not be
-  // able to simply CLAIM it: `user:approved` scores 0.9, the same as a `cli:*`
-  // caller, so the score-only ceiling clamp let it through verbatim. This walks
-  // the real MCP boundary — resolveToolSource, then the tool — because that is
-  // the composition an attacker actually has.
-  it('claim 13: agent B cannot BECOME the operator by declaring it', () => {
-    const secret = addMemory(
-      { title: 'jarvis deploy key 2', content: 'Sensitive material here.', category: 'note', project: PROJECT },
-      undefined,
-      JARVIS,
-    );
-    getDatabase().prepare(`UPDATE memories SET sensitivity_level = 'RESTRICTED' WHERE id = ?`).run(secret.id);
+  // Walks the real MCP composition: resolveToolSource, then the tool.
+  // Ceiling MUST be cli:mcp at 0.9 — the default agent:unknown (0.3) already
+  // score-clamps these claims and the test would pass for the wrong reason.
+  // `cli:openclaw-jarvis` is the MCP-reachable spoof (sourceParam allows cli).
+  it('claim 13: agent B cannot become the owner or the operator by declaring it', () => {
+    const savedEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT;
+    const savedAgentSource = process.env.SHIELDCORTEX_AGENT_SOURCE;
+    delete process.env.SHIELDCORTEX_AGENT_SOURCE;
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'claude';
+    try {
+      const ceiling = resolveToolSource(undefined, { toolName: 'get_memory', project: PROJECT, strict: false });
+      expect(ceiling.source).toEqual({ type: 'cli', identifier: 'mcp' });
 
-    for (const claim of [
-      { type: 'user', identifier: 'approved' },   // same score as cli — the bypass
-      { type: 'user', identifier: 'direct' },     // over-scores — already clamped
-      { type: 'user', identifier: 'michael' },
-    ] as DefenceSource[]) {
-      const resolved = resolveToolSource(claim, { toolName: 'get_memory', project: PROJECT, strict: false });
-      // The declaration never becomes an operator identity…
-      expect(resolved.source.type).not.toBe('user');
-      // …so the fetch that follows it is still a peer read, and is refused.
-      expect(executeGetMemory({ id: secret.id, source: resolved.source }).success).toBe(false);
+      const secret = addMemory(
+        { title: 'jarvis deploy key 2', content: 'Sensitive material here.', category: 'note', project: PROJECT },
+        undefined,
+        JARVIS,
+      );
+      getDatabase().prepare(`UPDATE memories SET sensitivity_level = 'RESTRICTED' WHERE id = ?`).run(secret.id);
+
+      for (const claim of [
+        { type: 'user', identifier: 'approved' },
+        { type: 'user', identifier: 'direct' },
+        { type: 'cli', identifier: 'openclaw-jarvis' },
+      ] as DefenceSource[]) {
+        const resolved = resolveToolSource(claim, { toolName: 'get_memory', project: PROJECT, strict: false });
+        expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+        expect(resolved.clamped).toBe(true);
+        expect(executeGetMemory({ id: secret.id, source: resolved.source }).success).toBe(false);
+      }
+
+      expect(executeGetMemory({ id: secret.id, source: JARVIS }).success).toBe(true);
+    } finally {
+      if (savedEntrypoint === undefined) delete process.env.CLAUDE_CODE_ENTRYPOINT;
+      else process.env.CLAUDE_CODE_ENTRYPOINT = savedEntrypoint;
+      if (savedAgentSource === undefined) delete process.env.SHIELDCORTEX_AGENT_SOURCE;
+      else process.env.SHIELDCORTEX_AGENT_SOURCE = savedAgentSource;
     }
-
-    // The owner is unaffected — it never needed to declare anything.
-    expect(executeGetMemory({ id: secret.id, source: JARVIS }).success).toBe(true);
   });
 
   it('claim 13: a web-sourced write by agent A does not surface in agent B\'s get_context', async () => {

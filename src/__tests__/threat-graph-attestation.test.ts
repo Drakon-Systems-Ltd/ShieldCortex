@@ -100,59 +100,100 @@ describe('resolveToolSource return shape', () => {
 });
 
 /**
- * The OPERATOR identity is a privilege boundary, not a trust tier (#269).
+ * Same-score identity is not self-declarable (#270).
  *
- * The clamp compares SCORES, so a same-score TYPE elevation slipped through:
- * `user:approved` scores 0.9 in BASE_SCORES and a normal MCP caller infers as
- * `cli:mcp`, also 0.9. Not greater — so the declaration was honoured verbatim
- * and the caller became `type: 'user'`. Once #269 grants RESTRICTED reads to
- * the operator, that one line is a full credential-isolation bypass: any peer
- * agent could pass `source: {type:'user', identifier:'approved'}` to
- * `get_memory`/`recall` and read another agent's secrets.
+ * The score clamp only rejects a declaration that OUTSCORES the env ceiling.
+ * A normal MCP process infers as `cli:mcp` (0.9). These claims are also 0.9,
+ * so the score clamp lets them through:
+ *   - `user:approved` (operator exception on the ACL)
+ *   - `cli:openclaw-jarvis` (owner of another agent's RESTRICTED row)
  *
- * `forget` already refuses a declared identity for exactly this reason ("the
- * clamp only caps trust SCORE, not identity"), and ResolvedToolSource's own
- * doc says attestation "must never be self-served". This enforces it at the
- * one place whose job is hardening a declared source, so every consumer —
- * not just the ACL — sees an operator identity only when the environment
- * actually backs it.
+ * Both are identity spoofs, not downgrades. Tests MUST pin the 0.9 ceiling
+ * via CLAUDE_CODE_ENTRYPOINT — without it the default `agent:unknown` (0.3)
+ * already score-clamps these claims and the suite goes green for the wrong
+ * reason. `forget` already refuses a declared identity for this reason.
  */
-describe('#269 — the operator identity can never be self-declared', () => {
-  it('drops a same-score `user` claim the environment did not confirm', () => {
+const IDENTITY_ENV_KEYS = [
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_AGENT_CONTEXT',
+  'CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
+  'CODEX_THREAD_ID',
+  'CODEX_CI',
+  'SHIELDCORTEX_AGENT_SOURCE',
+] as const;
+
+describe('#270 — same-score identity is not self-declarable', () => {
+  const saved: Partial<Record<(typeof IDENTITY_ENV_KEYS)[number], string | undefined>> = {};
+
+  beforeEach(() => {
+    for (const key of IDENTITY_ENV_KEYS) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+    // Any non-subagent entrypoint → inferSourceFromEnvironment returns cli:mcp (0.9).
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'claude';
+  });
+
+  afterEach(() => {
+    for (const key of IDENTITY_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it('pins the 0.9 cli:mcp ceiling this suite is about', () => {
+    const resolved = resolveToolSource(undefined, { toolName: 'recall', project: null });
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.attested).toBe(true);
+    expect(resolved.clamped).toBe(false);
+  });
+
+  it('drops user:approved at equal 0.9 (the score clamp would have honoured it)', () => {
     const resolved = resolveToolSource(
       { type: 'user', identifier: 'approved' },
       { toolName: 'get_memory', project: null, strict: false },
     );
-    // The env here infers a non-user identity, so the claim must not survive.
-    expect(resolved.source.type).not.toBe('user');
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
     expect(resolved.clamped).toBe(true);
-    // …and what is returned is now system-derived, so it IS attested.
     expect(resolved.attested).toBe(true);
   });
 
-  it('drops an over-scoring `user` claim too (unchanged clamp behaviour)', () => {
+  it('drops an over-scoring user:direct claim (unchanged score clamp)', () => {
     const resolved = resolveToolSource(
       { type: 'user', identifier: 'direct' },
       { toolName: 'recall', project: null, strict: false },
     );
-    expect(resolved.source.type).not.toBe('user');
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
     expect(resolved.clamped).toBe(true);
   });
 
-  it('leaves a NON-operator self-declaration alone (only `user` is a boundary)', () => {
+  it('drops cli:openclaw-jarvis at equal 0.9 (owner-identity spoof — MCP-reachable)', () => {
+    const resolved = resolveToolSource(
+      { type: 'cli', identifier: 'openclaw-jarvis' },
+      { toolName: 'get_memory', project: null, strict: false },
+    );
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.clamped).toBe(true);
+    expect(resolved.attested).toBe(true);
+  });
+
+  it('keeps a genuine trust downgrade (file:import 0.4 < cli:mcp 0.9)', () => {
     const resolved = resolveToolSource(
       { type: 'file', identifier: 'import' },
       { toolName: 'remember', project: null, strict: false },
     );
-    expect(resolved.source.type).toBe('file');
+    expect(resolved.source).toEqual({ type: 'file', identifier: 'import' });
     expect(resolved.clamped).toBe(false);
   });
 
-  it('honours a real operator environment (no declaration to second-guess)', () => {
-    const resolved = resolveToolSource(undefined, { toolName: 'recall', project: null });
-    // Whatever the env is, an undeclared identity is system-derived and attested.
-    expect(resolved.attested).toBe(true);
+  it('honours a declaration the environment independently confirms', () => {
+    const resolved = resolveToolSource(
+      { type: 'cli', identifier: 'mcp' },
+      { toolName: 'recall', project: null, strict: false },
+    );
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
     expect(resolved.clamped).toBe(false);
+    expect(resolved.attested).toBe(true);
   });
 });
 
