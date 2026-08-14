@@ -11,7 +11,7 @@ import { listAllowances } from '../threat-graph/allowance.js';
 
 export interface ThreatGraphQueryArgs {
   view: 'sources' | 'source' | 'events' | 'campaigns' | 'allowances' | 'conflicts';
-  /** Node key for view 'source' (e.g. 'agent:jarvis'). */
+  /** Node key for view 'source' (e.g. 'agent:build-bot'). */
   key?: string;
   /** Filter events by originating project. */
   project?: string;
