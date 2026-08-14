@@ -6,6 +6,7 @@ import semver from 'semver';
 import {
   readPluginInstallIndex,
   REALTIME_PLUGIN_ID,
+  classifyLiveLoadEvidence,
   type PluginIndexRow,
 } from '../integrations/openclaw-plugin-index.js';
 import {
@@ -254,9 +255,24 @@ export interface RunSelfCheckOptions {
   /**
    * Injectable post-boot registration sighting (defaults to scanning the
    * gateway logs for a `[shieldcortex] … registered` line newer than the boot
-   * roster snapshot, #142). Only consulted when the roster omits the plugin.
+   * roster snapshot, #142). Only consulted when the roster omits the plugin
+   * AND no gateway-PID load proof is present.
    */
   readRegistrationSeenAfterBoot?: () => boolean;
+  /**
+   * #216 test seam — gateway-PID-attributed registration (defaults to
+   * {@link findGatewayAttributedRegistrationSince}).
+   */
+  findGatewayAttributedRegistration?: (
+    sinceMs: number,
+    gatewayPid: number,
+  ) => { atMs: number; pid: number | null; version: string } | null;
+  /**
+   * #142 test seam — any dated registration since a bound.
+   */
+  findAnyRegistrationSince?: (
+    sinceMs: number,
+  ) => { atMs: number; pid: number | null; version: string } | null;
   /** Injectable live enforcement probe (defaults to the guarded real probe). */
   canaryProbe?: (home: string, pluginId: string) => Promise<CanaryResult>;
 }
@@ -304,41 +320,45 @@ export async function runPluginSelfCheck(
       latestBoot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
       return latestBoot?.plugins ?? null;
     });
-  // Ambiguous post-boot registration (CLI/anonymous). #216 gateway-PID proof
-  // is collected separately and grants loaded.
-  const readRegistration =
-    options.readRegistrationSeenAfterBoot ??
-    (() => {
-      if (process.env.JEST_WORKER_ID !== undefined) return false;
-      if (latestBoot?.atMs == null) return false;
-      // Only count as ambiguous if we do NOT already have a gateway-PID match.
-      if (gatewayPid != null) {
-        const gw = findGatewayAttributedRegistrationSince(latestBoot.atMs, gatewayPid);
-        if (gw) return false;
-      }
-      return findRegistrationSince(latestBoot.atMs) != null;
-    });
   const probe = options.canaryProbe ?? defaultCanaryProbe;
 
   const index = readIndex(home);
-  const liveRoster = readRoster();
-  let gatewayPidRegistrationSeenAfterBoot = false;
+  let liveRoster = readRoster();
+  // #216/#142: ONE decision tree with gatherReconcileInput (dual-review #281).
+  // Do not re-implement processStartedAtMs coupling here.
+  const classified = classifyLiveLoadEvidence({
+    pluginId,
+    liveRoster,
+    gatewayPid,
+    bootAtMs: latestBoot?.atMs ?? null,
+    processStartedAtMs,
+    findGatewayReg:
+      options.findGatewayAttributedRegistration ??
+      ((sinceMs, pid) =>
+        process.env.JEST_WORKER_ID !== undefined
+          ? null
+          : findGatewayAttributedRegistrationSince(sinceMs, pid)),
+    findAnyReg:
+      options.findAnyRegistrationSince ??
+      ((sinceMs) =>
+        process.env.JEST_WORKER_ID !== undefined
+          ? null
+          : findRegistrationSince(sinceMs)),
+  });
+  // When tests inject readRegistrationSeenAfterBoot, honour it for the
+  // ambiguous path only — never override a gateway-PID load proof.
+  let registrationSeenAfterBoot = classified.registrationSeenAfterBoot;
+  let gatewayPidRegistrationSeenAfterBoot =
+    classified.liveLoadEvidence === 'gateway-pid-registration';
   if (
-    process.env.JEST_WORKER_ID === undefined &&
-    gatewayPid != null &&
-    processStartedAtMs != null &&
-    !(liveRoster?.includes(pluginId))
-  ) {
-    const sinceMs = latestBoot?.atMs ?? processStartedAtMs;
-    gatewayPidRegistrationSeenAfterBoot =
-      findGatewayAttributedRegistrationSince(sinceMs, gatewayPid) != null;
-  }
-  const registrationSeenAfterBoot =
+    options.readRegistrationSeenAfterBoot &&
     !gatewayPidRegistrationSeenAfterBoot &&
-    liveRoster != null &&
-    !liveRoster.includes(pluginId)
-      ? readRegistration()
-      : false;
+    classified.liveLoadEvidence !== 'boot-roster'
+  ) {
+    registrationSeenAfterBoot = options.readRegistrationSeenAfterBoot();
+  }
+  liveRoster = classified.liveRoster;
+
   const onDiskVersion = options.expectedVersion ? readOnDisk(home) : null;
   const canary = await probe(home, pluginId);
   const verdict = evaluateSelfCheck({
