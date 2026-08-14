@@ -19,6 +19,7 @@ import {
   openClawConfigPath,
   getLastNativePluginInstallRefusal,
   __setNativePluginInstallForTest,
+  __setNativeSpawnForTest,
   __setLastNativePluginInstallRefusalForTest,
   __clearLastNativePluginInstallRefusalForTest,
 } from '../openclaw.js';
@@ -82,6 +83,7 @@ beforeEach(() => {
 
 afterEach(() => {
   __setNativePluginInstallForTest(null);
+  __setNativeSpawnForTest(null);
   __clearLastNativePluginInstallRefusalForTest();
   if (previousDocker === undefined) delete process.env.DOCKER;
   else process.env.DOCKER = previousDocker;
@@ -188,6 +190,35 @@ describe('install/repair surfaces native refusal (#251)', () => {
     const summary = logLines.join('\n');
     expect(summary).toMatch(/skipped after native install refused/i);
     expect(summary).not.toMatch(/Installed through native OpenClaw/);
+    // #251: nothing installed after refusal is a hard failure, not exit-0 quiet.
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('does not claim native-link success when load.paths already has the plugin but THIS run refused', async () => {
+    writeConfig({
+      plugins: {
+        allow: [PLUGIN],
+        load: { paths: [path.join(tempHome, '.openclaw', 'extensions', PLUGIN)] },
+        entries: { [PLUGIN]: { enabled: true } },
+      },
+    });
+    __setLastNativePluginInstallRefusalForTest({
+      reason: 'OpenClaw config is invalid',
+      detail: ['OpenClaw config is invalid'],
+      configInvalid: true,
+      truncated: false,
+      label: 'package install',
+    });
+    __setNativePluginInstallForTest(() => null);
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    const warnings = warnLines.join('\n');
+    expect(warnings).toMatch(/native plugin install refused/i);
+    expect(warnings).toMatch(/Not claiming native success|Pre-existing load\.paths/i);
+    const summary = logLines.join('\n');
+    expect(summary).not.toMatch(/Installed through native OpenClaw linked plugin records/);
+    expect(process.exitCode).toBe(1);
   });
 
   it('clears the refusal state when native install succeeds', async () => {
@@ -215,6 +246,80 @@ describe('install/repair surfaces native refusal (#251)', () => {
   });
 });
 
+describe('tryNativeOpenClawPluginInstall real spawn wiring (#251)', () => {
+  it('classifies failed spawnSync output into lastNativePluginInstallRefusal without pre-seeding', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    // Do NOT seed refusal state. Drive the real tryNative path via spawn seam.
+    __setNativePluginInstallForTest(null);
+    __setNativeSpawnForTest((_cmd, _args) => ({
+      status: 1,
+      stdout: 'Audit, status, health, logs, tasks list/audit, and doctor commands still run with invalid config.\n',
+      stderr:
+        'OpenClaw config is invalid\n' +
+        'File: ~/.openclaw/openclaw.json\n' +
+        'Problem:\n' +
+        '  - plugins.entries.bogus-dangler: Invalid input\n' +
+        'Fix: openclaw doctor --fix\n',
+    }));
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    const refusal = getLastNativePluginInstallRefusal();
+    expect(refusal).not.toBeNull();
+    expect(refusal!.configInvalid).toBe(true);
+    expect(refusal!.reason).toMatch(/config is invalid/i);
+    expect(refusal!.reason).not.toMatch(/still run with invalid config/i);
+
+    const warnings = warnLines.join('\n');
+    expect(warnings).toMatch(/native plugin install refused/i);
+    expect(warnings).toMatch(/openclaw config validate/);
+    // Local fallback after real refusal is labelled, not plain native success.
+    expect(warnings).toMatch(/local fallback|not a native registration/i);
+    expect(logLines.join('\n')).not.toMatch(/Installed through native OpenClaw package records/);
+  });
+
+  it('accepts Buffer stdout/stderr from spawn (does not wipe diagnosis)', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    __setNativeSpawnForTest(() => ({
+      status: 1,
+      stdout: Buffer.from('still run with invalid config\n'),
+      stderr: Buffer.from('OpenClaw config is invalid\n  × plugins.entries.bogus: bad\n'),
+    }));
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    const refusal = getLastNativePluginInstallRefusal();
+    expect(refusal?.configInvalid).toBe(true);
+    expect(refusal?.reason).toMatch(/config is invalid/i);
+  });
+
+  it('prefers config-invalid from the package attempt over later linked-attempt noise', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    let calls = 0;
+    __setNativeSpawnForTest((_cmd, args) => {
+      calls += 1;
+      const joined = args.join(' ');
+      if (joined.includes('--link')) {
+        return { status: 1, stderr: 'Error: plugin already exists\n', stdout: '' };
+      }
+      return {
+        status: 1,
+        stderr: 'OpenClaw config is invalid\n  × plugins.entries.bogus: Invalid input\n',
+        stdout: '',
+      };
+    });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(calls).toBe(2);
+    const refusal = getLastNativePluginInstallRefusal();
+    expect(refusal?.configInvalid).toBe(true);
+    expect(refusal?.reason).toMatch(/config is invalid/i);
+  });
+});
+
 describe('#251 source contract — tryNativeOpenClawPluginInstall keeps child output', () => {
   it('classifies spawn output instead of bare-null discard', () => {
     const src = fs.readFileSync(
@@ -228,10 +333,10 @@ describe('#251 source contract — tryNativeOpenClawPluginInstall keeps child ou
     const fn = src.slice(start, end);
     expect(fn).toMatch(/classifyNativePluginInstallFailure/);
     expect(fn).toMatch(/lastNativePluginInstallRefusal/);
-    expect(fn).toMatch(/summariseCommandOutput|classifyNativePluginInstallFailure/);
+    expect(fn).toMatch(/spawnResultText/);
     // Must still not delete the extensions copy before spawn (#214).
     const rmAt = fn.indexOf('rmSync');
-    const spawnAt = fn.indexOf('spawnSync');
+    const spawnAt = fn.indexOf('spawn(') >= 0 ? fn.indexOf('spawn(') : fn.indexOf('spawnSync');
     expect(spawnAt).toBeGreaterThan(0);
     if (rmAt >= 0) expect(rmAt).toBeGreaterThan(spawnAt);
   });

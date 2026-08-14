@@ -816,6 +816,26 @@ export function __setNativePluginInstallForTest(fn: (() => PluginInstallMode | n
 }
 
 /**
+ * #251 test seam — inject spawnSync results into the REAL tryNative path so
+ * classification/refusal wiring is exercised without a live openclaw binary.
+ * Signature mirrors the subset of spawnSync we read (status/stdout/stderr).
+ */
+type NativeSpawnResult = {
+  status: number | null;
+  stdout?: string | Buffer | null;
+  stderr?: string | Buffer | null;
+};
+type NativeSpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: { env?: NodeJS.ProcessEnv; encoding?: BufferEncoding; timeout?: number },
+) => NativeSpawnResult;
+let _nativeSpawnForTest: NativeSpawnFn | null = null;
+export function __setNativeSpawnForTest(fn: NativeSpawnFn | null): void {
+  _nativeSpawnForTest = fn;
+}
+
+/**
  * #214 — snapshot openclaw.json BEFORE any path that can let
  * `openclaw plugins install` rewrite it. The 8 Aug wipe was recoverable
  * only because Case had a 4-minute-old `.bak`. Restore stays merge-
@@ -930,6 +950,12 @@ function reportNativePluginInstallRefusal(refusal: NativePluginInstallRefusal): 
   }
 }
 
+function spawnResultText(value: string | Buffer | null | undefined): string {
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value)) return value.toString('utf-8');
+  return '';
+}
+
 function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // Test seam first: hermetic suites inject success/null without spawning.
   // They may also seed lastNativePluginInstallRefusal via the helper below.
@@ -941,7 +967,7 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
 
   lastNativePluginInstallRefusal = null;
   if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
-  if (!isOpenClawInstalled()) return null;
+  if (!isOpenClawInstalled() && !_nativeSpawnForTest) return null;
 
   // #214 defect 3: do not destroy ~/.openclaw/extensions/shieldcortex-realtime
   // before we know the native install succeeded. That copy is the rollback
@@ -955,9 +981,11 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   ];
 
   const refusals: NativePluginInstallRefusal[] = [];
+  const spawn = _nativeSpawnForTest ?? ((command, args, options) =>
+    spawnSync(command, args as string[], options));
 
   for (const attempt of attempts) {
-    const result = spawnSync('openclaw', attempt.args, {
+    const result = spawn('openclaw', attempt.args, {
       env,
       encoding: 'utf-8',
       timeout: NATIVE_INSTALL_TIMEOUT_MS,
@@ -973,8 +1001,8 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
     // failed attempts is how install/repair swallowed "OpenClaw config is
     // invalid" while the copy fallback still printed plain success.
     const refusal = classifyNativePluginInstallFailure(
-      typeof result.stdout === 'string' ? result.stdout : '',
-      typeof result.stderr === 'string' ? result.stderr : '',
+      spawnResultText(result.stdout),
+      spawnResultText(result.stderr),
       typeof result.status === 'number' ? result.status : null,
       { home: resolveUserHome(), label: attempt.label },
     );
@@ -1079,8 +1107,24 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
 
   // Native install (--link) registers via load.paths — skip the extensions
   // copy to avoid duplicate plugin ID warnings.
+  //
+  // #251: if THIS run's native install was refused, a pre-existing load.paths
+  // entry is NOT "Installed through native OpenClaw linked plugin records" for
+  // this run. Returning bare 'native-link' here was the silent-success hole
+  // both independent reviewers flagged. Keep the skip (no duplicate copy), but
+  // surface that registration is pre-existing and the live attempt failed.
   if (isPluginInLoadPaths()) {
-    console.log('Plugin already registered via load.paths, skipping extensions copy.');
+    if (lastNativePluginInstallRefusal) {
+      console.warn(
+        '  Note: plugin is already on plugins.load.paths from a previous install — ' +
+        'this run\'s native OpenClaw install still refused (see above). Not claiming native success.',
+      );
+      if (lastNativePluginInstallRefusal.configInvalid) {
+        process.exitCode = 1;
+      }
+    } else {
+      console.log('Plugin already registered via load.paths, skipping extensions copy.');
+    }
     return 'native-link';
   }
 
@@ -1092,6 +1136,7 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
     if (lastNativePluginInstallRefusal) {
       console.warn('  Warning: Plugin source not found — cannot fall back to a local copy after native install refused.');
       console.warn('  Nothing was installed. Fix the OpenClaw config (if invalid), rebuild (`npm run build`), then retry.');
+      process.exitCode = 1;
     } else {
       console.warn('  Warning: Plugin source not found, skipping plugin install');
     }
@@ -1536,10 +1581,17 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   }
   if (pluginInstallMode !== 'skipped') {
     console.log('  • shieldcortex-realtime plugin (real-time LLM input scanning + optional output extraction)');
+    const nativeRefusal = getLastNativePluginInstallRefusal();
     if (pluginInstallMode === 'native-package') {
       console.log('    Installed through native OpenClaw package records.');
     } else if (pluginInstallMode === 'native-link') {
-      console.log('    Installed through native OpenClaw linked plugin records.');
+      // #251: native-link is also returned for pre-existing load.paths after a
+      // refused attempt — never claim "installed through native …" then.
+      if (nativeRefusal) {
+        console.warn('    Pre-existing load.paths registration only — this run\'s native OpenClaw install was refused (not a native success).');
+      } else {
+        console.log('    Installed through native OpenClaw linked plugin records.');
+      }
     } else if (pluginInstallMode === 'trusted-local-copy') {
       console.log('    Installed as a local fallback and trusted via plugins.allow.');
     } else if (pluginInstallMode === 'untrusted-local-copy') {
@@ -1547,7 +1599,6 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     }
     // #251: local-copy success after a native refusal is NOT a plain success —
     // OpenClaw itself still rejected the install (often invalid config).
-    const nativeRefusal = getLastNativePluginInstallRefusal();
     if (
       nativeRefusal
       && (pluginInstallMode === 'trusted-local-copy' || pluginInstallMode === 'untrusted-local-copy')
