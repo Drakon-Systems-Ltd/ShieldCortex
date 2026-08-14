@@ -5,18 +5,25 @@
  * 1. Always computes the environment-inferred trust ceiling first.
  * 2. Clamps any over-claimed declared source down to that ceiling.
  * 3. Drops a same-score identity that the environment did not confirm
- *    (owner spoof / operator spoof). A genuine trust downgrade is kept.
+ *    (owner spoof / operator spoof). A genuine trust downgrade is kept
+ *    only after the unattested rewrite (#283) so it cannot wear a host
+ *    ACL key.
  * 4. Writes a `SOURCE_ELEVATION_BLOCKED` row to defence_audit when a clamp
  *    happens, so operators can spot prompt-injection trying to escalate
  *    its own trust or wear another agent's name.
  * 5. Writes a `SOURCE_MISSING` row when no source was declared, preserving
  *    the existing visibility into unconfigured callers.
+ * 6. #283: rewrites unattested below-ceiling declarations onto a stamped
+ *    identifier (`unattested>…`) so stored source + checkAccess ownership
+ *    keys cannot equal a host-attested `${type}:${identifier}` row. Does
+ *    not raise score (unattested pin is 0.3, never env-override 0.5).
  */
 
 import type { DefenceSource } from '../types.js';
 import { clampSourceToCeiling } from './env-detector.js';
 import { logAudit } from '../audit/logger.js';
 import { getStrictSourceMode } from '../../cloud/config.js';
+import { scoreSource } from './source-scorer.js';
 
 export interface ResolveToolSourceOptions {
   /** Tool name (e.g. 'remember', 'recall') — recorded in the audit reason. */
@@ -68,6 +75,32 @@ export function deriveAttested(input: {
   return false;
 }
 
+/** Already-stamped claim identifiers must not be double-wrapped. */
+function isClaimStamp(identifier: string): boolean {
+  return (
+    identifier.startsWith('env-override>')
+    || identifier.startsWith('env-claim>')
+    || identifier.startsWith('unattested>')
+    || identifier.startsWith('unrecognised>')
+  );
+}
+
+/**
+ * #283 — rewrite an unattested resolved identity so the stored source string
+ * (and therefore the checkAccess ownership key) cannot equal a host-attested
+ * `${type}:${identifier}` row. Score must not rise: agent stamps pin at 0.3
+ * via `unattested`.
+ *
+ * Exported for unit tests.
+ */
+export function rewriteUnattestedSource(source: DefenceSource): DefenceSource {
+  if (isClaimStamp(source.identifier)) return source;
+  // Stamp identifier on every unattested type so ownership cannot collide
+  // with a host-attested row of the same type:id. Agent is the dangerous
+  // inbound-exemption case; other types still need ACL-key separation.
+  return { type: source.type, identifier: `unattested>${source.identifier}` };
+}
+
 /**
  * Resolve the effective source for an MCP tool call.
  *
@@ -87,7 +120,7 @@ export function resolveToolSource(
   // Score clamp only rejects a declaration that OUTSCORES the ceiling.
   // A same-score different identity is not a downgrade — it is spoofing
   // (`user:approved` or `cli:openclaw-jarvis` against env `cli:mcp`, all 0.9).
-  // Genuine downgrades (file:import 0.4 < cli:mcp 0.9) stay honoured.
+  // Genuine downgrades stay honoured only after the unattested rewrite below.
   const env = detection.source;
   const identitySpoof = !!(
     declaredSource
@@ -108,6 +141,46 @@ export function resolveToolSource(
     strict,
     envInferred: env,
   });
+
+  // #283: unattested below-ceiling declarations (the default cli:* 0.9 path
+  // honouring agent:browser 0.3) used to keep the bare identity. Rewrite the
+  // stored source so ownership and inbound guards cannot treat it as host-
+  // attested. Do this BEFORE returns so the resolved source is final.
+  if (declaredSource && !attested && !clamped) {
+    const beforeScore = scoreSource(source).score;
+    const rewritten = rewriteUnattestedSource(source);
+    const afterScore = scoreSource(rewritten).score;
+    // Score must not rise (env-override pin would). Defensive floor.
+    source = afterScore > beforeScore + 1e-9
+      ? { type: 'agent', identifier: `unattested>${declaredSource.identifier}` }
+      : rewritten;
+    if (`${source.type}:${source.identifier}` !== `${declaredSource.type}:${declaredSource.identifier}`) {
+      try {
+        logAudit({
+          memory_id: null,
+          project: options.project,
+          timestamp: new Date().toISOString(),
+          source_type: source.type,
+          source_identifier: source.identifier,
+          trust_score: scoreSource(source).score,
+          sensitivity_level: 'PUBLIC',
+          firewall_result: 'ALLOW',
+          operation: null,
+          anomaly_score: 0,
+          threat_indicators: JSON.stringify(['identity_unattested']),
+          blocked_patterns: '[]',
+          reason:
+            `SOURCE_UNATTESTED_REWRITTEN: tool=${options.toolName}, ` +
+            `declared=${declaredSource.type}:${declaredSource.identifier} (score=${declaredScore}), ` +
+            `rewritten=${source.type}:${source.identifier} — reason: environment did not confirm identity`,
+          fragmentation_score: null,
+          pipeline_duration_ms: null,
+        });
+      } catch {
+        // Audit logging must never break tool execution.
+      }
+    }
+  }
 
   if (clamped && declaredSource) {
     try {

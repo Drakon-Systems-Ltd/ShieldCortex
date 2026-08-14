@@ -21,13 +21,16 @@
 
 import { checkAccess } from './access-control.js';
 import { redactContent } from '../sensitivity/redaction.js';
-import { isUntrustedInboundType } from './source-scorer.js';
+import { isUntrustedInboundSourceString } from './source-scorer.js';
 import type { DefenceSource } from '../types.js';
 import type { Memory, ContextSummary } from '../../memory/types.js';
 
 /**
  * Core read decision, shared by the camelCase (Memory) and snake_case (raw row)
  * guards so the policy lives in exactly one place.
+ *
+ * #283: `attested` threads ResolvedToolSource.attested into ownership. When
+ * omitted, checkAccess defaults to attested=true (legacy host-derived callers).
  */
 function callerCanRead(
   id: number,
@@ -35,21 +38,30 @@ function callerCanRead(
   sensitivityLevel: string | null,
   trustScore: number,
   source: DefenceSource | undefined,
+  attested?: boolean,
 ): boolean {
   // Quarantined memories are never surfaced through a normal read.
   if (trustScore === 0) return false;
   // Without a caller identity we cannot make a source-relative decision;
   // surface everything else (the server resolves a source in practice).
   if (!source) return true;
-  return checkAccess({ id, source: storedSource, sensitivity_level: sensitivityLevel }, source, 'read').canRead;
+  return checkAccess(
+    { id, source: storedSource, sensitivity_level: sensitivityLevel },
+    source,
+    'read',
+    attested === undefined ? undefined : { attested },
+  ).canRead;
 }
 
 /** Filter recalled memories (camelCase Memory) to those the caller may read. */
 export function guardReadMemories(
   memories: Memory[],
   source: DefenceSource | undefined,
+  options?: { attested?: boolean },
 ): Memory[] {
-  return memories.filter((m) => callerCanRead(m.id, m.source, m.sensitivityLevel, m.trustScore, source));
+  return memories.filter((m) =>
+    callerCanRead(m.id, m.source, m.sensitivityLevel, m.trustScore, source, options?.attested),
+  );
 }
 
 /**
@@ -59,6 +71,7 @@ export function guardReadMemories(
 export function guardReadRows<T extends Record<string, unknown>>(
   rows: T[],
   source: DefenceSource | undefined,
+  options?: { attested?: boolean },
 ): T[] {
   return rows.filter((r) =>
     callerCanRead(
@@ -67,6 +80,7 @@ export function guardReadRows<T extends Record<string, unknown>>(
       (r.sensitivity_level as string | null) ?? null,
       Number(r.trust_score ?? 1),
       source,
+      options?.attested,
     ),
   );
 }
@@ -78,22 +92,17 @@ export function guardReadRows<T extends Record<string, unknown>>(
  * These surfaces feed the prompt / a broadly-shared project summary, so they must
  * NEVER surface RESTRICTED, quarantined, or untrusted-inbound rows to ANYONE —
  * matching the .mjs prompt hooks. Untrusted-inbound is derived from TYPE_SCORES
- * (anything below UNTRUSTED_INBOUND_FLOOR) with `agent` explicitly exempted.
- * That exemption is the availability half: a low-trust subagent still receives
- * INTERNAL project context. This function does not block cross-agent
- * contamination of agent-typed rows; that is checkAccess / own-only on the
- * per-caller fetch path. Parse the stored type rather than prefix-matching so
- * `webx:…` cannot sneak past a `web:` startsWith check, and future types under
- * the floor are covered by construction.
+ * plus #283 claim-stamp detection on the identifier (env-claim / unattested /
+ * env-override agent rows are inbound even though type=agent). Host-attested
+ * agent rows stay exempt so a real low-trust subagent still receives INTERNAL
+ * project context. Cross-agent contamination of agent-typed rows remains
+ * checkAccess / own-only on the per-caller fetch path.
  */
 function isUntrustedInboundSource(source: string | null | undefined): boolean {
   // Null/empty stays fail-open: many INTERNAL rows are still unstamped, and
   // this surface must keep shared project context available. Fail-closed for
   // unknown provenance is a separate change.
-  if (!source) return false;
-  const sep = source.indexOf(':');
-  const type = (sep === -1 ? source : source.slice(0, sep)).toLowerCase();
-  return isUntrustedInboundType(type);
+  return isUntrustedInboundSourceString(source);
 }
 
 export function guardReadBySensitivity(memories: Memory[]): Memory[] {

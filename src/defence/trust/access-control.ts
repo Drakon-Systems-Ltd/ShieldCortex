@@ -6,9 +6,15 @@
  *   Trust 0.5–0.7 → Read own + non-restricted, write quarantine, delete own
  *   Trust < 0.5  → Read own only, write quarantine, delete none
  *
- * RESTRICTED is owner (trust ≥ 0.7) or `user` (human operator). A peer
- * high-trust cli/agent is not the operator — credential isolation holds
+ * RESTRICTED is owner (trust ≥ 0.7) and attested, or `user` (human operator).
+ * A peer high-trust cli/agent is not the operator — credential isolation holds
  * across agents (SCOPE P4).
+ *
+ * #283: ownership is decided by the host-attested identity key. An unattested
+ * caller never matches a stored row as owner, even if the writer-chosen
+ * type:identifier string collides. Callers that already went through
+ * resolveToolSource have rewritten unattested keys; the `attested` option is
+ * the second belt for any path that still holds a bare DefenceSource.
  */
 
 import type { DefenceSource } from '../types.js';
@@ -29,9 +35,16 @@ export interface AccessCheckMemory {
   sensitivity_level?: string | null;
 }
 
-/**
- * Check whether a source has access to a memory for a given operation.
- */
+export interface AccessCheckOptions {
+  /**
+   * #283 — from ResolvedToolSource.attested. When false, the caller is not
+   * host-attested and cannot be treated as owner of any stored row. Deliberately
+   * NOT a field on DefenceSource (caller-suppliable). Default true preserves
+   * legacy internal callers that already hold host-derived identities.
+   */
+  attested?: boolean;
+}
+
 /** Parse a stored "type:identifier" source string back into a DefenceSource. */
 function parseStoredSource(stored: string): DefenceSource {
   const i = stored.indexOf(':');
@@ -39,15 +52,24 @@ function parseStoredSource(stored: string): DefenceSource {
   return { type: stored.slice(0, i) as DefenceSource['type'], identifier: stored.slice(i + 1) };
 }
 
+/**
+ * Check whether a source has access to a memory for a given operation.
+ *
+ * @param options.attested — pass ResolvedToolSource.attested from the resolve
+ *   path. `false` denies ownership (read own / delete own / revoke own).
+ */
 export function checkAccess(
   memory: AccessCheckMemory,
   source: DefenceSource,
   operation: 'read' | 'write' | 'delete' | 'revoke',
+  options?: AccessCheckOptions,
 ): AccessPolicy {
   const trust = scoreSource(source).score;
   const memorySource = memory.source || '__system:unattributed';
   const callerKey = `${source.type}:${source.identifier}`;
-  const isOwner = memorySource === callerKey;
+  // #283: unattested callers never own. Host-attested equality still required.
+  const attested = options?.attested !== false;
+  const isOwner = attested && memorySource === callerKey;
   const isRestricted = memory.sensitivity_level === 'RESTRICTED';
 
   if (operation === 'read') {
@@ -68,7 +90,7 @@ export function checkAccess(
       return deny('RESTRICTED is isolated across agents');
     }
 
-    // Owner always reads own
+    // Owner always reads own (attested identity only — #283)
     if (isOwner) {
       return allow('Owner access');
     }
@@ -83,7 +105,11 @@ export function checkAccess(
       return allow('Shared read access');
     }
 
-    // Low trust: own only (already checked above)
+    // Low trust: own only (already checked above). Unattested low-trust that
+    // string-matched a host row used to fall through as owner — that door is shut.
+    if (!attested && memorySource === callerKey) {
+      return deny('Unattested identity cannot claim ownership');
+    }
     return deny('Insufficient trust for shared memories (need ≥0.5)');
   }
 

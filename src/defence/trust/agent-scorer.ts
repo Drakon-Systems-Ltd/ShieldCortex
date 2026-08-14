@@ -24,7 +24,12 @@ export const DEFAULT_AGENT_CONFIG: AgentTrustConfig = {
     'user-spawned': 0.9,
     'user-approved': 0.85,
     'cron': 0.5,
+    // Integrator / declaration stamps (#273 / #283). env-override is the
+    // at-cap pin (0.5). Below-cap claims must NOT use that pin — it would
+    // raise 0.3 → 0.5. env-claim / unattested stay at the low-trust floor.
     'env-override': 0.5,
+    'env-claim': 0.3,
+    'unattested': 0.3,
     'agent-spawned': 0.3,
     'web': 0.2,
   },
@@ -47,11 +52,11 @@ export function scoreAgent(
   // Circuit breaker: block agents beyond max depth
   if (depth > config.maxDepth) return 0;
 
-  // Integrator env claims may keep a unique identifier for ACL, but they
-  // cannot ride parent-tier trust. Pin at the origin score (0.5) with no
-  // further decay — the cap is a ceiling, not a forced downgrade below it.
-  if (origin === 'env-override') {
-    return config.originScores['env-override'] ?? 0.5;
+  // Claim stamps (#273 / #283) keep a unique identifier for ACL legibility
+  // but cannot ride parent-tier trust or depth decay. Pin at the origin
+  // score — the stamp is a ceiling/floor marker, not a hierarchy root.
+  if (origin === 'env-override' || origin === 'env-claim' || origin === 'unattested') {
+    return config.originScores[origin] ?? (origin === 'env-override' ? 0.5 : 0.3);
   }
 
   const baseScore = config.originScores[origin] ?? 0.3;

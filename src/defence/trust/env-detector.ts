@@ -55,6 +55,24 @@ function withOverrideOrigin(identifier: string): string {
 }
 
 /**
+ * #283 — below-cap integrator claims must not collide with a host-attested
+ * `${type}:${identifier}` ACL key, and must not raise trust. `env-override>`
+ * pins at 0.5 (the cap); below-cap uses `env-claim>` pinned at 0.3.
+ */
+const ENV_CLAIM_ORIGIN = 'env-claim';
+
+function withEnvClaimOrigin(identifier: string): string {
+  if (
+    identifier.startsWith(`${ENV_CLAIM_ORIGIN}>`)
+    || identifier.startsWith(`${ENV_OVERRIDE_ORIGIN}>`)
+    || identifier.startsWith('unattested>')
+  ) {
+    return identifier;
+  }
+  return `${ENV_CLAIM_ORIGIN}>${identifier}`;
+}
+
+/**
  * Bind a SHIELDCORTEX_AGENT_SOURCE claim to an identity scoreSource will
  * actually honour at ≤ ENV_OVERRIDE_SCORE_CAP. Pipeline / store / ACL all
  * re-score from type+identifier, so a ceiling-number-only clamp would leave
@@ -97,6 +115,13 @@ export function bindIntegratorOverrideSource(
   const score = scoreSource(candidate).score;
 
   if (score < ENV_OVERRIDE_SCORE_CAP) {
+    // #283: bare below-cap agent claims used to keep `agent:browser` verbatim,
+    // so checkAccess treated them as OWNER of host-attested agent:browser rows
+    // and guardReadBySensitivity treated type=agent as inbound-exempt. Stamp
+    // without raising score (env-claim → 0.3, never env-override → 0.5).
+    if (sourceType === 'agent') {
+      return { type: 'agent', identifier: withEnvClaimOrigin(identifier) };
+    }
     return candidate;
   }
   if (score === ENV_OVERRIDE_SCORE_CAP) {

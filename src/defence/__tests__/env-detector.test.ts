@@ -9,7 +9,7 @@ import {
   clampSourceToCeiling,
   bindIntegratorOverrideSource,
 } from '../trust/env-detector.js';
-import { scoreSource, isUntrustedInboundType } from '../trust/source-scorer.js';
+import { scoreSource, isUntrustedInboundType, isUntrustedInboundSourceString } from '../trust/source-scorer.js';
 import { guardReadBySensitivity } from '../trust/read-guard.js';
 import type { DefenceSource } from '../types.js';
 import type { Memory } from '../../memory/types.js';
@@ -88,14 +88,17 @@ describe('Environment-Based Source Inference', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'some-agent';
       const result = inferSourceFromEnvironment();
       expect(result.source.type).toBe('agent'); // defaults to agent
-      expect(result.source.identifier).toBe('some-agent');
+      // #283: below-cap bare tokens are env-claim stamped so they cannot wear
+      // a host-attested agent:<name> ACL key.
+      expect(result.source.identifier).toBe('env-claim>some-agent');
+      expect(scoreSource(result.source).score).toBe(0.3);
     });
 
     it('should prioritise SHIELDCORTEX_AGENT_SOURCE over CLAUDE_CODE_ENTRYPOINT', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:custom-tool';
       process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
       const result = inferSourceFromEnvironment();
-      expect(result.source).toEqual({ type: 'agent', identifier: 'custom-tool' });
+      expect(result.source).toEqual({ type: 'agent', identifier: 'env-claim>custom-tool' });
     });
 
     it('refuses operator and CLI types on the integrator override — they cannot become the ceiling', () => {
@@ -131,10 +134,12 @@ describe('Environment-Based Source Inference', () => {
       }
     });
 
-    it('keeps already-low override identities (no wrap, no raise)', () => {
+    it('stamps already-low override agent identities without raising trust (#283)', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:some-agent';
       const inferred = inferSourceFromEnvironment();
-      expect(inferred.source).toEqual({ type: 'agent', identifier: 'some-agent' });
+      // Wrap is required so checkAccess cannot treat the claim as host agent:some-agent.
+      // Score must stay 0.3 (env-claim pin), never rise to env-override 0.5.
+      expect(inferred.source).toEqual({ type: 'agent', identifier: 'env-claim>some-agent' });
       expect(scoreSource(inferred.source).score).toBe(0.3);
     });
 
@@ -177,8 +182,11 @@ describe('Environment-Based Source Inference', () => {
     it('keeps a bare token (no type prefix) as agent — documented integrator form', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'some-agent';
       const inferred = inferSourceFromEnvironment();
-      expect(inferred.source).toEqual({ type: 'agent', identifier: 'some-agent' });
+      // #283: type stays agent, identifier is claim-stamped. Type-only inbound
+      // helper still sees agent as exempt; full-source helper does not.
+      expect(inferred.source).toEqual({ type: 'agent', identifier: 'env-claim>some-agent' });
       expect(isUntrustedInboundType(inferred.source.type)).toBe(false);
+      expect(isUntrustedInboundSourceString(`${inferred.source.type}:${inferred.source.identifier}`)).toBe(true);
       expect(scoreSource(inferred.source).score).toBe(0.3);
     });
 
@@ -432,7 +440,7 @@ describe('Environment-Based Source Inference', () => {
       expect(entry.project).toBe('test-project');
     });
 
-    it('honours declared sources that score at or below the env ceiling', () => {
+    it('rewrites unattested declared sources that score at or below the env ceiling (#283)', () => {
       process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
       const declared = { type: 'agent' as const, identifier: 'user-spawned>task-1' };
 
@@ -442,10 +450,14 @@ describe('Environment-Based Source Inference', () => {
         strict: false,
       });
 
-      expect(resolved.source).toEqual(declared);
-      // An accepted self-declaration is honoured but not attested.
+      // Below-ceiling declarations are still accepted as a downgrade, but the
+      // stored identity is rewritten so ownership cannot wear a host ACL key.
+      expect(resolved.source).toEqual({ type: 'agent', identifier: 'unattested>user-spawned>task-1' });
       expect(resolved.attested).toBe(false);
-      expect(logAudit).not.toHaveBeenCalled();
+      expect(scoreSource(resolved.source).score).toBeLessThanOrEqual(scoreSource(declared).score);
+      expect(logAudit).toHaveBeenCalled();
+      const entry = logAudit.mock.calls[0][0] as { reason: string };
+      expect(entry.reason).toContain('SOURCE_UNATTESTED_REWRITTEN');
     });
 
     it('writes a SOURCE_MISSING audit row when no source is declared', () => {
