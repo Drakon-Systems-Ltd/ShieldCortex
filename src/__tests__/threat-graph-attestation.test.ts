@@ -22,6 +22,8 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { deriveAttested, resolveToolSource } from '../defence/trust/resolve-tool-source.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
+import { projectToCompletion } from '../threat-graph/projector.js';
+import { computeRiskModifier, runRiskSweep } from '../threat-graph/risk.js';
 import type { DefenceSource } from '../defence/types.js';
 
 beforeEach(() => {
@@ -234,5 +236,111 @@ describe('pipeline → ledger plumbing', () => {
   it('records NULL when the caller did not plumb attestation (legacy paths)', () => {
     runDefencePipeline('harmless note content', 'note', source, undefined, 'test');
     expect(lastAuditRow().source_attested).toBeNull();
+  });
+});
+
+/**
+ * #283 — the strict-mode divergence, end to end through the projector.
+ *
+ * Under strictSourceMode the ledger bit attests everything (above), so the
+ * spoof-resistance mechanism documented in risk.ts — "an attacker declaring
+ * rows under a victim's name resolves unattested (source_attested=0), which
+ * turns the trust modifier off" — does NOT fire on that posture.
+ *
+ * What protects the victim there is the ownership stamp: `resolveToolSource`
+ * rewrites the env-unconfirmed identity into the `unattested>` keyspace BEFORE it
+ * reaches the ledger, so `sourceKey(source_type, source_identifier)` mints a
+ * node disjoint from the victim's. The attacker accrues risk against their own
+ * key, by construction rather than by the attested flip.
+ *
+ * Asserted through the real projector, not by inspecting the stamp — the
+ * property is about which NODE the accrual lands on.
+ */
+describe('#283 strict-mode accrual lands on the stamped key, not the victim bare key', () => {
+  const ENV_KEYS = ['CLAUDE_CODE_ENTRYPOINT', 'CODEX_THREAD_ID', 'SHIELDCORTEX_AGENT_SOURCE'] as const;
+  const VICTIM = { type: 'hook', identifier: 'session-end' } as DefenceSource;
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+    // The default deployment this issue is about: cli:mcp 0.9 ceiling.
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+  });
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  function seedBlockRow(src: DefenceSource, attested: boolean, ts: string): void {
+    getDatabase().prepare(`
+      INSERT INTO defence_audit (
+        memory_id, project, timestamp, source_type, source_identifier,
+        trust_score, sensitivity_level, firewall_result,
+        anomaly_score, threat_indicators, blocked_patterns,
+        reason, fragmentation_score, pipeline_duration_ms, source_attested
+      ) VALUES (
+        NULL, 'test', @ts, @type, @identifier,
+        0.8, 'INTERNAL', 'BLOCK',
+        0, '[]', '["injection"]',
+        NULL, NULL, 1, @attested
+      )
+    `).run({ ts, type: src.type, identifier: src.identifier, attested: attested ? 1 : 0 });
+  }
+
+  function sourceNodeKeys(): string[] {
+    return (getDatabase()
+      .prepare("SELECT key FROM threat_nodes WHERE kind = 'source' ORDER BY key")
+      .all() as Array<{ key: string }>).map(r => r.key);
+  }
+
+  it('stamps the strict-mode claim before it reaches the ledger', () => {
+    const resolved = resolveToolSource(VICTIM, { toolName: 'remember', project: 'test', strict: true });
+    // The divergence itself: ledger says attested, ownership says unconfirmed.
+    expect(resolved.attested).toBe(true);
+    expect(resolved.source.type).toBe('hook');
+    expect(resolved.source.identifier).toBe('unattested>session-end');
+    expect(`${resolved.source.type}:${resolved.source.identifier}`).not.toBe('hook:session-end');
+  });
+
+  it('projects the attacker onto a node disjoint from the victim', () => {
+    const attacker = resolveToolSource(VICTIM, { toolName: 'remember', project: 'test', strict: true });
+    seedBlockRow(attacker.source, attacker.attested, '2026-08-01T10:00:00.000Z');
+    seedBlockRow(attacker.source, attacker.attested, '2026-08-01T10:05:00.000Z');
+    projectToCompletion();
+
+    const keys = sourceNodeKeys();
+    expect(keys).toContain('hook:unattested>session-end');
+    // The whole point: the victim's node was never touched.
+    expect(keys).not.toContain('hook:session-end');
+  });
+
+  it('accrues decayed risk on the stamped key and leaves the victim key at none', () => {
+    const attacker = resolveToolSource(VICTIM, { toolName: 'remember', project: 'test', strict: true });
+    seedBlockRow(attacker.source, attacker.attested, '2026-08-01T10:00:00.000Z');
+    seedBlockRow(attacker.source, attacker.attested, '2026-08-01T10:05:00.000Z');
+    projectToCompletion();
+    runRiskSweep({ nowMs: Date.parse('2026-08-01T11:00:00.000Z') });
+
+    const rows = getDatabase()
+      .prepare('SELECT source_key, risk, attested FROM source_risk')
+      .all() as Array<{ source_key: string; risk: number; attested: number }>;
+    const stamped = rows.find(r => r.source_key === 'hook:unattested>session-end');
+
+    expect(stamped).toBeDefined();
+    expect(stamped!.risk).toBeGreaterThan(0);
+    // Attested under strict — accrual is NOT suppressed. It simply lands on the
+    // attacker's own key, which is the property that replaces the flip.
+    expect(stamped!.attested).toBe(1);
+    expect(rows.some(r => r.source_key === 'hook:session-end')).toBe(false);
+  });
+
+  it('the trust modifier penalises the stamped identity, never the victim', () => {
+    const attacker = resolveToolSource(VICTIM, { toolName: 'remember', project: 'test', strict: true });
+    seedBlockRow(attacker.source, attacker.attested, '2026-08-01T10:00:00.000Z');
+    seedBlockRow(attacker.source, attacker.attested, '2026-08-01T10:05:00.000Z');
+    projectToCompletion();
+    runRiskSweep({ nowMs: Date.parse('2026-08-01T11:00:00.000Z') });
+
+    expect(computeRiskModifier(attacker.source, 'enforce').applied).toBe(true);
+    expect(computeRiskModifier(VICTIM, 'enforce')).toMatchObject({ modifier: 0, applied: false });
   });
 });
