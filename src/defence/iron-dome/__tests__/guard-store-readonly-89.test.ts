@@ -84,3 +84,23 @@ describe('#89 — guardStoreAccessIsReadOnly helper', () => {
     expect(guardStoreAccessIsReadOnly('ls /tmp')).toBe(false);
   });
 });
+
+describe('#89 — dual-review must-still-fire (Grok 4.6 / SOL)', () => {
+  it.each([
+    ['sed -i', "sed -i 's/a/b/' ~/.shieldcortex/approvals/approvals.json"],
+    ['find -delete', 'find ~/.shieldcortex/approvals -delete'],
+    ['find -exec rm', 'find ~/.shieldcortex/approvals -exec rm {} +'],
+    ['python os.remove', "python3 -c \"import os;os.remove('/home/u/.shieldcortex/approvals/approvals.json')\""],
+    ['python os.system touch', "python3 -c \"import os;os.system('touch ~/.shieldcortex/approvals/x')\""],
+    ['python open r+', "python3 -c \"open('/home/u/.shieldcortex/approvals/approvals.json','r+').write('x')\""],
+    ['python shutil.move', "python3 -c \"import shutil;shutil.move('/home/u/.shieldcortex/approvals/a','/tmp/a')\""],
+    ['node unlinkSync', "node -e \"require('fs').unlinkSync('/home/u/.shieldcortex/approvals/approvals.json')\""],
+    ['node execSync touch', "node -e \"require('child_process').execSync('touch ~/.shieldcortex/approvals/x')\""],
+    ['node copyFileSync', "node -e \"require('fs').copyFileSync('/tmp/x','/home/u/.shieldcortex/approvals/x')\""],
+    ['quoted redirect', 'echo x >"$HOME/.shieldcortex/approvals/x.json"'],
+    ['perl -i', "perl -i -pe 's/a/b/' ~/.shieldcortex/approvals/approvals.json"],
+  ])('GATEs %s', (_name, cmd) => {
+    const v = gate(cmd);
+    expect(v.decision).not.toBe('allow');
+  });
+});

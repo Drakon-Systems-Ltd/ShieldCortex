@@ -1661,6 +1661,38 @@ function isShellAnchorChar(text: string, at: number): boolean {
   return c === '$' && text[at + 1] === '(';
 }
 
+/**
+ * True when the match at `at` sits in a shell redirect destination
+ * (`> path`, `>>"path"`, `>"$HOME/…"`, `1> path`, `2>> path`).
+ * Used so path-target signals are not demoted to 'mention' merely because the
+ * destination token is quoted (#89 dual-review quoted-redirect hole).
+ */
+function pathTargetIsRedirectDestination(text: string, at: number): boolean {
+  // The path-target match often starts mid-token (`.shieldcortex/...` after
+  // `$HOME/` or `/home/u/`). Walk back across path characters and a single
+  // opening quote until we hit a redirect operator or a statement boundary.
+  let i = at - 1;
+  // optional opening quote glued to the path
+  if (i >= 0 && (text[i] === '"' || text[i] === "'")) i--;
+  // path / expansion characters between `>` and the match start
+  while (i >= 0 && /[A-Za-z0-9_./$~{}:-]/.test(text[i]!)) i--;
+  // whitespace between `>` and the path
+  while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
+  // optional opening quote after `>`
+  if (i >= 0 && (text[i] === '"' || text[i] === "'")) i--;
+  while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
+  if (i < 0) return false;
+  // one or two `>` (optionally with a leading fd digit)
+  if (text[i] !== '>') return false;
+  i--;
+  if (i >= 0 && text[i] === '>') i--;
+  if (i >= 0 && /\d/.test(text[i]!)) i--;
+  // must be at start or after a statement/pipe boundary
+  if (i < 0) return true;
+  const c = text[i]!;
+  return c === ' ' || c === '\t' || c === ';' || c === '|' || c === '&' || c === '\n';
+}
+
 function classifyWithCtx(
   ctx: SpanCtx,
   start: number,
@@ -1670,11 +1702,21 @@ function classifyWithCtx(
 ): SpanClass {
   // 1) URL — inert data being fetched; only becomes code via `curl … | bash`,
   //    whose pipe-to-shell pattern's span CROSSES the URL (not contained in it).
+  //    Path-target rules keep this exemption: a URL path segment naming
+  //    `.shieldcortex/approvals` is a reference, not access.
   if (contains(ctx.urls, start, end)) return 'mention';
+
+  // 1b) Path-target + shell redirect: a quoted (or bare) path that is the
+  //     destination of `>` / `>>` IS access, not a data-argument mention.
+  //     Without this, `echo x >"$HOME/.shieldcortex/approvals/x.json"` dropped
+  //     touch-approval-store at the quoted-data step below (#89 dual-review).
+  if (pathTarget && pathTargetIsRedirectDestination(text, start)) return 'executed';
+
   // 2) Quoted DATA — the span sits fully inside a data-argument quote. A span
   //    crossing a quote boundary (`"rm" -rf /`) is contained in no quote range,
   //    and a span touching a command substitution INSIDE that quote is executed
-  //    (`echo "$(rm -rf /)"`).
+  //    (`echo "$(rm -rf /)"`). Path-target names inside a pure echo/printf
+  //    string stay mentions (reference, not open).
   if (contains(ctx.dataQuotes, start, end) && !intersects(ctx.substitutions, start, end)) return 'mention';
 
   // 3) Interpreter source (issue #89). Shell regions never reach here.
@@ -1803,28 +1845,46 @@ function withProvenance(
 //
 // Deliberately does NOT apply to touch-sensitive-path (.ssh / .env / etc.):
 // reading secrets is still an access that needs a human nod.
+//
+// Dual-review floor (Grok 4.6 + SOL Pro on #292): interpreters are NOT
+// inherently read-only. They are admitted only when the body has no mutation /
+// shell-out / in-place-edit marker. sed/find stay off the pure-verb list or
+// are blocked by explicit in-place / -delete markers.
 
 const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
 
-/** Verbs that only OBSERVE a path — never create/modify/delete it. */
+/**
+ * Verbs that only OBSERVE a path when used without in-place flags.
+ * Interpreters are included so a pure `python3 -c 'print(open(...).read())'`
+ * diagnostic can pass — but only after STORE_MUTATION_RE clears the body.
+ */
 const STORE_READONLY_VERB_RE =
   /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|find|realpath|readlink|basename|dirname|test|\[|echo|printf|awk|sed|jq|yq|python|python3|node|perl|ruby)$/i;
 
 /**
- * Explicit mutation markers. Keep simple — fail closed on any of these when a
- * guard-store path is also named. Interpreter write APIs are matched as plain
- * identifiers so we never need nested quotes inside the regex literal.
+ * Explicit mutation / shell-out / in-place markers. Fail closed: any hit on a
+ * command that also names a guard store keeps the gate. Built via RegExp so
+ * we never nest quotes inside a slash-literal.
  */
 const STORE_MUTATION_RE = new RegExp(
   [
     // shell mutators at statement/pipe boundaries
     String.raw`(?:^|[\s;|&])(?:rm|mv|cp|install|tee|truncate|chmod|chown|chgrp|touch|mkdir|rmdir|ln|dd|shred|wipe)\b`,
-    // redirection into a path
-    String.raw`[>]{1,2}\s*(?:~|\$HOME|/|\.)`,
-    // common write APIs (node / python)
-    String.raw`\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|createWriteStream|json\.dump|fs\.write)\b`,
-    // open(..., 'w'/'a'/'x') — single or double quotes around the mode
-    String.raw`\bopen(?:Sync)?\s*\([^)]*['"][wax]`,
+    // redirection into a path — allow optional quotes between > and target
+    String.raw`[>]{1,2}\s*['"]?(?:~|\$HOME|/|\.|\$\{?HOME)`,
+    // in-place editors
+    String.raw`\b(?:sed|perl|ruby)\b[^|;\n]*\s-i\b`,
+    String.raw`\bawk\b[^|;\n]*\s-i\s+inplace\b`,
+    // find destructive actions
+    String.raw`\bfind\b[^|;\n]*\s-(?:delete|exec|execdir)\b`,
+    // node / python write + unlink + rename APIs
+    String.raw`\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|write_bytes|createWriteStream|json\.dump|fs\.write|writeSync|outputFile(?:Sync)?)\b`,
+    String.raw`\b(?:unlink(?:Sync)?|rmSync|rmdir(?:Sync)?|rename(?:Sync)?|copyFile(?:Sync)?|cpSync|replace(?:Sync)?)\b`,
+    String.raw`\b(?:os\.(?:remove|unlink|replace|rename|system)|shutil\.(?:copy|copy2|copytree|move|rmtree)|pathlib\.Path|Path\([^)]*\)\.(?:write_text|write_bytes|unlink|replace|rename))\b`,
+    // open modes that can write: w/a/x and any + form (r+, w+, a+, …)
+    String.raw`\bopen(?:Sync)?\s*\([^)]*['"](?:[wax]|r\+|w\+|a\+|x\+)`,
+    // interpreter shell-out — minting via nested touch/rm must not pass
+    String.raw`\b(?:child_process|execSync|execFileSync|spawnSync|os\.system|subprocess\.(?:run|call|Popen|check_call|check_output)|popen)\b`,
   ].join('|'),
   'i',
 );
@@ -1837,12 +1897,8 @@ const STORE_MUTATION_RE = new RegExp(
 export function guardStoreAccessIsReadOnly(text: string): boolean {
   const cmd = String(text || '');
   if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
-  // Any mutation marker anywhere on the line → keep the gate.
+  // Any mutation / shell-out / in-place marker → keep the gate.
   if (STORE_MUTATION_RE.test(cmd)) return false;
-  // Redirection INTO a store path (even without a recognised mutator verb).
-  if (/(?:^|[\s;|&])(?:cat|echo|printf|tee)\b[^|;]*[>]{1,2}\s*(?:~|\$HOME|[^|;]*\.shieldcortex[\\/]+(?:approvals|DECISIONS\.md|leases))/i.test(cmd)) {
-    return false;
-  }
   // Split on shell statement separators; every statement that names a store
   // path must begin with a recognised read-only verb (after env assigns/sudo).
   const parts = cmd.split(/(?:&&|\|\||;|\n)/);
@@ -1856,8 +1912,8 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
     let s = part.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '');
     s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
     // Pipeline: every stage that still names the store (or the first stage)
-    // must be a read-only verb. `cat store | grep x` ok; `cat store | tee y`
-    // already failed STORE_MUTATION_RE.
+    // must be a read-only verb. `cat store | grep x` ok; mutators already
+    // failed STORE_MUTATION_RE.
     const stages = s.split('|').map(x => x.trim()).filter(Boolean);
     for (const stage of stages) {
       if (!GUARD_STORE_PATH_RE.test(stage) && stage !== stages[0]) continue;
