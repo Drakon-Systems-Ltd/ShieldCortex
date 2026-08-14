@@ -202,6 +202,14 @@ export interface InterceptAuditEntry {
   escalated?: { by: 'session-taint'; from: string; to: string; reason: string };
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
+  /** #224 — binding fields. Present once the host injects `bindAudit`. */
+  plane?: 'action_guard' | 'conversation_firewall';
+  gatewayInstanceId?: string;
+  hookName?: string;
+  pluginId?: string;
+  nonce?: string;
+  seq?: number;
+  actionKey?: string;
 }
 
 const WATCHED_TOOLS = ['remember', 'mcp__memory__remember'] as const;
@@ -798,6 +806,10 @@ interface InterceptorOptions {
    *  limit, so a looping or compromised agent must not be able to spend it
    *  without bound. Exhausting it yields no judge, which yields a hold. */
   maxJudgeCallsPerMinute?: number;
+  /** #224 — stamp plane/instance/hook/nonce/seq/actionKey before the row hits
+   *  disk. Injected from `shieldcortex/defence` at runtime so this plugin does
+   *  not grow a second schema. Absent = unbound (older installed package). */
+  bindAudit?: (entry: InterceptAuditEntry, args?: Record<string, unknown>) => InterceptAuditEntry;
 }
 
 /** How many recent tool NAMES the judge is told about. Names only, never
@@ -820,6 +832,9 @@ export function createInterceptor(
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
+  const bindAudit = options?.bindAudit;
+  /** Args of the in-flight tool call — used only to mint #224 actionKey. */
+  let lastCallArgs: Record<string, unknown> | undefined;
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
@@ -831,8 +846,9 @@ export function createInterceptor(
   const recentTools: string[] = [];
 
   function emitAudit(entry: InterceptAuditEntry): void {
-    writeAuditEntry(entry);
-    onAuditEntry?.(entry);
+    const bound = bindAudit ? bindAudit(entry, lastCallArgs) : entry;
+    writeAuditEntry(bound);
+    onAuditEntry?.(bound);
   }
 
   function guardAuditBase(toolName: string, v: ToolGuardVerdictLike, preview: string): Omit<InterceptAuditEntry, 'action' | 'outcome'> {
@@ -1249,6 +1265,7 @@ export function createInterceptor(
   }
 
   async function handleToolCall(context: ToolCallContext): Promise<void> {
+    lastCallArgs = context.arguments;
     // Remember the NAME only. This is the entirety of what the approval broker's
     // judge will ever learn about the session — see buildSessionSummary.
     noteToolForSession(context.toolName);

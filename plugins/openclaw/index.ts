@@ -100,6 +100,19 @@ type DefenceModule = {
     notification: unknown,
     deps: { channels: NotifyChannelLike[]; timeoutMs?: number },
   ) => Promise<{ deliveredVia: string | null; attempts: Array<{ channel: string; result: { delivered: boolean; reason?: string } }> }>;
+  /** #224 — stamp binding fields on a realtime audit row. Optional so an
+   *  older installed package degrades to unbound records, not a crash. */
+  attachEnforcementBinding?: (
+    entry: Record<string, unknown>,
+    ctx: {
+      plane: 'action_guard' | 'conversation_firewall';
+      hookName: string;
+      pluginId: string;
+      tool?: string;
+      args?: Record<string, unknown>;
+      actionKey?: string;
+    },
+  ) => Record<string, unknown>;
 };
 
 let runtimePromise: Promise<OpenClawRuntime> | null = null;
@@ -2036,10 +2049,24 @@ const MIN_NOVELTY_CHARS = 40;
 async function auditLog(entry: Record<string, unknown>): Promise<boolean> {
   const dir = auditDir();
   try {
+    const hookName = typeof entry.hook === 'string' && entry.hook ? entry.hook : 'llm_input';
+    const plane = hookName === 'before_tool_call' ? 'action_guard' : 'conversation_firewall';
+    let bound = entry;
+    try {
+      const defenceMod = await getDefenceModule();
+      if (typeof defenceMod?.attachEnforcementBinding === 'function') {
+        bound = defenceMod.attachEnforcementBinding(entry, {
+          plane,
+          hookName,
+          pluginId: 'shieldcortex-realtime',
+          actionKey: typeof entry.actionKey === 'string' ? entry.actionKey : `conversation:${hookName}`,
+        });
+      }
+    } catch { /* older package / bind failure — write the unbound row */ }
     await fs.mkdir(dir, { recursive: true });
     await fs.appendFile(
       path.join(dir, `realtime-${new Date().toISOString().slice(0, 10)}.jsonl`),
-      JSON.stringify(entry) + "\n",
+      JSON.stringify(bound) + "\n",
     );
     return true;
   } catch (err) {
@@ -3448,6 +3475,15 @@ export default {
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
             cloudEnabled: (scConfig as any).cloudEnabled ?? false,
           }),
+          bindAudit: typeof (defenceMod as any).attachEnforcementBinding === 'function'
+            ? (entry, args) => (defenceMod as any).attachEnforcementBinding(entry, {
+                plane: 'action_guard',
+                hookName: 'before_tool_call',
+                pluginId: 'shieldcortex-realtime',
+                tool: entry.tool,
+                args: args ?? {},
+              }) as typeof entry
+            : undefined,
         });
         const guardState = interceptorConfig.actionGuard?.enabled
           ? (interceptorConfig.actionGuard.enforce ? 'Action Guard: enforce' : 'Action Guard: warn')

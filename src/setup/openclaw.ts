@@ -2226,6 +2226,11 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
     case 'status':
       await openClawHookStatus();
       break;
+    case 'inspect-runtime': {
+      const { printBoundRuntimeInspect } = await import('../integrations/openclaw-runtime-inspect.js');
+      printBoundRuntimeInspect();
+      break;
+    }
     case 'repair':
       await repairOpenClawPlugin();
       break;
@@ -2246,7 +2251,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       break;
     }
     default:
-      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair|skill install>');
+      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair|inspect-runtime|skill install>');
       console.log('');
       console.log('Install options:');
       console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
