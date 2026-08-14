@@ -12,6 +12,41 @@
 import type { DefenceSource } from '../types.js';
 import { scoreSource } from './source-scorer.js';
 
+/** Highest trust an integrator env string may confer. Host-attested rungs sit above this. */
+export const ENV_OVERRIDE_SCORE_CAP = 0.5;
+
+const ENV_OVERRIDE_ORIGIN = 'env-override';
+
+const OVERRIDE_TYPES = ['hook', 'email', 'web', 'agent', 'file', 'api'] as const;
+
+/**
+ * Bind a SHIELDCORTEX_AGENT_SOURCE claim to an identity scoreSource will
+ * actually honour at ≤ ENV_OVERRIDE_SCORE_CAP. Pipeline / store / ACL all
+ * re-score from type+identifier, so a ceiling-number-only clamp would leave
+ * `agent:user-spawned` at 0.9 on the write path.
+ *
+ * Claims already at or below the cap keep their type and identifier.
+ * Anything higher is rewritten to `agent:env-override>…` (pinned at 0.5).
+ */
+export function bindIntegratorOverrideSource(
+  claimedType: string,
+  identifier: string,
+): DefenceSource {
+  const sourceType = (OVERRIDE_TYPES as readonly string[]).includes(claimedType)
+    ? (claimedType as DefenceSource['type'])
+    : 'agent';
+  const candidate: DefenceSource = { type: sourceType, identifier };
+  if (scoreSource(candidate).score <= ENV_OVERRIDE_SCORE_CAP) {
+    return candidate;
+  }
+  return {
+    type: 'agent',
+    identifier: sourceType === 'agent'
+      ? `${ENV_OVERRIDE_ORIGIN}>${identifier}`
+      : `${ENV_OVERRIDE_ORIGIN}>${sourceType}:${identifier}`,
+  };
+}
+
 export interface EnvDetectionResult {
   source: DefenceSource;
   method:
@@ -28,7 +63,8 @@ export interface EnvDetectionResult {
  * Infer caller source from process environment variables.
  *
  * Priority order:
- * 1. SHIELDCORTEX_AGENT_SOURCE — explicit override (e.g. "agent:user-spawned>task-1")
+ * 1. SHIELDCORTEX_AGENT_SOURCE — explicit override label. May name the
+ *    process (e.g. "agent:user-spawned>task-1") but cannot outrank 0.5.
  * 2. CLAUDE_CODE_ENTRYPOINT=subagent — Claude Code sub-agent
  * 3. CLAUDE_AGENT_CONTEXT — generic agent context marker
  * 4. Codex origin / thread vars — Codex CLI or VS Code extension
@@ -42,15 +78,12 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
     const [type, ...rest] = scSource.split(':');
     const identifier = rest.join(':') || scSource;
     // Integrator override labels the process. It is not a host attestation.
-    // `user` and `cli` are operator/CLI trust — those rungs come from
-    // CLAUDE_CODE_ENTRYPOINT / Codex / unknown-default, never from an env
-    // string the spawner can set. Rejecting them here stops
-    // SHIELDCORTEX_AGENT_SOURCE=user:direct becoming the 1.0 ceiling on the
-    // no-declared-source path (clampSourceToCeiling(undefined)).
-    const validTypes = ['hook', 'email', 'web', 'agent', 'file', 'api'] as const;
-    const sourceType = validTypes.includes(type as any) ? (type as DefenceSource['type']) : 'agent';
+    // `user` and `cli` remap to `agent` (operator/CLI rungs are host-only).
+    // Any remaining claim that would score above 0.5 — including the
+    // documented `agent:user-spawned` 0.9 origin, plus hook/api residuals —
+    // is rebound to `agent:env-override>…` so scoreSource itself is ≤0.5.
     return {
-      source: { type: sourceType, identifier },
+      source: bindIntegratorOverrideSource(type, identifier),
       method: 'env:SHIELDCORTEX_AGENT_SOURCE',
       confidence: 'high',
     };
@@ -185,7 +218,10 @@ export function clampSourceToCeiling(
   declaredSource: DefenceSource | undefined,
 ): CeilingClampResult {
   const detection = inferSourceFromEnvironment();
-  const ceilingScore = scoreSource(detection.source).score;
+  const rawCeiling = scoreSource(detection.source).score;
+  const ceilingScore = detection.method === 'env:SHIELDCORTEX_AGENT_SOURCE'
+    ? Math.min(rawCeiling, ENV_OVERRIDE_SCORE_CAP)
+    : rawCeiling;
 
   if (!declaredSource) {
     return {

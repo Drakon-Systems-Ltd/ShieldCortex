@@ -68,9 +68,12 @@ describe('Environment-Based Source Inference', () => {
     it('should parse SHIELDCORTEX_AGENT_SOURCE with type prefix', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:user-spawned>task-1';
       const result = inferSourceFromEnvironment();
-      expect(result.source).toEqual({ type: 'agent', identifier: 'user-spawned>task-1' });
+      // Documented label is kept as a suffix; origin is rebound so the
+      // identity itself cannot score parent-tier 0.63/0.9.
+      expect(result.source).toEqual({ type: 'agent', identifier: 'env-override>user-spawned>task-1' });
       expect(result.method).toBe('env:SHIELDCORTEX_AGENT_SOURCE');
       expect(result.confidence).toBe('high');
+      expect(scoreSource(result.source).score).toBe(0.5);
     });
 
     it('should handle SHIELDCORTEX_AGENT_SOURCE without type prefix', () => {
@@ -96,8 +99,35 @@ describe('Environment-Based Source Inference', () => {
         const clamp = clampSourceToCeiling(undefined);
         expect(clamp.clamped).toBe(false);
         expect(clamp.source.type).toBe('agent');
-        expect(scoreSource(clamp.source).score).toBeLessThan(0.9);
+        expect(scoreSource(clamp.source).score).toBeLessThanOrEqual(0.5);
+        expect(clamp.ceilingScore).toBe(scoreSource(clamp.source).score);
       }
+    });
+
+    it('caps agent:user-spawned, hook, and api env claims at 0.5 — identity re-score included', () => {
+      const cases: Array<{ env: string; note: string }> = [
+        { env: 'agent:user-spawned', note: 'parent-tier agent origin' },
+        { env: 'agent:user-spawned>task-1', note: 'documented integrator form' },
+        { env: 'hook:x', note: 'hook residual' },
+        { env: 'api:x', note: 'api residual' },
+      ];
+      for (const { env } of cases) {
+        process.env.SHIELDCORTEX_AGENT_SOURCE = env;
+        const clamp = clampSourceToCeiling(undefined);
+        expect(clamp.clamped).toBe(false);
+        expect(clamp.ceilingScore).toBeLessThanOrEqual(0.5);
+        expect(scoreSource(clamp.source).score).toBe(clamp.ceilingScore);
+        expect(scoreSource(clamp.source).score).toBeLessThanOrEqual(0.5);
+        expect(clamp.source).not.toEqual({ type: 'agent', identifier: 'user-spawned' });
+        expect(clamp.detection.method).toBe('env:SHIELDCORTEX_AGENT_SOURCE');
+      }
+    });
+
+    it('keeps already-low override identities (no wrap, no raise)', () => {
+      process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:some-agent';
+      const inferred = inferSourceFromEnvironment();
+      expect(inferred.source).toEqual({ type: 'agent', identifier: 'some-agent' });
+      expect(scoreSource(inferred.source).score).toBe(0.3);
     });
 
     it('should return unknown:default with low confidence when no env vars set', () => {
@@ -258,6 +288,20 @@ describe('Environment-Based Source Inference', () => {
       const entry = logAudit.mock.calls[0][0] as { trust_score: number };
       expect(entry.trust_score).toBe(scoreSource(resolved.source).score);
       expect(entry.trust_score).not.toBe(0);
+    });
+
+    it('does not grant agent:user-spawned 0.9 from the integrator override', () => {
+      process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:user-spawned';
+
+      const resolved = resolveToolSource(undefined, {
+        toolName: 'remember',
+        project: null,
+      });
+
+      expect(scoreSource(resolved.source).score).toBeLessThanOrEqual(0.5);
+      const entry = logAudit.mock.calls[0][0] as { trust_score: number };
+      expect(entry.trust_score).toBe(scoreSource(resolved.source).score);
+      expect(entry.trust_score).toBeLessThanOrEqual(0.5);
     });
   });
 });
