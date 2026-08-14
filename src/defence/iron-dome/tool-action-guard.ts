@@ -26,6 +26,7 @@
  */
 
 import type { IronDomeConfig } from './config.js';
+import { forEachWindow } from '../scan-windows.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
 export type ToolGuardSeverity = 'benign' | 'sensitive' | 'dangerous' | 'catastrophic';
@@ -136,6 +137,57 @@ export function extractPath(args: Record<string, unknown>): string {
 }
 export function extractUrl(args: Record<string, unknown>): string {
   return pickString(args, ['url', 'uri', 'endpoint', 'href', 'host', 'to']);
+}
+
+// ── Write-content extraction + target recognition (issue #93) ────────────────
+//
+// Production bypass: a Bash heredoc writing a dangerous payload was DENIED
+// (the command surface is scanned), while the byte-identical payload delivered
+// via Edit/Write passed silently — the write tools were path-only by design.
+// The predicates below decide WHICH write targets get their content scanned:
+// a script-like path, a memory ledger, or a shebang-carrying body. Ordinary
+// docs/data files keep the field discipline — content there is prose.
+
+/** The content-bearing string of a write-family tool call, first present key wins. */
+export function extractWriteContent(args: Record<string, unknown>): string {
+  return pickString(args, ['new_string', 'content', 'contents', 'file_text', 'body', 'text']);
+}
+
+const SCRIPT_WRITE_EXT_RE = /\.(?:sh|bash|zsh|py|pyw|js|mjs|cjs|ts|tsx|rb|pl|php|ps1|bat|cmd|fish)$/i;
+const SHELL_RC_BASENAME_RE = /^\.(?:bashrc|zshrc|profile|bash_profile)$/i;
+
+/** A write target whose contents an interpreter (or a sourcing shell) will run. */
+export function isScriptLikeWritePath(path: string): boolean {
+  const base = String(path || '').trim().split(/[\\/]/).pop() ?? '';
+  return SCRIPT_WRITE_EXT_RE.test(base) || SHELL_RC_BASENAME_RE.test(base);
+}
+
+const MEMORY_BASENAME_RE = /^(?:MEMORY|CORTEX_MEMORY|CLAUDE)\.md$/i;
+
+/**
+ * A memory ledger / agent-instruction file. Content written here is re-read as
+ * INSTRUCTIONS on later turns, so a command payload in it is an injection, not
+ * prose — the same reason the memory-write tools get their own defence pipeline.
+ */
+export function isMemoryWritePath(path: string): boolean {
+  const norm = String(path || '').trim().replace(/\\/g, '/');
+  if (!norm) return false;
+  const base = norm.split('/').pop() ?? '';
+  if (MEMORY_BASENAME_RE.test(base)) return true;
+  return /\.md$/i.test(base)
+    && (/\/\.claude\/memory(?:\/|$)/i.test(norm) || /(?:^|\/)memory\//i.test(norm));
+}
+
+/**
+ * A body that is a PROGRAM by its own first bytes: a shebang prologue. Kept
+ * deliberately this narrow — a runbook that embeds a full script listing in a
+ * fenced code block contains `#!` at some line start, and gating on that would
+ * reopen the docs-prose FP class the field discipline exists to prevent. The
+ * kernel only honours a shebang at byte 0; the leading `\s*` tolerance is for
+ * Edit fragments that carry the prologue after a blank line.
+ */
+export function writeContentLooksExecutable(content: string): boolean {
+  return /^\uFEFF?\s*#!/.test(String(content || ''));
 }
 
 // ── Danger detection ─────────────────────────────────────────────────────────
@@ -3131,6 +3183,51 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
   return out;
 }
 
+// ── Write-content payload scan (issue #93) ───────────────────────────────────
+
+/**
+ * Scan write-family CONTENT with the same CATASTROPHIC/DANGEROUS sets the
+ * command surface uses. Matches are EXECUTED intent, not mentions: the caller
+ * only sends content bound for a script-like / memory / shebang target, where
+ * the agent is authoring code (or instructions a future turn re-reads), so the
+ * mention-vs-intent question is already answered by where the bytes land.
+ *
+ * Windowed via forEachWindow rather than truncated: per-regex work stays at the
+ * same ReDoS bound as the 50k command cap, but a payload past the cut point is
+ * still scanned — padding a script with filler must not clear the gate.
+ *
+ * The statement-level FP disposers the command path applies are applied here
+ * too, so a build script's `rm -rf .next` or a commit-message helper quoting
+ * "git push -f" does not gate at write time when the identical text would not
+ * gate at exec time.
+ */
+function scanWriteContentPayload(content: string): {
+  catastrophic: Array<{ signal: string; span: string }>;
+  dangerous: Array<{ signal: string; span: string }>;
+} {
+  const catastrophic: Array<{ signal: string; span: string }> = [];
+  const dangerous: Array<{ signal: string; span: string }> = [];
+  const seen = new Set<string>();
+  forEachWindow(content, (w) => {
+    const text = deobfuscateIfs(w);
+    for (const m of matchSpans(CATASTROPHIC, text)) {
+      if (m.signal === 'recursive-force-delete' && deleteTargetsAreWorkspaceConfined(text)) continue;
+      if (!seen.has(m.signal)) { seen.add(m.signal); catastrophic.push(m); }
+    }
+    // A catastrophic hit already decides the verdict — skip the dangerous pass.
+    if (catastrophic.length > 0) return true;
+    for (const m of matchSpans(DANGEROUS, text)) {
+      if (m.signal === 'file-delete' && deleteTargetsAreWorkspaceConfined(text)) continue;
+      if (m.signal === 'git-force-push' && !gitForcePushInvoked(text)) continue;
+      if (m.signal === 'git-delete-branch' && !gitDeleteBranchInvoked(text)) continue;
+      if (m.signal === 'modify-network-firewall' && firewallCallsAreReadOnly(text)) continue;
+      if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
+      if (!seen.has(m.signal)) { seen.add(m.signal); dangerous.push(m); }
+    }
+  });
+  return { catastrophic, dangerous };
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 // A command this long is already anomalous for an interactive tool call — cap
@@ -3187,9 +3284,71 @@ export function evaluateToolCall(
     return verdict('allow', 'benign', family, 'read_file', 'read-only operation', []);
   }
 
+  // #93: write-family CONTENT is path-gated. Ordinary docs/data stay
+  // field-discipline (prose may mention `rm -rf /` without gating). Script-like
+  // paths, memory ledgers, and shebang bodies are AUTHORING code/instructions —
+  // scan that content with the same CATASTROPHIC/DANGEROUS sets as commands.
+  // Clean scans return allow/sensitive so #95 auditAllows records that the write
+  // was seen (production hosts otherwise looked Bash-only for weeks).
+  if (family === 'write') {
+    const writeContent = extractWriteContent(args);
+    const scanThisWrite = writeContent.length > 0
+      && (isScriptLikeWritePath(path)
+        || isMemoryWritePath(path)
+        || writeContentLooksExecutable(writeContent));
+    if (scanThisWrite) {
+      const hits = scanWriteContentPayload(writeContent);
+      const memory = isMemoryWritePath(path);
+      if (hits.catastrophic.length > 0) {
+        const signals = ['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)];
+        const span = hits.catastrophic[0]?.span;
+        const reason = memory
+          ? buildReason('memory-write payload is a catastrophic command', signals, span)
+          : buildReason('write-content payload is a catastrophic command', signals, span);
+        return verdict(
+          'block',
+          'catastrophic',
+          family,
+          ACTION_BY_FAMILY[family],
+          reason,
+          [...new Set(signals)],
+          hits.catastrophic.map(m => ({ signal: m.signal, span: m.span })),
+        );
+      }
+      if (hits.dangerous.length > 0) {
+        const signals = ['write-content-dangerous', ...hits.dangerous.map(m => m.signal)];
+        const span = hits.dangerous[0]?.span;
+        const reason = memory
+          ? buildReason('memory-write payload is a dangerous command', signals, span)
+          : buildReason('write-content payload is a dangerous command', signals, span);
+        return verdict(
+          'require_approval',
+          'dangerous',
+          family,
+          ACTION_BY_FAMILY[family],
+          reason,
+          [...new Set(signals)],
+          hits.dangerous.map(m => ({ signal: m.signal, span: m.span })),
+        );
+      }
+      // Clean script/memory/shebang write — allow, but sensitive so it audits.
+      return verdict(
+        'allow',
+        'sensitive',
+        family,
+        ACTION_BY_FAMILY[family],
+        memory
+          ? 'memory-write content scanned — no dangerous signal detected'
+          : 'write-content scanned — no dangerous signal detected',
+        ['write-content-scanned'],
+      );
+    }
+  }
+
   // Field discipline: danger patterns scan the EXECUTION SURFACE
-  // (command/path/url) only — never content the agent produces
-  // (a message body, file contents). See commandScanText for the
+  // (command/path/url) only — never content the agent produces on ordinary
+  // docs/data writes (a message body, runbook prose). #93 carves out script /
+  // memory / shebang write targets above. See commandScanText for the
   // printed/commented-token suppression within a shell command.
   const execCommand = commandScanText(command);
   const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
