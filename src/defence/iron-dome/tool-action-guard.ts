@@ -471,8 +471,11 @@ const DANGEROUS: Pattern[] = [
   // The guard's own one-shot approval store (#118). The TTY gate stops the
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own
-  // approval. Any command that so much as names the store path goes to the
-  // operator — who is the only party with a legitimate reason to touch it.
+  // approval. MUTATING access still goes to the operator. Pure read-only
+  // inspection (ls/cat/grep/python -c open-for-read) is carved out below
+  // (issue #89 live FP 2026-08-14): gating a read of the store that the
+  // remediation text tells you to reconcile against is a self-referential
+  // deadlock on enforced hosts with no broker.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   // The session-lease ledger + lease store (#227). A freeze an agent can edit
   // or delete is not a freeze: DECISIONS.md is lifted by the OPERATOR (TTY-
@@ -1788,6 +1791,85 @@ function withProvenance(
  * keep the two purely-textual exemptions above it — a path inside a URL, or in
  * a quoted data argument — because those genuinely are references, not access.
  */
+
+// ── #89 read-only inspection of guard-owned stores ───────────────────────────
+//
+// `touch-approval-store` / `touch-decisions-ledger` fire on PATH, not verb.
+// That correctly gates minting/wiping freezes and approvals. It incorrectly
+// gated production diagnostics that only LISTED or READ the store — and the
+// remediation for the gate is "approve against that store", which the agent
+// cannot read. Carve out only when the WHOLE command is a recognised
+// read-only shape. Anything ambiguous fails closed (keeps the gate).
+//
+// Deliberately does NOT apply to touch-sensitive-path (.ssh / .env / etc.):
+// reading secrets is still an access that needs a human nod.
+
+const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
+
+/** Verbs that only OBSERVE a path — never create/modify/delete it. */
+const STORE_READONLY_VERB_RE =
+  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|find|realpath|readlink|basename|dirname|test|\[|echo|printf|awk|sed|jq|yq|python|python3|node|perl|ruby)$/i;
+
+/**
+ * Explicit mutation markers. Keep simple — fail closed on any of these when a
+ * guard-store path is also named. Interpreter write APIs are matched as plain
+ * identifiers so we never need nested quotes inside the regex literal.
+ */
+const STORE_MUTATION_RE = new RegExp(
+  [
+    // shell mutators at statement/pipe boundaries
+    String.raw`(?:^|[\s;|&])(?:rm|mv|cp|install|tee|truncate|chmod|chown|chgrp|touch|mkdir|rmdir|ln|dd|shred|wipe)\b`,
+    // redirection into a path
+    String.raw`[>]{1,2}\s*(?:~|\$HOME|/|\.)`,
+    // common write APIs (node / python)
+    String.raw`\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|createWriteStream|json\.dump|fs\.write)\b`,
+    // open(..., 'w'/'a'/'x') — single or double quotes around the mode
+    String.raw`\bopen(?:Sync)?\s*\([^)]*['"][wax]`,
+  ].join('|'),
+  'i',
+);
+
+/**
+ * True when every access to a guard-owned store path on this command is a
+ * pure inspection. Fail closed: any mutation marker, unknown verb near the
+ * path, or unparseable shape keeps the gate.
+ */
+export function guardStoreAccessIsReadOnly(text: string): boolean {
+  const cmd = String(text || '');
+  if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
+  // Any mutation marker anywhere on the line → keep the gate.
+  if (STORE_MUTATION_RE.test(cmd)) return false;
+  // Redirection INTO a store path (even without a recognised mutator verb).
+  if (/(?:^|[\s;|&])(?:cat|echo|printf|tee)\b[^|;]*[>]{1,2}\s*(?:~|\$HOME|[^|;]*\.shieldcortex[\\/]+(?:approvals|DECISIONS\.md|leases))/i.test(cmd)) {
+    return false;
+  }
+  // Split on shell statement separators; every statement that names a store
+  // path must begin with a recognised read-only verb (after env assigns/sudo).
+  const parts = cmd.split(/(?:&&|\|\||;|\n)/);
+  let sawStore = false;
+  for (const raw of parts) {
+    const part = raw.trim();
+    if (!part) continue;
+    if (!GUARD_STORE_PATH_RE.test(part)) continue;
+    sawStore = true;
+    // Strip leading env assigns and a single sudo.
+    let s = part.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '');
+    s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
+    // Pipeline: every stage that still names the store (or the first stage)
+    // must be a read-only verb. `cat store | grep x` ok; `cat store | tee y`
+    // already failed STORE_MUTATION_RE.
+    const stages = s.split('|').map(x => x.trim()).filter(Boolean);
+    for (const stage of stages) {
+      if (!GUARD_STORE_PATH_RE.test(stage) && stage !== stages[0]) continue;
+      const word = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/)[0] ?? '';
+      // strip path-ish invocations: /usr/bin/ls → ls
+      const base = word.split('/').pop() ?? word;
+      if (!STORE_READONLY_VERB_RE.test(base)) return false;
+    }
+  }
+  return sawStore;
+}
+
 const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger']);
 
 
@@ -3549,6 +3631,16 @@ export function evaluateToolCall(
   // the tool and never the verb, so a status sweep gated as hard as a flush.
   if (dangerSignals.includes('modify-network-firewall') && firewallCallsAreReadOnly(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'modify-network-firewall');
+  }
+  // #89: pure inspection of the approval store / decisions ledger is not a
+  // mutation. Drop the path-target signal so diagnostics are not deadlocked
+  // against the store the remediation tells them to reconcile. Mutating
+  // shapes keep the gate (STORE_MUTATION_RE fails closed above).
+  if ((dangerSignals.includes('touch-approval-store') || dangerSignals.includes('touch-decisions-ledger'))
+      && guardStoreAccessIsReadOnly(scanSurface)) {
+    dangerSignals = dangerSignals.filter(
+      sig => sig !== 'touch-approval-store' && sig !== 'touch-decisions-ledger',
+    );
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
