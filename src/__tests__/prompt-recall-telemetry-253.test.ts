@@ -184,9 +184,9 @@ describe('prompt-recall telemetry before early exits (#253)', () => {
     expect(src).toMatch(/gated:trivial-prompt/);
     expect(src).toMatch(/gated:prompt-too-short/);
     expect(src).toMatch(/gated:no-project-key/);
-    // Success path must not double-record via close-in-try.
-    expect(src).toMatch(/let recorded = false/);
-    expect(src).toMatch(/if \(!recorded\)/);
+    // Success path must not double-record via close-in-try or outer catch.
+    expect(src).toMatch(/let invocationRecorded = false/);
+    expect(src).toMatch(/if \(!invocationRecorded\)/);
 
     // Pair each known gate/zero-yield notes reason with a preceding record*
     // call in the same function body region (string presence is the floor;

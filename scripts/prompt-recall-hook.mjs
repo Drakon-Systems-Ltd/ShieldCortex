@@ -408,6 +408,9 @@ process.stdin.on('readable', () => {
 
 process.stdin.on('end', async () => {
   const startedAt = Date.now();
+  // #253: handler-level so a post-success throw cannot double-insert via
+  // the outer catch after the primary reinforce/telemetry block already wrote.
+  let invocationRecorded = false;
   try {
     const config = loadConfig();
     const hookData = JSON.parse(input || '{}');
@@ -623,7 +626,6 @@ process.stdin.on('end', async () => {
     // Reinforce access counts (fire-and-forget in a writable connection)
     // #253: record success/zero-yield once. close() lives in finally so a
     // close throw cannot re-enter the catch and double-insert telemetry.
-    let recorded = false;
     try {
       const writeDb = new Database(dbPath, { timeout: 1000 });
       try {
@@ -644,20 +646,21 @@ process.stdin.on('end', async () => {
           memoriesExtracted: memories.length,
           notes: memories.length > 0 ? 'injected' : 'zero-yield:defence-empty',
         });
-        recorded = true;
+        invocationRecorded = true;
       } finally {
         try { writeDb.close(); } catch { /* ignore close errors */ }
       }
     } catch {
       // Non-critical — don't block on access count update / telemetry
     }
-    if (!recorded) {
+    if (!invocationRecorded) {
       recordPromptRecallTelemetry({
         startedAt,
         memoriesExtracted: memories.length,
         notes: memories.length > 0 ? 'injected' : 'zero-yield:defence-empty',
         dbPath,
       });
+      invocationRecorded = true;
     }
 
     const output = {
@@ -686,12 +689,15 @@ process.stdin.on('end', async () => {
     process.exit(0);
   } catch (error) {
     console.error(`[shieldcortex] Proactive recall error: ${error.message}`);
-    // #253: errors are still firings — record when a DB is available.
-    recordPromptRecallTelemetry({
-      startedAt,
-      memoriesExtracted: 0,
-      notes: `error:${error?.message ?? 'unknown'}`.slice(0, 200),
-    });
+    // #253: errors are still firings — record when a DB is available,
+    // but only if this invocation has not already written a row.
+    if (!invocationRecorded) {
+      recordPromptRecallTelemetry({
+        startedAt,
+        memoriesExtracted: 0,
+        notes: `error:${error?.message ?? 'unknown'}`.slice(0, 200),
+      });
+    }
     process.exit(0);
   }
 });
