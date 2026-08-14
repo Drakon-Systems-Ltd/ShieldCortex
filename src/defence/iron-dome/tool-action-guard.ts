@@ -471,8 +471,11 @@ const DANGEROUS: Pattern[] = [
   // The guard's own one-shot approval store (#118). The TTY gate stops the
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own
-  // approval. Any command that so much as names the store path goes to the
-  // operator — who is the only party with a legitimate reason to touch it.
+  // approval. MUTATING access still goes to the operator. Pure read-only
+  // Pure shell inspection (ls/cat/grep/…) is carved out below (issue #89 live
+  // FP 2026-08-14). Interpreters stay gated — fail closed. Gating a pure ls of
+  // the store that remediation tells you to reconcile against is a
+  // self-referential deadlock on enforced hosts with no broker.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   // The session-lease ledger + lease store (#227). A freeze an agent can edit
   // or delete is not a freeze: DECISIONS.md is lifted by the OPERATOR (TTY-
@@ -1658,6 +1661,41 @@ function isShellAnchorChar(text: string, at: number): boolean {
   return c === '$' && text[at + 1] === '(';
 }
 
+/**
+ * True when the match at `at` sits in a shell redirect destination
+ * (`> path`, `>>"path"`, `>"$HOME/…"`, `1> path`, `2>> path`).
+ * Used so path-target signals are not demoted to 'mention' merely because the
+ * destination token is quoted (#89 dual-review quoted-redirect hole).
+ */
+function pathTargetIsRedirectDestination(text: string, at: number): boolean {
+  // Path-target match often starts mid-token (`.shieldcortex/...` after
+  // `$HOME/` or `/home/u/`). Walk back across path chars and quotes until a
+  // redirect operator. Glued forms count, including quoted destinations:
+  //   echo>"$HOME/.shieldcortex/approvals/x"
+  //   echo>path
+  //   printf %s x>>"$HOME/..."
+  let i = at - 1;
+  if (i >= 0 && (text[i] === '"' || text[i] === "'")) i--;
+  while (i >= 0 && /[A-Za-z0-9_./$~{}:-]/.test(text[i]!)) i--;
+  while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
+  if (i >= 0 && (text[i] === '"' || text[i] === "'")) i--;
+  while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
+  // optional noclobber bar: `>|` / `>>|`
+  if (i >= 0 && text[i] === '|') i--;
+  if (i < 0 || text[i] !== '>') return false;
+  i--;
+  if (i >= 0 && text[i] === '>') i--;
+  if (i >= 0 && /\d/.test(text[i]!)) i--;
+  if (i < 0) return true;
+  const c = text[i]!;
+  // boundary OR glued to preceding token (echo>path / printf '{}'>path)
+  return (
+    c === ' ' || c === '\t' || c === ';' || c === '|' || c === '&' || c === '\n'
+    || c === '"' || c === "'"
+    || /[A-Za-z0-9_./-]/.test(c)
+  );
+}
+
 function classifyWithCtx(
   ctx: SpanCtx,
   start: number,
@@ -1667,11 +1705,21 @@ function classifyWithCtx(
 ): SpanClass {
   // 1) URL — inert data being fetched; only becomes code via `curl … | bash`,
   //    whose pipe-to-shell pattern's span CROSSES the URL (not contained in it).
+  //    Path-target rules keep this exemption: a URL path segment naming
+  //    `.shieldcortex/approvals` is a reference, not access.
   if (contains(ctx.urls, start, end)) return 'mention';
+
+  // 1b) Path-target + shell redirect: a quoted (or bare) path that is the
+  //     destination of `>` / `>>` IS access, not a data-argument mention.
+  //     Without this, `echo x >"$HOME/.shieldcortex/approvals/x.json"` dropped
+  //     touch-approval-store at the quoted-data step below (#89 dual-review).
+  if (pathTarget && pathTargetIsRedirectDestination(text, start)) return 'executed';
+
   // 2) Quoted DATA — the span sits fully inside a data-argument quote. A span
   //    crossing a quote boundary (`"rm" -rf /`) is contained in no quote range,
   //    and a span touching a command substitution INSIDE that quote is executed
-  //    (`echo "$(rm -rf /)"`).
+  //    (`echo "$(rm -rf /)"`). Path-target names inside a pure echo/printf
+  //    string stay mentions (reference, not open).
   if (contains(ctx.dataQuotes, start, end) && !intersects(ctx.substitutions, start, end)) return 'mention';
 
   // 3) Interpreter source (issue #89). Shell regions never reach here.
@@ -1788,6 +1836,115 @@ function withProvenance(
  * keep the two purely-textual exemptions above it — a path inside a URL, or in
  * a quoted data argument — because those genuinely are references, not access.
  */
+
+// ── #89 read-only inspection of guard-owned stores ───────────────────────────
+//
+// Live FP (Jarvis 2026-08-14): pure `ls`/`cat` of the approvals store required
+// approval — self-referential deadlock on enforced hosts.
+//
+// Carve-out policy (Grok 4.6 multi-round floor on #292): FAIL CLOSED.
+// When ANY statement names a guard store, EVERY statement and EVERY pipeline
+// stage in the whole command must be a pure shell observation verb. That
+// closes sibling mint (`ls store; python Path.home() writer`), background
+// tails (`ls store & python …`), and path-smuggling pipes. Nested exec,
+// redirects into the store, and touch-sensitive-path stay gated.
+
+const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
+
+/** Verbs that only OBSERVE. No interpreters, editors, find, yq, jq. */
+const STORE_READONLY_VERB_RE =
+  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf)$/i;
+
+/**
+ * Redirect / tee / noclobber. Glued forms (`echo>path`, `echo>$p`) count —
+ * no required whitespace before `>`. Fd-to-fd dups (`2>&1`, `>&2`) excluded.
+ */
+const STORE_MUTATION_RE = new RegExp(
+  [
+    String.raw`(?:^|[\s;|&])(?:rm|mv|cp|install|tee|truncate|chmod|chown|chgrp|touch|mkdir|rmdir|ln|dd|shred|wipe)\b`,
+    // any non-fd-dup redirect: `>`, `>>`, `>|`, glued or spaced
+    String.raw`>{1,2}\|?(?!&\d)`,
+    // rg --pre can execute a writer
+    String.raw`\brg\b[^|\n]*\s--pre\b`,
+  ].join('|'),
+  'i',
+);
+
+/** Nested execution keeps the gate. */
+const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{/i;
+
+/**
+ * Split on statement separators without treating `2>&1` / `>&` / `|&` as
+ * job-control boundaries. Bare `&` (background) IS a boundary.
+ */
+function splitShellStatements(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    const n = cmd[i + 1];
+    if (c === '\n' || c === ';') {
+      if (cur.trim()) out.push(cur);
+      cur = '';
+      continue;
+    }
+    if (c === '&' && n === '&') {
+      if (cur.trim()) out.push(cur);
+      cur = '';
+      i++;
+      continue;
+    }
+    if (c === '|' && n === '|') {
+      if (cur.trim()) out.push(cur);
+      cur = '';
+      i++;
+      continue;
+    }
+    // bare `&` background — not `>&` / `2>&1` / `|&`
+    if (c === '&') {
+      const prev = cur.length ? cur[cur.length - 1] : '';
+      if (prev !== '>' && prev !== '|') {
+        if (cur.trim()) out.push(cur);
+        cur = '';
+        continue;
+      }
+    }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/**
+ * True when the whole command is pure shell inspection of a guard store.
+ * Fail closed on unknown verbs, nested execution, redirects, siblings, and
+ * any non-readonly pipeline stage.
+ */
+export function guardStoreAccessIsReadOnly(text: string): boolean {
+  const cmd = String(text || '');
+  if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
+  if (STORE_MUTATION_RE.test(cmd)) return false;
+  if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
+
+  const parts = splitShellStatements(cmd);
+  if (parts.length === 0) return false;
+
+  // When any statement names the store, EVERY statement must be readonly.
+  for (const raw of parts) {
+    const part = raw.trim();
+    if (!part) continue;
+    let s = part.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '');
+    s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
+    const stages = s.split('|').map(x => x.trim()).filter(Boolean);
+    for (const stage of stages) {
+      const word = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/)[0] ?? '';
+      const base = word.split('/').pop() ?? word;
+      if (!STORE_READONLY_VERB_RE.test(base)) return false;
+    }
+  }
+  return true;
+}
+
 const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger']);
 
 
@@ -3549,6 +3706,16 @@ export function evaluateToolCall(
   // the tool and never the verb, so a status sweep gated as hard as a flush.
   if (dangerSignals.includes('modify-network-firewall') && firewallCallsAreReadOnly(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'modify-network-firewall');
+  }
+  // #89: pure inspection of the approval store / decisions ledger is not a
+  // mutation. Drop the path-target signal so diagnostics are not deadlocked
+  // against the store the remediation tells them to reconcile. Mutating
+  // shapes keep the gate (STORE_MUTATION_RE fails closed above).
+  if ((dangerSignals.includes('touch-approval-store') || dangerSignals.includes('touch-decisions-ledger'))
+      && guardStoreAccessIsReadOnly(scanSurface)) {
+    dangerSignals = dangerSignals.filter(
+      sig => sig !== 'touch-approval-store' && sig !== 'touch-decisions-ledger',
+    );
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
