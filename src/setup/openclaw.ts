@@ -1144,7 +1144,16 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
   }
 
   const extensionsDir = findExtensionsDir();
-  if (!extensionsDir) return 'skipped';
+  if (!extensionsDir) {
+    // #251 sibling of missing-source: native refused, then no writable
+    // ~/.openclaw/extensions — must not return quiet skipped/exit 0.
+    if (lastNativePluginInstallRefusal) {
+      console.warn('  Warning: OpenClaw extensions directory unavailable — cannot fall back to a local copy after native install refused.');
+      console.warn('  Nothing was installed. Ensure ~/.openclaw exists and is writable, then retry.');
+      process.exitCode = 1;
+    }
+    return 'skipped';
+  }
 
   const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
   try {
@@ -1247,6 +1256,11 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
       console.warn(`  Skipped plugin install (permission denied on ${destDir})`);
     } else {
       console.warn(`  Warning: Could not install plugin: ${(err as Error).message}`);
+    }
+    // #251: copy/register throw after a native refusal must not quiet-succeed.
+    if (lastNativePluginInstallRefusal) {
+      console.warn('  Nothing was installed via local fallback after native install refused.');
+      process.exitCode = 1;
     }
     return 'skipped';
   }

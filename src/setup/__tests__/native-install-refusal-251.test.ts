@@ -322,6 +322,33 @@ describe('tryNativeOpenClawPluginInstall real spawn wiring (#251)', () => {
     const refusal = getLastNativePluginInstallRefusal();
     expect(refusal?.configInvalid).toBe(true);
     expect(refusal?.reason).toMatch(/config is invalid/i);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('hard-fails when extensions dir is unavailable after native refusal', async () => {
+    // Valid ~/.openclaw, but `extensions` is a FILE so mkdir/open fails and
+    // findExtensionsDir returns null — without tripping the earlier
+    // "OpenClaw not installed" hard exit.
+    const openclawDir = path.join(tempHome, '.openclaw');
+    fs.rmSync(openclawDir, { recursive: true, force: true });
+    fs.mkdirSync(openclawDir, { recursive: true });
+    fs.writeFileSync(path.join(openclawDir, 'extensions'), 'not-a-directory\n');
+    __setLastNativePluginInstallRefusalForTest({
+      reason: 'OpenClaw config is invalid',
+      detail: ['OpenClaw config is invalid'],
+      configInvalid: true,
+      truncated: false,
+      label: 'package install',
+    });
+    __setNativePluginInstallForTest(() => null);
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    const warnings = warnLines.join('\n');
+    expect(warnings).toMatch(/extensions directory unavailable|cannot fall back|Nothing was installed/i);
+    expect(process.exitCode).toBe(1);
+    expect(logLines.join('\n')).toMatch(/skipped after native install refused/i);
+    expect(logLines.join('\n')).not.toMatch(/Installed through native OpenClaw/);
   });
 });
 
