@@ -126,3 +126,26 @@ describe('#89 — round-4 Grok mint paths stay gated', () => {
     expect(v.signals).not.toContain('touch-approval-store');
   });
 });
+
+describe('#89 — round-5 Grok sibling/background mint paths stay gated', () => {
+  it.each([
+    ['sibling python writer', `ls ~/.shieldcortex/approvals; python3 -c "(pathlib.Path.home()/'.shieldcortex'/'approvals'/'approvals.json').write_text('{}')"`],
+    ['and-and python writer', `ls ~/.shieldcortex/approvals && python3 -c "open('/home/u/.shieldcortex/approvals/approvals.json','w').write('{}')"`],
+    ['background python writer', `ls ~/.shieldcortex/approvals & python3 -c "open('/home/u/.shieldcortex/approvals/approvals.json','w').write('{}')"`],
+    ['var redirect mint', `p=~/.shieldcortex/approvals/approvals.json; echo '{}' >$p`],
+  ])('GATEs %s', (_name, cmd) => {
+    const v = gate(cmd);
+    expect(v.decision).not.toBe('allow');
+  });
+
+  it('echo hi; ls store still allows (all statements readonly)', () => {
+    const v = gate('echo hi; ls ~/.shieldcortex/approvals');
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('touch-approval-store');
+  });
+
+  it('2>&1 does not split as background', () => {
+    const v = gate('ls ~/.shieldcortex/approvals 2>&1');
+    expect(v.decision).toBe('allow');
+  });
+});

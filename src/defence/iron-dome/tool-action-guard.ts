@@ -1838,74 +1838,106 @@ function withProvenance(
 
 // ── #89 read-only inspection of guard-owned stores ───────────────────────────
 //
-// `touch-approval-store` / `touch-decisions-ledger` fire on PATH, not verb.
 // Live FP (Jarvis 2026-08-14): pure `ls`/`cat` of the approvals store required
 // approval — self-referential deadlock on enforced hosts.
 //
-// Carve-out policy (Grok 4.6 + SOL multi-round floor on #292): FAIL CLOSED.
-//   - Only pure shell OBSERVATION verbs qualify (ls/cat/grep/head/stat/…).
-//   - Interpreters, editors, find, yq stay gated when a store path is named.
-//   - EVERY pipeline stage must be a readonly verb (no path-smuggling via
-//     `cat store | python writer` that rebuilds the path).
-//   - Command substitution / process substitution / backticks → keep gate.
-//   - touch-sensitive-path (.ssh/.env) is deliberately untouched.
+// Carve-out policy (Grok 4.6 multi-round floor on #292): FAIL CLOSED.
+// When ANY statement names a guard store, EVERY statement and EVERY pipeline
+// stage in the whole command must be a pure shell observation verb. That
+// closes sibling mint (`ls store; python Path.home() writer`), background
+// tails (`ls store & python …`), and path-smuggling pipes. Nested exec,
+// redirects into the store, and touch-sensitive-path stay gated.
 
 const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
 
-/** Verbs that only OBSERVE. No interpreters, no sed/awk/find/yq. */
+/** Verbs that only OBSERVE. No interpreters, editors, find, yq. */
 const STORE_READONLY_VERB_RE =
   /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq)$/i;
 
-/** Redirect / tee / noclobber — defence-in-depth for allowlisted verbs. */
+/** Redirect / tee / noclobber into a path-ish target. */
 const STORE_MUTATION_RE = new RegExp(
   [
     String.raw`(?:^|[\s;|&])(?:rm|mv|cp|install|tee|truncate|chmod|chown|chgrp|touch|mkdir|rmdir|ln|dd|shred|wipe)\b`,
-    String.raw`[>]{1,2}\|?\s*['"]?(?:~|\$HOME|/|\.|\$\{?HOME)`,
+    // path redirect (incl. noclobber) — NOT fd-to-fd like `2>&1` / `>&2`
+    // Negative lookahead skips `>&digit` / `> & digit` fd dup forms.
+    String.raw`(?:^|[\s;|&\d])>{1,2}\|?(?!&\d)`,
   ].join('|'),
   'i',
 );
 
-/** Nested execution — any of these near a store path keeps the gate. */
+/** Nested execution keeps the gate. */
 const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\//i;
 
 /**
- * True when every access to a guard-owned store path on this command is a
- * pure shell inspection. Fail closed on unknown verbs, nested execution,
- * and any non-readonly pipeline stage.
+ * Split on statement separators without treating `2>&1` / `>&` / `|&` as
+ * job-control boundaries. Bare `&` (background) IS a boundary.
+ */
+function splitShellStatements(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    const n = cmd[i + 1];
+    if (c === '\n' || c === ';') {
+      if (cur.trim()) out.push(cur);
+      cur = '';
+      continue;
+    }
+    if (c === '&' && n === '&') {
+      if (cur.trim()) out.push(cur);
+      cur = '';
+      i++;
+      continue;
+    }
+    if (c === '|' && n === '|') {
+      if (cur.trim()) out.push(cur);
+      cur = '';
+      i++;
+      continue;
+    }
+    // bare `&` background — not `>&` / `2>&1` / `|&`
+    if (c === '&') {
+      const prev = cur.length ? cur[cur.length - 1] : '';
+      if (prev !== '>' && prev !== '|') {
+        if (cur.trim()) out.push(cur);
+        cur = '';
+        continue;
+      }
+    }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/**
+ * True when the whole command is pure shell inspection of a guard store.
+ * Fail closed on unknown verbs, nested execution, redirects, siblings, and
+ * any non-readonly pipeline stage.
  */
 export function guardStoreAccessIsReadOnly(text: string): boolean {
   const cmd = String(text || '');
   if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
-  // Nested execution can mint/wipe without the store path sitting in argv0.
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
 
-  const parts = cmd.split(/(?:&&|\|\||;|\n)/);
-  let sawStore = false;
+  const parts = splitShellStatements(cmd);
+  if (parts.length === 0) return false;
+
+  // When any statement names the store, EVERY statement must be readonly.
   for (const raw of parts) {
     const part = raw.trim();
     if (!part) continue;
-    const namesStore = GUARD_STORE_PATH_RE.test(part);
-    if (namesStore) sawStore = true;
-    // Only inspect statements that name the store OR sit in a pipeline that
-    // does — for a bare `echo hi` sibling statement we skip.
-    if (!namesStore && !part.includes('|')) continue;
-
     let s = part.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '');
     s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
     const stages = s.split('|').map(x => x.trim()).filter(Boolean);
-    // If this statement names the store OR is a multi-stage pipeline that
-    // names the store, EVERY stage must be a readonly verb.
-    if (!namesStore && stages.length < 2) continue;
-    if (!namesStore && !stages.some(st => GUARD_STORE_PATH_RE.test(st))) continue;
-
     for (const stage of stages) {
       const word = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/)[0] ?? '';
       const base = word.split('/').pop() ?? word;
       if (!STORE_READONLY_VERB_RE.test(base)) return false;
     }
   }
-  return sawStore;
+  return true;
 }
 
 const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger']);
