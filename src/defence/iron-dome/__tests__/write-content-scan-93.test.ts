@@ -189,3 +189,33 @@ describe('#93 — the Bash surface is unchanged', () => {
     expect(x.decision).toBe('block');
   });
 });
+
+describe('#93 — dual-review residual pins', () => {
+  it('empty new_string does not hide evil content in a later key (pickString skips empty)', () => {
+    const v = evaluateToolCall('Edit', {
+      file_path: 'pwn.sh',
+      old_string: 'x',
+      new_string: '',
+      content: '#!/bin/bash\nrm -rf /\n',
+    });
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain('write-content-catastrophic');
+  });
+
+  it('clean write-content scan does NOT skip path-tier sensitive-path policy', () => {
+    // .env is a touch-sensitive-path target; a clean shebang must not blank that.
+    const v = evaluateToolCall('Write', {
+      file_path: '/home/u/.env',
+      content: '#!/bin/sh\necho hi\n',
+    });
+    // Must still gate on the sensitive path (require_approval or block), not silent allow.
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals.join(' ')).toMatch(/touch-sensitive-path|write-content/);
+  });
+
+  it('expanded shell rc basenames are script-like', () => {
+    for (const p of ['.zprofile', '.zshenv', '.zlogin', '.bash_login', '.bash_logout']) {
+      expect(isScriptLikeWritePath(p)).toBe(true);
+    }
+  });
+});

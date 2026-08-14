@@ -154,7 +154,7 @@ export function extractWriteContent(args: Record<string, unknown>): string {
 }
 
 const SCRIPT_WRITE_EXT_RE = /\.(?:sh|bash|zsh|py|pyw|js|mjs|cjs|ts|tsx|rb|pl|php|ps1|bat|cmd|fish)$/i;
-const SHELL_RC_BASENAME_RE = /^\.(?:bashrc|zshrc|profile|bash_profile)$/i;
+const SHELL_RC_BASENAME_RE = /^\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)$/i;
 
 /** A write target whose contents an interpreter (or a sourcing shell) will run. */
 export function isScriptLikeWritePath(path: string): boolean {
@@ -3290,6 +3290,10 @@ export function evaluateToolCall(
   // scan that content with the same CATASTROPHIC/DANGEROUS sets as commands.
   // Clean scans return allow/sensitive so #95 auditAllows records that the write
   // was seen (production hosts otherwise looked Bash-only for weeks).
+  // #93: only DIRTY write-content hits return early. A clean content scan must
+  // fall through so path-tier rules (touch-sensitive-path, approval-store, …)
+  // still run — content add-on, not a short-circuit that blanks path policy.
+  let writeContentScannedClean = false;
   if (family === 'write') {
     const writeContent = extractWriteContent(args);
     const scanThisWrite = writeContent.length > 0
@@ -3331,17 +3335,7 @@ export function evaluateToolCall(
           hits.dangerous.map(m => ({ signal: m.signal, span: m.span })),
         );
       }
-      // Clean script/memory/shebang write — allow, but sensitive so it audits.
-      return verdict(
-        'allow',
-        'sensitive',
-        family,
-        ACTION_BY_FAMILY[family],
-        memory
-          ? 'memory-write content scanned — no dangerous signal detected'
-          : 'write-content scanned — no dangerous signal detected',
-        ['write-content-scanned'],
-      );
+      writeContentScannedClean = true;
     }
   }
 
@@ -3637,8 +3631,9 @@ export function evaluateToolCall(
   const payloadSignals = [...new Set(dangerPayloadOnly.map(m => m.signal))];
   const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
+    const extra = writeContentScannedClean ? ['write-content-scanned'] : [];
     return withReview(verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
-      [sensitiveSignal, ...payloadSignals, ...opaqueSignals]));
+      [sensitiveSignal, ...payloadSignals, ...opaqueSignals, ...extra]));
   }
   if (payloadSignals.length > 0) {
     const payloadMatches = payloadSignals.flatMap(s => {
@@ -3670,6 +3665,18 @@ export function evaluateToolCall(
   // 4) A bare exec/network/write/git call with no dangerous signal is treated as
   // benign so the guard does not interrupt routine work (npm test, git status…).
   // (Read-only and memory tools already short-circuited to allow above.)
+  // #93: a clean script/memory/shebang content scan upgrades to sensitive so
+  // #95 auditAllows records that the write was seen (not silent like Bash-only).
+  if (writeContentScannedClean) {
+    return withReview(verdict(
+      'allow',
+      'sensitive',
+      family,
+      canonical,
+      'write-content scanned — no dangerous signal detected',
+      ['write-content-scanned', ...opaqueSignals],
+    ));
+  }
   return withReview(verdict('allow', 'benign', family, canonical, 'no dangerous signal detected', []));
 }
 
