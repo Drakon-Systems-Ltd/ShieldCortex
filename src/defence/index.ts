@@ -89,6 +89,16 @@ export {
   isGuardIndexOrigin,
   isSummaryOrigin,
 } from './iron-dome/session-guard.js';
+export {
+  REQUIRED_BINDING_FIELDS,
+  hasRequiredBinding,
+  attachEnforcementBinding,
+  actionKeyForToolCall,
+  nextAuditSeq,
+  resolveInstanceId,
+  bindRuntimeInspectPayload,
+} from './iron-dome/enforcement-binding.js';
+export type { EnforcementPlane, EnforcementBinding, BindingContext } from './iron-dome/enforcement-binding.js';
 // Session action lease (#227) — the freeze that binds every self, not just the
 // careful one. Pure core + fs layer exported through the same runtime seam as
 // `evaluateToolCall` so both enforcement planes reach ONE implementation.

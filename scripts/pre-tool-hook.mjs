@@ -61,6 +61,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_ACTION_GUARD = { enabled: true, enforce: true, autoApprove: [], auditAllows: true };
 
+/** #224 binding module, loaded once in main. Null when dist predates it. */
+let bindingMod = null;
+
 function loadActionGuardConfig() {
   try {
     const configPath = join(homedir(), '.shieldcortex', 'config.json');
@@ -224,6 +227,19 @@ async function loadApprovals() {
     return typeof mod.consumeApproval === 'function' && typeof mod.recordPending === 'function'
       ? mod
       : null;
+  } catch {
+    return null;
+  }
+}
+
+/** #224 — optional: stamp binding fields. Missing dist degrades to unbound. */
+async function loadBinding() {
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'enforcement-binding.js')).href
+    );
+    return typeof mod.attachEnforcementBinding === 'function' ? mod : null;
   } catch {
     return null;
   }
@@ -754,7 +770,7 @@ function writeTerminalOutcomeAudit(toolName, verdict, toolInput, action, outcome
     redactedAuditArgs(toolName, toolInput),
     action,
     outcome,
-    extra,
+    { ...extra, intentArgs: toolInput },
   );
 }
 
@@ -1185,7 +1201,7 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       return;
     }
     const date = new Date().toISOString().slice(0, 10);
-    const entry = {
+    let entry = {
       type: 'intercept',
       origin: 'claude-code-hook',
       tool: toolName,
@@ -1219,6 +1235,19 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       // #139 adds `permissionMode` + its outcome the same way.
       ...extra,
     };
+    delete entry.intentArgs;
+    if (bindingMod?.attachEnforcementBinding) {
+      try {
+        const intentArgs = extra.intentArgs && typeof extra.intentArgs === 'object' ? extra.intentArgs : args;
+        entry = bindingMod.attachEnforcementBinding(entry, {
+          plane: 'action_guard',
+          hookName: 'PreToolUse',
+          pluginId: 'claude-code-hook',
+          tool: toolName,
+          args: intentArgs && typeof intentArgs === 'object' ? intentArgs : {},
+        });
+      } catch { /* write the unbound row rather than drop the event */ }
+    }
     if (!appendFileNoFollow(join(auditDir, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n')) {
       noteAuditSinkFailure(`append failed for realtime-${date}.jsonl`);
       return;
@@ -1271,7 +1300,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
       redactedAuditArgs(toolName, toolInput),
       action,
       'asked',
-      { ...baseExtra, ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}), ...broker },
+      { ...baseExtra, intentArgs: toolInput, ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}), ...broker },
     );
     emitDecision('ask', safeDiagnosticApprovalReason(reason));
     return;
@@ -1402,6 +1431,7 @@ process.stdin.on('readable', () => {
 
 process.stdin.on('end', async () => {
   try {
+    bindingMod = await loadBinding();
     const cfg = loadActionGuardConfig();
     if (!cfg.enabled) process.exit(0);
 
@@ -1462,6 +1492,7 @@ process.stdin.on('end', async () => {
     }
 
     const guard = await loadGuard();
+    bindingMod = await loadBinding();
     if (!guard) {
       await handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode, await getNotify(), baseExtra); // always exits
       return;

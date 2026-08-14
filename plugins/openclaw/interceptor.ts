@@ -205,6 +205,14 @@ export interface InterceptAuditEntry {
   /** #260 — plane origin so the session-guard summariser can find this row. */
   origin?: 'openclaw-interceptor';
   sessionKey?: string;
+  /** #224 — binding fields. Present once the host injects `bindAudit`. */
+  plane?: 'action_guard' | 'conversation_firewall';
+  gatewayInstanceId?: string;
+  hookName?: string;
+  pluginId?: string;
+  nonce?: string;
+  seq?: number;
+  actionKey?: string;
 }
 
 const WATCHED_TOOLS = ['remember', 'mcp__memory__remember'] as const;
@@ -806,6 +814,10 @@ interface InterceptorOptions {
     keyFor: (sessionId: string | undefined) => string | null;
     index: (entry: InterceptAuditEntry) => void;
   };
+  /** #224 — stamp plane/instance/hook/nonce/seq/actionKey before the row hits
+   *  disk. Injected from `shieldcortex/defence` at runtime so this plugin does
+   *  not grow a second schema. Absent = unbound (older installed package). */
+  bindAudit?: (entry: InterceptAuditEntry, args?: Record<string, unknown>) => InterceptAuditEntry;
 }
 
 /** How many recent tool NAMES the judge is told about. Names only, never
@@ -829,6 +841,9 @@ export function createInterceptor(
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
   let lastSessionId: string | undefined;
+  const bindAudit = options?.bindAudit;
+  /** Args of the in-flight tool call — used only to mint #224 actionKey. */
+  let lastCallArgs: Record<string, unknown> | undefined;
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
@@ -841,11 +856,12 @@ export function createInterceptor(
 
   function emitAudit(entry: InterceptAuditEntry): void {
     const sessionKey = options?.sessionGuard?.keyFor(lastSessionId) ?? undefined;
-    const bound: InterceptAuditEntry = {
+    const withOrigin: InterceptAuditEntry = {
       ...entry,
       origin: 'openclaw-interceptor',
       ...(sessionKey ? { sessionKey } : {}),
     };
+    const bound = bindAudit ? bindAudit(withOrigin, lastCallArgs) : withOrigin;
     writeAuditEntry(bound);
     try { options?.sessionGuard?.index(bound); } catch { /* never wedge the turn */ }
     onAuditEntry?.(bound);
@@ -1266,6 +1282,7 @@ export function createInterceptor(
 
   async function handleToolCall(context: ToolCallContext): Promise<void> {
     lastSessionId = context.sessionId;
+    lastCallArgs = context.arguments;
     // Remember the NAME only. This is the entirety of what the approval broker's
     // judge will ever learn about the session — see buildSessionSummary.
     noteToolForSession(context.toolName);

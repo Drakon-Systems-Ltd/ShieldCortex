@@ -115,7 +115,7 @@ describe('#179 — the command the operator typed now exists', () => {
   it('the openclaw subcommand router carries a skill case and the usage names it', () => {
     const src = fs.readFileSync(path.join(repoRoot, 'src', 'setup', 'openclaw.ts'), 'utf-8');
     expect(src).toMatch(/case 'skill':/);
-    expect(src).toMatch(/openclaw <install\|uninstall\|status\|repair\|skill install>/);
+    expect(src).toMatch(/openclaw <install\|uninstall\|status\|repair\|inspect-runtime\|skill install>/);
   });
 
   it('update wires the resolved binary + acknowledge flag, and its skip names the install command', () => {

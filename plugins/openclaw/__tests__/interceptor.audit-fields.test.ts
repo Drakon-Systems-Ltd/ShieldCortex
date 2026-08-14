@@ -5,6 +5,10 @@ import {
   DEFAULT_CONFIG,
   type InterceptAuditEntry,
 } from '../interceptor.js';
+import {
+  attachEnforcementBinding,
+  hasRequiredBinding,
+} from '../../../src/defence/iron-dome/enforcement-binding.js';
 
 /**
  * Task 2: the InterceptAuditEntry emitted by the interceptor must carry the full
@@ -96,5 +100,56 @@ describe('InterceptAuditEntry — full pipeline metadata', () => {
     expect(autoDenied!.sensitivityLevel).toBe('INTERNAL');
     expect(autoDenied!.fragmentationScore).toBeNull();
     expect(autoDenied!.pipelineDurationMs).toBe(0);
+  });
+});
+
+describe('#224 InterceptAuditEntry is bound when bindAudit is injected', () => {
+  it('stamps plane, hook, nonce, seq and an action key on a gated Bash call', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const home = mkdtempSync(join(tmpdir(), 'sc-224-int-'));
+    const prevAudit = process.env.SHIELDCORTEX_AUDIT_DIR;
+    process.env.SHIELDCORTEX_AUDIT_DIR = join(home, '.shieldcortex', 'audit');
+    const captured: InterceptAuditEntry[] = [];
+    const { handleToolCall } = createInterceptor(
+      DEFAULT_CONFIG,
+      makeStubPipeline() as never,
+      {
+        evaluateToolCall: () => ({
+          decision: 'block',
+          severity: 'catastrophic',
+          family: 'exec',
+          action: 'execute_command',
+          reason: 'blocked',
+          signals: ['recursive-force-delete'],
+        }),
+        bindAudit: (entry, args) => attachEnforcementBinding(entry, {
+          plane: 'action_guard',
+          hookName: 'before_tool_call',
+          pluginId: 'shieldcortex-realtime',
+          tool: entry.tool,
+          args: args ?? {},
+          home,
+        }),
+        onAuditEntry: (e) => captured.push(e),
+      },
+    );
+
+    await handleToolCall({
+      toolName: 'Bash',
+      arguments: { command: 'rm -rf /', description: 'clean tmp' },
+    }).catch(() => { /* catastrophic throws after the audit row is written */ });
+
+    const denied = captured.find((e) => e.action === 'auto_deny' || e.outcome === 'auto_denied' || e.action === 'require_approval');
+    expect(denied).toBeDefined();
+    expect(hasRequiredBinding(denied)).toBe(true);
+    expect(denied!.plane).toBe('action_guard');
+    expect(denied!.hookName).toBe('before_tool_call');
+    expect(denied!.actionKey).toContain('rm');
+    expect(denied!.actionKey).not.toMatch(/clean tmp/);
+    if (prevAudit === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;
+    else process.env.SHIELDCORTEX_AUDIT_DIR = prevAudit;
+    try { rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 });

@@ -183,6 +183,14 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     expect(entry.origin).toBe('claude-code-hook');
     expect(entry.tool).toBe('Bash');
     expect(entry.firewallResult).toBe('ACTION_GUARD');
+    // #224 — a deny that cannot name its plane is not evidence.
+    expect(entry.plane).toBe('action_guard');
+    expect(entry.hookName).toBe('PreToolUse');
+    expect(entry.pluginId).toBe('claude-code-hook');
+    expect(entry.nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect(entry.seq).toBeGreaterThan(0);
+    expect(entry.actionKey).toContain('rm');
+    expect(entry.gatewayInstanceId).toEqual(expect.any(String));
   });
 
   it('audits the ask verdict so unattended denials are visible', async () => {
