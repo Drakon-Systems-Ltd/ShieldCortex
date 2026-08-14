@@ -89,6 +89,107 @@ function isAllowlisted(value: string, allowlist: string[]): boolean {
 }
 
 /**
+ * #205 — documentation / template placeholders are not secrets.
+ *
+ * ENV_SECRET patterns match `API_KEY=…` assignments at 0.82–0.85 confidence.
+ * Without a denylist they fire on every README (`your-api-key-here`,
+ * `changeme_in_production`, `replace-with-your-token`).
+ *
+ * Conservative on purpose (dual-review #280): only obvious template language.
+ * Do NOT match bare words like "change"/"replace"/"set" inside real values
+ * (`Spring-Change-2024`, `my-secret-prod-7f3a`). Prefer exacts + anchored
+ * phrase shapes with length caps.
+ */
+export function isDocumentationPlaceholder(value: string): boolean {
+  const raw = value.trim();
+  const v = raw.toLowerCase();
+  if (!v) return true;
+
+  // Exact common placeholders (whole value)
+  const exact = new Set([
+    'changeme',
+    'change_me',
+    'changeme!',
+    'password',
+    'secret',
+    'secret123',
+    'password123',
+    'admin',
+    'root',
+    'todo',
+    'fixme',
+    'fix_me',
+    'example',
+    'sample',
+    'dummy',
+    'placeholder',
+    'redacted',
+    'xxx',
+    'xxxx',
+    'xxxxxxxx',
+    '<password>',
+    '<secret>',
+    '<token>',
+    '<api_key>',
+    'your_password',
+    'your_secret',
+    'your_token',
+    'your_api_key',
+    'your-api-key',
+    'your-api-key-here',
+    'your_api_key_here',
+    'insert_here',
+    'insert-here',
+    'replace-with-your-token',
+    'replace_with_your_token',
+    'replace-with-your-secret',
+    'replace_with_your_secret',
+    'replace-with-your-password',
+    'changeme_in_production',
+    'change_me_in_production',
+    'changeme-in-production',
+  ]);
+  if (exact.has(v)) return true;
+
+  // Angle-bracket template tokens: <your-token>, <API_KEY>
+  if (/^<[^>]{1,40}>$/.test(raw)) return true;
+
+  // Pure mask runs
+  if (/^(x{4,}|\*{4,}|\.{4,}|-{4,}|_{4,})$/i.test(raw)) return true;
+  if (/^(xxx+|yyy+|zzz+|asdf|qwerty)([0-9!@._-]*)?$/i.test(v)) return true;
+
+  // Anchored "your/my … key/secret/token/password" whole-value templates.
+  // Requires a template tail (here|example|placeholder|xxx|sample) OR ends
+  // exactly at the credential noun — not "my-secret-prod-abc123".
+  if (
+    /^(your|my)[-_ ]+(api[-_ ]?key|secret|token|password|passwd|key)([-_ ]+(here|example|sample|placeholder|xxx+))?$/i.test(v)
+  ) {
+    return true;
+  }
+
+  // Anchored "replace/insert … with your …" whole-value templates only.
+  if (
+    v.length < 48
+    && /^(replace|insert)[-_ ]+(with[-_ ]+)?(your|my|a|the)[-_ ]+(api[-_ ]?key|secret|token|password|key|value)([-_ ]*(here)?)?$/.test(v)
+  ) {
+    return true;
+  }
+
+  // changeme / change_me as a PREFIX of a short template (changeme_in_production)
+  if (/^change[-_]?me([-_].{0,24})?$/.test(v) && v.length < 40) return true;
+
+  // *_in_production / *_here when the stem is a known placeholder word
+  if (
+    /^(change[-_]?me|password|secret|token|api[-_]?key|example|sample|dummy|placeholder|todo|fixme)[-_](in[-_]production|here|example|sample|placeholder|todo)$/.test(v)
+    && v.length < 48
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Expand a match span to the full contiguous identifier token it sits in, then
  * test it against the well-known-non-secret allowlist (git SHA / UUID).
  *
@@ -152,6 +253,11 @@ export function scanForCredentials(
       // Skip allowlisted values
       if (isAllowlisted(secretValue, cfg.allowlist)) continue;
 
+      // #205: documentation placeholders are not secrets.
+      // Only for env-style assignment CAPTURES — never for full connection
+      // strings / API keys (those can contain the word "example" in a host).
+      if (pattern.type === 'env_secret' && isDocumentationPlaceholder(secretValue)) continue;
+
       // Skip if this range is already covered by a higher-priority pattern
       const start = match.index;
       const end = start + fullMatch.length;
@@ -159,7 +265,7 @@ export function scanForCredentials(
 
       // Skip well-known PUBLIC identifiers (git SHA / UUID). Generic hex rules
       // match a substring of these, so expand to the full token before testing
-      // (Phase 17 A5).
+      // (Phase 17 A5 / #205 empty digests).
       if (matchIsWellKnownNonSecret(content, start, end)) continue;
 
       const action = actionForSeverity(pattern.severity, cfg);

@@ -264,13 +264,17 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     confidence: 0.97,
   },
   // Mailgun
+  //
+  // #205: historically `key-` + 32 alnum. Bound the whole token so we do not
+  // match inside longer identifiers. Confidence kept modest — current Mailgun
+  // docs no longer clearly advertise this prefix; treat as best-effort.
   {
     name: 'Mailgun API Key',
     type: 'api_key',
     provider: 'mailgun',
-    regex: /key-[A-Za-z0-9]{32}/g,
+    regex: /(?<![A-Za-z0-9_-])key-[A-Za-z0-9]{32}(?![A-Za-z0-9_-])/g,
     severity: 'critical',
-    confidence: 0.85,
+    confidence: 0.80,
   },
   // npm
   {
@@ -319,16 +323,11 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     severity: 'critical',
     confidence: 0.97,
   },
-  // Firebase Cloud Messaging
-  {
-    name: 'Firebase Cloud Messaging Key',
-    type: 'api_key',
-    provider: 'firebase',
-    regex: /AAAA[A-Za-z0-9_-]{40,}/g,
-    severity: 'critical',
-    confidence: 0.90,
-    minLength: 44,
-  },
+  // Firebase Cloud Messaging — REMOVED (#205).
+  // Legacy FCM server keys (AAAA…) were decommissioned mid-2024. The bare
+  // AAAA[A-Za-z0-9_-]{40,} pattern matched base64 zero-runs and other
+  // non-secrets at 0.90 confidence with zero remaining true-positive class.
+  // Do not re-add without a current, documented key format.
   // HashiCorp Vault
   {
     name: 'HashiCorp Vault Token',
@@ -339,11 +338,16 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     confidence: 0.96,
   },
   // Azure Subscription Key
+  //
+  // #205: bare `[a-f0-9]{32}` matched *inside* longer hex (SHA-256 twice,
+  // nested digests). Bound to a full 32-hex token — no leading/trailing hex.
+  // Confidence stays low; known public digests (empty MD5) are allowlisted
+  // in isWellKnownNonSecret / the scanner path.
   {
     name: 'Azure Subscription Key',
     type: 'api_key',
     provider: 'azure',
-    regex: /[a-f0-9]{32}/g,
+    regex: /(?<![A-Fa-f0-9])[a-f0-9]{32}(?![A-Fa-f0-9])/g,
     severity: 'medium',
     confidence: 0.35,
     minLength: 32,

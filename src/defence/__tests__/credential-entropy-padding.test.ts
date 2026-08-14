@@ -89,25 +89,37 @@ describe('#257 — entropy detector silently bypassed by low-entropy padding', (
     expect(leaksRawSecret(padded, UNKNOWN_SHAPE_SECRET)).toBe(false);
   });
 
-  it('a pure hex filler prefix that pattern-matches as an Azure key cannot suppress entropy redaction', () => {
-    // Regression for the second-order #257 bypass: the generic hex/Azure
-    // pattern used to claim only the low-entropy filler prefix. The later
-    // entropy token overlapped that range and was skipped, so the real unknown
-    // secret suffix survived in supposedly redacted output.
+  it('a pure hex filler prefix cannot suppress entropy redaction (#205: Azure no longer claims nested hex)', () => {
+    // Pre-#205: bare [a-f0-9]{32} claimed a 32-hex substring of the 40-hex
+    // filler; entropy then skipped the overlapping token and the secret
+    // suffix leaked. Post-#205 Azure is hex-bounded so it does NOT match
+    // inside a longer hex run — entropy alone must still catch the secret.
     const padded = 'a'.repeat(40) + UNKNOWN_SHAPE_SECRET;
     const result = scanForCredentials(padded);
     expect(result.leaked).toBe(true);
-    expect(result.findings.some((f) => f.provider === 'azure')).toBe(true);
+    expect(result.findings.some((f) => f.provider === 'azure')).toBe(false);
     expect(result.findings.some((f) => f.type === 'high_entropy')).toBe(true);
     expect(leaksRawSecret(padded, UNKNOWN_SHAPE_SECRET)).toBe(false);
   });
 
-  it('the same pattern-overlap fix covers a 32-char hex filler prefix', () => {
+  it('a 32-char hex filler glued to a secret is still fully redacted by entropy', () => {
+    // 32 hex + secret starting with hex letter is ONE contiguous hex-ish run
+    // under Azure's bounded rule (lookahead fails). Entropy must cover it.
     const padded = 'f'.repeat(32) + UNKNOWN_SHAPE_SECRET;
     const result = scanForCredentials(padded);
     expect(result.leaked).toBe(true);
     expect(result.findings.some((f) => f.type === 'high_entropy')).toBe(true);
     expect(leaksRawSecret(padded, UNKNOWN_SHAPE_SECRET)).toBe(false);
+  });
+
+  it('a standalone 32-hex Azure-shaped token still matches Azure; adjacent unknown secret still redacts', () => {
+    // Space separates so Azure can match the bounded 32-hex token.
+    const azureKey = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    const content = `${azureKey} ${UNKNOWN_SHAPE_SECRET}`;
+    const result = scanForCredentials(content);
+    expect(result.findings.some((f) => f.provider === 'azure')).toBe(true);
+    expect(result.findings.some((f) => f.type === 'high_entropy')).toBe(true);
+    expect(leaksRawSecret(content, UNKNOWN_SHAPE_SECRET)).toBe(false);
   });
 
   it('padding alone, with no secret attached, is NOT promoted to a finding', () => {

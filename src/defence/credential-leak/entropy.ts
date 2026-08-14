@@ -234,6 +234,12 @@ export function isWellKnownNonSecret(token: string): boolean {
   // Abbreviated git SHA (7–12 hex, the `git rev-parse --short` range).
   if (/^[0-9a-f]{7,12}$/i.test(t)) return true;
 
+  // #205: well-known empty-content digests. The empty-file MD5 is exactly
+  // 32 hex, so Azure's bounded 32-hex rule would still fire without this.
+  // Only the canonical empty digests — not arbitrary 32-hex.
+  if (/^d41d8cd98f00b204e9800998ecf8427e$/i.test(t)) return true; // MD5("")
+  if (/^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$/i.test(t)) return true; // SHA-256("")
+
   return false;
 }
 
