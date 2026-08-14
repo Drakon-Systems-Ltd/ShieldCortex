@@ -41,6 +41,7 @@ beforeEach(() => {
   process.env.DOCKER = 'false';
   fs.mkdirSync(path.join(tempHome, '.openclaw'), { recursive: true });
   previousExitCode = process.exitCode;
+  process.exitCode = undefined;
   jest.spyOn(console, 'log').mockImplementation(() => {});
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -114,7 +115,9 @@ describe('#214 pre-install snapshot of openclaw.json', () => {
     const live = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
     expect(live.plugins.allow).toContain(PLUGIN);
     expect(live.plugins.entries[PLUGIN].enabled).toBe(true);
-    expect(process.exitCode === 1).toBe(false);
+    // Isolate from other suites that leave exitCode=1 on the worker
+    // (macos-test failed this assertion while the stanza was restored).
+    expect(process.exitCode).not.toBe(1);
   });
 });
 
