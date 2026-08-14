@@ -13,9 +13,9 @@ opt back into advisory without touching the fail-open behaviour.
 from __future__ import annotations
 
 try:
-    from .sc_client import Verdict  # as a Hermes package
+    from .sc_client import ActionGuardVerdict, Verdict  # as a Hermes package
 except ImportError:  # pragma: no cover - standalone (tests add the package dir to sys.path)
-    from sc_client import Verdict
+    from sc_client import ActionGuardVerdict, Verdict
 
 
 # v4.47.2: the gate ENFORCES by default. Only an explicit opt-out disables it —
@@ -82,3 +82,33 @@ def tool_call_decision(
         return None
     detail = verdict.reason or (", ".join(verdict.threats) if verdict.threats else "policy violation")
     return {"action": "block", "message": f"ShieldCortex blocked this action — {detail}"}
+
+
+def action_guard_decision(
+    verdict: ActionGuardVerdict,
+    *,
+    enforce: bool = True,
+    fallback_blocked: bool = False,
+    fallback_dangerous: bool = False,
+):
+    """Map an Action Guard verdict to a Hermes hook decision.
+
+    Hermes has no approval prompt. ``require_approval`` therefore becomes a
+    block when enforcing (same unattended fail-closed the OpenClaw interceptor
+    already applies). ``allow`` is None. Scanner-down uses the same fallback
+    contract as :func:`tool_call_decision`.
+    """
+    if not verdict.available:
+        return tool_call_decision(
+            Verdict("ERROR", [], verdict.reason, available=False),
+            enforce=enforce,
+            fallback_blocked=fallback_blocked,
+            fallback_dangerous=fallback_dangerous,
+        )
+    if verdict.decision == "block":
+        detail = verdict.reason or "policy violation"
+        return {"action": "block", "message": f"ShieldCortex blocked this action — {detail}"}
+    if verdict.decision == "require_approval" and enforce:
+        detail = verdict.reason or "requires approval"
+        return {"action": "block", "message": f"ShieldCortex blocked this action — {detail}"}
+    return None

@@ -701,7 +701,7 @@ cp -r plugins/hermes/shieldcortex ~/.hermes/plugins/shieldcortex
 hermes plugins enable shieldcortex
 ```
 
-It registers a **`pre_tool_call` gate**: before every Hermes tool execution it scans the tool + arguments through ShieldCortex's defence pipeline via the local REST API (`POST /api/v1/scan`).
+It registers a **`pre_tool_call` gate**: before every Hermes tool execution it asks Action Guard via the local REST API (`POST /api/v1/action-guard`) — the same `evaluateToolCall` verdict the Claude Code hook and OpenClaw interceptor already share.
 
 - 🛡️ **Advisory-first** — `enforce` is off by default; it logs what it *would* block. Set `SHIELDCORTEX_ENFORCE=1` to actively block.
 - 🪂 **Fail-open** — if the ShieldCortex API is unreachable, the gate never blocks. A down scanner must not wedge the agent; every fail-open is logged.
