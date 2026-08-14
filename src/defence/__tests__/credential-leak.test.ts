@@ -191,11 +191,13 @@ describe('Credential Leak Detection', () => {
   });
 
   describe('Firebase FCM Keys', () => {
-    it('should detect valid Firebase FCM server keys', () => {
+    // #205: legacy FCM AAAA… server keys were decommissioned mid-2024.
+    // Pattern removed — pure FP surface (base64 zero-runs). Do not re-add
+    // without a current documented key format.
+    it('does not flag legacy AAAA FCM-shaped strings as firebase credentials', () => {
       const key = 'AAAA' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef01234567';
       const result = scanForCredentials(`FCM_KEY=${key}`);
-      expect(result.leaked).toBe(true);
-      expect(result.findings.some(f => f.provider === 'firebase')).toBe(true);
+      expect(result.findings.some(f => f.provider === 'firebase')).toBe(false);
     });
 
     it('should not trigger on "AAAA" alone or short strings', () => {

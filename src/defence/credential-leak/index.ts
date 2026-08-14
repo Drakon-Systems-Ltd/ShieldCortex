@@ -89,6 +89,70 @@ function isAllowlisted(value: string, allowlist: string[]): boolean {
 }
 
 /**
+ * #205 — documentation / template placeholders are not secrets.
+ *
+ * ENV_SECRET patterns match `API_KEY=…` assignments at 0.82–0.85 confidence.
+ * Without a denylist they fire on every README (`your-api-key-here`,
+ * `changeme_in_production`, `replace-with-your-token`). Conservative:
+ * only obvious placeholder language, not real-looking random values.
+ */
+export function isDocumentationPlaceholder(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  if (!v) return true;
+
+  // Exact common placeholders
+  const exact = new Set([
+    'changeme',
+    'change_me',
+    'changeme!',
+    'password',
+    'secret',
+    'secret123',
+    'password123',
+    'admin',
+    'root',
+    'todo',
+    'fixme',
+    'fix_me',
+    'example',
+    'sample',
+    'dummy',
+    'placeholder',
+    'redacted',
+    'xxx',
+    'xxxx',
+    'xxxxxxxx',
+    '<password>',
+    '<secret>',
+    '<token>',
+    '<api_key>',
+    'your_password',
+    'your_secret',
+    'your_token',
+    'your_api_key',
+    'insert_here',
+    'insert-here',
+  ]);
+  if (exact.has(v)) return true;
+
+  // Phrase-shaped placeholders
+  if (/^(your|my|the)[-_ ]?(api[-_ ]?key|secret|token|password|passwd|key)\b/.test(v)) return true;
+  if (/\b(your|my)[-_ ]?(api[-_ ]?key|secret|token|password)\b/.test(v)) return true;
+  if (/\b(replace|insert|put|enter|set)[-_ ]?(with[-_ ]?)?(your|a|the)[-_ ]?/.test(v)) return true;
+  // changeme / change_me anywhere in a short value (changeme_in_production)
+  if (/(^|[^a-z])change[-_]?me([^a-z]|$)/.test(v) && v.length < 48) return true;
+  if (/\b(change|replace)[-_]?(me)?\b/.test(v) && v.length < 40) return true;
+  if (/\b(example|sample|dummy|placeholder|redacted|todo|fixme)\b/.test(v) && v.length < 48) return true;
+  if (/^(x{4,}|\*{4,}|\.{4,}|-{4,}|_{4,})$/i.test(value.trim())) return true;
+  if (/^<.*>$/.test(value.trim())) return true;
+  if (/^(xxx+|yyy+|zzz+|abc+|test|testing|asdf|qwerty)([0-9!@._-]*)?$/i.test(v)) return true;
+  // *_in_production / *_here / *_todo style template tails
+  if (/_(in_production|here|todo|example|sample|placeholder)$/.test(v) && v.length < 48) return true;
+
+  return false;
+}
+
+/**
  * Expand a match span to the full contiguous identifier token it sits in, then
  * test it against the well-known-non-secret allowlist (git SHA / UUID).
  *
@@ -152,6 +216,11 @@ export function scanForCredentials(
       // Skip allowlisted values
       if (isAllowlisted(secretValue, cfg.allowlist)) continue;
 
+      // #205: documentation placeholders are not secrets.
+      // Only for env-style assignment CAPTURES — never for full connection
+      // strings / API keys (those can contain the word "example" in a host).
+      if (pattern.type === 'env_secret' && isDocumentationPlaceholder(secretValue)) continue;
+
       // Skip if this range is already covered by a higher-priority pattern
       const start = match.index;
       const end = start + fullMatch.length;
@@ -159,7 +228,7 @@ export function scanForCredentials(
 
       // Skip well-known PUBLIC identifiers (git SHA / UUID). Generic hex rules
       // match a substring of these, so expand to the full token before testing
-      // (Phase 17 A5).
+      // (Phase 17 A5 / #205 empty digests).
       if (matchIsWellKnownNonSecret(content, start, end)) continue;
 
       const action = actionForSeverity(pattern.severity, cfg);
