@@ -83,7 +83,10 @@ export function readConversationAccess(home: string, pluginId: string): Conversa
  * plugin's startup line and the tests cannot drift apart.
  */
 export function conversationAccessFix(pluginId: string): string {
-  return `Add "hooks": { "allowConversationAccess": true } to plugins.entries["${pluginId}"] in ~/.openclaw/openclaw.json, then restart the gateway. Conversation content is sensitive — this is your call, and leaving it ungranted is a valid choice.`;
+  // #275: lead with the command. The equivalent hand-edit is still named,
+  // because an operator reviewing a consent decision deserves to see exactly
+  // which key it flips — but they should not have to hand-edit to apply it.
+  return `Run \`shieldcortex enable conversation-scanning\` (sets "hooks": { "allowConversationAccess": true } on plugins.entries["${pluginId}"] in ~/.openclaw/openclaw.json, and backs the file up first), then restart the gateway. Conversation content is sensitive — this is your call, and leaving it ungranted is a valid choice.`;
 }
 
 /**

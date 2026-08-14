@@ -788,6 +788,14 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "enable"/"disable" (#275) — the feature toggles doctor points at.
+  // Bare `enable` lists every feature with its current state.
+  if (process.argv[2] === 'enable' || process.argv[2] === 'disable') {
+    const { handleToggleCommand } = await import('./cli/enable.js');
+    handleToggleCommand(process.argv.slice(3), process.argv[2] === 'enable');
+    return;
+  }
+
   // Handle "cloud" subcommand
   if (process.argv[2] === 'cloud') {
     const { handleCloudCommand } = await import('./cloud/cli.js');
@@ -1477,7 +1485,7 @@ ${bold}DOCS${reset}
   const knownCommands = new Set([
 
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair',
-    'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
+    'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status', 'enable', 'disable',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
     'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve', 'deny', 'allowlist',

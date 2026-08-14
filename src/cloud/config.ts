@@ -576,7 +576,7 @@ function writeRawConfig(raw: Record<string, unknown>): void {
  * Returns true if the mutation was applied and persisted, false if it was
  * skipped because the config was unparseable (`onParseFail: 'skip'`).
  */
-function mutateRawConfig(
+export function mutateRawConfig(
   fn: (raw: Record<string, unknown>) => void,
   onParseFail: 'throw' | 'skip' = 'throw',
 ): boolean {

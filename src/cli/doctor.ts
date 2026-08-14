@@ -2162,9 +2162,13 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
             `Action Guard is enforcing with no notify channel (actionGuard.notify.webhookUrl unset` +
             `${notifyOn ? '' : ', notify.enabled is not true'}) — unattended denials stay in the ` +
             `audit log and session-guard index only. The #242 cron incidents were this shape.`,
+          // #275: a runnable command, not a config fragment. Hand-editing
+          // config.json invalidates its `_sig` and reads back as tampering, so
+          // the remediation has to be something the operator can actually run.
           fix:
-            'Set `actionGuard.notify.enabled: true` and `actionGuard.notify.webhookUrl` to an https endpoint ' +
-            '(or `notify.openclaw: true`) so a denied cron reaches a human. OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
+            'Run `shieldcortex enable notify --openclaw` to route denials through the gateway you already have ' +
+            '(no endpoint needed), or `shieldcortex enable notify --webhook https://… --secret <key>` for a signed POST. ' +
+            'OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
         });
       }
     }
