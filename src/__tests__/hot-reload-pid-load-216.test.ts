@@ -22,6 +22,7 @@ import {
 } from '../integrations/openclaw-gateway-roster.js';
 import {
   reconcilePluginState,
+  classifyLiveLoadEvidence,
   type ReconcileInput,
 } from '../integrations/openclaw-plugin-index.js';
 import { evaluateSelfCheck } from '../setup/openclaw-selfcheck.js';
@@ -173,6 +174,121 @@ describe('#216 self-check — gateway-PID registration grants roster proof', () 
     });
     expect(v.rosterState).toBe('unproven');
     expect(v.rosterProof).toBe(false);
+  });
+});
+
+describe('#216 classifyLiveLoadEvidence — production decision tree (pure)', () => {
+  const pluginId = PLUGIN;
+  const gw = (atMs: number) => ({ atMs, pid: GW_PID, version: '4.47.32' });
+  const cli = (atMs: number) => ({ atMs, pid: CLI_PID, version: '4.50.0' });
+  const anon = (atMs: number) => ({ atMs, pid: null, version: '4.47.32' });
+
+  it('boot roster hit ⇒ boot-roster evidence, no registration scan needed', () => {
+    const r = classifyLiveLoadEvidence({
+      pluginId,
+      liveRoster: [PLUGIN, 'telegram'],
+      gatewayPid: GW_PID,
+      bootAtMs: 100,
+      processStartedAtMs: 50,
+      findGatewayReg: () => {
+        throw new Error('must not scan');
+      },
+      findAnyReg: () => {
+        throw new Error('must not scan');
+      },
+    });
+    expect(r.liveLoadEvidence).toBe('boot-roster');
+    expect(r.registrationSeenAfterBoot).toBe(false);
+  });
+
+  it('boot-miss + gateway-PID reg (bootAtMs bound only; processStartedAtMs null) ⇒ gateway-pid-registration', () => {
+    // SOL dual-review blocker: must not require processStartedAtMs.
+    const r = classifyLiveLoadEvidence({
+      pluginId,
+      liveRoster: ['telegram'],
+      gatewayPid: GW_PID,
+      bootAtMs: 100,
+      processStartedAtMs: null,
+      findGatewayReg: (since, pid) => {
+        expect(since).toBe(100);
+        expect(pid).toBe(GW_PID);
+        return gw(150);
+      },
+      findAnyReg: () => cli(160),
+    });
+    expect(r.liveLoadEvidence).toBe('gateway-pid-registration');
+    expect(r.liveRoster).toContain(PLUGIN);
+    expect(r.registrationSeenAfterBoot).toBe(false);
+  });
+
+  it('boot-miss + gateway-PID reg (processStartedAtMs bound only; bootAtMs null) ⇒ gateway-pid-registration', () => {
+    const r = classifyLiveLoadEvidence({
+      pluginId,
+      liveRoster: null,
+      gatewayPid: GW_PID,
+      bootAtMs: null,
+      processStartedAtMs: 200,
+      findGatewayReg: (since) => {
+        expect(since).toBe(200);
+        return gw(250);
+      },
+      findAnyReg: () => {
+        throw new Error('no boot ⇒ no #142 path');
+      },
+    });
+    expect(r.liveLoadEvidence).toBe('gateway-pid-registration');
+    expect(r.liveRoster).toEqual([PLUGIN]);
+  });
+
+  it('#142 preserved when processStartedAtMs is null: CLI/anon reg still marks registrationSeenAfterBoot', () => {
+    const r = classifyLiveLoadEvidence({
+      pluginId,
+      liveRoster: ['telegram'],
+      gatewayPid: GW_PID,
+      bootAtMs: 100,
+      processStartedAtMs: null,
+      findGatewayReg: () => null,
+      findAnyReg: (since) => {
+        expect(since).toBe(100);
+        return anon(120);
+      },
+    });
+    expect(r.liveLoadEvidence).toBeNull();
+    expect(r.registrationSeenAfterBoot).toBe(true);
+    expect(r.liveRoster).not.toContain(PLUGIN);
+  });
+
+  it('CLI-PID reg alone never grants gateway-pid-registration', () => {
+    const r = classifyLiveLoadEvidence({
+      pluginId,
+      liveRoster: ['telegram'],
+      gatewayPid: GW_PID,
+      bootAtMs: 100,
+      processStartedAtMs: 50,
+      findGatewayReg: () => null,
+      findAnyReg: () => cli(150),
+    });
+    expect(r.liveLoadEvidence).toBeNull();
+    expect(r.registrationSeenAfterBoot).toBe(true);
+  });
+
+  it('invalid gatewayPid does not call findGatewayReg; #142 still works', () => {
+    let gwCalls = 0;
+    const r = classifyLiveLoadEvidence({
+      pluginId,
+      liveRoster: ['telegram'],
+      gatewayPid: 0,
+      bootAtMs: 100,
+      processStartedAtMs: 50,
+      findGatewayReg: () => {
+        gwCalls++;
+        return gw(150);
+      },
+      findAnyReg: () => anon(120),
+    });
+    expect(gwCalls).toBe(0);
+    expect(r.liveLoadEvidence).toBeNull();
+    expect(r.registrationSeenAfterBoot).toBe(true);
   });
 });
 

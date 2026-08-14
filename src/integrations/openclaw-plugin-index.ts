@@ -755,6 +755,21 @@ export interface GatherOptions {
    * `http server listening` boot line). Returns null when it cannot be proven.
    */
   readLiveRoster?: () => string[] | null;
+  /**
+   * #216 test seam — gateway-PID-attributed registration since a bound.
+   * Production defaults to {@link findGatewayAttributedRegistrationSince}.
+   */
+  findGatewayAttributedRegistration?: (
+    sinceMs: number,
+    gatewayPid: number,
+  ) => { atMs: number; pid: number | null; version: string } | null;
+  /**
+   * #142 test seam — any dated registration since a bound (CLI/anonymous
+   * inclusive). Production defaults to {@link findRegistrationSince}.
+   */
+  findAnyRegistrationSince?: (
+    sinceMs: number,
+  ) => { atMs: number; pid: number | null; version: string } | null;
 }
 
 /**
@@ -848,6 +863,10 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   // #216: a post-boot registration attributed to the RUNNING gateway PID is
   // live-load proof (hot-reload after stanza restore). CLI-attributed or
   // anonymous registration lines stay ambiguous (`registrationSeenAfterBoot`).
+  //
+  // Dual-review #281: #142 and #216 must NOT both require processStartedAtMs.
+  // - #216 needs gatewayPid + a lower bound (bootAtMs ?? processStartedAtMs)
+  // - #142 only needs bootAtMs (a post-snapshot ambiguous sighting)
   let bootAtMs: number | null = null;
   let gatewayPid: number | null = null;
   let processStartedAtMs: number | null = null;
@@ -864,30 +883,27 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
       return boot?.plugins ?? null;
     });
   let liveRoster = readRoster();
-  let liveLoadEvidence: 'boot-roster' | 'gateway-pid-registration' | null =
-    liveRoster != null && liveRoster.includes(pluginId) ? 'boot-roster' : null;
-  let registrationSeenAfterBoot = false;
-
-  if (
-    process.env.JEST_WORKER_ID === undefined &&
-    liveLoadEvidence == null &&
-    gatewayPid != null &&
-    processStartedAtMs != null
-  ) {
-    // Prefer the boot snapshot timestamp when we have one (post-snapshot race);
-    // otherwise bound by process start so a hot-reload after a missing boot
-    // line can still prove load for the CURRENT process.
-    const sinceMs = bootAtMs ?? processStartedAtMs;
-    const gatewayReg = findGatewayAttributedRegistrationSince(sinceMs, gatewayPid);
-    if (gatewayReg) {
-      liveLoadEvidence = 'gateway-pid-registration';
-      if (liveRoster == null) liveRoster = [pluginId];
-      else if (!liveRoster.includes(pluginId)) liveRoster = [...liveRoster, pluginId];
-    } else if (liveRoster != null && !liveRoster.includes(pluginId) && bootAtMs != null) {
-      // Ambiguous sighting only — CLI/anonymous lines must not convict or acquit.
-      registrationSeenAfterBoot = findRegistrationSince(bootAtMs) != null;
-    }
-  }
+  const classified = classifyLiveLoadEvidence({
+    pluginId,
+    liveRoster,
+    gatewayPid,
+    bootAtMs,
+    processStartedAtMs,
+    // Production reads real logs; tests inject via options below when present.
+    findGatewayReg:
+      options.findGatewayAttributedRegistration ??
+      ((sinceMs, pid) =>
+        process.env.JEST_WORKER_ID !== undefined
+          ? null
+          : findGatewayAttributedRegistrationSince(sinceMs, pid)),
+    findAnyReg:
+      options.findAnyRegistrationSince ??
+      ((sinceMs) =>
+        process.env.JEST_WORKER_ID !== undefined ? null : findRegistrationSince(sinceMs)),
+  });
+  liveRoster = classified.liveRoster;
+  const liveLoadEvidence = classified.liveLoadEvidence;
+  const registrationSeenAfterBoot = classified.registrationSeenAfterBoot;
 
   return {
     pluginId,
@@ -905,6 +921,68 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     registrationSeenAfterBoot,
     liveLoadEvidence,
   };
+}
+
+/**
+ * #216/#142 pure classifier for post-boot live-load evidence.
+ *
+ * Extracted so Jest can exercise the production decision tree without touching
+ * real /tmp/openclaw logs (dual-review #281 blocker).
+ */
+export function classifyLiveLoadEvidence(input: {
+  pluginId: string;
+  liveRoster: string[] | null;
+  gatewayPid: number | null;
+  bootAtMs: number | null;
+  processStartedAtMs: number | null;
+  findGatewayReg: (sinceMs: number, gatewayPid: number) => { atMs: number; pid: number | null; version: string } | null;
+  findAnyReg: (sinceMs: number) => { atMs: number; pid: number | null; version: string } | null;
+}): {
+  liveRoster: string[] | null;
+  liveLoadEvidence: 'boot-roster' | 'gateway-pid-registration' | null;
+  registrationSeenAfterBoot: boolean;
+} {
+  let liveRoster = input.liveRoster;
+  let liveLoadEvidence: 'boot-roster' | 'gateway-pid-registration' | null =
+    liveRoster != null && liveRoster.includes(input.pluginId) ? 'boot-roster' : null;
+  let registrationSeenAfterBoot = false;
+
+  if (liveLoadEvidence != null) {
+    return { liveRoster, liveLoadEvidence, registrationSeenAfterBoot };
+  }
+
+  // #216 lower bound: prefer boot snapshot time, else process start. Either
+  // alone is enough — do not require both (SOL dual-review #281).
+  const sinceMs =
+    input.bootAtMs != null
+      ? input.bootAtMs
+      : input.processStartedAtMs != null
+        ? input.processStartedAtMs
+        : null;
+
+  if (
+    sinceMs != null &&
+    input.gatewayPid != null &&
+    Number.isInteger(input.gatewayPid) &&
+    input.gatewayPid > 0
+  ) {
+    const gatewayReg = input.findGatewayReg(sinceMs, input.gatewayPid);
+    if (gatewayReg) {
+      liveLoadEvidence = 'gateway-pid-registration';
+      if (liveRoster == null) liveRoster = [input.pluginId];
+      else if (!liveRoster.includes(input.pluginId)) liveRoster = [...liveRoster, input.pluginId];
+      return { liveRoster, liveLoadEvidence, registrationSeenAfterBoot: false };
+    }
+  }
+
+  // #142: ambiguous post-snapshot registration only needs bootAtMs.
+  // Independent of processStartedAtMs — a missing start bound must not turn
+  // a race into a confident enabled-not-loaded fail.
+  if (liveRoster != null && !liveRoster.includes(input.pluginId) && input.bootAtMs != null) {
+    registrationSeenAfterBoot = input.findAnyReg(input.bootAtMs) != null;
+  }
+
+  return { liveRoster, liveLoadEvidence, registrationSeenAfterBoot };
 }
 
 /** Extract the `~/.openclaw/npm/projects/<name>` directory name from any path
