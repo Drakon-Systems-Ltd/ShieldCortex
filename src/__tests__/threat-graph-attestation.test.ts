@@ -187,13 +187,19 @@ describe('#270 — same-score identity is not self-declarable', () => {
     expect(resolved.clamped).toBe(true);
   });
 
-  it('keeps a genuine trust downgrade (file:import 0.4 < cli:mcp 0.9)', () => {
+  it('rewrites a genuine trust downgrade off the host ACL key (#283)', () => {
+    // file:import 0.4 < cli:mcp 0.9 is still a legitimate downgrade (not
+    // clamped). #283 additionally rewrites the stored identity so ownership
+    // cannot wear host file:import. Score must not rise (file:unattested
+    // would score 0.6) — falls back to agent:unattested @ 0.3.
     const resolved = resolveToolSource(
       { type: 'file', identifier: 'import' },
       { toolName: 'remember', project: null, strict: false },
     );
-    expect(resolved.source).toEqual({ type: 'file', identifier: 'import' });
     expect(resolved.clamped).toBe(false);
+    expect(resolved.attested).toBe(false);
+    expect(resolved.source.identifier.startsWith('unattested>')).toBe(true);
+    expect(resolved.source).toEqual({ type: 'agent', identifier: 'unattested>import' });
   });
 
   it('honours a declaration the environment independently confirms', () => {
