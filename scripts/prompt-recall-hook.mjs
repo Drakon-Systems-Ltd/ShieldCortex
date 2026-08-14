@@ -360,6 +360,43 @@ function formatRecallContext(memories) {
   return lines.join('\n');
 }
 
+// ==================== TELEMETRY (#253) ====================
+
+/**
+ * Record a prompt-recall invocation BEFORE any early exit.
+ *
+ * Issue #253: seven process.exit(0) paths sat above the only
+ * recordHookInvocation call, so "fires but extracts nothing" was
+ * indistinguishable from "never fires" — the exact ambiguity this
+ * table was built to remove. Call this on every terminal path
+ * (including zero-yield gates) with memoriesExtracted: 0 and a
+ * short notes reason. Best-effort; never throws; never blocks exit.
+ */
+function recordPromptRecallTelemetry({
+  startedAt,
+  memoriesExtracted = 0,
+  notes = null,
+  dbPath = null,
+} = {}) {
+  const path = dbPath || getDbPath();
+  if (!path || !existsSync(path)) return;
+  let tdb = null;
+  try {
+    tdb = new Database(path, { timeout: 1000 });
+    recordHookInvocation(tdb, {
+      hookName: 'prompt-recall',
+      exitCode: 0,
+      durationMs: typeof startedAt === 'number' ? Date.now() - startedAt : null,
+      memoriesExtracted,
+      notes,
+    });
+  } catch {
+    // Telemetry must never block the user prompt.
+  } finally {
+    try { if (tdb) tdb.close(); } catch { /* ignore */ }
+  }
+}
+
 // ==================== MAIN ====================
 
 let input = '';
@@ -370,6 +407,10 @@ process.stdin.on('readable', () => {
 });
 
 process.stdin.on('end', async () => {
+  const startedAt = Date.now();
+  // #253: handler-level so a post-success throw cannot double-insert via
+  // the outer catch after the primary reinforce/telemetry block already wrote.
+  let invocationRecorded = false;
   try {
     const config = loadConfig();
     const hookData = JSON.parse(input || '{}');
@@ -411,6 +452,8 @@ process.stdin.on('end', async () => {
     }
 
     if (config.proactiveRecall !== true) {
+      // #253: fired, gated off — not "never ran".
+      recordPromptRecallTelemetry({ startedAt, notes: 'gated:proactiveRecall-disabled' });
       process.exit(0);
     }
 
@@ -421,20 +464,25 @@ process.stdin.on('end', async () => {
     const prompt = sanitisePromptForRecall(rawPrompt);
 
     if (prompt.length < MIN_PROMPT_LENGTH) {
+      recordPromptRecallTelemetry({ startedAt, notes: 'gated:prompt-too-short' });
       process.exit(0);
     }
 
     if (/^(yes|no|ok|sure|do it|go|send it|y|n|yep|nope)\s*[.!?]?\s*$/i.test(prompt.trim())) {
+      recordPromptRecallTelemetry({ startedAt, notes: 'gated:trivial-prompt' });
       process.exit(0);
     }
 
     const project = deriveProjectKey(cwd);
     if (!project) {
+      recordPromptRecallTelemetry({ startedAt, notes: 'gated:no-project-key' });
       process.exit(0);
     }
 
     const dbPath = getDbPath();
     if (!existsSync(dbPath)) {
+      // No DB file → cannot write telemetry either; still not a silent
+      // "never fired" once a DB exists on later runs. notes unused here.
       process.exit(0);
     }
 
@@ -488,6 +536,14 @@ process.stdin.on('end', async () => {
           relevanceDrops,
         });
       }
+      // #253: zero-yield recall MUST leave a hook_invocations row.
+      // This is the Veronica empty-store case — fires, injects nothing.
+      recordPromptRecallTelemetry({
+        startedAt,
+        memoriesExtracted: 0,
+        notes: fullSet.length > 0 ? 'zero-yield:filtered-empty' : 'zero-yield:no-candidates',
+        dbPath,
+      });
       process.exit(0);
     }
 
@@ -516,6 +572,12 @@ process.stdin.on('end', async () => {
           dedupHashes,
           context: null,
           relevanceDrops,
+        });
+        recordPromptRecallTelemetry({
+          startedAt,
+          memoriesExtracted: 0,
+          notes: 'zero-yield:dedup-suppressed',
+          dbPath,
         });
         process.exit(0);
       }
@@ -562,22 +624,43 @@ process.stdin.on('end', async () => {
     }
 
     // Reinforce access counts (fire-and-forget in a writable connection)
+    // #253: record success/zero-yield once. close() lives in finally so a
+    // close throw cannot re-enter the catch and double-insert telemetry.
     try {
       const writeDb = new Database(dbPath, { timeout: 1000 });
-      const ids = memories.map(m => m.id);
-      const placeholders = ids.map(() => '?').join(',');
-      writeDb.prepare(`
-        UPDATE memories SET access_count = access_count + 1, last_accessed = datetime('now')
-        WHERE id IN (${placeholders})
-      `).run(...ids);
-      // Phase 0 measurement: record the recall injection in hook_invocations
-      // (reusing the connection we already opened). This is the cumulative
-      // "is the store actually read into prompts?" signal — fires = recalls
-      // that injected ≥1, memories_extracted = count injected. Best-effort.
-      recordHookInvocation(writeDb, { hookName: 'prompt-recall', memoriesExtracted: memories.length });
-      writeDb.close();
+      try {
+        const ids = memories.map(m => m.id);
+        if (ids.length > 0) {
+          const placeholders = ids.map(() => '?').join(',');
+          writeDb.prepare(`
+            UPDATE memories SET access_count = access_count + 1, last_accessed = datetime('now')
+            WHERE id IN (${placeholders})
+          `).run(...ids);
+        }
+        // memories_extracted = injected count; notes distinguish success
+        // from zero-yield so status is not a lie.
+        recordHookInvocation(writeDb, {
+          hookName: 'prompt-recall',
+          exitCode: 0,
+          durationMs: Date.now() - startedAt,
+          memoriesExtracted: memories.length,
+          notes: memories.length > 0 ? 'injected' : 'zero-yield:defence-empty',
+        });
+        invocationRecorded = true;
+      } finally {
+        try { writeDb.close(); } catch { /* ignore close errors */ }
+      }
     } catch {
-      // Non-critical — don't block on access count update
+      // Non-critical — don't block on access count update / telemetry
+    }
+    if (!invocationRecorded) {
+      recordPromptRecallTelemetry({
+        startedAt,
+        memoriesExtracted: memories.length,
+        notes: memories.length > 0 ? 'injected' : 'zero-yield:defence-empty',
+        dbPath,
+      });
+      invocationRecorded = true;
     }
 
     const output = {
@@ -606,6 +689,15 @@ process.stdin.on('end', async () => {
     process.exit(0);
   } catch (error) {
     console.error(`[shieldcortex] Proactive recall error: ${error.message}`);
+    // #253: errors are still firings — record when a DB is available,
+    // but only if this invocation has not already written a row.
+    if (!invocationRecorded) {
+      recordPromptRecallTelemetry({
+        startedAt,
+        memoriesExtracted: 0,
+        notes: `error:${error?.message ?? 'unknown'}`.slice(0, 200),
+      });
+    }
     process.exit(0);
   }
 });
