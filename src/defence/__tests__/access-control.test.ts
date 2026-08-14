@@ -35,9 +35,27 @@ describe('Access Control', () => {
       expect(policy.canRead).toBe(true);
     });
 
-    it('should allow high-trust to read RESTRICTED', () => {
+    it('should deny high-trust non-owner RESTRICTED (cross-agent isolation)', () => {
       const policy = checkAccess(restrictedMemory, highTrustSource, 'read');
+      expect(policy.canRead).toBe(false);
+      expect(policy.reason).toContain('isolated across agents');
+    });
+
+    it('should allow the human operator to read RESTRICTED', () => {
+      const operator: DefenceSource = { type: 'user', identifier: 'direct' };
+      const policy = checkAccess(restrictedMemory, operator, 'read');
       expect(policy.canRead).toBe(true);
+    });
+
+    it('should allow a high-trust owner to read their own RESTRICTED', () => {
+      const ownRestricted: AccessCheckMemory = {
+        id: 5,
+        source: 'cli:mcp',
+        sensitivity_level: 'RESTRICTED',
+      };
+      const policy = checkAccess(ownRestricted, highTrustSource, 'read');
+      expect(policy.canRead).toBe(true);
+      expect(policy.reason).toContain('Owner');
     });
 
     it('should block medium-trust from RESTRICTED (credential isolation)', () => {

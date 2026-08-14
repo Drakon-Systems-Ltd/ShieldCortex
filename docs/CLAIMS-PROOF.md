@@ -10,8 +10,8 @@ npm test -- claims-proof
 ```
 
 - **Claims source:** `README.md` + `skills/shieldcortex/SKILL.md` (v4.47.39)
-- **Proof:** `src/__tests__/claims-proof.test.ts` — 17 tests, 108 assertions, all green
-- **Pillars:** 🧠 Memory (what it *stores*) · 🔓 Recall/ACL (what it *releases*) · 🛡️ Iron Dome (what it *does*) · 🌐 Environment Firewall (what it *sees*) · 🧾 Forensics
+- **Proof:** `src/__tests__/claims-proof.test.ts` — 19 tests, all green
+- **Pillars:** 🧠 Memory (what it *stores*) · 🔓 Recall/ACL (what it *releases*) · 🛡️ Iron Dome (what it *does*) · 🌐 Environment Firewall (what it *sees*) · 🧾 Forensics · 🚧 Fleet isolation (who can read whom)
 
 ## Traceability matrix
 
@@ -30,10 +30,11 @@ npm test -- claims-proof
 | 10a | `dangerous` tier is gated by default (require_approval, never silent-allow) with benign precision | P1/WS1 — internal posture proof; OpenClaw interceptor enforces-by-default on this verdict (core-wide default flip still pending) | C·claim 10 (gating) — broad `rm`, `sudo`, force-push all return `require_approval/dangerous` with a firing signal; (precision) — benign shell/read stay `allow` | ✅ |
 | 11 | Environment Firewall detects hidden web injection; enforce mode redacts before the model sees it (advisory by default) | README Environment Firewall | D·claim 11 — advisory passes content through (flagged, not blocked); enforce withholds/redacts; a clean page is not flagged in either mode | ✅ |
 | 12 | Provenance ledger records read/write/delete with content hashes | SKILL "a provenance ledger recording read/write/delete operations with content hashes" | E·claim 12 — ledger rows written for each operation, each carrying a content hash | ✅ |
+| 13 | Cross-agent contamination is blocked: peer agents cannot fetch each other's RESTRICTED rows, and a web-sourced write does not bootstrap another agent's `get_context` | SCOPE P4 "zero cross-contamination"; product plan Phase C group F | F·claim 13 — Edith cannot `get_memory`/`recall` Jarvis's RESTRICTED row; a `web:` canary written by Jarvis is absent from Edith's `get_context` | ✅ |
 
 ## Verdict
 
-**12 / 12 public claims proven by a firing adversarial test. 0 gaps, 0 unwired claims.**
+**13 / 13 public claims proven by a firing adversarial test. 0 gaps, 0 unwired claims.**
 
 _P1/WS1 adds internal posture proof **10a** (dangerous-tier gated by default + benign precision). Not counted as a new public claim: it hardens the posture behind claim 10 rather than asserting a new marketing line._
 
