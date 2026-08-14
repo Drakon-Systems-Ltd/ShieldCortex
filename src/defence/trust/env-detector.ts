@@ -41,7 +41,13 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
   if (scSource) {
     const [type, ...rest] = scSource.split(':');
     const identifier = rest.join(':') || scSource;
-    const validTypes = ['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api'] as const;
+    // Integrator override labels the process. It is not a host attestation.
+    // `user` and `cli` are operator/CLI trust — those rungs come from
+    // CLAUDE_CODE_ENTRYPOINT / Codex / unknown-default, never from an env
+    // string the spawner can set. Rejecting them here stops
+    // SHIELDCORTEX_AGENT_SOURCE=user:direct becoming the 1.0 ceiling on the
+    // no-declared-source path (clampSourceToCeiling(undefined)).
+    const validTypes = ['hook', 'email', 'web', 'agent', 'file', 'api'] as const;
     const sourceType = validTypes.includes(type as any) ? (type as DefenceSource['type']) : 'agent';
     return {
       source: { type: sourceType, identifier },

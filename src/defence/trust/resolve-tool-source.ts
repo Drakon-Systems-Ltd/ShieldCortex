@@ -153,7 +153,9 @@ export function resolveToolSource(
         timestamp: new Date().toISOString(),
         source_type: source.type,
         source_identifier: source.identifier,
-        trust_score: 0,
+        // Record the inferred trust, not a dummy zero. This path can grant
+        // cli:mcp at 0.9; logging 0 made the one high-trust grant look empty.
+        trust_score: ceilingScore,
         sensitivity_level: 'PUBLIC',
         firewall_result: 'ALLOW',
         operation: null, // source-resolution meta-event, not a memory read/write/delete

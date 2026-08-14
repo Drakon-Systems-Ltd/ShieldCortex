@@ -21,6 +21,7 @@
 
 import { checkAccess } from './access-control.js';
 import { redactContent } from '../sensitivity/redaction.js';
+import { isUntrustedInboundType } from './source-scorer.js';
 import type { DefenceSource } from '../types.js';
 import type { Memory, ContextSummary } from '../../memory/types.js';
 
@@ -75,16 +76,24 @@ export function guardReadRows<T extends Record<string, unknown>>(
  * start_session, the memory:// resources, restore_context, detect_contradictions).
  *
  * These surfaces feed the prompt / a broadly-shared project summary, so they must
- * NEVER surface RESTRICTED, quarantined, or untrusted-inbound (`web:` / `email:`)
- * rows to ANYONE — matching the .mjs prompt hooks and SCOPE P4 (a web capture
- * written by agent A must not bootstrap agent B). Unlike the per-caller fetch
- * tools they do NOT apply the source-relative own-only tier, so a low-trust
- * subagent still receives INTERNAL project context. Credential isolation
- * without the availability blackout.
+ * NEVER surface RESTRICTED, quarantined, or untrusted-inbound rows to ANYONE —
+ * matching the .mjs prompt hooks. Untrusted-inbound is derived from TYPE_SCORES
+ * (anything below UNTRUSTED_INBOUND_FLOOR) with `agent` explicitly exempted.
+ * That exemption is the availability half: a low-trust subagent still receives
+ * INTERNAL project context. This function does not block cross-agent
+ * contamination of agent-typed rows; that is checkAccess / own-only on the
+ * per-caller fetch path. Parse the stored type rather than prefix-matching so
+ * `webx:…` cannot sneak past a `web:` startsWith check, and future types under
+ * the floor are covered by construction.
  */
 function isUntrustedInboundSource(source: string | null | undefined): boolean {
+  // Null/empty stays fail-open: many INTERNAL rows are still unstamped, and
+  // this surface must keep shared project context available. Fail-closed for
+  // unknown provenance is a separate change.
   if (!source) return false;
-  return source.startsWith('web:') || source.startsWith('email:');
+  const sep = source.indexOf(':');
+  const type = (sep === -1 ? source : source.slice(0, sep)).toLowerCase();
+  return isUntrustedInboundType(type);
 }
 
 export function guardReadBySensitivity(memories: Memory[]): Memory[] {

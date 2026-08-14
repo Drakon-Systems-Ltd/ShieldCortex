@@ -740,4 +740,26 @@ describe('F. Fleet isolation (cross-agent contamination)', () => {
     expect(jarvis.success).toBe(true);
     expect(jarvis.context ?? '').not.toContain(canary);
   });
+
+  it('claim 13: a tool_response write does not surface in get_context either', async () => {
+    const canary = 'JARVIS-TOOL-RESPONSE-POISON-CANARY';
+    // tool_response scores 0.5 (quarantine band), so addMemory would refuse
+    // the write. Stamp after a successful store — this claim tests the
+    // read-guard, not the write ACL.
+    const row = addMemory(
+      {
+        title: `scanner output ${canary}`,
+        content: `External tool dumped this into memory ${canary}.`,
+        category: 'note',
+        project: PROJECT,
+      },
+      undefined,
+      JARVIS,
+    );
+    getDatabase().prepare(`UPDATE memories SET source = 'tool_response:browser' WHERE id = ?`).run(row.id);
+
+    const edith = await executeGetContext({ project: PROJECT, format: 'raw', source: EDITH });
+    expect(edith.success).toBe(true);
+    expect(edith.context ?? '').not.toContain(canary);
+  });
 });

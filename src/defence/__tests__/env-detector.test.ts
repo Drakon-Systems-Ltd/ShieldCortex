@@ -81,10 +81,23 @@ describe('Environment-Based Source Inference', () => {
     });
 
     it('should prioritise SHIELDCORTEX_AGENT_SOURCE over CLAUDE_CODE_ENTRYPOINT', () => {
-      process.env.SHIELDCORTEX_AGENT_SOURCE = 'cli:custom-tool';
+      process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:custom-tool';
       process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
       const result = inferSourceFromEnvironment();
-      expect(result.source).toEqual({ type: 'cli', identifier: 'custom-tool' });
+      expect(result.source).toEqual({ type: 'agent', identifier: 'custom-tool' });
+    });
+
+    it('refuses operator and CLI types on the integrator override — they cannot become the ceiling', () => {
+      for (const claimed of ['user:direct', 'user:approved', 'cli:mcp'] as const) {
+        process.env.SHIELDCORTEX_AGENT_SOURCE = claimed;
+        const inferred = inferSourceFromEnvironment();
+        expect(inferred.source.type).toBe('agent');
+        expect(inferred.method).toBe('env:SHIELDCORTEX_AGENT_SOURCE');
+        const clamp = clampSourceToCeiling(undefined);
+        expect(clamp.clamped).toBe(false);
+        expect(clamp.source.type).toBe('agent');
+        expect(scoreSource(clamp.source).score).toBeLessThan(0.9);
+      }
     });
 
     it('should return unknown:default with low confidence when no env vars set', () => {
@@ -225,9 +238,26 @@ describe('Environment-Based Source Inference', () => {
       // Env-inferred identity — attested.
       expect(resolved.attested).toBe(true);
       expect(logAudit).toHaveBeenCalledTimes(1);
-      const entry = logAudit.mock.calls[0][0] as { firewall_result: string; reason: string };
+      const entry = logAudit.mock.calls[0][0] as { firewall_result: string; reason: string; trust_score: number };
       expect(entry.firewall_result).toBe('ALLOW');
       expect(entry.reason).toContain('SOURCE_MISSING');
+      expect(entry.trust_score).toBe(scoreSource({ type: 'cli', identifier: 'mcp' }).score);
+    });
+
+    it('does not grant user:direct from SHIELDCORTEX_AGENT_SOURCE with no declared source', () => {
+      process.env.SHIELDCORTEX_AGENT_SOURCE = 'user:direct';
+
+      const resolved = resolveToolSource(undefined, {
+        toolName: 'recall',
+        project: null,
+      });
+
+      expect(resolved.source.type).toBe('agent');
+      expect(resolved.source).not.toEqual({ type: 'user', identifier: 'direct' });
+      expect(scoreSource(resolved.source).score).toBeLessThan(1);
+      const entry = logAudit.mock.calls[0][0] as { trust_score: number };
+      expect(entry.trust_score).toBe(scoreSource(resolved.source).score);
+      expect(entry.trust_score).not.toBe(0);
     });
   });
 });

@@ -113,6 +113,31 @@ describe('guardReadBySensitivity (shared-context bootstrap surfaces)', () => {
     ];
     expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([3]);
   });
+
+  it('drops tool_response inbound rows (same derived class as web/email)', () => {
+    const rows = [
+      mem({ id: 1, source: 'tool_response:browser', sensitivityLevel: 'PUBLIC' }),
+      mem({ id: 2, source: 'cli:openclaw-jarvis', sensitivityLevel: 'INTERNAL' }),
+    ];
+    expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([2]);
+  });
+
+  it('keeps agent-typed rows — the explicit availability exemption', () => {
+    const rows = [
+      mem({ id: 1, source: 'agent:peer', sensitivityLevel: 'INTERNAL' }),
+      mem({ id: 2, source: 'tool_response:browser', sensitivityLevel: 'PUBLIC' }),
+    ];
+    expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([1]);
+  });
+
+  it('parses the stored type, so unknown types fail closed and case does not matter', () => {
+    const rows = [
+      mem({ id: 1, source: 'WEB:evil.example', sensitivityLevel: 'PUBLIC' }),
+      mem({ id: 2, source: 'mystery', sensitivityLevel: 'INTERNAL' }),
+      mem({ id: 3, source: 'file:notes', sensitivityLevel: 'INTERNAL' }),
+    ];
+    expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([3]);
+  });
 });
 
 describe('guardReadMemory', () => {
