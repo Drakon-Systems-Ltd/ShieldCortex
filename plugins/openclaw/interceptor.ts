@@ -53,8 +53,15 @@ export interface ToolGuardVerdictLike {
   action: string;
   reason: string;
   signals: string[];
-  /** Rule → matched-span evidence behind `signals` (issue #192). */
-  matches?: Array<{ signal: string; span: string }>;
+  /** Rule → matched-span evidence behind `signals` (issue #192).
+   *  #184: optional source/line/chain when the match came from folded script. */
+  matches?: Array<{
+    signal: string;
+    span: string;
+    source?: string;
+    line?: number;
+    chain?: string;
+  }>;
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
 }
