@@ -1119,31 +1119,58 @@ function quoteAwareStatements(text: string): string[] {
   return out;
 }
 
-const SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|password\s*[=:]\s*\S{6,}|secret\s*[=:]\s*\S{6,})/i;
+// Credential VALUE shapes. Shared by the command-line hint and the folded-
+// source hint. These match key material itself, never an identifier.
+const SECRET_VALUE_SHAPE = String.raw`sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`;
+// #173: a `secret=` / `password=` assignment is only a hint when the RHS is a
+// LITERAL value. `secret = subprocess.run(...)` and `secret=$(op item get …)`
+// are names and expansions — matching them punished vault-backed code and
+// was evaded by renaming the variable to `cred`. `secret=` (equals) still
+// matches the suffix of `client_secret=` so `curl -d client_secret=…`
+// stays a command-line value (#185). `secret:` (colon) is word-bounded so
+// JSON `"client_secret": varname` is not an assignment. Unquoted literals
+// are a single token that is not a call (`subprocess.run` is rejected).
+const SECRET_LITERAL_ASSIGNMENT = String.raw`(?:(?:^|[^A-Za-z0-9_])(?:password|secret)["']?\s*:\s*|(?:password|secret)["']?\s*=\s*)(?:["'][^"'\n]{6,}["']|[A-Za-z0-9_+\-/]{6,}(?![A-Za-z0-9_+\-/.(]))`;
+const SECRET_HINT = new RegExp(`(?:${SECRET_VALUE_SHAPE}|${SECRET_LITERAL_ASSIGNMENT})`, 'i');
 /**
  * The secret hint for FOLDED PROGRAM SOURCE (#175) — credential LITERALS only.
  *
- * SECRET_HINT's generic `secret= / password=` arms are written for a command
- * line, where whatever follows the `=` is a real value by construction. Inside
- * program source the same shape is field VOCABULARY: every OAuth client on
+ * Inside program source `secret=` is field VOCABULARY: every OAuth client on
  * earth contains `'client_secret': cfg.secret` next to a `requests.post` to
- * its token endpoint — that is a credential doing its job, not leaving home.
- * When #160 pointed the fold at the Claude Code hook, that one reading turned
- * secret-egress into a blanket auto-deny of ordinary business automation:
- * three separate production scripts (inbox cleanup, two Xero syncs) were
- * catastrophic-blocked in a single evening, none of which move a secret
- * anywhere it does not belong. Same defect class as `process.kill` matching
- * the shell `kill` (#165): shell vocabulary applied to program identifiers.
- *
- * So folded non-shell source gates on what a command line cannot fake — a
- * hard credential literal (key material itself), or a QUOTED literal secret
- * assignment (`password = "hunter2abc"`). An identifier / expression on the
- * right-hand side (`'client_secret': cfg['secret']`) is code shape, and code
- * shape alone is not evidence of exfiltration. Folded SHELL scripts keep the
- * full SECRET_HINT — a folded .sh IS command text, and `curl -d
- * secret=$(cat …)` inside one must gate exactly as it would inline.
+ * its token endpoint. The command-line hint (#173) is now value-gated the
+ * same way for assignments; this regex stays quoted-literals-only because
+ * an unquoted token in source is an identifier, not a curl -d value.
  */
-const FOLDED_SOURCE_SECRET_HINT = /(sk-[a-z0-9-]{12,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|(?:password|secret)["']?\s*[=:]\s*["'][^"'\n]{6,}["'])/i;
+const FOLDED_SOURCE_SECRET_HINT = new RegExp(
+  `(?:${SECRET_VALUE_SHAPE}|(?:^|[^A-Za-z0-9_])(?:password|secret)["']?\\s*[=:]\\s*["'][^"'\\n]{6,}["'])`,
+  'i',
+);
+
+/** True when a secret hint in this region is not wholly a comment/string. */
+function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
+  const hint = region.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
+  const slice = text.slice(region.start, region.end);
+  const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
+  const data = region.lang === 'sh' ? [] : scriptDataRanges(text, region);
+  let m: RegExpExecArray | null;
+  while ((m = g.exec(slice)) !== null) {
+    if (m[0].length === 0) { g.lastIndex++; continue; }
+    const a = region.start + m.index;
+    const b = a + m[0].length;
+    const assignment = /(?:password|secret)["']?\s*[=:]/i.test(m[0]);
+    // Value shapes (sk-, ghp_, JWT, PEM) count even inside a string — that
+    // string is the credential. An assignment inside a comment or docstring
+    // is payload and must not fire (#173). The regex may consume one
+    // non-word prefix character (`"""secret =`); classify from the
+    // identifier so the opener quote does not poke out of the data range.
+    const ident = m[0].search(/(?:password|secret)/i);
+    const identStart = a + (ident >= 0 ? ident : 0);
+    if (assignment && data.some(([s, e]) => identStart >= s && b <= e)) continue;
+    return true;
+  }
+  return false;
+}
+
 const EXTERNAL_EGRESS = /\b(curl|wget|fetch|nc|netcat|scp|rsync|http\.post|requests\.post|fetch\()/i;
 
 // Outbound DATA on a network call (issue #73.2): a read-only GET carries nothing
@@ -3120,21 +3147,17 @@ export function evaluateToolCall(
   // 1c) Secret exfiltration: external egress carrying a credential/secret.
   const egressCommand = fold.content ? `${execCommand}\n${fold.content}` : execCommand;
   const egress = family === 'network' || EXTERNAL_EGRESS.test(egressCommand) || EXTERNAL_EGRESS.test(url);
-  // #175: the secret hint is surface-aware. The command line, the tool args and
-  // folded SHELL scripts take the full SECRET_HINT (they are command text);
-  // folded PROGRAM source takes the literals-only hint, because `client_secret:`
-  // next to a token-endpoint POST is what an OAuth client IS, and matching it
-  // catastrophic-blocked three production scripts in one evening. The split is
-  // by region language, never by "was it folded" — the same line #165 drew.
-  let secretSighted = SECRET_HINT.test(`${execSurface}   ${rawStringArgs(args)}`);
-  if (!secretSighted && fold.content) {
-    for (const r of fold.regions) {
-      const slice = fold.content.slice(r.start, r.end);
-      if ((r.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT).test(slice)) {
-        secretSighted = true;
-        break;
-      }
-    }
+  // #175 / #173: hint is surface-aware AND value-gated. Shell regions use
+  // SECRET_HINT (literal values + key-material shapes). Interpreter source
+  // uses FOLDED_SOURCE_SECRET_HINT (quoted literals / key material only).
+  // Matches wholly inside a comment or string are payload, not a credential
+  // in flight. Tool args stay on the command-line hint — they are values.
+  let secretSighted = SECRET_HINT.test(rawStringArgs(args));
+  if (!secretSighted) {
+    const slices = regions.length > 0
+      ? regions
+      : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
+    secretSighted = slices.some((r) => secretHintExecutedIn(scanSurface, r));
   }
   if (egress && secretSighted && looksExternal(url, scanSurface)) {
     return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
@@ -3357,7 +3380,10 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
 function rawStringArgs(args: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(args ?? {})) {
-    if (k === 'description') continue;
+    // `command` is scanned via execSurface/regions. Re-testing it here
+    // would ignore interpreter regions and re-apply the shell hint to a
+    // Python docstring (#173). `description` is prose (#185).
+    if (k === 'description' || k === 'command') continue;
     if (typeof v === 'string') parts.push(v);
     else if (Array.isArray(v)) parts.push(v.filter(x => typeof x === 'string').join(' '));
   }
