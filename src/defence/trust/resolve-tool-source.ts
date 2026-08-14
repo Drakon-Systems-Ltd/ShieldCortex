@@ -13,10 +13,13 @@
  *    its own trust or wear another agent's name.
  * 5. Writes a `SOURCE_MISSING` row when no source was declared, preserving
  *    the existing visibility into unconfigured callers.
- * 6. #283: rewrites unattested below-ceiling declarations onto a stamped
- *    identifier (`unattested>…`) so stored source + checkAccess ownership
- *    keys cannot equal a host-attested `${type}:${identifier}` row. Does
- *    not raise score (unattested pin is 0.3, never env-override 0.5).
+ * 6. #283: rewrites any declaration the environment did not confirm onto a
+ *    stamped identifier (`unattested>…`) so stored source + checkAccess
+ *    ownership keys cannot equal a host-attested `${type}:${identifier}`
+ *    row. Runs even under strictSourceMode (strict must not re-open spoof).
+ *    Does not raise score (unattested pin is 0.3, never env-override 0.5).
+ *    Writer-supplied claim stamps are stripped before rewrite so they cannot
+ *    smuggle a 0.5 env-override pin.
  */
 
 import type { DefenceSource } from '../types.js';
@@ -42,6 +45,9 @@ export interface ResolvedToolSource {
    * confirms) or the deployment runs strictSourceMode. Deliberately NOT a
    * field on DefenceSource — that type is caller-suppliable through the
    * scan-only/SDK surfaces, and attestation must never be self-served.
+   *
+   * #283: after an unattested rewrite the bit is forced false — strict mode
+   * must not mark a rewritten claim as host-attested owner material.
    */
   attested: boolean;
   clamped: boolean;
@@ -75,30 +81,41 @@ export function deriveAttested(input: {
   return false;
 }
 
-/** Already-stamped claim identifiers must not be double-wrapped. */
-function isClaimStamp(identifier: string): boolean {
-  return (
-    identifier.startsWith('env-override>')
-    || identifier.startsWith('env-claim>')
-    || identifier.startsWith('unattested>')
-    || identifier.startsWith('unrecognised>')
-  );
+const CLAIM_STAMP_PREFIXES = ['env-override>', 'env-claim>', 'unattested>', 'unrecognised>'] as const;
+
+/** Strip a leading claim stamp (case-insensitive) so writers cannot smuggle pins. */
+export function stripClaimStamp(identifier: string): string {
+  const lower = identifier.toLowerCase();
+  for (const p of CLAIM_STAMP_PREFIXES) {
+    if (lower.startsWith(p)) return identifier.slice(p.length);
+  }
+  return identifier;
+}
+
+function sameIdentity(a: DefenceSource, b: DefenceSource): boolean {
+  return a.type === b.type && a.identifier === b.identifier;
 }
 
 /**
- * #283 — rewrite an unattested resolved identity so the stored source string
- * (and therefore the checkAccess ownership key) cannot equal a host-attested
- * `${type}:${identifier}` row. Score must not rise: agent stamps pin at 0.3
- * via `unattested`.
+ * #283 — rewrite a declaration the environment did not confirm so the stored
+ * source string (and checkAccess ownership key) cannot equal a host-attested
+ * `${type}:${identifier}` row. Strips any writer-supplied claim stamp first
+ * (a declared `env-override>…` must not retain the 0.5 pin). Score must not
+ * rise: agent stamps pin at 0.3 via `unattested`.
  *
  * Exported for unit tests.
  */
 export function rewriteUnattestedSource(source: DefenceSource): DefenceSource {
-  if (isClaimStamp(source.identifier)) return source;
-  // Stamp identifier on every unattested type so ownership cannot collide
-  // with a host-attested row of the same type:id. Agent is the dangerous
-  // inbound-exemption case; other types still need ACL-key separation.
-  return { type: source.type, identifier: `unattested>${source.identifier}` };
+  const bareId = stripClaimStamp(source.identifier) || source.identifier;
+  const candidate: DefenceSource = { type: source.type, identifier: `unattested>${bareId}` };
+  const before = scoreSource({ type: source.type, identifier: bareId }).score;
+  const after = scoreSource(candidate).score;
+  // Never raise trust. file:import (0.4) → file:unattested would score as
+  // generic file 0.6 — fall back to agent:unattested at 0.3.
+  if (after > before + 1e-9) {
+    return { type: 'agent', identifier: `unattested>${bareId}` };
+  }
+  return candidate;
 }
 
 /**
@@ -116,45 +133,41 @@ export function resolveToolSource(
   const { declaredScore, ceilingScore, detection } = clampResult;
   let { source, clamped } = clampResult;
   const strict = options.strict ?? getStrictSourceMode();
+  const env = detection.source;
 
   // Score clamp only rejects a declaration that OUTSCORES the ceiling.
-  // A same-score different identity is not a downgrade — it is spoofing
-  // (`user:approved` or `cli:openclaw-jarvis` against env `cli:mcp`, all 0.9).
-  // Genuine downgrades stay honoured only after the unattested rewrite below.
-  const env = detection.source;
+  // A same-score different identity is not a downgrade — it is spoofing.
   const identitySpoof = !!(
     declaredSource
     && !clamped
     && declaredScore !== null
     && declaredScore === ceilingScore
-    && (declaredSource.type !== env.type || declaredSource.identifier !== env.identifier)
+    && !sameIdentity(declaredSource, env)
   );
   if (identitySpoof) {
     source = env;
     clamped = true;
   }
 
-  const attested = deriveAttested({
-    declared: declaredSource,
-    resolved: source,
-    clamped,
-    strict,
-    envInferred: env,
-  });
+  // #283: environment confirmation is the only thing that keeps a bare
+  // declared identity. strictSourceMode must NOT skip this rewrite — it only
+  // affects consequence posture, not "did the host confirm this name".
+  const envConfirmed = !declaredSource
+    || clamped
+    || sameIdentity(declaredSource, env);
 
-  // #283: unattested below-ceiling declarations (the default cli:* 0.9 path
-  // honouring agent:browser 0.3) used to keep the bare identity. Rewrite the
-  // stored source so ownership and inbound guards cannot treat it as host-
-  // attested. Do this BEFORE returns so the resolved source is final.
-  if (declaredSource && !attested && !clamped) {
+  let rewritten = false;
+  if (declaredSource && !envConfirmed) {
+    const beforeKey = `${source.type}:${source.identifier}`;
     const beforeScore = scoreSource(source).score;
-    const rewritten = rewriteUnattestedSource(source);
-    const afterScore = scoreSource(rewritten).score;
-    // Score must not rise (env-override pin would). Defensive floor.
-    source = afterScore > beforeScore + 1e-9
-      ? { type: 'agent', identifier: `unattested>${declaredSource.identifier}` }
-      : rewritten;
-    if (`${source.type}:${source.identifier}` !== `${declaredSource.type}:${declaredSource.identifier}`) {
+    source = rewriteUnattestedSource(source);
+    // Extra belt if rewrite somehow elevated.
+    if (scoreSource(source).score > beforeScore + 1e-9) {
+      source = { type: 'agent', identifier: `unattested>${stripClaimStamp(declaredSource.identifier)}` };
+    }
+    rewritten = `${source.type}:${source.identifier}` !== beforeKey
+      || source.identifier.startsWith('unattested>');
+    if (rewritten) {
       try {
         logAudit({
           memory_id: null,
@@ -182,6 +195,18 @@ export function resolveToolSource(
     }
   }
 
+  // Attestation: rewritten claims are never host-attested, even under strict.
+  let attested = deriveAttested({
+    declared: declaredSource,
+    resolved: source,
+    clamped,
+    strict,
+    envInferred: env,
+  });
+  if (rewritten || (declaredSource && !envConfirmed)) {
+    attested = false;
+  }
+
   if (clamped && declaredSource) {
     try {
       logAudit({
@@ -193,7 +218,7 @@ export function resolveToolSource(
         trust_score: ceilingScore,
         sensitivity_level: 'PUBLIC',
         firewall_result: 'BLOCK',
-        operation: null, // source-resolution meta-event, not a memory read/write/delete
+        operation: null,
         anomaly_score: 0,
         threat_indicators: JSON.stringify(['privilege_escalation']),
         blocked_patterns: '[]',
@@ -202,8 +227,6 @@ export function resolveToolSource(
           `declared=${declaredSource.type}:${declaredSource.identifier} (score=${declaredScore}), ` +
           `clamped=${source.type}:${source.identifier} (score=${ceilingScore}) ` +
           `via ${detection.method} (confidence: ${detection.confidence})` +
-          // Without this a same-score identity drop reads as a contradiction:
-          // the scores are EQUAL, yet the claim was rejected.
           (identitySpoof
             ? ' — reason: same-score identity is not self-declarable'
             : ''),
@@ -216,8 +239,6 @@ export function resolveToolSource(
     return { source, attested, clamped };
   }
 
-  // No declared source — inferred from environment. Preserve the existing
-  // SOURCE_MISSING visibility so operators see unconfigured callers.
   if (!declaredSource) {
     try {
       logAudit({
@@ -226,12 +247,10 @@ export function resolveToolSource(
         timestamp: new Date().toISOString(),
         source_type: source.type,
         source_identifier: source.identifier,
-        // Record the inferred trust, not a dummy zero. This path can grant
-        // cli:mcp at 0.9; logging 0 made the one high-trust grant look empty.
         trust_score: ceilingScore,
         sensitivity_level: 'PUBLIC',
         firewall_result: 'ALLOW',
-        operation: null, // source-resolution meta-event, not a memory read/write/delete
+        operation: null,
         anomaly_score: 0,
         threat_indicators: '[]',
         blocked_patterns: '[]',

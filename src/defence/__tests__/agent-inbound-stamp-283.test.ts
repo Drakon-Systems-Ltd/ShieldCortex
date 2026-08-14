@@ -224,6 +224,12 @@ describe('#283 — pure helpers', () => {
     expect(rewriteUnattestedSource(a)).toEqual(a);
   });
 
+  it('rewriteUnattestedSource strips writer-supplied env-override pin', () => {
+    const a = rewriteUnattestedSource({ type: 'agent', identifier: 'env-override>browser' });
+    expect(a).toEqual({ type: 'agent', identifier: 'unattested>browser' });
+    expect(scoreSource(a).score).toBe(0.3);
+  });
+
   it('deriveAttested is false for unclamped below-ceiling declaration', () => {
     expect(
       deriveAttested({
@@ -234,5 +240,56 @@ describe('#283 — pure helpers', () => {
         envInferred: { type: 'cli', identifier: 'mcp' },
       }),
     ).toBe(false);
+  });
+});
+
+describe('#283 dual-review blockers', () => {
+  const declared: DefenceSource = { type: 'agent', identifier: 'browser' };
+
+  it('strict:true still rewrites unconfirmed declaration and does not own host row', () => {
+    clearEnv();
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+    const resolved = resolveToolSource(declared, {
+      toolName: 'get_context',
+      project: null,
+      strict: true,
+    });
+    expect(resolved.source).toEqual({ type: 'agent', identifier: 'unattested>browser' });
+    expect(resolved.attested).toBe(false);
+    expect(scoreSource(resolved.source).score).toBe(0.3);
+    expect(
+      checkAccess(mem('agent:browser'), resolved.source, 'read', { attested: resolved.attested }).canRead,
+    ).toBe(false);
+  });
+
+  it('declared env-override> stamp cannot keep 0.5 pin under cli ceiling', () => {
+    clearEnv();
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+    const smuggled: DefenceSource = { type: 'agent', identifier: 'env-override>browser' };
+    const resolved = resolveToolSource(smuggled, {
+      toolName: 'recall',
+      project: null,
+      strict: false,
+    });
+    expect(resolved.source.identifier.startsWith('unattested>')).toBe(true);
+    expect(scoreSource(resolved.source).score).toBe(0.3);
+    expect(resolved.attested).toBe(false);
+    // Must not gain shared read via 0.5 pin
+    expect(scoreSource(resolved.source).score).toBeLessThan(0.5);
+  });
+
+  it('env-confirmed declaration stays bare and attested', () => {
+    clearEnv();
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
+    // env infers agent:agent-spawned; declare the same
+    const same: DefenceSource = { type: 'agent', identifier: 'agent-spawned' };
+    const resolved = resolveToolSource(same, {
+      toolName: 'recall',
+      project: null,
+      strict: false,
+    });
+    expect(resolved.source).toEqual(same);
+    expect(resolved.attested).toBe(true);
+    expect(resolved.clamped).toBe(false);
   });
 });

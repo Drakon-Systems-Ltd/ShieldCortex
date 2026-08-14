@@ -58,14 +58,20 @@ function withOverrideOrigin(identifier: string): string {
  * #283 — below-cap integrator claims must not collide with a host-attested
  * `${type}:${identifier}` ACL key, and must not raise trust. `env-override>`
  * pins at 0.5 (the cap); below-cap uses `env-claim>` pinned at 0.3.
+ *
+ * Stamps **agent** below-cap claims (the inbound-exempt type). Other below-cap
+ * types (email/web) stay bare — they are already inbound-blocked by type and
+ * do not inherit the agent ownership exemption. At-cap non-agent claims still
+ * get env-override> so they cannot wear host tool_response:/agent:cron keys.
  */
 const ENV_CLAIM_ORIGIN = 'env-claim';
 
 function withEnvClaimOrigin(identifier: string): string {
+  const lower = identifier.toLowerCase();
   if (
-    identifier.startsWith(`${ENV_CLAIM_ORIGIN}>`)
-    || identifier.startsWith(`${ENV_OVERRIDE_ORIGIN}>`)
-    || identifier.startsWith('unattested>')
+    lower.startsWith(`${ENV_CLAIM_ORIGIN}>`)
+    || lower.startsWith(`${ENV_OVERRIDE_ORIGIN}>`)
+    || lower.startsWith('unattested>')
   ) {
     return identifier;
   }

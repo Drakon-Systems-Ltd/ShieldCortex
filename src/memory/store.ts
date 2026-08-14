@@ -383,6 +383,7 @@ export function logAllowedDelete(
 function filterRowsByAccess(
   rows: Record<string, unknown>[],
   source: DefenceSource,
+  options?: { attested?: boolean },
 ): Record<string, unknown>[] {
   return rows.filter(row => {
     const policy = checkAccess(
@@ -393,6 +394,7 @@ function filterRowsByAccess(
       },
       source,
       'read',
+      options,
     );
     if (!policy.canRead) {
       logAccessDenial(row.id as number, source, policy.reason);
@@ -792,7 +794,7 @@ export function addMemory(
 /**
  * Get a memory by ID
  */
-export function getMemoryById(id: number, source?: DefenceSource): Memory | null {
+export function getMemoryById(id: number, source?: DefenceSource, options?: { attested?: boolean }): Memory | null {
   const db = getDatabase();
   const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
   if (!row) return null;
@@ -803,6 +805,7 @@ export function getMemoryById(id: number, source?: DefenceSource): Memory | null
       { id: row.id as number, source: row.source as string | null, sensitivity_level: row.sensitivity_level as string | null },
       source,
       'read',
+      options,
     );
     if (!policy.canRead) {
       logAccessDenial(id, source, policy.reason);
@@ -1241,10 +1244,11 @@ export function mergeMemories(
 export function deleteMemory(
   id: number,
   source?: DefenceSource,
-  opts?: { mode?: 'delete' | 'revoke' },
+  opts?: { mode?: 'delete' | 'revoke'; attested?: boolean },
 ): boolean {
   const db = getDatabase();
   const aclOp = opts?.mode ?? 'delete';
+  const aclOpts = opts?.attested === undefined ? undefined : { attested: opts.attested };
 
   // ACCESS CONTROL: Check delete permission. mode 'revoke' uses the
   // trust-hierarchy rule (own OR outrank); 'delete' (default) stays own-only.
@@ -1255,6 +1259,7 @@ export function deleteMemory(
         { id: row.id as number, source: row.source as string | null, sensitivity_level: row.sensitivity_level as string | null },
         source,
         aclOp,
+        aclOpts,
       );
       if (!policy.canDelete) {
         logAccessDenial(id, source, policy.reason, aclOp);
@@ -1368,6 +1373,7 @@ export function getRecentMemories(
   project?: string,
   source?: DefenceSource,
   filters?: MemoryListFilters,
+  acl?: { attested?: boolean },
 ): Memory[] {
   const db = getDatabase();
   const { clause, params } = buildMemoryFilterClause(project, filters);
@@ -1377,7 +1383,7 @@ export function getRecentMemories(
   params.push(source ? limit * 2 : limit); // over-fetch when access-filtering
 
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-  if (source) rows = filterRowsByAccess(rows, source);
+  if (source) rows = filterRowsByAccess(rows, source, acl);
   return rows.slice(0, limit).map(rowToMemory);
 }
 
@@ -1407,6 +1413,7 @@ export function getHighPriorityMemories(
   project?: string,
   source?: DefenceSource,
   filters?: MemoryListFilters,
+  acl?: { attested?: boolean },
 ): Memory[] {
   const db = getDatabase();
   // Phase 1b: gate + order on EFFECTIVE salience (the decaying score), not raw
@@ -1433,7 +1440,7 @@ export function getHighPriorityMemories(
   params.push(source ? limit * 2 : limit);
 
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-  if (source) rows = filterRowsByAccess(rows, source);
+  if (source) rows = filterRowsByAccess(rows, source, acl);
   return rows.slice(0, limit).map(rowToMemory);
 }
 

@@ -69,6 +69,7 @@ async function searchMemoriesInternal(
   config: MemoryConfig,
   source: DefenceSource | undefined,
   execution: SearchExecutionOptions,
+  acl?: { attested?: boolean },
 ): Promise<SearchResult[]> {
   if (++searchCount % 100 === 0) {
     pruneActivationCache();
@@ -309,6 +310,7 @@ async function searchMemoriesInternal(
         { id: result.memory.id, source: row?.source as string | null, sensitivity_level: row?.sensitivity_level as string | null },
         source,
         'read',
+        acl,
       );
       if (!policy.canRead) {
         logAccessDenial(result.memory.id, source, policy.reason);
@@ -543,22 +545,24 @@ export async function searchMemories(
   options: SearchOptions,
   config: MemoryConfig = DEFAULT_CONFIG,
   source?: DefenceSource,
+  acl?: { attested?: boolean },
 ): Promise<SearchResult[]> {
   return searchMemoriesInternal(options, config, source, {
     enableSideEffects: true,
     includeExplanation: false,
-  });
+  }, acl);
 }
 
 export async function searchMemoriesExplained(
   options: SearchOptions,
   config: MemoryConfig = DEFAULT_CONFIG,
   source?: DefenceSource,
+  acl?: { attested?: boolean },
 ): Promise<SearchResult[]> {
   return searchMemoriesInternal(options, config, source, {
     enableSideEffects: false,
     includeExplanation: true,
-  });
+  }, acl);
 }
 
 /**

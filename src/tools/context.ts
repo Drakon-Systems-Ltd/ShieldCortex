@@ -351,7 +351,7 @@ export const exportSchema = z.object({
   project: z.string().optional().describe('Export only memories for this project'),
 });
 
-export function executeExport(input: { project?: string; source?: DefenceSource }): {
+export function executeExport(input: { project?: string; source?: DefenceSource; sourceAttested?: boolean }): {
   success: boolean;
   data?: string;
   count?: number;

@@ -128,9 +128,10 @@ export function guardContextSummary(summary: ContextSummary): ContextSummary {
 export function guardReadMemory(
   memory: Memory | null | undefined,
   source: DefenceSource | undefined,
+  options?: { attested?: boolean },
 ): Memory | null {
   if (!memory) return null;
-  return guardReadMemories([memory], source)[0] ?? null;
+  return guardReadMemories([memory], source, options)[0] ?? null;
 }
 
 /**

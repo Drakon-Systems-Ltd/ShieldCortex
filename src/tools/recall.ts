@@ -41,7 +41,10 @@ export const recallSchema = z.object({
   source: sourceSchema,
 });
 
-export type RecallInput = z.infer<typeof recallSchema>;
+export type RecallInput = z.infer<typeof recallSchema> & {
+  /** INTERNAL — from resolveToolSourceFull.attested; never caller-supplied. */
+  sourceAttested?: boolean;
+};
 
 /**
  * Execute the recall tool
@@ -59,16 +62,18 @@ export async function executeRecall(input: RecallInput): Promise<{
     const projectFilter = resolvedProject ?? undefined;
 
     const source = input.source as DefenceSource | undefined;
+    const sourceAttested = input.sourceAttested;
+    const aclOpts = sourceAttested === undefined ? undefined : { attested: sourceAttested };
     let memories: Memory[] = [];
     let contradictions: Map<number, { memoryId: number; title: string; score: number }[]> | undefined;
 
     switch (input.mode) {
       case 'recent':
-        memories = getRecentMemories(input.limit, projectFilter, source);
+        memories = getRecentMemories(input.limit, projectFilter, source, undefined, aclOpts);
         break;
 
       case 'important':
-        memories = getHighPriorityMemories(input.limit, projectFilter, source);
+        memories = getHighPriorityMemories(input.limit, projectFilter, source, undefined, aclOpts);
         break;
 
       case 'search':
@@ -83,7 +88,7 @@ export async function executeRecall(input: RecallInput): Promise<{
           limit: input.limit,
           includeDecayed: input.includeDecayed,
           includeGlobal: input.includeGlobal,
-        }, undefined, source);
+        }, undefined, source, aclOpts);
         memories = results.map(r => r.memory);
 
         // If FTS5 returned few results, try embedding fallback for additional matches
@@ -124,7 +129,7 @@ export async function executeRecall(input: RecallInput): Promise<{
     // isolation / own-only for low trust). Belt-and-braces — the recent/important
     // store helpers + search already apply access control, but this keeps every
     // recall mode uniform and never reinforces a row the caller can't see.
-    memories = guardReadMemories(memories, source);
+    memories = guardReadMemories(memories, source, aclOpts);
 
     // Access each memory to reinforce it
     memories = memories.map(m => accessMemory(m.id, undefined, source) || m);
@@ -219,7 +224,7 @@ export const getMemorySchema = z.object({
   source: sourceSchema,
 });
 
-export function executeGetMemory(input: { id: number; source?: DefenceSource }): {
+export function executeGetMemory(input: { id: number; source?: DefenceSource; sourceAttested?: boolean }): {
   success: boolean;
   memory?: Memory;
   error?: string;
@@ -228,7 +233,7 @@ export function executeGetMemory(input: { id: number; source?: DefenceSource }):
     const memory = accessMemory(input.id, undefined, input.source);
     // Read ACL: a caller that may not read this memory gets a not-found, never
     // the content (don't reveal existence of RESTRICTED / other-source rows).
-    const allowed = guardReadMemory(memory, input.source);
+    const allowed = guardReadMemory(memory, input.source, input.sourceAttested === undefined ? undefined : { attested: input.sourceAttested });
     if (!allowed) {
       const error = new MemoryNotFoundError(input.id);
       return {
@@ -252,7 +257,7 @@ export function executeGetMemory(input: { id: number; source?: DefenceSource }):
  * Related links can cross trust/sensitivity boundaries, so the same read ACL
  * applies: a caller only sees related memories it is permitted to read.
  */
-export function executeGetRelated(input: { id: number; source?: DefenceSource }): {
+export function executeGetRelated(input: { id: number; source?: DefenceSource; sourceAttested?: boolean }): {
   success: boolean;
   related?: ReturnType<typeof getRelatedMemories>;
   error?: string;
@@ -260,7 +265,7 @@ export function executeGetRelated(input: { id: number; source?: DefenceSource })
   try {
     const related = getRelatedMemories(input.id);
     const allowedIds = new Set(
-      guardReadMemories(related.map((r) => r.memory), input.source).map((m) => m.id),
+      guardReadMemories(related.map((r) => r.memory), input.source, input.sourceAttested === undefined ? undefined : { attested: input.sourceAttested }).map((m) => m.id),
     );
     if (input.source && allowedIds.size > 0) {
       logAllowedRead(input.source, 'get_related', [...allowedIds]);
