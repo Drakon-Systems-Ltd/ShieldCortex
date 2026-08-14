@@ -88,14 +88,17 @@ describe('Environment-Based Source Inference', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'some-agent';
       const result = inferSourceFromEnvironment();
       expect(result.source.type).toBe('agent'); // defaults to agent
-      expect(result.source.identifier).toBe('some-agent');
+      // #283 residual: below-cap agent env claims get env-claim> (no raise, no host ACL collision)
+      expect(result.source.identifier).toBe('env-claim>some-agent');
+      expect(scoreSource(result.source).score).toBe(0.3);
     });
 
     it('should prioritise SHIELDCORTEX_AGENT_SOURCE over CLAUDE_CODE_ENTRYPOINT', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:custom-tool';
       process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent';
       const result = inferSourceFromEnvironment();
-      expect(result.source).toEqual({ type: 'agent', identifier: 'custom-tool' });
+      expect(result.source).toEqual({ type: 'agent', identifier: 'env-claim>custom-tool' });
+      expect(scoreSource(result.source).score).toBe(0.3);
     });
 
     it('refuses operator and CLI types on the integrator override — they cannot become the ceiling', () => {
@@ -131,10 +134,10 @@ describe('Environment-Based Source Inference', () => {
       }
     });
 
-    it('keeps already-low override identities (no wrap, no raise)', () => {
+    it('stamps already-low override agent identities without raising trust (#283)', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'agent:some-agent';
       const inferred = inferSourceFromEnvironment();
-      expect(inferred.source).toEqual({ type: 'agent', identifier: 'some-agent' });
+      expect(inferred.source).toEqual({ type: 'agent', identifier: 'env-claim>some-agent' });
       expect(scoreSource(inferred.source).score).toBe(0.3);
     });
 
@@ -177,8 +180,9 @@ describe('Environment-Based Source Inference', () => {
     it('keeps a bare token (no type prefix) as agent — documented integrator form', () => {
       process.env.SHIELDCORTEX_AGENT_SOURCE = 'some-agent';
       const inferred = inferSourceFromEnvironment();
-      expect(inferred.source).toEqual({ type: 'agent', identifier: 'some-agent' });
-      expect(isUntrustedInboundType(inferred.source.type)).toBe(false);
+      // #283 residual: stamped env-claim so it cannot own host agent:some-agent
+      expect(inferred.source).toEqual({ type: 'agent', identifier: 'env-claim>some-agent' });
+      expect(isUntrustedInboundType(inferred.source.type)).toBe(false); // type-only still exempt
       expect(scoreSource(inferred.source).score).toBe(0.3);
     });
 

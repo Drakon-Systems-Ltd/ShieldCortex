@@ -7,7 +7,8 @@
  *   "user-spawned>task-1>subtask-2"   → 0.9 × 0.7² = 0.44
  *   "cron"                            → base trust 0.5
  *   "agent-spawned"                   → base trust 0.3
- *   "env-override>…"                  → pinned 0.5 (integrator env claim)
+ *   "env-override>…"                  → pinned 0.5 (integrator env claim at cap)
+ *   "env-claim>…"                     → pinned 0.3 (integrator env claim below cap)
  *   "unattested>…"                    → self-declared; scores off the bare
  *                                       identifier but may not claim a
  *                                       privileged origin (see attestation-stamp)
@@ -38,6 +39,8 @@ export const DEFAULT_AGENT_CONFIG: AgentTrustConfig = {
     'user-approved': 0.85,
     'cron': 0.5,
     'env-override': 0.5,
+    // #283 residual: below-cap integrator env claim — pin 0.3, never raise to env-override 0.5
+    'env-claim': 0.3,
     'agent-spawned': 0.3,
     'web': 0.2,
   },
@@ -68,10 +71,11 @@ export function scoreAgent(
   if (depth > config.maxDepth) return 0;
 
   // Integrator env claims may keep a unique identifier for ACL, but they
-  // cannot ride parent-tier trust. Pin at the origin score (0.5) with no
-  // further decay — the cap is a ceiling, not a forced downgrade below it.
-  if (origin === 'env-override' && !selfDeclared) {
-    return config.originScores['env-override'] ?? 0.5;
+  // cannot ride parent-tier trust. Pin at the origin score with no further
+  // decay — the stamp is a ceiling/floor marker, not a hierarchy root.
+  // env-override = at-cap 0.5; env-claim = below-cap 0.3 (must not raise).
+  if ((origin === 'env-override' || origin === 'env-claim') && !selfDeclared) {
+    return config.originScores[origin] ?? (origin === 'env-override' ? 0.5 : 0.3);
   }
 
   const baseScore = selfDeclared ? UNPRIVILEGED_ORIGIN_SCORE : (config.originScores[origin] ?? 0.3);

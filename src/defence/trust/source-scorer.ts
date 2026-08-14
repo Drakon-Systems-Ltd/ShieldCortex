@@ -48,14 +48,47 @@ export const UNTRUSTED_INBOUND_FLOOR = 0.6;
 
 export const UNTRUSTED_INBOUND_EXEMPT_TYPES: ReadonlySet<DefenceSource['type']> = new Set(['agent']);
 
-export function isUntrustedInboundType(type: string): boolean {
+/**
+ * Claim stamps that mean "writer/env declared this, host did not".
+ * Includes CASE ownership stamp (`unattested>`) and TARS env residual stamps.
+ */
+const CLAIM_STAMP_PREFIXES = ['env-override>', 'env-claim>', 'unattested>', 'unrecognised>'] as const;
+
+export function isClaimStampedIdentifier(identifier: string): boolean {
+  const id = identifier.toLowerCase();
+  return CLAIM_STAMP_PREFIXES.some((prefix) => id.startsWith(prefix));
+}
+
+/**
+ * True when a stored `type:identifier` (or bare type) is untrusted inbound for
+ * shared-context bootstrap. Prefer this over {@link isUntrustedInboundType}
+ * when the full source string is available — type-only cannot see #283 stamps.
+ */
+export function isUntrustedInboundSourceString(source: string | null | undefined): boolean {
+  if (!source) return false;
+  const sep = source.indexOf(':');
+  const type = (sep === -1 ? source : source.slice(0, sep)).toLowerCase();
+  const identifier = sep === -1 ? '' : source.slice(sep + 1);
+  return isUntrustedInbound(type, identifier);
+}
+
+export function isUntrustedInbound(type: string, identifier = ''): boolean {
   const normalised = type.toLowerCase();
-  if ((UNTRUSTED_INBOUND_EXEMPT_TYPES as ReadonlySet<string>).has(normalised)) {
-    return false;
-  }
   const score = TYPE_SCORES[normalised as DefenceSource['type']];
   if (score === undefined) return true;
+  // Agent is exempt ONLY when host-attested (no claim stamp). A stamped agent
+  // row is a self-applied or integrator label — treat as inbound.
+  if (normalised === 'agent') {
+    return isClaimStampedIdentifier(identifier);
+  }
   return score < UNTRUSTED_INBOUND_FLOOR;
+}
+
+/** @deprecated Prefer {@link isUntrustedInbound} with identifier when available. */
+export function isUntrustedInboundType(type: string): boolean {
+  // Type-only path: agent without identifier is treated as potentially
+  // host-attested (legacy callers). New code must pass the identifier.
+  return isUntrustedInbound(type, '');
 }
 
 const HIERARCHY_DISPLAY = [

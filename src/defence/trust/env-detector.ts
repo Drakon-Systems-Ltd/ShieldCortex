@@ -49,9 +49,32 @@ const OVERRIDE_TYPES: ReadonlySet<string> = new Set(Object.keys(OVERRIDE_TYPE_TA
 
 /** Stamp env provenance onto an identifier, idempotently. */
 function withOverrideOrigin(identifier: string): string {
-  return identifier.startsWith(`${ENV_OVERRIDE_ORIGIN}>`)
+  const lower = identifier.toLowerCase();
+  return lower.startsWith(`${ENV_OVERRIDE_ORIGIN}>`)
     ? identifier
     : `${ENV_OVERRIDE_ORIGIN}>${identifier}`;
+}
+
+/**
+ * #283 residual (reconcile with CASE ownership stamp): below-cap integrator
+ * agent claims must not collide with host-attested `agent:${id}` ACL keys and
+ * must not raise trust. `env-override>` is the at-cap pin (0.5); below-cap uses
+ * `env-claim>` pinned at 0.3. Other below-cap types (email/web) stay bare —
+ * already inbound-blocked by type.
+ */
+const ENV_CLAIM_ORIGIN = 'env-claim';
+
+function withEnvClaimOrigin(identifier: string): string {
+  const lower = identifier.toLowerCase();
+  if (
+    lower.startsWith(`${ENV_CLAIM_ORIGIN}>`)
+    || lower.startsWith(`${ENV_OVERRIDE_ORIGIN}>`)
+    || lower.startsWith('unattested>')
+    || lower.startsWith('unrecognised>')
+  ) {
+    return identifier;
+  }
+  return `${ENV_CLAIM_ORIGIN}>${identifier}`;
 }
 
 /**
@@ -62,14 +85,10 @@ function withOverrideOrigin(identifier: string): string {
  *
  * Three bands, by the score the claimed identity actually earns:
  *
- * - **Below the cap** — keep type and identifier verbatim. Stamping provenance
- *   here would RAISE trust (`agent:some-agent` 0.3 → `env-override>` 0.5).
- * - **Exactly at the cap** — keep the type (it is already capped, and the type
- *   carries the inbound-untrusted decision), but stamp the identifier. A bare
- *   `agent:cron` / `tool_response:browser` is indistinguishable from the
- *   host-attested `${type}:${identifier}` ACL key of a real scheduler or tool
- *   response; the prefix keeps the score at 0.5 while making the row's env
- *   provenance legible to the ACL and the audit ledger.
+ * - **Below the cap** — agent gets `env-claim>` (no raise, no host ACL collision).
+ *   Other types stay bare (already inbound-blocked).
+ * - **Exactly at the cap** — keep the type, stamp `env-override>` so bare
+ *   `agent:cron` / `tool_response:browser` cannot wear host ACL keys.
  * - **Above the cap** — rebind onto the agent hierarchy at `env-override>…`,
  *   which `scoreAgent` pins at 0.5.
  */
@@ -97,6 +116,9 @@ export function bindIntegratorOverrideSource(
   const score = scoreSource(candidate).score;
 
   if (score < ENV_OVERRIDE_SCORE_CAP) {
+    if (sourceType === 'agent') {
+      return { type: 'agent', identifier: withEnvClaimOrigin(identifier) };
+    }
     return candidate;
   }
   if (score === ENV_OVERRIDE_SCORE_CAP) {
