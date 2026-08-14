@@ -811,21 +811,39 @@ export function __setNativePluginInstallForTest(fn: (() => PluginInstallMode | n
   _nativePluginInstallForTest = fn;
 }
 
+/**
+ * #214 — snapshot openclaw.json BEFORE any path that can let
+ * `openclaw plugins install` rewrite it. The 8 Aug wipe was recoverable
+ * only because Case had a 4-minute-old `.bak`. Restore stays merge-
+ * preserving (`verifyPluginRegistration`); this file is the forensic copy.
+ *
+ * Dated so a second install does not clobber the first snapshot.
+ * Returns the backup path, or null when there is nothing to copy.
+ */
+export function snapshotOpenClawConfig(homeArg?: string): string | null {
+  const configPath = homeArg
+    ? path.join(homeArg, '.openclaw', 'openclaw.json')
+    : openClawConfigPath();
+  if (!fs.existsSync(configPath)) return null;
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = `${configPath}.sc-preinstall.bak-${ts}`;
+  try {
+    fs.copyFileSync(configPath, dest);
+    return dest;
+  } catch {
+    return null;
+  }
+}
+
 function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   if (_nativePluginInstallForTest) return _nativePluginInstallForTest();
   if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
   if (!isOpenClawInstalled()) return null;
 
-  // Remove existing extensions copy so OpenClaw doesn't refuse with "plugin already exists"
-  const extDir = findExtensionsDir();
-  if (extDir) {
-    const existingDir = path.join(extDir, PLUGIN_DIR_NAME);
-    if (fs.existsSync(existingDir)) {
-      try {
-        fs.rmSync(existingDir, { recursive: true, force: true });
-      } catch { /* best-effort cleanup */ }
-    }
-  }
+  // #214 defect 3: do not destroy ~/.openclaw/extensions/shieldcortex-realtime
+  // before we know the native install succeeded. That copy is the rollback
+  // state. If OpenClaw refuses "plugin already exists", the --link attempt
+  // and the local-copy fallback still have something to work with.
 
   const env = { ...process.env, HOME: resolveUserHome() };
   const attempts: Array<{ args: string[]; label: string }> = [
@@ -1315,6 +1333,9 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     console.log('Skipping hook installation (--no-hooks flag).');
     installed = hooksDirs.length; // pretend success so plugin install proceeds
   }
+
+  // #214: snapshot openclaw.json before any path that can rewrite it.
+  if (!options.noPlugins) snapshotOpenClawConfig();
 
   // Install the real-time plugin to the extensions directory
   const pluginInstallMode = installPlugin({
