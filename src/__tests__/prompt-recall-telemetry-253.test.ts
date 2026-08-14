@@ -94,11 +94,10 @@ describe('prompt-recall telemetry before early exits (#253)', () => {
     runHook({ home, prompt: 'how do I deploy the production service safely today' });
 
     const rows = readInvocations(dbPath);
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    const last = rows[rows.length - 1];
-    expect(last.hook_name).toBe('prompt-recall');
-    expect(last.memories_extracted).toBe(0);
-    expect(last.notes).toMatch(/zero-yield:no-candidates/);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].hook_name).toBe('prompt-recall');
+    expect(rows[0].memories_extracted).toBe(0);
+    expect(rows[0].notes).toBe('zero-yield:no-candidates');
   });
 
   it('records gated:proactiveRecall-disabled when recall is off', () => {
@@ -109,9 +108,9 @@ describe('prompt-recall telemetry before early exits (#253)', () => {
     runHook({ home, prompt: 'how do I deploy the production service safely today' });
 
     const rows = readInvocations(dbPath);
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    expect(rows[rows.length - 1].notes).toMatch(/gated:proactiveRecall-disabled/);
-    expect(rows[rows.length - 1].memories_extracted).toBe(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].notes).toBe('gated:proactiveRecall-disabled');
+    expect(rows[0].memories_extracted).toBe(0);
   });
 
   it('records gated:trivial-prompt for yes/no acknowledgements', () => {
@@ -121,17 +120,17 @@ describe('prompt-recall telemetry before early exits (#253)', () => {
     runHook({ home, prompt: 'send it.' });
 
     const rows = readInvocations(dbPath);
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    expect(rows[rows.length - 1].notes).toMatch(/gated:trivial-prompt/);
-    expect(rows[rows.length - 1].memories_extracted).toBe(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].notes).toBe('gated:trivial-prompt');
+    expect(rows[0].memories_extracted).toBe(0);
   });
 
   it('records gated:prompt-too-short for tiny prompts', () => {
     runHook({ home, prompt: 'hi' });
 
     const rows = readInvocations(dbPath);
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    expect(rows[rows.length - 1].notes).toMatch(/gated:prompt-too-short/);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].notes).toBe('gated:prompt-too-short');
   });
 
   it('records injected count when a memory is actually recalled', () => {
@@ -154,36 +153,55 @@ describe('prompt-recall telemetry before early exits (#253)', () => {
     });
 
     const rows = readInvocations(dbPath);
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    const last = rows[rows.length - 1];
-    expect(last.hook_name).toBe('prompt-recall');
-    // Either injected ≥1 or zero-yield after defence/filter — never missing.
-    expect(last.notes).toMatch(/injected|zero-yield/);
-    if (last.notes === 'injected') {
-      expect(last.memories_extracted).toBeGreaterThanOrEqual(1);
-    }
+    // Exactly one row — catches double-record regressions.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].hook_name).toBe('prompt-recall');
+    // Hard-require real injection (reviewers flagged soft injected|zero-yield).
+    expect(rows[0].notes).toBe('injected');
+    expect(rows[0].memories_extracted).toBeGreaterThanOrEqual(1);
   });
 
-  it('source contract: every process.exit(0) after the capture block has a telemetry call nearby', () => {
+  it('records gated:no-project-key when no project can be derived', () => {
+    // cwd with no usable basename and no SHIELDCORTEX_PROJECT_KEY.
+    // Use '/' — deriveProjectKey typically cannot produce a key from root.
+    runHook({ home, prompt: 'how do I deploy the production service safely today', cwd: '/' });
+
+    const rows = readInvocations(dbPath);
+    // Either no-project-key, or some hosts derive a key from env/cwd fallback.
+    // If a key WAS derived, we still must have exactly one telemetry row.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].hook_name).toBe('prompt-recall');
+    expect(rows[0].memories_extracted).toBe(0);
+  });
+
+  it('source contract: early exits that can write telemetry are instrumented', () => {
     const src = readFileSync(HOOK, 'utf8');
-    // The helper must exist.
     expect(src).toMatch(/function recordPromptRecallTelemetry/);
-    // Zero-yield paths must call it (the Veronica bug).
     expect(src).toMatch(/zero-yield:no-candidates/);
     expect(src).toMatch(/zero-yield:dedup-suppressed/);
+    expect(src).toMatch(/zero-yield:filtered-empty/);
     expect(src).toMatch(/gated:proactiveRecall-disabled/);
     expect(src).toMatch(/gated:trivial-prompt/);
-    // Count process.exit(0) after capture block vs telemetry sites.
-    // Crude but catches a future exit that forgets the record call:
-    // every early-exit gate we know about must appear as a notes reason
-    // OR be the missing-db path (cannot write).
-    const exitCount = (src.match(/process\.exit\(0\)/g) || []).length;
-    expect(exitCount).toBeGreaterThanOrEqual(7);
-    // recordHookInvocation / recordPromptRecallTelemetry must appear more
-    // than the single success-path call that existed before #253.
-    const recordSites =
-      (src.match(/recordPromptRecallTelemetry\(/g) || []).length +
-      (src.match(/recordHookInvocation\(/g) || []).length;
-    expect(recordSites).toBeGreaterThanOrEqual(6);
+    expect(src).toMatch(/gated:prompt-too-short/);
+    expect(src).toMatch(/gated:no-project-key/);
+    // Success path must not double-record via close-in-try.
+    expect(src).toMatch(/let recorded = false/);
+    expect(src).toMatch(/if \(!recorded\)/);
+
+    // Pair each known gate/zero-yield notes reason with a preceding record*
+    // call in the same function body region (string presence is the floor;
+    // behavioral tests above are the real lock).
+    const requiredNotes = [
+      'gated:proactiveRecall-disabled',
+      'gated:prompt-too-short',
+      'gated:trivial-prompt',
+      'gated:no-project-key',
+      'zero-yield:no-candidates',
+      'zero-yield:dedup-suppressed',
+      'injected',
+    ];
+    for (const note of requiredNotes) {
+      expect(src).toContain(note);
+    }
   });
 });

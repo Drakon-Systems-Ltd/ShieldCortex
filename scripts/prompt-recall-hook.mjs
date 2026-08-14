@@ -621,29 +621,37 @@ process.stdin.on('end', async () => {
     }
 
     // Reinforce access counts (fire-and-forget in a writable connection)
+    // #253: record success/zero-yield once. close() lives in finally so a
+    // close throw cannot re-enter the catch and double-insert telemetry.
+    let recorded = false;
     try {
       const writeDb = new Database(dbPath, { timeout: 1000 });
-      const ids = memories.map(m => m.id);
-      if (ids.length > 0) {
-        const placeholders = ids.map(() => '?').join(',');
-        writeDb.prepare(`
-          UPDATE memories SET access_count = access_count + 1, last_accessed = datetime('now')
-          WHERE id IN (${placeholders})
-        `).run(...ids);
+      try {
+        const ids = memories.map(m => m.id);
+        if (ids.length > 0) {
+          const placeholders = ids.map(() => '?').join(',');
+          writeDb.prepare(`
+            UPDATE memories SET access_count = access_count + 1, last_accessed = datetime('now')
+            WHERE id IN (${placeholders})
+          `).run(...ids);
+        }
+        // memories_extracted = injected count; notes distinguish success
+        // from zero-yield so status is not a lie.
+        recordHookInvocation(writeDb, {
+          hookName: 'prompt-recall',
+          exitCode: 0,
+          durationMs: Date.now() - startedAt,
+          memoriesExtracted: memories.length,
+          notes: memories.length > 0 ? 'injected' : 'zero-yield:defence-empty',
+        });
+        recorded = true;
+      } finally {
+        try { writeDb.close(); } catch { /* ignore close errors */ }
       }
-      // #253: record EVERY terminal path, including zero-yield after
-      // recall-defence emptied the set. memories_extracted = injected count;
-      // notes distinguish success from zero-yield so status is not a lie.
-      recordHookInvocation(writeDb, {
-        hookName: 'prompt-recall',
-        exitCode: 0,
-        durationMs: Date.now() - startedAt,
-        memoriesExtracted: memories.length,
-        notes: memories.length > 0 ? 'injected' : 'zero-yield:defence-empty',
-      });
-      writeDb.close();
     } catch {
       // Non-critical — don't block on access count update / telemetry
+    }
+    if (!recorded) {
       recordPromptRecallTelemetry({
         startedAt,
         memoriesExtracted: memories.length,
