@@ -43,6 +43,15 @@ describe("checkAccess('revoke')", () => {
     expect(checkAccess({ id: 1, source: 'agent:agent-spawned' }, HIGH, 'delete').canDelete).toBe(false);
   });
 
+  it('claim-stamped high-trust caller cannot hierarchy-revoke a lower-trust source', () => {
+    const stampedHook: DefenceSource = { type: 'hook', identifier: 'unattested>session-end' };
+    const envClaim: DefenceSource = { type: 'agent', identifier: 'env-claim>browser' };
+    expect(checkAccess({ id: 1, source: 'agent:agent-spawned' }, stampedHook, 'revoke').canDelete).toBe(false);
+    expect(checkAccess({ id: 1, source: 'file:notes' }, stampedHook, 'revoke').reason)
+      .toMatch(/unattested|self-declared/);
+    expect(checkAccess({ id: 1, source: 'web:scrape' }, envClaim, 'revoke').canDelete).toBe(false);
+  });
+
   it('fail-safe: unattributed (null) target memories are NOT revocable, even by high-trust', () => {
     expect(checkAccess({ id: 1, source: null }, HIGH, 'revoke').canDelete).toBe(false);
     expect(checkAccess({ id: 1, source: '__system:unattributed' }, HIGH, 'revoke').canDelete).toBe(false);

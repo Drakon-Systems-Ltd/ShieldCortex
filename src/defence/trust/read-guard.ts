@@ -21,7 +21,7 @@
 
 import { checkAccess } from './access-control.js';
 import { redactContent } from '../sensitivity/redaction.js';
-import { isUntrustedInboundType } from './source-scorer.js';
+import { isUntrustedInboundSourceString } from './source-scorer.js';
 import type { DefenceSource } from '../types.js';
 import type { Memory, ContextSummary } from '../../memory/types.js';
 
@@ -90,10 +90,9 @@ function isUntrustedInboundSource(source: string | null | undefined): boolean {
   // Null/empty stays fail-open: many INTERNAL rows are still unstamped, and
   // this surface must keep shared project context available. Fail-closed for
   // unknown provenance is a separate change.
-  if (!source) return false;
-  const sep = source.indexOf(':');
-  const type = (sep === -1 ? source : source.slice(0, sep)).toLowerCase();
-  return isUntrustedInboundType(type);
+  // #283: full-string helper sees env-claim>/unattested>/env-override> stamps —
+  // type-only would keep stamped agent rows inbound-exempt.
+  return isUntrustedInboundSourceString(source);
 }
 
 export function guardReadBySensitivity(memories: Memory[]): Memory[] {
