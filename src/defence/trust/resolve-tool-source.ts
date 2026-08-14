@@ -4,10 +4,12 @@
  * MCP callers can self-declare any source they like. This module:
  * 1. Always computes the environment-inferred trust ceiling first.
  * 2. Clamps any over-claimed declared source down to that ceiling.
- * 3. Writes a `SOURCE_ELEVATION_BLOCKED` row to defence_audit when a clamp
+ * 3. Drops a same-score identity that the environment did not confirm
+ *    (owner spoof / operator spoof). A genuine trust downgrade is kept.
+ * 4. Writes a `SOURCE_ELEVATION_BLOCKED` row to defence_audit when a clamp
  *    happens, so operators can spot prompt-injection trying to escalate
- *    its own trust.
- * 4. Writes a `SOURCE_MISSING` row when no source was declared, preserving
+ *    its own trust or wear another agent's name.
+ * 5. Writes a `SOURCE_MISSING` row when no source was declared, preserving
  *    the existing visibility into unconfigured callers.
  */
 
@@ -78,14 +80,33 @@ export function resolveToolSource(
   options: ResolveToolSourceOptions,
 ): ResolvedToolSource {
   const clampResult = clampSourceToCeiling(declaredSource);
-  const { source, clamped, declaredScore, ceilingScore, detection } = clampResult;
+  const { declaredScore, ceilingScore, detection } = clampResult;
+  let { source, clamped } = clampResult;
   const strict = options.strict ?? getStrictSourceMode();
+
+  // Score clamp only rejects a declaration that OUTSCORES the ceiling.
+  // A same-score different identity is not a downgrade — it is spoofing
+  // (`user:approved` or `cli:openclaw-jarvis` against env `cli:mcp`, all 0.9).
+  // Genuine downgrades (file:import 0.4 < cli:mcp 0.9) stay honoured.
+  const env = detection.source;
+  const identitySpoof = !!(
+    declaredSource
+    && !clamped
+    && declaredScore !== null
+    && declaredScore === ceilingScore
+    && (declaredSource.type !== env.type || declaredSource.identifier !== env.identifier)
+  );
+  if (identitySpoof) {
+    source = env;
+    clamped = true;
+  }
+
   const attested = deriveAttested({
     declared: declaredSource,
     resolved: source,
     clamped,
     strict,
-    envInferred: detection.source,
+    envInferred: env,
   });
 
   if (clamped && declaredSource) {
@@ -107,7 +128,12 @@ export function resolveToolSource(
           `SOURCE_ELEVATION_BLOCKED: tool=${options.toolName}, ` +
           `declared=${declaredSource.type}:${declaredSource.identifier} (score=${declaredScore}), ` +
           `clamped=${source.type}:${source.identifier} (score=${ceilingScore}) ` +
-          `via ${detection.method} (confidence: ${detection.confidence})`,
+          `via ${detection.method} (confidence: ${detection.confidence})` +
+          // Without this a same-score identity drop reads as a contradiction:
+          // the scores are EQUAL, yet the claim was rejected.
+          (identitySpoof
+            ? ' — reason: same-score identity is not self-declarable'
+            : ''),
         fragmentation_score: null,
         pipeline_duration_ms: null,
       });

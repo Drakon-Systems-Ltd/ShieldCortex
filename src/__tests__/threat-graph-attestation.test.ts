@@ -99,6 +99,104 @@ describe('resolveToolSource return shape', () => {
   });
 });
 
+/**
+ * Same-score identity is not self-declarable (#270).
+ *
+ * The score clamp only rejects a declaration that OUTSCORES the env ceiling.
+ * A normal MCP process infers as `cli:mcp` (0.9). These claims are also 0.9,
+ * so the score clamp lets them through:
+ *   - `user:approved` (operator exception on the ACL)
+ *   - `cli:openclaw-jarvis` (owner of another agent's RESTRICTED row)
+ *
+ * Both are identity spoofs, not downgrades. Tests MUST pin the 0.9 ceiling
+ * via CLAUDE_CODE_ENTRYPOINT — without it the default `agent:unknown` (0.3)
+ * already score-clamps these claims and the suite goes green for the wrong
+ * reason. `forget` already refuses a declared identity for this reason.
+ */
+const IDENTITY_ENV_KEYS = [
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_AGENT_CONTEXT',
+  'CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
+  'CODEX_THREAD_ID',
+  'CODEX_CI',
+  'SHIELDCORTEX_AGENT_SOURCE',
+] as const;
+
+describe('#270 — same-score identity is not self-declarable', () => {
+  const saved: Partial<Record<(typeof IDENTITY_ENV_KEYS)[number], string | undefined>> = {};
+
+  beforeEach(() => {
+    for (const key of IDENTITY_ENV_KEYS) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+    // Any non-subagent entrypoint → inferSourceFromEnvironment returns cli:mcp (0.9).
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'claude';
+  });
+
+  afterEach(() => {
+    for (const key of IDENTITY_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it('pins the 0.9 cli:mcp ceiling this suite is about', () => {
+    const resolved = resolveToolSource(undefined, { toolName: 'recall', project: null });
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.attested).toBe(true);
+    expect(resolved.clamped).toBe(false);
+  });
+
+  it('drops user:approved at equal 0.9 (the score clamp would have honoured it)', () => {
+    const resolved = resolveToolSource(
+      { type: 'user', identifier: 'approved' },
+      { toolName: 'get_memory', project: null, strict: false },
+    );
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.clamped).toBe(true);
+    expect(resolved.attested).toBe(true);
+  });
+
+  it('drops an over-scoring user:direct claim (unchanged score clamp)', () => {
+    const resolved = resolveToolSource(
+      { type: 'user', identifier: 'direct' },
+      { toolName: 'recall', project: null, strict: false },
+    );
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.clamped).toBe(true);
+  });
+
+  it('drops cli:openclaw-jarvis at equal 0.9 (owner-identity spoof — MCP-reachable)', () => {
+    const resolved = resolveToolSource(
+      { type: 'cli', identifier: 'openclaw-jarvis' },
+      { toolName: 'get_memory', project: null, strict: false },
+    );
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.clamped).toBe(true);
+    expect(resolved.attested).toBe(true);
+  });
+
+  it('keeps a genuine trust downgrade (file:import 0.4 < cli:mcp 0.9)', () => {
+    const resolved = resolveToolSource(
+      { type: 'file', identifier: 'import' },
+      { toolName: 'remember', project: null, strict: false },
+    );
+    expect(resolved.source).toEqual({ type: 'file', identifier: 'import' });
+    expect(resolved.clamped).toBe(false);
+  });
+
+  it('honours a declaration the environment independently confirms', () => {
+    const resolved = resolveToolSource(
+      { type: 'cli', identifier: 'mcp' },
+      { toolName: 'recall', project: null, strict: false },
+    );
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.clamped).toBe(false);
+    expect(resolved.attested).toBe(true);
+  });
+});
+
 describe('pipeline → ledger plumbing', () => {
   const source: DefenceSource = { type: 'user', identifier: 'direct' };
 

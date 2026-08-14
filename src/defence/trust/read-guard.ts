@@ -75,14 +75,24 @@ export function guardReadRows<T extends Record<string, unknown>>(
  * start_session, the memory:// resources, restore_context, detect_contradictions).
  *
  * These surfaces feed the prompt / a broadly-shared project summary, so they must
- * NEVER surface RESTRICTED or quarantined rows to ANYONE (matching the .mjs
- * prompt hooks) — but, unlike the per-caller fetch tools, they do NOT apply the
- * source-relative own-only tier, so a low-trust subagent still receives the
- * INTERNAL project context it legitimately needs. Credential isolation without
- * the availability blackout.
+ * NEVER surface RESTRICTED, quarantined, or untrusted-inbound (`web:` / `email:`)
+ * rows to ANYONE — matching the .mjs prompt hooks and SCOPE P4 (a web capture
+ * written by agent A must not bootstrap agent B). Unlike the per-caller fetch
+ * tools they do NOT apply the source-relative own-only tier, so a low-trust
+ * subagent still receives INTERNAL project context. Credential isolation
+ * without the availability blackout.
  */
+function isUntrustedInboundSource(source: string | null | undefined): boolean {
+  if (!source) return false;
+  return source.startsWith('web:') || source.startsWith('email:');
+}
+
 export function guardReadBySensitivity(memories: Memory[]): Memory[] {
-  return memories.filter((m) => m.trustScore !== 0 && m.sensitivityLevel !== 'RESTRICTED');
+  return memories.filter((m) =>
+    m.trustScore !== 0
+    && m.sensitivityLevel !== 'RESTRICTED'
+    && !isUntrustedInboundSource(m.source),
+  );
 }
 
 /** Apply the sensitivity guard to every memory list in a context summary. */

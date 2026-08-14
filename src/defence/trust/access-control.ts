@@ -2,11 +2,13 @@
  * Memory access control — enforces read/write/delete policies based on trust.
  *
  * Access rules:
- *   Trust ≥ 0.7  → Read all, write direct, delete own
+ *   Trust ≥ 0.7  → Read all non-RESTRICTED, write direct, delete own
  *   Trust 0.5–0.7 → Read own + non-restricted, write quarantine, delete own
  *   Trust < 0.5  → Read own only, write quarantine, delete none
  *
- * RESTRICTED memories are always blocked below trust 0.7 (credential isolation).
+ * RESTRICTED is owner (trust ≥ 0.7) or `user` (human operator). A peer
+ * high-trust cli/agent is not the operator — credential isolation holds
+ * across agents (SCOPE P4).
  */
 
 import type { DefenceSource } from '../types.js';
@@ -49,9 +51,21 @@ export function checkAccess(
   const isRestricted = memory.sensitivity_level === 'RESTRICTED';
 
   if (operation === 'read') {
-    // RESTRICTED memories: credential isolation
-    if (isRestricted && trust < 0.7) {
-      return deny('Credential isolation: insufficient trust for RESTRICTED data');
+    // RESTRICTED: credential isolation holds ACROSS agents (SCOPE P4).
+    // Owner (trust ≥ 0.7) and the human operator (`user`) may read.
+    // A peer cli/agent at 0.9 is not the operator — that was the
+    // contamination hole (Edith fetching Jarvis's secrets).
+    if (isRestricted) {
+      if (trust < 0.7 && source.type !== 'user') {
+        return deny('Credential isolation: insufficient trust for RESTRICTED data');
+      }
+      if (isOwner) {
+        return allow('Owner access');
+      }
+      if (source.type === 'user') {
+        return allow('Operator credential access');
+      }
+      return deny('RESTRICTED is isolated across agents');
     }
 
     // Owner always reads own
@@ -59,7 +73,7 @@ export function checkAccess(
       return allow('Owner access');
     }
 
-    // High trust: read all
+    // High trust: read all non-RESTRICTED
     if (trust >= 0.7) {
       return allow('High-trust read access');
     }

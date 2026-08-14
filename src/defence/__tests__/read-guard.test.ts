@@ -104,6 +104,15 @@ describe('guardReadBySensitivity (shared-context bootstrap surfaces)', () => {
     ];
     expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([1, 2]);
   });
+
+  it('drops web/email inbound rows so a capture cannot bootstrap another agent', () => {
+    const rows = [
+      mem({ id: 1, source: 'web:evil.example', sensitivityLevel: 'PUBLIC' }),
+      mem({ id: 2, source: 'email:inbox', sensitivityLevel: 'INTERNAL' }),
+      mem({ id: 3, source: 'cli:openclaw-jarvis', sensitivityLevel: 'INTERNAL' }),
+    ];
+    expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([3]);
+  });
 });
 
 describe('guardReadMemory', () => {
