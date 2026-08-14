@@ -931,6 +931,15 @@ The [cloud free tier](https://shieldcortex.ai/pricing) is included: 500 scans/mo
 
 **Enterprise** adds full cloud memory/graph replication, shared review, Replay, Verify, Device Doctor, key scopes, multi-device fleets, and self-hosted deployments — contact **sales@drakonsystems.com**.
 
+## 🤝 Contributing
+
+Bug reports and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
+setup, the checks CI runs, and what a good PR looks like. Participation is governed by
+our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Found a security vulnerability? Do **not** open a public issue — follow
+[SECURITY.md](SECURITY.md) and email **security@drakonsystems.com**.
+
 ---
 
 <p align="center">
@@ -938,7 +947,9 @@ The [cloud free tier](https://shieldcortex.ai/pricing) is included: 500 scans/mo
   <a href="https://shieldcortex.ai/docs">Documentation</a> ·
   <a href="https://www.npmjs.com/package/shieldcortex">npm</a> ·
   <a href="https://pypi.org/project/shieldcortex/">PyPI</a> ·
-  <a href="CHANGELOG.md">Changelog</a>
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
