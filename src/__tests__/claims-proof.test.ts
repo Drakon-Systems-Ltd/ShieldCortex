@@ -45,6 +45,7 @@ import { detectSkillThreats } from '../defence/skill-scanner/patterns.js';
 import { checkContradiction } from '../memory/contradiction.js';
 
 import { checkAccess, type AccessCheckMemory } from '../defence/trust/access-control.js';
+import { resolveToolSource } from '../defence/trust/resolve-tool-source.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
 import {
   redactRestrictedForDisplay,
@@ -676,6 +677,36 @@ describe('F. Fleet isolation (cross-agent contamination)', () => {
       EDITH,
       'read',
     ).canRead).toBe(false);
+  });
+
+  // The ACL grants RESTRICTED to the operator (`type: 'user'`), so the isolation
+  // is only as strong as the operator identity itself. A peer agent must not be
+  // able to simply CLAIM it: `user:approved` scores 0.9, the same as a `cli:*`
+  // caller, so the score-only ceiling clamp let it through verbatim. This walks
+  // the real MCP boundary — resolveToolSource, then the tool — because that is
+  // the composition an attacker actually has.
+  it('claim 13: agent B cannot BECOME the operator by declaring it', () => {
+    const secret = addMemory(
+      { title: 'jarvis deploy key 2', content: 'Sensitive material here.', category: 'note', project: PROJECT },
+      undefined,
+      JARVIS,
+    );
+    getDatabase().prepare(`UPDATE memories SET sensitivity_level = 'RESTRICTED' WHERE id = ?`).run(secret.id);
+
+    for (const claim of [
+      { type: 'user', identifier: 'approved' },   // same score as cli — the bypass
+      { type: 'user', identifier: 'direct' },     // over-scores — already clamped
+      { type: 'user', identifier: 'michael' },
+    ] as DefenceSource[]) {
+      const resolved = resolveToolSource(claim, { toolName: 'get_memory', project: PROJECT, strict: false });
+      // The declaration never becomes an operator identity…
+      expect(resolved.source.type).not.toBe('user');
+      // …so the fetch that follows it is still a peer read, and is refused.
+      expect(executeGetMemory({ id: secret.id, source: resolved.source }).success).toBe(false);
+    }
+
+    // The owner is unaffected — it never needed to declare anything.
+    expect(executeGetMemory({ id: secret.id, source: JARVIS }).success).toBe(true);
   });
 
   it('claim 13: a web-sourced write by agent A does not surface in agent B\'s get_context', async () => {

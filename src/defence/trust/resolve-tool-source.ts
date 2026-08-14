@@ -78,15 +78,36 @@ export function resolveToolSource(
   options: ResolveToolSourceOptions,
 ): ResolvedToolSource {
   const clampResult = clampSourceToCeiling(declaredSource);
-  const { source, clamped, declaredScore, ceilingScore, detection } = clampResult;
+  const { declaredScore, ceilingScore, detection } = clampResult;
+  let { source, clamped } = clampResult;
   const strict = options.strict ?? getStrictSourceMode();
-  const attested = deriveAttested({
+  let attested = deriveAttested({
     declared: declaredSource,
     resolved: source,
     clamped,
     strict,
     envInferred: detection.source,
   });
+
+  // The OPERATOR identity is a privilege BOUNDARY, not just a trust tier (#269).
+  //
+  // clampSourceToCeiling compares SCORES, so a same-score TYPE elevation slipped
+  // through: `user:approved` scores 0.9 and a normal MCP caller infers as
+  // `cli:mcp`, also 0.9 — not greater, so the declaration was honoured verbatim
+  // and the caller became `type: 'user'`. Once the ACL grants RESTRICTED reads to
+  // the operator, that is a full credential-isolation bypass by one argument.
+  //
+  // `user` may therefore only come from the environment. An unattested claim to
+  // it is dropped to the env-inferred identity and audited as an elevation
+  // attempt — the same treatment an over-scoring claim already gets. This is the
+  // module whose job is hardening a declared source, so every consumer benefits,
+  // not only the ACL that happened to surface the hole.
+  const operatorClaimBlocked = !attested && source.type === 'user';
+  if (operatorClaimBlocked) {
+    source = detection.source;
+    clamped = true;
+    attested = true; // what we return is now system-derived
+  }
 
   if (clamped && declaredSource) {
     try {
@@ -107,7 +128,12 @@ export function resolveToolSource(
           `SOURCE_ELEVATION_BLOCKED: tool=${options.toolName}, ` +
           `declared=${declaredSource.type}:${declaredSource.identifier} (score=${declaredScore}), ` +
           `clamped=${source.type}:${source.identifier} (score=${ceilingScore}) ` +
-          `via ${detection.method} (confidence: ${detection.confidence})`,
+          `via ${detection.method} (confidence: ${detection.confidence})` +
+          // Without this an operator-identity block reads as a contradiction in
+          // the ledger: the scores are EQUAL, yet the claim was rejected.
+          (operatorClaimBlocked
+            ? ' — reason: operator identity is not self-declarable (type elevation at equal score)'
+            : ''),
         fragmentation_score: null,
         pipeline_duration_ms: null,
       });

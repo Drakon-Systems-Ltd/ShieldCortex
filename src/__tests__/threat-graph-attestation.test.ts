@@ -99,6 +99,63 @@ describe('resolveToolSource return shape', () => {
   });
 });
 
+/**
+ * The OPERATOR identity is a privilege boundary, not a trust tier (#269).
+ *
+ * The clamp compares SCORES, so a same-score TYPE elevation slipped through:
+ * `user:approved` scores 0.9 in BASE_SCORES and a normal MCP caller infers as
+ * `cli:mcp`, also 0.9. Not greater — so the declaration was honoured verbatim
+ * and the caller became `type: 'user'`. Once #269 grants RESTRICTED reads to
+ * the operator, that one line is a full credential-isolation bypass: any peer
+ * agent could pass `source: {type:'user', identifier:'approved'}` to
+ * `get_memory`/`recall` and read another agent's secrets.
+ *
+ * `forget` already refuses a declared identity for exactly this reason ("the
+ * clamp only caps trust SCORE, not identity"), and ResolvedToolSource's own
+ * doc says attestation "must never be self-served". This enforces it at the
+ * one place whose job is hardening a declared source, so every consumer —
+ * not just the ACL — sees an operator identity only when the environment
+ * actually backs it.
+ */
+describe('#269 — the operator identity can never be self-declared', () => {
+  it('drops a same-score `user` claim the environment did not confirm', () => {
+    const resolved = resolveToolSource(
+      { type: 'user', identifier: 'approved' },
+      { toolName: 'get_memory', project: null, strict: false },
+    );
+    // The env here infers a non-user identity, so the claim must not survive.
+    expect(resolved.source.type).not.toBe('user');
+    expect(resolved.clamped).toBe(true);
+    // …and what is returned is now system-derived, so it IS attested.
+    expect(resolved.attested).toBe(true);
+  });
+
+  it('drops an over-scoring `user` claim too (unchanged clamp behaviour)', () => {
+    const resolved = resolveToolSource(
+      { type: 'user', identifier: 'direct' },
+      { toolName: 'recall', project: null, strict: false },
+    );
+    expect(resolved.source.type).not.toBe('user');
+    expect(resolved.clamped).toBe(true);
+  });
+
+  it('leaves a NON-operator self-declaration alone (only `user` is a boundary)', () => {
+    const resolved = resolveToolSource(
+      { type: 'file', identifier: 'import' },
+      { toolName: 'remember', project: null, strict: false },
+    );
+    expect(resolved.source.type).toBe('file');
+    expect(resolved.clamped).toBe(false);
+  });
+
+  it('honours a real operator environment (no declaration to second-guess)', () => {
+    const resolved = resolveToolSource(undefined, { toolName: 'recall', project: null });
+    // Whatever the env is, an undeclared identity is system-derived and attested.
+    expect(resolved.attested).toBe(true);
+    expect(resolved.clamped).toBe(false);
+  });
+});
+
 describe('pipeline → ledger plumbing', () => {
   const source: DefenceSource = { type: 'user', identifier: 'direct' };
 
