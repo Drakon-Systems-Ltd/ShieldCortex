@@ -178,7 +178,11 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     const files = fs.readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
     expect(files.length).toBe(1);
     const lines = fs.readFileSync(path.join(auditDir, files[0]), 'utf-8').trim().split('\n');
-    const entry = JSON.parse(lines[lines.length - 1]);
+    let entry: Record<string, unknown> = JSON.parse(lines[lines.length - 1]);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const row = JSON.parse(lines[i]) as Record<string, unknown>;
+      if (row.action !== 'notify') { entry = row; break; }
+    }
     expect(entry.outcome).toBe('auto_denied');
     expect(entry.origin).toBe('claude-code-hook');
     expect(entry.tool).toBe('Bash');
@@ -189,7 +193,10 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     expect(entry.pluginId).toBe('claude-code-hook');
     expect(entry.nonce).toMatch(/^[0-9a-f]{32}$/);
     expect(entry.seq).toBeGreaterThan(0);
-    expect(entry.actionKey).toContain('rm');
+    // #284: deny path no longer mints actionKey from raw toolInput (command leak).
+    // Reconciliation uses actionId instead.
+    expect(entry.actionId).toMatch(/^act-[a-f0-9]{16}$/);
+    expect(entry.actionKey === undefined || !String(entry.actionKey).includes('rm -rf')).toBe(true);
     expect(entry.gatewayInstanceId).toEqual(expect.any(String));
   });
 
@@ -199,7 +206,11 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     const files = fs.readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
     expect(files.length).toBe(1);
     const lines = fs.readFileSync(path.join(auditDir, files[0]), 'utf-8').trim().split('\n');
-    const entry = JSON.parse(lines[lines.length - 1]);
+    let entry: Record<string, unknown> = JSON.parse(lines[lines.length - 1]);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const row = JSON.parse(lines[i]) as Record<string, unknown>;
+      if (row.action !== 'notify') { entry = row; break; }
+    }
     expect(entry.action).toBe('require_approval');
     expect(entry.origin).toBe('claude-code-hook');
   });
@@ -298,7 +309,11 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
       const files = fs.readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
       expect(files.length).toBe(1);
       const lines = fs.readFileSync(path.join(auditDir, files[0]), 'utf-8').trim().split('\n');
-      const entry = JSON.parse(lines[lines.length - 1]);
+      let entry: Record<string, unknown> = JSON.parse(lines[lines.length - 1]);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const row = JSON.parse(lines[i]) as Record<string, unknown>;
+        if (row.action !== 'notify') { entry = row; break; }
+      }
       expect(entry.outcome).toBe('auto_denied');
       expect(entry.threats).toContain('fallback-scan');
     } finally {
@@ -347,6 +362,11 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     const auditDir = path.join(tempHome, '.shieldcortex', 'audit');
     const files = fs.readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
     const lines = fs.readFileSync(path.join(auditDir, files[0]), 'utf-8').trim().split('\n');
+    // #284: trailing notify-status rows follow the denial; prefer last non-notify.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const row = JSON.parse(lines[i]) as Record<string, unknown>;
+      if (row.action !== 'notify') return row;
+    }
     return JSON.parse(lines[lines.length - 1]);
   }
 

@@ -205,8 +205,11 @@ export interface ActionGuardOutcomeNotification {
   signals: string[];
   severity: string;
   reason: string;
-  /** Stable non-secret correlation key, e.g. a local digest; never a raw session id. */
+  /** Action-scoped correlation (#284); legacy session-scoped sc- still accepted. */
   correlationId?: string;
+  actionId?: string;
+  sessionId?: string;
+  origin?: string;
   detectedAt: string;
 }
 
@@ -382,8 +385,14 @@ export interface ActionGuardOutcomeInput {
   signals: string[];
   severity: string;
   reason: string;
-  /** Stable non-secret correlation key, e.g. a local digest; never a raw session id. */
+  /** Stable non-secret correlation key — action-scoped act-… (#284); legacy sc- accepted. */
   correlationId?: string;
+  /** #284 Face 3 — action-scoped id (same value as correlationId going forward). */
+  actionId?: string;
+  /** #284 Face 3 — session key when known (sc-…), separate from action id. */
+  sessionId?: string;
+  /** #284 Face 2 — which plane produced the denial. */
+  origin?: string;
   /** ISO timestamp; supplied by the caller so a test can pin it. */
   detectedAt: string;
 }
@@ -489,15 +498,15 @@ export function buildActionGuardOutcomeNotification(
     detectedAt: safeDetectedAt(input.detectedAt),
   };
   const correlationId = safeActionGuardCorrelationId(input.correlationId)
-    ?? safeActionGuardCorrelationId((input as { actionId?: string }).actionId);
+    ?? safeActionGuardCorrelationId(input.actionId);
   if (correlationId) n.correlationId = correlationId;
-  const actionId = safeActionGuardCorrelationId((input as { actionId?: string }).actionId);
-  if (actionId) (n as { actionId?: string }).actionId = actionId;
-  const sessionRaw = String((input as { sessionId?: string }).sessionId ?? '').trim();
-  if (/^sc-[a-f0-9]{16}$/.test(sessionRaw)) (n as { sessionId?: string }).sessionId = sessionRaw;
-  const origin = String((input as { origin?: string }).origin ?? '').trim();
+  const actionId = safeActionGuardCorrelationId(input.actionId) ?? correlationId;
+  if (actionId) n.actionId = actionId;
+  const sessionRaw = String(input.sessionId ?? '').trim();
+  if (/^sc-[a-f0-9]{16}$/.test(sessionRaw)) n.sessionId = sessionRaw;
+  const origin = String(input.origin ?? '').trim();
   if (origin === 'claude-code-hook' || origin === 'openclaw-interceptor') {
-    (n as { origin?: string }).origin = origin;
+    n.origin = origin;
   }
   return n;
 }
@@ -583,9 +592,9 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
     `Outcome:   ${n.outcome}`,
     `Reason:    ${n.reason}`,
   ];
-  if ((n as { origin?: string }).origin) lines.push(`Origin:    ${(n as { origin?: string }).origin}`);
-  if ((n as { actionId?: string }).actionId) lines.push(`Action:    ${(n as { actionId?: string }).actionId}`);
-  if ((n as { sessionId?: string }).sessionId) lines.push(`Session:   ${(n as { sessionId?: string }).sessionId}`);
+  if (n.origin) lines.push(`Origin:    ${n.origin}`);
+  if (n.actionId) lines.push(`Action:    ${n.actionId}`);
+  if (n.sessionId) lines.push(`Session:   ${n.sessionId}`);
   if (n.correlationId) lines.push(`Correlation: ${n.correlationId}`);
   lines.push(`At:        ${n.detectedAt}`);
   lines.push('');
