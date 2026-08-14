@@ -113,6 +113,14 @@ describe('guardReadBySensitivity (shared-context bootstrap surfaces)', () => {
     ];
     expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([3]);
   });
+
+  it('drops tool_response inbound rows (same class as web/email)', () => {
+    const rows = [
+      mem({ id: 1, source: 'tool_response:browser', sensitivityLevel: 'PUBLIC' }),
+      mem({ id: 2, source: 'cli:openclaw-jarvis', sensitivityLevel: 'INTERNAL' }),
+    ];
+    expect(guardReadBySensitivity(rows).map((m) => m.id)).toEqual([2]);
+  });
 });
 
 describe('guardReadMemory', () => {

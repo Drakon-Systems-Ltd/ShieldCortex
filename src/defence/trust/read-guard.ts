@@ -75,16 +75,26 @@ export function guardReadRows<T extends Record<string, unknown>>(
  * start_session, the memory:// resources, restore_context, detect_contradictions).
  *
  * These surfaces feed the prompt / a broadly-shared project summary, so they must
- * NEVER surface RESTRICTED, quarantined, or untrusted-inbound (`web:` / `email:`)
- * rows to ANYONE — matching the .mjs prompt hooks and SCOPE P4 (a web capture
- * written by agent A must not bootstrap agent B). Unlike the per-caller fetch
- * tools they do NOT apply the source-relative own-only tier, so a low-trust
- * subagent still receives INTERNAL project context. Credential isolation
- * without the availability blackout.
+ * NEVER surface RESTRICTED, quarantined, or untrusted-inbound
+ * (`web:` / `email:` / `tool_response:`) rows to ANYONE — matching the
+ * .mjs prompt hooks and SCOPE P4 (a capture written by agent A must not
+ * bootstrap agent B). `tool_response` is a first-class DefenceSource
+ * (score 0.5) for raw external tool output; a prefix denylist that omits
+ * it lets an inbound capture land in every agent's get_context.
+ * Unlike the per-caller fetch tools they do NOT apply the source-relative
+ * own-only tier, so a low-trust subagent still receives INTERNAL project
+ * context. Credential isolation without the availability blackout.
  */
+const UNTRUSTED_INBOUND_TYPES = new Set(['web', 'email', 'tool_response']);
+
 function isUntrustedInboundSource(source: string | null | undefined): boolean {
+  // Null/empty stays fail-open: many INTERNAL rows are still unstamped, and
+  // this surface must keep shared project context available. Fail-closed for
+  // unknown provenance is a separate change.
   if (!source) return false;
-  return source.startsWith('web:') || source.startsWith('email:');
+  const sep = source.indexOf(':');
+  const type = (sep === -1 ? source : source.slice(0, sep)).toLowerCase();
+  return UNTRUSTED_INBOUND_TYPES.has(type);
 }
 
 export function guardReadBySensitivity(memories: Memory[]): Memory[] {

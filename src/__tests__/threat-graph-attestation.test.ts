@@ -177,6 +177,16 @@ describe('#270 — same-score identity is not self-declarable', () => {
     expect(resolved.attested).toBe(true);
   });
 
+  it('drops cli:openclaw-jarvis at equal 0.9 even when strictSourceMode attests the declaration', () => {
+    // strict attests consequences; it must not skip the identity-spoof gate.
+    const resolved = resolveToolSource(
+      { type: 'cli', identifier: 'openclaw-jarvis' },
+      { toolName: 'get_memory', project: null, strict: true },
+    );
+    expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
+    expect(resolved.clamped).toBe(true);
+  });
+
   it('keeps a genuine trust downgrade (file:import 0.4 < cli:mcp 0.9)', () => {
     const resolved = resolveToolSource(
       { type: 'file', identifier: 'import' },
