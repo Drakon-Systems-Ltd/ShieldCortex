@@ -649,6 +649,120 @@ export function setReviewedScripts(entries: Array<Record<string, unknown>>): voi
   });
 }
 
+// ── Action Guard notify channel (#275) ────────────────
+
+export interface ActionGuardNotifyConfig {
+  /** Master switch for the operator-notify transport (#143). Strict-true
+   *  semantics on read, mirroring notify-config.ts. */
+  enabled: boolean;
+  /** Deliver via the native OpenClaw approval card. */
+  openclaw: boolean;
+  /** Webhook channel target. Absent = no webhook channel configured. */
+  webhookUrl?: string;
+}
+
+const NOTIFY_WEBHOOK_URL_MAX_LENGTH = 2_048;
+
+/**
+ * Validate a webhook URL for the SIGNED setter path. Stricter than the
+ * runtime reader (notify-config.ts accepts http: for configs that predate
+ * this CLI): a URL being SET today must be https — a denial notification
+ * carries operational detail about what a cron just tried to run, and an
+ * http target hands that to the network in the clear. Throws with an
+ * operator-actionable message; never suggests hand-editing config.json.
+ */
+export function validateActionGuardNotifyWebhookUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    throw new Error('Invalid webhook URL: empty. Provide an https:// URL, e.g. https://hooks.example.com/shieldcortex.');
+  }
+  if (trimmed.length > NOTIFY_WEBHOOK_URL_MAX_LENGTH) {
+    throw new Error(`Invalid webhook URL: longer than ${NOTIFY_WEBHOOK_URL_MAX_LENGTH} characters.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`Invalid webhook URL: "${trimmed}" is not a URL. Provide an https:// URL, e.g. https://hooks.example.com/shieldcortex.`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`Invalid webhook URL: scheme must be https (got ${parsed.protocol.replace(/:$/, '')}). Denial notifications must not travel in cleartext.`);
+  }
+  return trimmed;
+}
+
+/** Strict-true read of `actionGuard.notify`, same discipline as
+ *  normaliseNotifyConfig in notify-config.ts (which stays the runtime's
+ *  boundary — this reader only serves the CLI/status surface). */
+export function getActionGuardNotifyConfig(): ActionGuardNotifyConfig {
+  const guard = actionGuardBlock(readRawConfig());
+  const notify = guard.notify && typeof guard.notify === 'object' && !Array.isArray(guard.notify)
+    ? (guard.notify as Record<string, unknown>)
+    : {};
+  const cfg: ActionGuardNotifyConfig = {
+    enabled: notify.enabled === true,
+    openclaw: notify.openclaw === true,
+  };
+  if (typeof notify.webhookUrl === 'string' && notify.webhookUrl.trim()) {
+    cfg.webhookUrl = notify.webhookUrl.trim();
+  }
+  return cfg;
+}
+
+/**
+ * The SIGNED write path for `actionGuard.notify` (#275) — what the
+ * `shieldcortex config --action-guard-notify-*` flags call. Routed through
+ * mutateRawConfig so the `_sig` HMAC is recomputed and the tamper flag
+ * clears; the hand-edit this replaces invalidated the signature and forced
+ * defenceMode strict. Read-modify-write on the notify block: sub-keys not in
+ * `updates` (webhookSecret, timeoutMs, a parked webhookUrl during a disable)
+ * survive untouched.
+ */
+export function setActionGuardNotifyConfig(updates: Partial<ActionGuardNotifyConfig>): void {
+  const webhookUrl = updates.webhookUrl !== undefined
+    ? validateActionGuardNotifyWebhookUrl(updates.webhookUrl)
+    : undefined;
+  mutateRawConfig((raw) => {
+    const guard = actionGuardBlock(raw);
+    const notify = guard.notify && typeof guard.notify === 'object' && !Array.isArray(guard.notify)
+      ? (guard.notify as Record<string, unknown>)
+      : {};
+    if (updates.enabled !== undefined) notify.enabled = updates.enabled;
+    if (updates.openclaw !== undefined) notify.openclaw = updates.openclaw;
+    if (webhookUrl !== undefined) notify.webhookUrl = webhookUrl;
+    guard.notify = notify;
+    raw.actionGuard = guard;
+  });
+}
+
+/**
+ * `doctor --fix-action-guard`'s write path (#209 migration, #275 fix): merge
+ * the deprecated `interceptor.actionGuard` alias into the top-level block —
+ * top-level wins per key, the alias gap-fills, matching what both runtime
+ * surfaces already resolve — remove the alias, and drop an emptied
+ * `interceptor` block. Routed through mutateRawConfig so the migrated file is
+ * RE-SIGNED: doctor's previous bare fs.writeFileSync carried the stale `_sig`
+ * through, and the "fix" itself tripped the integrity check into strict mode.
+ * Returns true when an alias was found and migrated.
+ */
+export function migrateInterceptorActionGuardAlias(): boolean {
+  let changed = false;
+  mutateRawConfig((raw) => {
+    const interceptor = raw.interceptor && typeof raw.interceptor === 'object' && !Array.isArray(raw.interceptor)
+      ? (raw.interceptor as Record<string, unknown>)
+      : null;
+    const alias = interceptor && interceptor.actionGuard && typeof interceptor.actionGuard === 'object' && !Array.isArray(interceptor.actionGuard)
+      ? (interceptor.actionGuard as Record<string, unknown>)
+      : null;
+    if (!interceptor || !alias) return;
+    raw.actionGuard = { ...alias, ...actionGuardBlock(raw) };
+    delete interceptor.actionGuard;
+    if (Object.keys(interceptor).length === 0) delete raw.interceptor;
+    changed = true;
+  });
+  return changed;
+}
+
 // ── Cloud Iron Dome Cache ─────────────────────────────
 
 /**

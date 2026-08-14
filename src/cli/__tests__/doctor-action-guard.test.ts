@@ -1,8 +1,14 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { checkActionGuard, fixActionGuardConfig } from '../doctor.js';
+import { handleCloudConfig } from '../../cloud/cli.js';
+import {
+  getConfigDir,
+  clearCloudConfigCache,
+  readRawConfig,
+  isConfigTampered,
+} from '../../cloud/config.js';
 
 /**
  * Issue #94 — doctor had ZERO Action Guard check: its "Defence canary" probes
@@ -15,11 +21,20 @@ import { checkActionGuard, fixActionGuardConfig } from '../doctor.js';
  * wiring proof stays with the consent-gated live canary.
  */
 
-const configPath = () => path.join(os.homedir(), '.shieldcortex', 'config.json');
+// Same file the CLI setters and both runtime surfaces resolve — the jest
+// sandbox (scripts/jest-config-sandbox.mjs) points this at a per-worker dir,
+// so these tests never touch the developer's real ~/.shieldcortex.
+const configPath = () => path.join(getConfigDir(), 'config.json');
+const legacySigPath = () => path.join(getConfigDir(), '.config-sig');
 
 function writeConfig(cfg: Record<string, unknown>): void {
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2));
+  // A hand-written fixture is unsigned; a `.config-sig` left over from an
+  // earlier signed write would make it read as tampered. Drop it and the
+  // mtime cache so every fixture is adopted fresh.
+  fs.rmSync(legacySigPath(), { force: true });
+  clearCloudConfigCache();
 }
 
 let savedConfig: string | null = null;
@@ -34,6 +49,9 @@ afterEach(() => {
   } else {
     fs.writeFileSync(configPath(), savedConfig);
   }
+  fs.rmSync(legacySigPath(), { force: true });
+  clearCloudConfigCache();
+  jest.restoreAllMocks();
 });
 
 describe('doctor — Action Guard check (#94)', () => {
@@ -197,5 +215,114 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     writeConfig({ actionGuard: { enforce: false } });
     const results = await checkActionGuard();
     expect(results.find((r) => /webhookUrl/i.test(r.message))).toBeUndefined();
+  });
+});
+
+/**
+ * #275 — the notify warn's Suggested fix must be a RUNNABLE command through the
+ * signed CLI path, not bare JSON key paths: operators who followed the old
+ * "set `actionGuard.notify.enabled: true`" prescription hand-edited
+ * config.json, invalidated the `_sig` HMAC, and got forced into strict mode.
+ */
+describe('doctor — Action Guard notify fix is a signed CLI command (#275)', () => {
+  const findNotifyWarn = async () => {
+    const results = await checkActionGuard();
+    return results.find((r) => r.status === 'warn' && /notify/.test(r.label));
+  };
+
+  it('prescribes `shieldcortex config` with a real flag, not bare key paths', async () => {
+    writeConfig({});
+    const warn = await findNotifyWarn();
+    expect(warn).toBeDefined();
+    expect(warn!.fix).toMatch(/shieldcortex config --action-guard-notify-(webhook|openclaw)/);
+    // The bare key-path prescription must no longer lead the fix.
+    expect(warn!.fix).not.toMatch(/Set `actionGuard\.notify/);
+  });
+
+  it('leads with the runnable command and never recommends hand-editing config.json', async () => {
+    writeConfig({});
+    const warn = await findNotifyWarn();
+    expect(warn).toBeDefined();
+    expect(warn!.fix!.startsWith('Run `shieldcortex config')).toBe(true);
+    // If config.json is mentioned at all it must be as a warning against
+    // editing it, never as an instruction: no sentence may open with an
+    // imperative Edit/Add/Set (the old fix began "Set `actionGuard...`").
+    expect(warn!.fix).not.toMatch(/(^|\.\s)(Edit|Add|Set)\b/);
+  });
+
+  it('warn clears when the OpenClaw channel is enabled via the CLI (signed write)', async () => {
+    fs.rmSync(configPath(), { force: true });
+    fs.rmSync(legacySigPath(), { force: true });
+    clearCloudConfigCache();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    handleCloudConfig(['--action-guard-notify-openclaw']);
+    const warn = await findNotifyWarn();
+    expect(warn).toBeUndefined();
+    const onDisk = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
+    expect(typeof onDisk._sig).toBe('string');
+  });
+
+  it('warn clears when a webhook channel is set via the CLI (signed write)', async () => {
+    fs.rmSync(configPath(), { force: true });
+    fs.rmSync(legacySigPath(), { force: true });
+    clearCloudConfigCache();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    handleCloudConfig(['--action-guard-notify-webhook', 'https://hooks.example.invalid/sc']);
+    const warn = await findNotifyWarn();
+    expect(warn).toBeUndefined();
+    clearCloudConfigCache();
+    readRawConfig();
+    expect(isConfigTampered()).toBe(false);
+  });
+});
+
+/**
+ * #275 acceptance 7 — `doctor --fix-action-guard` used a bare fs.writeFileSync,
+ * so the migration it performed carried the OLD `_sig` (or none) and the fix
+ * itself tripped the integrity check into strict mode. The write must go
+ * through cloud/config's guarded mutate path, which re-signs.
+ */
+describe('doctor — fixActionGuardConfig re-signs the migrated config (#275)', () => {
+  it('migrated config carries a fresh `_sig` and reads back untampered', async () => {
+    writeConfig({ interceptor: { actionGuard: { enforce: false } } });
+    const fix = fixActionGuardConfig();
+    expect(fix.changed).toBe(true);
+
+    const after = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
+    expect(typeof after._sig).toBe('string');
+    expect(after._sig).toMatch(/^[0-9a-f]{64}$/);
+
+    clearCloudConfigCache();
+    const raw = readRawConfig();
+    expect(isConfigTampered()).toBe(false);
+    expect(raw.defenceMode).not.toBe('strict');
+
+    if (fix.backupPath) fs.rmSync(fix.backupPath, { force: true });
+  });
+
+  it('migration on an already-signed config stays untampered too', async () => {
+    // Build a SIGNED config containing the alias: sign a base config via the
+    // CLI path, then splice the alias in through another signed write is not
+    // possible (no setter writes `interceptor`), so adopt an unsigned fixture
+    // first read, then verify the migration write re-signs from there.
+    writeConfig({
+      actionGuard: { enforce: false },
+      interceptor: { enabled: true, actionGuard: { enforce: true, autoApprove: ['git_force_push'] } },
+    });
+    const fix = fixActionGuardConfig();
+    expect(fix.changed).toBe(true);
+
+    const after = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
+    // Merge semantics unchanged from #209: top-level wins, alias gap-fills.
+    expect(after.actionGuard).toEqual({ enforce: false, autoApprove: ['git_force_push'] });
+    expect(after.interceptor.actionGuard).toBeUndefined();
+    expect(after.interceptor.enabled).toBe(true);
+    expect(typeof after._sig).toBe('string');
+
+    clearCloudConfigCache();
+    readRawConfig();
+    expect(isConfigTampered()).toBe(false);
+
+    if (fix.backupPath) fs.rmSync(fix.backupPath, { force: true });
   });
 });
