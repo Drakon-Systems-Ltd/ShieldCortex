@@ -164,6 +164,8 @@ describe('install/repair surfaces native refusal (#251)', () => {
     // Must not claim native package/link install after a refusal.
     expect(summary).not.toMatch(/Installed through native OpenClaw package records/);
     expect(summary).not.toMatch(/Installed through native OpenClaw linked plugin records/);
+    // #251: config-invalid + local-copy is still hard-fail for scripts/CI.
+    expect(process.exitCode).toBe(1);
   });
 
   it('does not report plain skip when native was refused and plugin source is missing', async () => {
@@ -218,6 +220,8 @@ describe('install/repair surfaces native refusal (#251)', () => {
     expect(warnings).toMatch(/Not claiming native success|Pre-existing load\.paths/i);
     const summary = logLines.join('\n');
     expect(summary).not.toMatch(/Installed through native OpenClaw linked plugin records/);
+    // Mode is skipped (not native-link); summary must say refused.
+    expect(summary).toMatch(/skipped after native install refused/i);
     expect(process.exitCode).toBe(1);
   });
 
@@ -276,6 +280,7 @@ describe('tryNativeOpenClawPluginInstall real spawn wiring (#251)', () => {
     // Local fallback after real refusal is labelled, not plain native success.
     expect(warnings).toMatch(/local fallback|not a native registration/i);
     expect(logLines.join('\n')).not.toMatch(/Installed through native OpenClaw package records/);
+    expect(process.exitCode).toBe(1);
   });
 
   it('accepts Buffer stdout/stderr from spawn (does not wipe diagnosis)', async () => {

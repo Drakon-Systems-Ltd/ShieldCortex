@@ -1109,10 +1109,10 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
   // copy to avoid duplicate plugin ID warnings.
   //
   // #251: if THIS run's native install was refused, a pre-existing load.paths
-  // entry is NOT "Installed through native OpenClaw linked plugin records" for
-  // this run. Returning bare 'native-link' here was the silent-success hole
-  // both independent reviewers flagged. Keep the skip (no duplicate copy), but
-  // surface that registration is pre-existing and the live attempt failed.
+  // entry is NOT a native success for this run. Returning bare 'native-link'
+  // lied to every caller/doctor that trusts PluginInstallMode. Keep the skip
+  // (no duplicate copy), surface the pre-existing registration, hard-fail on
+  // config-invalid, and return 'skipped' so the mode is not a native success.
   if (isPluginInLoadPaths()) {
     if (lastNativePluginInstallRefusal) {
       console.warn(
@@ -1122,9 +1122,9 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
       if (lastNativePluginInstallRefusal.configInvalid) {
         process.exitCode = 1;
       }
-    } else {
-      console.log('Plugin already registered via load.paths, skipping extensions copy.');
+      return 'skipped';
     }
+    console.log('Plugin already registered via load.paths, skipping extensions copy.');
     return 'native-link';
   }
 
@@ -1225,10 +1225,20 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
       // once by installOpenClawHook, after the registration verify, for every
       // non-skipped install mode. See reportConversationAccessState.
       console.log(`Installed real-time plugin to ${destDir}`);
+      // #251: local-copy after a config-invalid native refusal is still a
+      // degraded outcome for scripts/CI — OpenClaw itself refused. Soft-success
+      // (exit 0) was the original silent shape; hard-fail the process so repair
+      // does not look green while the config is still broken.
+      if (lastNativePluginInstallRefusal?.configInvalid) {
+        process.exitCode = 1;
+      }
       return 'trusted-local-copy';
     } else {
       console.warn('  Warning: Could not register plugin in OpenClaw config');
       console.log(`Installed real-time plugin to ${destDir}`);
+      if (lastNativePluginInstallRefusal?.configInvalid) {
+        process.exitCode = 1;
+      }
       return 'untrusted-local-copy';
     }
   } catch (err) {
@@ -1585,13 +1595,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     if (pluginInstallMode === 'native-package') {
       console.log('    Installed through native OpenClaw package records.');
     } else if (pluginInstallMode === 'native-link') {
-      // #251: native-link is also returned for pre-existing load.paths after a
-      // refused attempt — never claim "installed through native …" then.
-      if (nativeRefusal) {
-        console.warn('    Pre-existing load.paths registration only — this run\'s native OpenClaw install was refused (not a native success).');
-      } else {
-        console.log('    Installed through native OpenClaw linked plugin records.');
-      }
+      console.log('    Installed through native OpenClaw linked plugin records.');
     } else if (pluginInstallMode === 'trusted-local-copy') {
       console.log('    Installed as a local fallback and trusted via plugins.allow.');
     } else if (pluginInstallMode === 'untrusted-local-copy') {
@@ -1612,6 +1616,10 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     const nativeRefusal = getLastNativePluginInstallRefusal();
     if (nativeRefusal) {
       console.log('  • shieldcortex-realtime plugin: skipped after native install refused (see warnings above)');
+      if (nativeRefusal.configInvalid && isPluginInLoadPaths()) {
+        // load.paths pre-existed; mode is skipped but files may still be present.
+        console.warn('    Pre-existing load.paths registration only — this run\'s native OpenClaw install was refused (not a native success).');
+      }
     } else {
       console.log('  • shieldcortex-realtime plugin: skipped');
     }
