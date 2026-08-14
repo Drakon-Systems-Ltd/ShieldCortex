@@ -7,6 +7,7 @@ import {
   installOpenClawHook,
   openClawConfigPath,
   snapshotOpenClawConfig,
+  NATIVE_INSTALL_TIMEOUT_MS,
   __setNativePluginInstallForTest,
 } from '../openclaw.js';
 
@@ -118,6 +119,19 @@ describe('#214 pre-install snapshot of openclaw.json', () => {
     // Isolate from other suites that leave exitCode=1 on the worker
     // (macos-test failed this assertion while the stanza was restored).
     expect(process.exitCode).not.toBe(1);
+  });
+});
+
+describe('#214 native install timeout must not SIGTERM a mid-rewrite', () => {
+  it('gives OpenClaw at least two minutes — 30s is how aiquant lost the stanza', () => {
+    expect(NATIVE_INSTALL_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
+    const src = fs.readFileSync(
+      path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'openclaw.ts'),
+      'utf-8',
+    );
+    const fn = src.slice(src.indexOf('function tryNativeOpenClawPluginInstall'), src.indexOf('function findExtensionsDir'));
+    expect(fn).toMatch(/timeout:\s*NATIVE_INSTALL_TIMEOUT_MS/);
+    expect(fn).not.toMatch(/timeout:\s*30000/);
   });
 });
 

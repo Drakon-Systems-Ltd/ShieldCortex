@@ -835,6 +835,10 @@ export function snapshotOpenClawConfig(homeArg?: string): string | null {
   }
 }
 
+/** #214 — 30s SIGTERM'd `openclaw plugins install` mid-openclaw.json rewrite
+ *  on aiquant. Two minutes is still a bound, not a hang. */
+export const NATIVE_INSTALL_TIMEOUT_MS = 120_000;
+
 function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   if (_nativePluginInstallForTest) return _nativePluginInstallForTest();
   if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
@@ -855,7 +859,7 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
     const result = spawnSync('openclaw', attempt.args, {
       env,
       encoding: 'utf-8',
-      timeout: 30000,
+      timeout: NATIVE_INSTALL_TIMEOUT_MS,
     });
 
     if (result.status === 0) {

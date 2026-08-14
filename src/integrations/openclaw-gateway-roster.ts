@@ -57,6 +57,18 @@ function parseTimestamp(line: string): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+/** Journald `unit[pid]:` or a JSON `pid` field. Null when the line is anonymous. */
+export function parseLogLinePid(line: string): number | null {
+  try {
+    const obj = JSON.parse(line) as { pid?: unknown };
+    if (typeof obj.pid === 'number' && Number.isInteger(obj.pid) && obj.pid > 0) return obj.pid;
+  } catch { /* not JSON */ }
+  const m = /\b[\w.-]+\[(\d+)\]:/.exec(line);
+  if (!m) return null;
+  const pid = Number.parseInt(m[1], 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
 /**
  * Parse a single log line into a boot roster. PURE. Returns null when the line
  * is not a roster line.
@@ -198,6 +210,8 @@ const REGISTRATION_RE = /\[shieldcortex\]\s+v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+
 export interface RegistrationSighting {
   version: string;
   atMs: number;
+  /** Process that emitted the line, when the log attributes one (#214). */
+  pid: number | null;
 }
 
 /**
@@ -212,7 +226,7 @@ export function parseRegistrationsSince(text: string, sinceMs: number): Registra
     if (!m) continue;
     const ts = parseTimestamp(line);
     if (ts == null || ts < sinceMs) continue;
-    out.push({ version: m[1], atMs: ts });
+    out.push({ version: m[1], atMs: ts, pid: parseLogLinePid(line) });
   }
   return out;
 }
