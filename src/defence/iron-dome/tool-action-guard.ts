@@ -1668,31 +1668,32 @@ function isShellAnchorChar(text: string, at: number): boolean {
  * destination token is quoted (#89 dual-review quoted-redirect hole).
  */
 function pathTargetIsRedirectDestination(text: string, at: number): boolean {
-  // The path-target match often starts mid-token (`.shieldcortex/...` after
-  // `$HOME/` or `/home/u/`). Walk back across path characters and a single
-  // opening quote until we hit a redirect operator or a statement boundary.
+  // Path-target match often starts mid-token (`.shieldcortex/...` after
+  // `$HOME/` or `/home/u/`). Walk back across path chars and quotes until a
+  // redirect operator. Glued forms count, including quoted destinations:
+  //   echo>"$HOME/.shieldcortex/approvals/x"
+  //   echo>path
+  //   printf %s x>>"$HOME/..."
   let i = at - 1;
-  // optional opening quote glued to the path
   if (i >= 0 && (text[i] === '"' || text[i] === "'")) i--;
-  // path / expansion characters between `>` and the match start
   while (i >= 0 && /[A-Za-z0-9_./$~{}:-]/.test(text[i]!)) i--;
-  // whitespace between `>` and the path
   while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
-  // optional opening quote after `>`
   if (i >= 0 && (text[i] === '"' || text[i] === "'")) i--;
   while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
-  if (i < 0) return false;
-  // one or two `>` (optionally with a leading fd digit)
   // optional noclobber bar: `>|` / `>>|`
   if (i >= 0 && text[i] === '|') i--;
   if (i < 0 || text[i] !== '>') return false;
   i--;
   if (i >= 0 && text[i] === '>') i--;
   if (i >= 0 && /\d/.test(text[i]!)) i--;
-  // must be at start or after a statement/pipe boundary
   if (i < 0) return true;
   const c = text[i]!;
-  return c === ' ' || c === '\t' || c === ';' || c === '|' || c === '&' || c === '\n';
+  // boundary OR glued to preceding token (echo>path / printf '{}'>path)
+  return (
+    c === ' ' || c === '\t' || c === ';' || c === '|' || c === '&' || c === '\n'
+    || c === '"' || c === "'"
+    || /[A-Za-z0-9_./-]/.test(c)
+  );
 }
 
 function classifyWithCtx(
@@ -1870,7 +1871,7 @@ const STORE_MUTATION_RE = new RegExp(
 );
 
 /** Nested execution keeps the gate. */
-const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\//i;
+const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{/i;
 
 /**
  * Split on statement separators without treating `2>&1` / `>&` / `|&` as

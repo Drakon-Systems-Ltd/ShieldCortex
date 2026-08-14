@@ -167,3 +167,24 @@ describe('#89 — round-6 glued redirect + jq -i mint paths stay gated', () => {
     ).toBe(true);
   });
 });
+
+describe('#89 — round-7 function-def + glued-quoted redirect mint stay gated', () => {
+  it('function-def mint keeps the gate', () => {
+    const cmd = "ls () { python3 -c \"open('/home/u/.shieldcortex/approvals/approvals.json','w').write('{}')\"; }; ls ~/.shieldcortex/approvals";
+    const v = gate(cmd);
+    expect(v.decision).not.toBe('allow');
+  });
+
+  it.each([
+    ['glued quoted $HOME', 'echo x>"$HOME/.shieldcortex/approvals/x.json"'],
+    ['glued quoted single', "echo x>'$HOME/.shieldcortex/approvals/x.json'"],
+    ['printf glued quoted', `printf %s '{}'>"$HOME/.shieldcortex/approvals/approvals.json"`],
+  ])('GATEs %s with store signal', (_name, cmd) => {
+    const v = gate(cmd);
+    expect(v.decision).not.toBe('allow');
+    expect(
+      v.signals.includes('touch-approval-store')
+      || v.signals.includes('touch-decisions-ledger'),
+    ).toBe(true);
+  });
+});
