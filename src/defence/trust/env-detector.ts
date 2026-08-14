@@ -20,6 +20,8 @@ const ENV_OVERRIDE_ORIGIN = 'env-override';
 /** Rungs the host process attests, never a caller-controlled string. These remap to `agent`. */
 type HostOnlySourceType = 'user' | 'cli';
 
+const HOST_ONLY_TYPES: ReadonlySet<string> = new Set<HostOnlySourceType>(['user', 'cli']);
+
 /** Every DefenceSource type an integrator env string is allowed to keep. */
 type OverrideSourceType = Exclude<DefenceSource['type'], HostOnlySourceType>;
 
@@ -75,9 +77,22 @@ export function bindIntegratorOverrideSource(
   claimedType: string,
   identifier: string,
 ): DefenceSource {
-  const sourceType: DefenceSource['type'] = OVERRIDE_TYPES.has(claimedType)
-    ? (claimedType as OverrideSourceType)
-    : 'agent';
+  // Env input is an open string. Completeness over DefenceSource cannot see
+  // TOOL_RESPONSE / mystery / typos. Lowercase first (same as
+  // isUntrustedInboundType) and never fall through to `agent` — that is the
+  // only inbound-exempt type.
+  const normalised = claimedType.trim().toLowerCase();
+  let sourceType: DefenceSource['type'];
+  if (HOST_ONLY_TYPES.has(normalised)) {
+    sourceType = 'agent';
+  } else if (OVERRIDE_TYPES.has(normalised)) {
+    sourceType = normalised as OverrideSourceType;
+  } else {
+    return {
+      type: 'web',
+      identifier: `unrecognised>${normalised || claimedType}:${identifier}`,
+    };
+  }
   const candidate: DefenceSource = { type: sourceType, identifier };
   const score = scoreSource(candidate).score;
 
@@ -123,8 +138,16 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
   // 1. Explicit ShieldCortex source override (for integrators)
   const scSource = process.env.SHIELDCORTEX_AGENT_SOURCE;
   if (scSource) {
-    const [type, ...rest] = scSource.split(':');
-    const identifier = rest.join(':') || scSource;
+    const colon = scSource.indexOf(':');
+    // Bare token (no `:`) is the documented "defaults to agent" form.
+    // A typed claim (`type:identifier`) is classified by bind — unknown
+    // types must not inherit that default, or `mystery:x` becomes agent:x.
+    const bound = colon === -1
+      ? bindIntegratorOverrideSource('agent', scSource)
+      : bindIntegratorOverrideSource(
+          scSource.slice(0, colon),
+          scSource.slice(colon + 1) || scSource,
+        );
     // Integrator override labels the process. It is not a host attestation.
     // `user` and `cli` remap to `agent` (operator/CLI rungs are host-only).
     // Any remaining claim that would score above 0.5 — including the
@@ -134,7 +157,7 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
     // stays inbound-blocked) but carry an `env-override>` identifier so they
     // cannot impersonate a host-attested `agent:cron` / `tool_response:*` row.
     return {
-      source: bindIntegratorOverrideSource(type, identifier),
+      source: bound,
       method: 'env:SHIELDCORTEX_AGENT_SOURCE',
       confidence: 'high',
     };
