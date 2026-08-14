@@ -4,6 +4,7 @@
 
 import type { DefenceSource, TrustScore } from '../types.js';
 import { scoreAgent, buildAgentHierarchy } from './agent-scorer.js';
+import { stripUnattestedStamp } from './attestation-stamp.js';
 
 const BASE_SCORES: Record<string, number> = {
   'user:direct': 1.0,
@@ -71,9 +72,14 @@ const HIERARCHY_DISPLAY = [
 
 export function scoreSource(source: DefenceSource): TrustScore {
   const key = `${source.type}:${source.identifier}`;
+  // Score off the BARE identifier: the ownership stamp separates a self-declared
+  // identity from the host-attested one of the same name, and must not move the
+  // number in either direction. `agent` is the exception — see scoreAgent, where
+  // a stamped identifier is barred from claiming a privileged origin.
+  const bareKey = `${source.type}:${stripUnattestedStamp(source.identifier)}`;
 
   // Exact match overrides
-  const baseScore = BASE_SCORES[key];
+  const baseScore = BASE_SCORES[bareKey];
   if (baseScore !== undefined) {
     return { score: baseScore, source, hierarchy: [...HIERARCHY_DISPLAY, `>> ${key} = ${baseScore}`] };
   }

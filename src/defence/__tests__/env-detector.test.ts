@@ -442,10 +442,36 @@ describe('Environment-Based Source Inference', () => {
         strict: false,
       });
 
-      expect(resolved.source).toEqual(declared);
+      // The declaration is honoured — same type, same name, same trust score —
+      // but #283: the environment never produced this identity, so it is keyed
+      // into its own ownership namespace. Without the stamp this exact case
+      // (a below-ceiling declaration, so the clamp never fires) read the
+      // host-attested `agent:user-spawned>task-1`'s rows as OWNER.
+      expect(resolved.source.type).toBe(declared.type);
+      expect(resolved.source.identifier).toBe(`unattested>${declared.identifier}`);
+      // The stamp never RAISES a score. Here it lowers one, deliberately and in
+      // the only case it does: `user-spawned` is an ORIGIN, and an origin means
+      // "the host or the integrator's environment said so". A writer-chosen
+      // string claiming that origin is exactly the claim under audit, so it
+      // scores as an unconfirmed agent (0.3) decayed one rung — 0.21, not 0.63.
+      // Same rule keeps a declared `agent:env-override>…` off the 0.5 pin, i.e.
+      // below the trust≥0.5 delete floor.
+      expect(scoreSource(declared).score).toBe(0.63);
+      expect(scoreSource(resolved.source).score).toBe(0.21);
       // An accepted self-declaration is honoured but not attested.
       expect(resolved.attested).toBe(false);
-      expect(logAudit).not.toHaveBeenCalled();
+      expect(resolved.envConfirmed).toBe(false);
+      // ...and it is no longer the quietest path in the resolver: a
+      // self-declared identity now leaves a SOURCE_UNATTESTED row (ALLOW — the
+      // declaration stands, only its ownership is namespaced).
+      expect(logAudit).toHaveBeenCalledTimes(1);
+      const row = logAudit.mock.calls[0][0] as {
+        firewall_result: string;
+        reason: string;
+      };
+      expect(row.firewall_result).toBe('ALLOW');
+      expect(row.reason).toContain('SOURCE_UNATTESTED');
+      expect(row.reason).toContain('declared=agent:user-spawned>task-1');
     });
 
     it('writes a SOURCE_MISSING audit row when no source is declared', () => {

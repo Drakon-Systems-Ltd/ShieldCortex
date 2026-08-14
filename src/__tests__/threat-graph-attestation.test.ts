@@ -192,8 +192,13 @@ describe('#270 — same-score identity is not self-declarable', () => {
       { type: 'file', identifier: 'import' },
       { toolName: 'remember', project: null, strict: false },
     );
-    expect(resolved.source).toEqual({ type: 'file', identifier: 'import' });
+    // The downgrade stands — type, name and 0.4 trust are all preserved — but
+    // #283 keys it as self-declared: the env inferred `cli:mcp`, never
+    // `file:import`, so this identity may not own the real `file:import`'s rows.
+    expect(resolved.source.type).toBe('file');
+    expect(resolved.source.identifier).toBe('unattested>import');
     expect(resolved.clamped).toBe(false);
+    expect(resolved.envConfirmed).toBe(false);
   });
 
   it('honours a declaration the environment independently confirms', () => {
