@@ -9,12 +9,14 @@ import {
  * read-only diagnostics against ~/.shieldcortex/approvals were require_approval
  * on touch-approval-store — self-referential deadlock on enforced hosts.
  *
- * Mutating the store must STILL gate. Sensitive paths (.ssh/.env) are untouched.
+ * Policy (Grok 4.6 + SOL floor): FAIL CLOSED. Only pure shell observation
+ * verbs (ls/cat/grep/…) drop the gate. Interpreters stay gated when they
+ * name the store — a mutation denylist can never be complete.
  */
 
 const gate = (command: string) => evaluateToolCall('Bash', { command });
 
-describe('#89 — read-only inspection of guard stores is allowed', () => {
+describe('#89 — read-only shell inspection of guard stores is allowed', () => {
   it.each([
     ['ls approvals', 'ls -la ~/.shieldcortex/approvals'],
     ['ls leases', 'ls ~/.shieldcortex/leases'],
@@ -23,9 +25,8 @@ describe('#89 — read-only inspection of guard stores is allowed', () => {
     ['head approvals', 'head -20 ~/.shieldcortex/approvals/approvals.json'],
     ['stat approvals', 'stat ~/.shieldcortex/approvals'],
     ['pipeline read', 'cat ~/.shieldcortex/approvals/approvals.json | jq .'],
-    ['python read open', "python3 -c \"print(open('/home/u/.shieldcortex/approvals/approvals.json').read())\""],
     ['echo then ls', 'echo hi; ls ~/.shieldcortex/approvals'],
-    ['find approvals', 'find ~/.shieldcortex/approvals -type f'],
+    ['rg approvals', 'rg hash ~/.shieldcortex/approvals'],
   ])('ALLOWs %s', (_name, cmd) => {
     const v = gate(cmd);
     expect(v.signals).not.toContain('touch-approval-store');
@@ -34,9 +35,32 @@ describe('#89 — read-only inspection of guard stores is allowed', () => {
   });
 });
 
-describe('#89 — mutating guard stores still gates (must-still-fire)', () => {
+describe('#89 — interpreters naming the store stay gated (fail closed)', () => {
+  it.each([
+    ['python read open', "python3 -c \"print(open('/home/u/.shieldcortex/approvals/approvals.json').read())\""],
+    ['python write', "python3 -c \"import json;json.dump({},open('/home/u/.shieldcortex/approvals/approvals.json','w'))\""],
+    ['python os.remove', "python3 -c \"import os;os.remove('/home/u/.shieldcortex/approvals/approvals.json')\""],
+    ['python os.system touch', "python3 -c \"import os;os.system('touch ~/.shieldcortex/approvals/x')\""],
+    ['node read', "node -e \"console.log(require('fs').readFileSync('/home/u/.shieldcortex/approvals/approvals.json','utf8'))\""],
+    ['node write', "node -e \"require('fs').writeFileSync('/home/u/.shieldcortex/approvals/approvals.json','{}')\""],
+    ['node unlinkSync', "node -e \"require('fs').unlinkSync('/home/u/.shieldcortex/approvals/approvals.json')\""],
+    ['find approvals', 'find ~/.shieldcortex/approvals -type f'],
+    ['sed print', "sed -n '1,5p' ~/.shieldcortex/approvals/approvals.json"],
+  ])('GATEs %s', (_name, cmd) => {
+    const v = gate(cmd);
+    expect(v.decision).not.toBe('allow');
+    expect(
+      v.signals.includes('touch-approval-store')
+      || v.signals.includes('touch-decisions-ledger'),
+    ).toBe(true);
+  });
+});
+
+describe('#89 — shell mutations still gate (must-still-fire)', () => {
   it.each([
     ['redirect write', "echo '{}' > ~/.shieldcortex/approvals/approvals.json"],
+    ['noclobber redirect', "echo '{}' >| ~/.shieldcortex/approvals/approvals.json"],
+    ['quoted redirect', 'echo x >"$HOME/.shieldcortex/approvals/x.json"'],
     ['append DECISIONS', 'echo x >> ~/.shieldcortex/DECISIONS.md'],
     ['rm approvals', 'rm ~/.shieldcortex/approvals/approvals.json'],
     ['rm -rf approvals', 'rm -rf ~/.shieldcortex/approvals'],
@@ -44,16 +68,11 @@ describe('#89 — mutating guard stores still gates (must-still-fire)', () => {
     ['chmod approvals', 'chmod -R 777 ~/.shieldcortex/approvals'],
     ['touch new', 'touch ~/.shieldcortex/approvals/new'],
     ['tee write', 'echo x | tee ~/.shieldcortex/approvals/x.json'],
-    ['python write', "python3 -c \"import json;json.dump({},open('/home/u/.shieldcortex/approvals/approvals.json','w'))\""],
-    ['node write', "node -e \"require('fs').writeFileSync('/home/u/.shieldcortex/approvals/approvals.json','{}')\""],
     ['cp into store', 'cp /tmp/x ~/.shieldcortex/approvals/x.json'],
+    ['sed -i', "sed -i 's/a/b/' ~/.shieldcortex/approvals/approvals.json"],
+    ['find -delete', 'find ~/.shieldcortex/approvals -delete'],
   ])('GATEs %s', (_name, cmd) => {
     const v = gate(cmd);
-    expect(
-      v.signals.includes('touch-approval-store')
-      || v.signals.includes('touch-decisions-ledger')
-      || v.decision !== 'allow',
-    ).toBe(true);
     expect(v.decision).not.toBe('allow');
   });
 });
@@ -76,31 +95,14 @@ describe('#89 — guardStoreAccessIsReadOnly helper', () => {
     expect(guardStoreAccessIsReadOnly('ls ~/.shieldcortex/approvals')).toBe(true);
     expect(guardStoreAccessIsReadOnly('cat ~/.shieldcortex/DECISIONS.md')).toBe(true);
   });
-  it('false for redirects and rm', () => {
+  it('false for redirects, rm, interpreters, find', () => {
     expect(guardStoreAccessIsReadOnly('echo x > ~/.shieldcortex/approvals/a')).toBe(false);
+    expect(guardStoreAccessIsReadOnly("echo x >| ~/.shieldcortex/approvals/a")).toBe(false);
     expect(guardStoreAccessIsReadOnly('rm ~/.shieldcortex/approvals/a')).toBe(false);
+    expect(guardStoreAccessIsReadOnly("python3 -c \"print(open('/home/u/.shieldcortex/approvals/a').read())\"")).toBe(false);
+    expect(guardStoreAccessIsReadOnly('find ~/.shieldcortex/approvals -type f')).toBe(false);
   });
   it('false when no store path present', () => {
     expect(guardStoreAccessIsReadOnly('ls /tmp')).toBe(false);
-  });
-});
-
-describe('#89 — dual-review must-still-fire (Grok 4.6 / SOL)', () => {
-  it.each([
-    ['sed -i', "sed -i 's/a/b/' ~/.shieldcortex/approvals/approvals.json"],
-    ['find -delete', 'find ~/.shieldcortex/approvals -delete'],
-    ['find -exec rm', 'find ~/.shieldcortex/approvals -exec rm {} +'],
-    ['python os.remove', "python3 -c \"import os;os.remove('/home/u/.shieldcortex/approvals/approvals.json')\""],
-    ['python os.system touch', "python3 -c \"import os;os.system('touch ~/.shieldcortex/approvals/x')\""],
-    ['python open r+', "python3 -c \"open('/home/u/.shieldcortex/approvals/approvals.json','r+').write('x')\""],
-    ['python shutil.move', "python3 -c \"import shutil;shutil.move('/home/u/.shieldcortex/approvals/a','/tmp/a')\""],
-    ['node unlinkSync', "node -e \"require('fs').unlinkSync('/home/u/.shieldcortex/approvals/approvals.json')\""],
-    ['node execSync touch', "node -e \"require('child_process').execSync('touch ~/.shieldcortex/approvals/x')\""],
-    ['node copyFileSync', "node -e \"require('fs').copyFileSync('/tmp/x','/home/u/.shieldcortex/approvals/x')\""],
-    ['quoted redirect', 'echo x >"$HOME/.shieldcortex/approvals/x.json"'],
-    ['perl -i', "perl -i -pe 's/a/b/' ~/.shieldcortex/approvals/approvals.json"],
-  ])('GATEs %s', (_name, cmd) => {
-    const v = gate(cmd);
-    expect(v.decision).not.toBe('allow');
   });
 });

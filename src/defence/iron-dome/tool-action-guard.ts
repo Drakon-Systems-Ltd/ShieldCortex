@@ -1683,7 +1683,9 @@ function pathTargetIsRedirectDestination(text: string, at: number): boolean {
   while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
   if (i < 0) return false;
   // one or two `>` (optionally with a leading fd digit)
-  if (text[i] !== '>') return false;
+  // optional noclobber bar: `>|` / `>>|`
+  if (i >= 0 && text[i] === '|') i--;
+  if (i < 0 || text[i] !== '>') return false;
   i--;
   if (i >= 0 && text[i] === '>') i--;
   if (i >= 0 && /\d/.test(text[i]!)) i--;
@@ -1840,67 +1842,48 @@ function withProvenance(
 // That correctly gates minting/wiping freezes and approvals. It incorrectly
 // gated production diagnostics that only LISTED or READ the store — and the
 // remediation for the gate is "approve against that store", which the agent
-// cannot read. Carve out only when the WHOLE command is a recognised
-// read-only shape. Anything ambiguous fails closed (keeps the gate).
+// cannot read.
 //
-// Deliberately does NOT apply to touch-sensitive-path (.ssh / .env / etc.):
-// reading secrets is still an access that needs a human nod.
-//
-// Dual-review floor (Grok 4.6 + SOL Pro on #292): interpreters are NOT
-// inherently read-only. They are admitted only when the body has no mutation /
-// shell-out / in-place-edit marker. sed/find stay off the pure-verb list or
-// are blocked by explicit in-place / -delete markers.
+// Carve-out policy (Grok 4.6 + SOL floor on #292):
+//   FAIL CLOSED. Only pure shell observation verbs qualify. Interpreters
+//   (python/node/perl/ruby), editors (sed/awk), and find are NOT on the
+//   allowlist — a denylist of mutation APIs can never be complete, and
+//   admitting them reopens self-approval minting. Ambiguous shapes keep the
+//   gate. touch-sensitive-path (.ssh/.env) is deliberately untouched.
 
 const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
 
 /**
- * Verbs that only OBSERVE a path when used without in-place flags.
- * Interpreters are included so a pure `python3 -c 'print(open(...).read())'`
- * diagnostic can pass — but only after STORE_MUTATION_RE clears the body.
+ * Verbs that only OBSERVE a path. Intentionally excludes interpreters, sed,
+ * awk, and find — those stay gated when they name a guard store.
  */
 const STORE_READONLY_VERB_RE =
-  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|find|realpath|readlink|basename|dirname|test|\[|echo|printf|awk|sed|jq|yq|python|python3|node|perl|ruby)$/i;
+  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq|yq)$/i;
 
 /**
- * Explicit mutation / shell-out / in-place markers. Fail closed: any hit on a
- * command that also names a guard store keeps the gate. Built via RegExp so
- * we never nest quotes inside a slash-literal.
+ * Mutation markers. Defence-in-depth for allowlisted verbs that can still
+ * write via redirect / tee / noclobber. Not a substitute for keeping
+ * interpreters off STORE_READONLY_VERB_RE.
  */
 const STORE_MUTATION_RE = new RegExp(
   [
     // shell mutators at statement/pipe boundaries
     String.raw`(?:^|[\s;|&])(?:rm|mv|cp|install|tee|truncate|chmod|chown|chgrp|touch|mkdir|rmdir|ln|dd|shred|wipe)\b`,
-    // redirection into a path — allow optional quotes between > and target
-    String.raw`[>]{1,2}\s*['"]?(?:~|\$HOME|/|\.|\$\{?HOME)`,
-    // in-place editors
-    String.raw`\b(?:sed|perl|ruby)\b[^|;\n]*\s-i\b`,
-    String.raw`\bawk\b[^|;\n]*\s-i\s+inplace\b`,
-    // find destructive actions
-    String.raw`\bfind\b[^|;\n]*\s-(?:delete|exec|execdir)\b`,
-    // node / python write + unlink + rename APIs
-    String.raw`\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|write_bytes|createWriteStream|json\.dump|fs\.write|writeSync|outputFile(?:Sync)?)\b`,
-    String.raw`\b(?:unlink(?:Sync)?|rmSync|rmdir(?:Sync)?|rename(?:Sync)?|copyFile(?:Sync)?|cpSync|replace(?:Sync)?)\b`,
-    String.raw`\b(?:os\.(?:remove|unlink|replace|rename|system)|shutil\.(?:copy|copy2|copytree|move|rmtree)|pathlib\.Path|Path\([^)]*\)\.(?:write_text|write_bytes|unlink|replace|rename))\b`,
-    // open modes that can write: w/a/x and any + form (r+, w+, a+, …)
-    String.raw`\bopen(?:Sync)?\s*\([^)]*['"](?:[wax]|r\+|w\+|a\+|x\+)`,
-    // interpreter shell-out — minting via nested touch/rm must not pass
-    String.raw`\b(?:child_process|execSync|execFileSync|spawnSync|os\.system|subprocess\.(?:run|call|Popen|check_call|check_output)|popen)\b`,
+    // redirection into a path — `>`, `>>`, noclobber `>|` / `>>|`, optional quotes
+    String.raw`[>]{1,2}\|?\s*['"]?(?:~|\$HOME|/|\.|\$\{?HOME)`,
   ].join('|'),
   'i',
 );
 
 /**
  * True when every access to a guard-owned store path on this command is a
- * pure inspection. Fail closed: any mutation marker, unknown verb near the
- * path, or unparseable shape keeps the gate.
+ * pure shell inspection. Fail closed on unknown verbs / interpreters /
+ * ambiguous shapes.
  */
 export function guardStoreAccessIsReadOnly(text: string): boolean {
   const cmd = String(text || '');
   if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
-  // Any mutation / shell-out / in-place marker → keep the gate.
   if (STORE_MUTATION_RE.test(cmd)) return false;
-  // Split on shell statement separators; every statement that names a store
-  // path must begin with a recognised read-only verb (after env assigns/sudo).
   const parts = cmd.split(/(?:&&|\|\||;|\n)/);
   let sawStore = false;
   for (const raw of parts) {
@@ -1908,17 +1891,12 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
     if (!part) continue;
     if (!GUARD_STORE_PATH_RE.test(part)) continue;
     sawStore = true;
-    // Strip leading env assigns and a single sudo.
     let s = part.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '');
     s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
-    // Pipeline: every stage that still names the store (or the first stage)
-    // must be a read-only verb. `cat store | grep x` ok; mutators already
-    // failed STORE_MUTATION_RE.
     const stages = s.split('|').map(x => x.trim()).filter(Boolean);
     for (const stage of stages) {
       if (!GUARD_STORE_PATH_RE.test(stage) && stage !== stages[0]) continue;
       const word = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/)[0] ?? '';
-      // strip path-ish invocations: /usr/bin/ls → ls
       const base = word.split('/').pop() ?? word;
       if (!STORE_READONLY_VERB_RE.test(base)) return false;
     }
