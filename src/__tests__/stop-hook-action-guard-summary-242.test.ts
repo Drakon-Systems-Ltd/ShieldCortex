@@ -1154,6 +1154,33 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     expect(rows.some((r) => r.type === 'session_summary')).toBe(true);
     expect(JSON.stringify(rows)).not.toContain(secret);
   });
+
+  it('summarises an OpenClaw interceptor denial for the same session-key formula (#260)', () => {
+    writeFileSync(auditFile(), [
+      JSON.stringify({
+        type: 'intercept',
+        origin: 'openclaw-interceptor',
+        sessionKey: sessionKey('openclaw-cron-backup'),
+        action: 'require_approval',
+        outcome: 'failure_denied',
+        tool: 'Bash',
+        threats: ['recursive-force-delete'],
+        ts: '2026-08-11T01:30:28.897Z',
+      }),
+      '',
+    ].join('\n'));
+
+    const result = runStopHook({ session_id: 'openclaw-cron-backup' });
+    expect(result.status).toBe(0);
+    const rows = readFileSync(auditFile(), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const summary = rows.find((r) => r.type === 'session_summary' && r.outcome === 'action_guard_degraded');
+    expect(summary).toMatchObject({
+      origin: 'claude-code-stop-hook',
+      sessionKey: sessionKey('openclaw-cron-backup'),
+      guardOutcomeCount: 1,
+      outcomes: { failure_denied: 1 },
+    });
+  });
 });
 
 function mkdtempCompat(prefix: string): string {

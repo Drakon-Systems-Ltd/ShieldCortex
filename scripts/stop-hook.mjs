@@ -470,13 +470,20 @@ function addSummaryFingerprints(row, seen) {
   }
 }
 
+// Keep in step with src/defence/iron-dome/session-guard.ts — the hook cannot
+// import that module. OpenClaw rows must be readable here so a mixed-plane
+// box does not double-summarise (#260) and so an interceptor deny is not
+// silently dropped by an exact-string origin check.
+const GUARD_INDEX_ORIGINS = new Set(['claude-code-hook', 'openclaw-interceptor']);
+const SUMMARY_ORIGINS = new Set(['claude-code-stop-hook', 'openclaw-session-end']);
+
 function collectSummariesFromLines(lines, sessionKey, alreadySummarised) {
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
       const isSummary = (row?.recordKind === 'summary' || row?.type === 'session_summary')
-        && row.origin === 'claude-code-stop-hook'
+        && SUMMARY_ORIGINS.has(String(row.origin ?? ''))
         && row.sessionKey === sessionKey
         && row.outcome === 'action_guard_degraded';
       if (isSummary) addSummaryFingerprints(row, alreadySummarised);
@@ -491,7 +498,7 @@ function collectGuardsFromLines(lines, file, sessionKey, alreadySummarised, rows
     try {
       const row = JSON.parse(line);
       const isGuard = (row?.recordKind === 'guard' || row?.type === 'intercept')
-        && row.origin === 'claude-code-hook'
+        && GUARD_INDEX_ORIGINS.has(String(row.origin ?? ''))
         && row.action !== 'notify'
         && row.sessionKey === sessionKey
         && GUARD_DEGRADED_OUTCOMES.has(String(row.outcome));

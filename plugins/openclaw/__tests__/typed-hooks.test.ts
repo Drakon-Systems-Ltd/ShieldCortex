@@ -25,6 +25,7 @@ describe('OpenClaw runtime registration', () => {
     expect(typedHooks).toEqual(expect.arrayContaining([
       'before_tool_call',
       'session_end',
+      'agent_end',
       'llm_input',
       'llm_output',
     ]));

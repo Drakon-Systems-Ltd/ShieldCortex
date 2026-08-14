@@ -18,7 +18,8 @@
       "llm_output",
       "before_agent_run",
       "before_tool_call",
-      "session_end"
+      "session_end",
+      "agent_end"
     ],
     "commands": [
       "shieldcortex-status"

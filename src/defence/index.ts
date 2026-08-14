@@ -81,6 +81,15 @@ export {
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
 export {
+  sessionKeyFor,
+  sessionKeySalt,
+  appendSessionGuardIndex,
+  recordActionGuardDegraded,
+  GUARD_DEGRADED_OUTCOMES,
+  isGuardIndexOrigin,
+  isSummaryOrigin,
+} from './iron-dome/session-guard.js';
+export {
   REQUIRED_BINDING_FIELDS,
   hasRequiredBinding,
   attachEnforcementBinding,
