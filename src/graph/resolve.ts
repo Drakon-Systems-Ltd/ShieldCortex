@@ -8,7 +8,7 @@ import type { EntityType, ExtractionResult } from './extract.js';
  * cross-table lookup.
  */
 export interface TripleProvenance {
-  /** Canonical source tuple of the writing memory (e.g. `agent:jarvis`). */
+  /** Canonical source tuple of the writing memory (e.g. `agent:build-bot`). */
   writerSource: string;
   /** Trust score at write time (raw — capping is applied on store). */
   writerTrust: number;

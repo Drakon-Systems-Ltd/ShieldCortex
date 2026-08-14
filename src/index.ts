@@ -991,7 +991,7 @@ ${bold}DOCS${reset}
     } else if (action === 'reset-source') {
       const key = process.argv[4];
       if (!key) {
-        console.error("Usage: shieldcortex threat-graph reset-source '<source-key>'  (e.g. 'agent:jarvis')");
+        console.error("Usage: shieldcortex threat-graph reset-source '<source-key>'  (e.g. 'agent:build-bot')");
         process.exit(1);
       }
       const { resetSourceRisk } = await import('./threat-graph/risk.js');
