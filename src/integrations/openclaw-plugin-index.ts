@@ -7,7 +7,11 @@ import {
   readInstalledRealtimePluginVersion,
   resolveLocalExtensionInstall,
 } from './openclaw-plugin-state.js';
-import { readLatestBootRoster, findRegistrationSince } from './openclaw-gateway-roster.js';
+import {
+  readLatestBootRoster,
+  findRegistrationSince,
+  findGatewayAttributedRegistrationSince,
+} from './openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from './openclaw-gateway-process.js';
 
 /**
@@ -149,8 +153,20 @@ export interface ReconcileInput {
    * (#142). The snapshot races registration (169 ms margin observed live), so
    * absence-from-snapshot plus a later sighting is ambiguous — CLI processes
    * write identical lines — and must not convict the host as UNPROTECTED.
+   *
+   * #216: this flag is ONLY for ambiguous (non-gateway-PID) sightings. A
+   * registration whose log PID matches the running gateway is live-load proof
+   * and is folded into `liveRoster` / `liveLoadEvidence` instead.
    */
   registrationSeenAfterBoot?: boolean;
+  /**
+   * #216 — how `loadedInLiveRoster === true` was proven for this gather.
+   * - `boot-roster`: named on the current process boot line
+   * - `gateway-pid-registration`: post-boot/hot-reload registration attributed
+   *   to the running gateway PID (Case #213 / issue #216)
+   * - omitted/null: not proven loaded via live evidence
+   */
+  liveLoadEvidence?: 'boot-roster' | 'gateway-pid-registration' | null;
 }
 
 export type PluginLoadState =
@@ -256,8 +272,16 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   );
 
   // #103: the live gateway roster overrides the install index. Null = unread.
+  // #216: gather may also prove load via a gateway-PID-attributed registration
+  // (hot-reload / post-boot), which is represented either by promoting the
+  // plugin id into `liveRoster` or by `liveLoadEvidence`.
   const liveRoster = input.liveRoster ?? null;
-  const loadedInLiveRoster = liveRoster == null ? null : liveRoster.includes(pluginId);
+  const loadedInLiveRoster =
+    liveRoster == null
+      ? input.liveLoadEvidence === 'gateway-pid-registration'
+        ? true
+        : null
+      : liveRoster.includes(pluginId) || input.liveLoadEvidence === 'gateway-pid-registration';
 
   const installsJsonVersion = input.installsJson?.version ?? null;
   const indexVersion = indexRecord?.version ?? indexRecord?.resolvedVersion ?? null;
@@ -506,9 +530,12 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
 
   // Say exactly which evidence we have. Claiming "loaded in roster" off the
   // install index alone is what made #103 a false positive.
+  // #216: distinguish boot-snapshot proof from PID-attributed hot-reload proof.
   reasons.push(
     loadedInLiveRoster === true
-      ? 'enabled, present on the running gateway boot roster, versions agree at the expected build'
+      ? input.liveLoadEvidence === 'gateway-pid-registration'
+        ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load), versions agree at the expected build'
+        : 'enabled, present on the running gateway boot roster, versions agree at the expected build'
       : 'enabled and installed, versions agree at the expected build — but the running gateway boot roster could NOT be read, so the plugin is not proven loaded',
   );
   return { ...base, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
@@ -817,24 +844,51 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   // #142/#150: bound the boot line by the RUNNING gateway's process start
   // (from OpenClaw's boot-lifecycle table). A line from a previous process, or
   // one we cannot bound, yields null — "cannot prove", never a stale answer.
+  //
+  // #216: a post-boot registration attributed to the RUNNING gateway PID is
+  // live-load proof (hot-reload after stanza restore). CLI-attributed or
+  // anonymous registration lines stay ambiguous (`registrationSeenAfterBoot`).
   let bootAtMs: number | null = null;
+  let gatewayPid: number | null = null;
+  let processStartedAtMs: number | null = null;
   const readRoster =
     options.readLiveRoster ??
     (() => {
       if (process.env.JEST_WORKER_ID !== undefined) return null;
       const proc = readRunningGatewayProcess(home);
       if (!proc) return null;
+      gatewayPid = proc.pid;
+      processStartedAtMs = proc.startedAtMs;
       const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
       bootAtMs = boot?.atMs ?? null;
       return boot?.plugins ?? null;
     });
-  const liveRoster = readRoster();
-  const registrationSeenAfterBoot =
-    liveRoster != null &&
-    !liveRoster.includes(pluginId) &&
+  let liveRoster = readRoster();
+  let liveLoadEvidence: 'boot-roster' | 'gateway-pid-registration' | null =
+    liveRoster != null && liveRoster.includes(pluginId) ? 'boot-roster' : null;
+  let registrationSeenAfterBoot = false;
+
+  if (
     process.env.JEST_WORKER_ID === undefined &&
-    bootAtMs != null &&
-    findRegistrationSince(bootAtMs) != null;
+    liveLoadEvidence == null &&
+    gatewayPid != null &&
+    processStartedAtMs != null
+  ) {
+    // Prefer the boot snapshot timestamp when we have one (post-snapshot race);
+    // otherwise bound by process start so a hot-reload after a missing boot
+    // line can still prove load for the CURRENT process.
+    const sinceMs = bootAtMs ?? processStartedAtMs;
+    const gatewayReg = findGatewayAttributedRegistrationSince(sinceMs, gatewayPid);
+    if (gatewayReg) {
+      liveLoadEvidence = 'gateway-pid-registration';
+      if (liveRoster == null) liveRoster = [pluginId];
+      else if (!liveRoster.includes(pluginId)) liveRoster = [...liveRoster, pluginId];
+    } else if (liveRoster != null && !liveRoster.includes(pluginId) && bootAtMs != null) {
+      // Ambiguous sighting only — CLI/anonymous lines must not convict or acquit.
+      registrationSeenAfterBoot = findRegistrationSince(bootAtMs) != null;
+    }
+  }
+
   return {
     pluginId,
     expectedVersion: options.expectedVersion,
@@ -849,6 +903,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     projectDirs: scanProjectDirs(home, pluginId),
     liveRoster,
     registrationSeenAfterBoot,
+    liveLoadEvidence,
   };
 }
 

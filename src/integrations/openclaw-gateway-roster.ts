@@ -266,3 +266,49 @@ export function findRegistrationSince(
   }
   return newest;
 }
+
+/**
+ * #216 — newest registration at/after `sinceMs` whose log line is attributed
+ * to `gatewayPid`.
+ *
+ * A post-boot `[shieldcortex] v… registered` line is only LIVE LOAD proof when
+ * the emitting process is the running gateway. CLI / repair / doctor processes
+ * write identical message text into the shared log; without PID attribution
+ * those lines must stay AMBIGUOUS (`load-unproven`), never "loaded".
+ *
+ * Null means "no gateway-attributed dated sighting" — not "not registered".
+ */
+export function findGatewayAttributedRegistrationSince(
+  sinceMs: number,
+  gatewayPid: number,
+  options: ReadBootRosterOptions = {},
+): RegistrationSighting | null {
+  if (!Number.isInteger(gatewayPid) || gatewayPid <= 0) return null;
+
+  const logDir = options.logDir ?? DEFAULT_LOG_DIR;
+  const readDir = options.readDir ?? ((d: string) => fs.readdirSync(d));
+  const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
+
+  let names: string[];
+  try {
+    names = readDir(logDir);
+  } catch {
+    return null;
+  }
+
+  let newest: RegistrationSighting | null = null;
+  for (const name of names) {
+    if (!name.startsWith('openclaw-') || !name.endsWith('.log')) continue;
+    let text: string;
+    try {
+      text = readFile(path.join(logDir, name));
+    } catch {
+      continue;
+    }
+    for (const sighting of parseRegistrationsSince(text, sinceMs)) {
+      if (sighting.pid !== gatewayPid) continue;
+      if (!newest || sighting.atMs > newest.atMs) newest = sighting;
+    }
+  }
+  return newest;
+}

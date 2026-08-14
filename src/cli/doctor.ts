@@ -3298,15 +3298,24 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // from roster presence alone (#74 attempt #3 was roster-present-but-not-
       // enforcing). Say "loaded (roster-confirmed)"; point at repair's canary. (#74 finding 6)
       //
+      // #216: when the reconciler proved load via a gateway-PID-attributed
+      // post-boot registration (hot-reload), say so — the boot snapshot alone
+      // would have been a false absent.
+      //
       // "Loaded" does not mean "scanning conversations" either — that gap is
       // owned by `checkOpenClawPluginLoadState`, which downgrades this tick when
       // the conversation-access grant is missing (#226), and reported in full by
       // `checkOpenClawConversationScanning` (#225/#230). This renderer is pure:
       // it reads the verdict and nothing off disk.
+      const hotReload =
+        Array.isArray(verdict.reasons) &&
+        verdict.reasons.some((r) => /RUNNING gateway PID after boot|hot-reload/i.test(r));
       return {
         label,
         status: 'pass',
-        message: `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+        message: hotReload
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`
+          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }
     default: {

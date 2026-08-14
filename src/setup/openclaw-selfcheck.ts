@@ -12,7 +12,7 @@ import {
   readInstalledRealtimePluginVersion,
   resolveRealtimePluginInstallPath,
 } from '../integrations/openclaw-plugin-state.js';
-import { readLatestBootRoster, findRegistrationSince, type BootRoster } from '../integrations/openclaw-gateway-roster.js';
+import { readLatestBootRoster, findRegistrationSince, findGatewayAttributedRegistrationSince, type BootRoster } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveRepairConsent } from './repair-consent.js';
 import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
@@ -111,9 +111,19 @@ export interface SelfCheckInput {
    * (#142). Registration races the snapshot (169 ms margin observed live) and
    * also happens mid-life, so absence-from-snapshot plus a later sighting is
    * AMBIGUOUS — CLI processes write identical lines — and must yield
-   * `unproven`, never `absent`. It never grants `loaded`; the canary does.
+   * `unproven`, never `absent`. It never grants `loaded` by itself.
+   *
+   * #216: gateway-PID-attributed registration is NOT this flag — that is
+   * `gatewayPidRegistrationSeenAfterBoot` / live-load proof.
    */
   registrationSeenAfterBoot?: boolean;
+  /**
+   * #216 — a post-boot registration line attributed to the RUNNING gateway
+   * PID. Unlike CLI-ambiguous `registrationSeenAfterBoot`, this IS live-load
+   * proof (hot-reload after stanza restore). Grants `loaded` when the boot
+   * snapshot omitted the plugin.
+   */
+  gatewayPidRegistrationSeenAfterBoot?: boolean;
   /** The build the flow expects to be enforcing; enables the version proof. */
   expectedVersion?: string;
   /** Ground-truth on-disk version, for the version proof. */
@@ -147,8 +157,14 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
 
   let rosterState: RosterProofState;
   if (liveRoster == null) {
-    rosterState = 'unproven';
+    // #216: gateway-PID registration can still prove load when the boot line
+    // itself was unreadable (log wiped after hot-reload).
+    rosterState = input.gatewayPidRegistrationSeenAfterBoot === true ? 'loaded' : 'unproven';
   } else if (liveRoster.includes(pluginId)) {
+    rosterState = 'loaded';
+  } else if (input.gatewayPidRegistrationSeenAfterBoot === true) {
+    // #216: Case #213 shape — boot snapshot missed the plugin, but the running
+    // gateway process itself later emitted the registration line.
     rosterState = 'loaded';
   } else if (input.registrationSeenAfterBoot === true) {
     // #142: the boot line is a snapshot and registration races it. A sighting
@@ -161,7 +177,13 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
   const rosterProof = rosterState === 'loaded';
 
   if (rosterState === 'loaded') {
-    reasons.push('roster proof: plugin named on the RUNNING gateway boot roster — actually loaded, not merely installed');
+    if (input.gatewayPidRegistrationSeenAfterBoot === true && !(liveRoster?.includes(pluginId))) {
+      reasons.push(
+        'roster proof: plugin registration attributed to the RUNNING gateway PID after boot — live load proven (hot-reload / post-boot), not merely installed',
+      );
+    } else {
+      reasons.push('roster proof: plugin named on the RUNNING gateway boot roster — actually loaded, not merely installed');
+    }
   } else if (rosterState === 'absent') {
     reasons.push('roster proof FAILED: plugin ABSENT from the RUNNING gateway boot roster — interceptor not loaded, host unprotected while status reports ON');
     if (enabledInIndex) {
@@ -269,31 +291,54 @@ export async function runPluginSelfCheck(
   // previous process, or one we cannot bound, yields null — "cannot prove",
   // never a stale answer wearing a fresh badge.
   let latestBoot: BootRoster | null | undefined;
+  let gatewayPid: number | null = null;
+  let processStartedAtMs: number | null = null;
   const readRoster =
     options.readLiveRoster ??
     (() => {
       if (process.env.JEST_WORKER_ID !== undefined) return null;
       const proc = readRunningGatewayProcess(home);
       if (!proc) return null;
+      gatewayPid = proc.pid;
+      processStartedAtMs = proc.startedAtMs;
       latestBoot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
       return latestBoot?.plugins ?? null;
     });
-  // Only meaningful when the bounded boot line exists yet omits the plugin:
-  // a registration sighted after that snapshot means the snapshot cannot
-  // convict (#142's 169 ms race), though it also cannot acquit.
+  // Ambiguous post-boot registration (CLI/anonymous). #216 gateway-PID proof
+  // is collected separately and grants loaded.
   const readRegistration =
     options.readRegistrationSeenAfterBoot ??
     (() => {
       if (process.env.JEST_WORKER_ID !== undefined) return false;
       if (latestBoot?.atMs == null) return false;
+      // Only count as ambiguous if we do NOT already have a gateway-PID match.
+      if (gatewayPid != null) {
+        const gw = findGatewayAttributedRegistrationSince(latestBoot.atMs, gatewayPid);
+        if (gw) return false;
+      }
       return findRegistrationSince(latestBoot.atMs) != null;
     });
   const probe = options.canaryProbe ?? defaultCanaryProbe;
 
   const index = readIndex(home);
   const liveRoster = readRoster();
+  let gatewayPidRegistrationSeenAfterBoot = false;
+  if (
+    process.env.JEST_WORKER_ID === undefined &&
+    gatewayPid != null &&
+    processStartedAtMs != null &&
+    !(liveRoster?.includes(pluginId))
+  ) {
+    const sinceMs = latestBoot?.atMs ?? processStartedAtMs;
+    gatewayPidRegistrationSeenAfterBoot =
+      findGatewayAttributedRegistrationSince(sinceMs, gatewayPid) != null;
+  }
   const registrationSeenAfterBoot =
-    liveRoster != null && !liveRoster.includes(pluginId) ? readRegistration() : false;
+    !gatewayPidRegistrationSeenAfterBoot &&
+    liveRoster != null &&
+    !liveRoster.includes(pluginId)
+      ? readRegistration()
+      : false;
   const onDiskVersion = options.expectedVersion ? readOnDisk(home) : null;
   const canary = await probe(home, pluginId);
   const verdict = evaluateSelfCheck({
@@ -301,6 +346,7 @@ export async function runPluginSelfCheck(
     index,
     liveRoster,
     registrationSeenAfterBoot,
+    gatewayPidRegistrationSeenAfterBoot,
     canary,
     expectedVersion: options.expectedVersion,
     onDiskVersion,
