@@ -24,7 +24,7 @@ describe('#89 — read-only shell inspection of guard stores is allowed', () => 
     ['grep approvals', 'grep -n hash ~/.shieldcortex/approvals/*'],
     ['head approvals', 'head -20 ~/.shieldcortex/approvals/approvals.json'],
     ['stat approvals', 'stat ~/.shieldcortex/approvals'],
-    ['pipeline read', 'cat ~/.shieldcortex/approvals/approvals.json | jq .'],
+    ['pipeline read', 'cat ~/.shieldcortex/approvals/approvals.json | head -5'],
     ['echo then ls', 'echo hi; ls ~/.shieldcortex/approvals'],
     ['rg approvals', 'rg hash ~/.shieldcortex/approvals'],
   ])('ALLOWs %s', (_name, cmd) => {
@@ -120,8 +120,8 @@ describe('#89 — round-4 Grok mint paths stay gated', () => {
     expect(v.decision).not.toBe('allow');
   });
 
-  it('cat store | jq still allows (every stage readonly)', () => {
-    const v = gate('cat ~/.shieldcortex/approvals/approvals.json | jq .');
+  it('cat store | head still allows (every stage readonly)', () => {
+    const v = gate('cat ~/.shieldcortex/approvals/approvals.json | head -5');
     expect(v.decision).toBe('allow');
     expect(v.signals).not.toContain('touch-approval-store');
   });
@@ -147,5 +147,23 @@ describe('#89 — round-5 Grok sibling/background mint paths stay gated', () => 
   it('2>&1 does not split as background', () => {
     const v = gate('ls ~/.shieldcortex/approvals 2>&1');
     expect(v.decision).toBe('allow');
+  });
+});
+
+describe('#89 — round-6 glued redirect + jq -i mint paths stay gated', () => {
+  it.each([
+    ['glued redirect', "echo '{}'>~/.shieldcortex/approvals/approvals.json"],
+    ['glued append', "echo x>>~/.shieldcortex/approvals/approvals.json"],
+    ['glued var redirect', "p=~/.shieldcortex/approvals/approvals.json; echo '{}'>$p"],
+    ['jq -i', "jq -i '.x=1' ~/.shieldcortex/approvals/approvals.json"],
+    ['rg --pre', 'rg --pre tee hash ~/.shieldcortex/approvals'],
+  ])('GATEs %s with store signal', (_name, cmd) => {
+    const v = gate(cmd);
+    expect(v.decision).not.toBe('allow');
+    expect(
+      v.signals.includes('touch-approval-store')
+      || v.signals.includes('touch-decisions-ledger')
+      || v.decision === 'block',
+    ).toBe(true);
   });
 });

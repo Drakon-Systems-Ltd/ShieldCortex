@@ -1850,17 +1850,21 @@ function withProvenance(
 
 const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
 
-/** Verbs that only OBSERVE. No interpreters, editors, find, yq. */
+/** Verbs that only OBSERVE. No interpreters, editors, find, yq, jq. */
 const STORE_READONLY_VERB_RE =
-  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq)$/i;
+  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf)$/i;
 
-/** Redirect / tee / noclobber into a path-ish target. */
+/**
+ * Redirect / tee / noclobber. Glued forms (`echo>path`, `echo>$p`) count —
+ * no required whitespace before `>`. Fd-to-fd dups (`2>&1`, `>&2`) excluded.
+ */
 const STORE_MUTATION_RE = new RegExp(
   [
     String.raw`(?:^|[\s;|&])(?:rm|mv|cp|install|tee|truncate|chmod|chown|chgrp|touch|mkdir|rmdir|ln|dd|shred|wipe)\b`,
-    // path redirect (incl. noclobber) — NOT fd-to-fd like `2>&1` / `>&2`
-    // Negative lookahead skips `>&digit` / `> & digit` fd dup forms.
-    String.raw`(?:^|[\s;|&\d])>{1,2}\|?(?!&\d)`,
+    // any non-fd-dup redirect: `>`, `>>`, `>|`, glued or spaced
+    String.raw`>{1,2}\|?(?!&\d)`,
+    // rg --pre can execute a writer
+    String.raw`\brg\b[^|\n]*\s--pre\b`,
   ].join('|'),
   'i',
 );
