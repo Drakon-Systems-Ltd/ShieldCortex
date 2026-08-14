@@ -1896,14 +1896,21 @@ function buildReason(
   return `${prefix} [${parts.join('; ')}]`;
 }
 
-/** Pick the best provenance from the first classified match that carries one. */
-function firstProvenance(
+/**
+ * #184 dual-review: bind the displayed span and the `in:` provenance to the
+ * SAME match. Prefer the first match that carries a folded source; otherwise
+ * fall back to matches[0] for span-only (inline) evidence.
+ */
+function reasonEvidence(
   matches: readonly ClassifiedMatch[],
-): { source?: string; line?: number; chain?: string } | undefined {
-  for (const m of matches) {
-    if (m.source) return { source: m.source, line: m.line, chain: m.chain };
-  }
-  return undefined;
+): { span?: string; provenance?: { source?: string; line?: number; chain?: string } } {
+  if (matches.length === 0) return {};
+  const withSource = matches.find(m => m.source);
+  const pick = withSource ?? matches[0];
+  const provenance = pick.source
+    ? { source: pick.source, line: pick.line, chain: pick.chain }
+    : undefined;
+  return { span: pick.span, provenance };
 }
 
 function matchEvidence(
@@ -3247,9 +3254,9 @@ export function evaluateToolCall(
   const catastrophicExecuted = catastrophicMatches.filter(m => m.tier === 'executed');
   if (catastrophicExecuted.length > 0) {
     const catastrophicSignals = catastrophicExecuted.map(m => m.signal);
-    const prov = firstProvenance(catastrophicExecuted);
+    const ev = reasonEvidence(catastrophicExecuted);
     return withReview(verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
-      buildReason('catastrophic operation blocked', catastrophicSignals, catastrophicExecuted[0].span, prov),
+      buildReason('catastrophic operation blocked', catastrophicSignals, ev.span, ev.provenance),
       [...catastrophicSignals, ...opaqueSignals],
       matchEvidence(catastrophicExecuted)));
   }
@@ -3455,11 +3462,12 @@ export function evaluateToolCall(
     const surviving = [...new Set(dangerSignals)]
       .map(s => dangerEvidence.get(s))
       .filter((m): m is ClassifiedMatch => m !== undefined);
-    const prov = firstProvenance(surviving);
-    // Prefer a span that still belongs to a surviving signal after filters.
-    const spanForReason = surviving[0]?.span ?? dangerSpan;
+    const ev = reasonEvidence(surviving);
+    // Prefer classified span/provenance; fall back to first-write dangerSpan
+    // when evidence was synthetic (no ClassifiedMatch).
+    const spanForReason = ev.span ?? dangerSpan;
     return withReview(verdict('require_approval', 'dangerous', family, action,
-      buildReason('recognised dangerous operation requires approval', dangerSignals, spanForReason, prov),
+      buildReason('recognised dangerous operation requires approval', dangerSignals, spanForReason, ev.provenance),
       [...dangerSignals, ...opaqueSignals],
       matchEvidence(surviving)));
   }
@@ -3478,12 +3486,13 @@ export function evaluateToolCall(
       const m = dangerPayloadOnly.find(x => x.signal === s);
       return m ? [m] : [];
     });
+    const ev = reasonEvidence(payloadMatches);
     return withReview(verdict('allow', 'sensitive', family, canonical,
       buildReason(
         'dangerous vocabulary appears only as data inside folded script source',
         payloadSignals,
-        dangerPayloadOnly[0].span,
-        firstProvenance(payloadMatches),
+        ev.span ?? dangerPayloadOnly[0]?.span,
+        ev.provenance,
       ),
       [...payloadSignals, ...opaqueSignals],
       matchEvidence(payloadMatches)));
