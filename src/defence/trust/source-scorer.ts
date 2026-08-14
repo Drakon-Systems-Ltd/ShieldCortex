@@ -15,7 +15,7 @@ const BASE_SCORES: Record<string, number> = {
   'file:import': 0.4,
 };
 
-const TYPE_SCORES: Record<DefenceSource['type'], number> = {
+export const TYPE_SCORES: Record<DefenceSource['type'], number> = {
   user: 1.0,
   cli: 0.9,
   hook: 0.8,
@@ -26,6 +26,36 @@ const TYPE_SCORES: Record<DefenceSource['type'], number> = {
   email: 0.4,
   web: 0.3,
 };
+
+/**
+ * Shared-context bootstrap floor. A type scoring strictly below this is
+ * untrusted inbound unless explicitly exempted.
+ *
+ * 0.6 is the generic `file` band: file:* stays available on get_context.
+ * Identifier pins such as file:import (0.4) are write-path quarantine
+ * adjustments, not a bootstrap denylist — this helper is type-level so a
+ * restore still hydrates the session.
+ *
+ * `agent` scores 0.5, identical to `tool_response`. It is exempted on
+ * purpose: guardReadBySensitivity promises INTERNAL project context to a
+ * low-trust subagent (credential isolation without the availability
+ * blackout). This function therefore does NOT implement "a capture written
+ * by agent A must not bootstrap agent B" — that is checkAccess / own-only
+ * on the per-caller fetch path.
+ */
+export const UNTRUSTED_INBOUND_FLOOR = 0.6;
+
+export const UNTRUSTED_INBOUND_EXEMPT_TYPES: ReadonlySet<DefenceSource['type']> = new Set(['agent']);
+
+export function isUntrustedInboundType(type: string): boolean {
+  const normalised = type.toLowerCase();
+  if ((UNTRUSTED_INBOUND_EXEMPT_TYPES as ReadonlySet<string>).has(normalised)) {
+    return false;
+  }
+  const score = TYPE_SCORES[normalised as DefenceSource['type']];
+  if (score === undefined) return true;
+  return score < UNTRUSTED_INBOUND_FLOOR;
+}
 
 const HIERARCHY_DISPLAY = [
   'user:direct = 1.0',

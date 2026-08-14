@@ -12,6 +12,104 @@
 import type { DefenceSource } from '../types.js';
 import { scoreSource } from './source-scorer.js';
 
+/** Highest trust an integrator env string may confer. Host-attested rungs sit above this. */
+export const ENV_OVERRIDE_SCORE_CAP = 0.5;
+
+const ENV_OVERRIDE_ORIGIN = 'env-override';
+
+/** Rungs the host process attests, never a caller-controlled string. These remap to `agent`. */
+type HostOnlySourceType = 'user' | 'cli';
+
+const HOST_ONLY_TYPES: ReadonlySet<string> = new Set<HostOnlySourceType>(['user', 'cli']);
+
+/** Every DefenceSource type an integrator env string is allowed to keep. */
+type OverrideSourceType = Exclude<DefenceSource['type'], HostOnlySourceType>;
+
+/**
+ * Runtime allowlist, derived from `DefenceSource['type']` rather than hand-listed.
+ *
+ * The `Record<OverrideSourceType, true>` annotation is the completeness check:
+ * it must name EVERY non-host type, so adding a member to `DefenceSource['type']`
+ * fails to compile here until that member is classified. A hand-maintained list
+ * silently omitted `tool_response`, which let `tool_response:browser` fall
+ * through to `agent:browser` — 0.3 and inbound-EXEMPT, i.e. strictly weaker than
+ * the 0.5 inbound-blocked row an honest stamp produces.
+ */
+const OVERRIDE_TYPE_TABLE: Record<OverrideSourceType, true> = {
+  hook: true,
+  email: true,
+  web: true,
+  agent: true,
+  file: true,
+  api: true,
+  tool_response: true,
+};
+
+const OVERRIDE_TYPES: ReadonlySet<string> = new Set(Object.keys(OVERRIDE_TYPE_TABLE));
+
+/** Stamp env provenance onto an identifier, idempotently. */
+function withOverrideOrigin(identifier: string): string {
+  return identifier.startsWith(`${ENV_OVERRIDE_ORIGIN}>`)
+    ? identifier
+    : `${ENV_OVERRIDE_ORIGIN}>${identifier}`;
+}
+
+/**
+ * Bind a SHIELDCORTEX_AGENT_SOURCE claim to an identity scoreSource will
+ * actually honour at ≤ ENV_OVERRIDE_SCORE_CAP. Pipeline / store / ACL all
+ * re-score from type+identifier, so a ceiling-number-only clamp would leave
+ * `agent:user-spawned` at 0.9 on the write path.
+ *
+ * Three bands, by the score the claimed identity actually earns:
+ *
+ * - **Below the cap** — keep type and identifier verbatim. Stamping provenance
+ *   here would RAISE trust (`agent:some-agent` 0.3 → `env-override>` 0.5).
+ * - **Exactly at the cap** — keep the type (it is already capped, and the type
+ *   carries the inbound-untrusted decision), but stamp the identifier. A bare
+ *   `agent:cron` / `tool_response:browser` is indistinguishable from the
+ *   host-attested `${type}:${identifier}` ACL key of a real scheduler or tool
+ *   response; the prefix keeps the score at 0.5 while making the row's env
+ *   provenance legible to the ACL and the audit ledger.
+ * - **Above the cap** — rebind onto the agent hierarchy at `env-override>…`,
+ *   which `scoreAgent` pins at 0.5.
+ */
+export function bindIntegratorOverrideSource(
+  claimedType: string,
+  identifier: string,
+): DefenceSource {
+  // Env input is an open string. Completeness over DefenceSource cannot see
+  // TOOL_RESPONSE / mystery / typos. Lowercase first (same as
+  // isUntrustedInboundType) and never fall through to `agent` — that is the
+  // only inbound-exempt type.
+  const normalised = claimedType.trim().toLowerCase();
+  let sourceType: DefenceSource['type'];
+  if (HOST_ONLY_TYPES.has(normalised)) {
+    sourceType = 'agent';
+  } else if (OVERRIDE_TYPES.has(normalised)) {
+    sourceType = normalised as OverrideSourceType;
+  } else {
+    return {
+      type: 'web',
+      identifier: `unrecognised>${normalised || claimedType}:${identifier}`,
+    };
+  }
+  const candidate: DefenceSource = { type: sourceType, identifier };
+  const score = scoreSource(candidate).score;
+
+  if (score < ENV_OVERRIDE_SCORE_CAP) {
+    return candidate;
+  }
+  if (score === ENV_OVERRIDE_SCORE_CAP) {
+    return { type: sourceType, identifier: withOverrideOrigin(identifier) };
+  }
+  return {
+    type: 'agent',
+    identifier: sourceType === 'agent'
+      ? withOverrideOrigin(identifier)
+      : withOverrideOrigin(`${sourceType}:${identifier}`),
+  };
+}
+
 export interface EnvDetectionResult {
   source: DefenceSource;
   method:
@@ -28,7 +126,8 @@ export interface EnvDetectionResult {
  * Infer caller source from process environment variables.
  *
  * Priority order:
- * 1. SHIELDCORTEX_AGENT_SOURCE — explicit override (e.g. "agent:user-spawned>task-1")
+ * 1. SHIELDCORTEX_AGENT_SOURCE — explicit override label. May name the
+ *    process (e.g. "agent:user-spawned>task-1") but cannot outrank 0.5.
  * 2. CLAUDE_CODE_ENTRYPOINT=subagent — Claude Code sub-agent
  * 3. CLAUDE_AGENT_CONTEXT — generic agent context marker
  * 4. Codex origin / thread vars — Codex CLI or VS Code extension
@@ -39,12 +138,26 @@ export function inferSourceFromEnvironment(): EnvDetectionResult {
   // 1. Explicit ShieldCortex source override (for integrators)
   const scSource = process.env.SHIELDCORTEX_AGENT_SOURCE;
   if (scSource) {
-    const [type, ...rest] = scSource.split(':');
-    const identifier = rest.join(':') || scSource;
-    const validTypes = ['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api'] as const;
-    const sourceType = validTypes.includes(type as any) ? (type as DefenceSource['type']) : 'agent';
+    const colon = scSource.indexOf(':');
+    // Bare token (no `:`) is the documented "defaults to agent" form.
+    // A typed claim (`type:identifier`) is classified by bind — unknown
+    // types must not inherit that default, or `mystery:x` becomes agent:x.
+    const bound = colon === -1
+      ? bindIntegratorOverrideSource('agent', scSource)
+      : bindIntegratorOverrideSource(
+          scSource.slice(0, colon),
+          scSource.slice(colon + 1) || scSource,
+        );
+    // Integrator override labels the process. It is not a host attestation.
+    // `user` and `cli` remap to `agent` (operator/CLI rungs are host-only).
+    // Any remaining claim that would score above 0.5 — including the
+    // documented `agent:user-spawned` 0.9 origin, plus hook/api residuals —
+    // is rebound to `agent:env-override>…` so scoreSource itself is ≤0.5.
+    // Claims that land exactly on 0.5 keep their type (so `tool_response`
+    // stays inbound-blocked) but carry an `env-override>` identifier so they
+    // cannot impersonate a host-attested `agent:cron` / `tool_response:*` row.
     return {
-      source: { type: sourceType, identifier },
+      source: bound,
       method: 'env:SHIELDCORTEX_AGENT_SOURCE',
       confidence: 'high',
     };
@@ -179,7 +292,10 @@ export function clampSourceToCeiling(
   declaredSource: DefenceSource | undefined,
 ): CeilingClampResult {
   const detection = inferSourceFromEnvironment();
-  const ceilingScore = scoreSource(detection.source).score;
+  const rawCeiling = scoreSource(detection.source).score;
+  const ceilingScore = detection.method === 'env:SHIELDCORTEX_AGENT_SOURCE'
+    ? Math.min(rawCeiling, ENV_OVERRIDE_SCORE_CAP)
+    : rawCeiling;
 
   if (!declaredSource) {
     return {

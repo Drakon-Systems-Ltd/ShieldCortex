@@ -7,6 +7,7 @@
  *   "user-spawned>task-1>subtask-2"   → 0.9 × 0.7² = 0.44
  *   "cron"                            → base trust 0.5
  *   "agent-spawned"                   → base trust 0.3
+ *   "env-override>…"                  → pinned 0.5 (integrator env claim)
  */
 
 export interface AgentTrustConfig {
@@ -23,6 +24,7 @@ export const DEFAULT_AGENT_CONFIG: AgentTrustConfig = {
     'user-spawned': 0.9,
     'user-approved': 0.85,
     'cron': 0.5,
+    'env-override': 0.5,
     'agent-spawned': 0.3,
     'web': 0.2,
   },
@@ -44,6 +46,13 @@ export function scoreAgent(
 
   // Circuit breaker: block agents beyond max depth
   if (depth > config.maxDepth) return 0;
+
+  // Integrator env claims may keep a unique identifier for ACL, but they
+  // cannot ride parent-tier trust. Pin at the origin score (0.5) with no
+  // further decay — the cap is a ceiling, not a forced downgrade below it.
+  if (origin === 'env-override') {
+    return config.originScores['env-override'] ?? 0.5;
+  }
 
   const baseScore = config.originScores[origin] ?? 0.3;
   return Math.round(baseScore * Math.pow(config.decayFactor, depth) * 1000) / 1000;

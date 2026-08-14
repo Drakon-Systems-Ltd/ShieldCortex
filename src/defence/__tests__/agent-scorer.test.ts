@@ -16,6 +16,12 @@ describe('Agent Trust Scorer', () => {
       expect(scoreAgent('user-spawned>task-1>subtask')).toBe(0.441);
     });
 
+    it('should score env-override origin at 0.5 even with a parent-tier suffix', () => {
+      expect(scoreAgent('env-override')).toBe(0.5);
+      expect(scoreAgent('env-override>user-spawned')).toBe(0.5);
+      expect(scoreAgent('env-override>user-spawned>task-1')).toBe(0.5);
+    });
+
     it('should score cron origin at 0.5', () => {
       expect(scoreAgent('cron')).toBe(0.5);
     });

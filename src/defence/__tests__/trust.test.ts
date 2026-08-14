@@ -76,4 +76,28 @@ describe('Trust Source Scorer', () => {
     expect(scoreSource({ type: 'file', identifier: 'import' }).score).toBeLessThan(0.5);
     expect(scoreSource({ type: 'api', identifier: 'dashboard' }).score).toBe(0.7);
   });
+
+  it('derives untrusted-inbound types from the score table with agent exempted', async () => {
+    const {
+      isUntrustedInboundType,
+      TYPE_SCORES,
+      UNTRUSTED_INBOUND_FLOOR,
+    } = await import('../trust/source-scorer.js');
+
+    expect(isUntrustedInboundType('web')).toBe(true);
+    expect(isUntrustedInboundType('email')).toBe(true);
+    expect(isUntrustedInboundType('tool_response')).toBe(true);
+    expect(isUntrustedInboundType('agent')).toBe(false);
+    expect(isUntrustedInboundType('file')).toBe(false);
+    expect(isUntrustedInboundType('cli')).toBe(false);
+    expect(isUntrustedInboundType('mystery')).toBe(true);
+
+    for (const [type, score] of Object.entries(TYPE_SCORES)) {
+      if (type === 'agent') {
+        expect(isUntrustedInboundType(type)).toBe(false);
+      } else {
+        expect(isUntrustedInboundType(type)).toBe(score < UNTRUSTED_INBOUND_FLOOR);
+      }
+    }
+  });
 });
