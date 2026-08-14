@@ -404,7 +404,10 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(decisionOf(result.stdout).permissionDecision).toBe('deny');
       const body = delivered();
       expect(body.event).toBe('action_guard_denial');
-      expect(body.sessionId).toBeUndefined();
+      // #284: session may be present as a hashed sc- id (never the raw unsafe session_id).
+      if (body.sessionId !== undefined) {
+        expect(String(body.sessionId)).toMatch(/^sc-[a-f0-9]{16}$/);
+      }
       expect(body.cwd).toBeUndefined();
       expect(JSON.stringify(body)).not.toContain(secret);
       expect(JSON.stringify(lastAudit())).not.toContain(secret);
