@@ -106,6 +106,11 @@ describe('#59 — Claude Code hook: dangerous degraded op is gated (ask), never 
     const dir = path.join(tempHome, '.shieldcortex', 'audit');
     const f = fs.readdirSync(dir).find((n) => /^realtime-.*\.jsonl$/.test(n))!;
     const lines = fs.readFileSync(path.join(dir, f), 'utf-8').trim().split('\n');
+    // #284: trailing notify-status rows follow the denial; prefer last non-notify.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const row = JSON.parse(lines[i]) as Record<string, unknown>;
+      if (row.action !== 'notify') return row;
+    }
     return JSON.parse(lines[lines.length - 1]);
   };
 
