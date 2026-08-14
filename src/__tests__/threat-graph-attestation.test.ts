@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { deriveAttested, resolveToolSource } from '../defence/trust/resolve-tool-source.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
 import type { DefenceSource } from '../defence/types.js';
 
 beforeEach(() => {
@@ -192,8 +193,14 @@ describe('#270 — same-score identity is not self-declarable', () => {
       { type: 'file', identifier: 'import' },
       { toolName: 'remember', project: null, strict: false },
     );
-    expect(resolved.source).toEqual({ type: 'file', identifier: 'import' });
+    // Honoured, not clamped — the downgrade is genuine and the TRUST is exactly
+    // the declared 0.4. The identity is stamped `claimed>` because the host never
+    // confirmed it (#283), which keeps it out of the real `file:import` ACL key
+    // without touching the score. See attested-ownership-283.test.ts.
     expect(resolved.clamped).toBe(false);
+    expect(resolved.attested).toBe(false);
+    expect(resolved.source).toEqual({ type: 'file', identifier: 'claimed>import' });
+    expect(scoreSource(resolved.source).score).toBe(0.4);
   });
 
   it('honours a declaration the environment independently confirms', () => {

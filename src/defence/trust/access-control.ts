@@ -9,10 +9,15 @@
  * RESTRICTED is owner (trust ≥ 0.7) or `user` (human operator). A peer
  * high-trust cli/agent is not the operator — credential isolation holds
  * across agents (SCOPE P4).
+ *
+ * Ownership is `${type}:${identifier}` equality against the identity
+ * `resolveToolSource` produced — which is the HOST-ATTESTED stamp, not the
+ * caller's raw declaration (#283). See ./attestation.ts.
  */
 
 import type { DefenceSource } from '../types.js';
 import { scoreSource } from './source-scorer.js';
+import { isUnattestedClaimIdentifier } from './attestation.js';
 
 export interface AccessPolicy {
   canRead: boolean;
@@ -46,7 +51,13 @@ export function checkAccess(
 ): AccessPolicy {
   const trust = scoreSource(source).score;
   const memorySource = memory.source || '__system:unattributed';
+  // The caller key IS the attestation stamp (#283). `resolveToolSource` rewrites
+  // an identity the host did not confirm into the `claimed>` keyspace, which the
+  // host never mints — so a writer-chosen `hook:session-end` cannot string-match
+  // the host-attested `hook:session-end` rows it is impersonating. Read, delete
+  // and revoke all inherit that from this one comparison.
   const callerKey = `${source.type}:${source.identifier}`;
+  const callerAttested = !isUnattestedClaimIdentifier(source.identifier);
   const isOwner = memorySource === callerKey;
   const isRestricted = memory.sensitivity_level === 'RESTRICTED';
 
@@ -116,6 +127,16 @@ export function checkAccess(
     // rows by source.
     if (!memory.source || memorySource === '__system:unattributed') {
       return deny('Revoke denied: unattributed memories cannot be revoked by source');
+    }
+    // Hierarchy revoke is a CROSS-IDENTITY destructive power, granted purely on
+    // the caller's trust NUMBER. A self-declared `hook:session-end` scores 0.8
+    // on a `cli:*` 0.9 host, which would outrank and mass-delete every
+    // `agent:agent-spawned` (0.3) row. Key-separation alone does not stop that —
+    // this branch never consults ownership — so the stamp gates it directly:
+    // only a host-attested identity may outrank anyone. Own-revoke above is
+    // unaffected; a stamped caller still cleans up its own rows.
+    if (!callerAttested) {
+      return deny('Revoke denied: an unattested (self-declared) identity cannot outrank another source');
     }
     const targetTrust = scoreSource(parseStoredSource(memorySource)).score;
     if (targetTrust > 0 && trust >= 0.7 && trust > targetTrust) {

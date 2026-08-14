@@ -11,12 +11,18 @@
  *    its own trust or wear another agent's name.
  * 5. Writes a `SOURCE_MISSING` row when no source was declared, preserving
  *    the existing visibility into unconfigured callers.
+ * 6. Rewrites any identity the host did NOT attest into the `claimed>`
+ *    keyspace, so a below-ceiling self-declaration (`hook:session-end` 0.8 on a
+ *    `cli:*` 0.9 host) can never own, delete or hierarchy-revoke the rows of the
+ *    real holder of that name, and writes a `SOURCE_UNATTESTED_CLAIM` audit row
+ *    (#283). The stamp does not change the trust score.
  */
 
 import type { DefenceSource } from '../types.js';
 import { clampSourceToCeiling } from './env-detector.js';
 import { logAudit } from '../audit/logger.js';
 import { getStrictSourceMode } from '../../cloud/config.js';
+import { markUnattestedIdentifier } from './attestation.js';
 
 export interface ResolveToolSourceOptions {
   /** Tool name (e.g. 'remember', 'recall') — recorded in the audit reason. */
@@ -108,6 +114,41 @@ export function resolveToolSource(
     strict,
     envInferred: env,
   });
+
+  // #283: an unattested identity is writer-chosen. Move it into a disjoint
+  // keyspace BEFORE it leaves this function, so every downstream consumer —
+  // the stored `source` string, the `checkAccess` caller key shared by
+  // read/delete/revoke, and the read guards — inherits the same stamp from one
+  // place. `scoreSource` strips the marker, so trust is unchanged.
+  if (!attested) {
+    source = { type: source.type, identifier: markUnattestedIdentifier(source.identifier) };
+    try {
+      logAudit({
+        memory_id: null,
+        project: options.project,
+        timestamp: new Date().toISOString(),
+        source_type: source.type,
+        source_identifier: source.identifier,
+        trust_score: declaredScore ?? ceilingScore,
+        sensitivity_level: 'PUBLIC',
+        firewall_result: 'ALLOW',
+        operation: null, // source-resolution meta-event, not a memory read/write/delete
+        anomaly_score: 0,
+        threat_indicators: JSON.stringify(['unattested_identity']),
+        blocked_patterns: '[]',
+        reason:
+          `SOURCE_UNATTESTED_CLAIM: tool=${options.toolName}, ` +
+          `declared=${declaredSource?.type}:${declaredSource?.identifier} (score=${declaredScore}), ` +
+          `bound=${source.type}:${source.identifier} — below the ${detection.method} ` +
+          `ceiling ${ceilingScore}, so the environment never confirmed it; ` +
+          `ownership is keyed on the stamped identity, not the claimed name`,
+        fragmentation_score: null,
+        pipeline_duration_ms: null,
+      });
+    } catch {
+      // Audit logging must never break tool execution.
+    }
+  }
 
   if (clamped && declaredSource) {
     try {

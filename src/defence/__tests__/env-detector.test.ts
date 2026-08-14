@@ -442,10 +442,22 @@ describe('Environment-Based Source Inference', () => {
         strict: false,
       });
 
-      expect(resolved.source).toEqual(declared);
-      // An accepted self-declaration is honoured but not attested.
+      // An accepted self-declaration is honoured but NOT attested — so its
+      // trust is kept and its ACL identity is stamped into the `claimed>`
+      // keyspace the host never mints (#283). Trust is unchanged: the stamp
+      // separates ownership, not tiers.
+      expect(resolved.clamped).toBe(false);
       expect(resolved.attested).toBe(false);
-      expect(logAudit).not.toHaveBeenCalled();
+      expect(resolved.source).toEqual({ type: 'agent', identifier: 'claimed>user-spawned>task-1' });
+      expect(scoreSource(resolved.source).score).toBe(scoreSource(declared).score);
+
+      // It is audited now — "honoured but unconfirmed" was previously silent.
+      expect(logAudit).toHaveBeenCalledTimes(1);
+      const entry = logAudit.mock.calls[0][0] as { firewall_result: string; reason: string; threat_indicators: string };
+      expect(entry.firewall_result).toBe('ALLOW');
+      expect(entry.reason).toContain('SOURCE_UNATTESTED_CLAIM');
+      expect(entry.reason).toContain('declared=agent:user-spawned>task-1');
+      expect(entry.threat_indicators).toContain('unattested_identity');
     });
 
     it('writes a SOURCE_MISSING audit row when no source is declared', () => {

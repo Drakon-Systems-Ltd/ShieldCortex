@@ -4,6 +4,7 @@
 
 import type { DefenceSource, TrustScore } from '../types.js';
 import { scoreAgent, buildAgentHierarchy } from './agent-scorer.js';
+import { stripUnattestedClaim } from './attestation.js';
 
 const BASE_SCORES: Record<string, number> = {
   'user:direct': 1.0,
@@ -52,7 +53,19 @@ export function isUntrustedInboundType(type: string): boolean {
   if ((UNTRUSTED_INBOUND_EXEMPT_TYPES as ReadonlySet<string>).has(normalised)) {
     return false;
   }
-  const score = TYPE_SCORES[normalised as DefenceSource['type']];
+  return isUntrustedInboundTypeUnexempted(normalised);
+}
+
+/**
+ * Score-only inbound classification, ignoring the exemption list.
+ *
+ * The `agent` exemption exists to keep INTERNAL project context available to a
+ * REAL subagent. It is keyed on a type string, and a type string is
+ * writer-chosen — so it must not apply to an identity the host never attested
+ * (#283). The read guard calls this variant for stamped rows.
+ */
+export function isUntrustedInboundTypeUnexempted(type: string): boolean {
+  const score = TYPE_SCORES[type.toLowerCase() as DefenceSource['type']];
   if (score === undefined) return true;
   return score < UNTRUSTED_INBOUND_FLOOR;
 }
@@ -70,7 +83,12 @@ const HIERARCHY_DISPLAY = [
 ];
 
 export function scoreSource(source: DefenceSource): TrustScore {
-  const key = `${source.type}:${source.identifier}`;
+  // The unattested-claim stamp (#283) separates ACL KEYSPACE, never trust. Score
+  // the underlying identity so the stamp can neither raise trust (`file:import`
+  // 0.4 would fall back to the `file` type score 0.6; an `agent` identifier
+  // would gain a decay level) nor lower it into a different policy band.
+  const identifier = stripUnattestedClaim(source.identifier);
+  const key = `${source.type}:${identifier}`;
 
   // Exact match overrides
   const baseScore = BASE_SCORES[key];
@@ -80,13 +98,13 @@ export function scoreSource(source: DefenceSource): TrustScore {
 
   // Agent hierarchy scoring
   if (source.type === 'agent') {
-    const score = scoreAgent(source.identifier);
+    const score = scoreAgent(identifier);
     return {
       score,
       source,
       hierarchy: [
         'Agent Hierarchy:',
-        ...buildAgentHierarchy(source.identifier),
+        ...buildAgentHierarchy(identifier),
         `>> ${key} = ${score}`,
       ],
     };

@@ -21,7 +21,8 @@
 
 import { checkAccess } from './access-control.js';
 import { redactContent } from '../sensitivity/redaction.js';
-import { isUntrustedInboundType } from './source-scorer.js';
+import { isUntrustedInboundType, isUntrustedInboundTypeUnexempted } from './source-scorer.js';
+import { isUnattestedClaimIdentifier } from './attestation.js';
 import type { DefenceSource } from '../types.js';
 import type { Memory, ContextSummary } from '../../memory/types.js';
 
@@ -93,6 +94,18 @@ function isUntrustedInboundSource(source: string | null | undefined): boolean {
   if (!source) return false;
   const sep = source.indexOf(':');
   const type = (sep === -1 ? source : source.slice(0, sep)).toLowerCase();
+  const identifier = sep === -1 ? '' : source.slice(sep + 1);
+  // #283: the `agent` exemption is an AVAILABILITY carve-out for identities the
+  // host attested (env-inferred `agent:agent-spawned` and friends) — a real
+  // subagent still gets INTERNAL project context. It must not extend to a
+  // writer-chosen `agent:` name, which is precisely "a capture written by agent
+  // A bootstrapping agent B". Read the stamp, not the self-declared type: a
+  // stamped agent row falls back to its score (0.5 < the 0.6 floor) and is
+  // treated as untrusted inbound. Other types keep their existing type-level
+  // decision, so a stamped `file:` restore still hydrates the session.
+  if (isUnattestedClaimIdentifier(identifier)) {
+    return isUntrustedInboundTypeUnexempted(type);
+  }
   return isUntrustedInboundType(type);
 }
 

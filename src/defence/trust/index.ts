@@ -5,6 +5,13 @@ export { checkAccess } from './access-control.js';
 export { inferSourceFromEnvironment, resolveSource, clampSourceToCeiling } from './env-detector.js';
 export type { CeilingClampResult } from './env-detector.js';
 export { resolveToolSource } from './resolve-tool-source.js';
+export {
+  UNATTESTED_CLAIM_MARKER,
+  isUnattestedClaimIdentifier,
+  isUnattestedClaimStoredSource,
+  stripUnattestedClaim,
+  markUnattestedIdentifier,
+} from './attestation.js';
 export type { ResolveToolSourceOptions } from './resolve-tool-source.js';
 export type { AccessPolicy, AccessCheckMemory } from './access-control.js';
 export type { AgentTrustConfig } from './agent-scorer.js';

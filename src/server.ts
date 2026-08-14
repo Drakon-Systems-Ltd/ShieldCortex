@@ -363,6 +363,14 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       // it from the environment, NOT the MCP-declared `source` param. Honouring a
       // declared identity would let a caller claim ownership of any peer source's
       // memories (the clamp only caps trust SCORE, not identity).
+      //
+      // PINNED (#283): do NOT switch this to resolveToolSource / args.source.
+      // `args.source` is accepted on the schema for interface symmetry and is
+      // deliberately discarded here. The attestation stamp makes a declared
+      // identity SAFE to key ownership on, but this call site is the one that
+      // reaches `checkAccess('revoke')` — the only destructive cross-identity
+      // branch — so it stays env-inferred and never grows a declared-identity
+      // path. Regression: src/__tests__/attested-ownership-283.test.ts.
       const source = inferSourceFromEnvironment().source;
       const result = await executeForget({ ...args, source });
       return {
