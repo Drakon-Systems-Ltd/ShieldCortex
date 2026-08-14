@@ -90,6 +90,12 @@ describe('Action Guard hook — prompt-surface rule', () => {
     const dir = path.join(tempHome, '.shieldcortex', 'audit');
     const file = fs.readdirSync(dir).find((n) => /^realtime-.*\.jsonl$/.test(n))!;
     const lines = fs.readFileSync(path.join(dir, file), 'utf-8').trim().split('\n');
+    // #284 writes a trailing notify-status row after the denial. Prefer the
+    // last non-notify intercept so existing assertions keep reading the verdict.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const row = JSON.parse(lines[i]) as Record<string, unknown>;
+      if (row.action !== 'notify') return row;
+    }
     return JSON.parse(lines[lines.length - 1]);
   }
 
@@ -163,7 +169,10 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(String(rows[0].surface)).toMatch(/redacted action surface/i);
       expect(JSON.stringify(rows[0])).not.toContain(DANGEROUS_COMMAND);
       expect(JSON.stringify(rows[0])).not.toContain(secret);
-      expect(String(rows[0].correlationId)).toMatch(/^sc-[a-f0-9]{16}$/);
+      // #284 Face 3 — correlationId is action-scoped; session identity is sessionId.
+      expect(String(rows[0].correlationId)).toMatch(/^act-[a-f0-9]{16}$/);
+      expect(rows[0].origin).toBe('claude-code-hook');
+      expect(String(rows[0].actionId)).toMatch(/^act-[a-f0-9]{16}$/);
     });
 
     it('records the local denial before notify loading, even when the configured dist root is unusable', async () => {
@@ -329,8 +338,11 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(deliveries[0].headers['x-shieldcortex-event']).toBe('action_guard_denial');
       expect(body.event).toBe('action_guard_denial');
       expect(body.outcome).toBe('denied_no_prompt_surface');
-      expect(body.correlationId).toMatch(/^sc-[a-f0-9]{16}$/);
-      expect(body.sessionId).toBeUndefined();
+      // #284 — correlation is the action id; session may be present as sessionId.
+      expect(String(body.correlationId)).toMatch(/^act-[a-f0-9]{16}$/);
+      if (body.sessionId !== undefined) {
+        expect(String(body.sessionId)).toMatch(/^sc-[a-f0-9]{16}$/);
+      }
       expect(body.cwd).toBeUndefined();
       expect(String(body.surface)).toMatch(/redacted action surface/i);
       expect(JSON.stringify(body)).not.toContain(DANGEROUS_COMMAND);

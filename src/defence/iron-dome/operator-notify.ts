@@ -397,6 +397,20 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'filesystem-destructive', 'destructive-filesystem', 'dangerous-shell',
   'command-exec', 'network-egress', 'credential-access', 'data-exfiltration',
   'untrusted-script', 'reviewed-script', 'shell-injection', 'persistence-risk',
+  // #284 Face 1 — keep real guard signals on operator-notify / denial rows.
+  'install-package', 'git-force-push', 'local-package-install', 'move-or-copy', 'file-delete', 'service-restart', 'exec-like',
+  'recursive-force-delete', 'delete-root-or-home', 'fork-bomb', 'format-filesystem',
+  'raw-disk-write', 'redirect-to-block-device', 'disk-partition-tool',
+  'pipe-download-to-shell', 'pipe-download-stdin-exec', 'pipe-download-module-exec',
+  'recursive-perms-on-root', 'shred-device', 'git-delete-branch',
+  'stop-process-or-service', 'modify-network-firewall', 'install-package-global',
+  'modify-scheduler', 'truncate-to-zero', 'wipe-history-or-logs',
+  'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger',
+  'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
+  'decode-pipe-to-shell', 'change-permissions', 'git-mutate',
+  'recursive-find-delete', 'external-egress', 'oversized-command',
+  'opaque-script-invocation', 'opaque-script', 'secret-egress-fold',
+  'force-push', 'force-push-invocation',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
@@ -448,7 +462,8 @@ function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string):
 
 function safeActionGuardCorrelationId(v: unknown): string | undefined {
   const text = String(v ?? '').trim();
-  return /^sc-[a-f0-9]{16}$/.test(text) ? text : undefined;
+  // #284: correlationId is action-scoped (act-…) going forward; keep sc- for legacy.
+  return /^(?:act|sc)-[a-f0-9]{16}$/.test(text) ? text : undefined;
 }
 
 function safeDetectedAt(v: unknown): string {
@@ -473,8 +488,17 @@ export function buildActionGuardOutcomeNotification(
     reason: safeActionGuardReason(event, outcome),
     detectedAt: safeDetectedAt(input.detectedAt),
   };
-  const correlationId = safeActionGuardCorrelationId(input.correlationId);
+  const correlationId = safeActionGuardCorrelationId(input.correlationId)
+    ?? safeActionGuardCorrelationId((input as { actionId?: string }).actionId);
   if (correlationId) n.correlationId = correlationId;
+  const actionId = safeActionGuardCorrelationId((input as { actionId?: string }).actionId);
+  if (actionId) (n as { actionId?: string }).actionId = actionId;
+  const sessionRaw = String((input as { sessionId?: string }).sessionId ?? '').trim();
+  if (/^sc-[a-f0-9]{16}$/.test(sessionRaw)) (n as { sessionId?: string }).sessionId = sessionRaw;
+  const origin = String((input as { origin?: string }).origin ?? '').trim();
+  if (origin === 'claude-code-hook' || origin === 'openclaw-interceptor') {
+    (n as { origin?: string }).origin = origin;
+  }
   return n;
 }
 
@@ -559,6 +583,9 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
     `Outcome:   ${n.outcome}`,
     `Reason:    ${n.reason}`,
   ];
+  if ((n as { origin?: string }).origin) lines.push(`Origin:    ${(n as { origin?: string }).origin}`);
+  if ((n as { actionId?: string }).actionId) lines.push(`Action:    ${(n as { actionId?: string }).actionId}`);
+  if ((n as { sessionId?: string }).sessionId) lines.push(`Session:   ${(n as { sessionId?: string }).sessionId}`);
   if (n.correlationId) lines.push(`Correlation: ${n.correlationId}`);
   lines.push(`At:        ${n.detectedAt}`);
   lines.push('');
