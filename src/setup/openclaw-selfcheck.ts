@@ -178,7 +178,10 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
   const rosterProof = rosterState === 'loaded';
 
   if (rosterState === 'loaded') {
-    if (input.gatewayPidRegistrationSeenAfterBoot === true && !(liveRoster?.includes(pluginId))) {
+    // Prefer the true evidence source. gather/selfcheck may promote pluginId
+    // into liveRoster after a gateway-PID hit (#216 dual-review nit) — still
+    // say hot-reload when that is how we proved load.
+    if (input.gatewayPidRegistrationSeenAfterBoot === true) {
       reasons.push(
         'roster proof: plugin registration attributed to the RUNNING gateway PID after boot — live load proven (hot-reload / post-boot), not merely installed',
       );
