@@ -50,7 +50,8 @@ jest.unstable_mockModule('../defence/audit/logger.js', () => ({
 }));
 
 const { logAudit } = (await import('../defence/audit/logger.js')) as unknown as { logAudit: jest.Mock };
-const { resolveToolSource } = await import('../defence/trust/resolve-tool-source.js');
+const { resolveToolSource, deriveEnvConfirmed, deriveAttested } =
+  await import('../defence/trust/resolve-tool-source.js');
 
 const ENV_KEYS = [
   'CLAUDE_CODE_ENTRYPOINT',
@@ -81,12 +82,25 @@ const RUNGS: ReadonlyArray<{ declared: DefenceSource; score: number }> = [
   { declared: { type: 'agent', identifier: 'browser' }, score: 0.3 },
 ];
 
+/**
+ * BOTH postures. The first cut of this suite pinned `strict: false` in every
+ * helper, and that blind spot hid the whole fix on the deployment the product
+ * calls hardened: `deriveAttested` returns true for strict regardless of
+ * evidence, so keying the ownership stamp on it meant strictSourceMode was the
+ * one mode where every rung below kept the bare key. The stamp is keyed on
+ * env-confirmation now; run the entire matrix on both to hold that.
+ */
+const STRICT_MODES = [false, true] as const;
+
+/** Set per outer describe.each run; read by `resolve`. */
+let activeStrict = false;
+
 function key(s: DefenceSource): string {
   return `${s.type}:${s.identifier}`;
 }
 
 function resolve(declared: DefenceSource): DefenceSource {
-  return resolveToolSource(declared, { toolName: 'recall', project: 'p', strict: false }).source;
+  return resolveToolSource(declared, { toolName: 'recall', project: 'p', strict: activeStrict }).source;
 }
 
 function setHost(env: Record<string, string>): void {
@@ -94,10 +108,11 @@ function setHost(env: Record<string, string>): void {
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
 }
 
-describe('#283 unattested below-ceiling claims cannot own host-attested rows', () => {
+describe.each(STRICT_MODES)('#283 unattested below-ceiling claims cannot own host-attested rows (strictSourceMode=%s)', (strict) => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
+    activeStrict = strict;
     logAudit.mockClear();
     for (const k of ENV_KEYS) delete process.env[k];
   });
@@ -110,7 +125,7 @@ describe('#283 unattested below-ceiling claims cannot own host-attested rows', (
 
     it('infers the 0.9 cli ceiling this issue is about', () => {
       const ceiling = resolveToolSource(undefined, {
-        toolName: 'recall', project: 'p', strict: false,
+        toolName: 'recall', project: 'p', strict: activeStrict,
       });
       expect(key(ceiling.source)).toBe(expectedCeiling);
       expect(scoreSource(ceiling.source).score).toBe(0.9);
@@ -194,7 +209,7 @@ describe('#283 unattested below-ceiling claims cannot own host-attested rows', (
     it('an identity the environment DOES confirm is attested and left unstamped', () => {
       const [type, identifier] = expectedCeiling.split(':');
       const declared = { type, identifier } as DefenceSource;
-      const resolved = resolveToolSource(declared, { toolName: 'recall', project: 'p', strict: false });
+      const resolved = resolveToolSource(declared, { toolName: 'recall', project: 'p', strict: activeStrict });
       expect(resolved.attested).toBe(true);
       expect(key(resolved.source)).toBe(expectedCeiling);
 
@@ -244,6 +259,40 @@ describe('#283 unattested below-ceiling claims cannot own host-attested rows', (
         checkAccess({ id: 8, source: 'agent:agent-spawned', sensitivity_level: 'INTERNAL' }, caller, 'revoke').canDelete,
       ).toBe(false);
     });
+  });
+});
+
+describe('#283 the ownership stamp is keyed on evidence, not on the posture toggle', () => {
+  // The regression that CHANGES_REQUESTED #287: `deriveAttested` is the LEDGER
+  // bit (it rides to defence_audit.source_attested and gates threat-graph
+  // accrual), and it returns true for strict by design. Keying the ownership
+  // rewrite on it meant strictSourceMode — the mode operators turn ON to harden
+  // — was the one posture where a writer-chosen `hook:session-end` kept the
+  // bare key and could own, delete and hierarchy-revoke the real holder's rows.
+  const declared: DefenceSource = { type: 'hook', identifier: 'session-end' };
+  const env: DefenceSource = { type: 'cli', identifier: 'mcp' };
+
+  it('does not confirm an identity the environment never saw', () => {
+    // strict is not a parameter of this predicate at all — that is the fix.
+    expect(deriveEnvConfirmed({ declared, clamped: false, envInferred: env })).toBe(false);
+  });
+
+  it('keeps the ledger bit meaning "strict attests everything" (threat-graph pin)', () => {
+    expect(deriveAttested({ declared, resolved: declared, clamped: false, strict: true })).toBe(true);
+    expect(deriveAttested({ declared, resolved: declared, clamped: false, strict: false })).toBe(false);
+  });
+
+  it('the two bits are allowed to disagree, and only env-confirmation drives the stamp', () => {
+    // Precisely the divergence the fix introduces: attested (ledger) true,
+    // env-confirmed (ownership) false → the identity is still stamped.
+    expect(deriveAttested({ declared, resolved: declared, clamped: false, strict: true, envInferred: env })).toBe(true);
+    expect(deriveEnvConfirmed({ declared, clamped: false, envInferred: env })).toBe(false);
+  });
+
+  it('confirms what the environment DID infer, and anything the clamp rebound', () => {
+    expect(deriveEnvConfirmed({ declared: env, clamped: false, envInferred: env })).toBe(true);
+    expect(deriveEnvConfirmed({ declared, clamped: true, envInferred: env })).toBe(true);
+    expect(deriveEnvConfirmed({ declared: undefined, clamped: false, envInferred: env })).toBe(true);
   });
 });
 

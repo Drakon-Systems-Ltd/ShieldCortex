@@ -11,11 +11,12 @@
  *    its own trust or wear another agent's name.
  * 5. Writes a `SOURCE_MISSING` row when no source was declared, preserving
  *    the existing visibility into unconfigured callers.
- * 6. Rewrites any identity the host did NOT attest into the `claimed>`
+ * 6. Rewrites any identity the ENVIRONMENT did not confirm into the `claimed>`
  *    keyspace, so a below-ceiling self-declaration (`hook:session-end` 0.8 on a
  *    `cli:*` 0.9 host) can never own, delete or hierarchy-revoke the rows of the
  *    real holder of that name, and writes a `SOURCE_UNATTESTED_CLAIM` audit row
- *    (#283). The stamp does not change the trust score.
+ *    (#283). The stamp does not change the trust score, and it does not depend
+ *    on strictSourceMode — see `deriveEnvConfirmed` vs `deriveAttested`.
  */
 
 import type { DefenceSource } from '../types.js';
@@ -47,12 +48,46 @@ export interface ResolvedToolSource {
 }
 
 /**
+ * Did the ENVIRONMENT confirm this identity? Pure, exported for exhaustive
+ * unit testing.
+ *
+ * This is the physical question — "did anything other than the writer vouch
+ * for this name?" — and it is the ONLY input to the `claimed>` ownership stamp.
+ * Deliberately NOT a function of strictSourceMode: strict mode is an operator
+ * posture toggle, not a source of evidence, and a mode that hardens
+ * consequences must not be the thing that hands a writer-chosen name the
+ * ownership key it could not earn otherwise (#283 strict path).
+ */
+export function deriveEnvConfirmed(input: {
+  declared: DefenceSource | undefined;
+  clamped: boolean;
+  envInferred?: DefenceSource;
+}): boolean {
+  // Nothing declared — the identity IS the environment inference.
+  if (!input.declared) return true;
+  // Over-claim rejected: the identity we return is the env ceiling, not theirs.
+  if (input.clamped) return true;
+  // Declared exactly what the environment independently inferred.
+  return !!(
+    input.envInferred
+    && input.declared.type === input.envInferred.type
+    && input.declared.identifier === input.envInferred.identifier
+  );
+}
+
+/**
  * Pure attestation derivation (exported for exhaustive unit testing).
  *
- * strictSourceMode does not verify identities — it is the operator's opt-in
- * to hardened consequences (unknown sources score 0.3, sub-trust writes
- * auto-quarantine), so risk-based trust penalties keyed on claimed
- * identities are part of the posture they chose.
+ * This is the LEDGER bit — it rides to `defence_audit.source_attested` and
+ * gates threat-graph risk accrual and graph conflict trust. strictSourceMode
+ * does not verify identities, but it is the operator's opt-in to hardened
+ * consequences (unknown sources score 0.3, sub-trust writes auto-quarantine),
+ * so risk-based trust penalties keyed on claimed identities are part of the
+ * posture they chose — hence strict still attests here.
+ *
+ * That is precisely why this bit must NOT drive the ownership stamp: see
+ * `deriveEnvConfirmed`. Under strict, ownership keys on env-confirmation while
+ * the ledger keeps its wider meaning, and the two no longer have to agree.
  */
 export function deriveAttested(input: {
   declared: DefenceSource | undefined;
@@ -62,16 +97,7 @@ export function deriveAttested(input: {
   envInferred?: DefenceSource;
 }): boolean {
   if (input.strict) return true;
-  if (!input.declared) return true;
-  if (input.clamped) return true;
-  if (
-    input.envInferred &&
-    input.declared.type === input.envInferred.type &&
-    input.declared.identifier === input.envInferred.identifier
-  ) {
-    return true;
-  }
-  return false;
+  return deriveEnvConfirmed(input);
 }
 
 /**
@@ -107,6 +133,11 @@ export function resolveToolSource(
     clamped = true;
   }
 
+  const envConfirmed = deriveEnvConfirmed({
+    declared: declaredSource,
+    clamped,
+    envInferred: env,
+  });
   const attested = deriveAttested({
     declared: declaredSource,
     resolved: source,
@@ -115,12 +146,17 @@ export function resolveToolSource(
     envInferred: env,
   });
 
-  // #283: an unattested identity is writer-chosen. Move it into a disjoint
+  // #283: an env-unconfirmed identity is writer-chosen. Move it into a disjoint
   // keyspace BEFORE it leaves this function, so every downstream consumer —
   // the stored `source` string, the `checkAccess` caller key shared by
   // read/delete/revoke, and the read guards — inherits the same stamp from one
   // place. `scoreSource` strips the marker, so trust is unchanged.
-  if (!attested) {
+  //
+  // Keyed on env-confirmation, NOT on `attested`: strict attests everything for
+  // the ledger, and keying the stamp there let strictSourceMode — the hardened
+  // posture — be the one place a writer-chosen `hook:session-end` kept the
+  // ownership key on every default `cli:*` 0.9 host.
+  if (!envConfirmed) {
     source = { type: source.type, identifier: markUnattestedIdentifier(source.identifier) };
     try {
       logAudit({
