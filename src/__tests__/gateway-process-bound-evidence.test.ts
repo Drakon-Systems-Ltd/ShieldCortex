@@ -79,6 +79,28 @@ describe('parseRegistrationsSince — dated lines only, bounded below', () => {
     expect(parseRegistrationsSince(text, 0)).toHaveLength(0);
   });
 
+  it('#214 — attributes a journald unit[pid] so a CLI line is not the gateway', () => {
+    const iso = '2026-08-08T14:04:00.000Z';
+    const text = [
+      JSON.stringify({ time: iso, pid: 4242, message: '[shieldcortex] v4.47.32 registered (llm_input)' }),
+      `2026-08-08T14:04:01.000Z host shieldcortex[9999]: [shieldcortex] v4.50.0 registered (llm_input)`,
+      `2026-08-08T14:04:02.000Z host openclaw-gateway[4242]: [shieldcortex] v4.47.32 registered (llm_input)`,
+    ].join('\n');
+    const got = parseRegistrationsSince(text, Date.parse('2026-08-08T14:00:00.000Z'));
+    expect(got.map((s) => s.pid)).toEqual([4242, 9999, 4242]);
+    expect(got.map((s) => s.version)).toEqual(['4.47.32', '4.50.0', '4.47.32']);
+  });
+
+  it('#214 — running version ignores a registration whose pid is not the gateway', () => {
+    const iso = '2026-08-08T14:04:00.000Z';
+    const text = [
+      `${iso} host openclaw-gateway[111]: [shieldcortex] v4.47.32 registered (llm_input)`,
+      `${iso} host shieldcortex[999]: [shieldcortex] v4.50.0 registered (llm_input)`,
+    ].join('\n');
+    expect(parseRunningPluginVersionSince(text, Date.parse('2026-08-08T14:00:00.000Z'), 111)).toBe('4.47.32');
+    expect(parseRunningPluginVersionSince(text, Date.parse('2026-08-08T14:00:00.000Z'), 111)).not.toBe('4.50.0');
+  });
+
   it('findRegistrationSince returns null when the log dir is unreadable', () => {
     expect(findRegistrationSince(0, { logDir: '/definitely/not/a/dir' })).toBeNull();
   });

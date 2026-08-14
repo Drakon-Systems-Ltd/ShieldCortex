@@ -21,6 +21,8 @@
 import { describe, it, expect } from '@jest/globals';
 import { waitForGatewayReady } from '../gateway-readiness.js';
 import { resolveRepairConsent } from '../repair-consent.js';
+import { reconcileOpenClawPluginState, MAX_RECONCILE_PASSES } from '../openclaw-reconcile.js';
+import { reconcilePluginState, type ReconcileInput } from '../../integrations/openclaw-plugin-index.js';
 
 // ── 1. The race that produced the false FAILED ─────────────────────────────
 
@@ -121,5 +123,73 @@ describe('#156 — a human at a terminal has already consented', () => {
     // Non-TTY with no env is exactly the shape of an agent or cron run. It must
     // never restart the gateway it is itself running inside.
     expect(resolveRepairConsent({ env: bare, isTty: false }).restart).toBe(false);
+  });
+});
+
+// ── 3. Detect → remediate → verify until stable, not one pass ──────────────
+
+describe('#156 — repair converges instead of one-shot', () => {
+  const PLUGIN = 'shieldcortex-realtime';
+
+  function wiped(): ReconcileInput {
+    return {
+      pluginId: PLUGIN,
+      expectedVersion: '4.50.0',
+      config: { enabled: null, inAllow: false, readable: true, present: true },
+      installsJson: { version: '4.50.0', installPath: '/x' },
+      index: {
+        installRecords: { [PLUGIN]: { source: 'npm', version: '4.50.0', installPath: '/x' } },
+        plugins: [],
+        warning: null,
+      },
+      onDiskVersion: '4.50.0',
+      projectDirs: [],
+      liveRoster: [],
+    };
+  }
+
+  it('retries a restore that failed the first pass, then reports success', async () => {
+    expect(MAX_RECONCILE_PASSES).toBeGreaterThanOrEqual(2);
+    const input = wiped();
+    let restores = 0;
+    let enabled = false;
+    const result = await reconcileOpenClawPluginState({
+      home: '/tmp/sc-156-converge',
+      pluginId: PLUGIN,
+      expectedVersion: '4.50.0',
+      apply: true,
+      readState: () => {
+        const i: ReconcileInput = enabled
+          ? {
+            ...input,
+            config: { enabled: true, inAllow: true, readable: true, present: true },
+            index: { ...input.index!, plugins: [{ pluginId: PLUGIN, enabled: true }] },
+            liveRoster: [PLUGIN],
+          }
+          : input;
+        return { input: i, verdict: reconcilePluginState(i) };
+      },
+      restoreRegistration: () => {
+        restores += 1;
+        if (restores === 1) return { ok: false, detail: 'first write raced' };
+        enabled = true;
+        return { ok: true, detail: 'restored on retry' };
+      },
+      runCommand: () => ({ status: 0, output: 'ok' }),
+      reloadGateway: async () => ({ restarted: true, detail: 'reloaded' }),
+      waitForGateway: async () => ({ ready: true, waitedMs: 5 }),
+      selfCheck: async () => ({
+        ok: enabled,
+        rosterState: enabled ? 'present' : 'absent',
+        rosterProof: enabled,
+        canaryProof: enabled,
+        versionProof: true,
+        reasons: [enabled ? 'loaded' : 'not loaded'],
+      }) as never,
+    });
+    expect(restores).toBeGreaterThanOrEqual(2);
+    expect(result.ok).toBe(true);
+    expect(result.passes).toBeGreaterThanOrEqual(2);
+    expect(result.postVerdict?.state).toBe('healthy');
   });
 });

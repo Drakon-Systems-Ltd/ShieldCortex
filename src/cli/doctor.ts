@@ -35,7 +35,7 @@ import {
   evaluateEnforcementSupport,
   describeEnforcementSupport,
 } from '../integrations/openclaw-conversation-capability.js';
-import { parseRegistrationsSince } from '../integrations/openclaw-gateway-roster.js';
+import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import { getCanonicalSchema } from '../database/init.js';
@@ -3373,6 +3373,8 @@ export interface RunningPluginVersionDeps {
    * "running".
    */
   readGatewayProcessStartMs: () => number | null;
+  /** #214 — running gateway pid, so a CLI registration line is not quoted as the gateway. */
+  readGatewayPid?: () => number | null;
 }
 
 /**
@@ -3381,13 +3383,20 @@ export interface RunningPluginVersionDeps {
  * chronological (oldest → newest), so the final match is the current start's
  * registration. Returns null when no registration line is present.
  */
-export function parseRunningPluginVersion(journal: string): string | null {
+export function parseRunningPluginVersion(journal: string, gatewayPid?: number | null): string | null {
   // Matches "[shieldcortex] v4.47.8 registered (...)" including semver
   // pre-release/build suffixes. Global so we can walk to the final match.
   const re = /\[shieldcortex\]\s+v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s+registered/g;
   let match: RegExpExecArray | null;
   let last: string | null = null;
   while ((match = re.exec(journal)) !== null) {
+    if (gatewayPid != null) {
+      const lineStart = journal.lastIndexOf('\n', match.index) + 1;
+      const lineEnd = journal.indexOf('\n', match.index);
+      const line = journal.slice(lineStart, lineEnd < 0 ? journal.length : lineEnd);
+      const pid = parseLogLinePid(line);
+      if (pid != null && pid !== gatewayPid) continue;
+    }
     last = match[1];
   }
   return last;
@@ -3398,9 +3407,16 @@ export function parseRunningPluginVersion(journal: string): string | null {
  * count, and a line that cannot be dated cannot be called fresh. The unbounded
  * parser above remains for callers that genuinely want "newest ever".
  */
-export function parseRunningPluginVersionSince(journal: string, sinceMs: number): string | null {
+export function parseRunningPluginVersionSince(
+  journal: string,
+  sinceMs: number,
+  gatewayPid?: number | null,
+): string | null {
   const sightings = parseRegistrationsSince(journal, sinceMs);
-  return sightings.length > 0 ? sightings[sightings.length - 1].version : null;
+  const usable = gatewayPid == null
+    ? sightings
+    : sightings.filter((s) => s.pid == null || s.pid === gatewayPid);
+  return usable.length > 0 ? usable[usable.length - 1].version : null;
 }
 
 /**
@@ -3469,6 +3485,7 @@ export function realRunningPluginVersionDeps(home: string = os.homedir()): Runni
       return null;
     },
     readGatewayProcessStartMs: (): number | null => readRunningGatewayProcess(home)?.startedAtMs ?? null,
+    readGatewayPid: (): number | null => readRunningGatewayProcess(home)?.pid ?? null,
   };
 }
 
@@ -3514,9 +3531,10 @@ export async function checkOpenClawRunningPluginVersion(
     };
   }
 
+  const gatewayPid = deps.readGatewayPid?.() ?? null;
   const running = journal.preBounded
-    ? parseRunningPluginVersion(journal.text)
-    : parseRunningPluginVersionSince(journal.text, processStartMs);
+    ? parseRunningPluginVersion(journal.text, gatewayPid)
+    : parseRunningPluginVersionSince(journal.text, processStartMs, gatewayPid);
   if (!running) {
     const historic = journal.preBounded ? null : parseRunningPluginVersion(journal.text);
     return {
@@ -3547,6 +3565,65 @@ export async function checkOpenClawRunningPluginVersion(
       'Restart the OpenClaw gateway so it re-registers the on-disk plugin:\n' +
       `  ${gatewayRestartAdvice()}\n` +
       'Until then the live interceptor is the version shown as "running", not the one on disk.',
+  };
+}
+
+/**
+ * #156 — the aiquant silent-skip is a static property of the installed
+ * manifest. A 2026.7.x gateway will not load us at boot unless
+ * `activation.onStartup === true` or `activation.onCapabilities` lists `hook`.
+ */
+export function readPluginStartupIntent(home: string = os.homedir()): {
+  onStartup: boolean;
+  hookCapability: boolean;
+  source: string;
+} | null {
+  const candidates = [
+    path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime', 'openclaw.plugin.json'),
+  ];
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as { activation?: { onStartup?: unknown; onCapabilities?: unknown } };
+      const act = raw.activation && typeof raw.activation === 'object' ? raw.activation : {};
+      const caps = Array.isArray(act.onCapabilities) ? act.onCapabilities : [];
+      return {
+        onStartup: act.onStartup === true,
+        hookCapability: caps.includes('hook'),
+        source: file,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export async function checkPluginStartupIntent(home: string = os.homedir()): Promise<CheckResult> {
+  const label = 'OpenClaw plugin startup intent';
+  if (!fs.existsSync(path.join(home, '.openclaw'))) {
+    return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
+  }
+  const intent = readPluginStartupIntent(home);
+  if (!intent) {
+    return { label, status: 'info', message: 'skipped (no installed plugin manifest)' };
+  }
+  if (intent.onStartup && intent.hookCapability) {
+    return {
+      label,
+      status: 'pass',
+      message: `installed manifest declares onStartup + hook capability (${intent.source.replace(home, '~')})`,
+    };
+  }
+  return {
+    label,
+    status: 'fail',
+    message:
+      `installed plugin manifest will not load at gateway boot ` +
+      `(activation.onStartup=${intent.onStartup}, hook capability=${intent.hookCapability}) — ` +
+      `this is the aiquant silent-skip`,
+    fix:
+      'Reinstall the current plugin so the on-disk manifest has `activation.onStartup: true` and `onCapabilities: ["hook"]`: `shieldcortex repair` or `openclaw plugins install @drakon-systems/shieldcortex-realtime`.',
   };
 }
 
@@ -3882,6 +3959,7 @@ export async function runDoctor(
     checkOpenClawPluginLoadState,
     checkOpenClawConversationScanning,
     checkOpenClawRunningPluginVersion,
+    checkPluginStartupIntent,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkOpenClawManagedPinDrift,

@@ -44,6 +44,9 @@ export interface StepResult {
   detail: string;
 }
 
+/** #156 — one extra detect→remediate pass when the first did not converge. */
+export const MAX_RECONCILE_PASSES = 2;
+
 export interface ReconcileExecResult {
   /** The state BEFORE remediation — what the plan was computed from. */
   verdict: ReconcileVerdict;
@@ -61,6 +64,8 @@ export interface ReconcileExecResult {
   selfCheck?: SelfCheckRunResult;
   ok: boolean;
   messages: string[];
+  /** How many detect→remediate passes ran (#156). */
+  passes?: number;
 }
 
 export interface ReconcileOptions {
@@ -102,6 +107,8 @@ export interface ReconcileOptions {
    * path and leave the re-read unproven.
    */
   readState?: () => { input: ReconcileInput; verdict: ReconcileVerdict };
+  /** Internal: which converge pass this is (1-based). */
+  pass?: number;
 }
 
 function defaultApply(): boolean {
@@ -388,7 +395,24 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     messages.push('reconciled: plugin confirmed loaded (roster) and enforcing (canary)');
   }
 
-  return { verdict, postVerdict, plan, applied: true, stepResults, selfCheck: selfCheckResult, ok, messages };
+  const pass = options.pass ?? 1;
+  if (!ok && postVerdict.severity !== 'ok' && pass < MAX_RECONCILE_PASSES) {
+    messages.push(`state still ${postVerdict.state} after pass ${pass} — running another detect→remediate pass (#156)`);
+    const retry = await reconcileOpenClawPluginState({ ...options, pass: pass + 1 });
+    return {
+      verdict,
+      postVerdict: retry.postVerdict ?? postVerdict,
+      plan: [...plan, ...retry.plan],
+      applied: true,
+      stepResults: [...stepResults, ...retry.stepResults],
+      selfCheck: retry.selfCheck ?? selfCheckResult,
+      ok: retry.ok,
+      messages: [...messages, ...retry.messages],
+      passes: retry.passes ?? pass + 1,
+    };
+  }
+
+  return { verdict, postVerdict, plan, applied: true, stepResults, selfCheck: selfCheckResult, ok, messages, passes: pass };
 }
 
 /**
