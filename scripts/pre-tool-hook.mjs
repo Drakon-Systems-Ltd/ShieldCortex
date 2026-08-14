@@ -482,7 +482,7 @@ async function pingOperator(notify, { toolName, toolInput, verdict, hash, noProm
   if (!channel) return null;
   try {
     const displayVerdict = safeApprovalVerdict(verdict);
-    const safeSessionId = notificationContext(sessionKey).correlationId;
+    const safeSessionId = notificationContext(sessionKey).sessionId;
     const result = await notify.requestOperatorApproval(
       {
         hash,
@@ -520,11 +520,27 @@ const SAFE_TOOL_NAMES = new Set([
   'TodoWrite', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Workflow',
 ]);
 const SAFE_SIGNALS = new Set([
+  // Generic / legacy summary names kept for older rows and broker payloads.
   'secret-egress', 'approval-required', 'fallback-scan', 'privilege-escalation',
   'filesystem-destructive', 'destructive-filesystem', 'dangerous-shell',
   'command-exec', 'network-egress', 'credential-access', 'data-exfiltration',
   'untrusted-script', 'reviewed-script', 'shell-injection', 'persistence-risk',
   'install-package', 'git-force-push', 'local-package-install', 'move-or-copy', 'file-delete', 'service-restart', 'exec-like',
+  // #284 Face 1 — real Action Guard signal names must survive the local
+  // denials.jsonl / operator-notify path. Previously almost every live
+  // catastrophic signal collapsed to "redacted-signal".
+  'recursive-force-delete', 'delete-root-or-home', 'fork-bomb', 'format-filesystem',
+  'raw-disk-write', 'redirect-to-block-device', 'disk-partition-tool',
+  'pipe-download-to-shell', 'pipe-download-stdin-exec', 'pipe-download-module-exec',
+  'recursive-perms-on-root', 'shred-device', 'git-delete-branch',
+  'stop-process-or-service', 'modify-network-firewall', 'install-package-global',
+  'modify-scheduler', 'truncate-to-zero', 'wipe-history-or-logs',
+  'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger',
+  'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
+  'decode-pipe-to-shell', 'change-permissions', 'git-mutate',
+  'recursive-find-delete', 'external-egress', 'oversized-command',
+  'opaque-script-invocation', 'opaque-script', 'secret-egress-fold',
+  'force-push', 'force-push-invocation',
 ]);
 const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
 const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
@@ -697,8 +713,21 @@ function safePermissionMode(value) {
     : null;
 }
 
-function notificationContext(sessionKey) {
-  return /^sc-[a-f0-9]{16}$/.test(String(sessionKey ?? '')) ? { correlationId: sessionKey } : {};
+function mintActionId() {
+  // #284 Face 3 — action-scoped id, distinct from the session key.
+  return `act-${randomBytes(8).toString('hex')}`;
+}
+
+function notificationContext(sessionKey, actionId) {
+  const out = {};
+  if (/^sc-[a-f0-9]{16}$/.test(String(sessionKey ?? ''))) {
+    out.sessionId = sessionKey;
+  }
+  if (typeof actionId === 'string' && /^act-[a-f0-9]{16}$/.test(actionId)) {
+    out.actionId = actionId;
+    out.correlationId = actionId;
+  }
+  return out;
 }
 
 function safeBrokerAudit(audit) {
@@ -724,7 +753,9 @@ function redactedActionSurface(toolName, toolInput) {
   const keys = ['command', 'script', 'file_path', 'path', 'url', 'pattern'];
   const present = keys.filter((k) => toolInput?.[k] !== undefined && toolInput?.[k] !== null);
   const suffix = present.length > 0 ? ` fields=${present.join(',')}` : ' no command field';
-  return `${safeToolName(toolName)}: [redacted action surface; inspect local audit]${suffix}`;
+  // #284 Face 1 — name the verified sink. denials.jsonl is a summary; unredacted
+  // command lives in ~/.shieldcortex/audit/realtime-YYYY-MM-DD.jsonl.
+  return `${safeToolName(toolName)}: [redacted action surface; unredacted command in ~/.shieldcortex/audit/realtime-*.jsonl]${suffix}`;
 }
 
 function redactedAuditArgs(toolName, toolInput) {
@@ -764,14 +795,24 @@ function safeAllowAuditVerdict(verdict, outcome = 'allowed') {
 }
 
 function writeTerminalOutcomeAudit(toolName, verdict, toolInput, action, outcome, event, extra = {}) {
+  const actionId = extra.actionId || mintActionId();
+  // #284: do NOT pass raw toolInput as intentArgs on the deny path. Binding would
+  // mint actionKey from the full command and put it on the durable audit row —
+  // the same leak denials.jsonl is carefully redacting. Terminal outcomes are
+  // already refused; reconciliation uses actionId, not a replayable actionKey.
   writeAuditEntry(
     safeToolName(toolName),
     terminalOutcomeAuditVerdict(verdict, outcome, event),
     redactedAuditArgs(toolName, toolInput),
     action,
     outcome,
-    { ...extra, intentArgs: toolInput },
+    {
+      ...extra,
+      actionId,
+      origin: extra.origin || 'claude-code-hook',
+    },
   );
+  return actionId;
 }
 
 function safeDiagnosticReason(reason) {
@@ -811,19 +852,28 @@ function terminalDecisionReason(verdict, outcome, event) {
   return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
 }
 
-function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey }) {
-  const context = notificationContext(sessionKey);
-  return {
+function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
+  const id = actionId || mintActionId();
+  const context = notificationContext(sessionKey, id);
+  const row = {
     event,
     outcome,
+    // #284 Face 2 — origin on every denial row (especially auto_deny/critical).
+    origin: 'claude-code-hook',
     tool: safeToolName(toolName),
     surface: redactedActionSurface(toolName, toolInput),
     signals: safeSignalList(verdict.signals),
     severity: verdict.severity === 'catastrophic' ? 'critical' : String(verdict.severity ?? 'unknown'),
     reason: safeGuardOutcomeReason(verdict, outcome, event),
+    ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+    ...(context.actionId ? { actionId: context.actionId } : {}),
     ...(context.correlationId ? { correlationId: context.correlationId } : {}),
     detectedAt: new Date().toISOString(),
   };
+  if (notify && typeof notify === 'object') {
+    row.notify = notify;
+  }
+  return row;
 }
 
 function recordLocalGuardOutcome(outcome) {
@@ -836,36 +886,95 @@ function recordLocalGuardOutcome(outcome) {
   return false;
 }
 
-async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey }) {
-  const localOutcome = buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey });
-  recordLocalGuardOutcome(localOutcome);
+function classifyNotifyStatus(notifyMod, result) {
+  // #284 Face 4 — distinguish not_configured / no_channel / delivered / error.
+  if (!notifyMod) {
+    return { status: 'not_configured', deliveredVia: null };
+  }
+  if (
+    !notifyMod.denialChannel ||
+    typeof notifyMod.deliverOperatorNotification !== 'function' ||
+    typeof notifyMod.buildActionGuardOutcomeNotification !== 'function'
+  ) {
+    return { status: 'no_channel', deliveredVia: null };
+  }
+  if (result?.deliveredVia) {
+    return {
+      status: 'delivered',
+      deliveredVia: safeNotifyLabel(result.deliveredVia) ?? 'redacted-channel',
+    };
+  }
+  const attemptReason = Array.isArray(result?.attempts)
+    ? result.attempts.map((a) => a?.result?.reason).find(Boolean)
+    : null;
+  return {
+    status: 'error',
+    deliveredVia: null,
+    error: safeDiagnosticReason(attemptReason ?? 'delivery failed'),
+  };
+}
+
+async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId }) {
+  const id = actionId || mintActionId();
+  // #284 dual-review blocker (SOL): write the denial row FIRST with notify pending,
+  // then attempt delivery and append/update status. A hang/crash during notify must
+  // not drop the forensics row that operators open first (denials.jsonl).
+  const pendingRow = buildLocalGuardOutcome({
+    toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
+    notify: { status: 'pending', deliveredVia: null },
+  });
+  recordLocalGuardOutcome(pendingRow);
+
   let notify = null;
   try {
     notify = typeof notifyOrPromise?.then === 'function' ? await notifyOrPromise : notifyOrPromise;
   } catch {
     notify = null;
   }
+
+  let deliveryResult = null;
   if (
-    !notify?.denialChannel ||
-    typeof notify.deliverOperatorNotification !== 'function' ||
-    typeof notify.buildActionGuardOutcomeNotification !== 'function'
-  ) return null;
-  try {
-    const notification = notify.buildActionGuardOutcomeNotification(localOutcome);
-    const result = await notify.deliverOperatorNotification(notification, {
-      channels: [notify.denialChannel],
-      timeoutMs: notify.config.timeoutMs,
-    });
-    if (result?.deliveredVia) {
-      const via = safeNotifyLabel(result.deliveredVia) ?? 'redacted-channel';
-      console.error(`[shieldcortex] operator-notify: reported ${outcome} for ${safeToolName(toolName)} via ${via}.`);
+    notify?.denialChannel &&
+    typeof notify.deliverOperatorNotification === 'function' &&
+    typeof notify.buildActionGuardOutcomeNotification === 'function'
+  ) {
+    try {
+      const notification = notify.buildActionGuardOutcomeNotification(pendingRow);
+      deliveryResult = await notify.deliverOperatorNotification(notification, {
+        channels: [notify.denialChannel],
+        timeoutMs: notify.config?.timeoutMs,
+      }) ?? null;
+      if (deliveryResult?.deliveredVia) {
+        const via = safeNotifyLabel(deliveryResult.deliveredVia) ?? 'redacted-channel';
+        console.error(`[shieldcortex] operator-notify: reported ${outcome} for ${safeToolName(toolName)} via ${via}.`);
+      }
+    } catch (err) {
+      console.error('[shieldcortex] ⚠️ operator-notify error — guard outcome unchanged.');
+      deliveryResult = {
+        deliveredVia: null,
+        attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: safeDiagnosticReason(err?.message ?? err) } }],
+      };
     }
-    return result ?? null;
-  } catch (err) {
-    console.error('[shieldcortex] ⚠️ operator-notify error — guard outcome unchanged.');
-    return { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: safeDiagnosticReason(err?.message ?? err) } }] };
   }
+
+  const notifyStatus = classifyNotifyStatus(notify, deliveryResult);
+  // Append a second denials.jsonl line with final notify status (same actionId)
+  // so operators can see both "denied" and "were they told" without losing the
+  // first row if delivery hangs.
+  const finalRow = buildLocalGuardOutcome({
+    toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
+    notify: notifyStatus,
+  });
+  recordLocalGuardOutcome(finalRow);
+
+  return {
+    deliveredVia: deliveryResult?.deliveredVia ?? null,
+    attempts: deliveryResult?.attempts ?? [],
+    notify: notifyStatus,
+    actionId: id,
+  };
 }
+
 
 function notificationAudit(result) {
   if (!result) return {};
@@ -884,11 +993,46 @@ function notificationAudit(result) {
 }
 
 function recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result) {
-  if (!result) return;
-  writeAuditEntry(safeToolName(toolName), { severity: safeSeverity(verdict?.severity, 'action_guard_warning'), decision: safeDecision(verdict?.decision, 'action_guard_warning'), signals: safeSignalList(verdict?.signals) }, { notification: 'redacted' }, 'notify', result.deliveredVia ? 'notified' : 'notify_failed', {
-    ...baseExtra,
-    ...notificationAudit(result),
-  });
+  // #284 Face 4 — always record notify status when the deny path ran alert.
+  if (!result) {
+    writeAuditEntry(
+      safeToolName(toolName),
+      {
+        severity: safeSeverity(verdict?.severity, 'action_guard_warning'),
+        decision: safeDecision(verdict?.decision, 'action_guard_warning'),
+        signals: safeSignalList(verdict?.signals),
+      },
+      { notification: 'redacted' },
+      'notify',
+      'notify_not_configured',
+      { ...baseExtra, notify: { status: 'not_configured', deliveredVia: null } },
+    );
+    return;
+  }
+  const status = result.notify?.status
+    ?? (result.deliveredVia ? 'delivered' : 'error');
+  const outcome =
+    status === 'delivered' ? 'notified'
+      : status === 'not_configured' ? 'notify_not_configured'
+        : status === 'no_channel' ? 'notify_no_channel'
+          : 'notify_failed';
+  writeAuditEntry(
+    safeToolName(toolName),
+    {
+      severity: safeSeverity(verdict?.severity, 'action_guard_warning'),
+      decision: safeDecision(verdict?.decision, 'action_guard_warning'),
+      signals: safeSignalList(verdict?.signals),
+    },
+    { notification: 'redacted' },
+    'notify',
+    outcome,
+    {
+      ...baseExtra,
+      ...(result.actionId ? { actionId: result.actionId } : {}),
+      notify: result.notify ?? notificationAudit(result).notify,
+      ...notificationAudit(result),
+    },
+  );
 }
 
 /**
@@ -1305,7 +1449,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
     emitDecision('ask', safeDiagnosticApprovalReason(reason));
     return;
   }
-  writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, 'denied_no_prompt_surface', 'action_guard_denial', {
+  const actionId = writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, 'denied_no_prompt_surface', 'action_guard_denial', {
     ...baseExtra,
     ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
     noPromptSurfaceReason: noPromptSurface,
@@ -1318,8 +1462,9 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
     outcome: 'denied_no_prompt_surface',
     event: 'action_guard_denial',
     sessionKey: baseExtra.sessionKey,
+    actionId,
   });
-  recordNotifyAudit(toolName, { ...auditVerdict, reason }, toolInput, baseExtra, notified);
+  recordNotifyAudit(toolName, { ...auditVerdict, reason }, toolInput, { ...baseExtra, actionId }, notified);
   console.error(
     `[shieldcortex] action-guard DENIED ${safeToolName(toolName)}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
   );
@@ -1344,7 +1489,7 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
   // 1. Catastrophic — hard deny, always.
   if (fallbackCatastrophicMatch(toolInput)) {
     const fallbackVerdict = { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'], reason: `Guard unavailable: ${failureSummary}; fallback catastrophic scan matched` };
-    writeTerminalOutcomeAudit(
+    const actionId = writeTerminalOutcomeAudit(
       toolName,
       fallbackVerdict,
       toolInput, 'auto_deny', 'auto_denied', 'action_guard_denial', baseExtra,
@@ -1356,8 +1501,9 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
       outcome: 'auto_denied',
       event: 'action_guard_denial',
       sessionKey: baseExtra.sessionKey,
+      actionId,
     });
-    recordNotifyAudit(toolName, fallbackVerdict, toolInput, baseExtra, notified);
+    recordNotifyAudit(toolName, fallbackVerdict, toolInput, { ...baseExtra, actionId }, notified);
     console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureSummary}) and fallback scan matched a catastrophic pattern — DENYING ${safeToolName(toolName)} (fail-closed, WS2)`);
     emitDecision('deny', terminalDecisionReason(fallbackVerdict, 'auto_denied', 'action_guard_denial'));
     process.exit(0);
@@ -1368,7 +1514,7 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
   if (dangerousSignal) {
     if (!cfg.enforce) {
       const fallbackWarnVerdict = { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal], reason: `Guard unavailable: ${failureSummary}; enforce:false advisory` };
-      writeTerminalOutcomeAudit(
+      const actionId = writeTerminalOutcomeAudit(
         toolName,
         fallbackWarnVerdict,
         toolInput, 'gate_degraded', 'failure_allowed', 'action_guard_warning', baseExtra,
@@ -1380,8 +1526,9 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
         outcome: 'failure_allowed',
         event: 'action_guard_warning',
         sessionKey: baseExtra.sessionKey,
+        actionId,
       });
-      recordNotifyAudit(toolName, fallbackWarnVerdict, toolInput, baseExtra, notified);
+      recordNotifyAudit(toolName, fallbackWarnVerdict, toolInput, { ...baseExtra, actionId }, notified);
       console.error(`[shieldcortex] ⚠️ action-guard unavailable (${failureSummary}) — advisory (enforce:false), allowing dangerous ${safeToolName(toolName)} [${safeSignalList([dangerousSignal]).join(', ')}]`);
       process.exit(0);
     }
@@ -1402,7 +1549,7 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
 
   // 3. No match — benign/unknown. Fail open, but never silently.
   const fallbackOpenVerdict = { severity: 'benign', decision: 'allow', signals: ['fallback-scan'], reason: `Guard unavailable: ${failureSummary}; fallback matched nothing` };
-  writeTerminalOutcomeAudit(
+  const actionId = writeTerminalOutcomeAudit(
     toolName,
     fallbackOpenVerdict,
     toolInput, 'gate_degraded', 'failure_allowed', 'action_guard_warning', baseExtra,
@@ -1414,8 +1561,9 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
     outcome: 'failure_allowed',
     event: 'action_guard_warning',
     sessionKey: baseExtra.sessionKey,
+    actionId,
   });
-  recordNotifyAudit(toolName, fallbackOpenVerdict, toolInput, baseExtra, notified);
+  recordNotifyAudit(toolName, fallbackOpenVerdict, toolInput, { ...baseExtra, actionId }, notified);
   console.error(`[shieldcortex] action-guard unavailable (${failureSummary}) — allowing ${safeToolName(toolName)} (fallback matched nothing; fail-open)`);
   process.exit(0);
 }
@@ -1540,7 +1688,7 @@ process.stdin.on('end', async () => {
       if (leaseGate?.acquired) {
         try { (await loadLease())?.releaseToolCallLease(toolName, toolInput, { self: leaseSelf }); } catch { /* self-heals at TTL */ }
       }
-      writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'auto_deny', 'auto_denied', 'action_guard_denial', baseExtra);
+      const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'auto_deny', 'auto_denied', 'action_guard_denial', baseExtra);
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
         toolInput,
@@ -1548,8 +1696,9 @@ process.stdin.on('end', async () => {
         outcome: 'auto_denied',
         event: 'action_guard_denial',
         sessionKey: baseExtra.sessionKey,
+        actionId,
       });
-      recordNotifyAudit(toolName, verdict, toolInput, baseExtra, notified);
+      recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
       console.error(
         `[shieldcortex] action-guard BLOCKED ${safeToolName(toolName)}: ${safeGuardOutcomeReason(verdict, 'auto_denied', 'action_guard_denial')} [${safeSignalList(verdict.signals).join(', ')}]`,
       );
@@ -1574,7 +1723,7 @@ process.stdin.on('end', async () => {
     }
 
     if (!cfg.enforce) {
-      writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
+      const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
         toolInput,
@@ -1582,8 +1731,9 @@ process.stdin.on('end', async () => {
         outcome: 'warned',
         event: 'action_guard_warning',
         sessionKey: baseExtra.sessionKey,
+        actionId,
       });
-      recordNotifyAudit(toolName, verdict, toolInput, baseExtra, notified);
+      recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
       console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')}`);
       process.exit(0); // Advisory: warn, emit no decision.
     }
@@ -1620,7 +1770,7 @@ process.stdin.on('end', async () => {
 
     if (brokered?.outcome === 'harden') {
       const brokerAudit = safeBrokerAudit(brokered.audit);
-      writeTerminalOutcomeAudit(toolName, { ...verdict, reason: brokered.reason ?? verdict.reason }, toolInput, 'require_approval', 'auto_denied', 'action_guard_denial', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
+      const actionId = writeTerminalOutcomeAudit(toolName, { ...verdict, reason: brokered.reason ?? verdict.reason }, toolInput, 'require_approval', 'auto_denied', 'action_guard_denial', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
         toolInput,
@@ -1628,8 +1778,9 @@ process.stdin.on('end', async () => {
         outcome: 'auto_denied',
         event: 'action_guard_denial',
         sessionKey: baseExtra.sessionKey,
+        actionId,
       });
-      recordNotifyAudit(toolName, { ...verdict, reason: brokered.reason ?? verdict.reason }, toolInput, baseExtra, notified);
+      recordNotifyAudit(toolName, { ...verdict, reason: brokered.reason ?? verdict.reason }, toolInput, { ...baseExtra, actionId, ...(brokerAudit ? { broker: brokerAudit } : {}) }, notified);
       console.error(`[shieldcortex] approval broker HARDENED ${safeToolName(toolName)} to a denial: ${safeDiagnosticReason(brokered.reason)}`);
       // No approve-hash offered. Hardening exists precisely for the case where
       // the request is trying to talk somebody into saying yes.
