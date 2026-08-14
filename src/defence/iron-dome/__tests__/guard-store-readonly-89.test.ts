@@ -106,3 +106,23 @@ describe('#89 — guardStoreAccessIsReadOnly helper', () => {
     expect(guardStoreAccessIsReadOnly('ls /tmp')).toBe(false);
   });
 });
+
+describe('#89 — round-4 Grok mint paths stay gated', () => {
+  it.each([
+    ['cmd subst python write', `echo $(python3 -c "open('/home/u/.shieldcortex/approvals/approvals.json','w').write('{}')")`],
+    ['process subst write', `echo '{}' > >(python3 -c "open('/home/u/.shieldcortex/approvals/approvals.json','w').write(open(0).read())")`],
+    ['path-smuggling pipeline', `echo ~/.shieldcortex/approvals/approvals.json | python3 -c "import sys; open(sys.stdin.read().strip(),'w').write('{}')"`],
+    ['cat store | python writer', `cat ~/.shieldcortex/approvals/approvals.json | python3 -c "import pathlib; (pathlib.Path.home()/'.shieldcortex'/'approvals'/'approvals.json').write_text('{}')"`],
+    ['yq -i', `yq -i '.x=1' ~/.shieldcortex/approvals/approvals.json`],
+    ['backticks', 'echo `cat ~/.shieldcortex/approvals/approvals.json`'],
+  ])('GATEs %s', (_name, cmd) => {
+    const v = gate(cmd);
+    expect(v.decision).not.toBe('allow');
+  });
+
+  it('cat store | jq still allows (every stage readonly)', () => {
+    const v = gate('cat ~/.shieldcortex/approvals/approvals.json | jq .');
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('touch-approval-store');
+  });
+});

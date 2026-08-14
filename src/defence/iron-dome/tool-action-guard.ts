@@ -472,10 +472,10 @@ const DANGEROUS: Pattern[] = [
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own
   // approval. MUTATING access still goes to the operator. Pure read-only
-  // inspection (ls/cat/grep/python -c open-for-read) is carved out below
-  // (issue #89 live FP 2026-08-14): gating a read of the store that the
-  // remediation text tells you to reconcile against is a self-referential
-  // deadlock on enforced hosts with no broker.
+  // Pure shell inspection (ls/cat/grep/…) is carved out below (issue #89 live
+  // FP 2026-08-14). Interpreters stay gated — fail closed. Gating a pure ls of
+  // the store that remediation tells you to reconcile against is a
+  // self-referential deadlock on enforced hosts with no broker.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   // The session-lease ledger + lease store (#227). A freeze an agent can edit
   // or delete is not a freeze: DECISIONS.md is lifted by the OPERATOR (TTY-
@@ -1839,63 +1839,67 @@ function withProvenance(
 // ── #89 read-only inspection of guard-owned stores ───────────────────────────
 //
 // `touch-approval-store` / `touch-decisions-ledger` fire on PATH, not verb.
-// That correctly gates minting/wiping freezes and approvals. It incorrectly
-// gated production diagnostics that only LISTED or READ the store — and the
-// remediation for the gate is "approve against that store", which the agent
-// cannot read.
+// Live FP (Jarvis 2026-08-14): pure `ls`/`cat` of the approvals store required
+// approval — self-referential deadlock on enforced hosts.
 //
-// Carve-out policy (Grok 4.6 + SOL floor on #292):
-//   FAIL CLOSED. Only pure shell observation verbs qualify. Interpreters
-//   (python/node/perl/ruby), editors (sed/awk), and find are NOT on the
-//   allowlist — a denylist of mutation APIs can never be complete, and
-//   admitting them reopens self-approval minting. Ambiguous shapes keep the
-//   gate. touch-sensitive-path (.ssh/.env) is deliberately untouched.
+// Carve-out policy (Grok 4.6 + SOL multi-round floor on #292): FAIL CLOSED.
+//   - Only pure shell OBSERVATION verbs qualify (ls/cat/grep/head/stat/…).
+//   - Interpreters, editors, find, yq stay gated when a store path is named.
+//   - EVERY pipeline stage must be a readonly verb (no path-smuggling via
+//     `cat store | python writer` that rebuilds the path).
+//   - Command substitution / process substitution / backticks → keep gate.
+//   - touch-sensitive-path (.ssh/.env) is deliberately untouched.
 
 const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
 
-/**
- * Verbs that only OBSERVE a path. Intentionally excludes interpreters, sed,
- * awk, and find — those stay gated when they name a guard store.
- */
+/** Verbs that only OBSERVE. No interpreters, no sed/awk/find/yq. */
 const STORE_READONLY_VERB_RE =
-  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq|yq)$/i;
+  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq)$/i;
 
-/**
- * Mutation markers. Defence-in-depth for allowlisted verbs that can still
- * write via redirect / tee / noclobber. Not a substitute for keeping
- * interpreters off STORE_READONLY_VERB_RE.
- */
+/** Redirect / tee / noclobber — defence-in-depth for allowlisted verbs. */
 const STORE_MUTATION_RE = new RegExp(
   [
-    // shell mutators at statement/pipe boundaries
     String.raw`(?:^|[\s;|&])(?:rm|mv|cp|install|tee|truncate|chmod|chown|chgrp|touch|mkdir|rmdir|ln|dd|shred|wipe)\b`,
-    // redirection into a path — `>`, `>>`, noclobber `>|` / `>>|`, optional quotes
     String.raw`[>]{1,2}\|?\s*['"]?(?:~|\$HOME|/|\.|\$\{?HOME)`,
   ].join('|'),
   'i',
 );
 
+/** Nested execution — any of these near a store path keeps the gate. */
+const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\//i;
+
 /**
  * True when every access to a guard-owned store path on this command is a
- * pure shell inspection. Fail closed on unknown verbs / interpreters /
- * ambiguous shapes.
+ * pure shell inspection. Fail closed on unknown verbs, nested execution,
+ * and any non-readonly pipeline stage.
  */
 export function guardStoreAccessIsReadOnly(text: string): boolean {
   const cmd = String(text || '');
   if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
+  // Nested execution can mint/wipe without the store path sitting in argv0.
+  if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
+
   const parts = cmd.split(/(?:&&|\|\||;|\n)/);
   let sawStore = false;
   for (const raw of parts) {
     const part = raw.trim();
     if (!part) continue;
-    if (!GUARD_STORE_PATH_RE.test(part)) continue;
-    sawStore = true;
+    const namesStore = GUARD_STORE_PATH_RE.test(part);
+    if (namesStore) sawStore = true;
+    // Only inspect statements that name the store OR sit in a pipeline that
+    // does — for a bare `echo hi` sibling statement we skip.
+    if (!namesStore && !part.includes('|')) continue;
+
     let s = part.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '');
     s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
     const stages = s.split('|').map(x => x.trim()).filter(Boolean);
+    // If this statement names the store OR is a multi-stage pipeline that
+    // names the store, EVERY stage must be a readonly verb.
+    if (!namesStore && stages.length < 2) continue;
+    if (!namesStore && !stages.some(st => GUARD_STORE_PATH_RE.test(st))) continue;
+
     for (const stage of stages) {
-      if (!GUARD_STORE_PATH_RE.test(stage) && stage !== stages[0]) continue;
       const word = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/)[0] ?? '';
       const base = word.split('/').pop() ?? word;
       if (!STORE_READONLY_VERB_RE.test(base)) return false;
