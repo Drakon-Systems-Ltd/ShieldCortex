@@ -174,33 +174,98 @@ export interface RunJudgeOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_JUDGE_TIMEOUT_MS = 8_000;
+/** Raised from 8s in the #143 residual; see broker-config.ts for the field
+ *  evidence. Kept identical to DEFAULT_BROKER_CONFIG.judgeTimeoutMs. */
+const DEFAULT_JUDGE_TIMEOUT_MS = 15_000;
+
+/**
+ * Why there is no judge result. Reported for the audit row ONLY — every value
+ * here means the same thing to the policy: no usable judge, hold for a human.
+ */
+export type JudgeFailureReason = 'timeout' | 'unreachable' | 'parse' | 'thrown';
+
+/**
+ * A judge pass and the reason it failed, if it did.
+ *
+ * The distinction exists for the operator reading an audit row, not for the
+ * broker: "the judge never answered" and "the judge said hold" used to be the
+ * same null, so a systematically-timing-out judge looked exactly like a
+ * cautious one. Pure data — `result` is still null on every failure path, so
+ * nothing here can become a verdict.
+ */
+export interface JudgeRunResult {
+  result: JudgeResult | null;
+  timedOut: boolean;
+  error?: JudgeFailureReason;
+}
+
+/** Distinguishes "our timer won the race" from "the invoker resolved null". */
+const TIMED_OUT: unique symbol = Symbol('judge-timed-out');
+
+/**
+ * Did a transport's rejection describe a deadline rather than an outage?
+ *
+ * `cli-invoker.ts` runs its own deadline and rejects with "judge CLI timed out
+ * after Nms"; on the hook that timer and this one are set from the same config
+ * value, so either may win. Reading the message keeps the audit honest about
+ * the case this residual exists to name. It is a LABEL, never a decision: this
+ * branch returns `result: null` whichever way it answers.
+ */
+function isTimeoutError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /timed?\s*out|timeout|ETIMEDOUT/i.test(message);
+}
+
+/**
+ * Run one judge pass and report why it failed.
+ *
+ * Returns a null `result` on ANY failure — unreachable model, junk response,
+ * timeout — because the broker reads null as "hold for a human", which is the
+ * fail-closed direction. `timedOut` and `error` are audit metadata layered on
+ * top of that, and no combination of them can produce a verdict.
+ */
+export async function runJudgeDetailed(
+  req: JudgeRequest,
+  invoke: ModelInvoker,
+  opts: RunJudgeOptions = {},
+): Promise<JudgeRunResult> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_JUDGE_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const prompt = buildJudgePrompt(req);
+    const raced = await Promise.race<string | typeof TIMED_OUT>([
+      invoke(JUDGE_SYSTEM_PROMPT, prompt),
+      new Promise<typeof TIMED_OUT>(resolve => {
+        timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+      }),
+    ]);
+    if (raced === TIMED_OUT) return { result: null, timedOut: true, error: 'timeout' };
+    // An invoker that resolves a non-string is not speaking the protocol —
+    // treated as no model rather than handed to the parser.
+    if (typeof raced !== 'string') return { result: null, timedOut: false, error: 'unreachable' };
+    const parsed = parseJudgeResponse(raced);
+    if (!parsed) return { result: null, timedOut: false, error: 'parse' };
+    return { result: parsed, timedOut: false };
+  } catch (err) {
+    if (isTimeoutError(err)) return { result: null, timedOut: true, error: 'timeout' };
+    return { result: null, timedOut: false, error: 'thrown' };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * Run one judge pass. Returns null on ANY failure — unreachable model, junk
  * response, timeout — because the broker reads null as "hold for a human",
  * which is the fail-closed direction.
+ *
+ * The original signature, kept as the thin wrapper it now is: callers that do
+ * not care WHY there is no judge are not made to handle it.
  */
 export async function runJudge(
   req: JudgeRequest,
   invoke: ModelInvoker,
   opts: RunJudgeOptions = {},
 ): Promise<JudgeResult | null> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_JUDGE_TIMEOUT_MS;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const prompt = buildJudgePrompt(req);
-    const raced = await Promise.race([
-      invoke(JUDGE_SYSTEM_PROMPT, prompt),
-      new Promise<null>(resolve => {
-        timer = setTimeout(() => resolve(null), timeoutMs);
-      }),
-    ]);
-    if (typeof raced !== 'string') return null;
-    return parseJudgeResponse(raced);
-  } catch {
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return (await runJudgeDetailed(req, invoke, opts)).result;
 }

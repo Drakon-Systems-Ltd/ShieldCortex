@@ -1,6 +1,6 @@
 # Design: AI-assisted approval broker
 
-**Status:** proposal (no code yet — spec first, per Michael 31 Jul 2026)
+**Status:** shipped, off by default (opt-in) — core + both transports landed; field residuals from the Jarvis box folded in 15 Aug 2026. Open questions 1 and 2 below remain open.
 **Author:** Jarvis
 **Depends on:** #118 one-shot approval store (shipped 4.47.18), #139 deny-when-no-prompt-surface
 **Issue:** #143
@@ -124,6 +124,40 @@ Open questions 1 (confidence calibration) and 2 (injection detection ANDed with
 the `llm_input` scanner) are **not** closed — the threshold is a conservative
 0.9 chosen a priori and has not been validated against the 429-event corpus, and
 the judge's injection signal is currently used alone.
+
+### Field residuals (15 Aug 2026)
+
+Shipped after the broker ran on the Jarvis box. Neither changes what can be
+released; both change what the operator can see.
+
+**Judge deadline: 8s → 15s.** Observed judge latency reached ~6s, so an 8s
+ceiling was turning answered judges into silent nulls. A null holds for a human,
+so the old value was safe but wasteful — the deadline exists to bound the
+operator's wait, not to race the model. The default now lives in three files
+that cannot import each other and are kept in step by hand:
+`DEFAULT_BROKER_CONFIG.judgeTimeoutMs`, `approval-judge.ts`'s
+`DEFAULT_JUDGE_TIMEOUT_MS`, and `cli-invoker.ts`'s `DEFAULT_TIMEOUT_MS`. Config
+bounds are unchanged (500ms–60s), and the tighten-only rule still holds.
+
+**`judge_timed_out` in the audit.** "The judge never answered" and "the judge
+said hold" were the same `null`, so a judge timing out on every call looked
+exactly like a cautious one — which is how a silently-broken judge stays broken.
+`runJudgeDetailed()` now returns `{ result, timedOut, error }` where `error` is
+one of `timeout | unreachable | parse | thrown`; `runJudge()` is a thin wrapper
+returning `.result`, so existing callers are unchanged. The transports pass that
+through as `judgeMeta`, and `BrokerAudit` carries `judgeTimedOut` and
+`judgeUnavailableReason`.
+
+This is **audit metadata only**. `result` is still null on every failure path,
+`judgeAssessment` is still `unavailable`, the outcome is still `hold`, and
+`canAutoApproveOnTimeout` is still derived from `outcome === 'pre_clear'` alone.
+No value of `timedOut` can produce a pre-clear.
+
+**Doctor tells the truth about the broker.** With the Action Guard enforcing,
+`doctor` now reports whether the broker block is armed or merely present — a
+disabled broker is the default and protects nothing, and doctor no longer lets
+an operator infer otherwise. Either way the notify channel is still the human
+path.
 
 Question 3 ("in-context" definition) is answered differently per surface, and
 deliberately: the OpenClaw path sends a list of bare tool NAMES from the session

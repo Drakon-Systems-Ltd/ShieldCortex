@@ -107,6 +107,10 @@ export interface BrokerAuditLike {
   judgeConfidence: number | null;
   injectionSuspected: boolean;
   inContext: boolean | null;
+  /** #143 residual — "the judge never answered" told apart from "the judge said
+   *  hold". Audit only; neither field can reach an outcome. */
+  judgeTimedOut?: boolean;
+  judgeUnavailableReason?: string | null;
   reason: string;
 }
 
@@ -142,11 +146,26 @@ export interface BrokerRuntime {
     invoke: ModelInvokerLike,
     opts?: { timeoutMs?: number },
   ) => Promise<JudgeResultLike | null>;
+  /** #143 residual, and OPTIONAL: this plugin is built across a package
+   *  boundary, so a main package from before the residual injects `runJudge`
+   *  alone and the pass below falls back to it. Absent costs an audit field,
+   *  never a gate. */
+  runJudgeDetailed?: (
+    req: {
+      tool: string;
+      toolInput: unknown;
+      verdict: { severity: string; action: string; reason: string; signals: string[] };
+      sessionSummary?: string;
+    },
+    invoke: ModelInvokerLike,
+    opts?: { timeoutMs?: number },
+  ) => Promise<{ result: JudgeResultLike | null; timedOut: boolean; error?: string }>;
   brokerDecision: (input: {
     tool: string;
     toolInput: unknown;
     verdict: ToolGuardVerdictLike;
     judge: JudgeResultLike | null;
+    judgeMeta?: { timedOut?: boolean; error?: string | null };
     policy?: { allowPreClear: boolean; preClearConfidence: number };
   }) => BrokerDecisionLike;
   timeoutOutcome: (decision: BrokerDecisionLike) => 'approve' | 'deny';
@@ -941,17 +960,28 @@ export function createInterceptor(
       });
 
       let judge: JudgeResultLike | null = null;
+      // Only set when a judge pass actually ran: "no seam on this build" and
+      // "budget spent" are not timeouts, and claiming otherwise would be the
+      // same overclaim in the audit that this residual removes from doctor.
+      let judgeMeta: { timedOut?: boolean; error?: string | null } | undefined;
       if (invoke && judgeLimiter.shouldAllow()) {
-        judge = await broker.runJudge(
-          {
-            tool: context.toolName,
-            toolInput: context.arguments,
-            verdict: { severity: v.severity, action: v.action, reason: v.reason, signals: v.signals },
-            sessionSummary: buildSessionSummary(),
-          },
-          invoke,
-          { timeoutMs: broker.config.judgeTimeoutMs },
-        );
+        const request = {
+          tool: context.toolName,
+          toolInput: context.arguments,
+          verdict: { severity: v.severity, action: v.action, reason: v.reason, signals: v.signals },
+          sessionSummary: buildSessionSummary(),
+        };
+        const opts = { timeoutMs: broker.config.judgeTimeoutMs };
+        if (typeof broker.runJudgeDetailed === 'function') {
+          const detailed = await broker.runJudgeDetailed(request, invoke, opts);
+          judge = detailed?.result ?? null;
+          judgeMeta = {
+            timedOut: detailed?.timedOut === true,
+            error: typeof detailed?.error === 'string' ? detailed.error : null,
+          };
+        } else {
+          judge = await broker.runJudge(request, invoke, opts);
+        }
       } else if (invoke) {
         log.warn(`[shieldcortex] approval broker: judge budget spent this minute — holding ${context.toolName} for the operator`);
       }
@@ -961,6 +991,7 @@ export function createInterceptor(
         toolInput: context.arguments,
         verdict: v,
         judge,
+        ...(judgeMeta ? { judgeMeta } : {}),
         policy: {
           allowPreClear: broker.config.allowPreClear,
           preClearConfidence: broker.config.preClearConfidence,

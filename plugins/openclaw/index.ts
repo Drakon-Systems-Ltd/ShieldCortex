@@ -3300,6 +3300,11 @@ function resolveBrokerRuntime(
     return {
       config,
       runJudge: defenceMod.runJudge,
+      // #143 residual, and deliberately NOT in `needed`: an older shieldcortex
+      // build has runJudge alone, and the interceptor falls back to it. Missing
+      // it costs an audit field, never a gate.
+      runJudgeDetailed:
+        typeof defenceMod.runJudgeDetailed === 'function' ? defenceMod.runJudgeDetailed : undefined,
       brokerDecision: defenceMod.brokerDecision,
       timeoutOutcome: defenceMod.timeoutOutcome,
       approvalTimeoutMs: typeof defenceMod.approvalTimeoutMs === 'function' ? defenceMod.approvalTimeoutMs : undefined,

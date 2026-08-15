@@ -277,6 +277,62 @@ describe('doctor — Action Guard notify fix is a signed CLI command (#275)', ()
 });
 
 /**
+ * #143 residual — the broker block is the thing operators most often believe is
+ * protecting them, and it is OFF by default. Doctor must say which it is, and
+ * must not let "broker configured" read as "broker working".
+ */
+describe('doctor — approval broker honesty (#143)', () => {
+  const brokerResult = async () => {
+    const results = await checkActionGuard();
+    return results.find((r) => /broker/.test(r.label));
+  };
+
+  it('says the broker is present but disabled when it is not opted into', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true, broker: { allowPreClear: true } } });
+    const broker = await brokerResult();
+    expect(broker).toBeDefined();
+    expect(broker!.message).toMatch(/disabled/i);
+    expect(broker!.message).toMatch(/opt-in/i);
+    // No claim of protection from a broker that never runs.
+    expect(broker!.message).not.toMatch(/armed|protecting/i);
+    // The human path is still notify, armed or not.
+    expect(broker!.message).toMatch(/notify channel/i);
+  });
+
+  it('treats a non-true `enabled` as disabled, exactly as the runtime does', async () => {
+    for (const enabled of ['true', 1, 'yes']) {
+      writeConfig({ actionGuard: { enabled: true, enforce: true, broker: { enabled } } });
+      const broker = await brokerResult();
+      expect(broker!.message).toMatch(/disabled/i);
+    }
+  });
+
+  it('says the broker is armed when it is switched on, without overclaiming', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true, broker: { enabled: true } } });
+    const broker = await brokerResult();
+    expect(broker).toBeDefined();
+    expect(broker!.message).toMatch(/armed/i);
+    // Armed still means: catastrophic never brokered, no judge → hold, and the
+    // human is reached through notify.
+    expect(broker!.message).toMatch(/catastrophic is never brokered/i);
+    expect(broker!.message).toMatch(/notify channel/i);
+    expect(broker!.message).not.toMatch(/disabled/i);
+  });
+
+  it('says nothing about a broker on a config that has no broker block', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    expect(await brokerResult()).toBeUndefined();
+  });
+
+  it('does not report on the broker when the guard is not enforcing', async () => {
+    // Nothing is gated, so nothing is brokered — reporting on the broker here
+    // would imply a gate that is not there.
+    writeConfig({ actionGuard: { enforce: false, broker: { enabled: true } } });
+    expect(await brokerResult()).toBeUndefined();
+  });
+});
+
+/**
  * #275 acceptance 7 — `doctor --fix-action-guard` used a bare fs.writeFileSync,
  * so the migration it performed carried the OLD `_sig` (or none) and the fix
  * itself tripped the integrity check into strict mode. The write must go

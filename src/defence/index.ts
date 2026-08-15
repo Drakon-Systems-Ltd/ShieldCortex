@@ -111,9 +111,9 @@ export type { LeaseGateResult, LeaseGateOptions } from './iron-dome/session-leas
 // Code hook) can reach them at runtime without importing the package at compile
 // time, the same seam `evaluateToolCall` already uses.
 export { brokerDecision, timeoutOutcome, isPreClearable, PRE_CLEARABLE_SIGNALS, DEFAULT_BROKER_POLICY } from './iron-dome/approval-broker.js';
-export type { BrokerInput, BrokerDecision, BrokerOutcome, BrokerAudit, BrokerPolicy, BrokerVerdictLike, JudgeResult } from './iron-dome/approval-broker.js';
-export { runJudge, buildJudgePrompt, parseJudgeResponse, JUDGE_SYSTEM_PROMPT } from './iron-dome/approval-judge.js';
-export type { JudgeRequest, ModelInvoker, RunJudgeOptions } from './iron-dome/approval-judge.js';
+export type { BrokerInput, BrokerDecision, BrokerOutcome, BrokerAudit, BrokerPolicy, BrokerVerdictLike, JudgeResult, JudgeUnavailableReason } from './iron-dome/approval-broker.js';
+export { runJudge, runJudgeDetailed, buildJudgePrompt, parseJudgeResponse, JUDGE_SYSTEM_PROMPT } from './iron-dome/approval-judge.js';
+export type { JudgeRequest, JudgeRunResult, JudgeFailureReason, ModelInvoker, RunJudgeOptions } from './iron-dome/approval-judge.js';
 export { normaliseBrokerConfig, normaliseBrokerModel, toBrokerPolicy, approvalTimeoutMs, DEFAULT_BROKER_CONFIG } from './iron-dome/broker-config.js';
 export type { BrokerConfig, BrokerGatedSeverity } from './iron-dome/broker-config.js';
 export { createCliInvoker } from './iron-dome/cli-invoker.js';
