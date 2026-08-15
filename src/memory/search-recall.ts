@@ -311,7 +311,7 @@ async function searchMemoriesInternal(
         'read',
       );
       if (!policy.canRead) {
-        logAccessDenial(result.memory.id, source, policy.reason);
+        logAccessDenial(result.memory.id, source, policy.reason, 'read', execution.attested);
         return false;
       }
       return true;
@@ -543,10 +543,12 @@ export async function searchMemories(
   options: SearchOptions,
   config: MemoryConfig = DEFAULT_CONFIG,
   source?: DefenceSource,
+  attested?: boolean,
 ): Promise<SearchResult[]> {
   return searchMemoriesInternal(options, config, source, {
     enableSideEffects: true,
     includeExplanation: false,
+    attested,
   });
 }
 

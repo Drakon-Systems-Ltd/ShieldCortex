@@ -5,6 +5,12 @@ import { Memory, MemoryCategory, MemoryConfig, SearchResult } from './types.js';
 export interface SearchExecutionOptions {
   enableSideEffects: boolean;
   includeExplanation: boolean;
+  /**
+   * Caller attestation for any access-denial row this search emits (a denied
+   * read is a BLOCK keyed to the caller). undefined ⇒ NULL (unplumbed). NOT a
+   * field on the caller-suppliable source — it rides the resolved identity.
+   */
+  attested?: boolean;
 }
 
 export interface SearchScoringContext {

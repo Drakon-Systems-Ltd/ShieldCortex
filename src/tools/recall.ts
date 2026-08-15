@@ -46,7 +46,7 @@ export type RecallInput = z.infer<typeof recallSchema>;
 /**
  * Execute the recall tool
  */
-export async function executeRecall(input: RecallInput): Promise<{
+export async function executeRecall(input: RecallInput & { sourceAttested?: boolean }): Promise<{
   success: boolean;
   memories?: Memory[];
   contradictions?: Map<number, { memoryId: number; title: string; score: number }[]>;
@@ -64,11 +64,11 @@ export async function executeRecall(input: RecallInput): Promise<{
 
     switch (input.mode) {
       case 'recent':
-        memories = getRecentMemories(input.limit, projectFilter, source);
+        memories = getRecentMemories(input.limit, projectFilter, source, undefined, input.sourceAttested);
         break;
 
       case 'important':
-        memories = getHighPriorityMemories(input.limit, projectFilter, source);
+        memories = getHighPriorityMemories(input.limit, projectFilter, source, undefined, input.sourceAttested);
         break;
 
       case 'search':
@@ -83,7 +83,7 @@ export async function executeRecall(input: RecallInput): Promise<{
           limit: input.limit,
           includeDecayed: input.includeDecayed,
           includeGlobal: input.includeGlobal,
-        }, undefined, source);
+        }, undefined, source, input.sourceAttested);
         memories = results.map(r => r.memory);
 
         // If FTS5 returned few results, try embedding fallback for additional matches
@@ -139,7 +139,7 @@ export async function executeRecall(input: RecallInput): Promise<{
     });
 
     // Provenance ledger: one allowed-read row per recall call (not per memory).
-    if (source) logAllowedRead(source, `recall:${input.mode}`, memories.map(m => m.id), projectFilter);
+    if (source) logAllowedRead(source, `recall:${input.mode}`, memories.map(m => m.id), projectFilter, input.sourceAttested);
 
     return {
       success: true,
@@ -219,7 +219,7 @@ export const getMemorySchema = z.object({
   source: sourceSchema,
 });
 
-export function executeGetMemory(input: { id: number; source?: DefenceSource }): {
+export function executeGetMemory(input: { id: number; source?: DefenceSource; sourceAttested?: boolean }): {
   success: boolean;
   memory?: Memory;
   error?: string;
@@ -236,7 +236,7 @@ export function executeGetMemory(input: { id: number; source?: DefenceSource }):
         error: error.toUserMessage(),
       };
     }
-    if (input.source) logAllowedRead(input.source, 'get_memory', [allowed.id], allowed.project ?? null);
+    if (input.source) logAllowedRead(input.source, 'get_memory', [allowed.id], allowed.project ?? null, input.sourceAttested);
     return { success: true, memory: allowed };
   } catch (error) {
     return {
@@ -252,7 +252,7 @@ export function executeGetMemory(input: { id: number; source?: DefenceSource }):
  * Related links can cross trust/sensitivity boundaries, so the same read ACL
  * applies: a caller only sees related memories it is permitted to read.
  */
-export function executeGetRelated(input: { id: number; source?: DefenceSource }): {
+export function executeGetRelated(input: { id: number; source?: DefenceSource; sourceAttested?: boolean }): {
   success: boolean;
   related?: ReturnType<typeof getRelatedMemories>;
   error?: string;
@@ -263,7 +263,7 @@ export function executeGetRelated(input: { id: number; source?: DefenceSource })
       guardReadMemories(related.map((r) => r.memory), input.source).map((m) => m.id),
     );
     if (input.source && allowedIds.size > 0) {
-      logAllowedRead(input.source, 'get_related', [...allowedIds]);
+      logAllowedRead(input.source, 'get_related', [...allowedIds], null, input.sourceAttested);
     }
     return { success: true, related: related.filter((r) => allowedIds.has(r.memory.id)) };
   } catch (error) {

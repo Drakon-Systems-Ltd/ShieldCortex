@@ -22,6 +22,9 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { deriveAttested, resolveToolSource } from '../defence/trust/resolve-tool-source.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
+import { attestedFlag } from '../defence/audit/logger.js';
+import { addMemory, deleteMemory, getMemoryById, logAccessDenial, logAllowedDelete, logAllowedRead } from '../memory/store.js';
+import { executeGetMemory, executeRecall } from '../tools/recall.js';
 import { projectToCompletion } from '../threat-graph/projector.js';
 import { computeRiskModifier, runRiskSweep } from '../threat-graph/risk.js';
 import type { DefenceSource } from '../defence/types.js';
@@ -211,6 +214,181 @@ describe('#270 — same-score identity is not self-declarable', () => {
     expect(resolved.source).toEqual({ type: 'cli', identifier: 'mcp' });
     expect(resolved.clamped).toBe(false);
     expect(resolved.attested).toBe(true);
+  });
+});
+
+describe('attestedFlag — the boolean→column mapping (one source of truth)', () => {
+  it('true→1, false→0, undefined→NULL', () => {
+    expect(attestedFlag(true)).toBe(1);
+    // The trap: `attested ?? null` would return `false` here, not 0 — and a
+    // false-that-is-not-0 silently disables the risk modifier for that source.
+    expect(attestedFlag(false)).toBe(0);
+    expect(attestedFlag(undefined)).toBeNull();
+  });
+});
+
+/**
+ * The resolver's own three meta rows must carry attestation.
+ *
+ * These rows ARE the evidence the risk model exists for — a blocked elevation,
+ * a spoof drop, an unconfigured caller — yet they shipped with source_attested
+ * NULL, so none of them ever accrued. Each row carries the SAME `attested`
+ * value the resolver already computed for the identity, which is the only
+ * correct choice: hardcoding SOURCE_UNATTESTED to 0 would contradict the strict
+ * contract (deriveAttested returns true under strict, and the row is still
+ * written on that path).
+ */
+describe('resolver meta rows carry source_attested', () => {
+  const IDENTITY_ENV_KEYS = [
+    'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_CONTEXT', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
+    'CODEX_THREAD_ID', 'CODEX_CI', 'SHIELDCORTEX_AGENT_SOURCE',
+  ] as const;
+  const saved: Partial<Record<(typeof IDENTITY_ENV_KEYS)[number], string | undefined>> = {};
+
+  beforeEach(() => {
+    for (const key of IDENTITY_ENV_KEYS) { saved[key] = process.env[key]; delete process.env[key]; }
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'claude'; // → cli:mcp 0.9 ceiling
+  });
+  afterEach(() => {
+    for (const key of IDENTITY_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  function rowByReason(prefix: string): { source_attested: number | null } | undefined {
+    return getDatabase()
+      .prepare("SELECT source_attested FROM defence_audit WHERE reason LIKE ? ORDER BY id DESC LIMIT 1")
+      .get(`${prefix}%`) as { source_attested: number | null } | undefined;
+  }
+
+  it('SOURCE_MISSING (no declaration, env-inferred) → attested=1', () => {
+    resolveToolSource(undefined, { toolName: 'recall', project: 'test' });
+    expect(rowByReason('SOURCE_MISSING')?.source_attested).toBe(1);
+  });
+
+  it('SOURCE_ELEVATION_BLOCKED (clamped spoof) → attested=1', () => {
+    resolveToolSource({ type: 'user', identifier: 'approved' }, { toolName: 'get_memory', project: 'test', strict: false });
+    expect(rowByReason('SOURCE_ELEVATION_BLOCKED')?.source_attested).toBe(1);
+  });
+
+  it('SOURCE_UNATTESTED (declared downgrade, unconfirmed, strict off) → attested=0', () => {
+    resolveToolSource({ type: 'file', identifier: 'import' }, { toolName: 'remember', project: 'test', strict: false });
+    expect(rowByReason('SOURCE_UNATTESTED')?.source_attested).toBe(0);
+  });
+
+  it('SOURCE_UNATTESTED under strict → attested=1 (strict contract; NOT hardcoded 0)', () => {
+    resolveToolSource({ type: 'file', identifier: 'import' }, { toolName: 'remember', project: 'test', strict: true });
+    expect(rowByReason('SOURCE_UNATTESTED')?.source_attested).toBe(1);
+  });
+});
+
+/**
+ * The read / delete / denial provenance helpers must be able to carry the
+ * caller's attestation. A read-denial is a BLOCK row keyed to a source; with
+ * NULL attestation it never accrued, so a spoofing caller's denied reads left
+ * no risk trail. Back-compat: omitting the argument keeps NULL.
+ */
+describe('store provenance helpers thread attested', () => {
+  const attestedSrc: DefenceSource = { type: 'cli', identifier: 'mcp' };
+  let seedId: number;
+
+  beforeEach(() => {
+    // logAccessDenial / single-id logAllowedRead reference a real memory_id
+    // (defence_audit.memory_id is FK-constrained); seed one so the rows land.
+    seedId = addMemory({ title: 'seed', content: 'harmless seed content for acl tests' }).id;
+  });
+
+  function lastRow(): { source_attested: number | null; firewall_result: string } {
+    return getDatabase()
+      .prepare('SELECT source_attested, firewall_result FROM defence_audit ORDER BY id DESC LIMIT 1')
+      .get() as { source_attested: number | null; firewall_result: string };
+  }
+
+  it('logAllowedRead stamps attested when told', () => {
+    logAllowedRead(attestedSrc, 'recall', [seedId], 'test', true);
+    expect(lastRow()).toMatchObject({ firewall_result: 'ALLOW', source_attested: 1 });
+  });
+
+  it('logAllowedRead defaults to NULL (unplumbed caller)', () => {
+    logAllowedRead(attestedSrc, 'recall', [seedId], 'test');
+    expect(lastRow().source_attested).toBeNull();
+  });
+
+  it('logAllowedDelete stamps attested when told', () => {
+    logAllowedDelete(seedId, attestedSrc, 'test', 'delete', true);
+    expect(lastRow()).toMatchObject({ firewall_result: 'ALLOW', source_attested: 1 });
+  });
+
+  it('logAccessDenial stamps attested when told (BLOCK rows must be able to accrue)', () => {
+    logAccessDenial(seedId, attestedSrc, 'trust too low', 'read', true);
+    expect(lastRow()).toMatchObject({ firewall_result: 'BLOCK', source_attested: 1 });
+  });
+
+  it('logAccessDenial defaults to NULL', () => {
+    logAccessDenial(seedId, attestedSrc, 'trust too low');
+    expect(lastRow().source_attested).toBeNull();
+  });
+});
+
+/**
+ * The read / delete WRAPPERS must pass the caller's resolved attestation down
+ * to the provenance helpers — otherwise the helpers accept an `attested`
+ * argument nobody supplies and every row stays NULL. These pin the wiring
+ * end-to-end on the common (allowed) paths; the deep denial path is covered by
+ * the helper unit tests above plus the ledger accrual suite.
+ */
+describe('read/delete wrappers thread the caller attestation', () => {
+  const caller: DefenceSource = { type: 'cli', identifier: 'mcp' };
+
+  function lastRowFor(result: string): { source_attested: number | null } | undefined {
+    return getDatabase()
+      .prepare('SELECT source_attested FROM defence_audit WHERE firewall_result = ? ORDER BY id DESC LIMIT 1')
+      .get(result) as { source_attested: number | null } | undefined;
+  }
+
+  it('deleteMemory passes attested to the allowed-delete row', () => {
+    const id = addMemory({ title: 'own', content: 'a memory this caller owns' }, undefined, caller).id;
+    deleteMemory(id, caller, { mode: 'delete' }, true);
+    const row = getDatabase()
+      .prepare("SELECT source_attested FROM defence_audit WHERE reason LIKE 'deleted memory%' ORDER BY id DESC LIMIT 1")
+      .get() as { source_attested: number | null };
+    expect(row.source_attested).toBe(1);
+  });
+
+  it('executeGetMemory stamps the allowed-read provenance row', () => {
+    const id = addMemory({ title: 'own', content: 'readable by its owner' }, undefined, caller).id;
+    executeGetMemory({ id, source: caller, sourceAttested: true });
+    expect(lastRowFor('ALLOW')?.source_attested).toBe(1);
+  });
+
+  it('executeRecall (recent) stamps the recall provenance row', async () => {
+    addMemory({ title: 'own', content: 'a recent memory of this caller' }, undefined, caller);
+    await executeRecall({
+      mode: 'recent', limit: 10, includeDecayed: false, includeGlobal: true,
+      source: caller, sourceAttested: true,
+    } as Parameters<typeof executeRecall>[0]);
+    const row = getDatabase()
+      .prepare("SELECT source_attested FROM defence_audit WHERE reason LIKE 'read %via recall%' ORDER BY id DESC LIMIT 1")
+      .get() as { source_attested: number | null } | undefined;
+    expect(row?.source_attested).toBe(1);
+  });
+
+  it('getMemoryById denial carries attested (the weighted, accruing path)', () => {
+    // Seed a memory owned by another agent at a sensitivity that isolates it,
+    // then read it as a DIFFERENT low-trust agent → checkAccess denies, and the
+    // BLOCK denial row must carry the reader's attestation so it can accrue.
+    const owner: DefenceSource = { type: 'agent', identifier: 'alpha' };
+    const id = addMemory(
+      { title: 'secret', content: 'my password is hunter2 and api key sk-live-abc' },
+      undefined, owner,
+    ).id;
+    const reader: DefenceSource = { type: 'agent', identifier: 'beta>gamma>delta' }; // deep chain → low trust
+    getMemoryById(id, reader, true);
+    const denial = getDatabase()
+      .prepare("SELECT source_attested FROM defence_audit WHERE firewall_result = 'BLOCK' AND reason LIKE 'Access denied%' ORDER BY id DESC LIMIT 1")
+      .get() as { source_attested: number | null } | undefined;
+    expect(denial?.source_attested).toBe(1);
   });
 });
 

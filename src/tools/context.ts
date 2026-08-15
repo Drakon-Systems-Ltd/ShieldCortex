@@ -42,7 +42,7 @@ export type GetContextInput = z.infer<typeof getContextSchema>;
 /**
  * Execute the get_context tool
  */
-export async function executeGetContext(input: GetContextInput): Promise<{
+export async function executeGetContext(input: GetContextInput & { sourceAttested?: boolean }): Promise<{
   success: boolean;
   context?: string;
   summary?: ContextSummary;
@@ -99,7 +99,7 @@ export async function executeGetContext(input: GetContextInput): Promise<{
         ...summary.recentMemories, ...summary.keyDecisions,
         ...summary.activePatterns, ...summary.pendingItems, ...relevantMemories,
       ].map(m => m.id);
-      logAllowedRead(source, 'get_context', [...new Set(surfacedIds)], projectFilter);
+      logAllowedRead(source, 'get_context', [...new Set(surfacedIds)], projectFilter, input.sourceAttested);
     }
 
     return {
@@ -351,7 +351,7 @@ export const exportSchema = z.object({
   project: z.string().optional().describe('Export only memories for this project'),
 });
 
-export function executeExport(input: { project?: string; source?: DefenceSource }): {
+export function executeExport(input: { project?: string; source?: DefenceSource; sourceAttested?: boolean }): {
   success: boolean;
   data?: string;
   count?: number;
@@ -370,7 +370,7 @@ export function executeExport(input: { project?: string; source?: DefenceSource 
     const memories = JSON.parse(data) as Array<{ id: number }>;
     // Provenance ledger: a bulk export is the highest-value read to audit.
     if (input.source) {
-      logAllowedRead(input.source, 'export_memories', memories.map(m => m.id), projectFilter);
+      logAllowedRead(input.source, 'export_memories', memories.map(m => m.id), projectFilter, input.sourceAttested);
     }
     return {
       success: true,
