@@ -6,6 +6,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.53.0] - 2026-08-15
+
+**Minor — attestation write-path + allowlist batch review + threat-graph projector heal on upgrade.**
+
+Four landings since 4.52.3, published together so hosts on `shieldcortex update` get a coherent train:
+
+1. **Threat-graph projector un-stall (#304)** — upgraded installs where the projector cursor advanced but modern lease runs died no longer sit silent forever. The projector heals itself; doctor surfaces stall/never-ran/error instead of a clean bill of health on a dead graph. **Headline behaviour change on every upgraded install: the graph starts moving again.**
+2. **Attestation Phase 1 (#308)** — `source_attested` plumbed through the write surface (MCP / read / delete / tool-response / iron-dome). NULL-preserving and backward-compatible; unattested history stays NULL, not false.
+3. **Attestation Phase 2 (#313)** — the `.mjs` hook plane is attested behind an allowlist clamp. Rogue importers do not get a free attested stamp.
+4. **Allowlist scan + update-time batch review (#311 / #309)** — `shieldcortex allowlist scan` discovers Hermes/OpenClaw cron scripts, classifies vs `reviewedScripts` by content hash, and TTY-pins through the same path as `allowlist add`. `shieldcortex update` offers interactive review or one headless pointer line.
+
+### Behaviour / ops notes (read before flipping knobs)
+
+- **`threatGraph.trustModifier` stays advisory by default.** Do **not** flip to `enforce` in or after this cut. Until now enforce was inert everywhere because the ledger was all-NULL. After 4.53.0, attested rows start accruing real risk — and the #182 lesson says a fleet's own infra (session-end-hook especially) will top the risk list first. **Advisory soak until the FP picture is measured.**
+- No SDK / client API change — TS SDK and PyPI stay on **0.3.0**.
+- Hosts pick this up with `shieldcortex update`.
+
+### Added
+
+- **`shieldcortex allowlist scan`** (+ `--json` / `--glob` / cron path flags / TTY `--yes` requiring typed `approve`).
+- **`source_attested` write-path** across MCP, read, delete, hook, tool-response, and iron-dome surfaces (NULL-preserving).
+- **Hook-plane attestation allowlist clamp** (Phase 2) so only approved hook importers stamp attested.
+- **Doctor threat-graph stall detection** — never-ran backlog, stalled-upgrade cursor, last projector error.
+
+### Fixed
+
+- **Threat-graph projector on upgraded installs** — un-stall / self-heal so the graph moves again (#304).
+- **Allowlist pin TOCTOU** — scan/yes bind `expectedSha256` from the reviewed preview; content rewrite refuses the write.
+- **Incomplete cron discovery** — unreadable/invalid cron JSON exits 1 (not empty-ok).
+- **TTY preview spoofing** — CSI/C0 sanitised in allowlist scan previews.
+
+### Security
+
+- Attested stamps are host-path / allowlist derived, not caller-supplied free labels.
+- Allowlist batch review keeps the #118 TTY gate: non-interactive never writes; headless update never auto-approves.
+
+### PRs
+
+- #304 threat-graph un-stall + doctor visibility
+- #308 attestation Phase 1 write-path
+- #311 / #309 allowlist scan + update hook
+- #313 attestation Phase 2 hook allowlist clamp
+
 ## [4.52.3] - 2026-08-15
 
 **Patch — Hermes Action Guard: malformed 200 is unavailable, not allow.**
