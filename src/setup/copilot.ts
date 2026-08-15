@@ -352,6 +352,9 @@ export async function installCopilot(): Promise<void> {
     console.log('  • Defence pipeline (firewall, trust scoring, audit trail)');
     console.log('  • Knowledge graph queries');
     console.log('  • Memory consolidation');
+    console.log();
+    console.log('This is an MCP memory server — NOT a tool gate.');
+    console.log('VS Code / Cursor cannot deny Bash via MCP. `shieldcortex lease` will report NOT BOUND.');
   } else if (vscodeDirs.length === 0 && !cursorDir) {
     console.error('Neither VS Code nor Cursor was found on this system.');
     process.exit(1);

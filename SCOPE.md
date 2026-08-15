@@ -2,7 +2,9 @@
 
 *A second brain with a defence system built in.*
 
-Status anchor: **v4.47.39** · 2026-08-12 · claims proven: **12/12** (`docs/CLAIMS-PROOF.md`)
+Status anchor: **v4.52.1** · 2026-08-15 · claims proven: **12/12** (`docs/CLAIMS-PROOF.md`)
+
+Runtime enforcement is **bound** on Claude Code (PreToolUse), OpenClaw (`before_tool_call`), and Hermes (`pre_tool_call`). Codex, Cursor, Copilot, LangChain, and generic MCP get the memory firewall / scanner only — they are **not bound**. Conversation-turn blocking on OpenClaw requires an operator grant and posture `enforce` (default `observe`). See the README capability matrix.
 
 ---
 

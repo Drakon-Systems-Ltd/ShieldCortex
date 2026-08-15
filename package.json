@@ -1,7 +1,7 @@
 {
   "name": "shieldcortex",
   "version": "4.52.1",
-  "description": "Trustworthy memory and security for AI agents. Recall debugging, review queue, OpenClaw session capture, and memory poisoning defence for Claude Code, Codex, OpenClaw, LangChain, and MCP agents.",
+  "description": "Trustworthy memory and security for AI agents. Memory firewall for any host that writes through it; runtime tool gates on Claude Code, OpenClaw, and Hermes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -40,6 +40,11 @@
       "import": "./dist/scan-only.js",
       "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/scan-only.d.ts"
+    },
+    "./enforce": {
+      "import": "./dist/enforce.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
+      "types": "./dist/enforce.d.ts"
     },
     "./environment": {
       "import": "./dist/environment/index.js",
@@ -170,6 +175,7 @@
     "scripts/prompt-recall-hook.mjs",
     "scripts/pre-tool-hook.mjs",
     "scripts/lib",
-    "dashboard/.next/standalone"
+    "dashboard/.next/standalone",
+    "plugins/hermes"
   ]
 }
