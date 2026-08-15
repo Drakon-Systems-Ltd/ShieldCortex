@@ -6,6 +6,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.52.2] - 2026-08-15
+
+**Patch — bound-plane honesty + portable `shieldcortex/enforce` + Hermes install CLI.**
+
+Docs and packaging stop overclaiming Codex/Cursor/MCP as tool gates. Ships the portable Action Guard entry point and Hermes plugin install path that 4.52.1 README already described but did not publish on npm `@latest`.
+
+### Added
+
+- **`import { evaluateAction, evaluateToolCall } from 'shieldcortex/enforce'`** — portable Action Guard entry (no sqlite pull via iron-dome index). Host must honour `block` / `require_approval`.
+- **`shieldcortex hermes install|status|uninstall`** — copies `plugins/hermes/shieldcortex` into `~/.hermes/plugins/shieldcortex`. Tool gate bound via local Action Guard API; conversation/freeze not bound on this plane.
+- **`plugins/hermes` included in the npm package `files` list** so the installer works from a global install, not only a git clone.
+- **`shieldcortex lease` / plane report** names Hermes + explicitly marks Cursor/Codex MCP as NOT BOUND.
+
+### Docs
+
+- README capability matrix: Claude Code / OpenClaw / Hermes = bound; Codex / Cursor / Copilot / LangChain / generic MCP = not bound.
+- SCOPE anchor → v4.52.2. SKILL + Codex/Copilot installers print honesty lines.
+- Paired site honesty: pricing/docs stop calling Codex/Cursor installs “hooks”.
+
+### Notes
+
+- Version was left at 4.52.1 on the feature PR (#298); this patch is the publish vehicle.
+- Dual-reviewed APPROVE_WITH_NITS (Grok 4.6 + SOL). Nits retained: lease default `anon-pid`, evaluateAction returns verdict+lease separately, hermes BOUND-on-disk vs armed.
+
 ## [4.52.1] - 2026-08-15
 
 **Patch — Action Guard enable/enforce via signed CLI flags.**
