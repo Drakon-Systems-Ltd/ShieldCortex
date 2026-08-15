@@ -103,10 +103,17 @@ describe('hook plane attestation', () => {
       }, 'shieldcortex', { source: 'victim-hook-name' });
 
       const row = db.prepare(
-        "SELECT source_attested FROM defence_audit WHERE source_identifier = 'victim-hook-name' ORDER BY id DESC LIMIT 1",
-      ).get() as { source_attested: number | null } | undefined;
-      expect(row).toBeDefined();
-      expect(row?.source_attested).toBeNull();
+        "SELECT source_attested, firewall_result FROM defence_audit WHERE source_identifier = 'victim-hook-name' ORDER BY id DESC LIMIT 1",
+      ).get() as { source_attested: number | null; firewall_result: string } | undefined;
+      // firewall_result ALLOW + a stored memories row prove the REAL pipeline
+      // ran — the writeFallbackAudit path (dist missing / pipeline throw) also
+      // writes a NULL row, but as a BLOCK with nothing stored, so without
+      // these two assertions this test passes vacuously off the fallback.
+      expect(row).toMatchObject({ firewall_result: 'ALLOW', source_attested: null });
+      const stored = db.prepare(
+        "SELECT COUNT(*) AS c FROM memories WHERE source = 'hook:victim-hook-name'",
+      ).get() as { c: number };
+      expect(stored.c).toBe(1);
     } finally {
       db.close();
     }
