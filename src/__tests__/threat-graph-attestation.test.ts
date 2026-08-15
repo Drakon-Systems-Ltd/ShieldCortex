@@ -23,8 +23,10 @@ import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { deriveAttested, resolveToolSource } from '../defence/trust/resolve-tool-source.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { attestedFlag } from '../defence/audit/logger.js';
-import { addMemory, deleteMemory, getMemoryById, logAccessDenial, logAllowedDelete, logAllowedRead } from '../memory/store.js';
+import { addMemory, deleteMemory, getMemoryById, logAccessDenial, logAllowedDelete, logAllowedRead, mergeMemories } from '../memory/store.js';
 import { executeGetMemory, executeRecall } from '../tools/recall.js';
+import { enrichMemory } from '../memory/lifecycle.js';
+import { importMemories } from '../memory/consolidate.js';
 import { projectToCompletion } from '../threat-graph/projector.js';
 import { computeRiskModifier, runRiskSweep } from '../threat-graph/risk.js';
 import type { DefenceSource } from '../defence/types.js';
@@ -389,6 +391,57 @@ describe('read/delete wrappers thread the caller attestation', () => {
       .prepare("SELECT source_attested FROM defence_audit WHERE firewall_result = 'BLOCK' AND reason LIKE 'Access denied%' ORDER BY id DESC LIMIT 1")
       .get() as { source_attested: number | null } | undefined;
     expect(denial?.source_attested).toBe(1);
+  });
+});
+
+/**
+ * System-constant writers attest BY CONSTRUCTION.
+ *
+ * enrichment / merge / import / consolidate-summary / quarantine-approve all
+ * re-scan derived or approved content under a CODE-CONSTANT identity that no
+ * caller can influence, so the identity is attested by construction. Stamping
+ * them lets the content their channel BLOCKs accrue to that channel (the same
+ * conduit-accrual model as hooks) instead of silently dropping to NULL.
+ *
+ * IMPORTANT: this attests the identity WITHOUT changing the scan trust. The
+ * enrichment/merge/import re-scans keep their deliberately conservative
+ * low-trust source (enrichment is attacker-influenced recall-query text —
+ * lifecycle.ts documents the low-trust choice as intentional). Attestation is
+ * about who the row belongs to, not how strictly it was scanned.
+ */
+describe('system-constant writers attest by construction', () => {
+  function rowByIdentifier(identifier: string): { source_attested: number | null } | undefined {
+    return getDatabase()
+      .prepare('SELECT source_attested FROM defence_audit WHERE source_identifier = ? ORDER BY id DESC LIMIT 1')
+      .get(identifier) as { source_attested: number | null } | undefined;
+  }
+
+  it('mergeMemories re-scan (cli:merge) is attested', () => {
+    const a = addMemory({ title: 'dup a', content: 'the release ships on friday afternoon' }).id;
+    const b = addMemory({ title: 'dup b', content: 'the release ships on friday, staged rollout' }).id;
+    mergeMemories(a, b);
+    expect(rowByIdentifier('merge')?.source_attested).toBe(1);
+  });
+
+  it('importMemories re-scan (file:import) is attested', () => {
+    const json = JSON.stringify([
+      { title: 'imported note', content: 'a perfectly benign imported memory', type: 'long_term', category: 'note' },
+    ]);
+    importMemories(json);
+    expect(rowByIdentifier('import')?.source_attested).toBe(1);
+  });
+
+  it('enrichMemory re-scan (web:enrichment) is attested, scan trust unchanged', () => {
+    const id = addMemory({
+      title: 'db migration', content: 'database migration drizzle sqlite journal wal mode',
+    }).id;
+    // Related-but-novel context (jaccard ≈ 0.42) so it clears the similarity
+    // band and actually runs the enrichment re-scan.
+    const result = enrichMemory(
+      id, 'database migration drizzle sqlite journal now also busy timeout tuning', 'search',
+    );
+    expect(result.enriched).toBe(true);
+    expect(rowByIdentifier('enrichment')?.source_attested).toBe(1);
   });
 });
 

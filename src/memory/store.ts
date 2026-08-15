@@ -1126,6 +1126,9 @@ export function mergeMemories(
       source,
       undefined,
       kept.project ?? removed.project ?? undefined,
+      // Mechanical re-scan of two already-scanned rows under a system-constant
+      // identity (default cli:merge) — attested by construction.
+      { sourceAttested: true },
     );
     if (defenceResult.firewall.result !== 'ALLOW') {
       throw new MemoryBlockedError(defenceResult.firewall.reason);

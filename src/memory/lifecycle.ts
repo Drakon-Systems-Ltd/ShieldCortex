@@ -265,7 +265,11 @@ export function enrichMemory(
   // analogue of mergeMemories. The appended text comes from a recall query /
   // caller and could straddle an injection or credential into a clean stored
   // row. Skip (don't poison) on a non-ALLOW verdict.
-  const defenceResult = runDefencePipeline(newContent, memory.title, ENRICH_SOURCE, undefined, memory.project ?? undefined);
+  // ENRICH_SOURCE is a code constant (attested by construction). Keep the
+  // deliberate low-trust scan for the VERDICT (see the source note above) but
+  // stamp attestation so an enrichment-channel BLOCK accrues to that channel
+  // instead of dropping to NULL. Trust and attestation are separate concerns.
+  const defenceResult = runDefencePipeline(newContent, memory.title, ENRICH_SOURCE, undefined, memory.project ?? undefined, { sourceAttested: true });
   if (defenceResult.firewall.result !== 'ALLOW') {
     return { enriched: false, reason: `Enrichment blocked by defence: ${defenceResult.firewall.reason}` };
   }

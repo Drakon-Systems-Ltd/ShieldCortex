@@ -115,6 +115,10 @@ function promoteApprovedQuarantineRow(row: QuarantineRow, reviewedBy: string): M
     // quarantine band, so it isn't re-quarantined in a loop). The pipeline still
     // RE-SCANS, so genuinely-malicious content fails closed (caller catches it).
     { type: 'user', identifier: 'approved' },
+    // Code-constant identity (the MCP surface rejects a declared user: type) →
+    // attested by construction. An approved-then-still-malicious re-scan BLOCK
+    // accrues to user:approved.
+    { sourceAttested: true },
   );
 }
 
