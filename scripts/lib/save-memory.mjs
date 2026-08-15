@@ -28,6 +28,16 @@ const DEDUP_TITLE_JACCARD = pickNumber('SHIELDCORTEX_DEDUP_TITLE_JACCARD', 0.6);
 const DEDUP_COMBINED = pickNumber('SHIELDCORTEX_DEDUP_COMBINED', 0.5);
 const DEDUP_CANDIDATE_LIMIT = 200; // bound the candidate scan per write
 
+// Hook identities shipped IN THIS PACKAGE — string literals at the three hook
+// call sites (session-end/pre-compact/stop) plus the JSDoc'd default. These are
+// attested by construction: no transcript content or hook stdin can reach the
+// field. The clamp exists because this module is importable by any same-user
+// process — a free opts.source must NOT mint attested rows under an arbitrary
+// name. Out-of-allowlist sources still scan and store, but land UNDEFINED →
+// source_attested NULL (never `false`→0: an explicit 0 under a real key is the
+// mute lever risk.ts's latest-non-null attestation resolution hands out).
+const KNOWN_HOOK_SOURCES = new Set(['session-end-hook', 'pre-compact-hook', 'stop-hook', 'hook']);
+
 /**
  * Insert an auto-extracted memory into the SC database, routed through the
  * full defence pipeline.
@@ -65,7 +75,9 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
 
   let result;
   try {
-    result = defence.runDefencePipeline(memory.content, memory.title, source, undefined, project ?? undefined);
+    result = defence.runDefencePipeline(memory.content, memory.title, source, undefined, project ?? undefined, {
+      sourceAttested: KNOWN_HOOK_SOURCES.has(sourceIdentifier) ? true : undefined,
+    });
   } catch (err) {
     const msg = err && typeof err === 'object' && 'message' in err ? String(err.message) : String(err);
     writeFallbackAudit(db, memory, project, sourceIdentifier, `pipeline_error: ${msg}`);
@@ -212,6 +224,12 @@ function insertQuarantineRow(db, memory, project, source, result) {
 
 function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
   // Synthetic audit row for cases where the pipeline could not run.
+  //
+  // source_attested is DELIBERATELY absent (schema default NULL): both call
+  // sites are self-inflicted states (dist build missing / pipeline threw), and
+  // an attested BLOCK here would accrue full-weight risk against the hook's
+  // own identity for a packaging problem, not an attack. Leave NULL — do not
+  // "fix" this into an accruing row.
   try {
     db.prepare(`
       INSERT INTO defence_audit (
