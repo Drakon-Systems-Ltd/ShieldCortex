@@ -278,8 +278,19 @@ function sourcesBroken(sources: { hermes: CronSourceReport; openclaw: CronSource
 const PREVIEW_MAX_LINES = 40;
 const PREVIEW_MAX_BYTES = 2_048;
 
+/** Strip CSI/OSC and most C0 controls so a hostile script cannot spoof the
+ *  review banner/path/hash on a TTY. Keep tab; turn CR into a visible marker. */
+function sanitisePreviewLine(line: string): string {
+  return line
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)?/g, '')
+    .replace(/\u001b./g, '')
+    .replace(/\r/g, '⏎')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+}
+
 function makePreview(content: string): string {
-  const lines = content.split('\n');
+  const lines = content.split('\n').map(sanitisePreviewLine);
   let preview = lines.slice(0, PREVIEW_MAX_LINES).join('\n');
   if (preview.length > PREVIEW_MAX_BYTES) preview = preview.slice(0, PREVIEW_MAX_BYTES);
   if (preview.length < content.length) preview += '\n…';
