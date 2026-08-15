@@ -6,10 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.52.3] - 2026-08-15
+
+**Patch — Hermes Action Guard: malformed 200 is unavailable, not allow.**
+
+The advertised Hermes bound plane treated a 200 JSON body without a valid `decision` as `allow` + `available=True`, which skipped the catastrophic/dangerous fallback. Those responses are now unavailable so the fallback still runs. Remote `reason` is bounded. CI runs the Hermes Python suite.
+
 ### Fixed
 
-- **Hermes Action Guard client: a 200 JSON body is not a verdict.** Missing, blank, or unknown `decision` used to coerce to `allow` with `available=True`, which skipped the #59 catastrophic/dangerous fallback on the advertised bound plane. Those responses are now unavailable so the fallback still runs. CI now executes the Hermes Python suite.
-- **Hermes Action Guard remote `reason` is bounded.** Valid `block`/`require_approval` reasons (and scan-path reasons) are flattened to a single line and capped so a misbound local service cannot inject a message boundary or an unbounded prompt in ShieldCortex's voice.
+- **Hermes `evaluate_tool_call`**: missing / null / blank / bool / list / unknown / non-dict `decision` → `available=False` (PR #301, closes #300).
+- **Remote reason sanitisation**: single-line, control-stripped, 400-char cap before hook messages.
+- **CI**: Linux job runs `python3 -m unittest discover -s plugins/hermes/shieldcortex/tests -v`.
 
 ## [4.52.2] - 2026-08-15
 
