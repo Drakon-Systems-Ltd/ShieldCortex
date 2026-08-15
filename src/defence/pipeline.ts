@@ -401,8 +401,12 @@ export async function runDefencePipelineWithVerify(
   source: DefenceSource,
   config?: DefenceConfig,
   project?: string,
+  // sourceAttested is SYSTEM-derivation only (resolver / code-constant
+  // identity) — never a caller claim. Forwarded to the sync pipeline's audit
+  // row; the async layers below never change it.
+  options?: PipelineRunOptions,
 ): Promise<DefencePipelineResultWithVerify> {
-  let result: DefencePipelineResultWithVerify = runDefencePipeline(content, title, source, config, project);
+  let result: DefencePipelineResultWithVerify = runDefencePipeline(content, title, source, config, project, options);
 
   // Semantic-similarity layer (LOCAL, async-path only). Runs regardless of the
   // cloud-verify gate below. Lazy-imported so the sync pipeline never pulls in

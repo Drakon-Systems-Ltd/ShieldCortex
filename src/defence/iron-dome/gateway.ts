@@ -38,6 +38,8 @@ export function validateGateway(
   instruction: string,
   config: IronDomeConfig,
   source?: DefenceSource,
+  /** Resolver-derived attestation for `source`; omit ⇒ NULL (fail-safe). */
+  attested?: boolean,
 ): GatewayResult {
   if (!config.enabled) {
     return {
@@ -67,6 +69,7 @@ export function validateGateway(
     allowed: result.allowed,
     reason: result.reason,
     source,
+    attested,
   });
 
   return result;

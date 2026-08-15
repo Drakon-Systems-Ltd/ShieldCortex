@@ -1146,7 +1146,10 @@ ${bold}DOCS${reset}
 
     const { runDefencePipeline } = await import('./defence/pipeline.js');
     const source = { type: 'cli' as const, identifier: 'shieldcortex-scan' };
-    const result = runDefencePipeline(text, 'CLI Scan', source);
+    // Hardcoded identity in this dispatch → attested by construction. Operator
+    // decision (accept-with-soak): test BLOCKs accrue to cli:shieldcortex-scan;
+    // the advisory soak absorbs it, and enforce stays off until FP-measured.
+    const result = runDefencePipeline(text, 'CLI Scan', source, undefined, undefined, { sourceAttested: true });
 
     const bold = '\x1b[1m';
     const reset = '\x1b[0m';

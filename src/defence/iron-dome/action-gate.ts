@@ -24,6 +24,8 @@ export function isActionAllowed(
   action: string,
   config: IronDomeConfig,
   source?: DefenceSource,
+  /** Resolver-derived attestation for `source`; omit ⇒ NULL (fail-safe). */
+  attested?: boolean,
 ): ActionGateResult {
   if (!config.enabled) {
     return {
@@ -52,6 +54,7 @@ export function isActionAllowed(
         allowed: false,
         reason: result.reason,
         source,
+        attested,
       });
       return result;
     }
@@ -72,6 +75,7 @@ export function isActionAllowed(
       allowed: true,
       reason: result.reason,
       source,
+      attested,
     });
     return result;
   }
@@ -91,6 +95,7 @@ export function isActionAllowed(
       allowed: false,
       reason: result.reason,
       source,
+      attested,
     });
     return result;
   }
@@ -107,6 +112,7 @@ export function isActionAllowed(
     allowed: true,
     reason: result.reason,
     source,
+    attested,
   });
   return result;
 }

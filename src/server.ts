@@ -1164,7 +1164,7 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
     { title: 'Iron Dome Action Check', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const { getIronDomeStatus, isActionAllowed, validateGateway } = await import('./defence/iron-dome/index.js');
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'iron_dome_check');
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'iron_dome_check');
       const status = getIronDomeStatus();
 
       const lines = ['## Iron Dome Check', ''];
@@ -1176,7 +1176,7 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
 
       // Gateway check
       if (args.channel) {
-        const gateway = validateGateway(args.channel, args.action, status.config, source);
+        const gateway = validateGateway(args.channel, args.action, status.config, resolved.source, resolved.attested);
         lines.push(`**Gateway:** ${gateway.trustLevel} — ${gateway.reason}`);
         if (!gateway.allowed) {
           lines.push('', '**Result:** BLOCKED by gateway. Channel is not trusted.');
@@ -1185,7 +1185,7 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
       }
 
       // Action gate check
-      const gate = isActionAllowed(args.action, status.config, source);
+      const gate = isActionAllowed(args.action, status.config, resolved.source, resolved.attested);
       lines.push(`**Action Gate:** ${gate.decision} — ${gate.reason}`);
 
       return { content: [{ type: 'text', text: lines.join('\n') }] };
