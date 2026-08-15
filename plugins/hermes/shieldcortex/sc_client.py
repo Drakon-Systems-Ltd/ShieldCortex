@@ -131,6 +131,23 @@ def fallback_dangerous_match(content: str) -> bool:
 DEFAULT_BASE_URL = os.environ.get("SHIELDCORTEX_API_URL", "http://127.0.0.1:3001")
 TOKEN_FILE = os.path.expanduser("~/.shieldcortex/.api-token")
 
+# Remote strings enter hook messages in ShieldCortex's voice. Bound + flatten
+# so a misbound local service cannot inject a message boundary or an unbounded
+# prompt. Same threat model as the unknown-decision 32-char echo.
+_REMOTE_REASON_LIMIT = 400
+_REMOTE_CTRL = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def sanitize_remote_reason(value, *, limit: int = _REMOTE_REASON_LIMIT) -> str:
+    """Coerce a remote reason to a single-line bounded string. Non-strings → ''."""
+    if not isinstance(value, str):
+        return ""
+    cleaned = _REMOTE_CTRL.sub(" ", value)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > limit:
+        return cleaned[:limit]
+    return cleaned
+
 
 def _api_token() -> str | None:
     """Bearer token for the ShieldCortex API: env first, then ~/.shieldcortex/.api-token."""
@@ -150,10 +167,10 @@ class Verdict:
 
     __slots__ = ("result", "threats", "reason", "available")
 
-    def __init__(self, result: str, threats, reason: str, available: bool = True):
+    def __init__(self, result: str, threats, reason: object = "", available: bool = True):
         self.result = (result or "ALLOW").upper()  # ALLOW | BLOCK | QUARANTINE | ERROR
-        self.threats = list(threats or [])
-        self.reason = reason or ""
+        self.threats = [t for t in threats if isinstance(t, str)][:32] if isinstance(threats, list) else []
+        self.reason = sanitize_remote_reason(reason)
         self.available = available  # False => scanner unreachable (fail-open)
 
     @property
@@ -175,10 +192,13 @@ class ActionGuardVerdict:
 
     __slots__ = ("decision", "signals", "reason", "available")
 
-    def __init__(self, decision: str, signals, reason: str, available: bool = True):
+    def __init__(self, decision: str, signals, reason: object = "", available: bool = True):
         self.decision = (decision or "allow").lower()  # allow | require_approval | block
-        self.signals = list(signals or [])
-        self.reason = reason or ""
+        if isinstance(signals, list):
+            self.signals = [s for s in signals if isinstance(s, str)][:32]
+        else:
+            self.signals = []
+        self.reason = sanitize_remote_reason(reason)
         self.available = available
 
     def __repr__(self) -> str:
@@ -235,8 +255,7 @@ def evaluate_tool_call(
     signals = data.get("signals") or []
     if not isinstance(signals, list):
         signals = []
-    reason = data.get("reason") or ""
-    return ActionGuardVerdict(decision, signals, reason, available=True)
+    return ActionGuardVerdict(decision, signals, data.get("reason"), available=True)
 
 
 def scan(
