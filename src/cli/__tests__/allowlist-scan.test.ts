@@ -84,7 +84,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
 
   test('discovery: absolute .py path inside a Hermes prompt string', () => {
     writeHermesCron({ jobs: [{ prompt: `Every morning run python3 ${scriptPath} and email the result` }] });
-    const found = discoverScripts({ home: dir });
+    const found = discoverScripts({ home: dir }).scripts;
     expect(found.map((f) => f.path)).toContain(scriptPath);
   });
 
@@ -92,13 +92,13 @@ describe('shieldcortex allowlist scan (#309)', () => {
     mkdirSync(join(dir, 'jobs'), { recursive: true });
     writeFileSync(join(dir, 'jobs', 'nightly.sh'), '#!/bin/sh\necho hi\n');
     writeHermesCron({ jobs: [{ prompt: 'run bash ~/jobs/nightly.sh please' }] });
-    const found = discoverScripts({ home: dir });
+    const found = discoverScripts({ home: dir }).scripts;
     expect(found.map((f) => f.path)).toContain(join(dir, 'jobs', 'nightly.sh'));
   });
 
   test('discovery: explicit Hermes `script` field', () => {
     writeHermesCron({ jobs: [{ prompt: 'do the thing', script: scriptPath }] });
-    const found = discoverScripts({ home: dir });
+    const found = discoverScripts({ home: dir }).scripts;
     expect(found.map((f) => f.path)).toContain(scriptPath);
   });
 
@@ -108,7 +108,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
       jobs: [{ payload: { kind: 'agentTurn', message: `node ${join(dir, 'poll.mjs')} --daily` } }],
     });
     writeFileSync(join(dir, 'poll.mjs'), 'console.log(1)\n');
-    const found = discoverScripts({ home: dir });
+    const found = discoverScripts({ home: dir }).scripts;
     expect(found.map((f) => f.path)).toContain(join(dir, 'poll.mjs'));
   });
 
@@ -117,17 +117,17 @@ describe('shieldcortex allowlist scan (#309)', () => {
     mkdirSync(join(dir, '.hermes', 'skills', 'sentry'), { recursive: true });
     writeFileSync(skillScript, SOURCE);
     writeHermesCron({ jobs: [{ prompt: `use the memory skill: python3 ${skillScript}` }] });
-    const found = discoverScripts({ home: dir });
+    const found = discoverScripts({ home: dir }).scripts;
     expect(found.map((f) => f.path)).toContain(skillScript);
   });
 
   test('discovery: bare-array Hermes shape, malformed JSON and absent files never throw', () => {
     writeHermesCron([{ prompt: `sh ${scriptPath}` }]);
-    expect(discoverScripts({ home: dir }).map((f) => f.path)).toContain(scriptPath);
+    expect(discoverScripts({ home: dir }).scripts.map((f) => f.path)).toContain(scriptPath);
     writeHermesCron('{not json');
     expect(() => discoverScripts({ home: dir })).not.toThrow();
     rmSync(join(dir, '.hermes'), { recursive: true, force: true });
-    expect(discoverScripts({ home: dir })).toEqual([]);
+    expect(discoverScripts({ home: dir }).scripts).toEqual([]);
   });
 
   // ── Classification ────────────────────────────────────────
@@ -344,4 +344,50 @@ describe('shieldcortex allowlist scan (#309)', () => {
     expect(stored).toHaveLength(1);
     expect((stored[0] as Record<string, unknown>).path).toBe(realpathSync(scriptPath));
   });
+
+  test('pin binds expectedSha256 — TOCTOU rewrite refuses write', async () => {
+    const { pinReviewedScript } = await import('../allowlist.js');
+    const { hashScriptSource } = await import('../../defence/iron-dome/reviewed-scripts.js');
+    writeFileSync(scriptPath, SOURCE);
+    const seen = hashScriptSource(SOURCE);
+    writeFileSync(scriptPath, SOURCE + '# swapped\n');
+    const pin = pinReviewedScript(scriptPath, undefined, {
+      expectedSha256: seen,
+      readEntries: () => stored,
+      writeEntries: (e) => { stored = e; },
+    });
+    expect(pin.ok).toBe(false);
+    expect(stored).toEqual([]);
+    if (!pin.ok) expect(pin.error).toMatch(/Content changed since review/);
+  });
+
+  test('invalid cron JSON is incomplete discovery, not empty-ok exit 0', async () => {
+    const cronDir = join(dir, '.hermes', 'cron');
+    mkdirSync(cronDir, { recursive: true });
+    writeFileSync(join(cronDir, 'jobs.json'), '{not-json');
+    const logs: string[] = [];
+    const errs: string[] = [];
+    const code = await runAllowlistScan([], {
+      home: dir,
+      interactive: false,
+      log: (m) => logs.push(m),
+      error: (m) => errs.push(m),
+      readEntries: () => stored,
+      writeEntries: (e) => { stored = e; },
+    });
+    expect(code).toBe(1);
+    expect(stored).toEqual([]);
+    expect(errs.join('\n') + logs.join('\n')).toMatch(/INVALID JSON|incomplete/i);
+  });
+
+  test('discovery reports source status ok vs absent', () => {
+    const r = discoverScripts({ home: dir });
+    expect(r.sources.hermes.status).toBe('absent');
+    mkdirSync(join(dir, '.hermes', 'cron'), { recursive: true });
+    writeFileSync(join(dir, '.hermes', 'cron', 'jobs.json'), JSON.stringify({ jobs: [] }));
+    const r2 = discoverScripts({ home: dir });
+    expect(r2.sources.hermes.status).toBe('ok');
+    expect(r2.scripts).toEqual([]);
+  });
+
 });

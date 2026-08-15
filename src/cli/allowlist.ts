@@ -105,6 +105,12 @@ export interface PinDeps {
   now?: number;
   readEntries?: () => unknown[];
   writeEntries?: (entries: Array<Record<string, unknown>>) => void;
+  /**
+   * When set (scan review / batch --yes), the on-disk content at pin time MUST
+   * still hash to this value. Closes the TOCTOU where an agent rewrites the
+   * file after the human saw the preview and before `y`/`approve`.
+   */
+  expectedSha256?: string;
 }
 
 export type PinResult = { ok: true; entry: ReviewedScriptEntry } | { ok: false; error: string };
@@ -138,6 +144,14 @@ export function pinReviewedScript(target: string, note: string | undefined, deps
   }
 
   const sha256 = hashScriptSource(content);
+  if (deps.expectedSha256 && deps.expectedSha256 !== sha256) {
+    return {
+      ok: false,
+      error:
+        `Content changed since review (expected ${deps.expectedSha256.slice(0, 12)}…, now ${sha256.slice(0, 12)}…). ` +
+        `Nothing pinned — re-run scan and review the new bytes.`,
+    };
+  }
   const entries = normaliseReviewedScripts(readEntries());
   const kept = entries.filter((e) => e.path !== canonical);
   const entry: ReviewedScriptEntry = { path: canonical, sha256, addedAt: now, ...(note ? { note } : {}) };

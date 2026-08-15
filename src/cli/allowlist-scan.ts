@@ -93,12 +93,26 @@ export function extractScriptPaths(text: string, home: string): string[] {
   return out;
 }
 
-/** A cron store that is absent, unreadable, or not JSON is an empty source. */
-function readJsonSafe(path: string): unknown {
+/** A cron store that is absent is empty-ok; unreadable/malformed is distinct. */
+export type CronSourceStatus = 'absent' | 'ok' | 'unreadable' | 'invalid_json';
+
+export interface CronSourceReport {
+  path: string;
+  status: CronSourceStatus;
+}
+
+function inspectJsonFile(path: string): { status: CronSourceStatus; doc?: unknown } {
   try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    return undefined;
+    const raw = readFileSync(path, 'utf8');
+    try {
+      return { status: 'ok', doc: JSON.parse(raw) };
+    } catch {
+      return { status: 'invalid_json' };
+    }
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err && err.code === 'ENOENT') return { status: 'absent' };
+    return { status: 'unreadable' };
   }
 }
 
@@ -207,8 +221,12 @@ function expandGlob(pattern: string, cwd: string): string[] {
   return out;
 }
 
-/** Union of every discovery source, deduped by expanded path. Never throws. */
-export function discoverScripts(deps: ScanDeps = {}): DiscoveredScript[] {
+/** Union of every discovery source, deduped by expanded path. Never throws.
+ *  Cron source health is returned separately so "file missing" ≠ "we could not look". */
+export function discoverScripts(deps: ScanDeps = {}): {
+  scripts: DiscoveredScript[];
+  sources: { hermes: CronSourceReport; openclaw: CronSourceReport };
+} {
   const home = deps.home ?? homedir();
   const cwd = deps.cwd ?? process.cwd();
   const bySource = new Map<string, Set<string>>();
@@ -219,10 +237,16 @@ export function discoverScripts(deps: ScanDeps = {}): DiscoveredScript[] {
   };
 
   const hermesPath = deps.hermesCronPath ?? join(home, '.hermes', 'cron', 'jobs.json');
-  for (const p of hermesCandidates(readJsonSafe(hermesPath), home)) add(p, 'hermes-cron');
+  const hermes = inspectJsonFile(hermesPath);
+  if (hermes.status === 'ok') {
+    for (const p of hermesCandidates(hermes.doc, home)) add(p, 'hermes-cron');
+  }
 
   const openclawPath = deps.openclawCronPath ?? join(home, '.openclaw', 'cron', 'jobs.json');
-  for (const p of openclawCandidates(readJsonSafe(openclawPath), home)) add(p, 'openclaw-cron');
+  const openclaw = inspectJsonFile(openclawPath);
+  if (openclaw.status === 'ok') {
+    for (const p of openclawCandidates(openclaw.doc, home)) add(p, 'openclaw-cron');
+  }
 
   for (const pattern of deps.globs ?? []) {
     try {
@@ -232,9 +256,21 @@ export function discoverScripts(deps: ScanDeps = {}): DiscoveredScript[] {
     }
   }
 
-  return [...bySource.entries()]
-    .map(([path, sources]) => ({ path, sources: [...sources] }))
-    .sort((a, b) => a.path.localeCompare(b.path));
+  return {
+    scripts: [...bySource.entries()]
+      .map(([path, sources]) => ({ path, sources: [...sources] }))
+      .sort((a, b) => a.path.localeCompare(b.path)),
+    sources: {
+      hermes: { path: hermesPath, status: hermes.status },
+      openclaw: { path: openclawPath, status: openclaw.status },
+    },
+  };
+}
+
+function sourcesBroken(sources: { hermes: CronSourceReport; openclaw: CronSourceReport }): CronSourceReport[] {
+  return [sources.hermes, sources.openclaw].filter(
+    (s) => s.status === 'unreadable' || s.status === 'invalid_json',
+  );
 }
 
 // ── Classification ──────────────────────────────────────────
@@ -331,17 +367,37 @@ function statusPaint(status: ScanStatus): string {
   return `${RED}too_large${RESET}`;
 }
 
-function renderSummary(items: ScanItem[]): string {
+function renderSummary(
+  items: ScanItem[],
+  sources?: { hermes: CronSourceReport; openclaw: CronSourceReport },
+): string {
+  const lines: string[] = [];
+  if (sources) {
+    for (const s of [sources.hermes, sources.openclaw]) {
+      if (s.status === 'absent') continue;
+      if (s.status === 'ok') {
+        lines.push(`${DIM}source ok: ${s.path}${RESET}`);
+      } else if (s.status === 'invalid_json') {
+        lines.push(`${RED}source INVALID JSON (did not scan): ${s.path}${RESET}`);
+      } else {
+        lines.push(`${RED}source UNREADABLE (did not scan): ${s.path}${RESET}`);
+      }
+    }
+  }
   if (items.length === 0) {
-    return `${DIM}Reviewed-script scan — no scripts discovered in Hermes/OpenClaw cron jobs.${RESET}`;
+    lines.push(
+      `${DIM}Reviewed-script scan — no scripts discovered from readable Hermes/OpenClaw cron jobs ` +
+        `(absolute or ~/ paths with script extensions only; relative names are not extracted).${RESET}`,
+    );
+    return lines.join('\n');
   }
   const count = (s: ScanStatus): number => items.filter((i) => i.status === s).length;
-  const lines: string[] = [
+  lines.push(
     `${BOLD}Reviewed-script scan${RESET} — ${items.length} script(s) discovered: ` +
       `${count('current')} current · ${count('new')} new · ${count('changed')} changed · ` +
       `${count('missing')} missing · ${count('too_large')} too large`,
-    '',
-  ];
+  );
+  lines.push('');
   for (const i of items) {
     const notes: string[] = [i.sources.join(', ')];
     if (i.sha256) notes.push(`sha256 ${i.sha256.slice(0, 12)}…`);
@@ -427,7 +483,10 @@ export async function reviewScanItems(items: ScanItem[], deps: ScanDeps = {}): P
       continue;
     }
     const note = (await ask('  note (optional, why is this trusted): ')).trim() || undefined;
-    const pin = pinReviewedScript(item.path, note, deps);
+    const pin = pinReviewedScript(item.path, note, {
+      ...deps,
+      ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
+    });
     if (pin.ok) {
       result.pinned += 1;
       log(`  ${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET} — any edit re-gates it.`);
@@ -488,20 +547,26 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
 
   const scanDeps: ScanDeps = { ...deps, hermesCronPath, openclawCronPath, globs };
   let items: ScanItem[];
+  let sourceReport: { hermes: CronSourceReport; openclaw: CronSourceReport };
   try {
     const readEntries = deps.readEntries ?? getReviewedScriptsRaw;
-    items = classifyScripts(discoverScripts(scanDeps), readEntries());
+    const discovered = discoverScripts(scanDeps);
+    sourceReport = discovered.sources;
+    items = classifyScripts(discovered.scripts, readEntries());
   } catch (e) {
     err(`Scan failed: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
   }
 
+  const broken = sourcesBroken(sourceReport);
   const needsReview = items.filter((i) => i.status === 'new' || i.status === 'changed');
 
   if (json) {
     log(
       JSON.stringify(
         {
+          sources: sourceReport,
+          discoveryIncomplete: broken.length > 0,
           counts: {
             current: items.filter((i) => i.status === 'current').length,
             new: items.filter((i) => i.status === 'new').length,
@@ -522,22 +587,40 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
         2,
       ),
     );
+    if (broken.length > 0) return 1;
     return needsReview.length > 0 ? 3 : 0;
   }
 
-  log(renderSummary(items));
+  log(renderSummary(items, sourceReport));
+  if (broken.length > 0) {
+    err(
+      `Cron source(s) present but not readable/parseable — scan is incomplete. Fix: ${broken
+        .map((s) => s.path)
+        .join(', ')}`,
+    );
+    // Incomplete discovery must not look like "all clear".
+    return 1;
+  }
   if (needsReview.length === 0) return 0;
 
   if (!interactive) {
     log('');
-    log(`${needsReview.length} new/changed need human review — run: ${BOLD}shieldcortex allowlist scan${RESET} in an interactive terminal.`);
+    log(
+      `${needsReview.length} new/changed need human review — run: ${BOLD}shieldcortex allowlist scan${RESET} in an interactive terminal.`,
+    );
     return 3;
   }
 
   if (yes) {
+    // Show the same previews the per-item loop would before batch approve.
+    for (let i = 0; i < needsReview.length; i++) {
+      log(renderReviewItem(needsReview[i], i + 1, needsReview.length));
+    }
     const ask = deps.prompt ?? ttyPrompt;
     const answer = (
-      await ask(`\nType ${BOLD}approve${RESET} to pin ALL ${needsReview.length} new/changed script(s) listed above, anything else to cancel: `)
+      await ask(
+        `\nType ${BOLD}approve${RESET} to pin ALL ${needsReview.length} new/changed script(s) listed above at the hashes shown, anything else to cancel: `,
+      )
     )
       .trim()
       .toLowerCase();
@@ -547,7 +630,10 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     }
     let failed = 0;
     for (const item of needsReview) {
-      const pin = pinReviewedScript(item.path, undefined, deps);
+      const pin = pinReviewedScript(item.path, undefined, {
+        ...deps,
+        ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
+      });
       if (pin.ok) {
         log(`${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET}`);
       } else {
@@ -574,16 +660,33 @@ export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Prom
   const log = deps.log ?? ((m: string) => console.log(m));
   try {
     const readEntries = deps.readEntries ?? getReviewedScriptsRaw;
-    const items = classifyScripts(discoverScripts(deps), readEntries());
+    const discovered = discoverScripts(deps);
+    const broken = sourcesBroken(discovered.sources);
+    const items = classifyScripts(discovered.scripts, readEntries());
     const needsReview = items.filter((i) => i.status === 'new' || i.status === 'changed');
-    if (needsReview.length === 0) return;
+
+    if (broken.length > 0) {
+      log(
+        `${DIM}reviewed-script scan: cron source incomplete (${broken
+          .map((s) => `${s.path}:${s.status}`)
+          .join(', ')}) — run: shieldcortex allowlist scan${RESET}`,
+      );
+      // Still offer review for whatever we *did* find when interactive.
+    }
+
+    if (needsReview.length === 0 && broken.length === 0) return;
 
     const interactive = deps.interactive ?? isInteractive();
     if (!interactive) {
-      log(`${DIM}reviewed-script scan: ${needsReview.length} new/changed — run: shieldcortex allowlist scan${RESET}`);
+      if (needsReview.length > 0) {
+        log(
+          `${DIM}reviewed-script scan: ${needsReview.length} new/changed — run: shieldcortex allowlist scan${RESET}`,
+        );
+      }
       return;
     }
-    log(renderSummary(items));
+    if (needsReview.length === 0) return;
+    log(renderSummary(items, discovered.sources));
     await reviewScanItems(items, deps);
   } catch (e) {
     log(`${DIM}reviewed-script scan skipped — ${e instanceof Error ? e.message : String(e)}${RESET}`);
