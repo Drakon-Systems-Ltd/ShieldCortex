@@ -6,6 +6,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.52.4] - 2026-08-15
+
+**Patch — `allowlist scan` + update-time batch review for cron scripts (#309).**
+
+Turns the ad-hoc discovery grind (regex over cron prompts, mislabeled paths, network-script misses) into a first-class TTY tool. Hosts on `shieldcortex update` get an interactive review when a terminal is present, or one pointer line headless.
+
+### Added
+
+- **`shieldcortex allowlist scan`** — discovers scripts named by Hermes/OpenClaw cron jobs (absolute or `~/` + script extension) plus optional `--glob`; classifies `current` / `new` / `changed` / `missing` / `too_large` against `actionGuard.reviewedScripts` by content hash.
+- **TTY batch pin** through the same `pinReviewedScript` path as `allowlist add` (canonical path + content hash). Non-interactive runs never write (exit 3 when review needed).
+- **`shieldcortex update` hook** — interactive terminals get the same review; headless prints one dim pointer and never fails the update.
+
+### Security
+
+- Pin binds **`expectedSha256`** from the reviewed preview (TOCTOU refuse on rewrite).
+- Cron sources report `absent|ok|unreadable|invalid_json`; unreadable/invalid → exit 1 (not empty-ok).
+- Preview CSI/C0 sanitised against TTY spoofing.
+- `--yes` requires a TTY + typed word `approve`, and shows per-item previews first.
+
+### Notes
+
+- Closes #309 via PR #311. Dual-reviewed APPROVE_WITH_NITS (Grok 4.6 + SOL), blockers empty. CI green Node 20/22 + macOS.
+- No SDK/client API change — TS SDK and PyPI stay on 0.3.0.
+- Hosts pick this up with `shieldcortex update`.
+
 ## [4.52.3] - 2026-08-15
 
 **Patch — Hermes Action Guard: malformed 200 is unavailable, not allow.**
