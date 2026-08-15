@@ -421,6 +421,15 @@ export function projectToCompletion(options?: ProjectorOptions): ProjectResult {
     total.cursor = r.cursor;
     if (r.processed === 0) break;
   }
+  // A completed drain IS a run — stamp it. Doctor treats a non-zero cursor
+  // with no recorded run as the stalled-upgrade shape (an old projector moved
+  // the cursor; every modern run then died before recording anything), so a
+  // legitimate completion path that skips the stamp would read as that stall.
+  // The lease runner stamps its own (with error text) on release.
+  try {
+    getDatabase().prepare('UPDATE threat_graph_state SET last_run_at = ? WHERE id = 1')
+      .run(new Date().toISOString());
+  } catch { /* best-effort — projection itself succeeded */ }
   return total;
 }
 
@@ -594,14 +603,28 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
   const token = `${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
   let acquired = false;
-  db.transaction(() => {
-    const state = db.prepare('SELECT lease_expires_at FROM threat_graph_state WHERE id = 1')
-      .get() as { lease_expires_at: string | null };
-    if (state.lease_expires_at && Date.parse(state.lease_expires_at) > now) return;
-    db.prepare('UPDATE threat_graph_state SET lease_expires_at = ?, lease_token = ? WHERE id = 1')
-      .run(new Date(now + leaseMs).toISOString(), token);
-    acquired = true;
-  }).immediate();
+  try {
+    db.transaction(() => {
+      const state = db.prepare('SELECT lease_expires_at FROM threat_graph_state WHERE id = 1')
+        .get() as { lease_expires_at: string | null };
+      if (state.lease_expires_at && Date.parse(state.lease_expires_at) > now) return;
+      db.prepare('UPDATE threat_graph_state SET lease_expires_at = ?, lease_token = ? WHERE id = 1')
+        .run(new Date(now + leaseMs).toISOString(), token);
+      acquired = true;
+    }).immediate();
+  } catch (e) {
+    // A failure HERE happens before any token exists, so the token-guarded
+    // last_error write in the run path can never record it — which is how a
+    // missing lease_token migration produced a projector that died on every
+    // tick while doctor read NULL and reported healthy. Record it unguarded
+    // and best-effort (the state table itself may be what's broken), then
+    // rethrow: acquisition failing is still a failure.
+    try {
+      db.prepare('UPDATE threat_graph_state SET last_error = ? WHERE id = 1')
+        .run(`lease acquisition failed: ${e instanceof Error ? e.message : String(e)}`.slice(0, 1000));
+    } catch { /* the primary signal is the rethrow below */ }
+    throw e;
+  }
 
   if (!acquired) return { ran: false, audit: null, realtime: null };
 

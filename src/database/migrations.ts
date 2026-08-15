@@ -858,14 +858,27 @@ export function runMigrations(database: Database.Database): void {
     if (edgeCols.length > 0 && !edgeCols.some((c) => c.name === 'attrs')) {
       database.exec("ALTER TABLE threat_edges ADD COLUMN attrs TEXT NOT NULL DEFAULT '{}'");
     }
-    // Threat-graph Phase D (Loop 4): campaign-detection throttle timestamp.
+    // threat_graph_state: reconcile EVERY nullable column the shipped schema
+    // declares, not a hand-picked few. `lease_token` was added to the CREATE
+    // TABLE (Phase A, single-writer lease) with no ALTER migration, so every
+    // UPGRADED install kept the old table and `runProjectorWithLease` threw
+    // `no such column: lease_token` on each worker tick — a silently dead
+    // projector behind a green doctor (it judges health by cursor lag, and a
+    // cursor that never advances has no lag). Phase D/E columns had one-off
+    // ALTERs here; this replaces that per-column pattern with the full list so
+    // the next column added to the schema cannot repeat the class. All TEXT +
+    // NULL-default, so ADD COLUMN is safe on any prior shape.
     const stateCols = database.prepare("PRAGMA table_info(threat_graph_state)").all() as { name: string }[];
-    if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_campaign_at')) {
-      database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_campaign_at TEXT");
-    }
-    // Threat-graph Phase E (ShadowMerge defence): conflict-detection throttle.
-    if (stateCols.length > 0 && !stateCols.some((c) => c.name === 'last_conflict_at')) {
-      database.exec("ALTER TABLE threat_graph_state ADD COLUMN last_conflict_at TEXT");
+    if (stateCols.length > 0) {
+      const have = new Set(stateCols.map((c) => c.name));
+      for (const col of [
+        'lease_expires_at', 'lease_token', 'last_run_at',
+        'last_campaign_at', 'last_conflict_at', 'last_error',
+      ]) {
+        if (!have.has(col)) {
+          database.exec(`ALTER TABLE threat_graph_state ADD COLUMN ${col} TEXT`);
+        }
+      }
     }
     // Threat-graph Phase E: triple write-time provenance + dispute flag. The
     // `triples` table exists from the ontology migration above, so these are
