@@ -24,7 +24,18 @@ export function isActionAllowed(
   action: string,
   config: IronDomeConfig,
   source?: DefenceSource,
-  /** Resolver-derived attestation for `source`; omit ⇒ NULL (fail-safe). */
+  /**
+   * Resolver-derived attestation for `source`; omit ⇒ NULL (fail-safe).
+   *
+   * WARNING — do NOT wire MCP-caller attestation into the advisory-check
+   * paths (iron_dome_check): policy denials (requires_approval /
+   * untrusted-channel probes) log as BLOCK, and the threat-graph projector
+   * weighs every attested BLOCK at 1.0 with no policy/threat distinction —
+   * compliant pre-flight checks would saturate the caller's shared key at
+   * the daily risk cap (verified by repro, PR #315 review). Attest only
+   * genuinely threat-shaped rows, after the projector can weight policy
+   * rows separately.
+   */
   attested?: boolean,
 ): ActionGateResult {
   if (!config.enabled) {

@@ -4,12 +4,14 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { runDefencePipelineWithVerify } from '../defence/pipeline.js';
 import { scanMemoryFilesDetailed } from '../audit/memory-scanner.js';
 import { isActionAllowed } from '../defence/iron-dome/action-gate.js';
 import { validateGateway } from '../defence/iron-dome/gateway.js';
+import { ShieldCortexGuard } from '../integrations/langchain.js';
+import { ShieldCortexGuardedMemoryBridge } from '../integrations/universal.js';
 import { DEFAULT_IRON_DOME_CONFIG } from '../defence/iron-dome/config.js';
 import type { DefenceSource } from '../defence/types.js';
 
@@ -122,34 +124,127 @@ describe('phase 3 — remaining pipeline callers', () => {
       expect(lastGateRow().source_attested).toBe(1);
     });
 
-    it('the iron_dome_check handler passes the resolved attestation (source pin)', () => {
+    it('the iron_dome_check handler does NOT attest its advisory rows (source pin)', () => {
+      // Adversarially verified (PR #315 review, repro'd): attesting these
+      // policy checks lets three COMPLIANT pre-flight iron_dome_check calls
+      // saturate the shared cli:mcp key at the daily risk cap, because
+      // requires_approval / untrusted-channel rows log as BLOCK and the
+      // projector weighs every attested BLOCK at 1.0. The handler must pass
+      // the resolved SOURCE but never the resolver's attested bit.
       const src = readFileSync(join(repoRoot, 'src', 'server.ts'), 'utf8');
       const at = src.indexOf("'iron_dome_check'");
       expect(at).toBeGreaterThan(-1);
-      const handler = src.slice(at, at + 2800);
-      expect(handler).toContain('resolveToolSourceFull');
-      expect(handler).toMatch(/validateGateway\([^)]*resolved\.attested/s);
-      expect(handler).toMatch(/isActionAllowed\([^)]*resolved\.attested/s);
+      const end = src.indexOf('server.tool(', at + 1);
+      const handler = src.slice(at, end === -1 ? at + 4000 : end);
+      const gatewayArgs = extractCallArgs(handler, 'validateGateway(');
+      const gateArgs = extractCallArgs(handler, 'isActionAllowed(');
+      expect(gatewayArgs.length + gateArgs.length).toBeGreaterThan(0);
+      for (const args of [...gatewayArgs, ...gateArgs]) {
+        expect(args).toContain('resolved.source');
+        expect(args).not.toContain('attested');
+      }
     });
   });
 
   describe('NEVER-ATTEST pins — caller-influenceable identities stay unplumbed (NULL)', () => {
     // These surfaces let the CALLER pick the identity (REST body, host-app
     // declarations). Attesting them is trust elevation; an explicit false is a
-    // mute lever. The correct state is UNPLUMBED — no sourceAttested at all.
+    // mute lever. The correct state is UNPLUMBED — no 6th options argument at
+    // all. STRUCTURAL pin (top-level argument count of each call expression),
+    // not a text search: a whole-file not.toContain('sourceAttested') both
+    // breaks on innocent comments and misses an imported-constant 6th arg.
     const files = [
       'src/api/visualization-server.ts',
       'src/integrations/universal.ts',
       'src/integrations/langchain.ts',
     ];
 
-    it.each(files)('%s passes no sourceAttested to the pipeline', (rel) => {
+    it.each(files)('%s passes at most 5 args to runDefencePipeline (no options)', (rel) => {
       const src = readFileSync(join(repoRoot, rel), 'utf8');
-      expect(src).toContain('runDefencePipeline');
-      expect(src).not.toContain('sourceAttested');
+      const calls = extractCallArgs(src, 'runDefencePipeline(');
+      expect(calls.length).toBeGreaterThan(0);
+      for (const args of calls) {
+        expect(countTopLevelArgs(args)).toBeLessThanOrEqual(5);
+      }
+    });
+
+    it('behavioural: the langchain guard scan leaves attestation NULL', () => {
+      const guard = new ShieldCortexGuard();
+      guard.scan('harmless content scanned via the langchain integration', 'note');
+      const row = getDatabase()
+        .prepare('SELECT source_attested FROM defence_audit ORDER BY id DESC LIMIT 1')
+        .get() as { source_attested: number | null };
+      expect(row.source_attested).toBeNull();
+    });
+
+    it('behavioural: the universal bridge save leaves attestation NULL', async () => {
+      const backend = {
+        name: 'stub',
+        save: async () => ({ id: 'x1' }),
+      };
+      const bridge = new ShieldCortexGuardedMemoryBridge(backend);
+      await bridge.save({ content: 'harmless content saved via the universal bridge' });
+      const row = getDatabase()
+        .prepare('SELECT source_attested FROM defence_audit ORDER BY id DESC LIMIT 1')
+        .get() as { source_attested: number | null };
+      expect(row.source_attested).toBeNull();
     });
   });
 });
+
+/**
+ * Extract the argument text of every `name(...)` call in `src` (balanced-paren
+ * scan; string-literal aware enough for these call sites).
+ */
+function extractCallArgs(src: string, name: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (;;) {
+    const at = src.indexOf(name, from);
+    if (at === -1) break;
+    let depth = 1;
+    let i = at + name.length;
+    for (; i < src.length && depth > 0; i++) {
+      const c = src[i];
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (c === "'" || c === '"' || c === '`') {
+        const quote = c;
+        i++;
+        while (i < src.length && src[i] !== quote) {
+          if (src[i] === '\\') i++;
+          i++;
+        }
+      }
+    }
+    out.push(src.slice(at + name.length, i - 1));
+    from = i;
+  }
+  return out;
+}
+
+/** Count top-level (depth-0) comma-separated arguments in a call-args string. */
+function countTopLevelArgs(rawArgs: string): number {
+  // Normalise away a trailing comma — `f(a, b,)` is 2 args, not 3.
+  const args = rawArgs.trim().replace(/,\s*$/, '');
+  if (!args) return 0;
+  let depth = 0;
+  let count = 1;
+  for (let i = 0; i < args.length; i++) {
+    const c = args[i];
+    if (c === '(' || c === '{' || c === '[') depth++;
+    else if (c === ')' || c === '}' || c === ']') depth--;
+    else if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      i++;
+      while (i < args.length && args[i] !== quote) {
+        if (args[i] === '\\') i++;
+        i++;
+      }
+    } else if (c === ',' && depth === 0) count++;
+  }
+  return count;
+}
 
 describe('phase 3 — the CLI scan command attests (accept-with-soak)', () => {
   // Operator decision (2026-08-15): `shieldcortex scan` is how operators test
