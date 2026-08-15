@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hermes Action Guard client: a 200 JSON body is not a verdict.** Missing, blank, or unknown `decision` used to coerce to `allow` with `available=True`, which skipped the #59 catastrophic/dangerous fallback on the advertised bound plane. Those responses are now unavailable so the fallback still runs. CI now executes the Hermes Python suite.
+- **Hermes Action Guard remote `reason` is bounded.** Valid `block`/`require_approval` reasons (and scan-path reasons) are flattened to a single line and capped so a misbound local service cannot inject a message boundary or an unbounded prompt in ShieldCortex's voice.
+
 ## [4.52.2] - 2026-08-15
 
 **Patch — bound-plane honesty + portable `shieldcortex/enforce` + Hermes install CLI.**
