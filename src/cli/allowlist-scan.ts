@@ -6,8 +6,10 @@
  * Hermes cron jobs (`~/.hermes/cron/jobs.json`), OpenClaw cron jobs
  * (`~/.openclaw/cron/jobs.json`), and any explicit `--glob` patterns — and
  * diffs every resolvable script against `actionGuard.reviewedScripts` by
- * content hash. Missing files never throw; a cron store we cannot read is an
- * empty discovery source, not an error.
+ * content hash. An **absent** cron store is empty-ok. A store that **exists
+ * but is unreadable or invalid JSON is incomplete discovery** — `scan`
+ * exits 1 so automation cannot treat "we could not look" as "all clear".
+ * Relative script names are not extracted (absolute or `~/` + extension only).
  *
  * Trust surface discipline, same #118 threat model as `allowlist add`:
  *   - Non-interactive runs LIST ONLY. They exit 3 when there is something a
