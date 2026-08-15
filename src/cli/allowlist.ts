@@ -6,6 +6,7 @@
  *   shieldcortex allowlist add <path> [--note "why"]
  *   shieldcortex allowlist remove <path>
  *   shieldcortex allowlist verify                # exit 1 if any entry drifted
+ *   shieldcortex allowlist scan                  # #309 cron discovery + TTY batch review
  *
  * `add` pins a script by ABSOLUTE CANONICAL PATH + CONTENT HASH so the Action
  * Guard stops folding its source into the scan surface. This is the standing
@@ -38,7 +39,7 @@ const RESET = '\x1b[0m';
 
 /** Matches the resolver's fold cap — a file the guard would refuse to fold
  *  cannot meaningfully be "exempt from folding". */
-const MAX_REVIEWABLE_BYTES = 262_144;
+export const MAX_REVIEWABLE_BYTES = 262_144;
 
 export interface AllowlistDeps {
   now?: number;
@@ -100,7 +101,69 @@ function toRecords(entries: ReviewedScriptEntry[]): Array<Record<string, unknown
   }));
 }
 
-export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number {
+export interface PinDeps {
+  now?: number;
+  readEntries?: () => unknown[];
+  writeEntries?: (entries: Array<Record<string, unknown>>) => void;
+  /**
+   * When set (scan review / batch --yes), the on-disk content at pin time MUST
+   * still hash to this value. Closes the TOCTOU where an agent rewrites the
+   * file after the human saw the preview and before `y`/`approve`.
+   */
+  expectedSha256?: string;
+}
+
+export type PinResult = { ok: true; entry: ReviewedScriptEntry } | { ok: false; error: string };
+
+/**
+ * The ONE write path for pinning a script as reviewed — `allowlist add` and
+ * the scan review flow (#309) both come through here, so canonicalisation,
+ * the size cap, and replace-on-same-path can never drift apart. NOT TTY-gated
+ * itself: every caller must gate on `isInteractive()` before invoking, the
+ * same way `add` does.
+ */
+export function pinReviewedScript(target: string, note: string | undefined, deps: PinDeps = {}): PinResult {
+  const now = deps.now ?? Date.now();
+  const readEntries = deps.readEntries ?? getReviewedScriptsRaw;
+  const writeEntries = deps.writeEntries ?? setReviewedScripts;
+
+  let canonical: string;
+  let content: string;
+  try {
+    canonical = realpathSync(isAbsolute(target) ? target : resolvePath(process.cwd(), target));
+    const st = statSync(canonical);
+    if (!st.isFile()) {
+      return { ok: false, error: `Not a regular file: ${canonical}` };
+    }
+    if (st.size > MAX_REVIEWABLE_BYTES) {
+      return { ok: false, error: `File exceeds the guard's 256KB fold cap — it is never folded, so there is nothing to exempt.` };
+    }
+    content = readFileSync(canonical, 'utf8');
+  } catch (e) {
+    return { ok: false, error: `Cannot read ${target}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  const sha256 = hashScriptSource(content);
+  if (deps.expectedSha256 && deps.expectedSha256 !== sha256) {
+    return {
+      ok: false,
+      error:
+        `Content changed since review (expected ${deps.expectedSha256.slice(0, 12)}…, now ${sha256.slice(0, 12)}…). ` +
+        `Nothing pinned — re-run scan and review the new bytes.`,
+    };
+  }
+  const entries = normaliseReviewedScripts(readEntries());
+  const kept = entries.filter((e) => e.path !== canonical);
+  const entry: ReviewedScriptEntry = { path: canonical, sha256, addedAt: now, ...(note ? { note } : {}) };
+  try {
+    writeEntries(toRecords([...kept, entry]));
+  } catch (e) {
+    return { ok: false, error: `Could not write the allowlist: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  return { ok: true, entry };
+}
+
+export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number | Promise<number> {
   const now = deps.now ?? Date.now();
   const log = deps.log ?? ((m: string) => console.log(m));
   const err = deps.error ?? ((m: string) => console.error(m));
@@ -109,6 +172,13 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number {
 
   const args = argv.filter((a) => a !== '--');
   const sub = args[0];
+
+  // Scan (#309) dispatches before the entries read: it does its own read, and
+  // the dynamic import keeps the module edge one-directional (scan imports
+  // `pinReviewedScript` from here statically).
+  if (sub === 'scan') {
+    return import('./allowlist-scan.js').then((m) => m.runAllowlistScan(args.slice(1), deps));
+  }
 
   const entries = normaliseReviewedScripts(readEntries());
 
@@ -146,37 +216,14 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number {
     }
     if (!requireHuman(deps, err, 'add')) return 1;
 
-    let canonical: string;
-    let content: string;
-    try {
-      canonical = realpathSync(isAbsolute(target) ? target : resolvePath(process.cwd(), target));
-      const st = statSync(canonical);
-      if (!st.isFile()) {
-        err(`Not a regular file: ${canonical}`);
-        return 1;
-      }
-      if (st.size > MAX_REVIEWABLE_BYTES) {
-        err(`File exceeds the guard's 256KB fold cap — it is never folded, so there is nothing to exempt.`);
-        return 1;
-      }
-      content = readFileSync(canonical, 'utf8');
-    } catch (e) {
-      err(`Cannot read ${target}: ${e instanceof Error ? e.message : String(e)}`);
+    const pin = pinReviewedScript(target, note, { now, readEntries, writeEntries });
+    if (!pin.ok) {
+      err(pin.error);
       return 1;
     }
 
-    const sha256 = hashScriptSource(content);
-    const kept = entries.filter((e) => e.path !== canonical);
-    const entry: ReviewedScriptEntry = { path: canonical, sha256, addedAt: now, ...(note ? { note } : {}) };
-    try {
-      writeEntries(toRecords([...kept, entry]));
-    } catch (e) {
-      err(`Could not write the allowlist: ${e instanceof Error ? e.message : String(e)}`);
-      return 1;
-    }
-
-    log(`${GREEN}✓${RESET} Pinned ${BOLD}${canonical}${RESET} as reviewed.`);
-    log(`  sha256 ${sha256.slice(0, 16)}… — the guard stops folding this file's source.`);
+    log(`${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET} as reviewed.`);
+    log(`  sha256 ${pin.entry.sha256.slice(0, 16)}… — the guard stops folding this file's source.`);
     log(`${DIM}  You are vouching for this file's CONTENT. Any edit re-gates it; the command line`);
     log(`  that invokes it is still scanned in full. Remove with: shieldcortex allowlist remove <path>${RESET}`);
     return 0;
@@ -213,6 +260,6 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number {
     return 0;
   }
 
-  err(`Unknown subcommand "${sub}". Usage: shieldcortex allowlist [list|add|remove|verify]`);
+  err(`Unknown subcommand "${sub}". Usage: shieldcortex allowlist [list|add|remove|verify|scan]`);
   return 1;
 }

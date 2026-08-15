@@ -767,6 +767,19 @@ export async function runUpdate(): Promise<void> {
     }
     process.stdout.write('\n');
   }
+
+  // #309 — after the package is current, surface new/changed cron-referenced
+  // scripts for TTY batch review. Headless updates only print a pointer line;
+  // never auto-pin and never fail the update if discovery is weird.
+  try {
+    const { maybeReviewAllowlistAfterUpdate } = await import('./allowlist-scan.js');
+    await maybeReviewAllowlistAfterUpdate({
+      log: (m: string) => process.stdout.write(`  ${paint('gray', m)}\n`),
+    });
+  } catch {
+    /* update must not fail on allowlist scan */
+  }
+
   maybePrint411Notice(currentVersion, mainUpdated);
   await maybePrintDashboardHint();
 }
