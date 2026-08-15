@@ -24,7 +24,7 @@ from sc_client import (  # noqa: E402
 from policy import action_guard_decision, resolve_enforce, tool_call_decision  # noqa: E402
 
 
-def fake_opener(response: dict | None, *, raises: Exception | None = None):
+def fake_opener(response: dict | list | None, *, raises: Exception | None = None):
     """Build a urlopen-compatible opener returning `response` as JSON (or raising)."""
 
     @contextmanager
@@ -87,6 +87,20 @@ class TestActionGuardClient(unittest.TestCase):
         v = evaluate_tool_call("Bash", {"command": "ls"}, opener=fake_opener({"decision": "deny"}))
         self.assertFalse(v.available)
         self.assertIn("unknown action-guard decision", v.reason)
+        self.assertNotIn("deny" * 10, v.reason)
+
+    def test_non_dict_body_is_unavailable(self):
+        v = evaluate_tool_call("Bash", {"command": "ls"}, opener=fake_opener([]))
+        self.assertFalse(v.available)
+        self.assertIn("malformed action-guard response", v.reason)
+
+    def test_bool_decision_is_unavailable(self):
+        v = evaluate_tool_call("Bash", {"command": "ls"}, opener=fake_opener({"decision": True}))
+        self.assertFalse(v.available)
+
+    def test_list_decision_is_unavailable(self):
+        v = evaluate_tool_call("Bash", {"command": "ls"}, opener=fake_opener({"decision": ["block"]}))
+        self.assertFalse(v.available)
 
     def test_blank_decision_is_unavailable(self):
         v = evaluate_tool_call("Bash", {"command": "ls"}, opener=fake_opener({"decision": "   "}))

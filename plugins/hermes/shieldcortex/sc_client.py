@@ -228,8 +228,9 @@ def evaluate_tool_call(
         )
     decision = decision_raw.strip().lower()
     if decision not in ("allow", "require_approval", "block"):
+        shown = decision[:32]
         return ActionGuardVerdict(
-            "allow", [], f"unknown action-guard decision: {decision}", available=False,
+            "allow", [], f"unknown action-guard decision: {shown!r}", available=False,
         )
     signals = data.get("signals") or []
     if not isinstance(signals, list):
