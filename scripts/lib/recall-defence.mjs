@@ -121,6 +121,9 @@ export function emitRecallAudit(logAudit, { memoryId, action, layer, reason, pro
       reason: `recall-withheld: ${reason ?? layer ?? 'policy'}`,
       fragmentation_score: null,
       pipeline_duration_ms: 0,
+      // hook:recall-defence is a literal in this shipped file — attested by
+      // construction, so withheld-recall BLOCKs can accrue to the channel.
+      source_attested: 1,
     });
   } catch {
     // best-effort
