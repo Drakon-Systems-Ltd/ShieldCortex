@@ -91,7 +91,9 @@ export function withResponseScan(toolName: string, handler: (...args: any[]) => 
 
     if (textContent.length < 20) return result;
 
-    const scan = scanToolResponse(toolName, textContent, config.toolResponseMode);
+    // toolName is bound at tool registration by server code (a literal), never
+    // caller-supplied → attested by construction.
+    const scan = scanToolResponse(toolName, textContent, config.toolResponseMode, true);
     if (scan.clean) return result;
 
     // Enforce mode: swap the threatening text for the sanitised payload the
@@ -927,7 +929,9 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
           isError: true,
         };
       }
-      const scan = scanToolResponse(args.toolName, args.content, args.mode as 'advisory' | 'enforce' | undefined);
+      // args.toolName is caller-supplied free text — attesting it would let a
+      // caller accrue BLOCK rows onto tool_response:<any-victim>. Explicit false.
+      const scan = scanToolResponse(args.toolName, args.content, args.mode as 'advisory' | 'enforce' | undefined, false);
 
       const lines = [
         `## Tool Response Scan: ${args.toolName}`,

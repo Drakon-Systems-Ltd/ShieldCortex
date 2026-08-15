@@ -32,7 +32,7 @@ import { detectEncoding } from './firewall/encoding-detector.js';
 import { detectMarkdownImageExfil } from './firewall/markdown-image-detector.js';
 import { detectHiddenWebInjection } from './hidden-web-injection.js';
 import { neutraliseToolResponse } from './tool-response-enforce.js';
-import { logAudit } from './audit/logger.js';
+import { attestedFlag, logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
 import type { ThreatIndicator, ToolResponseScanResult } from './types.js';
@@ -95,6 +95,14 @@ export function scanToolResponse(
   toolName: string,
   content: string,
   mode?: 'advisory' | 'enforce',
+  /**
+   * Attestation for the threat row. MUST be decided per call site, never a
+   * constant here: withResponseScan binds a server-literal toolName (→ true),
+   * but the scan_tool_response MCP tool passes a caller-supplied toolName
+   * (→ false — an attacker could otherwise accrue BLOCKs onto a victim tool).
+   * undefined ⇒ NULL (external lib consumers).
+   */
+  attested?: boolean,
 ): ToolResponseScanResult {
   const startTime = performance.now();
   const resolvedMode = mode ?? getToolResponseScanConfig().toolResponseMode;
@@ -288,6 +296,7 @@ export function scanToolResponse(
         reason: summary,
         fragmentation_score: null,
         pipeline_duration_ms: durationMs,
+        source_attested: attestedFlag(attested),
       });
     } catch {
       // Audit logging must never affect tool response delivery
