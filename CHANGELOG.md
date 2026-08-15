@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.52.1] - 2026-08-15
+
+**Patch — Action Guard enable/enforce via signed CLI flags.**
+
+Hosts on `shieldcortex update` can now toggle Action Guard without hand-editing `~/.shieldcortex/config.json` (which invalidated the embedded `_sig` HMAC and forced defenceMode strict).
+
+### Added
+
+- **`shieldcortex config --action-guard-enable|disable|enforce|advisory`** — signed write path for `actionGuard.enabled` / `actionGuard.enforce` (PR #296).
+  - `--action-guard-enforce` also sets `enabled: true` (enforcing a disabled guard is nonsense).
+  - `--action-guard-advisory` writes warn-mode only and leaves `enabled` as-is.
+  - `--cloud-status` reports `Action Guard: Off | Enforce | Advisory (warn-mode)`.
+  - Doctor fix text points at these flags instead of hand-edit paths.
+  - Defaults match runtime/doctor: absent key = ON (`!== false`). Sibling keys (notify, reviewedScripts, broker) preserved on write.
+
+### Notes
+
+- No security-behaviour change for default hosts (Action Guard remains on/enforce when keys are absent).
+- SDK/PyPI stay at 0.3.0 (no client API change). Cloud dep floor moves to `^4.52.1`.
+
 ## [4.52.0] - 2026-08-15
 
 **Security residual grind — Action Guard precision, approval-broker field residual, and an instruction-detector floor that stops treating English morphology as a different language.**
