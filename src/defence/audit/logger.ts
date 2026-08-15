@@ -7,6 +7,20 @@ import { getDatabase, isDatabaseInitialized } from '../../database/init.js';
 import type { AuditEntry } from '../types.js';
 
 /**
+ * Map an attestation intent to the `source_attested` ledger value.
+ *
+ * The one place the boolean→column mapping lives, so every writer that plumbs
+ * attestation agrees on it: `true`→1, `false`→0, and `undefined`→NULL — the
+ * last meaning "this writer does not derive attestation", which the risk model
+ * reads conservatively as un-attested. A writer must never pass a literal
+ * `false` as a placeholder for "not plumbed yet": an explicit 0 under a real
+ * identity is what mutes that source's trust modifier (risk.ts latest-non-null).
+ */
+export function attestedFlag(attested: boolean | undefined): number | null {
+  return attested === undefined ? null : attested ? 1 : 0;
+}
+
+/**
  * Log an audit entry to the defence_audit table.
  * Fire-and-forget safe: errors are caught and logged, never thrown.
  */

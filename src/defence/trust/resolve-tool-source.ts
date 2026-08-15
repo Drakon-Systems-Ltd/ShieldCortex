@@ -23,7 +23,7 @@
 import type { DefenceSource } from '../types.js';
 import { applyOwnershipStamp } from './attestation-stamp.js';
 import { clampSourceToCeiling } from './env-detector.js';
-import { logAudit } from '../audit/logger.js';
+import { attestedFlag, logAudit } from '../audit/logger.js';
 import { getStrictSourceMode } from '../../cloud/config.js';
 
 export interface ResolveToolSourceOptions {
@@ -189,6 +189,10 @@ export function resolveToolSource(
             : ''),
         fragmentation_score: null,
         pipeline_duration_ms: null,
+        // Same attestation the resolver derived for this identity. NOT a
+        // hardcoded value: SOURCE_UNATTESTED is written under strict too,
+        // where deriveAttested returns true — 0 there would be wrong.
+        source_attested: attestedFlag(attested),
       });
     } catch {
       // Audit logging must never break tool execution.
@@ -228,6 +232,10 @@ export function resolveToolSource(
           `(confidence: ${detection.confidence}), so the declared identity owns only its own writes`,
         fragmentation_score: null,
         pipeline_duration_ms: null,
+        // Same attestation the resolver derived for this identity. NOT a
+        // hardcoded value: SOURCE_UNATTESTED is written under strict too,
+        // where deriveAttested returns true — 0 there would be wrong.
+        source_attested: attestedFlag(attested),
       });
     } catch {
       // Audit logging must never break tool execution.
@@ -260,6 +268,10 @@ export function resolveToolSource(
           `via ${detection.method} (confidence: ${detection.confidence})`,
         fragmentation_score: null,
         pipeline_duration_ms: null,
+        // Same attestation the resolver derived for this identity. NOT a
+        // hardcoded value: SOURCE_UNATTESTED is written under strict too,
+        // where deriveAttested returns true — 0 there would be wrong.
+        source_attested: attestedFlag(attested),
       });
     } catch {
       // Audit logging must never break tool execution.

@@ -32,7 +32,7 @@ import { detectEncoding } from './firewall/encoding-detector.js';
 import { detectMarkdownImageExfil } from './firewall/markdown-image-detector.js';
 import { detectHiddenWebInjection } from './hidden-web-injection.js';
 import { neutraliseToolResponse } from './tool-response-enforce.js';
-import { logAudit } from './audit/logger.js';
+import { attestedFlag, logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
 import type { ThreatIndicator, ToolResponseScanResult } from './types.js';
@@ -95,6 +95,17 @@ export function scanToolResponse(
   toolName: string,
   content: string,
   mode?: 'advisory' | 'enforce',
+  /**
+   * Attestation for the threat row. MUST be decided per call site, never a
+   * constant here: withResponseScan binds a server-literal toolName (→ true).
+   * For a CALLER-supplied toolName, OMIT the argument (NULL) — do not pass
+   * false: tool_response:<name> keys are un-namespaced and shared with the
+   * attested withResponseScan writes, and risk.ts resolves attestation
+   * latest-non-null, so an explicit 0 under a victim's key would MUTE the
+   * trust modifier that channel legitimately accrued. `false` is only safe
+   * for keys namespaced away from attested writers.
+   */
+  attested?: boolean,
 ): ToolResponseScanResult {
   const startTime = performance.now();
   const resolvedMode = mode ?? getToolResponseScanConfig().toolResponseMode;
@@ -288,6 +299,7 @@ export function scanToolResponse(
         reason: summary,
         fragmentation_score: null,
         pipeline_duration_ms: durationMs,
+        source_attested: attestedFlag(attested),
       });
     } catch {
       // Audit logging must never affect tool response delivery

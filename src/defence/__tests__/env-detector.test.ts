@@ -20,6 +20,9 @@ import type { Memory } from '../../memory/types.js';
 jest.unstable_mockModule('../audit/logger.js', () => ({
   logAudit: jest.fn(() => 1),
   createContentHash: jest.fn(() => 'hash'),
+  // resolve-tool-source now imports attestedFlag from here; the mock must
+  // provide every export the module under test links, or ESM fails to link.
+  attestedFlag: (a: boolean | undefined) => (a === undefined ? null : a ? 1 : 0),
 }));
 
 const { logAudit } = (await import('../audit/logger.js')) as { logAudit: jest.Mock };

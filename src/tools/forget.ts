@@ -52,7 +52,7 @@ export type ForgetInput = z.infer<typeof forgetSchema>;
 /**
  * Execute the forget tool
  */
-export async function executeForget(input: ForgetInput): Promise<{
+export async function executeForget(input: ForgetInput & { sourceAttested?: boolean }): Promise<{
   success: boolean;
   deleted?: number;
   denied?: number;
@@ -97,7 +97,7 @@ export async function executeForget(input: ForgetInput): Promise<{
         };
       }
 
-      const deleted = deleteMemory(input.id, source);
+      const deleted = deleteMemory(input.id, source, undefined, input.sourceAttested);
       if (!deleted && source) {
         return {
           success: false,
@@ -233,7 +233,7 @@ export async function executeForget(input: ForgetInput): Promise<{
     const deletedMemories: { id: number; title: string }[] = [];
     withTransaction(() => {
       for (const memory of affected) {
-        if (deleteMemory(memory.id, source, { mode: deleteMode })) {
+        if (deleteMemory(memory.id, source, { mode: deleteMode }, input.sourceAttested)) {
           deletedMemories.push(memory);
         }
       }

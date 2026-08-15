@@ -91,7 +91,9 @@ export function withResponseScan(toolName: string, handler: (...args: any[]) => 
 
     if (textContent.length < 20) return result;
 
-    const scan = scanToolResponse(toolName, textContent, config.toolResponseMode);
+    // toolName is bound at tool registration by server code (a literal), never
+    // caller-supplied → attested by construction.
+    const scan = scanToolResponse(toolName, textContent, config.toolResponseMode, true);
     if (scan.clean) return result;
 
     // Enforce mode: swap the threatening text for the sanitised payload the
@@ -325,8 +327,8 @@ Modes: search (query-based), recent (by time), important (by salience)`,
     },
     { title: 'Search Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('recall', async (args) => {
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'recall');
-      const result = await executeRecall({ ...args, source });
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'recall');
+      const result = await executeRecall({ ...args, source: resolved.source, sourceAttested: resolved.attested });
       return {
         content: [{ type: 'text', text: formatRecallResult(result, true) }],
       };
@@ -363,8 +365,10 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       // it from the environment, NOT the MCP-declared `source` param. Honouring a
       // declared identity would let a caller claim ownership of any peer source's
       // memories (the clamp only caps trust SCORE, not identity).
+      // Env-derived identity (never the declared param) → attested by
+      // construction: nothing caller-suppliable influenced it.
       const source = inferSourceFromEnvironment().source;
-      const result = await executeForget({ ...args, source });
+      const result = await executeForget({ ...args, source, sourceAttested: true });
       return {
         content: [{ type: 'text', text: formatForgetResult(result) }],
       };
@@ -387,8 +391,8 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     },
     { title: 'Get Project Context', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('get_context', async (args) => {
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_context');
-      const result = await executeGetContext({ ...args, source });
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'get_context');
+      const result = await executeGetContext({ ...args, source: resolved.source, sourceAttested: resolved.attested });
       return {
         content: [{
           type: 'text',
@@ -518,8 +522,8 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     },
     { title: 'Get Memory by ID', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('get_memory', async (args) => {
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_memory');
-      const result = executeGetMemory({ ...args, source });
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'get_memory');
+      const result = executeGetMemory({ ...args, source: resolved.source, sourceAttested: resolved.attested });
       return {
         content: [{
           type: 'text',
@@ -539,8 +543,8 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     },
     { title: 'Export Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('export_memories', async (args) => {
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'export_memories');
-      const result = executeExport({ ...args, source });
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'export_memories');
+      const result = executeExport({ ...args, source: resolved.source, sourceAttested: resolved.attested });
       return {
         content: [{
           type: 'text',
@@ -600,8 +604,8 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
     },
     { title: 'Get Related Memories', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     withKillSwitchGuard('memory_read', withResponseScan('get_related', async (args) => {
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'get_related');
-      const result = executeGetRelated({ id: args.id, source });
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'get_related');
+      const result = executeGetRelated({ id: args.id, source: resolved.source, sourceAttested: resolved.attested });
       if (!result.success) {
         return { content: [{ type: 'text', text: `Error: ${result.error}` }], isError: true };
       }
@@ -925,6 +929,12 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
           isError: true,
         };
       }
+      // args.toolName is caller-supplied free text writing to the SAME
+      // un-namespaced tool_response:<name> keys withResponseScan attests, so
+      // neither true (trust elevation) NOR false is safe here: risk.ts resolves
+      // attestation latest-non-null, and an explicit 0 under a victim's key
+      // would MUTE the modifier that channel legitimately accrued. Omit →
+      // NULL, which is inert on both the accrual gate and the mute query.
       const scan = scanToolResponse(args.toolName, args.content, args.mode as 'advisory' | 'enforce' | undefined);
 
       const lines = [

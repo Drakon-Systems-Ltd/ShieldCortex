@@ -534,6 +534,8 @@ export function clusterAndSummarise(options?: { minClusterSize?: number }): {
           // System-generated consolidation summary — honest cli provenance
           // (trust 0.9, above the auto-quarantine band so it isn't held).
           { type: 'cli', identifier: 'consolidate:summary' },
+          // Code-constant identity → attested by construction.
+          { sourceAttested: true },
         );
         summariesCreated++;
       } catch {
@@ -1135,6 +1137,9 @@ export function importMemories(json: string): number {
           },
           DEFAULT_CONFIG,
           { type: 'file', identifier: 'import' },
+          // Code-constant identity → attested by construction. A poisoned
+          // import row that BLOCKs accrues to the file:import channel.
+          { sourceAttested: true },
         );
         imported++;
       } catch {

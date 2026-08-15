@@ -64,9 +64,13 @@ export function accessMemory(
   id: number,
   config: MemoryConfig = DEFAULT_CONFIG,
   source?: DefenceSource,
+  attested?: boolean,
 ): Memory | null {
   const db = getDatabase();
-  const memory = getMemoryById(id, source);
+  // Thread the caller's attestation into the ACL denial this read can emit —
+  // this is the production get_memory denial path, and a BLOCK keyed to the
+  // caller must be able to accrue.
+  const memory = getMemoryById(id, source, attested);
   if (!memory) return null;
 
   // Calculate new salience with reinforcement
@@ -265,7 +269,11 @@ export function enrichMemory(
   // analogue of mergeMemories. The appended text comes from a recall query /
   // caller and could straddle an injection or credential into a clean stored
   // row. Skip (don't poison) on a non-ALLOW verdict.
-  const defenceResult = runDefencePipeline(newContent, memory.title, ENRICH_SOURCE, undefined, memory.project ?? undefined);
+  // ENRICH_SOURCE is a code constant (attested by construction). Keep the
+  // deliberate low-trust scan for the VERDICT (see the source note above) but
+  // stamp attestation so an enrichment-channel BLOCK accrues to that channel
+  // instead of dropping to NULL. Trust and attestation are separate concerns.
+  const defenceResult = runDefencePipeline(newContent, memory.title, ENRICH_SOURCE, undefined, memory.project ?? undefined, { sourceAttested: true });
   if (defenceResult.firewall.result !== 'ALLOW') {
     return { enriched: false, reason: `Enrichment blocked by defence: ${defenceResult.firewall.reason}` };
   }

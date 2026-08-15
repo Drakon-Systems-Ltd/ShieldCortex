@@ -54,7 +54,7 @@ import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult, AuditOperation } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
-import { logAudit, createContentHash } from '../defence/audit/logger.js';
+import { logAudit, createContentHash, attestedFlag } from '../defence/audit/logger.js';
 import { dispatchWebhook } from '../events/webhooks.js';
 import { safeJsonParse } from './fts.js';
 // Internal use of the link API. links.ts also imports from store.ts (getMemoryById,
@@ -292,6 +292,7 @@ export function logAccessDenial(
   source: DefenceSource,
   reason: string,
   operation: AuditOperation = 'read',
+  attested?: boolean,
 ): void {
   const trust = scoreSource(source).score;
   logAudit({
@@ -310,6 +311,9 @@ export function logAccessDenial(
     reason: `Access denied: ${reason}`,
     fragmentation_score: null,
     pipeline_duration_ms: 0,
+    // A denial is a BLOCK keyed to a source; carrying attestation lets the
+    // threat graph accrue a spoofer's denied reads instead of dropping them.
+    source_attested: attestedFlag(attested),
   });
 }
 
@@ -324,6 +328,7 @@ export function logAllowedRead(
   tool: string,
   memoryIds: number[],
   project?: string | null,
+  attested?: boolean,
 ): void {
   if (memoryIds.length === 0) return;
   logAudit({
@@ -342,6 +347,7 @@ export function logAllowedRead(
     reason: `read ${memoryIds.length} memor${memoryIds.length === 1 ? 'y' : 'ies'} via ${tool}`,
     fragmentation_score: null,
     pipeline_duration_ms: null,
+    source_attested: attestedFlag(attested),
   });
 }
 
@@ -356,6 +362,7 @@ export function logAllowedDelete(
   source: DefenceSource,
   project?: string | null,
   operation: AuditOperation = 'delete',
+  attested?: boolean,
 ): void {
   logAudit({
     memory_id: null,
@@ -373,6 +380,7 @@ export function logAllowedDelete(
     reason: `deleted memory #${memoryId}`,
     fragmentation_score: null,
     pipeline_duration_ms: null,
+    source_attested: attestedFlag(attested),
   });
 }
 
@@ -383,6 +391,7 @@ export function logAllowedDelete(
 function filterRowsByAccess(
   rows: Record<string, unknown>[],
   source: DefenceSource,
+  attested?: boolean,
 ): Record<string, unknown>[] {
   return rows.filter(row => {
     const policy = checkAccess(
@@ -395,7 +404,7 @@ function filterRowsByAccess(
       'read',
     );
     if (!policy.canRead) {
-      logAccessDenial(row.id as number, source, policy.reason);
+      logAccessDenial(row.id as number, source, policy.reason, 'read', attested);
       return false;
     }
     return true;
@@ -476,6 +485,9 @@ export function addMemory(
       reason: `Rate limited: exceeded ${RATE_LIMIT_MAX} writes/minute`,
       fragmentation_score: null,
       pipeline_duration_ms: 0,
+      // BLOCK keyed to the caller — carries the same attestation the pipeline
+      // row would, so a flood from an attested source can accrue.
+      source_attested: attestedFlag(options?.sourceAttested),
     });
     throw new MemoryBlockedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
   }
@@ -792,7 +804,7 @@ export function addMemory(
 /**
  * Get a memory by ID
  */
-export function getMemoryById(id: number, source?: DefenceSource): Memory | null {
+export function getMemoryById(id: number, source?: DefenceSource, attested?: boolean): Memory | null {
   const db = getDatabase();
   const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
   if (!row) return null;
@@ -805,7 +817,7 @@ export function getMemoryById(id: number, source?: DefenceSource): Memory | null
       'read',
     );
     if (!policy.canRead) {
-      logAccessDenial(id, source, policy.reason);
+      logAccessDenial(id, source, policy.reason, 'read', attested);
       return null;
     }
   }
@@ -1114,6 +1126,9 @@ export function mergeMemories(
       source,
       undefined,
       kept.project ?? removed.project ?? undefined,
+      // Mechanical re-scan of two already-scanned rows under a system-constant
+      // identity (default cli:merge) — attested by construction.
+      { sourceAttested: true },
     );
     if (defenceResult.firewall.result !== 'ALLOW') {
       throw new MemoryBlockedError(defenceResult.firewall.reason);
@@ -1242,6 +1257,7 @@ export function deleteMemory(
   id: number,
   source?: DefenceSource,
   opts?: { mode?: 'delete' | 'revoke' },
+  attested?: boolean,
 ): boolean {
   const db = getDatabase();
   const aclOp = opts?.mode ?? 'delete';
@@ -1257,7 +1273,7 @@ export function deleteMemory(
         aclOp,
       );
       if (!policy.canDelete) {
-        logAccessDenial(id, source, policy.reason, aclOp);
+        logAccessDenial(id, source, policy.reason, aclOp, attested);
         return false;
       }
     }
@@ -1282,7 +1298,7 @@ export function deleteMemory(
     // caller is attributed. Internal source-less deletes (merge/consolidation)
     // are machinery, not user actions, so they're not audited here.
     if (source) {
-      logAllowedDelete(id, source, (memory.project as string | undefined) ?? null, aclOp);
+      logAllowedDelete(id, source, (memory.project as string | undefined) ?? null, aclOp, attested);
     }
     if (isFeatureEnabled('cloud_sync')) {
       syncMemoryDeleteToCloud(memory);
@@ -1368,6 +1384,7 @@ export function getRecentMemories(
   project?: string,
   source?: DefenceSource,
   filters?: MemoryListFilters,
+  attested?: boolean,
 ): Memory[] {
   const db = getDatabase();
   const { clause, params } = buildMemoryFilterClause(project, filters);
@@ -1377,7 +1394,7 @@ export function getRecentMemories(
   params.push(source ? limit * 2 : limit); // over-fetch when access-filtering
 
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-  if (source) rows = filterRowsByAccess(rows, source);
+  if (source) rows = filterRowsByAccess(rows, source, attested);
   return rows.slice(0, limit).map(rowToMemory);
 }
 
@@ -1407,6 +1424,7 @@ export function getHighPriorityMemories(
   project?: string,
   source?: DefenceSource,
   filters?: MemoryListFilters,
+  attested?: boolean,
 ): Memory[] {
   const db = getDatabase();
   // Phase 1b: gate + order on EFFECTIVE salience (the decaying score), not raw
@@ -1433,7 +1451,7 @@ export function getHighPriorityMemories(
   params.push(source ? limit * 2 : limit);
 
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-  if (source) rows = filterRowsByAccess(rows, source);
+  if (source) rows = filterRowsByAccess(rows, source, attested);
   return rows.slice(0, limit).map(rowToMemory);
 }
 

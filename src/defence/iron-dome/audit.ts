@@ -5,7 +5,7 @@
  */
 
 import type { DefenceSource } from '../types.js';
-import { logAudit } from '../audit/logger.js';
+import { attestedFlag, logAudit } from '../audit/logger.js';
 
 export interface IronDomeAuditEvent {
   action: string;
@@ -14,6 +14,13 @@ export interface IronDomeAuditEvent {
   allowed: boolean;
   reason: string;
   source?: DefenceSource;
+  /**
+   * Attestation for the row. Omit for the default cli:iron-dome identity — a
+   * code constant, attested by construction. If you supply your OWN `source`
+   * (e.g. a resolved caller), you MUST state attestation too: an unstated
+   * source falls to NULL (fail-safe), never silently attested.
+   */
+  attested?: boolean;
 }
 
 /**
@@ -22,6 +29,10 @@ export interface IronDomeAuditEvent {
  */
 export function logIronDomeAudit(event: IronDomeAuditEvent): void {
   try {
+    // No source ⇒ the code-constant cli:iron-dome identity ⇒ attested by
+    // construction. A supplied source with no stated attestation fails safe to
+    // NULL (a resolved caller identity is only attested if the resolver said so).
+    const attested = event.attested ?? (event.source ? undefined : true);
     logAudit({
       memory_id: null,
       project: null,
@@ -38,6 +49,7 @@ export function logIronDomeAudit(event: IronDomeAuditEvent): void {
       reason: `[iron-dome:${event.action}] ${event.reason}`,
       fragmentation_score: null,
       pipeline_duration_ms: null,
+      source_attested: attestedFlag(attested),
     });
   } catch (err) {
     console.error('[iron-dome] Failed to log audit event:', err);
