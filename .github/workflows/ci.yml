@@ -101,6 +101,11 @@ jobs:
       - name: Test
         run: npm test
 
+      # The advertised Hermes bound plane is Python. `npm test` never loads it,
+      # so a fail-open in evaluate_tool_call shipped through a green Node suite.
+      - name: Hermes plugin unit tests
+        run: python3 -m unittest discover -s plugins/hermes/shieldcortex/tests -v
+
       - name: Install dashboard dependencies
         run: cd dashboard && npm ci
 

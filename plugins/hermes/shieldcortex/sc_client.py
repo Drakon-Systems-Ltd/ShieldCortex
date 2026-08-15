@@ -214,13 +214,27 @@ def evaluate_tool_call(
     except Exception as exc:
         return ActionGuardVerdict("allow", [], f"scanner unreachable: {exc}", available=False)
 
-    decision = str((data or {}).get("decision") or "allow").lower()
+    # A 200 JSON body is not a verdict. Missing/unknown `decision` used to
+    # coerce to allow + available=True, which skipped the #59 fallback and
+    # failed open on the advertised bound plane (wrong local service, proxy
+    # envelope, future field rename). Treat it as unavailable so the
+    # catastrophic/dangerous fallback still runs.
+    if not isinstance(data, dict):
+        return ActionGuardVerdict("allow", [], "malformed action-guard response", available=False)
+    decision_raw = data.get("decision")
+    if not isinstance(decision_raw, str) or not decision_raw.strip():
+        return ActionGuardVerdict(
+            "allow", [], "malformed action-guard response: missing decision", available=False,
+        )
+    decision = decision_raw.strip().lower()
     if decision not in ("allow", "require_approval", "block"):
-        decision = "allow"
-    signals = (data or {}).get("signals") or []
+        return ActionGuardVerdict(
+            "allow", [], f"unknown action-guard decision: {decision}", available=False,
+        )
+    signals = data.get("signals") or []
     if not isinstance(signals, list):
         signals = []
-    reason = (data or {}).get("reason") or ""
+    reason = data.get("reason") or ""
     return ActionGuardVerdict(decision, signals, reason, available=True)
 
 
