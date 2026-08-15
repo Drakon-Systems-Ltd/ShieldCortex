@@ -104,12 +104,30 @@ export const DEFAULT_BROKER_POLICY: BrokerPolicy = {
   preClearConfidence: 0.9,
 };
 
+/**
+ * Why there is no judge result, for the audit row (#143 residual).
+ *
+ * Every value means exactly the same thing to the policy — no usable judge,
+ * hold for a human. It exists so an operator can tell "the judge never
+ * answered" from "the judge said hold", which were the same null until now: a
+ * judge that times out on every call used to be indistinguishable from a
+ * cautious one, and that is how a silently-broken judge stays broken.
+ */
+export type JudgeUnavailableReason = 'timeout' | 'unreachable' | 'parse' | 'thrown' | 'disabled';
+
+const JUDGE_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set<JudgeUnavailableReason>([
+  'timeout', 'unreachable', 'parse', 'thrown', 'disabled',
+]);
+
 export interface BrokerInput {
   tool: string;
   toolInput: unknown;
   verdict: BrokerVerdictLike;
   /** null when no judge ran: model unreachable, disabled, or out of budget. */
   judge: JudgeResult | null;
+  /** Optional availability metadata from the transport, for the audit row only.
+   *  It can add a WORD to the reason; it can never add an outcome. */
+  judgeMeta?: { timedOut?: boolean; error?: string | null };
   policy?: BrokerPolicy;
 }
 
@@ -133,6 +151,11 @@ export interface BrokerAudit {
   judgeConfidence: number | null;
   injectionSuspected: boolean;
   inContext: boolean | null;
+  /** True only when the transport reported a deadline AND no judge came back.
+   *  Never true alongside a usable judge — a judge that answered did not time out. */
+  judgeTimedOut?: boolean;
+  /** Why the judge is 'unavailable', or null when one was actually used. */
+  judgeUnavailableReason?: JudgeUnavailableReason | null;
   reason: string;
 }
 
@@ -164,6 +187,25 @@ function judgeIsUsable(j: JudgeResult | null): j is JudgeResult {
   return true;
 }
 
+/**
+ * Normalise the transport's availability metadata (#143 residual).
+ *
+ * A usable judge always reports "did not time out, no reason" regardless of
+ * what the transport claimed — a judge that answered did not time out, and a
+ * caller cannot mark a live verdict as an outage. Unrecognised reason strings
+ * are dropped rather than carried, so a hostile or stale transport cannot write
+ * free text into the audit row.
+ */
+function judgeAvailability(
+  meta: BrokerInput['judgeMeta'],
+  usable: boolean,
+): { timedOut: boolean; reason: JudgeUnavailableReason | null } {
+  if (usable) return { timedOut: false, reason: null };
+  const raw = typeof meta?.error === 'string' ? meta.error : '';
+  const reason = JUDGE_UNAVAILABLE_REASONS.has(raw) ? (raw as JudgeUnavailableReason) : null;
+  return { timedOut: meta?.timedOut === true || reason === 'timeout', reason };
+}
+
 function decide(input: BrokerInput): { outcome: BrokerOutcome; reason: string } {
   const policy = input.policy ?? DEFAULT_BROKER_POLICY;
   const { verdict, judge } = input;
@@ -176,11 +218,15 @@ function decide(input: BrokerInput): { outcome: BrokerOutcome; reason: string } 
     };
   }
 
-  // (4) No usable judge → the human is the only path.
+  // (4) No usable judge → the human is the only path. A timeout is named
+  // explicitly: same outcome, but the operator can see that the judge never
+  // answered rather than assuming it looked and hesitated.
   if (!judgeIsUsable(judge)) {
     return {
       outcome: 'hold',
-      reason: 'no usable judge assessment — holding for operator approval',
+      reason: judgeAvailability(input.judgeMeta, false).timedOut
+        ? 'judge timed out — holding for operator approval'
+        : 'no usable judge assessment — holding for operator approval',
     };
   }
 
@@ -227,6 +273,7 @@ function decide(input: BrokerInput): { outcome: BrokerOutcome; reason: string } 
 export function brokerDecision(input: BrokerInput): BrokerDecision {
   const { outcome, reason } = decide(input);
   const usable = judgeIsUsable(input.judge);
+  const availability = judgeAvailability(input.judgeMeta, usable);
 
   return {
     outcome,
@@ -245,6 +292,10 @@ export function brokerDecision(input: BrokerInput): BrokerDecision {
       judgeConfidence: usable ? (input.judge as JudgeResult).confidence : null,
       injectionSuspected: usable ? (input.judge as JudgeResult).injectionSuspected : false,
       inContext: usable ? (input.judge as JudgeResult).inContext : null,
+      // Audit only. Neither field is read by any decision above, and
+      // canAutoApproveOnTimeout stays derived from the outcome alone.
+      judgeTimedOut: availability.timedOut,
+      judgeUnavailableReason: availability.reason,
       reason,
     },
   };

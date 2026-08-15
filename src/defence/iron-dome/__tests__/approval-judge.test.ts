@@ -9,6 +9,7 @@ import {
   buildJudgePrompt,
   parseJudgeResponse,
   runJudge,
+  runJudgeDetailed,
   JUDGE_SYSTEM_PROMPT,
   type ModelInvoker,
 } from '../approval-judge.js';
@@ -150,5 +151,78 @@ describe('runJudge fails closed', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].system).toBe(JUDGE_SYSTEM_PROMPT);
     expect(seen[0].user).toContain('ls');
+  });
+});
+
+/**
+ * #143 residual — "the judge never answered" and "the judge said hold" were the
+ * same null, so a judge timing out on every call was indistinguishable from a
+ * cautious one. `runJudgeDetailed` names the difference; it does not change it.
+ * Every test here asserts `result` is still null.
+ */
+describe('runJudgeDetailed names WHY there is no judge, and never invents one', () => {
+  const req = { tool: 'Bash', toolInput: { command: 'ls' }, verdict };
+  const invoker = (fn: () => Promise<string>): ModelInvoker => fn as unknown as ModelInvoker;
+
+  it('reports a timeout as timedOut with a null result', async () => {
+    const slow: ModelInvoker = () => new Promise(res => { setTimeout(() => res(ok), 5_000).unref?.(); });
+    const r = await runJudgeDetailed(req, slow, { timeoutMs: 50 });
+    expect(r.result).toBeNull();
+    expect(r.timedOut).toBe(true);
+    expect(r.error).toBe('timeout');
+  });
+
+  it('reports a transport that rejects on ITS own deadline as a timeout too', async () => {
+    // cli-invoker.ts runs its own deadline and rejects with this exact shape;
+    // on the hook both timers are set from one config value, so either may win.
+    const r = await runJudgeDetailed(
+      req,
+      invoker(async () => { throw new Error('judge CLI timed out after 15000ms'); }),
+    );
+    expect(r.result).toBeNull();
+    expect(r.timedOut).toBe(true);
+    expect(r.error).toBe('timeout');
+  });
+
+  it('reports an unreachable model as thrown, NOT as a timeout', async () => {
+    const r = await runJudgeDetailed(req, invoker(async () => { throw new Error('ENOTFOUND'); }));
+    expect(r.result).toBeNull();
+    expect(r.timedOut).toBe(false);
+    expect(r.error).toBe('thrown');
+  });
+
+  it('reports an unparseable reply as parse, NOT as a timeout', async () => {
+    const r = await runJudgeDetailed(req, invoker(async () => 'Sure, looks fine to me!'));
+    expect(r.result).toBeNull();
+    expect(r.timedOut).toBe(false);
+    expect(r.error).toBe('parse');
+  });
+
+  it('reports an invoker that resolves a non-string as unreachable', async () => {
+    const r = await runJudgeDetailed(req, (async () => null) as unknown as ModelInvoker);
+    expect(r.result).toBeNull();
+    expect(r.timedOut).toBe(false);
+    expect(r.error).toBe('unreachable');
+  });
+
+  it('a successful pass carries the verdict, no timeout and no error', async () => {
+    const r = await runJudgeDetailed(req, invoker(async () => ok));
+    expect(r.result?.assessment).toBe('benign');
+    expect(r.timedOut).toBe(false);
+    expect(r.error).toBeUndefined();
+  });
+
+  it('runJudge is exactly runJudgeDetailed().result — existing callers are unchanged', async () => {
+    const cases: Array<ModelInvoker> = [
+      invoker(async () => ok),
+      invoker(async () => 'junk'),
+      invoker(async () => { throw new Error('ENOTFOUND'); }),
+      invoker(async () => { throw new Error('judge CLI timed out after 15000ms'); }),
+    ];
+    for (const invoke of cases) {
+      const detailed = await runJudgeDetailed(req, invoke, { timeoutMs: 200 });
+      const plain = await runJudge(req, invoke, { timeoutMs: 200 });
+      expect(plain).toEqual(detailed.result);
+    }
   });
 });

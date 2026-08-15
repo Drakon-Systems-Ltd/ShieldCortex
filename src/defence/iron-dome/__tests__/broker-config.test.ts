@@ -48,6 +48,21 @@ describe('defaults', () => {
   it('agrees with the decision core about the pre-clear confidence floor', () => {
     expect(DEFAULT_BROKER_CONFIG.preClearConfidence).toBe(DEFAULT_BROKER_POLICY.preClearConfidence);
   });
+
+  // #143 residual. Field latency reached ~6s, so 8s was turning answered judges
+  // into silent nulls. Pinned because the same number lives in three files that
+  // cannot import each other (approval-judge.ts, cli-invoker.ts, here).
+  it('gives the judge 15s, the residual default', () => {
+    expect(DEFAULT_BROKER_CONFIG.judgeTimeoutMs).toBe(15_000);
+    expect(normaliseBrokerConfig({ enabled: true }).judgeTimeoutMs).toBe(15_000);
+  });
+
+  it('still bounds the judge timeout at 500ms..60s — the default moved, the bounds did not', () => {
+    expect(normaliseBrokerConfig({ judgeTimeoutMs: 500 }).judgeTimeoutMs).toBe(500);
+    expect(normaliseBrokerConfig({ judgeTimeoutMs: 60_000 }).judgeTimeoutMs).toBe(60_000);
+    expect(normaliseBrokerConfig({ judgeTimeoutMs: 499 }).judgeTimeoutMs).toBe(15_000);
+    expect(normaliseBrokerConfig({ judgeTimeoutMs: 60_001 }).judgeTimeoutMs).toBe(15_000);
+  });
 });
 
 // ── hostile input: unknown fields ───────────────────────────────────────────

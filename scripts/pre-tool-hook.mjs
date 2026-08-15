@@ -298,6 +298,10 @@ async function loadBroker(rawBrokerConfig) {
       config: normalised,
       brokerDecision: core.brokerDecision,
       runJudge: judge.runJudge,
+      // #143 residual. Optional on purpose: a dist build from before the
+      // residual has runJudge and nothing else, and the pass below falls back
+      // to it. A missing detail function costs an audit field, never a gate.
+      runJudgeDetailed: typeof judge.runJudgeDetailed === 'function' ? judge.runJudgeDetailed : null,
       createCliInvoker: cli.createCliInvoker,
     };
   } catch {
@@ -546,6 +550,9 @@ const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
 const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
 const SAFE_BROKER_OUTCOMES = new Set(['harden', 'pre_clear', 'hold', 'unavailable', 'not_brokerable']);
 const SAFE_JUDGE_ASSESSMENTS = new Set(['approve', 'deny', 'hold', 'uncertain', 'in_context', 'out_of_context', 'benign', 'unavailable']);
+/** #143 residual — why a judge is 'unavailable'. Allowlisted, like every other
+ *  string this hook copies into an audit row that leaves the process. */
+const SAFE_JUDGE_UNAVAILABLE_REASONS = new Set(['timeout', 'unreachable', 'parse', 'thrown', 'disabled']);
 
 function readExistingSessionSalt(file) {
   try {
@@ -744,6 +751,12 @@ function safeBrokerAudit(audit) {
   }
   if (typeof audit.injectionSuspected === 'boolean') out.injectionSuspected = audit.injectionSuspected;
   if (typeof audit.inContext === 'boolean') out.inContext = audit.inContext;
+  // #143 residual. A boolean and one allowlisted word — the same treatment
+  // every other field here gets, because "it came from our own core" is not a
+  // property this function is allowed to assume.
+  if (typeof audit.judgeTimedOut === 'boolean') out.judgeTimedOut = audit.judgeTimedOut;
+  const unavailableReason = String(audit.judgeUnavailableReason ?? '');
+  if (SAFE_JUDGE_UNAVAILABLE_REASONS.has(unavailableReason)) out.judgeUnavailableReason = unavailableReason;
   const signals = safeSignalList(audit.signals);
   if (signals.length > 0) out.signals = signals;
   return Object.keys(out).length > 0 ? out : undefined;
@@ -1052,25 +1065,41 @@ async function runBrokerPass(broker, toolName, toolInput, verdict) {
       model: broker.config.model,
       timeoutMs: broker.config.judgeTimeoutMs,
     });
-    const judgeResult = await broker.runJudge(
-      {
-        tool: toolName,
-        toolInput,
-        verdict: {
-          severity: verdict.severity,
-          action: verdict.action,
-          reason: verdict.reason,
-          signals: verdict.signals,
-        },
+    const request = {
+      tool: toolName,
+      toolInput,
+      verdict: {
+        severity: verdict.severity,
+        action: verdict.action,
+        reason: verdict.reason,
+        signals: verdict.signals,
       },
-      invoke,
-      { timeoutMs: broker.config.judgeTimeoutMs },
-    );
+    };
+    const opts = { timeoutMs: broker.config.judgeTimeoutMs };
+
+    // #143 residual — "the judge never answered" and "the judge said hold" were
+    // the same null, so a judge timing out on every call looked like a cautious
+    // one. The detail is metadata: `result` is still null on every failure, and
+    // null still holds for a human.
+    let judgeResult = null;
+    let judgeMeta;
+    if (broker.runJudgeDetailed) {
+      const detailed = await broker.runJudgeDetailed(request, invoke, opts);
+      judgeResult = detailed?.result ?? null;
+      judgeMeta = {
+        timedOut: detailed?.timedOut === true,
+        error: typeof detailed?.error === 'string' ? detailed.error : null,
+      };
+    } else {
+      judgeResult = await broker.runJudge(request, invoke, opts);
+    }
+
     const decision = broker.brokerDecision({
       tool: toolName,
       toolInput,
       verdict,
       judge: judgeResult,
+      ...(judgeMeta ? { judgeMeta } : {}),
       policy: {
         allowPreClear: broker.config.allowPreClear,
         preClearConfidence: broker.config.preClearConfidence,

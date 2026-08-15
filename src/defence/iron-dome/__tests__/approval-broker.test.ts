@@ -298,3 +298,83 @@ describe('every broker decision is explainable', () => {
     expect(d.audit.judgeAssessment).toBe('unavailable');
   });
 });
+
+// ── #143 residual: a timed-out judge is named, and still holds ─────────────
+
+/**
+ * The marker exists so an operator can tell a judge that never answered from a
+ * judge that answered "hold" — until now both were the same `null`, and a
+ * systematically-timing-out judge looked exactly like a cautious one.
+ *
+ * It is metadata. Every test here also re-asserts the outcome, because the one
+ * way this feature could go wrong is by becoming an input to the decision.
+ */
+describe('#143 residual: judge timeout is visible in the audit and never a release', () => {
+  const timedOut = { judge: null, judgeMeta: { timedOut: true, error: 'timeout' } };
+
+  it('holds on a timed-out judge, and says so in the reason', () => {
+    const d = brokerDecision(input(timedOut));
+    expect(d.outcome).toBe('hold');
+    expect(d.reason).toMatch(/timed out/i);
+    expect(d.audit.judgeTimedOut).toBe(true);
+    expect(d.audit.judgeUnavailableReason).toBe('timeout');
+    expect(d.audit.judgeAssessment).toBe('unavailable');
+    expect(d.audit.judgeConfidence).toBeNull();
+  });
+
+  it('a timeout NEVER auto-approves, on the most pre-clearable request there is', () => {
+    // Reversible signal, pre-clear allowed, threshold floored — everything the
+    // pre-clear path wants, except a judge.
+    const d = brokerDecision(
+      input({ ...timedOut, policy: { allowPreClear: true, preClearConfidence: 0 } }),
+    );
+    expect(d.outcome).toBe('hold');
+    expect(d.canAutoApproveOnTimeout).toBe(false);
+    expect(timeoutOutcome(d)).toBe('deny');
+  });
+
+  it('catastrophic stays not_brokerable when the judge timed out', () => {
+    const d = brokerDecision(
+      input({
+        ...timedOut,
+        verdict: { ...dangerous(['delete-root-or-home']), severity: 'catastrophic', decision: 'block' },
+      }),
+    );
+    expect(d.outcome).toBe('not_brokerable');
+    expect(d.canAutoApproveOnTimeout).toBe(false);
+    expect(timeoutOutcome(d)).toBe('deny');
+  });
+
+  it('distinguishes a timeout from every other reason there is no judge', () => {
+    for (const error of ['unreachable', 'parse', 'thrown', 'disabled']) {
+      const d = brokerDecision(input({ judge: null, judgeMeta: { timedOut: false, error } }));
+      expect(d.outcome).toBe('hold');
+      expect(d.audit.judgeTimedOut).toBe(false);
+      expect(d.audit.judgeUnavailableReason).toBe(error);
+      expect(d.reason).not.toMatch(/timed out/i);
+    }
+  });
+
+  it('drops a reason it does not recognise rather than carrying it into the audit', () => {
+    const d = brokerDecision(
+      input({ judge: null, judgeMeta: { timedOut: false, error: 'approved-by-the-model-honestly' } }),
+    );
+    expect(d.outcome).toBe('hold');
+    expect(d.audit.judgeUnavailableReason).toBeNull();
+  });
+
+  it('a caller cannot mark a judge that actually answered as timed out', () => {
+    const d = brokerDecision(input({ judge: judge(), judgeMeta: { timedOut: true, error: 'timeout' } }));
+    expect(d.outcome).toBe('pre_clear');
+    expect(d.audit.judgeTimedOut).toBe(false);
+    expect(d.audit.judgeUnavailableReason).toBeNull();
+  });
+
+  it('reports no timeout when the transport says nothing (the pre-residual caller)', () => {
+    const d = brokerDecision(input({ judge: null }));
+    expect(d.outcome).toBe('hold');
+    expect(d.audit.judgeTimedOut).toBe(false);
+    expect(d.audit.judgeUnavailableReason).toBeNull();
+    expect(d.reason).toMatch(/no usable judge/i);
+  });
+});

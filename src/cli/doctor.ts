@@ -2173,6 +2173,34 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
             'forces strict mode. OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
         });
       }
+
+      // #143 residual: the broker block is the thing operators most often
+      // believe is protecting them. Say what is actually true — present and
+      // disabled is the default, and a disabled broker does nothing at all.
+      // Neither state removes the need for a notify channel: the broker can
+      // harden or hold, but the human path is still the notify path.
+      const brokerBlock = isBlock(merged.broker) ? merged.broker : null;
+      if (brokerBlock) {
+        results.push(
+          brokerBlock.enabled === true
+            ? {
+                label: `${label} broker`,
+                status: 'info',
+                message:
+                  'approval broker is armed (`actionGuard.broker.enabled: true`) — it can harden a gate or hold it, ' +
+                  'and only pre-clears reversible on-host actions; catastrophic is never brokered and an unavailable ' +
+                  'or timed-out judge holds for a human. The human path is still the notify channel.',
+              }
+            : {
+                label: `${label} broker`,
+                status: 'info',
+                message:
+                  'approval broker is present but disabled (opt-in; `actionGuard.broker.enabled` is not true) — ' +
+                  'no judge runs and no gate is brokered. Denials still need a notify channel to reach a human.',
+                fix: 'Set `actionGuard.broker.enabled: true` to opt in — the broker never widens a gate, but it is off until you say so.',
+              },
+        );
+      }
     }
 
     if (alias) {

@@ -65,7 +65,12 @@ export const DEFAULT_BROKER_CONFIG: BrokerConfig = {
   enabled: false,
   allowPreClear: DEFAULT_BROKER_POLICY.allowPreClear,
   preClearConfidence: DEFAULT_BROKER_POLICY.preClearConfidence,
-  judgeTimeoutMs: 8_000,
+  // 15s, raised from 8s in the #143 residual. Field latency on the Jarvis box
+  // reached ~6s, and an 8s ceiling turned an answered judge into a silent null
+  // often enough to matter. A null holds for a human, so the old value was safe
+  // but wasteful; the ceiling exists to bound the operator's wait, not to race
+  // the model. Still well inside the 60s bound.
+  judgeTimeoutMs: 15_000,
   approvalTimeoutMs: {
     // The more dangerous the action, the sooner we stop waiting — because
     // "stop waiting" resolves to DENY for everything the broker did not

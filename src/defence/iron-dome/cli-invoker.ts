@@ -66,7 +66,9 @@ export interface CliInvokerOptions {
 }
 
 const DEFAULT_COMMAND = 'claude';
-const DEFAULT_TIMEOUT_MS = 8_000;
+/** Matches DEFAULT_BROKER_CONFIG.judgeTimeoutMs and approval-judge's own
+ *  default — three files, one deadline, kept in step by hand (#143 residual). */
+const DEFAULT_TIMEOUT_MS = 15_000;
 /** Grace between "please stop" and "stop". */
 const KILL_GRACE_MS = 100;
 /** A judge reply is one small JSON object. Anything beyond this is noise, and

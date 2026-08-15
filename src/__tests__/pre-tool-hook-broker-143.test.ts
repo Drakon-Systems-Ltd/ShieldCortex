@@ -280,6 +280,35 @@ describe('#143 — the approval broker through the real Claude Code hook', () =>
     expect(Date.now() - started).toBeLessThan(20_000);
   }, 60_000);
 
+  // #143 residual — a judge that times out on every call used to be
+  // indistinguishable in the audit from a cautious one that answered "hold".
+  it('marks a timed-out judge as timed out in the audit row, and still holds', () => {
+    writeBrokerConfig(true, { judgeTimeoutMs: 500 });
+    const p = join(binDir, 'claude');
+    writeFileSync(p, '#!/usr/bin/env bash\nsleep 30\n');
+    chmodSync(p, 0o755);
+
+    expect(runHook(PRE_CLEARABLE).decision).toBe('ask');
+
+    const row = auditRows().find(r => r.broker);
+    expect(row!.broker).toMatchObject({
+      outcome: 'hold',
+      judgeAssessment: 'unavailable',
+      judgeTimedOut: true,
+      judgeUnavailableReason: 'timeout',
+    });
+  }, 60_000);
+
+  it('does NOT mark a judge that answered badly as timed out', () => {
+    writeBrokerConfig(true);
+    installFakeClaude({ exitCode: 1 });
+    runHook(PRE_CLEARABLE);
+
+    const row = auditRows().find(r => r.broker);
+    expect(row!.broker).toMatchObject({ outcome: 'hold', judgeTimedOut: false });
+    expect((row!.broker as Record<string, unknown>).judgeUnavailableReason).toBe('thrown');
+  }, 60_000);
+
   // ── the red line ──────────────────────────────────────────────────────────
 
   it('never brokers a catastrophic call — no model is even consulted', () => {
