@@ -4,7 +4,19 @@
  * Port of ~/clawd/skills/iron-dome/scripts/scan.py to TypeScript.
  * Detects prompt injection patterns in text content from untrusted sources
  * (emails, form submissions, API responses, web pages).
+ *
+ * Like the memory firewall's instruction detector, this is a FAST PRE-FILTER
+ * FLOOR over known injection shapes — not a claim of complete or multilingual
+ * coverage. It shares the #204 normalisation fold and override-morphology
+ * frames with the firewall so the two tiers cannot disagree about the same
+ * payload (see firewall/instruction-normalize.ts, firewall/instruction-morphology.ts).
  */
+
+import { instructionMatchVariants } from '../firewall/instruction-normalize.js';
+import {
+  OVERRIDE_MORPHOLOGY,
+  PROMPT_EXTRACTION,
+} from '../firewall/instruction-morphology.js';
 
 // ── Types ──
 
@@ -109,6 +121,33 @@ pattern(
   'Claims to enable special modes or bypass restrictions',
   /(?:developer|debug|admin|maintenance|test|god|sudo|root|unrestricted|jailbreak)\s*mode\s*(?:enabled|activated|on|engaged)/gi,
 );
+
+// Generated override frames (issue #204) — the inflected, passive and
+// negated-compliance shapes of the `ignore_previous` rule above. Registered from
+// the shared generator so the firewall and the scanner match the same grammar;
+// recompiled with `g` here because this scanner exec-loops for every match.
+for (const frame of OVERRIDE_MORPHOLOGY) {
+  pattern(
+    'fake_system_message',
+    'high',
+    frame.name,
+    frame.description,
+    new RegExp(frame.regex.source, 'gi'),
+  );
+}
+
+// Narrow system-prompt extraction — aligned with the firewall's
+// `prompt_extraction` group so "reveal your system prompt" is caught on both
+// paths. Severity stays `high`: it is an extraction attempt, not yet an exfil.
+for (const frame of PROMPT_EXTRACTION) {
+  pattern(
+    'credential_extraction',
+    'high',
+    frame.name,
+    frame.description,
+    new RegExp(frame.regex.source, 'gi'),
+  );
+}
 
 // ── Authority claims ──
 
@@ -412,37 +451,43 @@ function reclassifyHostRuntimeNotices(
 /**
  * Scan text for prompt injection patterns.
  */
+const NORMALISED_MATCH_NOTE =
+  ' — matched only after normalisation (zero-width/bidi strip, confusable fold, ' +
+  'punctuation collapse, classic leet); the span recorded below is the normalised text.';
+
 export function scanForInjection(text: string): InjectionScanResult {
   const detections: InjectionDetection[] = [];
 
-  // Scan built-in patterns
-  for (const pat of PATTERNS) {
-    // Reset lastIndex for global regexes
-    pat.regex.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = pat.regex.exec(text)) !== null) {
-      detections.push({
-        category: pat.category as string,
-        severity: pat.severity,
-        pattern: pat.name,
-        match: match[0].trim().slice(0, 200),
-        description: pat.description,
-      });
-    }
-  }
+  // The raw text is variant 0, so an un-obfuscated payload matches on the first
+  // pass with its original span intact. Variants 1..2 are the #204 normalisation
+  // folds — the same helper the memory firewall uses. A rule that already fired
+  // on an earlier variant is skipped, so a normalised copy can only add rules the
+  // raw text missed; it never re-reports the same rule with a rewritten span.
+  // (Budget: at most 3 variants — see instructionMatchVariants.)
+  const variants = instructionMatchVariants(text);
+  const firedRules = new Set<string>();
 
-  // Scan external (cloud-synced) patterns
-  for (const pat of externalPatterns) {
-    pat.regex.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = pat.regex.exec(text)) !== null) {
-      detections.push({
-        category: pat.category as string,
-        severity: pat.severity,
-        pattern: pat.name,
-        match: match[0].trim().slice(0, 200),
-        description: pat.description,
-      });
+  for (let variantIndex = 0; variantIndex < variants.length; variantIndex++) {
+    const target = variants[variantIndex];
+    const normalised = variantIndex > 0;
+
+    for (const pat of [...PATTERNS, ...externalPatterns]) {
+      const ruleKey = `${pat.category}:${pat.name}`;
+      if (normalised && firedRules.has(ruleKey)) continue;
+
+      // Every registered pattern is global; matchAll iterates a clone, so the
+      // shared regex objects never carry lastIndex state between scans.
+      pat.regex.lastIndex = 0;
+      for (const match of target.matchAll(pat.regex)) {
+        firedRules.add(ruleKey);
+        detections.push({
+          category: pat.category as string,
+          severity: pat.severity,
+          pattern: pat.name,
+          match: match[0].trim().slice(0, 200),
+          description: normalised ? pat.description + NORMALISED_MATCH_NOTE : pat.description,
+        });
+      }
     }
   }
 

@@ -117,6 +117,12 @@ only when an embedding model is available; see the note under the list.
 + ✅ Credential Leak Detection → API keys, tokens, private keys — 49 patterns, 25 providers
 ```
 
+The instruction-injection regex tier is a **fast pre-filter floor**, not a claim of
+complete or multilingual coverage: shared normalisation (zero-width/bidi strip,
+confusable fold, punctuation collapse, classic leet as an extra variant) plus a
+bounded morphology generator for override intent. You still cannot enumerate a
+language — non-English and free paraphrase are out of scope for this tier.
+
 Unicode confusables (Cyrillic/Greek homoglyphs, NFKC forms) are folded *inside* the
 instruction and encoding detectors rather than being a detector of their own, so a
 homoglyph-smuggled keyword is caught by the detector it was trying to evade.
