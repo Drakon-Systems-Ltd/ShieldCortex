@@ -6,6 +6,59 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.52.0] - 2026-08-15
+
+**Security residual grind — Action Guard precision, approval-broker field residual, and an instruction-detector floor that stops treating English morphology as a different language.**
+
+This cut closes the open security board that was still open after v4.51.0: write-content scan (#93), store-read FP deadlock (#89), broker field residual (#143), and instruction-detector Stage 1+2 (#204). Plus the deny-forensics / trust / doctor / install honesty stack that landed on the way. No open issues remain on the board at tag time.
+
+### Fixed — Action Guard
+
+- **Read-only inspection of the approval/decision stores no longer deadlocks itself (#89).** Enforced hosts could not `ls`/`cat`/`grep` their own approvals ledger without requesting approval to look at approvals. Fail-closed carve-out for pure shell observation verbs only; interpreters, nested exec, function-defs, glued/quoted redirects, pipeline non-readonly siblings, and in-place editors still gate. Dual-reviewed multi-round (Grok 4.6 + SOL).
+- **Edit/Write content is scanned on script and memory targets (#93).** Write-then-exec no longer launders a payload past path policy via a clean path scan; ordinary docs prose stays allowed. Dual-reviewed.
+- **Deny-path forensics land before notify delivery (#284).** A hung/crashed operator notify can no longer drop the denial row that explains why the action stopped.
+- **Transitive provenance cites the folded-file match that actually fired (#184).** Reason span and provenance bind to the same match.
+- **Env override cannot claim operator or CLI trust (#273 / #283).** CASE ownership-stamp core + TARS env residual reconciled — writer-chosen identity stamps cannot raise trust or collide with host ACL keys.
+
+### Fixed — Approval broker (field residual)
+
+- **Judge timeout 8s → 15s with honest timed-out audit (#143).** Live fleet runs were killing the judge into a silent null under ~6s latency. `runJudgeDetailed` distinguishes timeout / unreachable / parse / thrown; timeouts never pre-clear and never auto-approve; doctor reports armed vs present-but-disabled honestly. Broker remains **opt-in**.
+
+### Fixed — Instruction detector floor
+
+- **Stage 1+2 residual (#204): shared normalisation + bounded morphology on BOTH detectors.** Regex tier is a **fast pre-filter floor**, not a language model — stated in code headers and README.
+  - Shared `normalizeInstructionText` / `instructionMatchVariants` (≤3 variants): zero-width/bidi strip → confusable fold → punctuation collapse → whitespace; classic leet as an **additional** variant only (digit `1` unmapped; never replace-only).
+  - Bounded morphology generator over closed verb/object/noun tables × active / passive / stop-following frames + narrow `print|show|reveal|display your (system )?prompt`.
+  - Wired into `detectInstructions` **and** `scanForInjection` — closes the live scanner homoglyph miss.
+  - Explicit non-claims: no multilingual detection, no full paraphrase on hot path, semantic stays async additive. Dual-reviewed (Grok 4.6 + SOL).
+
+### Fixed — Doctor / install / credentials / hooks
+
+- Hot-reload load attributed to the host process PID; selfcheck routes through live-load evidence (#216).
+- Install hard-fails every post-refusal dead-end and surfaces OpenClaw config-invalid refusal (#251).
+- Credential placeholder denylist tightened; hex patterns bounded; stale Firebase FCM dropped (#205).
+- Prompt-recall telemetry recorded before early exits; double-record hardened (#253).
+- Signed CLI path for Action Guard notify config (#275).
+
+### Claims / honesty
+
+- Instruction-injection regex tier documented as a pre-filter floor (not complete or multilingual coverage).
+- Broker remains opt-in; semantic paraphrase remains async additive.
+- CONTRIBUTING.md and CODE_OF_CONDUCT.md added (#274).
+
+### Upgrade notes
+
+```bash
+npm i -g shieldcortex@4.52.0
+shieldcortex update
+# OpenClaw hosts:
+openclaw plugins update @drakon-systems/shieldcortex-realtime
+# then, at a quiet moment, reload the OpenClaw host process and:
+shieldcortex doctor
+```
+
+No default-posture change on Action Guard enforce. Broker still off unless configured. Instruction-detector floor is stricter on morph/obfuscation shapes and should not FP ordinary engineering prose (corpus-gated).
+
 ## [4.51.0] - 2026-08-14
 
 **The Action Guard's false-positive rate stops being a vibe and becomes a CI gate — held at 100% precision / 100% recall, and now proven identical on all three enforcement planes. Plus credential isolation between agents, and enforcement evidence you can actually count.**
