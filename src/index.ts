@@ -643,8 +643,10 @@ ${bold}COMMANDS${reset}
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
-  ${cyan}allowlist${reset} [add|remove|verify]  Pin a human-reviewed script (path + content hash)
-                        so the guard stops folding its source; any edit re-gates it
+  ${cyan}allowlist${reset} [add|remove|verify|scan]
+                        Pin a human-reviewed script (path + content hash)
+                        so the guard stops folding its source; any edit re-gates it.
+                        scan = discover cron-referenced scripts and TTY-batch-review new/changed
   ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
@@ -864,7 +866,8 @@ ${bold}DOCS${reset}
   // approve/deny above are one-shot. TTY-gated on every mutating verb.
   if (process.argv[2] === 'allowlist') {
     const { runAllowlist } = await import('./cli/allowlist.js');
-    process.exitCode = runAllowlist(process.argv.slice(3));
+    // scan is async (TTY prompts); add/list/verify stay sync.
+    process.exitCode = await Promise.resolve(runAllowlist(process.argv.slice(3)));
     return;
   }
 
