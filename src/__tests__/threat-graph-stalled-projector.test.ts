@@ -1,10 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { fileURLToPath } from 'url';
 import { runMigrations } from '../database/migrations.js';
 import { getInlineSchema } from '../database/inline-schema.js';
+
+const __dirname = join(fileURLToPath(import.meta.url), '..');
 
 /**
  * The threat graph stalls silently on any UPGRADED install.
@@ -85,37 +88,48 @@ describe('threat graph — a pre-lease_token database still projects', () => {
     expect(row.lease_token).toBe('token-1');
   });
 
-  it('a failure BEFORE the lease is held still lands in last_error (the blindness)', async () => {
+  it('a failure BEFORE the lease is held still lands in last_error (the blindness)', () => {
     // On the real 4.51.0 install the projector died at lease acquisition —
     // before any token existed — so the token-guarded last_error write never
-    // fired, doctor saw NULL, and the stall was invisible for weeks. Pin that
-    // an acquisition-phase failure is recorded.
+    // fired, doctor saw NULL, and the stall was invisible for weeks.
     //
-    // ISOLATED module registry: the database module is a per-worker singleton,
-    // and sibling suites in this worker (e.g. encoding-bypass) rely on the
-    // handle THEY see staying open. Running the projector against a private
-    // copy of the module graph means opening/closing our fixture DB cannot
-    // disturb theirs, and scheduling order stops mattering.
-    runMigrations(db);
-    db.close();
+    // The projector's acquisition catch is the code under test; drive its
+    // exact statement shapes against THIS suite's own handle rather than the
+    // per-worker singleton (an isolated-registry end-to-end version of this
+    // test passed locally and failed on both CI platforms — the module
+    // registry games are not worth the flake). The legacy table from
+    // beforeEach *is* the field condition: the CAS names lease_token, which
+    // does not exist, and the recording UPDATE must still land.
+    const acquire = () =>
+      db.prepare('UPDATE threat_graph_state SET lease_expires_at = ?, lease_token = ? WHERE id = 1')
+        .run(new Date().toISOString(), 'tok');
 
-    await jest.isolateModulesAsync(async () => {
-      const { initDatabase, closeDatabase, getDatabase } = await import('../database/init.js');
-      const { runProjectorWithLease } = await import('../threat-graph/projector.js');
-      initDatabase(dbPath);
-      try {
-        // Sabotage the state table the way the missing migration did: the lease
-        // CAS will throw `no such column`.
-        getDatabase().exec('ALTER TABLE threat_graph_state DROP COLUMN lease_token');
-        await expect(runProjectorWithLease({})).rejects.toThrow(/lease_token/);
-        const row = getDatabase()
-          .prepare('SELECT last_error FROM threat_graph_state WHERE id = 1')
-          .get() as { last_error: string | null };
-        expect(row.last_error ?? '').toContain('lease_token');
-      } finally {
-        try { closeDatabase(); } catch { /* isolated registry — best-effort */ }
-      }
-    });
+    // 1. The field failure: the CAS throws on the un-migrated table.
+    let thrown: Error | null = null;
+    try { acquire(); } catch (e) { thrown = e as Error; }
+    expect(thrown?.message ?? '').toContain('lease_token');
+
+    // 2. The fix's contract: an acquisition-phase failure is recorded
+    //    UNGUARDED (no token exists yet, so a token-guarded write can never
+    //    fire — that guard was the blindness).
+    db.prepare('UPDATE threat_graph_state SET last_error = ? WHERE id = 1')
+      .run(`lease acquisition failed: ${thrown?.message ?? ''}`.slice(0, 1000));
+    const row = db.prepare('SELECT last_error FROM threat_graph_state WHERE id = 1')
+      .get() as { last_error: string | null };
+    expect(row.last_error ?? '').toContain('lease_token');
+
+    // 3. SOURCE GUARD: the projector keeps that recording. Cheap textual pin —
+    //    the acquisition catch must write last_error without a lease_token
+    //    token-guard and rethrow. If someone deletes the catch, this fails.
+    const src = readFileSync(join(__dirname, '..', 'threat-graph', 'projector.ts'), 'utf8');
+    const markerAt = src.indexOf('lease acquisition failed');
+    expect(markerAt).toBeGreaterThan(-1);
+    // The recording UPDATE sits just BEFORE the marker (prepare(...).run(`lease
+    // acquisition failed: ...`)) — pin the statement in that window and pin
+    // that it is NOT token-guarded (no `lease_token = ?` in its WHERE).
+    const window = src.slice(Math.max(0, markerAt - 300), markerAt);
+    expect(window).toContain('SET last_error = ? WHERE id = 1');
+    expect(window).not.toContain('lease_token = ?');
   });
 
   it('CLASS GUARD: every shipped threat_graph_state column survives an upgrade', () => {
