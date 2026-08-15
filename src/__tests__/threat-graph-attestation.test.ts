@@ -19,7 +19,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { fileURLToPath } from 'url';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
+
+const __dirname = join(fileURLToPath(import.meta.url), '..');
 import { deriveAttested, resolveToolSource } from '../defence/trust/resolve-tool-source.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { attestedFlag } from '../defence/audit/logger.js';
@@ -378,6 +383,23 @@ describe('read/delete wrappers thread the caller attestation', () => {
     expect(row?.source_attested).toBe(1);
   });
 
+  it('the PRODUCTION get_memory denial path carries attested (via executeGetMemory→accessMemory)', () => {
+    // The adversarial review caught that the earlier direct-call test used a
+    // shape production never produces. This one goes through the real chain:
+    // executeGetMemory → accessMemory → getMemoryById → logAccessDenial.
+    const owner: DefenceSource = { type: 'agent', identifier: 'alpha' };
+    const id = addMemory(
+      { title: 'secret2', content: 'the service password is hunter2 and the api key sk-live-xyz' },
+      undefined, owner,
+    ).id;
+    const reader: DefenceSource = { type: 'agent', identifier: 'beta>gamma>delta' };
+    executeGetMemory({ id, source: reader, sourceAttested: true });
+    const denial = getDatabase()
+      .prepare("SELECT source_attested FROM defence_audit WHERE firewall_result = 'BLOCK' AND reason LIKE 'Access denied%' ORDER BY id DESC LIMIT 1")
+      .get() as { source_attested: number | null } | undefined;
+    expect(denial?.source_attested).toBe(1);
+  });
+
   it('getMemoryById denial carries attested (the weighted, accruing path)', () => {
     // Seed a memory owned by another agent at a sensitivity that isolates it,
     // then read it as a DIFFERENT low-trust agent → checkAccess denies, and the
@@ -473,14 +495,46 @@ describe('scanToolResponse threads a per-call-site attestation', () => {
     expect(lastToolRow()?.source_attested).toBe(1);
   });
 
-  it('attested=false for a caller-supplied tool name (the scan_tool_response tool)', () => {
-    scanToolResponse('victim-tool', injection, 'advisory', false);
-    expect(lastToolRow()?.source_attested).toBe(0);
+  it('NULL for a caller-supplied tool name (the scan_tool_response tool)', () => {
+    // NOT 0. tool_response:<toolName> is an UN-namespaced key shared with
+    // withResponseScan's attested writes, and risk.ts resolves attestation
+    // latest-non-null — an explicit 0 under a victim's key would MUTE the
+    // modifier that channel legitimately accrued. NULL is inert on both the
+    // accrual gate (===1) and the latest-non-null query (IS NOT NULL).
+    scanToolResponse('victim-tool', injection, 'advisory', undefined);
+    expect(lastToolRow()?.source_attested).toBeNull();
   });
 
   it('NULL when unplumbed (external lib consumers)', () => {
     scanToolResponse('some-tool', injection, 'advisory');
     expect(lastToolRow()?.source_attested).toBeNull();
+  });
+
+  it('MUTE-RESISTANCE: a caller-named scan cannot flip an attested channel to 0', () => {
+    // The attack the adversarial review confirmed: withResponseScan writes
+    // attested=1 under tool_response:recall; an attacker then calls
+    // scan_tool_response({toolName: 'recall', ...}) hoping their newer row
+    // wins risk.ts's latest-non-null resolution and mutes the channel.
+    scanToolResponse('recall', injection, 'advisory', true);      // legit accrual
+    scanToolResponse('recall', injection, 'advisory', undefined); // attacker scan (newer row)
+    projectToCompletion();
+    runRiskSweep({ nowMs: Date.now() });
+    const row = getDatabase()
+      .prepare("SELECT attested FROM source_risk WHERE source_key = 'tool_response:recall'")
+      .get() as { attested: number } | undefined;
+    expect(row?.attested).toBe(1); // the legit attestation stays authoritative
+  });
+
+  it('SOURCE GUARD: the scan_tool_response handler never passes a non-null attestation', () => {
+    // Pin the call site itself: server.ts's scan_tool_response handler must not
+    // pass `false` (mute lever) or `true` (trust elevation) for the
+    // caller-supplied toolName. Textual pin on the handler's scan call.
+    const src = readFileSync(join(__dirname, '..', 'server.ts'), 'utf8');
+    const handlerCall = src.split('\n').filter(l => l.includes('scanToolResponse(args.toolName'));
+    expect(handlerCall.length).toBeGreaterThan(0);
+    for (const line of handlerCall) {
+      expect(line).not.toMatch(/,\s*(false|true)\s*\)/);
+    }
   });
 });
 

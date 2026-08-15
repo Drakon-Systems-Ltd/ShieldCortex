@@ -127,7 +127,7 @@ export async function executeRecall(input: RecallInput & { sourceAttested?: bool
     memories = guardReadMemories(memories, source);
 
     // Access each memory to reinforce it
-    memories = memories.map(m => accessMemory(m.id, undefined, source) || m);
+    memories = memories.map(m => accessMemory(m.id, undefined, source, input.sourceAttested) || m);
 
     // v4.0.0: Append staleness warnings to old memories
     memories = memories.map(m => {
@@ -225,7 +225,7 @@ export function executeGetMemory(input: { id: number; source?: DefenceSource; so
   error?: string;
 } {
   try {
-    const memory = accessMemory(input.id, undefined, input.source);
+    const memory = accessMemory(input.id, undefined, input.source, input.sourceAttested);
     // Read ACL: a caller that may not read this memory gets a not-found, never
     // the content (don't reveal existence of RESTRICTED / other-source rows).
     const allowed = guardReadMemory(memory, input.source);

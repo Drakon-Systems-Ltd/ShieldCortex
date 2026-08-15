@@ -97,10 +97,13 @@ export function scanToolResponse(
   mode?: 'advisory' | 'enforce',
   /**
    * Attestation for the threat row. MUST be decided per call site, never a
-   * constant here: withResponseScan binds a server-literal toolName (→ true),
-   * but the scan_tool_response MCP tool passes a caller-supplied toolName
-   * (→ false — an attacker could otherwise accrue BLOCKs onto a victim tool).
-   * undefined ⇒ NULL (external lib consumers).
+   * constant here: withResponseScan binds a server-literal toolName (→ true).
+   * For a CALLER-supplied toolName, OMIT the argument (NULL) — do not pass
+   * false: tool_response:<name> keys are un-namespaced and shared with the
+   * attested withResponseScan writes, and risk.ts resolves attestation
+   * latest-non-null, so an explicit 0 under a victim's key would MUTE the
+   * trust modifier that channel legitimately accrued. `false` is only safe
+   * for keys namespaced away from attested writers.
    */
   attested?: boolean,
 ): ToolResponseScanResult {

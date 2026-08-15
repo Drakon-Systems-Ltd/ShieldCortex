@@ -929,9 +929,13 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
           isError: true,
         };
       }
-      // args.toolName is caller-supplied free text — attesting it would let a
-      // caller accrue BLOCK rows onto tool_response:<any-victim>. Explicit false.
-      const scan = scanToolResponse(args.toolName, args.content, args.mode as 'advisory' | 'enforce' | undefined, false);
+      // args.toolName is caller-supplied free text writing to the SAME
+      // un-namespaced tool_response:<name> keys withResponseScan attests, so
+      // neither true (trust elevation) NOR false is safe here: risk.ts resolves
+      // attestation latest-non-null, and an explicit 0 under a victim's key
+      // would MUTE the modifier that channel legitimately accrued. Omit →
+      // NULL, which is inert on both the accrual gate and the mute query.
+      const scan = scanToolResponse(args.toolName, args.content, args.mode as 'advisory' | 'enforce' | undefined);
 
       const lines = [
         `## Tool Response Scan: ${args.toolName}`,

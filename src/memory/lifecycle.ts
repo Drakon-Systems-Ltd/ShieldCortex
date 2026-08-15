@@ -64,9 +64,13 @@ export function accessMemory(
   id: number,
   config: MemoryConfig = DEFAULT_CONFIG,
   source?: DefenceSource,
+  attested?: boolean,
 ): Memory | null {
   const db = getDatabase();
-  const memory = getMemoryById(id, source);
+  // Thread the caller's attestation into the ACL denial this read can emit —
+  // this is the production get_memory denial path, and a BLOCK keyed to the
+  // caller must be able to accrue.
+  const memory = getMemoryById(id, source, attested);
   if (!memory) return null;
 
   // Calculate new salience with reinforcement
