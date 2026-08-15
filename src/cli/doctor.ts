@@ -2139,13 +2139,14 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         label: `${label} config`,
         status: 'warn',
         message: `Action Guard is disabled in config (\`${provenance('enabled')}: false\`) — tool calls are not gated on either surface`,
-        fix: `Remove \`${provenance('enabled')}: false\` from ~/.shieldcortex/config.json to restore gating.`,
+        fix: 'Run `shieldcortex config --action-guard-enable` to restore gating — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
       });
     } else if (!effective.enforce) {
       results.push({
         label: `${label} config`,
         status: 'warn',
         message: `Action Guard runs in warn-mode (\`${provenance('enforce')}: false\`) on both surfaces — dangerous ops log but are not gated (catastrophic still blocks)`,
+        fix: 'Run `shieldcortex config --action-guard-enforce` to gate dangerous ops — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
       });
     }
 

@@ -22,6 +22,8 @@ import {
   setRevokeBySourceEnabled,
   getActionGuardNotifyConfig,
   setActionGuardNotifyConfig,
+  getActionGuardCoreConfig,
+  setActionGuardCoreConfig,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -53,8 +55,11 @@ export function handleCloudConfig(args: string[]): void {
     const agNotifyChannels = [agNotify.openclaw ? 'openclaw' : null, agNotify.webhookUrl ? 'webhook' : null]
       .filter(Boolean)
       .join(' + ');
+    const agCore = getActionGuardCoreConfig();
+    const agStatus = !agCore.enabled ? 'Off' : agCore.enforce ? 'Enforce' : 'Advisory (warn-mode)';
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Tool-Output Firewall: ${toolFirewall.scanToolResponses ? toolFirewall.toolResponseMode : 'Off'}`);
+    console.log(`  Action Guard: ${agStatus}`);
     console.log(`  Action Guard Notify: ${agNotify.enabled ? (agNotifyChannels || 'Enabled (no channel configured!)') : 'Off'}`);
     console.log(`  Revoke-by-source: ${isRevokeBySourceEnabled() ? 'Enabled (destructive)' : 'Disabled (default)'}`);
     console.log(`  Cloud Enabled:  ${config.cloudEnabled ? 'Yes' : 'No'}`);
@@ -291,6 +296,39 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  // ── Action Guard core switches (enable/enforce) ──
+  // The SIGNED path for actionGuard.enabled / actionGuard.enforce, same reason
+  // the notify flags exist: hand-editing config.json for these keys invalidates
+  // the `_sig` HMAC and forces defenceMode strict. Both keys default ON when
+  // absent (`!== false` semantics on read), so disable/advisory write an
+  // explicit false.
+
+  if (args.includes('--action-guard-enable')) {
+    setActionGuardCoreConfig({ enabled: true });
+    console.log('Action Guard enabled — tool calls are gated on both surfaces.');
+    changed = true;
+  }
+
+  if (args.includes('--action-guard-disable')) {
+    setActionGuardCoreConfig({ enabled: false });
+    console.log('Action Guard DISABLED — tool calls are NOT gated on either surface, and catastrophic checks may not fire while the guard is off entirely. Re-enable with --action-guard-enable.');
+    changed = true;
+  }
+
+  if (args.includes('--action-guard-enforce')) {
+    // Enforce implies enabled: enforcing a disabled guard is nonsense, so this
+    // flag also switches the guard on rather than writing a dead enforce key.
+    setActionGuardCoreConfig({ enabled: true, enforce: true });
+    console.log('Action Guard ENFORCE — dangerous ops require approval / block.');
+    changed = true;
+  }
+
+  if (args.includes('--action-guard-advisory')) {
+    setActionGuardCoreConfig({ enforce: false });
+    console.log('Action Guard ADVISORY (warn-mode) — dangerous ops log but are not gated (catastrophic still blocks when enabled).');
+    changed = true;
+  }
+
   // ── Action Guard notify channel (#275) ──
   // The SIGNED path for what doctor's "enforcing with no notify channel" warn
   // prescribes. Hand-editing config.json for these keys invalidates the `_sig`
@@ -370,6 +408,10 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
     console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
     console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
+    console.log('  --action-guard-enable    Enable Action Guard tool-call gating (default: on)');
+    console.log('  --action-guard-disable   Disable Action Guard entirely — tool calls are NOT gated');
+    console.log('  --action-guard-enforce   Gate dangerous ops (approval/block); also enables the guard');
+    console.log('  --action-guard-advisory  Warn-mode — dangerous ops log but are not gated (catastrophic still blocks)');
     console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
     console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
     console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');

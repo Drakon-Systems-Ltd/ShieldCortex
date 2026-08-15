@@ -735,6 +735,56 @@ export function setActionGuardNotifyConfig(updates: Partial<ActionGuardNotifyCon
   });
 }
 
+// ── Action Guard core switches (enable/enforce) ───────
+
+export interface ActionGuardCoreConfig {
+  /** Master switch. Default ON when the key is absent (`enabled !== false`). */
+  enabled: boolean;
+  /** When true, gate dangerous ops. When false, warn-mode — dangerous ops log
+   *  but are not gated (catastrophic may still block). Default ON when absent. */
+  enforce: boolean;
+}
+
+/**
+ * EFFECTIVE core config, resolved the same way both runtime surfaces and
+ * doctor's posture check resolve it (#209): top-level `actionGuard` merged
+ * over the deprecated `interceptor.actionGuard` alias (top-level wins per
+ * key), with default-ON semantics — a key is only off when explicitly false.
+ */
+export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
+  const raw = readRawConfig();
+  const interceptor = raw.interceptor && typeof raw.interceptor === 'object' && !Array.isArray(raw.interceptor)
+    ? (raw.interceptor as Record<string, unknown>)
+    : {};
+  const alias = interceptor.actionGuard && typeof interceptor.actionGuard === 'object' && !Array.isArray(interceptor.actionGuard)
+    ? (interceptor.actionGuard as Record<string, unknown>)
+    : {};
+  const merged = { ...alias, ...actionGuardBlock(raw) };
+  return {
+    enabled: merged.enabled !== false,
+    enforce: merged.enforce !== false,
+  };
+}
+
+/**
+ * The SIGNED write path for `actionGuard.enabled` / `actionGuard.enforce` —
+ * what the `shieldcortex config --action-guard-enable|disable|enforce|advisory`
+ * flags call. Same discipline as setActionGuardNotifyConfig: routed through
+ * mutateRawConfig so the `_sig` HMAC is recomputed, and read-modify-write on
+ * the actionGuard block so sibling keys (notify, reviewedScripts, broker,
+ * autoApprove) survive untouched. The deprecated `interceptor.actionGuard`
+ * alias is deliberately left alone — top-level wins on both surfaces (#209),
+ * and migration is `doctor --fix-action-guard`'s job.
+ */
+export function setActionGuardCoreConfig(updates: Partial<ActionGuardCoreConfig>): void {
+  mutateRawConfig((raw) => {
+    const guard = actionGuardBlock(raw);
+    if (updates.enabled !== undefined) guard.enabled = updates.enabled;
+    if (updates.enforce !== undefined) guard.enforce = updates.enforce;
+    raw.actionGuard = guard;
+  });
+}
+
 /**
  * `doctor --fix-action-guard`'s write path (#209 migration, #275 fix): merge
  * the deprecated `interceptor.actionGuard` alias into the top-level block —
