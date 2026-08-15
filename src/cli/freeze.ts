@@ -80,6 +80,26 @@ export function describeLocalPlanes(home: string = os.homedir()): string[] {
       : '  openclaw interceptor:  UNKNOWN — plugin registry exists but cannot be read');
   }
 
+  // Hermes plane: plugin files on disk. Enable is Hermes' own command.
+  try {
+    const hermesPlugin = path.join(home, '.hermes', 'plugins', 'shieldcortex', 'plugin.yaml');
+    lines.push(fs.existsSync(hermesPlugin)
+      ? '  hermes pre_tool_call:  BOUND (plugin on disk; binds when Hermes has it enabled + API up)'
+      : '  hermes pre_tool_call:  NOT BOUND — run `shieldcortex hermes install`');
+  } catch {
+    lines.push('  hermes pre_tool_call:  UNKNOWN — cannot inspect ~/.hermes/plugins');
+  }
+
+  // MCP-only hosts: present config is not a deny plane.
+  const cursorMcp = path.join(home, '.cursor', 'mcp.json');
+  const codexCfg = path.join(home, '.codex', 'config.toml');
+  if (fs.existsSync(cursorMcp)) {
+    lines.push('  cursor / vscode mcp:   NOT BOUND — MCP memory only; host cannot wrap Bash');
+  }
+  if (fs.existsSync(codexCfg)) {
+    lines.push('  codex mcp:             NOT BOUND — MCP memory only; host cannot wrap Bash');
+  }
+
   lines.push('  NOT bound anywhere:    direct shell outside tool calls; hosts without the guard;');
   lines.push('                         installs older than this feature. A freeze binds tool calls');
   lines.push('                         where a plane above says BOUND — nothing else. Verify other');

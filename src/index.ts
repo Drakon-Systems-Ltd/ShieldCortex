@@ -662,7 +662,8 @@ ${bold}COMMANDS${reset}
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
   ${cyan}copilot${reset} <action>      Set up VS Code / Cursor MCP integration
-  ${cyan}codex${reset} <action>        Set up Codex CLI / VS Code MCP integration
+  ${cyan}codex${reset} <action>        Set up Codex CLI / VS Code MCP integration (memory only)
+  ${cyan}hermes${reset} <action>       Install the Hermes pre_tool_call Action Guard plugin
   ${cyan}graph${reset} backfill        Backfill knowledge graph from memories
   ${cyan}hook${reset} <action>         Manage hooks (start, stop, status)
   ${cyan}service${reset} <action>      Manage background service
@@ -771,6 +772,12 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'codex') {
     const { handleCodexCommand } = await import('./setup/codex.js');
     await handleCodexCommand(process.argv[3] || '');
+    return;
+  }
+
+  if (process.argv[2] === 'hermes') {
+    const { handleHermesCommand } = await import('./setup/hermes.js');
+    await handleHermesCommand(process.argv[3] || '');
     return;
   }
 
@@ -1477,7 +1484,7 @@ ${bold}DOCS${reset}
   const knownCommands = new Set([
 
     'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair',
-    'openclaw', 'clawdbot', 'copilot', 'codex', 'service', 'config', 'status',
+    'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
     'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve', 'deny', 'allowlist',

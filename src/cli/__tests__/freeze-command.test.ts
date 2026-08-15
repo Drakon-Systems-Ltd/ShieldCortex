@@ -64,6 +64,7 @@ describe('freeze → enforcement parser round-trip', () => {
     const text = out.join('\n');
     expect(text).toMatch(/claude-code hook/);
     expect(text).toMatch(/openclaw interceptor/);
+    expect(text).toMatch(/hermes pre_tool_call/);
     expect(text).toMatch(/NOT bound anywhere/);
   });
 });

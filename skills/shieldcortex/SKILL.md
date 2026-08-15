@@ -22,8 +22,10 @@ install:
   minVersion: "20"
   note: >
     Run the installed `shieldcortex` binary directly. The quickstart command
-    detects your environment and guides MCP server registration. All data stays
-    local in ~/.shieldcortex/. No account or API key needed for local use.
+    detects your environment. Claude Code and OpenClaw get hooks that can deny;
+    Codex/Cursor/VS Code get an MCP memory server only (not a tool gate).
+    All data stays local in ~/.shieldcortex/. No account or API key needed
+    for local use.
 permissions:
   filesystem: readwrite
   network: optional
@@ -87,7 +89,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 
 This section explains every privileged operation the tool performs and why.
 
-- **Active interception, not scan-only.** Beyond read-only scans, ShieldCortex *enforces* at the boundary: writes failing the pipeline are quarantined/blocked; recalled memory is trust/ACL-filtered before the agent sees it; in enforce mode the tool-output firewall redacts/withholds malicious tool results; and the OpenClaw `before_tool_call` interceptor + Iron Dome kill-switch can block operations. Surprising enforcement is opt-in (tool-output firewall defaults to advisory). `shieldcortex status` and `iron-dome status` report which controls are active.
+- **Active interception, not scan-only — on hosts that can deny.** Writes failing the pipeline are quarantined/blocked; recalled memory is trust/ACL-filtered before the agent sees it. Tool-call denial is **bound** on Claude Code (PreToolUse), OpenClaw (`before_tool_call`), and Hermes (`pre_tool_call`, enforce by default). Codex, Cursor, Copilot, and generic MCP get a memory server / scanner the model may ignore — they are **not bound**. Tool-output firewall defaults to advisory. `shieldcortex doctor` and `shieldcortex lease` report bound / not-bound / unknown per plane.
 - **Setup is user-initiated, with one bounded exception.** Installing hooks, registering the MCP server, and migrating data are manual steps the user runs in their terminal, and `quickstart` asks before each action. The npm postinstall script (disclosed in the trust table above) never adds integrations that weren't already present — on global installs it only prints instructions, checks the native binding, seeds default config on first install, and refreshes an existing OpenClaw hook/plugin install. The exception: the bundled cortex-memory hook performs a small automatic self-heal at gateway bootstrap, documented in full under **"Automatic self-heal at gateway bootstrap"** below.
 - **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (the postinstall script does not touch memory or config data beyond seeding defaults on a first-ever global install).
 - **Destructive `forget` is bounded and gated.** Per-memory and filtered bulk deletes go through a delete ACL (own-only) and are recorded in the audit ledger. Revoke-by-source (`forget --fromSource`, bulk-delete every memory from one source — for purging a poisoned agent) is **disabled by default** and only enabled by an out-of-band human action (`shieldcortex config --allow-revoke-by-source`); even then it is bounded by a trust-hierarchy ACL (you must own the source or out-rank it) and a per-call row cap. A compromised agent cannot mass-delete your memory.
@@ -234,9 +236,9 @@ shieldcortex service start|stop|status  # Manage background service
 ### Integrations
 ```bash
 # subcommand is `install`, not `setup` (also: status, uninstall; openclaw adds repair, skill)
-shieldcortex openclaw install    # Set up OpenClaw hook + realtime plugin
-shieldcortex copilot install     # Set up VS Code / Cursor MCP server
-shieldcortex codex install       # Set up Codex CLI MCP server
+shieldcortex openclaw install    # Hook + realtime plugin — tool gate BOUND
+shieldcortex copilot install     # VS Code / Cursor MCP memory server — NOT a tool gate
+shieldcortex codex install       # Codex CLI MCP memory server — NOT a tool gate
 shieldcortex config --openclaw-auto-memory true   # Enable auto-memory in OpenClaw
 shieldcortex config --proactive-recall true|false  # Enable/disable proactive recall
 ```

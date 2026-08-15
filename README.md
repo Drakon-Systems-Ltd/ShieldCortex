@@ -27,7 +27,17 @@ shieldcortex quickstart
 > [!NOTE]
 > ShieldCortex is MIT licensed and **free — every local feature is included**, with no trial and no licence key. An optional cloud free tier adds centralised audit visibility (500 scans/month, 7-day retention, 1 member — sign in with just your email). Teams, servers, and fleets are Enterprise: sales@drakonsystems.com.
 
-**Works with** Claude Code · Codex CLI / VS Code · Cursor · VS Code · OpenClaw · LangChain · MCP agents · Python via REST API
+**Where it can actually say no**
+
+| Host | Memory firewall | Tool gate | Turn gate | Freeze / lease |
+|---|---|---|---|---|
+| **Claude Code** | yes | **bound** (PreToolUse) | unbound | **bound** |
+| **OpenClaw** | yes | **bound** (`before_tool_call`) | **bound** only if you grant conversation access *and* set posture `enforce` (default is `observe`) | **bound** |
+| **Hermes** | via local API | **bound** (`pre_tool_call`, enforce by default) | unbound | unbound |
+| **Codex / Cursor / Copilot / any MCP host** | yes, if the agent calls the tools | **unbound** — MCP cannot wrap the host's Bash | unbound | unbound |
+| **LangChain JS / Python SDK** | yes, if you call `scan` / `save` | **unbound** | unbound | unbound |
+
+Memory security is portable. Runtime enforcement is not. `shieldcortex doctor` and `shieldcortex lease` report **bound / not-bound / unknown** per plane on this host — they will not print “protected” for a host that cannot deny.
 
 **Why teams adopt ShieldCortex**
 
@@ -190,7 +200,7 @@ npm install -g shieldcortex
 shieldcortex quickstart
 ```
 
-`quickstart` scans your machine and auto-detects which agent tools are installed — **Claude Code, OpenClaw, VS Code, Cursor, and Codex** — then configures ShieldCortex for all of them in one go. One command, everything detected, no per-tool setup steps.
+`quickstart` detects which agent tools are installed and configures what each host can actually support. Claude Code and OpenClaw get hooks that can **deny**. Codex, Cursor, and VS Code get an MCP memory server — that is a scanner the model may call, not a tool gate. `doctor` will say so.
 
 > If you want to configure a single tool manually, use `shieldcortex install` instead. It registers the MCP server and session hooks for whichever agent is in the current working directory.
 
@@ -211,7 +221,7 @@ shieldcortex doctor
 
 ShieldCortex has two tiers:
 
-- **Free (MIT)** — every local feature: memory, recall, review, dashboard, Iron Dome, custom injection patterns, custom policies, custom firewall rules, audit export, the dependency scanner, Cortex mistake learning, unlimited X-Ray (including npm deep scans and the CI/CD gate), and the OpenClaw/Codex integrations. No trial, no licence key, no signup. The cloud free tier is included too: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email.
+- **Free (MIT)** — every local feature: memory, recall, review, dashboard, Iron Dome, custom injection patterns, custom policies, custom firewall rules, audit export, the dependency scanner, Cortex mistake learning, unlimited X-Ray (including npm deep scans and the CI/CD gate), and the OpenClaw / Claude Code / Hermes enforcement planes plus MCP memory on other hosts. No trial, no licence key, no signup. The cloud free tier is included too: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email.
 - **Enterprise** — full cloud memory/graph replication, team management, shared patterns, servers and fleets, self-hosted deployments, SLA. Contact **sales@drakonsystems.com**.
 
 Check the current state at any time:
@@ -699,18 +709,18 @@ Every time you type a message, ShieldCortex automatically recalls relevant memor
 
 ShieldCortex also runs natively on **Hermes** — the Python agent runtime — not as a shim but as a Hermes-native plugin.
 
-Drop the plugin folder in and enable it:
+Install and enable:
 
 ```bash
-# from a clone of this repo
-cp -r plugins/hermes/shieldcortex ~/.hermes/plugins/shieldcortex
+shieldcortex hermes install
 hermes plugins enable shieldcortex
+shieldcortex api   # local Action Guard API on :3001 — required
 ```
 
 It registers a **`pre_tool_call` gate**: before every Hermes tool execution it asks Action Guard via the local REST API (`POST /api/v1/action-guard`) — the same `evaluateToolCall` verdict the Claude Code hook and OpenClaw interceptor already share.
 
-- 🛡️ **Advisory-first** — `enforce` is off by default; it logs what it *would* block. Set `SHIELDCORTEX_ENFORCE=1` to actively block.
-- 🪂 **Fail-open** — if the ShieldCortex API is unreachable, the gate never blocks. A down scanner must not wedge the agent; every fail-open is logged.
+- 🛡️ **Enforce by default** (since 4.47.2). Opt out to advisory with `SHIELDCORTEX_ENFORCE=0` (or `false` / `no` / `off` / `advisory`).
+- 🪂 **Fail-open if the API is down** — a scanner outage must not wedge the agent. Catastrophic shapes still fail closed via the local fallback. Every degrade is logged.
 - 🔒 **Authenticated** — reads the API token from `SHIELDCORTEX_API_TOKEN` or `~/.shieldcortex/.api-token` and sends `Authorization: Bearer`.
 - 📦 **Isolated** — installs under `~/.hermes/plugins/shieldcortex/`, touching nothing else on the host. Coexists cleanly with an OpenClaw ShieldCortex on the same machine (separate state dirs, no shared-SQLite contention).
 
@@ -807,16 +817,16 @@ SHIELDCORTEX_RANKER=legacy npm run bench   # env var overrides config for a sing
 
 ## 🔌 Integrations
 
-| Platform | Setup |
-|---|---|
-| **Claude Code** | `shieldcortex install` |
-| **Codex CLI / VS Code** | `shieldcortex codex install` |
-| **Cursor** | `shieldcortex install` |
-| **VS Code** (Copilot) | `shieldcortex install` |
-| **OpenClaw** | `openclaw skills install shieldcortex && openclaw plugins install @drakon-systems/shieldcortex-realtime` — [details above](#-openclaw-integration) |
-| **LangChain JS** | `import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'` |
-| **Python** (CrewAI, LangChain) | `pip install shieldcortex` — [hosted-API client](#python), needs a cloud key |
-| **Any MCP agent** | `shieldcortex install` |
+| Platform | Setup | What you get |
+|---|---|---|
+| **Claude Code** | `shieldcortex install` | MCP memory **and** PreToolUse tool gate (bound) |
+| **OpenClaw** | `openclaw skills install shieldcortex && openclaw plugins install @drakon-systems/shieldcortex-realtime` — [details](#-openclaw-integration) | MCP memory **and** `before_tool_call` gate (bound) |
+| **Hermes** | `shieldcortex hermes install` — [details](#-hermes-integration) | `pre_tool_call` gate via local Action Guard API (bound; enforce by default) |
+| **Codex CLI / VS Code** | `shieldcortex codex install` | MCP memory server only — **not bound** |
+| **Cursor / Copilot** | `shieldcortex install` / `copilot install` | MCP memory server only — **not bound** |
+| **LangChain JS** | `import { ShieldCortexMemory } from 'shieldcortex/integrations/langchain'` | In-process scan on `save` — **not bound** |
+| **Python** (CrewAI, LangChain extras) | `pip install shieldcortex` — [hosted-API client](#python) | Cloud `scan()` — **not bound** |
+| **Any MCP agent** | `shieldcortex install` | Memory + advisory tools the model may ignore — **not bound** |
 
 <br>
 
@@ -824,8 +834,8 @@ SHIELDCORTEX_RANKER=legacy npm run bench   # env var overrides config for a sing
 
 `shieldcortex` ships as ESM only (`"type": "module"`, no CommonJS build) — this is a
 deliberate choice, not an oversight, and it won't change silently. Every entry point
-(`shieldcortex`, `shieldcortex/defence`, `shieldcortex/scan`, `shieldcortex/lib`,
-`shieldcortex/integrations/*`, `shieldcortex/environment`) works with:
+(`shieldcortex`, `shieldcortex/defence`, `shieldcortex/scan`, `shieldcortex/enforce`,
+`shieldcortex/lib`, `shieldcortex/integrations/*`, `shieldcortex/environment`) works with:
 
 ```js
 import shieldcortex from 'shieldcortex';
@@ -867,7 +877,8 @@ shieldcortex iron-dome status     # Check Iron Dome status
 openclaw skills install shieldcortex
 openclaw plugins install @drakon-systems/shieldcortex-realtime
 shieldcortex openclaw status      # Check OpenClaw hook status
-shieldcortex codex install        # Connect Codex CLI / VS Code
+shieldcortex hermes install       # Hermes pre_tool_call Action Guard (bound)
+shieldcortex codex install        # Codex MCP memory server (NOT a tool gate)
 shieldcortex consolidate          # Run Dream Mode (merge, archive, contradict)
 shieldcortex audit                # Dependency scanner
 shieldcortex xray <path>          # Deep file analysis for hidden threats

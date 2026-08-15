@@ -155,6 +155,9 @@ export async function installCodex(): Promise<void> {
   console.log();
   console.log('This Codex config is shared by the Codex CLI and IDE extension.');
   console.log('Restart Codex / VS Code if it was already open.');
+  console.log();
+  console.log('This is an MCP memory server — NOT a tool gate.');
+  console.log('Codex cannot deny Bash via MCP. `shieldcortex lease` will report NOT BOUND.');
 }
 
 export async function uninstallCodex(): Promise<void> {
