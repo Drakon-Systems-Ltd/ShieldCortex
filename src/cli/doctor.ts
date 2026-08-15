@@ -551,6 +551,23 @@ export async function checkThreatGraph(
       };
     }
 
+    // A non-zero cursor with NO recorded run is the stalled-upgrade shape: an
+    // old projector advanced the cursor, then every modern lease run died
+    // before it could stamp last_run_at (observed live: the lease_token column
+    // was missing on upgraded installs, the acquisition threw outside the
+    // recorded path, and this check read "cursor close enough → ✅ caught up"
+    // for weeks). Lag CANNOT distinguish "healthy and idle" from "dead and
+    // frozen" — only a recorded completion can.
+    if (cursor > 0 && !state?.last_run_at) {
+      return {
+        label,
+        status: 'warn',
+        message: `cursor is at ${cursor} but no projector run has ever completed on this install — ` +
+          'the graph data predates the current projector, which is likely failing before it can record anything',
+        fix: 'shieldcortex threat-graph rebuild (and check last_error afterwards)',
+      };
+    }
+
     if (lag > lagWarnThreshold) {
       return {
         label,
