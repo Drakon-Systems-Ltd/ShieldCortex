@@ -2,10 +2,30 @@
  * Instruction Detector
  *
  * Detects prompt injection and hidden instruction patterns in memory content.
+ *
+ * SCOPE — read this before adding patterns (issue #204).
+ * This is a FAST PRE-FILTER FLOOR, not a detector of intent. It catches the
+ * literal and lightly-obfuscated shapes of known injection phrasing: attack
+ * markers, a closed set of override frames (see instruction-morphology.ts), and
+ * the same text after a normalisation fold (see instruction-normalize.ts). It
+ * runs on the synchronous write path, so it must stay bounded and cheap.
+ *
+ * What it does NOT do, and must not be described as doing:
+ *   - non-English injection. Nothing here is multilingual.
+ *   - paraphrase. Reworded intent ("set aside what you were told before") is
+ *     the async semantic layer's job — an additive backstop, never a hot-path
+ *     dependency (src/defence/semantic/).
+ *   - completeness. A synonym this file has not seen will pass. That is the
+ *     expected failure mode of a regex tier, which is why the layers above it
+ *     (trust scoring, quarantine, semantic) do not assume it is exhaustive.
  */
 
-import { foldConfusables } from './confusables.js';
 import { someWindow } from '../scan-windows.js';
+import { instructionMatchVariants } from './instruction-normalize.js';
+import {
+  OVERRIDE_MORPHOLOGY_PATTERNS,
+  PROMPT_EXTRACTION_PATTERNS,
+} from './instruction-morphology.js';
 
 export interface InstructionDetectionResult {
   detected: boolean;
@@ -17,6 +37,12 @@ interface PatternGroup {
   name: string;
   patterns: RegExp[];
   weight: number;
+  /**
+   * Name of a group this one merely extends. If that group already matched, this
+   * one is skipped entirely — a single phrase must not count as two independent
+   * signals and collect the multi-group confidence bonus.
+   */
+  subsumedBy?: string;
 }
 
 const PATTERN_GROUPS: PatternGroup[] = [
@@ -60,6 +86,17 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /repeat\s+your\s+instructions/i,
       /what\s+are\s+your\s+rules/i,
     ],
+  },
+  {
+    // Generated override frames — the inflected/passive/negated-compliance
+    // shapes the hand-written list above only ever caught in the base active
+    // voice (issue #204). Same weight as `hidden_instruction` because it is the
+    // same signal reached by a different surface form, and `subsumedBy` stops a
+    // phrase that matches both from scoring as two groups.
+    name: 'hidden_instruction_morphology',
+    weight: 0.8,
+    subsumedBy: 'hidden_instruction',
+    patterns: OVERRIDE_MORPHOLOGY_PATTERNS,
   },
   {
     name: 'memory_manipulation',
@@ -135,6 +172,9 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /what\s+were\s+you\s+told/i,
       /display\s+your\s+(system\s+)?prompt/i,
       /reveal\s+your\s+instructions/i,
+      // Narrow print/show/reveal/display + your + (system) prompt, shared with
+      // the Iron Dome scanner so both tiers agree on this frame (issue #204).
+      ...PROMPT_EXTRACTION_PATTERNS,
     ],
   },
   {
@@ -183,15 +223,14 @@ export function detectInstructions(content: string): InstructionDetectionResult 
   let totalWeight = 0;
   let maxWeight = 0;
 
-  // Fold cross-script confusables (Cyrillic/Greek homoglyphs + NFKC forms) to
-  // their Latin skeleton so a single-glyph substitution like `ignorе` (Cyrillic
-  // е) still matches the ASCII patterns. We test the original first, then the
-  // folded copy only if folding changed something — testing both means we never
-  // *lose* a match that the original would have caught.
-  const folded = foldConfusables(content);
-  const variants = folded !== content ? [content, folded] : [content];
+  // Test the original first, then up to two normalised copies (confusable fold,
+  // zero-width/bidi strip, punctuation collapse, and a classic-leet fold) — see
+  // instruction-normalize.ts. The original always leads, so normalisation can
+  // only ever *add* a match, never lose one the raw text would have caught.
+  const variants = instructionMatchVariants(content);
 
   for (const group of PATTERN_GROUPS) {
+    if (group.subsumedBy && matchedPatterns.includes(group.subsumedBy)) continue;
     for (const pattern of group.patterns) {
       if (variants.some((variant) => safeRegexTest(pattern, variant))) {
         matchedPatterns.push(group.name);
