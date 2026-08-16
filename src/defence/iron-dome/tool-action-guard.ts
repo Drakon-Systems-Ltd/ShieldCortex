@@ -272,7 +272,7 @@ const CATASTROPHIC: Pattern[] = [
   // verb and the /dev/ target in ONE statement — mirroring recursive-force-delete
   // above — so `export PATH=/opt/wipe/bin; echo /dev/null` no longer collides two
   // unrelated statements into a false catastrophic block (issue #89).
-  { re: /\b(?:shred|wipe)\b[^|;&\n]*\/dev\//i, signal: 'shred-device' },
+  { re: /\b(?:shred|wipe)\b[^|;&\n]*\/dev\/(?!null\b|stdout\b|stderr\b|fd\/\d)/i, signal: 'shred-device' },
 ];
 
 /**
