@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **Caller-supplied `user:` identity (#305 / #306)** — quarantine / risk-reset / conflict review rows no longer stamp MCP `notes` or dashboard `reviewedBy` as a `user:` provenance identity. The row uses the inferred runtime source; the caller string stays annotation. REST `/v1/scan` now coerces `type: 'user'` to `api`, matching the MCP reject.
+
 ## [4.54.0] - 2026-08-16
 
 **Minor — attestation Phases 3–5: remaining callers, OpenClaw realtime record-only, sentinel + doctor coverage.**

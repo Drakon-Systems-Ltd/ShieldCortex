@@ -8,6 +8,7 @@
 import { createContentHash } from '../defence/audit/logger.js';
 import { logAudit } from '../defence/audit/logger.js';
 import { getDatabase } from '../database/init.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
 import { sourceKey } from './keys.js';
 
 export interface QuarantineDecision {
@@ -138,12 +139,16 @@ export function recordQuarantineDecision(input: DecisionInput): void {
     bulk: input.bulk,
   };
   try {
+    // #305 — reviewer identity is host-derived. `reviewedBy` is caller notes
+    // (MCP `notes`, dashboard free text) and must stay annotation, never a
+    // user: provenance row. Allowance consumes payload.source_key.
+    const reviewer = inferSourceFromEnvironment().source;
     logAudit({
       memory_id: null,
       project: input.project,
       timestamp: new Date().toISOString(),
-      source_type: 'user',
-      source_identifier: input.reviewedBy,
+      source_type: reviewer.type,
+      source_identifier: reviewer.identifier,
       trust_score: 0.9,
       sensitivity_level: 'INTERNAL',
       firewall_result: 'ALLOW',
@@ -151,7 +156,7 @@ export function recordQuarantineDecision(input: DecisionInput): void {
       anomaly_score: 0,
       threat_indicators: '[]',
       blocked_patterns: '[]',
-      reason: JSON.stringify(payload),
+      reason: JSON.stringify({ ...payload, reviewed_by: input.reviewedBy }),
       fragmentation_score: null,
       pipeline_duration_ms: null,
     });

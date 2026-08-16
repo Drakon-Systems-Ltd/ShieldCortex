@@ -22,6 +22,7 @@
 import { getDatabase, isDatabaseInitialized } from '../database/init.js';
 import type { DefenceSource } from '../defence/types.js';
 import { logAudit } from '../defence/audit/logger.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
 import { cachedStmt } from './shared.js';
 import { sourceKey } from './keys.js';
 
@@ -333,12 +334,14 @@ export function resetSourceRisk(key: string, opts: { reviewedBy: string }): Rese
   if (!found) return { found: false };
 
   try {
+    // #305 — reviewedBy is annotation; the row identity is host-derived.
+    const reviewer = inferSourceFromEnvironment().source;
     logAudit({
       memory_id: null,
       project: null,
       timestamp: nowIso,
-      source_type: 'user',
-      source_identifier: opts.reviewedBy,
+      source_type: reviewer.type,
+      source_identifier: reviewer.identifier,
       trust_score: 0.9,
       sensitivity_level: 'INTERNAL',
       firewall_result: 'ALLOW',

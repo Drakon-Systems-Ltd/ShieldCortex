@@ -221,6 +221,23 @@ describe('Phase E — conflict resolution', () => {
     expect(row(tb2).valid_to).toBeTruthy(); // re-suspended by replay
   });
 
+  it('#305: the resolution review row carries host-derived identity; operator is annotation only', () => {
+    const a = entity('deploy-305');
+    const good = entity('good-305');
+    const evil = entity('evil-305');
+    triple(a, 'uses', good, 'cli:m', 0.95);
+    triple(a, 'uses', evil, 'agent:x', 0.3);
+    detectRelationConflicts({ nowMs: NOW });
+    resolveConflict({ subjectId: a, predicate: 'uses', resolution: 'keep_both' }, 'victim-name', { nowMs: NOW + 1000 });
+
+    const audit = getDatabase().prepare(
+      "SELECT source_type, source_identifier, reason FROM defence_audit WHERE operation = 'review' ORDER BY id DESC LIMIT 1",
+    ).get() as { source_type: string; source_identifier: string; reason: string };
+    expect(audit.source_type).not.toBe('user');
+    expect(audit.source_identifier).not.toBe('victim-name');
+    expect((JSON.parse(audit.reason) as { reviewed_by?: string }).reviewed_by).toBe('victim-name');
+  });
+
   it('keep_one rejects a kept object that is not on the channel', () => {
     const a = entity('svc3');
     const b = entity('b3');
