@@ -12,6 +12,7 @@
  *   forms    base, -s/-es, past, past participle, -ing  (+ 3 irregulars)
  *   objects  previous prior above earlier existing old original
  *   nouns    instructions rules prompts context directives constraints guidelines
+ *            filters
  *
  * Every frame requires an OBJECT **and** a NOUN from the closed tables. That
  * requirement is the false-positive floor, and it is deliberate:
@@ -51,6 +52,10 @@ export const OVERRIDE_OBJECTS = [
  * Closed noun table (regex fragments — the trailing `?` carries the plural).
  * `warning`, `email`, `message` are deliberately absent: those are the words
  * that make ordinary prose look like an attack.
+ *
+ * `filters?` belongs with the other guard-adjacent nouns. `policies?` is not
+ * here: it would buy nothing on the current floor and would break the length
+ * cap.
  */
 export const OVERRIDE_NOUNS = [
   'instructions?',
@@ -60,6 +65,7 @@ export const OVERRIDE_NOUNS = [
   'directives?',
   'constraints?',
   'guidelines?',
+  'filters?',
 ] as const;
 
 /**
@@ -191,13 +197,18 @@ export const OVERRIDE_MORPHOLOGY: MorphologyPattern[] = [
  * Direct system-prompt extraction, narrow by design: an imperative reveal verb
  * plus `your` plus `prompt`. `your` is load-bearing — it is what separates
  * "show your system prompt" from "update the system prompt template in the docs".
+ *
+ * `output`, `dump` and `list` sit with `print/show/reveal/display`. `your`
+ * still gates every one of them, so "dump the request log" and "list the
+ * prompt templates" stay quiet.
  */
 export const PROMPT_EXTRACTION: MorphologyPattern[] = [
   {
     name: 'system_prompt_extraction',
-    description: 'Direct request to print, show, reveal or display the system prompt',
+    description:
+      'Direct request to print, show, reveal, display, output, dump or list the system prompt',
     regex:
-      /\b(?:print|show|reveal|display)\s+(?:(?:me|us)\s+)?your\s+(?:(?:full|entire|complete|original|initial|exact|actual|verbatim)\s+)?(?:system\s+)?prompts?\b/i,
+      /\b(?:print|show|reveal|display|output|dump|list)\s+(?:(?:me|us)\s+)?your\s+(?:(?:full|entire|complete|original|initial|exact|actual|verbatim)\s+)?(?:system\s+)?prompts?\b/i,
   },
 ];
 
