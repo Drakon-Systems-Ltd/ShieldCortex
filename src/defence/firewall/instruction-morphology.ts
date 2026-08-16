@@ -53,10 +53,9 @@ export const OVERRIDE_OBJECTS = [
  * `warning`, `email`, `message` are deliberately absent: those are the words
  * that make ordinary prose look like an attack.
  *
- * `filters?` is the #318 residual — "ignore all previous filters" is the same
- * override frame pointed at the guard rather than the prompt. `policies?` is
- * NOT here: the #318 corpus has zero policy/policies payloads, so it would buy
- * nothing and push the table past its length cap.
+ * `filters?` belongs with the other guard-adjacent nouns. `policies?` is not
+ * here: it would buy nothing on the current floor and would break the length
+ * cap.
  */
 export const OVERRIDE_NOUNS = [
   'instructions?',
@@ -199,9 +198,8 @@ export const OVERRIDE_MORPHOLOGY: MorphologyPattern[] = [
  * plus `your` plus `prompt`. `your` is load-bearing — it is what separates
  * "show your system prompt" from "update the system prompt template in the docs".
  *
- * #318 adds `output`, `dump` and `list` to the verb group only. They are the
- * verbs the evaded corpus reached for once `print/show/reveal/display` closed;
- * `your` still gates every one of them, so "dump the request log" and "list the
+ * `output`, `dump` and `list` sit with `print/show/reveal/display`. `your`
+ * still gates every one of them, so "dump the request log" and "list the
  * prompt templates" stay quiet.
  */
 export const PROMPT_EXTRACTION: MorphologyPattern[] = [
