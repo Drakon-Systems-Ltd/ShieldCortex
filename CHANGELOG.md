@@ -6,10 +6,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.54.1] - 2026-08-16
+
+**Patch — board grind + instruction-floor GHSA.**
+
+Security and honesty fixes that landed on main after 4.54.0. `threatGraph.trustModifier` stays **advisory**. SDK / PyPI stay **0.3.0**.
+
 ### Security
 
-- **Caller-supplied `user:` identity (#305 / #306)** — quarantine / risk-reset / conflict review rows no longer stamp MCP `notes` or dashboard `reviewedBy` as a `user:` provenance identity. The row uses the inferred runtime source; the caller string stays annotation. REST `/v1/scan` now coerces `type: 'user'` to `api`, matching the MCP reject.
-- **Instruction-floor morphology (GHSA-hx2c-rqg7-ggpm)** — sync override-noun and prompt-extraction tables cover the documented near-twin class. `scan` remains a regex/morphology floor, not a semantic classifier. #204 false-positive floor unchanged. Public tests are must-catch + FP-floor anchors only.
+- **Caller-supplied `user:` identity (#305 / #306 / #323)** — quarantine / risk-reset / conflict review rows no longer stamp MCP `notes` or dashboard `reviewedBy` as a `user:` provenance identity. REST `/v1/scan` coerces `type: 'user'` to `api`.
+- **Instruction-floor morphology (GHSA-hx2c-rqg7-ggpm / #330)** — sync override-noun and prompt-extraction tables cover the documented near-twin class. `scan` remains a regex/morphology floor, not a semantic classifier. #204 false-positive floor unchanged. Public tests are must-catch + FP-floor anchors only.
+
+### Fixed
+
+- **#303** — `shred-device` ignores `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N` redirects.
+- **#317** — Mac LaunchAgent running-version UNKNOWN is a log-channel gap; roster-confirmed + disk match passes. Darwin copy no longer says `journalctl`.
+- **#307** — overflowed attested sources inherit overflow risk instead of silent 0.
+- **#320** — lease-runner version-mismatch rebuild persists a risk snapshot and reseeds after a complete drain.
+- **#284 Face 1** — deny surface no longer claims the command lives in `realtime-*.jsonl`.
+
+### Not in this cut
+
+- **#310** stays design (Telegram card ≠ TTY review). Follow-on is #331 loud DNP digest.
+- **`trustModifier`** stays advisory.
+
+### PRs
+
+- #323 #325 #326 #327 #328 #329 #330
 
 ## [4.54.0] - 2026-08-16
 
