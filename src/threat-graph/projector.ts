@@ -435,6 +435,54 @@ export function projectToCompletion(options?: ProjectorOptions): ProjectResult {
   return total;
 }
 
+type RiskSnap = {
+  key: string;
+  risk_sum: number;
+  risk_ref_ts: string;
+  risk_win_start: string | null;
+  risk_win_weight: number | null;
+};
+
+function takeRiskSnapshot(): RiskSnap[] {
+  return getDatabase().prepare(`
+    SELECT key,
+           json_extract(attrs,'$.risk_sum') AS risk_sum,
+           json_extract(attrs,'$.risk_ref_ts') AS risk_ref_ts,
+           json_extract(attrs,'$.risk_win_start') AS risk_win_start,
+           json_extract(attrs,'$.risk_win_weight') AS risk_win_weight
+    FROM threat_nodes
+    WHERE kind = 'source' AND json_extract(attrs,'$.risk_sum') IS NOT NULL
+  `).all() as RiskSnap[];
+}
+
+function applyRiskSnapshot(snapshot: RiskSnap[], halfLifeMs: number): void {
+  if (snapshot.length === 0) return;
+  const db = getDatabase();
+  const H = halfLifeMs;
+  db.transaction(() => {
+    for (const snap of snapshot) {
+      const node = db.prepare("SELECT id, attrs FROM threat_nodes WHERE kind = 'source' AND key = ?")
+        .get(snap.key) as { id: number; attrs: string } | undefined;
+      if (!node) continue;
+      let attrs: Record<string, unknown>;
+      try { attrs = JSON.parse(node.attrs) as Record<string, unknown>; } catch { continue; }
+      const replayedSum = typeof attrs.risk_sum === 'number' ? attrs.risk_sum : 0;
+      const replayedRef = typeof attrs.risk_ref_ts === 'string' ? Date.parse(attrs.risk_ref_ts) : Date.parse(snap.risk_ref_ts);
+      const snapRef = Date.parse(snap.risk_ref_ts);
+      const target = Math.max(replayedRef, snapRef);
+      const replayedAt = replayedSum * Math.pow(2, -(target - replayedRef) / H);
+      const snapAt = snap.risk_sum * Math.pow(2, -(target - snapRef) / H);
+      if (snapAt > replayedAt) {
+        attrs.risk_sum = snapAt;
+        attrs.risk_ref_ts = new Date(target).toISOString();
+        if (snap.risk_win_start) attrs.risk_win_start = snap.risk_win_start;
+        if (typeof snap.risk_win_weight === 'number') attrs.risk_win_weight = snap.risk_win_weight;
+        db.prepare('UPDATE threat_nodes SET attrs = ? WHERE id = ?').run(JSON.stringify(attrs), node.id);
+      }
+    }
+  }).immediate();
+}
+
 /**
  * Clear the derived view and reset both cursors. Stamps PROJECTOR_VERSION.
  * source_risk is cleared too: a rebuild over a retention-purged ledger yields
@@ -635,20 +683,26 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
   try {
     // Projection-rule upgrades: a stored version behind the code forces a
     // from-zero rebuild (the doc's rebuild-on-bump mechanism).
-    const stored = (db.prepare('SELECT projector_version FROM threat_graph_state WHERE id = 1')
-      .get() as { projector_version: number }).projector_version;
-    if (stored !== PROJECTOR_VERSION) {
-      // KNOWN GAP (#320): unlike rebuildThreatGraph, this path has no risk
-      // snapshot/reseed, so risk from retention-purged evidence lapses on a
-      // version bump (bounded by decay — ~1% on default retention). Not fixed
-      // inline: the batched cross-tick replay below makes a post-replay reseed
-      // double-count; see the issue for the design options.
+    const storedRow = db.prepare(
+      'SELECT projector_version, rebuild_pending, risk_snapshot FROM threat_graph_state WHERE id = 1',
+    ).get() as { projector_version: number; rebuild_pending: string | null; risk_snapshot: string | null };
+    if (storedRow.projector_version !== PROJECTOR_VERSION) {
+      // #320 — persist the risk snapshot BEFORE clearGraph so batched replay
+      // can reseed after a COMPLETE drain, not mid-tick (that would double-count).
+      if (storedRow.rebuild_pending !== '1') {
+        const snap = takeRiskSnapshot();
+        db.prepare(
+          "UPDATE threat_graph_state SET rebuild_pending = '1', risk_snapshot = ? WHERE id = 1",
+        ).run(JSON.stringify(snap));
+      }
       clearGraph();
     }
 
     const audit: ProjectResult = { processed: 0, cursor: 0, eventNodes: 0, errors: [] };
+    let lastBatchProcessed = 0;
     for (let i = 0; i < maxBatches; i++) {
       const r = projectAuditLedger(options);
+      lastBatchProcessed = r.processed;
       audit.processed += r.processed;
       audit.eventNodes += r.eventNodes;
       audit.errors.push(...r.errors);
@@ -663,6 +717,16 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
       ? projectRealtimeLedger({ dir: options.realtimeDir })
       : null;
     if (realtime) runErrors.push(...realtime.errors);
+
+    const pending = (db.prepare('SELECT rebuild_pending, risk_snapshot FROM threat_graph_state WHERE id = 1')
+      .get() as { rebuild_pending: string | null; risk_snapshot: string | null } | undefined);
+    const realtimeDrained = !realtime || realtime.processed === 0;
+    if (pending?.rebuild_pending === '1' && lastBatchProcessed === 0 && realtimeDrained) {
+      let snap: RiskSnap[] = [];
+      try { snap = JSON.parse(pending.risk_snapshot || '[]') as RiskSnap[]; } catch { snap = []; }
+      applyRiskSnapshot(snap, options?.halfLifeMs ?? DEFAULT_HALF_LIFE_MS);
+      db.prepare("UPDATE threat_graph_state SET rebuild_pending = NULL, risk_snapshot = NULL WHERE id = 1").run();
+    }
 
     // Idle decay sweep — recompute source_risk for EVERY source each pass, so
     // an idle source's risk heals on schedule instead of freezing at peak.

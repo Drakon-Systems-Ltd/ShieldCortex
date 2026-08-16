@@ -288,7 +288,9 @@ CREATE TABLE IF NOT EXISTS threat_graph_state (
   last_run_at TEXT,
   last_campaign_at TEXT,
   last_conflict_at TEXT,
-  last_error TEXT
+  last_error TEXT,
+  rebuild_pending TEXT,
+  risk_snapshot TEXT
 );
 
 -- Hot-path read surface: one row per source, precomputed async (Phase B).

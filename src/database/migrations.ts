@@ -881,6 +881,7 @@ export function runMigrations(database: Database.Database): void {
       for (const col of [
         'lease_expires_at', 'lease_token', 'last_run_at',
         'last_campaign_at', 'last_conflict_at', 'last_error',
+        'rebuild_pending', 'risk_snapshot',
       ]) {
         if (!have.has(col)) {
           database.exec(`ALTER TABLE threat_graph_state ADD COLUMN ${col} TEXT`);
