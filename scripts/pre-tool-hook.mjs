@@ -766,9 +766,9 @@ function redactedActionSurface(toolName, toolInput) {
   const keys = ['command', 'script', 'file_path', 'path', 'url', 'pattern'];
   const present = keys.filter((k) => toolInput?.[k] !== undefined && toolInput?.[k] !== null);
   const suffix = present.length > 0 ? ` fields=${present.join(',')}` : ' no command field';
-  // #284 Face 1 — name the verified sink. denials.jsonl is a summary; unredacted
-  // command lives in ~/.shieldcortex/audit/realtime-YYYY-MM-DD.jsonl.
-  return `${safeToolName(toolName)}: [redacted action surface; unredacted command in ~/.shieldcortex/audit/realtime-*.jsonl]${suffix}`;
+  // #284 Face 1 — denials.jsonl / notify carry a redacted surface only.
+  // Do not claim the raw command lives in realtime-*.jsonl; that pointer was a lie.
+  return `${safeToolName(toolName)}: [redacted action surface; command not persisted to notify or denials.jsonl preview]${suffix}`;
 }
 
 function redactedAuditArgs(toolName, toolInput) {
