@@ -228,7 +228,9 @@ export function getInlineSchema(): string {
       last_run_at TEXT,
       last_campaign_at TEXT,
       last_conflict_at TEXT,
-      last_error TEXT
+      last_error TEXT,
+      rebuild_pending TEXT,
+      risk_snapshot TEXT
     );
 
     CREATE TABLE IF NOT EXISTS source_risk (
