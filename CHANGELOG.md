@@ -6,9 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.54.2] - 2026-08-16
+
+**Patch — loud DNP digest.**
+
+Operator visibility for headless `denied_no_prompt_surface` without spam. `threatGraph.trustModifier` stays **advisory**. SDK / PyPI stay **0.3.0**.
+
 ### Added
 
 - **#331 loud DNP digest** — host-local time-window rollup for `denied_no_prompt_surface` notifies. First DNP in the window pages; later ones coalesce. `actionGuard.notify.dnpDigestWindowMs` (default 15m, `0` = legacy every-event). Payload / `permission_mode` never mute. #310 stays design (no approval cards).
+
+### References
+
+- #331 #333
 
 ## [4.54.1] - 2026-08-16
 
