@@ -79,8 +79,10 @@ import {
  *  src_type/src_id attrs, and risk_reset review-row consumption.
  *  v3 (Phase C): quarantine_decision consumption → operator allowance edges.
  *  v4 (Phase D): realtime `tainted` attr on conversation event nodes.
- *  v5 (Phase E): relation-channel conflict detection + triple provenance. */
-export const PROJECTOR_VERSION = 5;
+ *  v5 (Phase E): relation-channel conflict detection + triple provenance.
+ *  v6 (attestation Phase 4): realtime `attested` attr on conversation event
+ *  nodes — record-only writer claim, never an accrual input. */
+export const PROJECTOR_VERSION = 6;
 
 export interface ProjectorOptions {
   /** Rows per claim-and-advance batch. */
