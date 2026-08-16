@@ -69,6 +69,29 @@ describe('computeRiskModifier', () => {
     const r = computeRiskModifier({ type: 'agent', identifier: longId }, 'enforce');
     expect(r.modifier).toBeCloseTo(RISK_TRUST_CAP, 6);
   });
+
+  it('#307 overflowed attested source uses overflow risk, not silent 0', () => {
+    seedRisk(0.8, 1, 'overflow');
+    getDatabase().prepare(`
+      INSERT INTO defence_audit (
+        memory_id, project, timestamp, source_type, source_identifier,
+        trust_score, sensitivity_level, firewall_result,
+        anomaly_score, threat_indicators, blocked_patterns,
+        reason, fragmentation_score, pipeline_duration_ms, source_attested
+      ) VALUES (NULL, 'test', '2026-08-16T00:00:00.000Z', 'agent', 'overflowed-attacker',
+        0.1, 'PUBLIC', 'BLOCK', 0, '[]', '[]', NULL, NULL, 0, 1)
+    `).run();
+    const r = computeRiskModifier({ type: 'agent', identifier: 'overflowed-attacker' }, 'enforce');
+    expect(r.modifier).toBeGreaterThan(0);
+    expect(r.applied).toBe(true);
+  });
+
+  it('#307 overflowed unattested source stays 0', () => {
+    seedRisk(0.8, 1, 'overflow');
+    const r = computeRiskModifier({ type: 'agent', identifier: 'overflowed-unattested' }, 'enforce');
+    expect(r.modifier).toBe(0);
+    expect(r.applied).toBe(false);
+  });
 });
 
 describe('pipeline integration', () => {
