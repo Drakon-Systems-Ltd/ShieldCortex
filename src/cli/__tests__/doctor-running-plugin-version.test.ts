@@ -113,6 +113,33 @@ describe('checkOpenClawRunningPluginVersion', () => {
     expect(r.message).toMatch(/running version UNKNOWN/i);
   });
 
+  it('#317 passes UNKNOWN log gap when roster-confirmed matches disk', async () => {
+    installOnDisk('4.53.0');
+    const r = await checkOpenClawRunningPluginVersion(home, {
+      readGatewayJournal: () => ({
+        text: 'Jul 21 09:00:01 host openclaw-gateway[123]: starting gateway\n',
+        preBounded: true,
+      }),
+      readGatewayProcessStartMs: () => 1_700_000_000_000,
+      readRosterConfirmedVersion: () => '4.53.0',
+    });
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/roster-confirmed/i);
+    expect(r.message).toMatch(/log line unavailable/i);
+    expect(r.message).not.toMatch(/UNKNOWN/i);
+  });
+
+  it('#317 does not let roster compose override a FRESH stale log line (#94)', async () => {
+    installOnDisk('4.53.0');
+    const r = await checkOpenClawRunningPluginVersion(home, {
+      readGatewayJournal: () => ({ text: journalWith('4.47.8'), preBounded: true }),
+      readGatewayProcessStartMs: () => 1_700_000_000_000,
+      readRosterConfirmedVersion: () => '4.53.0',
+    });
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/stale/i);
+  });
+
   it('skips (info) when OpenClaw is present but the realtime plugin is not installed', async () => {
     fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
     const r = await checkOpenClawRunningPluginVersion(home, { readGatewayJournal: () => ({ text: journalWith('4.47.13'), preBounded: true }), readGatewayProcessStartMs: () => 1_700_000_000_000 });

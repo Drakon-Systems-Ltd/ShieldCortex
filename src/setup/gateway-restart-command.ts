@@ -72,3 +72,14 @@ export function gatewayRestartCommand(
 export function gatewayRestartAdvice(platform: RestartPlatform = process.platform): string {
   return gatewayRestartCommand(platform).advice;
 }
+
+/** How to inspect the running gateway boot line — not journalctl on Darwin. */
+export function gatewayBootLogAdvice(platform: RestartPlatform = process.platform): string {
+  if (platform === 'darwin') {
+    return 'openclaw gateway restart   # then: launchctl print gui/$(id -u)/ai.openclaw.gateway';
+  }
+  if (platform === 'linux') {
+    return 'journalctl --user -u openclaw-gateway | grep "http server listening"';
+  }
+  return 'inspect the OpenClaw gateway process log for a boot/"http server listening" line';
+}

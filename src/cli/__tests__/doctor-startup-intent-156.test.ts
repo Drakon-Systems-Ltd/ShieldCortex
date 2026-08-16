@@ -44,6 +44,30 @@ describe('#156 readPluginStartupIntent', () => {
   it('returns null when no installed manifest exists', () => {
     expect(readPluginStartupIntent(home)).toBeNull();
   });
+
+  it('#317 reads the npm-projects install path, not only extensions/', () => {
+    const pkg = path.join(
+      home,
+      '.openclaw',
+      'npm',
+      'projects',
+      'drakon-systems-shieldcortex-shieldcortex-realtime-abc',
+      'node_modules',
+      '@drakon-systems',
+      'shieldcortex-realtime',
+    );
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ version: '4.53.0' }));
+    fs.writeFileSync(
+      path.join(pkg, 'openclaw.plugin.json'),
+      JSON.stringify({ id: 'shieldcortex-realtime', activation: { onStartup: true, onCapabilities: ['hook'] } }),
+    );
+    const intent = readPluginStartupIntent(home);
+    expect(intent).not.toBeNull();
+    expect(intent!.onStartup).toBe(true);
+    expect(intent!.hookCapability).toBe(true);
+    expect(intent!.source).toContain('npm/projects');
+  });
 });
 
 describe('#156 doctor startup-intent check', () => {

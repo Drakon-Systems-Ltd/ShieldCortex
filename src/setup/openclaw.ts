@@ -11,7 +11,7 @@ import path from 'path';
 import os from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { gatewayRestartAdvice } from './gateway-restart-command.js';
+import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
 import {
   resolveRealtimePluginInstallPath,
   resolveRealtimeProjectDir,
@@ -1711,7 +1711,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
         // an unreadable log is the #142 false alarm; say what we actually know.
         console.warn('✗ Honest-state self-check INCONCLUSIVE: could not read the running gateway\'s boot roster,');
         console.warn('  so the plugin is not PROVEN loaded — this is unproven, not known-broken. Check it yourself with:');
-        console.warn('    journalctl --user -u openclaw-gateway | grep "http server listening"');
+        console.warn(`    ${gatewayBootLogAdvice()}`);
         process.exitCode = 1;
       } else if (!check.versionProof) {
         console.warn('✗ Honest-state self-check FAILED: the loaded plugin version is OLDER than expected (silent downgrade, #74).');
@@ -1870,7 +1870,7 @@ async function reportLoadAndEnforcement(): Promise<void> {
     } else {
       console.log('  Loaded: UNPROVEN — could not read the running gateway\'s boot roster');
       console.log('    This is unproven, not known-broken. Check it directly:');
-      console.log('      journalctl --user -u openclaw-gateway | grep "http server listening"');
+      console.log(`      ${gatewayBootLogAdvice()}`);
     }
 
     if (check.canaryProof) {
