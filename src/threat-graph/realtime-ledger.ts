@@ -187,7 +187,16 @@ export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeR
 
       let row: Record<string, unknown>;
       try {
-        row = JSON.parse(item.raw) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(item.raw);
+        // JSON.parse('null') / '42' / '"x"' / '[]' all SUCCEED — a non-object
+        // line used to throw on `row.type` OUTSIDE this catch, rolling back
+        // the transaction with the cursor unadvanced and permanently wedging
+        // the projection on one hostile or accidental line (this file is
+        // same-user-writable). Non-objects are malformed rows: record + skip.
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('non-object row');
+        }
+        row = parsed as Record<string, unknown>;
       } catch {
         result.errors.push(`${item.file}:${item.line}: malformed JSON`);
         continue;
@@ -209,6 +218,13 @@ export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeR
       // this detection tainted the session, so attribution can distinguish a
       // taint-raising event. Forward-compatible — absent on older rows.
       if (typeof row.tainted === 'boolean') attrs.tainted = row.tainted;
+      // Writer-side attestation claim (attestation Phase 4) — RECORD-ONLY.
+      // Strict === true: this file is same-user-writable (hostile-influenceable),
+      // so truthiness is not acceptable, and the claim must NEVER feed accrual —
+      // attrs.attested is attribution metadata, a DIFFERENT fact from
+      // source_risk.attested (sweep-derived from defence_audit). Absent or any
+      // non-true value ⇒ unattested. Old rows lack the field (compat: unattested).
+      if (row.attested === true) attrs.attested = true;
       db.prepare('UPDATE threat_nodes SET attrs = ? WHERE id = ?').run(JSON.stringify(attrs), eventId);
 
       const sourceId = upsertNode('source', `conversation:${hook}`, ts);

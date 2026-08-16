@@ -79,8 +79,10 @@ import {
  *  src_type/src_id attrs, and risk_reset review-row consumption.
  *  v3 (Phase C): quarantine_decision consumption → operator allowance edges.
  *  v4 (Phase D): realtime `tainted` attr on conversation event nodes.
- *  v5 (Phase E): relation-channel conflict detection + triple provenance. */
-export const PROJECTOR_VERSION = 5;
+ *  v5 (Phase E): relation-channel conflict detection + triple provenance.
+ *  v6 (attestation Phase 4): realtime `attested` attr on conversation event
+ *  nodes — record-only writer claim, never an accrual input. */
+export const PROJECTOR_VERSION = 6;
 
 export interface ProjectorOptions {
   /** Rows per claim-and-advance batch. */
@@ -636,6 +638,11 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
     const stored = (db.prepare('SELECT projector_version FROM threat_graph_state WHERE id = 1')
       .get() as { projector_version: number }).projector_version;
     if (stored !== PROJECTOR_VERSION) {
+      // KNOWN GAP (#320): unlike rebuildThreatGraph, this path has no risk
+      // snapshot/reseed, so risk from retention-purged evidence lapses on a
+      // version bump (bounded by decay — ~1% on default retention). Not fixed
+      // inline: the batched cross-tick replay below makes a post-replay reseed
+      // double-count; see the issue for the design options.
       clearGraph();
     }
 

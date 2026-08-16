@@ -2373,6 +2373,11 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
           // lets the threat graph attribute taint-raising events). Metadata
           // only — no content, same as the fields above.
           tainted: trust.mayTaint,
+          // Writer-side attestation (attestation Phase 4): the hook identity
+          // above is a hardcoded literal — no conversation content can reach
+          // it. RECORD-ONLY at the reader (attribution metadata); the JSONL
+          // has no integrity, so this claim never feeds risk accrual.
+          attested: true,
           ts: new Date().toISOString(),
         };
         await auditLog(entry);
@@ -2978,6 +2983,10 @@ export async function handleBeforeAgentRun(
       decisionRowPersisted = await auditLog({
         type: decision.outcome === 'unavailable' ? 'scan_unavailable' : 'threat',
         hook: 'before_agent_run',
+        // Writer-side attestation (attestation Phase 4): hook is a literal;
+        // record-only at the reader, never an accrual input. Stamps the
+        // scan_unavailable variant too (same object) — harmless, same claim.
+        attested: true,
         eventId,
         sessionId,
         model,

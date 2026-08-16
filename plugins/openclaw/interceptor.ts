@@ -650,7 +650,17 @@ function xrayMemoryGuard(content: string, title?: string): XRayGuardResult {
 // Field paths verified against src/defence/types.ts: trust.score (TrustScore.score),
 // sensitivity.level (SensitivityClassification.level), fragmentation.score
 // (FragmentationAnalysis.score; fragmentation itself is nullable).
-type PipelineRunner = (content: string, title: string, source: { type: string; identifier: string }) => {
+type PipelineRunner = (
+  content: string,
+  title: string,
+  source: { type: string; identifier: string },
+  // Optional trailing params of the real runDefencePipeline (config, project,
+  // options). Only options.sourceAttested is used here: the agent:openclaw
+  // identity below is a plugin-code literal, attested by construction.
+  config?: unknown,
+  project?: string,
+  options?: { sourceAttested?: boolean },
+) => {
   allowed: boolean;
   firewall: {
     result: 'ALLOW' | 'BLOCK' | 'QUARANTINE';
@@ -1363,7 +1373,10 @@ export function createInterceptor(
 
     try {
       const pipelineStart = Date.now();
-      const result = pipeline(content, title, { type: 'agent', identifier: 'openclaw' });
+      // Identity is a plugin-code literal → attested by construction. Hostile
+      // CONTENT that BLOCKs accrues to agent:openclaw — the channel, same
+      // conduit-accrual model as the hooks; advisory soak absorbs it.
+      const result = pipeline(content, title, { type: 'agent', identifier: 'openclaw' }, undefined, undefined, { sourceAttested: true });
       pipelineDurationMs = Date.now() - pipelineStart;
       severity = mapSeverity(result.firewall);
       firewallResult = result.firewall.result;
