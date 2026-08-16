@@ -151,8 +151,31 @@ export function computeRiskModifier(source: DefenceSource, mode: TrustModifierMo
 
   try {
     const key = sourceKey(source.type, source.identifier);
-    const row = cachedStmt('SELECT risk, attested FROM source_risk WHERE source_key = ?')
+    let row = cachedStmt('SELECT risk, attested FROM source_risk WHERE source_key = ?')
       .get(key) as { risk: number; attested: number } | undefined;
+
+    // #307 — overflowed identities have no own source_risk row. Use the overflow
+    // bucket's risk, but THIS source's latest-non-null attestation (unattested
+    // overflow traffic must not tighten).
+    if (!row) {
+      const ownNode = cachedStmt("SELECT 1 AS ok FROM threat_nodes WHERE kind = 'source' AND key = ?")
+        .get(key) as { ok: number } | undefined;
+      if (!ownNode) {
+        const overflow = cachedStmt("SELECT risk FROM source_risk WHERE source_key = 'overflow'")
+          .get() as { risk: number } | undefined;
+        if (overflow && overflow.risk > 0) {
+          const attestRow = cachedStmt(`
+            SELECT source_attested FROM defence_audit
+            WHERE source_type = ? AND source_identifier = ? AND source_attested IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+          `).get(source.type, source.identifier) as { source_attested: number } | undefined;
+          if (attestRow?.source_attested === 1) {
+            row = { risk: overflow.risk, attested: 1 };
+          }
+        }
+      }
+    }
+
     if (!row || row.attested !== 1 || row.risk <= 0) return { modifier: 0, applied: false };
 
     const modifier = Math.min(row.risk * RISK_TRUST_SCALE, RISK_TRUST_CAP);
@@ -194,7 +217,7 @@ export function runRiskSweep(options: RiskSweepOptions): RiskSweepResult {
   const windowStartIso = new Date(options.nowMs - COUNTER_WINDOW_MS).toISOString();
 
   const nodes = db.prepare(
-    "SELECT key, attrs FROM threat_nodes WHERE kind = 'source' AND key != 'overflow'"
+    "SELECT key, attrs FROM threat_nodes WHERE kind = 'source'"
   ).all() as SourceNodeRow[];
 
   const upsert = cachedStmt(`
