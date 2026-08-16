@@ -487,10 +487,14 @@ async function checkDatabase(): Promise<CheckResult> {
  * split. Lets an operator WATCH coverage climb after upgrading instead of
  * inferring the writers' state from risk_modifier zeros.
  *
- * A busy window with ZERO non-NULL rows warns: the doctor binary shipping this
- * check also ships plumbed writers, so an all-NULL recent ledger means the
- * rows are coming from still-running pre-upgrade processes (MCP server,
- * gateway, dashboard) that need a restart to pick up the new dist.
+ * The stale-process warn keys on KNOWN-HOOK rows only (adversarially
+ * confirmed, PR #322 review): overall-zero coverage is NOT a fault signal,
+ * because this same build deliberately ships never-attest writers (REST scan
+ * API, langchain guard, universal bridge — pinned NULL forever per the #308
+ * mute-lever rule), so a box used exclusively through those surfaces is
+ * healthy at 0%. Hook rows are the sharp discriminator: their writers ship in
+ * this package and are pinned as attesting, so a busy all-NULL hook window
+ * means still-running pre-upgrade processes are writing them — restart.
  */
 export async function checkAttestationCoverage(
   opts: { nowMs?: number; windowDays?: number; minRowsForWarn?: number } = {},
@@ -541,12 +545,23 @@ export async function checkAttestationCoverage(
     const nonNull = attested + unattested;
     const pct = Math.round((nonNull / total) * 100);
 
-    if (nonNull === 0 && total >= minRowsForWarn) {
+    // Stale-process discriminator: only the shipped hook writers (pinned as
+    // attesting in this build) can prove staleness. Overall-zero coverage is
+    // healthy on a never-attest-only box — see the docblock.
+    const hookCounts = db.prepare(`
+      SELECT COUNT(*) AS total,
+             SUM(CASE WHEN source_attested IS NOT NULL THEN 1 ELSE 0 END) AS nonNull
+      FROM defence_audit
+      WHERE timestamp >= ?
+        AND source_type = 'hook'
+        AND source_identifier IN ('session-end-hook', 'pre-compact-hook', 'stop-hook', 'hook', 'recall-defence')
+    `).get(since) as { total: number; nonNull: number | null };
+    if (hookCounts.total >= minRowsForWarn && (hookCounts.nonNull ?? 0) === 0) {
       return {
         label,
         status: 'warn',
-        message: `${total} audit rows in the last ${windowDays} days and no audit row carries attestation — ` +
-          'the rows are likely written by still-running pre-upgrade processes',
+        message: `${hookCounts.total} hook-captured audit rows in the last ${windowDays} days and none carries attestation — ` +
+          'these writers attest in the current build, so still-running pre-upgrade processes are writing them',
         fix: 'restart long-running ShieldCortex processes (MCP server, OpenClaw gateway, dashboard) so they load the current build',
       };
     }

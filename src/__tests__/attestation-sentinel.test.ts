@@ -101,15 +101,18 @@ describe('phase 5 — doctor attestation-coverage metric', () => {
     closeDatabase();
   });
 
-  function seedRow(daysAgo: number, attested: number | null): void {
+  function seedRow(daysAgo: number, attested: number | null, source: { type?: string; identifier?: string } = {}): void {
     getDatabase().prepare(`
       INSERT INTO defence_audit (
         memory_id, project, timestamp, source_type, source_identifier,
         trust_score, sensitivity_level, firewall_result,
         anomaly_score, threat_indicators, blocked_patterns,
         reason, fragmentation_score, pipeline_duration_ms, source_attested
-      ) VALUES (NULL, 'test', ?, 'cli', 'seed', 0.9, 'PUBLIC', 'ALLOW', 0, '[]', '[]', NULL, NULL, 0, ?)
-    `).run(new Date(NOW - daysAgo * 86_400_000).toISOString(), attested);
+      ) VALUES (NULL, 'test', ?, ?, ?, 0.9, 'PUBLIC', 'ALLOW', 0, '[]', '[]', NULL, NULL, 0, ?)
+    `).run(
+      new Date(NOW - daysAgo * 86_400_000).toISOString(),
+      source.type ?? 'cli', source.identifier ?? 'seed', attested,
+    );
   }
 
   it('reports the window percentage with the attested/unattested/unplumbed split', async () => {
@@ -126,12 +129,36 @@ describe('phase 5 — doctor attestation-coverage metric', () => {
     expect(result.message).toContain('1 unplumbed');
   });
 
-  it('warns when a busy install has ZERO attested rows (stale long-running processes)', async () => {
-    for (let i = 0; i < 60; i++) seedRow(1, null);
+  it('warns when KNOWN-HOOK rows are all unattested (the stale-process discriminator)', async () => {
+    // Hook rows come from writers this build ships and pins as attesting, so
+    // an all-NULL hook window is a sharp signal: still-running pre-upgrade
+    // processes are writing them.
+    for (let i = 0; i < 60; i++) seedRow(1, null, { type: 'hook', identifier: 'session-end-hook' });
     const result = await checkAttestationCoverage({ nowMs: NOW });
     expect(result.status).toBe('warn');
-    expect(result.message.toLowerCase()).toContain('no audit row');
+    expect(result.message.toLowerCase()).toContain('hook');
     expect(result.fix ?? '').toMatch(/restart/i);
+  });
+
+  it('does NOT warn on a healthy never-attest-only install (adversarially confirmed false-warn)', async () => {
+    // The confirmed Phase 5 review finding: a box used exclusively through the
+    // deliberately-never-attested surfaces (REST scan API, langchain guard,
+    // universal bridge — pinned NULL forever per the #308 mute-lever rule)
+    // accrues 50+ all-NULL rows while perfectly healthy. That must be a PASS
+    // with 0% coverage, not a permanent un-clearable warn whose "restart"
+    // diagnosis is affirmatively wrong.
+    for (let i = 0; i < 60; i++) seedRow(1, null, { type: 'api', identifier: 'rest-scan' });
+    for (let i = 0; i < 20; i++) seedRow(1, null, { type: 'cli', identifier: 'langchain-guard' });
+    const result = await checkAttestationCoverage({ nowMs: NOW });
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('0%');
+  });
+
+  it('a single attested hook row clears the stale-process warn', async () => {
+    for (let i = 0; i < 60; i++) seedRow(2, null, { type: 'hook', identifier: 'session-end-hook' });
+    seedRow(1, 1, { type: 'hook', identifier: 'session-end-hook' }); // post-restart row
+    const result = await checkAttestationCoverage({ nowMs: NOW });
+    expect(result.status).toBe('pass');
   });
 
   it('a quiet window is informational, not a fault', async () => {
