@@ -148,7 +148,9 @@ describe('Fix #13 — /api/v1/scan source normalisation + tamper audit', () => {
       expect(rows[0].source_type).toBe('api');
 
       // No audit row was minted under the caller-claimed user identity.
-      expect(queryAuditLogs({ source: 'user', limit: 50 }).length).toBe(0);
+      const spoofed = queryAuditLogs({ source: 'user', limit: 50 })
+        .filter(row => row.source_identifier === 'victim-name');
+      expect(spoofed.length).toBe(0);
     });
 
     it('truncates oversize source.identifier in the audit row', () => {

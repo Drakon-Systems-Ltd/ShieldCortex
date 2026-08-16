@@ -154,12 +154,25 @@ describe('quarantine decision ledger', () => {
     ).get() as { source_type: string; source_identifier: string; reason: string };
     expect(audit.source_type).not.toBe('user');
     expect(audit.source_identifier).not.toBe('victim-name');
+    expect(audit.source_type.length).toBeGreaterThan(0);
+    expect(audit.source_identifier.length).toBeGreaterThan(0);
 
     // The allowance payload is untouched: source_key stays the QUARANTINED
     // item's identity, and the notes survive only as the reviewed_by annotation.
     const d = decisionRows()[0]!;
     expect(d.source_key).toBe('agent:jarvis');
     expect((JSON.parse(audit.reason) as { reviewed_by?: string }).reviewed_by).toBe('victim-name');
+  });
+
+  it('#305: empty reviewedBy still cannot mint a user: row', () => {
+    const qid = seedQuarantine({ sourceIdentifier: 'jarvis' });
+    approveQuarantineItem(qid, '');
+    const audit = getDatabase().prepare(
+      "SELECT source_type, source_identifier, reason FROM defence_audit WHERE operation = 'review' ORDER BY id DESC LIMIT 1"
+    ).get() as { source_type: string; source_identifier: string; reason: string };
+    expect(audit.source_type).not.toBe('user');
+    expect(audit.source_identifier).not.toBe('');
+    expect((JSON.parse(audit.reason) as { reviewed_by?: string }).reviewed_by).toBe('');
   });
 
   it('the exemplar hash binds the title (same content + different title → different hash)', () => {
