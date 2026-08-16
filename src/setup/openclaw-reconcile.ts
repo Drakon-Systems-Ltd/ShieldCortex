@@ -17,6 +17,7 @@ import { waitForGatewayReady } from './gateway-readiness.js';
 import { summariseRepair, renderRepairHeadline } from './repair-verdict.js';
 import { resolveRepairConsent } from './repair-consent.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
+import { gatewayBootLogAdvice } from './gateway-restart-command.js';
 
 /**
  * The #74 metadata reconciler orchestrator.
@@ -458,7 +459,7 @@ export function formatReconcileReport(result: ReconcileExecResult): string[] {
       lines.push(
         verdict.loadedInLiveRoster === true
           ? '✓ realtime plugin healthy: enabled, loaded on the running gateway roster, versions agree.'
-          : '⚠ realtime plugin installed and enabled, versions agree — NOT proven loaded: the running gateway boot roster could not be read. Restart the gateway, then re-run, or check `journalctl --user -u openclaw-gateway | grep "http server listening"` yourself.',
+          : `⚠ realtime plugin installed and enabled, versions agree — NOT proven loaded: the running gateway boot roster could not be read. Restart the gateway, then re-run, or check \`${gatewayBootLogAdvice()}\` yourself.`,
       );
       return lines;
     }

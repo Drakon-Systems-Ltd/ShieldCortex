@@ -3539,6 +3539,13 @@ export interface RunningPluginVersionDeps {
   readGatewayProcessStartMs: () => number | null;
   /** #214 — running gateway pid, so a CLI registration line is not quoted as the gateway. */
   readGatewayPid?: () => number | null;
+  /**
+   * #317 — version proven loaded by the live gateway roster (same evidence as
+   * "plugin loaded: roster-confirmed"). Used only when the log channel has no
+   * fresh `[shieldcortex] … registered` line. A FRESH stale log line still wins
+   * (the #94 class).
+   */
+  readRosterConfirmedVersion?: () => string | null;
 }
 
 /**
@@ -3650,6 +3657,17 @@ export function realRunningPluginVersionDeps(home: string = os.homedir()): Runni
     },
     readGatewayProcessStartMs: (): number | null => readRunningGatewayProcess(home)?.startedAtMs ?? null,
     readGatewayPid: (): number | null => readRunningGatewayProcess(home)?.pid ?? null,
+    readRosterConfirmedVersion: (): string | null => {
+      try {
+        const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: pkg.version }));
+        if (verdict.loadedInLiveRoster === true) {
+          return readInstalledRealtimePluginVersion(home);
+        }
+      } catch {
+        // roster unreadable — log path stays the only proof
+      }
+      return null;
+    },
   };
 }
 
@@ -3701,13 +3719,26 @@ export async function checkOpenClawRunningPluginVersion(
     : parseRunningPluginVersionSince(journal.text, processStartMs, gatewayPid);
   if (!running) {
     const historic = journal.preBounded ? null : parseRunningPluginVersion(journal.text);
+    const roster = deps.readRosterConfirmedVersion?.() ?? null;
+    if (roster && roster === diskVersion) {
+      return {
+        label,
+        status: 'pass',
+        message:
+          `running v${roster} matches on-disk v${diskVersion} (roster-confirmed; ` +
+          `log line unavailable on this platform)`,
+      };
+    }
     return {
       label,
       status: 'info',
       message:
         `running version UNKNOWN — no \`[shieldcortex] … registered\` line since the running gateway ` +
         `started (${new Date(processStartMs).toISOString()}); on-disk v${diskVersion}.` +
-        (historic ? ` An older line exists (v${historic}) but predates this process and proves nothing about it` : ''),
+        (historic ? ` An older line exists (v${historic}) but predates this process and proves nothing about it` : '') +
+        (process.platform === 'darwin'
+          ? ' On macOS LaunchAgent hosts this is usually a log-channel gap, not an unload — see `openclaw gateway restart` / `launchctl print gui/$(id -u)/ai.openclaw.gateway`'
+          : ''),
     };
   }
 
@@ -3745,6 +3776,16 @@ export function readPluginStartupIntent(home: string = os.homedir()): {
   const candidates = [
     path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime', 'openclaw.plugin.json'),
   ];
+  // #317 — modern npm-projects layout (same ground-truth path as on-disk version).
+  try {
+    const install = resolveRealtimePluginInstallPath(home);
+    if (install) {
+      candidates.push(path.join(install, 'openclaw.plugin.json'));
+      candidates.push(path.join(install, 'dist', 'openclaw.plugin.json'));
+    }
+  } catch {
+    // ignore
+  }
   for (const file of candidates) {
     try {
       if (!fs.existsSync(file)) continue;
