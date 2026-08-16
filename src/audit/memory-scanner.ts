@@ -463,7 +463,9 @@ function scanMemoryFile(filePath: string): AuditFinding[] {
 
   // Run through the defence pipeline
   try {
-    const result = runDefencePipeline(content, `audit:${filePath}`, AUDIT_SOURCE);
+    // Code-constant identity (cli:shieldcortex-audit) → attested by
+    // construction; a hostile memory file's BLOCK accrues to the audit channel.
+    const result = runDefencePipeline(content, `audit:${filePath}`, AUDIT_SOURCE, undefined, undefined, { sourceAttested: true });
 
     if (result.firewall.result === 'BLOCK') {
       findings.push({
@@ -582,7 +584,10 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
 
   try {
     const auditSource: DefenceSource = { type: 'cli', identifier: `memory-file:${file.path}` };
-    const result = runDefencePipeline(content, `audit:${file.path}`, auditSource);
+    // System-composed identity (the scanner walks the filesystem itself; no
+    // caller declares it) → attested. Accrual lands on cli:memory-file:<path>
+    // — the hostile FILE's own key — and only ever tightens.
+    const result = runDefencePipeline(content, `audit:${file.path}`, auditSource, undefined, undefined, { sourceAttested: true });
     auditId = result.auditId;
     anomalyScore = result.firewall.anomalyScore;
     firewallResult = result.firewall.result;

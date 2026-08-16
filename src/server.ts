@@ -1164,7 +1164,7 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
     { title: 'Iron Dome Action Check', readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     async (args) => {
       const { getIronDomeStatus, isActionAllowed, validateGateway } = await import('./defence/iron-dome/index.js');
-      const source = resolveToolSource(args.source as DefenceSource | undefined, 'iron_dome_check');
+      const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'iron_dome_check');
       const status = getIronDomeStatus();
 
       const lines = ['## Iron Dome Check', ''];
@@ -1174,9 +1174,19 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
 
-      // Gateway check
+      // Gateway check.
+      //
+      // DELIBERATELY NOT ATTESTED (adversarially verified, PR #315 review):
+      // these are advisory POLICY checks — requires_approval and
+      // untrusted-channel probes log allowed:false, which the audit maps to
+      // BLOCK, and the projector weighs every attested BLOCK at 1.0 with no
+      // policy/threat distinction. Attesting them lets three COMPLIANT
+      // pre-flight checks saturate the shared cli:mcp key at the daily risk
+      // cap (repro'd) — self-tightening for good behaviour. Do not wire
+      // resolved.attested here until policy-denial rows are weighted
+      // separately from threat BLOCKs in the threat-graph projector.
       if (args.channel) {
-        const gateway = validateGateway(args.channel, args.action, status.config, source);
+        const gateway = validateGateway(args.channel, args.action, status.config, resolved.source);
         lines.push(`**Gateway:** ${gateway.trustLevel} — ${gateway.reason}`);
         if (!gateway.allowed) {
           lines.push('', '**Result:** BLOCKED by gateway. Channel is not trusted.');
@@ -1184,8 +1194,8 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
         }
       }
 
-      // Action gate check
-      const gate = isActionAllowed(args.action, status.config, source);
+      // Action gate check — same non-attestation rationale as above.
+      const gate = isActionAllowed(args.action, status.config, resolved.source);
       lines.push(`**Action Gate:** ${gate.decision} — ${gate.reason}`);
 
       return { content: [{ type: 'text', text: lines.join('\n') }] };
