@@ -130,4 +130,24 @@ describe('#89 remainder — shred anchored to command position', () => {
     expect(v.decision).toBe('block');
     expect(v.signals).toContain('shred-device');
   });
+
+  it.each([
+    ['shred file with stdout discard', 'shred -n 3 secret.txt >/dev/null'],
+    ['shred file with stderr discard', 'shred secret.txt 2>/dev/null'],
+    ['wipe file with stdout discard', 'wipe old.key >/dev/null'],
+    ['shred file with /dev/stdout', 'shred secret.txt >/dev/stdout'],
+    ['shred file with /dev/stderr', 'shred secret.txt >/dev/stderr'],
+  ])('#303 does not treat fd redirects as devices: %s', (_name, cmd) => {
+    const v = verdict(cmd);
+    expect(v.signals).not.toContain('shred-device');
+  });
+
+  it.each([
+    ['nvme', 'shred /dev/nvme0n1'],
+    ['wipe sdb', 'wipe /dev/sdb'],
+  ])('#303 still blocks real block devices: %s', (_name, cmd) => {
+    const v = verdict(cmd);
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain('shred-device');
+  });
 });
