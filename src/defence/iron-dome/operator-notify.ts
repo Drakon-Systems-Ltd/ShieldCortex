@@ -579,6 +579,10 @@ export function formatConversationThreatNotification(n: ConversationThreatNotifi
 }
 
 export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotification): string {
+  const extra = n as ActionGuardOutcomeNotification & { digestText?: string; digestCount?: number };
+  if (typeof extra.digestText === 'string' && extra.digestText.trim()) {
+    return truncate(extra.digestText, 4_000);
+  }
   const denied = n.event === 'action_guard_denial';
   const lines = [
     denied
@@ -592,6 +596,9 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
     `Outcome:   ${n.outcome}`,
     `Reason:    ${n.reason}`,
   ];
+  if (typeof extra.digestCount === 'number') {
+    lines.push(`Digest:    ${extra.digestCount} DNP in current host window`);
+  }
   if (n.origin) lines.push(`Origin:    ${n.origin}`);
   if (n.actionId) lines.push(`Action:    ${n.actionId}`);
   if (n.sessionId) lines.push(`Session:   ${n.sessionId}`);

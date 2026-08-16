@@ -335,9 +335,9 @@ async function loadNotify(rawNotifyConfig) {
     }
   };
   try {
-    const [notifyConfigMod, notifyMod, webhookMod, openclawMod] = await Promise.all([
+    const [notifyConfigMod, notifyMod, webhookMod, openclawMod, digestMod] = await Promise.all([
       load('notify-config.js'), load('operator-notify.js'), load('webhook-notify-channel.js'),
-      load('openclaw-approval-channel.js'),
+      load('openclaw-approval-channel.js'), load('dnp-digest.js'),
     ]);
     if (typeof notifyConfigMod?.normaliseNotifyConfig !== 'function') return null;
     if (typeof notifyMod?.requestOperatorApproval !== 'function') return null;
@@ -396,6 +396,9 @@ async function loadNotify(rawNotifyConfig) {
         : null,
       buildActionGuardOutcomeNotification: typeof notifyMod.buildActionGuardOutcomeNotification === 'function'
         ? notifyMod.buildActionGuardOutcomeNotification
+        : null,
+      formatDnpDigestText: typeof digestMod?.formatDnpDigestText === 'function'
+        ? digestMod.formatDnpDigestText
         : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
@@ -901,6 +904,14 @@ function recordLocalGuardOutcome(outcome) {
 
 function classifyNotifyStatus(notifyMod, result) {
   // #284 Face 4 — distinguish not_configured / no_channel / delivered / error.
+  // #331 — coalesced is a successful volume decision, not a delivery failure.
+  if (result?.coalesced === true) {
+    return {
+      status: 'coalesced',
+      deliveredVia: null,
+      digestCount: typeof result.digestCount === 'number' ? result.digestCount : undefined,
+    };
+  }
   if (!notifyMod) {
     return { status: 'not_configured', deliveredVia: null };
   }
@@ -946,13 +957,67 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   }
 
   let deliveryResult = null;
-  if (
+  // #331 — DNP volume control. Always record forensics; outbound notify is
+  // at most once per host window. Payload never decides mute.
+  let digestDecision = null;
+  if (outcome === 'denied_no_prompt_surface' && notify) {
+    try {
+      const dig = await import(
+        pathToFileURL(resolve(process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist'), 'defence', 'iron-dome', 'dnp-digest.js')).href
+      );
+      if (typeof dig.recordDnpDigestEvent === 'function') {
+        const context = notificationContext(sessionKey, id);
+        digestDecision = dig.recordDnpDigestEvent(
+          {
+            actionId: id,
+            sessionId: context.sessionId,
+            tool: safeToolName(toolName),
+            signals: safeSignalList(verdict?.signals),
+            severity: String(verdict?.severity ?? 'unknown'),
+          },
+          {
+            home: homedir(),
+            windowMs: notify.config?.dnpDigestWindowMs,
+          },
+        );
+      }
+    } catch {
+      digestDecision = null;
+    }
+  }
+
+  if (digestDecision?.action === 'coalesce') {
+    deliveryResult = {
+      deliveredVia: null,
+      coalesced: true,
+      digestCount: digestDecision.summary?.count,
+      attempts: [],
+    };
+  } else if (
     notify?.denialChannel &&
     typeof notify.deliverOperatorNotification === 'function' &&
     typeof notify.buildActionGuardOutcomeNotification === 'function'
   ) {
     try {
-      const notification = notify.buildActionGuardOutcomeNotification(pendingRow);
+      let notification = notify.buildActionGuardOutcomeNotification(pendingRow);
+      // Enrich first-of-window DNP with digest text when builder supports it.
+      if (
+        digestDecision?.action === 'notify' &&
+        digestDecision.summary &&
+        typeof notify.formatDnpDigestText === 'function'
+      ) {
+        notification = {
+          ...notification,
+          digestText: notify.formatDnpDigestText(digestDecision.summary),
+          digestCount: digestDecision.summary.count,
+        };
+      } else if (digestDecision?.action === 'notify' && digestDecision.summary) {
+        // Inline fallback so older dist still gets a rolled-up reason line.
+        notification = {
+          ...notification,
+          reason: `${notification.reason} [digest: ${digestDecision.summary.count} DNP in window]`,
+        };
+      }
       deliveryResult = await notify.deliverOperatorNotification(notification, {
         channels: [notify.denialChannel],
         timeoutMs: notify.config?.timeoutMs,

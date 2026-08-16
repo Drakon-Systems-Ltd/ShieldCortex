@@ -463,6 +463,30 @@ describe('Action Guard hook — prompt-surface rule', () => {
         expect(after).toEqual(before);
       });
     });
+
+    it('#331 coalesces later DNPs in the host window (one outbound page)', async () => {
+      writeNotifyConfig({ dnpDigestWindowMs: 900_000 });
+      const r1 = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
+      expect(decisionOf(r1.stdout).permissionDecision).toBe('deny');
+      expect(deliveries).toHaveLength(1);
+      const body1 = JSON.parse(deliveries[0].body) as Record<string, unknown>;
+      expect(body1.outcome).toBe('denied_no_prompt_surface');
+      // Digest text preferred when present
+      expect(String(body1.text)).toMatch(/DNP digest|denied_no_prompt_surface|BLOCKED/i);
+
+      const r2 = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
+      expect(decisionOf(r2.stdout).permissionDecision).toBe('deny');
+      // Still one webhook delivery — second DNP was coalesced.
+      expect(deliveries).toHaveLength(1);
+
+      const denialsPath = path.join(tempHome, '.shieldcortex', 'denials.jsonl');
+      expect(fs.existsSync(denialsPath)).toBe(true);
+      const rows = fs.readFileSync(denialsPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+      const finals = rows.filter((r) => r.outcome === 'denied_no_prompt_surface' && r.notify && (r.notify as { status?: string }).status !== 'pending');
+      expect(finals.length).toBeGreaterThanOrEqual(2);
+      expect(finals.some((r) => (r.notify as { status?: string }).status === 'delivered')).toBe(true);
+      expect(finals.some((r) => (r.notify as { status?: string }).status === 'coalesced')).toBe(true);
+    });
   });
 
   describe('degraded guard (WS2 fallback) follows the same rule', () => {
