@@ -74,8 +74,10 @@ describe('#284 deny-path forensics', () => {
     expect(row.signals).toEqual(expect.arrayContaining(['recursive-force-delete']));
     expect(row.signals).not.toEqual(['redacted-signal']);
 
-    // Face 1 wording — points at realtime audit, not vague "local audit"
-    expect(String(row.surface)).toMatch(/realtime-\*\.jsonl/);
+    // Face 1 wording — do not claim a sink that does not hold the command
+    expect(String(row.surface)).toMatch(/redacted action surface/i);
+    expect(String(row.surface)).not.toMatch(/realtime-\*\.jsonl/);
+    expect(String(row.surface)).toMatch(/not persisted/i);
 
     // Face 2 — origin on auto_deny/critical
     expect(row.origin).toBe('claude-code-hook');

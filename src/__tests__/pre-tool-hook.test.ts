@@ -428,4 +428,12 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
       fs.rmSync(emptyDist, { recursive: true, force: true });
     }
   });
+
+  it('#284 Face 1 does not claim the raw command lives in realtime-*.jsonl', () => {
+    const src = fs.readFileSync(HOOK_PATH, 'utf8');
+    expect(src).toMatch(/redacted action surface/i);
+    expect(src).not.toMatch(/unredacted command in ~\/\.shieldcortex\/audit\/realtime-/);
+    const surface = src.match(/redacted action surface[^`]*/)?.[0] ?? '';
+    expect(surface.toLowerCase()).not.toContain('realtime-');
+  });
 });
