@@ -13,8 +13,10 @@
 
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
-import { detectRelationConflicts, resolveConflict } from '../threat-graph/conflict.js';
+import { detectRelationConflicts, parseConflictResolution, resolveConflict } from '../threat-graph/conflict.js';
 import { projectToCompletion, rebuildThreatGraph } from '../threat-graph/projector.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
 
 beforeEach(() => initDatabase(':memory:'));
 afterEach(() => closeDatabase());
@@ -232,5 +234,50 @@ describe('Phase E — conflict resolution', () => {
     expect(() =>
       resolveConflict({ subjectId: a, predicate: 'uses', resolution: 'keep_one', keptObjectId: bogus }, 'michael', { nowMs: NOW + 1000 }),
     ).toThrow();
+  });
+
+  // #305 (sibling of the quarantine decision ledger): the `operator` argument
+  // is a caller-supplied label. Stamping it as source_type='user' +
+  // source_identifier=<label> minted arbitrary `user:*` ledger rows.
+  it('stamps the env-derived reviewer identity, not the caller label', () => {
+    const env = inferSourceFromEnvironment().source;
+    const a = entity('svc4');
+    const b = entity('b4');
+    const c = entity('c4');
+    triple(a, 'uses', b, 'cli:m', 0.95);
+    triple(a, 'uses', c, 'agent:x', 0.2);
+    detectRelationConflicts({ nowMs: NOW });
+    resolveConflict({ subjectId: a, predicate: 'uses', resolution: 'keep_both' }, 'victim-name', { nowMs: NOW + 1000 });
+
+    const audit = getDatabase().prepare(
+      "SELECT source_type, source_identifier, trust_score, source_attested, reason FROM defence_audit WHERE operation = 'review' ORDER BY id DESC LIMIT 1",
+    ).get() as {
+      source_type: string; source_identifier: string; trust_score: number;
+      source_attested: number | null; reason: string;
+    };
+
+    expect(audit.source_type).not.toBe('user');
+    expect(audit.source_identifier).not.toBe('victim-name');
+    expect(audit.source_type).toBe(env.type);
+    expect(audit.source_identifier).toBe(env.identifier);
+    expect(audit.source_attested).toBe(1);
+    expect(audit.trust_score).toBe(scoreSource(env).score);
+
+    // …and the label survives as the payload annotation.
+    expect(parseConflictResolution(audit.reason)?.reviewed_by).toBe('victim-name');
+  });
+
+  it('parses a legacy resolution payload written before the annotation field existed', () => {
+    const legacy = JSON.stringify({
+      kind: 'conflict_resolution',
+      subject_id: 1,
+      predicate: 'uses',
+      resolution: 'keep_both',
+      covered_object_ids: [2, 3],
+    });
+    const parsed = parseConflictResolution(legacy);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.covered_object_ids).toEqual([2, 3]);
+    expect(parsed!.reviewed_by).toBeUndefined();
   });
 });

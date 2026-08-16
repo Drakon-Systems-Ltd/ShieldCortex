@@ -15,8 +15,10 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { projectToCompletion } from '../threat-graph/projector.js';
 import { runRiskSweep } from '../threat-graph/risk.js';
-import { resetSourceRisk } from '../threat-graph/risk.js';
+import { parseRiskReset, resetSourceRisk } from '../threat-graph/risk.js';
 import { checkThreatGraph } from '../cli/doctor.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
 
 function insertBlock(identifier = 'jarvis', ts = '2026-08-01T00:00:00.000Z'): void {
   getDatabase().prepare(`
@@ -57,8 +59,36 @@ describe('resetSourceRisk', () => {
       "SELECT operation, source_type, source_identifier, reason FROM defence_audit WHERE operation = 'review' ORDER BY id DESC LIMIT 1"
     ).get() as { operation: string; source_type: string; source_identifier: string; reason: string };
     expect(audit.operation).toBe('review');
-    expect(audit.source_identifier).toBe('michael');
     expect(audit.reason).toContain('agent:jarvis');
+    // The operator label is an ANNOTATION in the payload, never the identity.
+    expect(audit.reason).toContain('michael');
+  });
+
+  // #305 (sibling of the quarantine decision ledger): `reviewedBy` is a
+  // caller-supplied label. Stamping it as source_type='user' +
+  // source_identifier=<label> minted arbitrary `user:*` ledger rows.
+  it('stamps the env-derived reviewer identity, not the caller label', () => {
+    const env = inferSourceFromEnvironment().source;
+    insertBlock();
+    projectToCompletion();
+    resetSourceRisk('agent:jarvis', { reviewedBy: 'victim-name' });
+
+    const audit = getDatabase().prepare(
+      "SELECT source_type, source_identifier, trust_score, source_attested FROM defence_audit WHERE operation = 'review' ORDER BY id DESC LIMIT 1"
+    ).get() as { source_type: string; source_identifier: string; trust_score: number; source_attested: number | null };
+
+    expect(audit.source_type).not.toBe('user');
+    expect(audit.source_identifier).not.toBe('victim-name');
+    expect(audit.source_type).toBe(env.type);
+    expect(audit.source_identifier).toBe(env.identifier);
+    expect(audit.source_attested).toBe(1);
+    expect(audit.trust_score).toBe(scoreSource(env).score);
+
+    // …and the label survives as the payload annotation.
+    const payload = parseRiskReset((getDatabase().prepare(
+      "SELECT reason FROM defence_audit WHERE operation = 'review' ORDER BY id DESC LIMIT 1"
+    ).get() as { reason: string }).reason);
+    expect(payload?.reviewed_by).toBe('victim-name');
   });
 
   it('reports not-found for an unknown source without writing risk state', () => {

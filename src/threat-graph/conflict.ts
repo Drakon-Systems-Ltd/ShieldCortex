@@ -23,7 +23,9 @@
 
 import type { Database } from 'better-sqlite3';
 import { getDatabase } from '../database/init.js';
-import { logAudit } from '../defence/audit/logger.js';
+import { attestedFlag, logAudit } from '../defence/audit/logger.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
 
 /**
  * Single-valued predicates: a subject should have exactly one of these. A
@@ -131,6 +133,10 @@ export interface ConflictResolution {
   resolution: 'keep_one' | 'keep_both' | 'reject_both';
   kept_object_id?: number;
   covered_object_ids: number[];
+  /** Operator ANNOTATION only — the ledger identity is the row's env-derived
+   * source_type/source_identifier, never this string. Absent on rows written
+   * before the field existed. */
+  reviewed_by?: string;
 }
 
 export function parseConflictResolution(reason: string | null | undefined): ConflictResolution | null {
@@ -157,6 +163,7 @@ export function parseConflictResolution(reason: string | null | undefined): Conf
     resolution,
     kept_object_id: typeof p.kept_object_id === 'number' ? p.kept_object_id : undefined,
     covered_object_ids: covered,
+    reviewed_by: typeof p.reviewed_by === 'string' ? safeLabel(p.reviewed_by) : undefined,
   };
 }
 
@@ -462,15 +469,22 @@ export function resolveConflict(
       resolution: input.resolution,
       kept_object_id: input.resolution === 'keep_one' ? input.keptObjectId : undefined,
       covered_object_ids: covered,
+      reviewed_by: safeLabel(operator) || undefined,
     };
+    // Reviewer identity is env-derived, never the `operator` label — that
+    // string is supplied by the caller, and stamping it would mint
+    // `user:<anything>` ledger rows. Env-derived → attested by construction;
+    // the label survives as the payload's `reviewed_by` annotation. (Same rule
+    // as the quarantine decision ledger, src/threat-graph/decision.ts.)
+    const reviewer = inferSourceFromEnvironment().source;
     try {
       logAudit({
         memory_id: null,
         project: null,
         timestamp: nowIso,
-        source_type: 'user',
-        source_identifier: operator,
-        trust_score: 0.9,
+        source_type: reviewer.type,
+        source_identifier: reviewer.identifier,
+        trust_score: scoreSource(reviewer).score,
         sensitivity_level: 'INTERNAL',
         firewall_result: 'ALLOW',
         operation: 'review',
@@ -480,6 +494,7 @@ export function resolveConflict(
         reason: JSON.stringify(payload),
         fragmentation_score: null,
         pipeline_duration_ms: null,
+        source_attested: attestedFlag(true),
       });
     } catch {
       // Recording the decision must never break the resolution action itself.

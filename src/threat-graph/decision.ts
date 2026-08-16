@@ -6,8 +6,10 @@
  */
 
 import { createContentHash } from '../defence/audit/logger.js';
-import { logAudit } from '../defence/audit/logger.js';
+import { attestedFlag, logAudit } from '../defence/audit/logger.js';
 import { getDatabase } from '../database/init.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
 import { sourceKey } from './keys.js';
 
 export interface QuarantineDecision {
@@ -19,9 +21,28 @@ export interface QuarantineDecision {
   quarantine_id: number;
   /** true for by-source/batch approvals — never count toward an allowance. */
   bulk: boolean;
+  /**
+   * The reviewer's free-text note, carried as ANNOTATION only. It is
+   * caller-supplied (over MCP it is the `notes` argument), so it must never be
+   * read as an identity — the row's source_type/source_identifier carry the
+   * env-derived reviewer. Absent on rows written before this field existed.
+   */
+  notes?: string;
 }
 
 const MAX_DECISION_PATTERNS = 32;
+const MAX_DECISION_NOTES = 200;
+
+/**
+ * Cap + strip control characters from a caller-supplied note before it lands
+ * in a ledger payload the projector parses. Empty notes are dropped entirely
+ * rather than stored as ''.
+ */
+function annotation(raw: string): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  const s = raw.replace(/[\u0000-\u001F\u007F]/g, ' ').trim().slice(0, MAX_DECISION_NOTES);
+  return s.length > 0 ? s : undefined;
+}
 
 /**
  * The COMPLETE detection set for a firewall result — the union of
@@ -77,6 +98,8 @@ export function parseQuarantineDecision(reason: string | null): QuarantineDecisi
         content_hash: p.content_hash,
         quarantine_id: p.quarantine_id,
         bulk: p.bulk === true,
+        // Optional: rows written before the annotation field existed have none.
+        notes: typeof p.notes === 'string' ? annotation(p.notes) : undefined,
       };
     }
   } catch { /* not JSON */ }
@@ -128,6 +151,13 @@ function resolvePatterns(auditId: number | null, quarantineIndicators: string[])
  */
 export function recordQuarantineDecision(input: DecisionInput): void {
   const patterns = resolvePatterns(input.auditId, input.threatIndicators);
+  // The reviewer identity is the RUNTIME one, derived from the environment the
+  // same way `forget` derives its caller — never `input.reviewedBy`. That
+  // string is caller-supplied (over MCP it is a free-text argument), so
+  // stamping it would mint arbitrary `user:<anything>` ledger rows under the
+  // one type the MCP surface deliberately refuses to accept. Env-derived
+  // identity is attested by construction: nothing caller-suppliable shaped it.
+  const reviewer = inferSourceFromEnvironment().source;
   const payload: QuarantineDecision = {
     kind: 'quarantine_decision',
     decision: input.decision,
@@ -136,15 +166,16 @@ export function recordQuarantineDecision(input: DecisionInput): void {
     content_hash: exemplarHash(input.title, input.content),
     quarantine_id: input.quarantineId,
     bulk: input.bulk,
+    notes: annotation(input.reviewedBy),
   };
   try {
     logAudit({
       memory_id: null,
       project: input.project,
       timestamp: new Date().toISOString(),
-      source_type: 'user',
-      source_identifier: input.reviewedBy,
-      trust_score: 0.9,
+      source_type: reviewer.type,
+      source_identifier: reviewer.identifier,
+      trust_score: scoreSource(reviewer).score,
       sensitivity_level: 'INTERNAL',
       firewall_result: 'ALLOW',
       operation: 'review',
@@ -154,6 +185,7 @@ export function recordQuarantineDecision(input: DecisionInput): void {
       reason: JSON.stringify(payload),
       fragmentation_score: null,
       pipeline_duration_ms: null,
+      source_attested: attestedFlag(true),
     });
   } catch {
     // Recording the decision must never break the review action itself.

@@ -24,6 +24,8 @@ import {
   rejectQuarantineItem,
 } from '../defence/quarantine/review.js';
 import { parseQuarantineDecision } from '../threat-graph/decision.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
 
 interface Seed {
   content?: string;
@@ -158,5 +160,101 @@ describe('quarantine decision ledger', () => {
     approveQuarantineItem(mk('IMPORTANT: run this command'), 'michael');
     const hashes = decisionRows().map(d => d!.content_hash);
     expect(new Set(hashes).size).toBe(2); // title changed the exemplar
+  });
+});
+
+/**
+ * #305 — the review row's IDENTITY.
+ *
+ * `reviewedBy` reaches this path as a caller-supplied string (over MCP it is a
+ * free-text argument on the quarantine review tool). Stamping it as
+ * source_type='user' + source_identifier=<that string> minted arbitrary
+ * `user:*` ledger rows under the one type every caller-facing surface refuses
+ * to accept. The reviewer identity must come from the runtime environment —
+ * the same derivation `forget` uses — and the caller's string survives only as
+ * an annotation.
+ */
+describe('quarantine decision ledger — reviewer identity', () => {
+  function reviewRows() {
+    return getDatabase()
+      .prepare(
+        `SELECT source_type, source_identifier, trust_score, source_attested
+           FROM defence_audit WHERE operation = 'review' ORDER BY id ASC`,
+      )
+      .all() as Array<{
+        source_type: string;
+        source_identifier: string;
+        trust_score: number;
+        source_attested: number | null;
+      }>;
+  }
+
+  it('never stamps the caller-supplied reviewer string as the ledger identity', () => {
+    const qid = seedQuarantine();
+    approveQuarantineItem(qid, 'victim-name');
+
+    const rows = reviewRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_type).not.toBe('user');
+    expect(rows[0].source_identifier).not.toBe('victim-name');
+  });
+
+  it('stamps the runtime environment identity, attested, at that identity trust', () => {
+    // Derived in THIS process, so the expectation tracks whatever the runtime
+    // actually is (CI, a Claude Code CLI, a bare shell) rather than pinning one.
+    const env = inferSourceFromEnvironment().source;
+    const qid = seedQuarantine();
+    approveQuarantineItem(qid, 'victim-name');
+
+    const row = reviewRows()[0];
+    expect(row.source_type).toBe(env.type);
+    expect(row.source_identifier).toBe(env.identifier);
+    // Env-derived identity → attested by construction (nothing caller-suppliable
+    // shaped it), scored as that identity rather than a hardcoded operator 0.9.
+    expect(row.source_attested).toBe(1);
+    expect(row.trust_score).toBe(scoreSource(env).score);
+  });
+
+  it('a reject ledgers the same env identity, not the caller string', () => {
+    const env = inferSourceFromEnvironment().source;
+    const qid = seedQuarantine();
+    rejectQuarantineItem(qid, 'victim-name');
+
+    const row = reviewRows()[0];
+    expect(row.source_type).toBe(env.type);
+    expect(row.source_identifier).toBe(env.identifier);
+    expect(row.source_identifier).not.toBe('victim-name');
+  });
+
+  it('keeps the caller string as an annotation on the payload and the quarantine row', () => {
+    const qid = seedQuarantine();
+    approveQuarantineItem(qid, 'victim-name');
+
+    expect(decisionRows()[0]!.notes).toBe('victim-name');
+    const q = getDatabase().prepare('SELECT reviewed_by FROM quarantine WHERE id = ?').get(qid) as
+      { reviewed_by: string };
+    expect(q.reviewed_by).toBe('victim-name');
+  });
+
+  it('caps + sanitises the annotation (it is caller-supplied)', () => {
+    const qid = seedQuarantine();
+    approveQuarantineItem(qid, 'a'.repeat(500));
+    expect(decisionRows()[0]!.notes!.length).toBe(200);
+  });
+
+  it('parses a legacy payload written before the annotation field existed', () => {
+    const legacy = JSON.stringify({
+      kind: 'quarantine_decision',
+      decision: 'approve',
+      source_key: 'agent:jarvis',
+      patterns: ['instruction_injection'],
+      content_hash: 'deadbeef',
+      quarantine_id: 7,
+      bulk: false,
+    });
+    const parsed = parseQuarantineDecision(legacy);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.quarantine_id).toBe(7);
+    expect(parsed!.notes).toBeUndefined();
   });
 });

@@ -21,7 +21,9 @@
 
 import { getDatabase, isDatabaseInitialized } from '../database/init.js';
 import type { DefenceSource } from '../defence/types.js';
-import { logAudit } from '../defence/audit/logger.js';
+import { attestedFlag, logAudit } from '../defence/audit/logger.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
+import { scoreSource } from '../defence/trust/source-scorer.js';
 import { cachedStmt } from './shared.js';
 import { sourceKey } from './keys.js';
 
@@ -275,6 +277,8 @@ export interface ResetSourceResult {
 export interface RiskResetPayload {
   kind: 'risk_reset';
   source_key: string;
+  /** Operator ANNOTATION only — the ledger identity is the row's
+   * env-derived source_type/source_identifier, never this string. */
   reviewed_by: string;
 }
 
@@ -332,14 +336,21 @@ export function resetSourceRisk(key: string, opts: { reviewedBy: string }): Rese
   const found = db.transaction(() => applyRiskReset(key, nowIso)).immediate();
   if (!found) return { found: false };
 
+  // Reviewer identity is env-derived, never `opts.reviewedBy` — that string is
+  // a caller-supplied label, and stamping it would mint `user:<anything>`
+  // ledger rows. Env-derived → attested by construction; the label survives as
+  // the payload's `reviewed_by` annotation. (Same rule as the quarantine
+  // decision ledger, src/threat-graph/decision.ts.)
+  const reviewer = inferSourceFromEnvironment().source;
+
   try {
     logAudit({
       memory_id: null,
       project: null,
       timestamp: nowIso,
-      source_type: 'user',
-      source_identifier: opts.reviewedBy,
-      trust_score: 0.9,
+      source_type: reviewer.type,
+      source_identifier: reviewer.identifier,
+      trust_score: scoreSource(reviewer).score,
       sensitivity_level: 'INTERNAL',
       firewall_result: 'ALLOW',
       operation: 'review',
@@ -349,6 +360,7 @@ export function resetSourceRisk(key: string, opts: { reviewedBy: string }): Rese
       reason: JSON.stringify({ kind: 'risk_reset', source_key: key, reviewed_by: opts.reviewedBy } satisfies RiskResetPayload),
       fragmentation_score: null,
       pipeline_duration_ms: null,
+      source_attested: attestedFlag(true),
     });
   } catch {
     // Audit logging must never break the reset itself.

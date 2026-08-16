@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **Caller-declared operator identity no longer reaches the ledger (#305 / #306).** The REST `/v1/scan` and `/v1/scan/batch` surfaces no longer accept a caller-declared `user` source type — it now takes the same silent coercion to `api` as any other unrecognised type, matching what MCP has always enforced and what an HTTP request honestly is. Separately, the quarantine decision ledger, source-risk reset, and relation-conflict resolution now stamp the reviewer identity from the runtime environment (the same derivation `forget` uses) instead of a caller-supplied review label. The label survives as a payload annotation and on `quarantine.reviewed_by`; it is no longer an audit identity. Existing ledger rows parse unchanged.
+
 ## [4.53.0] - 2026-08-15
 
 **Minor — attestation write-path + allowlist batch review + threat-graph projector heal on upgrade.**

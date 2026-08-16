@@ -60,6 +60,21 @@ describe('Fix #13 — /api/v1/scan source normalisation + tamper audit', () => {
       expect(result.identifier).toBe('mallory');
     });
 
+    // #306 — an HTTP request is never a literal human typing, and 'user' is the
+    // one type that scores 1.0, clears the auto-quarantine band and gates
+    // RESTRICTED reads. It is not whitelisted, so it takes the same silent
+    // unknown-type coercion to 'api' as any other unrecognised value.
+    it('does not whitelist "user"', () => {
+      expect(__test__.ALLOWED_DEFENCE_SOURCE_TYPES).not.toContain('user');
+    });
+
+    it('coerces a caller-declared "user" type to "api", identifier preserved', () => {
+      const result = normaliseDefenceSource({ type: 'user', identifier: 'michael' });
+      expect(result.type).toBe('api');
+      expect(result.type).not.toBe('user');
+      expect(result.identifier).toBe('michael');
+    });
+
     it('falls back to default identifier when missing', () => {
       const result = normaliseDefenceSource({ type: 'api' });
       expect(result.identifier).toBe('rest-api');
@@ -125,6 +140,27 @@ describe('Fix #13 — /api/v1/scan source normalisation + tamper audit', () => {
       expect(attackerRows.length).toBe(0);
     });
 
+    it('never audits a caller-declared source.type "user" as user (#306)', () => {
+      const { res } = createResponseMock();
+      handleV1Scan(
+        makeReq({
+          content: 'hello world',
+          title: 'Test',
+          source: { type: 'user', identifier: 'rest-claims-human' },
+        }),
+        res,
+      );
+
+      const rows = queryAuditLogs({ source: 'api', limit: 50 })
+        .filter(row => row.source_identifier === 'rest-claims-human');
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      expect(rows[0].source_type).toBe('api');
+
+      // The declared 'user' type never reached the ledger.
+      const userRows = queryAuditLogs({ source: 'user', limit: 50 });
+      expect(userRows.length).toBe(0);
+    });
+
     it('truncates oversize source.identifier in the audit row', () => {
       const longId = 'b'.repeat(__test__.MAX_SOURCE_IDENTIFIER_LENGTH + 75);
       const { res } = createResponseMock();
@@ -163,6 +199,25 @@ describe('Fix #13 — /api/v1/scan source normalisation + tamper audit', () => {
 
       expect(rows.length).toBeGreaterThanOrEqual(1);
       expect(rows[0].source_type).toBe('api');
+    });
+
+    it('never audits a caller-declared source.type "user" as user (#306)', () => {
+      const { res } = createResponseMock();
+      handleV1ScanBatch(
+        makeReq({
+          items: [{ content: 'item one', title: 'A' }],
+          source: { type: 'user', identifier: 'batch-claims-human' },
+        }),
+        res,
+      );
+
+      const rows = queryAuditLogs({ source: 'api', limit: 50 })
+        .filter(row => row.source_identifier === 'batch-claims-human');
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      expect(rows[0].source_type).toBe('api');
+
+      const userRows = queryAuditLogs({ source: 'user', limit: 50 });
+      expect(userRows.length).toBe(0);
     });
   });
 

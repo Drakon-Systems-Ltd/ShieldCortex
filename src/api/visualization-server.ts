@@ -64,8 +64,17 @@ const PORT = process.env.PORT || 3001;
 // controlled `source.type` values pollute Iron Dome dashboards and audit
 // queries. Normalise unknown values to 'api' silently (defence in depth) and
 // cap identifier length to avoid log-explosion attacks.
+//
+// 'user' is deliberately absent (#306). An HTTP request is never a literal
+// human typing — the honest identity for this surface is 'api'/'web' — and
+// 'user' is the one type that scores 1.0, clears the auto-quarantine band and
+// gates RESTRICTED reads. The MCP surface already refuses a declared 'user'
+// (see sourceParam in src/server.ts); REST honouring it was the same
+// self-attestation hole through a different door. It is now an unknown type,
+// so the fallback below coerces it to 'api' — no rejection, same as any other
+// unrecognised value.
 const ALLOWED_DEFENCE_SOURCE_TYPES: ReadonlyArray<DefenceSource['type']> = [
-  'user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response',
+  'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response',
 ] as const;
 const MAX_SOURCE_IDENTIFIER_LENGTH = 200;
 
