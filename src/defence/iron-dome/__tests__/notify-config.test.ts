@@ -117,6 +117,14 @@ describe('normaliseNotifyConfig — timeoutMs bounds', () => {
     expect(normaliseNotifyConfig({ enabled: true, timeoutMs: NaN }).timeoutMs).toBe(DEFAULT_NOTIFY_CONFIG.timeoutMs);
   });
 
+  it('#331 defaults dnpDigestWindowMs to 15m and accepts 0 disable', () => {
+    expect(normaliseNotifyConfig({ enabled: true }).dnpDigestWindowMs).toBe(DEFAULT_NOTIFY_CONFIG.dnpDigestWindowMs);
+    expect(normaliseNotifyConfig({ enabled: true, dnpDigestWindowMs: 0 }).dnpDigestWindowMs).toBe(0);
+    expect(normaliseNotifyConfig({ enabled: true, dnpDigestWindowMs: 120_000 }).dnpDigestWindowMs).toBe(120_000);
+    expect(normaliseNotifyConfig({ enabled: true, dnpDigestWindowMs: 'bypassPermissions' }).dnpDigestWindowMs)
+      .toBe(DEFAULT_NOTIFY_CONFIG.dnpDigestWindowMs);
+  });
+
   it('honours an in-range override', () => {
     expect(normaliseNotifyConfig({ enabled: true, timeoutMs: 3_000 }).timeoutMs).toBe(3_000);
   });

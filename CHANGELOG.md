@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **#331 loud DNP digest** — host-local time-window rollup for `denied_no_prompt_surface` notifies. First DNP in the window pages; later ones coalesce. `actionGuard.notify.dnpDigestWindowMs` (default 15m, `0` = legacy every-event). Payload / `permission_mode` never mute. #310 stays design (no approval cards).
+
 ## [4.54.1] - 2026-08-16
 
 **Patch — board grind + instruction-floor GHSA.**

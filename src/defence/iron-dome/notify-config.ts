@@ -19,6 +19,11 @@
  * degrades to "no configured channel" rather than a spoofed one.
  */
 
+import {
+  DEFAULT_DNP_DIGEST_WINDOW_MS,
+  normaliseDnpDigestWindowMs,
+} from './dnp-digest.js';
+
 export interface NotifyConfig {
   /** Master switch. FALSE by default — the whole transport is opt-in. */
   enabled: boolean;
@@ -44,6 +49,14 @@ export interface NotifyConfig {
    *  truthy-but-not-true value must read as "not opted in".
    *  See openclaw-approval-channel.ts. */
   openclaw: boolean;
+  /**
+   * #331 — host-local DNP digest window (ms).
+   * - default 15m
+   * - `0` disables digest (every DNP notifies, legacy volume)
+   * - only finite values in [60s, 24h] accepted; junk → default
+   * Payload / permission_mode never appear here and never mute.
+   */
+  dnpDigestWindowMs: number;
 }
 
 const TIMEOUT_MIN_MS = 500;
@@ -59,6 +72,7 @@ export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
   enabled: false,
   timeoutMs: 10_000,
   openclaw: false,
+  dnpDigestWindowMs: DEFAULT_DNP_DIGEST_WINDOW_MS,
 };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -136,6 +150,9 @@ export function normaliseNotifyConfig(raw: unknown): NotifyConfig {
     // Strict true for the same reason as `enabled`: this arms a channel that
     // raises native gateway approval cards. Junk degrades to "not opted in".
     openclaw: raw.openclaw === true,
+    // #331 — volume window. Explicit 0 disables. Junk → default 15m.
+    // Never derived from permission_mode or any payload field.
+    dnpDigestWindowMs: normaliseDnpDigestWindowMs(raw.dnpDigestWindowMs),
   };
 
   const webhookUrl = normaliseWebhookUrl(raw.webhookUrl);
