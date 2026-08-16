@@ -52,13 +52,16 @@ describe('resetSourceRisk', () => {
       .get() as { s: number | null };
     expect(node.s ?? 0).toBe(0);
 
-    // Recorded as an operator review event.
+    // Recorded as an operator review event with a host-derived identity (#305):
+    // the caller-supplied reviewedBy string is annotation, never a user: row.
     const audit = db.prepare(
       "SELECT operation, source_type, source_identifier, reason FROM defence_audit WHERE operation = 'review' ORDER BY id DESC LIMIT 1"
     ).get() as { operation: string; source_type: string; source_identifier: string; reason: string };
     expect(audit.operation).toBe('review');
-    expect(audit.source_identifier).toBe('michael');
+    expect(audit.source_type).not.toBe('user');
+    expect(audit.source_identifier).not.toBe('michael');
     expect(audit.reason).toContain('agent:jarvis');
+    expect((JSON.parse(audit.reason) as { reviewed_by?: string }).reviewed_by).toBe('michael');
   });
 
   it('reports not-found for an unknown source without writing risk state', () => {

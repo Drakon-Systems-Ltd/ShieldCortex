@@ -24,6 +24,7 @@
 import type { Database } from 'better-sqlite3';
 import { getDatabase } from '../database/init.js';
 import { logAudit } from '../defence/audit/logger.js';
+import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
 
 /**
  * Single-valued predicates: a subject should have exactly one of these. A
@@ -131,6 +132,8 @@ export interface ConflictResolution {
   resolution: 'keep_one' | 'keep_both' | 'reject_both';
   kept_object_id?: number;
   covered_object_ids: number[];
+  /** Annotation only — never the audit-row identity (#305). */
+  reviewed_by?: string;
 }
 
 export function parseConflictResolution(reason: string | null | undefined): ConflictResolution | null {
@@ -462,14 +465,17 @@ export function resolveConflict(
       resolution: input.resolution,
       kept_object_id: input.resolution === 'keep_one' ? input.keptObjectId : undefined,
       covered_object_ids: covered,
+      reviewed_by: operator,
     };
     try {
+      // #305 — operator string is annotation; row identity is host-derived.
+      const reviewer = inferSourceFromEnvironment().source;
       logAudit({
         memory_id: null,
         project: null,
         timestamp: nowIso,
-        source_type: 'user',
-        source_identifier: operator,
+        source_type: reviewer.type,
+        source_identifier: reviewer.identifier,
         trust_score: 0.9,
         sensitivity_level: 'INTERNAL',
         firewall_result: 'ALLOW',

@@ -53,6 +53,12 @@ describe('Fix #13 — /api/v1/scan source normalisation + tamper audit', () => {
       }
     });
 
+    it('#306: coerces caller-declared type "user" to "api" (user is host-attested only)', () => {
+      const result = normaliseDefenceSource({ type: 'user', identifier: 'victim-name' });
+      expect(result.type).toBe('api');
+      expect(result.identifier).toBe('victim-name');
+    });
+
     it('normalises unknown type to "api"', () => {
       const result = normaliseDefenceSource({ type: 'attacker', identifier: 'mallory' });
       expect(result.type).toBe('api');
@@ -123,6 +129,26 @@ describe('Fix #13 — /api/v1/scan source normalisation + tamper audit', () => {
       // the audit table.
       const attackerRows = queryAuditLogs({ source: 'attacker' as never, limit: 50 });
       expect(attackerRows.length).toBe(0);
+    });
+
+    it('#306: audits a type "user" claim as source_type api, never user', () => {
+      const { res } = createResponseMock();
+      handleV1Scan(
+        makeReq({
+          content: 'hello world',
+          title: 'Test',
+          source: { type: 'user', identifier: 'victim-name' },
+        }),
+        res,
+      );
+
+      const rows = queryAuditLogs({ source: 'api', limit: 50 })
+        .filter(row => row.source_identifier === 'victim-name');
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      expect(rows[0].source_type).toBe('api');
+
+      // No audit row was minted under the caller-claimed user identity.
+      expect(queryAuditLogs({ source: 'user', limit: 50 }).length).toBe(0);
     });
 
     it('truncates oversize source.identifier in the audit row', () => {

@@ -59,13 +59,16 @@ import { classifySqlQuery } from './sql-classifier.js';
 
 const PORT = process.env.PORT || 3001;
 
-// ── Defence source whitelist (Fix #13) ──────────────────────────────────────
+// ── Defence source whitelist (Fix #13 / #306) ───────────────────────────────
 // The DefenceSource.type field is part of the threat-model surface — caller-
 // controlled `source.type` values pollute Iron Dome dashboards and audit
 // queries. Normalise unknown values to 'api' silently (defence in depth) and
 // cap identifier length to avoid log-explosion attacks.
+//
+// `user` is intentionally omitted: it is the top of the trust ladder and must
+// never be self-declarable. MCP already rejects it; REST used to honour it.
 const ALLOWED_DEFENCE_SOURCE_TYPES: ReadonlyArray<DefenceSource['type']> = [
-  'user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response',
+  'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response',
 ] as const;
 const MAX_SOURCE_IDENTIFIER_LENGTH = 200;
 
