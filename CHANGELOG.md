@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 ### Security
 
 - **Caller-supplied `user:` identity (#305 / #306)** — quarantine / risk-reset / conflict review rows no longer stamp MCP `notes` or dashboard `reviewedBy` as a `user:` provenance identity. The row uses the inferred runtime source; the caller string stays annotation. REST `/v1/scan` now coerces `type: 'user'` to `api`, matching the MCP reject.
+- **Instruction-floor morphology (GHSA-hx2c-rqg7-ggpm)** — sync override-noun and prompt-extraction tables cover the documented near-twin class. `scan` remains a regex/morphology floor, not a semantic classifier. #204 false-positive floor unchanged. Public tests are must-catch + FP-floor anchors only.
 
 ## [4.54.0] - 2026-08-16
 
