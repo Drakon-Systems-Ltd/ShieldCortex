@@ -6,6 +6,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.54.0] - 2026-08-16
+
+**Minor — attestation Phases 3–5: remaining callers, OpenClaw realtime record-only, sentinel + doctor coverage.**
+
+Three landings on top of 4.53.0 (Phases 1–2 already shipped there), published together so hosts on `shieldcortex update` get a coherent train:
+
+1. **Attestation Phase 3 (#315)** — remaining `runDefencePipeline` callers plumbed with polarity from provenance. System-literal/composed identities (CLI scan, X-Ray memory scanner, iron-dome gate/gateway with optional attested + fail-safe NULL) stamp when the path is host-derived. REST `/v1/scan`, universal bridge, and langchain stay **unplumbed (NULL, not false)** — deliberate #308 mute-lever rule, locked by source-pin tests.
+2. **Attestation Phase 4 (#316)** — record-only attestation on the OpenClaw realtime plane. Also includes a realtime JSONL wedge fix (non-object line can no longer stall projection).
+3. **Attestation Phase 5 (#322)** — end-to-end sentinel (attested BLOCK → lease projector → `source_risk` → next-scan `risk_modifier`, with unattested inverse) and doctor **Attestation coverage** metric (% non-NULL over 28d with attested/unattested/unplumbed split). Stale-process warn keys on **known-hook rows only** so never-attest-only installs stay PASS at 0%.
+
+### Behaviour / ops notes (read before flipping knobs)
+
+- **`threatGraph.trustModifier` stays advisory by default.** Do **not** flip to `enforce` in or after this cut. Attested rows continue accruing real risk under advisory soak (#182). Measure FP before any enforce discussion.
+- Historic `source_attested` is **never backfilled** (NULL→1 is a trust-elevation hole; NULL→0 adds mute-lever surface). Coverage climbs only as upgraded processes write new rows.
+- No SDK / client API change — TS SDK and PyPI stay on **0.3.0**.
+- Hosts pick this up with `shieldcortex update` (restart long-running MCP/gateway/dashboard processes so writers load the new build).
+- **Not in this cut:** #321 sync instruction-floor tighten (disclosure hold / GHSA draft); #320 lease-runner version-mismatch risk amnesty (design, separate).
+
+### Added
+
+- **Phase 3 caller plumbing** — CLI scan, X-Ray, iron-dome gate/gateway attested paths; WithVerify option forwarding.
+- **Phase 4 OpenClaw realtime record-only attestation.**
+- **Phase 5 e2e attestation sentinel** + doctor `Attestation coverage` check.
+- **Structural never-attest pins** on REST / langchain / universal (NULL forever).
+
+### Fixed
+
+- **Realtime projector wedge** — non-object JSONL line can no longer stall projection (#316 follow-on).
+- **Doctor attestation stale-process false-warn** — never-attest-only busy windows no longer permanent WARN; hook-only discriminator (#322 review fix).
+- **Iron-dome advisory rows** not attested; structural never-attest pins (#315 follow-on).
+
+### Security
+
+- Attested stamps remain host-path / system-derived, not caller-supplied free labels.
+- No-backfill decision recorded at the migration site and pinned by test.
+- trustModifier default remains `advisory`.
+
+### PRs
+
+- #315 attestation Phase 3 remaining callers
+- #316 attestation Phase 4 OpenClaw realtime record-only (+ JSONL wedge fix)
+- #322 attestation Phase 5 sentinel + doctor coverage
+
 ## [4.53.0] - 2026-08-15
 
 **Minor — attestation write-path + allowlist batch review + threat-graph projector heal on upgrade.**
