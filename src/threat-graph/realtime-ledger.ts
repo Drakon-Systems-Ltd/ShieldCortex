@@ -187,7 +187,16 @@ export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeR
 
       let row: Record<string, unknown>;
       try {
-        row = JSON.parse(item.raw) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(item.raw);
+        // JSON.parse('null') / '42' / '"x"' / '[]' all SUCCEED — a non-object
+        // line used to throw on `row.type` OUTSIDE this catch, rolling back
+        // the transaction with the cursor unadvanced and permanently wedging
+        // the projection on one hostile or accidental line (this file is
+        // same-user-writable). Non-objects are malformed rows: record + skip.
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('non-object row');
+        }
+        row = parsed as Record<string, unknown>;
       } catch {
         result.errors.push(`${item.file}:${item.line}: malformed JSON`);
         continue;

@@ -638,6 +638,11 @@ export async function runProjectorWithLease(options?: LeaseRunOptions): Promise<
     const stored = (db.prepare('SELECT projector_version FROM threat_graph_state WHERE id = 1')
       .get() as { projector_version: number }).projector_version;
     if (stored !== PROJECTOR_VERSION) {
+      // KNOWN GAP (#320): unlike rebuildThreatGraph, this path has no risk
+      // snapshot/reseed, so risk from retention-purged evidence lapses on a
+      // version bump (bounded by decay — ~1% on default retention). Not fixed
+      // inline: the batched cross-tick replay below makes a post-replay reseed
+      // double-count; see the issue for the design options.
       clearGraph();
     }
 

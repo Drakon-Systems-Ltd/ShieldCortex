@@ -90,6 +90,27 @@ describe('phase 4 — realtime attestation is record-only', () => {
     }
   });
 
+  it('a literal null / non-object JSONL line cannot wedge the projection', () => {
+    // JSON.parse('null') SUCCEEDS, so the malformed-JSON catch never fired and
+    // `row.type` then threw outside it — rolling back the transaction, leaving
+    // the cursor unadvanced, and permanently wedging the realtime projection
+    // on one hostile or accidental line (this file is same-user-writable).
+    // Non-object parses must count as malformed and be skipped like bad JSON.
+    fs.writeFileSync(
+      path.join(dir, 'realtime-2026-08-16.jsonl'),
+      ['null', '42', '"threat"', '[]', JSON.stringify({ ...base })].join('\n') + '\n',
+    );
+    const result = projectRealtimeLedger({ dir });
+    // The real row after the garbage still projects…
+    expect(result.eventNodes).toBe(1);
+    // …the garbage is recorded as malformed…
+    expect(result.errors.filter(e => e.includes('malformed')).length).toBe(4);
+    // …and the cursor is PAST the garbage (no permanent wedge).
+    expect(result.cursor).toBe('realtime-2026-08-16.jsonl:5');
+    // A second run is dry — nothing re-processes.
+    expect(projectRealtimeLedger({ dir }).processed).toBe(0);
+  });
+
   it('the risk model never reads event-attr attestation (source pin)', () => {
     // attrs.attested (row-level writer claim on event nodes) and
     // source_risk.attested (sweep-derived from defence_audit) are DIFFERENT
