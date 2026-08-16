@@ -567,7 +567,7 @@ export async function checkAttestationCoverage(
         status: 'warn',
         message: `${hookCounts.total} hook-captured audit rows in the last ${windowDays} days and none carries attestation — ` +
           'these writers attest in the current build, so still-running pre-upgrade processes are writing them',
-        fix: 'restart long-running ShieldCortex processes (MCP server, OpenClaw gateway, dashboard) so they load the current build',
+        fix: 'These writers attest in the current build — still-running pre-upgrade processes are writing them. Run `openclaw gateway restart` and restart MCP / dashboard so they load the current build',
       };
     }
 

@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Doctor `$` lines are real commands** — gateway restart prints `openclaw gateway restart`, never English `restart OpenClaw gateway`.
+
 ## [4.54.3] - 2026-08-16
 
 **Patch — doctor mobile/tmux report.**

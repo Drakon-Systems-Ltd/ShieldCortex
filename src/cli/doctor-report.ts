@@ -139,10 +139,8 @@ export function extractFixCommands(fix: string | undefined): string[] {
     if (!c) continue;
     // Prefer real shell-ish snippets
     if (
-      /^(shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|sudo|chown|chmod|rm|mkdir)\b/i.test(c) ||
-      c.startsWith('SHIELDCORTEX_') ||
-      c.includes('allowConversationAccess') ||
-      c.includes('~/.shieldcortex')
+      /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(c) ||
+      c.startsWith('SHIELDCORTEX_')
     ) {
       cmds.push(c);
     }
@@ -172,24 +170,13 @@ export function extractFixCommands(fix: string | undefined): string[] {
   }
   if (cmds.length > 0) return unique(cmds);
 
-  // Config JSON snippet guidance
-  if (/allowConversationAccess/i.test(fix)) {
-    return [
-      'set allowConversationAccess=true on shieldcortex-realtime hooks',
-      'restart OpenClaw gateway',
-    ];
+  // Config / restart guidance. Only emit a real binary — never English
+  // that a phone user will copy after `$`.
+  if (/allowConversationAccess/i.test(fix) || /restart.{0,40}gateway/i.test(fix) || /restart long-running/i.test(fix)) {
+    return ['openclaw gateway restart'];
   }
 
-  // Restart guidance without a single binary
-  if (/restart long-running/i.test(fix)) {
-    return ['restart MCP server / OpenClaw gateway / dashboard'];
-  }
-
-  // JSON/config path instructions — keep short first sentence as guidance
-  const firstPart = fix.split(/[.\u2014]/)[0];
-  const first = typeof firstPart === 'string' ? firstPart.trim() : '';
-  if (first && first.length <= 100) return [first];
-  return [ellipsize(fix.replace(/\s+/g, ' ').trim(), 96)];
+  return [];
 }
 
 function unique(xs: string[]): string[] {
@@ -352,14 +339,23 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
   const why = oneLineWhy(g.why, width);
   lines.push(...wrapLine(why, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
   // Fix commands
+  // Fix lines: `$` only on a real binary. English notes stay notes.
   if (g.fixCommands.length === 0) {
-    lines.push(`${style.dim}    $ (see message — no single command)${style.reset}`);
+    lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
   } else {
     for (const cmd of g.fixCommands.slice(0, 3)) {
-      const prefixed = `$ ${cmd}`;
+      const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
+        || cmd.startsWith('SHIELDCORTEX_');
+      const prefixed = runnable ? `$ ${cmd}` : cmd;
       for (const wl of wrapLine(prefixed, width, 4, 6)) {
-        lines.push(`${style.bold}${wl}${style.reset}`);
+        lines.push(runnable ? `${style.bold}${wl}${style.reset}` : `${style.dim}${wl}${style.reset}`);
       }
+    }
+  }
+  if (g.theme === 'SCAN') {
+    const note = 'also set allowConversationAccess=true in ~/.openclaw/openclaw.json';
+    if (!g.fixCommands.some((c) => /allowConversationAccess/i.test(c))) {
+      lines.push(...wrapLine(note, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
     }
   }
   return lines;
