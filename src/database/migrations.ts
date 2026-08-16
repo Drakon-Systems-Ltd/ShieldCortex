@@ -838,6 +838,13 @@ export function runMigrations(database: Database.Database): void {
       // (NULL on legacy rows and unplumbed paths); risk_modifier = the
       // advisory trust modifier computed for this scan (NULL until the
       // modifier ships/fires). Local-only until declared as egress.
+      //
+      // NEVER BACKFILL source_attested on historic rows (decision recorded
+      // 2026-08-16, attestation Phase 5, pinned by test): NULL→1 is a
+      // trust-elevation hole (attesting identities nothing derived), and
+      // NULL→0 is a behavioural no-op that only adds mute-lever surface via
+      // risk.ts's latest-non-null resolution. The consumption side reads NULL
+      // conservatively; history stays NULL, forever.
       if (!auditColNames.has('source_attested')) {
         database.exec('ALTER TABLE defence_audit ADD COLUMN source_attested INTEGER');
       }
