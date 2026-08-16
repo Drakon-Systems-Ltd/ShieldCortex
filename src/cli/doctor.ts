@@ -61,6 +61,11 @@ import { validateOpenClawConfig } from '../integrations/openclaw-config-validate
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
+import {
+  formatDoctorReport,
+  shouldColorDoctor,
+  type DoctorReportStyle,
+} from './doctor-report.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -4132,7 +4137,9 @@ export async function runDoctor(
   // runDoctorAiSection() resolves the real pool-inherited CLI transport.
   deps: { aiInvoke?: ModelInvoker | null } = {},
 ): Promise<DoctorSummary> {
-  console.log(`\n${bold}ShieldCortex Doctor${reset} v${pkg.version}\n`);
+  // Title is emitted by formatDoctorReport (mobile layout). Keep a single
+  // leading blank so piped/cron capture still starts cleanly.
+  console.log('');
 
   const results: CheckResult[] = [];
 
@@ -4252,38 +4259,32 @@ export async function runDoctor(
   // the same single fact already reported by the Database line (#129).
   const { visible, suppressed } = partitionUninitialisedSkips(gated);
 
-  // Print results
-  for (const r of visible) {
-    console.log(`  ${icon(r.status)} ${bold}${r.label}:${reset} ${r.message}`);
-  }
-  if (suppressed.length > 0) {
-    console.log(`  ${dim}(${suppressed.map(r => r.label).join(', ')} checked once the database exists)${reset}`);
-  }
-
-  // Summary
+  // Summary counts stay on the RAW visible set (exit codes / CI gates).
   const passed = visible.filter(r => r.status === 'pass').length;
   const warnings = visible.filter(r => r.status === 'warn').length;
   const failures = visible.filter(r => r.status === 'fail').length;
   const infos = visible.filter(r => r.status === 'info').length;
   const total = visible.length;
 
-  console.log('');
-  const parts: string[] = [];
-  parts.push(`${passed}/${total} checks passed`);
-  if (warnings > 0) parts.push(`${yellow}${warnings} warning${warnings !== 1 ? 's' : ''}${reset}`);
-  if (failures > 0) parts.push(`${red}${failures} failure${failures !== 1 ? 's' : ''}${reset}`);
-  if (infos > 0) parts.push(`${infos} info`);
-  console.log(`  ${parts.join(', ')}`);
+  // Mobile/tmux report (render-only). Default collapses passes + duplicate
+  // warning themes; --verbose restores the full pass list. Exit codes and
+  // check logic are unchanged.
+  const verbose = args.includes('--verbose') || args.includes('--debug');
+  const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
+  const reportLines = formatDoctorReport(visible, {
+    verbose,
+    version: String(pkg.version ?? ''),
+    target: (() => {
+      try { return os.hostname(); } catch { return ''; }
+    })(),
+    color: shouldColorDoctor(),
+    style,
+    width: Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80,
+  });
+  for (const line of reportLines) console.log(line);
 
-  // Suggested fixes. Deduplicated: one root cause can fail several checks at
-  // once (a root-owned ~/.shieldcortex fails Database, Disk and Lock), and
-  // printing the same remedy three times reads as three separate problems.
-  const fixes = [...new Set(visible.filter(r => r.fix).map(r => r.fix as string))];
-  if (fixes.length > 0) {
-    console.log(`\n  ${bold}Suggested fixes:${reset}`);
-    for (const f of fixes) {
-      console.log(`  ${dim}\u2192${reset} ${f}`);
-    }
+  if (suppressed.length > 0) {
+    console.log(`${dim}(${suppressed.map(r => r.label).join(', ')} checked once the database exists)${reset}`);
   }
 
   // (The Pro upsell footer that used to render here was removed with the
@@ -4313,7 +4314,7 @@ export async function runDoctor(
     const reason = failures > 0
       ? `${failures} failed check${failures !== 1 ? 's' : ''}`
       : `${warnings} warning${warnings !== 1 ? 's' : ''} (--strict)`;
-    console.log(`  ${dim}exit ${exitCode} \u2014 ${reason}${reset}`);
+    console.log(`${dim}exit ${exitCode} \u2014 ${reason}${reset}`);
   }
 
   console.log('');

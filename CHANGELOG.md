@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Doctor mobile/tmux report** — default output is attention-first: failures and warnings with Why + `$` command lines; passes collapsed; duplicate warning themes (e.g. conversation scanning) merged with `xN`. `shieldcortex doctor --verbose` restores the full pass list. Check logic and exit codes unchanged.
+
 ## [4.54.2] - 2026-08-16
 
 **Patch — loud DNP digest.**
