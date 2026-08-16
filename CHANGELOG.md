@@ -6,9 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.54.3] - 2026-08-16
+
+**Patch — doctor mobile/tmux report.**
+
+Readable attention-first doctor output for phone SSH and tmux. `threatGraph.trustModifier` stays **advisory**. SDK / PyPI stay **0.3.0**.
+
 ### Changed
 
-- **Doctor mobile/tmux report** — default output is attention-first: failures and warnings with Why + `$` command lines; passes collapsed; duplicate warning themes (e.g. conversation scanning) merged with `xN`. `shieldcortex doctor --verbose` restores the full pass list. Check logic and exit codes unchanged.
+- **Doctor mobile/tmux report (#335)** — default output is attention-first: failures and warnings with Why + `$` command lines; passes collapsed; duplicate warning themes (e.g. conversation scanning) merged with `xN`. `shieldcortex doctor --verbose` restores the full pass list. Check logic and exit codes unchanged.
+
+### References
+
+- #335
 
 ## [4.54.2] - 2026-08-16
 
