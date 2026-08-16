@@ -12,6 +12,7 @@
  *   forms    base, -s/-es, past, past participle, -ing  (+ 3 irregulars)
  *   objects  previous prior above earlier existing old original
  *   nouns    instructions rules prompts context directives constraints guidelines
+ *            filters
  *
  * Every frame requires an OBJECT **and** a NOUN from the closed tables. That
  * requirement is the false-positive floor, and it is deliberate:
@@ -51,6 +52,11 @@ export const OVERRIDE_OBJECTS = [
  * Closed noun table (regex fragments — the trailing `?` carries the plural).
  * `warning`, `email`, `message` are deliberately absent: those are the words
  * that make ordinary prose look like an attack.
+ *
+ * `filters?` is the #318 residual — "ignore all previous filters" is the same
+ * override frame pointed at the guard rather than the prompt. `policies?` is
+ * NOT here: the #318 corpus has zero policy/policies payloads, so it would buy
+ * nothing and push the table past its length cap.
  */
 export const OVERRIDE_NOUNS = [
   'instructions?',
@@ -60,6 +66,7 @@ export const OVERRIDE_NOUNS = [
   'directives?',
   'constraints?',
   'guidelines?',
+  'filters?',
 ] as const;
 
 /**
@@ -191,13 +198,19 @@ export const OVERRIDE_MORPHOLOGY: MorphologyPattern[] = [
  * Direct system-prompt extraction, narrow by design: an imperative reveal verb
  * plus `your` plus `prompt`. `your` is load-bearing — it is what separates
  * "show your system prompt" from "update the system prompt template in the docs".
+ *
+ * #318 adds `output`, `dump` and `list` to the verb group only. They are the
+ * verbs the evaded corpus reached for once `print/show/reveal/display` closed;
+ * `your` still gates every one of them, so "dump the request log" and "list the
+ * prompt templates" stay quiet.
  */
 export const PROMPT_EXTRACTION: MorphologyPattern[] = [
   {
     name: 'system_prompt_extraction',
-    description: 'Direct request to print, show, reveal or display the system prompt',
+    description:
+      'Direct request to print, show, reveal, display, output, dump or list the system prompt',
     regex:
-      /\b(?:print|show|reveal|display)\s+(?:(?:me|us)\s+)?your\s+(?:(?:full|entire|complete|original|initial|exact|actual|verbatim)\s+)?(?:system\s+)?prompts?\b/i,
+      /\b(?:print|show|reveal|display|output|dump|list)\s+(?:(?:me|us)\s+)?your\s+(?:(?:full|entire|complete|original|initial|exact|actual|verbatim)\s+)?(?:system\s+)?prompts?\b/i,
   },
 ];
 

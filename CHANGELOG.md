@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Instruction floor: paraphrase-evasion residual, Phase A (#318).** A 131-payload paraphrase assault walked 112 attacks past `shieldcortex scan` on 4.53.0. Most of that is paraphrase and belongs to the async semantic layer — `scan` is the sync regex/morphology floor, not a semantic classifier — but two closed-table gaps were this tier's: `filters?` joins the override noun table ("ignore all previous filters"), and `output|dump|list` join the prompt-extraction verbs ("output your system prompt"). `your` stays load-bearing and every override frame still needs both an OBJECT and a NOUN, so the #204 false-positive floor is unchanged. The corpus is seeded as a regression fixture.
+
 ## [4.53.0] - 2026-08-15
 
 **Minor — attestation write-path + allowlist batch review + threat-graph projector heal on upgrade.**
