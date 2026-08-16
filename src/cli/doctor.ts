@@ -480,6 +480,108 @@ async function checkDatabase(): Promise<CheckResult> {
  * Uses the initialised singleton when present (tests); otherwise opens the
  * DB file read-only like every other doctor check.
  */
+/**
+ * Attestation coverage (attestation Phase 5) — the rollout observability the
+ * plumbing phases need: % of recent defence_audit rows carrying a non-NULL
+ * source_attested, with the attested / explicitly-unattested / unplumbed
+ * split. Lets an operator WATCH coverage climb after upgrading instead of
+ * inferring the writers' state from risk_modifier zeros.
+ *
+ * The stale-process warn keys on KNOWN-HOOK rows only (adversarially
+ * confirmed, PR #322 review): overall-zero coverage is NOT a fault signal,
+ * because this same build deliberately ships never-attest writers (REST scan
+ * API, langchain guard, universal bridge — pinned NULL forever per the #308
+ * mute-lever rule), so a box used exclusively through those surfaces is
+ * healthy at 0%. Hook rows are the sharp discriminator: their writers ship in
+ * this package and are pinned as attesting, so a busy all-NULL hook window
+ * means still-running pre-upgrade processes are writing them — restart.
+ */
+export async function checkAttestationCoverage(
+  opts: { nowMs?: number; windowDays?: number; minRowsForWarn?: number } = {},
+): Promise<CheckResult> {
+  const label = 'Attestation coverage';
+  const windowDays = opts.windowDays ?? 28;
+  const minRowsForWarn = opts.minRowsForWarn ?? 50;
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Database = require('better-sqlite3');
+  let db: any = null;
+  let opened = false;
+  try {
+    const { isDatabaseInitialized, getDatabase } = await import('../database/init.js');
+    if (isDatabaseInitialized()) {
+      db = getDatabase();
+    } else {
+      const dbPath = getDbPath();
+      const gate = databasePrerequisite(label, dbPath);
+      if (gate) return gate;
+      db = new Database(dbPath, { readonly: true });
+      opened = true;
+    }
+
+    const hasCol = (db.prepare('PRAGMA table_info(defence_audit)').all() as Array<{ name: string }>)
+      .some((c) => c.name === 'source_attested');
+    if (!hasCol) {
+      return { label, status: 'info', message: 'source_attested column not present yet (created on next init after upgrade)' };
+    }
+
+    const nowMs = opts.nowMs ?? Date.now();
+    const since = new Date(nowMs - windowDays * 86_400_000).toISOString();
+    const counts = db.prepare(`
+      SELECT COUNT(*) AS total,
+             SUM(CASE WHEN source_attested = 1 THEN 1 ELSE 0 END) AS attested,
+             SUM(CASE WHEN source_attested = 0 THEN 1 ELSE 0 END) AS unattested,
+             SUM(CASE WHEN source_attested IS NULL THEN 1 ELSE 0 END) AS unplumbed
+      FROM defence_audit WHERE timestamp >= ?
+    `).get(since) as { total: number; attested: number | null; unattested: number | null; unplumbed: number | null };
+
+    const total = counts.total;
+    if (total === 0) {
+      return { label, status: 'info', message: `no audit rows in the last ${windowDays} days — nothing to measure yet` };
+    }
+    const attested = counts.attested ?? 0;
+    const unattested = counts.unattested ?? 0;
+    const unplumbed = counts.unplumbed ?? 0;
+    const nonNull = attested + unattested;
+    const pct = Math.round((nonNull / total) * 100);
+
+    // Stale-process discriminator: only the shipped hook writers (pinned as
+    // attesting in this build) can prove staleness. Overall-zero coverage is
+    // healthy on a never-attest-only box — see the docblock.
+    const hookCounts = db.prepare(`
+      SELECT COUNT(*) AS total,
+             SUM(CASE WHEN source_attested IS NOT NULL THEN 1 ELSE 0 END) AS nonNull
+      FROM defence_audit
+      WHERE timestamp >= ?
+        AND source_type = 'hook'
+        AND source_identifier IN ('session-end-hook', 'pre-compact-hook', 'stop-hook', 'hook', 'recall-defence')
+    `).get(since) as { total: number; nonNull: number | null };
+    if (hookCounts.total >= minRowsForWarn && (hookCounts.nonNull ?? 0) === 0) {
+      return {
+        label,
+        status: 'warn',
+        message: `${hookCounts.total} hook-captured audit rows in the last ${windowDays} days and none carries attestation — ` +
+          'these writers attest in the current build, so still-running pre-upgrade processes are writing them',
+        fix: 'restart long-running ShieldCortex processes (MCP server, OpenClaw gateway, dashboard) so they load the current build',
+      };
+    }
+
+    return {
+      label,
+      status: 'pass',
+      message: `${pct}% of the last ${windowDays} days' ${total} audit rows carry attestation ` +
+        `(${attested} attested / ${unattested} explicitly unattested / ${unplumbed} unplumbed)`,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'warn', message: `could not measure: ${msg}` };
+  } finally {
+    if (opened && db) {
+      try { db.close(); } catch { /* readonly close is best-effort */ }
+    }
+  }
+}
+
 export async function checkThreatGraph(
   opts: { lagWarnThreshold?: number; enabled?: boolean; nowMs?: number; sweepStaleMs?: number } = {},
 ): Promise<CheckResult> {
@@ -4029,6 +4131,7 @@ export async function runDoctor(
     checkDefenceCanary,
     checkActionGuard,
     checkThreatGraph,
+    checkAttestationCoverage,
     checkClaudeCodeVersion,
     checkModelCache,
   ];
