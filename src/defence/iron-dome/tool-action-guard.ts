@@ -1171,6 +1171,66 @@ function applyCdDest(cwd: ConfinedCwd, dest: string): ConfinedCwd {
   return { kind: 'workspace', rel: cwd.rel ? joinPathParts(cwd.rel, dest) : dest };
 }
 
+/**
+ * A statement stripped of the shell furniture that hides a `cd` from a
+ * leading-anchor test: the grouping characters a subshell / brace group leaves
+ * on the ends (`(cd /`, `{ cd /`) and the two wrappers that still leave `cd`
+ * the real command (`builtin cd /`, `command cd /`).
+ *
+ * Measured on the #339 build: every one of those spellings walked straight past
+ * `^cd\b`, so a root-level relative delete kept the workspace cwd and the
+ * exemption ALLOWED it — the fail-open direction, one wrapper away from the
+ * case #339 had just closed.
+ */
+function unwrapCdStatement(stmt: string): string {
+  let s = stmt.replace(/^[\s(){}]+/, '').replace(/[\s(){}]+$/, '');
+  for (let prev = ''; s !== prev; ) {
+    prev = s;
+    s = s.replace(/^(?:builtin|command)\s+/i, '');
+  }
+  return s;
+}
+
+function isInlineShellStatement(s: string): boolean {
+  return /^(?:(?:builtin|command|env|nohup|exec)\s+)*(?:bash|sh|zsh|ksh|dash|ash)\b/i.test(s);
+}
+
+/**
+ * Nested surfaces a relative delete can hide in: unquoted `(…)` / `$(…)` /
+ * backticks, plus `bash -c '…'` (and friends). Missing `-c` program text is
+ * unreadable — fail closed. Depth is owned by the caller.
+ */
+function nestedDeleteSurfaces(text: string): { bodies: string[]; unreadable: boolean } {
+  const bodies = collectExecutableBodies(text);
+  let unreadable = false;
+  for (const stmt of disposerStatements(text)) {
+    const tokens = tokeniseStatement(stmt);
+    for (let i = 0; i < tokens.length; i++) {
+      const base = commandBaseName(tokens[i]!);
+      if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) continue;
+      for (let j = i + 1; j < tokens.length; j++) {
+        if (isInlineProgramFlag(base, tokens[j]!)) {
+          const prog = tokens[j + 1];
+          if (!prog) unreadable = true;
+          else bodies.push(prog);
+          break;
+        }
+        if (BASH_VALUE_OPTION.test(tokens[j]!)) { j++; continue; }
+        if (!tokens[j]!.startsWith('-')) break;
+      }
+    }
+  }
+  return { bodies, unreadable };
+}
+
+// A `cd` / `pushd` / `popd` ANYWHERE in a statement the cd parser could not
+// read as a clean destination (`eval "cd /"`, `foo=$(cd /)`, a shell whose
+// program is quoted). The directory may have moved and this walk cannot say
+// where, so the only honest answer is "uncertain" — which costs the exemption
+// rather than betting the cwd is still the workspace. Hyphen excluded from the
+// boundary so a hyphenated identifier (`docker-cd-helper`) is not a cd (#188).
+const CD_WORD_RE = /(?<![\w-])(?:cd|pushd|popd)(?![\w-])/i;
+
 /** Cwd in effect just before `end`, walking cd / pushd and failing closed on ||. */
 function cwdBefore(text: string, end: number): ConfinedCwd {
   const slice = text.slice(0, end);
@@ -1178,7 +1238,7 @@ function cwdBefore(text: string, end: number): ConfinedCwd {
   let quote: string | null = null;
   let stmt = '';
   const flush = (sep: string): void => {
-    const s = stmt.trim();
+    const s = unwrapCdStatement(stmt);
     stmt = '';
     if (!s) return;
     if (/^pushd\b|^popd\b/i.test(s)) {
@@ -1186,6 +1246,8 @@ function cwdBefore(text: string, end: number): ConfinedCwd {
     } else if (/^cd\b/i.test(s)) {
       const dest = parseCdDest(s);
       cwd = dest === 'bad' ? { kind: 'uncertain' } : applyCdDest(cwd, dest);
+    } else if (CD_WORD_RE.test(s) && !isInlineShellStatement(s)) {
+      cwd = { kind: 'uncertain' };
     }
     if (sep === '||' || sep === '|') cwd = { kind: 'uncertain' };
   };
@@ -1209,6 +1271,10 @@ function cwdBefore(text: string, end: number): ConfinedCwd {
     }
     stmt += c;
   }
+  // The leftover statement, with no separator of its own. `rm` is at command
+  // position after openers cwdBefore does not split on (`` ` ``, `$(`, `(`), so
+  // dropping the tail dropped the `cd` in ``cd / `rm -rf x` `` entirely.
+  flush('');
   return cwd;
 }
 
@@ -1255,7 +1321,16 @@ function hasStandaloneRmStatement(text: string): boolean {
   return RM_STATEMENT_RE.test(text);
 }
 
-function deleteTargetsAreWorkspaceConfined(text: string): boolean {
+function deleteTargetsAreWorkspaceConfined(text: string, depth = 0): boolean {
+  if (depth < 2) {
+    const nested = nestedDeleteSurfaces(text);
+    if (nested.unreadable) return false;
+    for (const body of nested.bodies) {
+      if (hasStandaloneRmStatement(body) && !deleteTargetsAreWorkspaceConfined(body, depth + 1)) {
+        return false;
+      }
+    }
+  }
   const mint = symlinkMintTaint(text);
   if (mint.all) return false;
   RM_STATEMENT_RE.lastIndex = 0;

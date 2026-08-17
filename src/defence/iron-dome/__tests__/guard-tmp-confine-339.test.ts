@@ -164,6 +164,32 @@ describe('#339 — a symlink minted on the same line is not a proof of confineme
   });
 });
 
+describe('#339 — wrapper / subshell cd is still a cwd change', () => {
+  it('a subshell cd to root is not workspace-confined', () => {
+    expect(verdict(`(cd / && ${RMRF} relative-target)`).decision).toBe('block');
+  });
+
+  it('a brace-group cd to root is not workspace-confined', () => {
+    expect(verdict(`{ cd /; ${RMRF} relative-target; }`).decision).toBe('block');
+  });
+
+  it('an inline shell program that cds to root is not workspace-confined', () => {
+    expect(verdict(`bash -c 'cd / && ${RMRF} relative-target'`).decision).toBe('block');
+    expect(verdict(`sh -c "cd / && ${RMRF} relative-target"`).decision).toBe('block');
+  });
+
+  it('builtin/command wrappers around cd still move cwd', () => {
+    expect(verdict(`builtin cd / && ${RMRF} relative-target`).decision).toBe('block');
+    expect(verdict(`command cd / && ${RMRF} relative-target`).decision).toBe('block');
+  });
+
+  it('#170 relief still holds inside wrappers that stay in the workspace', () => {
+    expect(verdict(`bash -c 'cd dashboard && ${RMRF} .next'`).decision).toBe('allow');
+    expect(verdict(`(cd dashboard && ${RMRF} .next)`).decision).toBe('allow');
+    expect(verdict(`{ cd dashboard; ${RMRF} .next; }`).decision).toBe('allow');
+  });
+});
+
 describe('#339 — mixed and multi-target lines', () => {
   it('a confined target next to a system target still blocks', () => {
     expect(verdict(`${RMRF} /tmp/sc339-a ${SYSTEM_TARGET}`).decision).toBe('block');
