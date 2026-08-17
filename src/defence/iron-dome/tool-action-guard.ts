@@ -25,6 +25,7 @@
  * user's `autoApprove` list.
  */
 
+import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
 import { forEachWindow } from '../scan-windows.js';
 
@@ -1085,55 +1086,205 @@ const RM_STATEMENT_RE = /(^|[;&|(){}`\n]|\$\()\s*(?:sudo\s+)?rm\b([^;&|(){}`\n]*
 // (`build/rm-cache`, `src/rm/x`), which is not a delete verb at all and must
 // not cost the exemption.
 const RM_WORD_RE = /(?<![\w./-])rm(?![\w./-])/gi;
-const CONFINED_TEMP_TARGET_RE = /^(?:\/tmp|\/var\/tmp|\/private\/var\/folders)\/[^\s]+$/i;
-/** Beyond this many `rm` statements the line is not analysable — never exempt. */
+/** Beyond this many standalone delete statements the line is not analysable. */
 const RM_STATEMENT_SCAN_LIMIT = 64;
 
-/** At least one statement on the line begins with a standalone `rm`. */
+type ConfinedCwd =
+  | { kind: 'workspace'; rel: string }
+  | { kind: 'abs'; path: string }
+  | { kind: 'uncertain' };
+
+function joinPathParts(base: string, child: string): string {
+  const left = base.replace(/\/+$/, '');
+  const right = child.replace(/^\/+/, '');
+  if (!left) return `/${right}`;
+  if (!right) return left;
+  return `${left}/${right}`;
+}
+
+/** Darwin /private/tmp is /tmp; /private/var/tmp is /var/tmp. */
+function normalizeDarwinTempAliases(p: string): string {
+  return p
+    .replace(/^\/private\/tmp(?=\/|$)/i, '/tmp')
+    .replace(/^\/private\/var\/tmp(?=\/|$)/i, '/var/tmp')
+    .replace(/^\/private\/var\/folders(?=\/|$)/i, '/var/folders')
+    .replace(/\/{2,}/g, '/');
+}
+
+/** A confined temp child, never the temp root itself. */
+function isConfinedAbsolute(p: string): boolean {
+  const n = normalizeDarwinTempAliases(p).replace(/\/+$/, '');
+  const lower = n.toLowerCase();
+  return ['/tmp/', '/var/tmp/', '/var/folders/'].some(prefix => lower.startsWith(prefix));
+}
+
+/**
+ * Resolve existing components (so a symlink parent is followed) and append
+ * any missing tail lexically. Returns null on ELOOP / EACCES / special files.
+ */
+function resolveExistingPrefix(p: string): string | null {
+  const trimmed = p.length > 1 ? p.replace(/\/+$/, '') : p;
+  const parts = trimmed.split('/').filter(Boolean);
+  let current = '';
+  for (let i = 0; i < parts.length; i++) {
+    const next = `${current}/${parts[i]}`;
+    try {
+      const st = lstatSync(next);
+      if (st.isSymbolicLink()) {
+        try { current = realpathSync(next); }
+        catch { return null; }
+        continue;
+      }
+      if (!st.isDirectory() && !st.isFile()) return null;
+      try { current = realpathSync(next); }
+      catch { current = next; }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === 'ENOENT') {
+        const rest = parts.slice(i).join('/');
+        return current ? `${current}/${rest}` : `/${rest}`;
+      }
+      return null;
+    }
+  }
+  return current || trimmed;
+}
+
+function parseCdDest(stmt: string): string | 'bad' {
+  const m = stmt.match(/^\s*cd\b(.*)$/i);
+  if (!m) return 'bad';
+  const rest = (m[1] ?? '').trim();
+  if (!rest) return 'bad';
+  const positional = rest.split(/\s+/)
+    .map(t => t.replace(/^[\"']|[\"']$/g, ''))
+    .filter(t => t && !t.startsWith('-'));
+  if (positional.length !== 1) return 'bad';
+  const dest = positional[0]!;
+  if (dest === '-' || /[$`*?~]/.test(dest) || dest.includes('..')) return 'bad';
+  return dest;
+}
+
+function applyCdDest(cwd: ConfinedCwd, dest: string): ConfinedCwd {
+  if (cwd.kind === 'uncertain') return cwd;
+  if (dest.startsWith('/')) return { kind: 'abs', path: dest };
+  if (cwd.kind === 'abs') return { kind: 'abs', path: joinPathParts(cwd.path, dest) };
+  return { kind: 'workspace', rel: cwd.rel ? joinPathParts(cwd.rel, dest) : dest };
+}
+
+/** Cwd in effect just before `end`, walking cd / pushd and failing closed on ||. */
+function cwdBefore(text: string, end: number): ConfinedCwd {
+  const slice = text.slice(0, end);
+  let cwd: ConfinedCwd = { kind: 'workspace', rel: '' };
+  let quote: string | null = null;
+  let stmt = '';
+  const flush = (sep: string): void => {
+    const s = stmt.trim();
+    stmt = '';
+    if (!s) return;
+    if (/^pushd\b|^popd\b/i.test(s)) {
+      cwd = { kind: 'uncertain' };
+    } else if (/^cd\b/i.test(s)) {
+      const dest = parseCdDest(s);
+      cwd = dest === 'bad' ? { kind: 'uncertain' } : applyCdDest(cwd, dest);
+    }
+    if (sep === '||' || sep === '|') cwd = { kind: 'uncertain' };
+  };
+  for (let i = 0; i < slice.length; i++) {
+    const c = slice[i]!;
+    if (c === '\\' && quote !== "'" && i + 1 < slice.length) {
+      stmt += c + slice[++i];
+      continue;
+    }
+    if (quote) {
+      stmt += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; stmt += c; continue; }
+    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') {
+      let sep = c;
+      if ((c === '&' || c === '|') && slice[i + 1] === c) { sep = c + c; i++; }
+      flush(sep);
+      continue;
+    }
+    stmt += c;
+  }
+  return cwd;
+}
+
+function effectiveDeleteTarget(tok: string, cwd: ConfinedCwd): string | 'uncertain' {
+  if (tok.startsWith('/')) return tok;
+  if (cwd.kind === 'uncertain') return 'uncertain';
+  if (cwd.kind === 'abs') return joinPathParts(cwd.path, tok);
+  return cwd.rel ? joinPathParts(cwd.rel, tok) : tok;
+}
+
+/** Same-line ln -s / cp -s destinations. Unreadable dest taints the whole line. */
+function symlinkMintTaint(text: string): { all: boolean; dests: string[] } {
+  const dests: string[] = [];
+  let all = false;
+  for (const raw of quoteAwareStatements(text)) {
+    const stmt = raw.trim();
+    const isLn = /^ln\b/i.test(stmt);
+    const isCp = /^cp\b/i.test(stmt);
+    if (!isLn && !isCp) continue;
+    const args = stmt.split(/\s+/).slice(1);
+    const flags = args.filter(a => a.startsWith('-'));
+    const positional = args
+      .filter(a => !a.startsWith('-'))
+      .map(a => a.replace(/^[\"']|[\"']$/g, ''));
+    const symbolic = flags.some(f =>
+      f === '--symbolic' || (!f.startsWith('--') && f.includes('s')));
+    if (!symbolic) continue;
+    const dest = positional[positional.length - 1] ?? '';
+    if (!dest || /[$`*?~]/.test(dest)) { all = true; continue; }
+    dests.push(dest);
+  }
+  return { all, dests };
+}
+
+function mintTaintsTarget(target: string, dest: string): boolean {
+  const a = normalizeDarwinTempAliases(target);
+  const b = normalizeDarwinTempAliases(dest);
+  return a === b || a.startsWith(b.endsWith('/') ? b : `${b}/`);
+}
+
+/** At least one statement on the line begins with a standalone delete verb. */
 function hasStandaloneRmStatement(text: string): boolean {
   RM_STATEMENT_RE.lastIndex = 0;
   return RM_STATEMENT_RE.test(text);
 }
 
 function deleteTargetsAreWorkspaceConfined(text: string): boolean {
+  const mint = symlinkMintTaint(text);
+  if (mint.all) return false;
   RM_STATEMENT_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   let sawTarget = false;
   let statements = 0;
   while ((m = RM_STATEMENT_RE.exec(text)) !== null) {
-    // Truncating the scan used to fall out of the loop and return the verdict
-    // built from the statements already seen — so a long enough command was
-    // exempted on the strength of its first 64 deletes (measured, #196). An
-    // unanalysable line is never downgraded.
     if (++statements > RM_STATEMENT_SCAN_LIMIT) return false;
+    const cwd = cwdBefore(text, m.index);
     const args = m[2] ?? '';
     for (const raw of args.split(/\s+/)) {
       const tok = raw.trim().replace(/^["']|["']$/g, '');
-      if (!tok || tok.startsWith('-')) continue;          // flags, not targets
+      if (!tok || tok.startsWith('-')) continue;
       sawTarget = true;
-      // Never gamble on anything that can expand or climb.
       if (/[$`*?~]/.test(tok)) return false;
       if (tok.includes('..')) return false;
-      // The WHOLE current directory is not an innocuous confined subdir — it is
-      // every entry in cwd (`.git`, source, uncommitted work), the same blast
-      // radius as `./*`. Any token that is only dots and slashes normalises to
-      // cwd (`.`, `./`, `./.`, `.//`, `././`) — and the quote strip above means
-      // `'.'` / `"."` reach here as `.`. A NAMED relative dir (`.next`, `./build`)
-      // has a non-dot/slash char and stays confined. (#182 residual — Grok.)
       if (/^\.[.\/]*$/.test(tok)) return false;
-      if (tok.startsWith('/')) {
-        if (!CONFINED_TEMP_TARGET_RE.test(tok)) return false;
-        continue;
+      const effective = effectiveDeleteTarget(tok, cwd);
+      if (effective === 'uncertain') return false;
+      if (mint.dests.some(d => mintTaintsTarget(effective, d) || mintTaintsTarget(tok, d))) {
+        return false;
       }
-      // Relative and non-climbing — a workspace path.
+      if (!effective.startsWith('/')) continue;
+      const resolved = resolveExistingPrefix(effective);
+      if (resolved === null) return false;
+      if (!isConfinedAbsolute(resolved)) return false;
     }
   }
   if (!sawTarget) return false;
-  // Every `rm` on the line must have been one of the statements just examined.
-  // If the splitter could not account for one — `find … -exec rm -rf {} +`,
-  // `xargs rm`, any shape not yet understood — its target was never checked,
-  // and an unexamined delete must not inherit the exemption its neighbours
-  // earned. Fail-safe by construction rather than by enumeration.
   RM_WORD_RE.lastIndex = 0;
   const occurrences = (text.match(RM_WORD_RE) ?? []).length;
   return occurrences === statements;
