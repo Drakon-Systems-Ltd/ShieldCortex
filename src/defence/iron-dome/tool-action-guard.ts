@@ -191,6 +191,20 @@ export function writeContentLooksExecutable(content: string): boolean {
   return /^\uFEFF?\s*#!/.test(String(content || ''));
 }
 
+/**
+ * #341 Face 1 — memory/markdown writes re-read as prose. Quoted forensic
+ * evidence (inline backticks, fenced blocks) is a mention, not a command to
+ * run. Strip those spans before the write-content danger scan so incident
+ * notes can cite shell/ops forms without a promptless deny.
+ * Script-like targets never use this — their bytes are programs.
+ */
+export function neutralizeMarkdownCommandMentions(content: string): string {
+  let s = String(content || '');
+  s = s.replace(/```[\s\S]*?```/g, ' ');
+  s = s.replace(/`[^`\n]+`/g, ' ');
+  return s;
+}
+
 // ── Danger detection ─────────────────────────────────────────────────────────
 
 interface Pattern { re: RegExp; signal: string; }
@@ -3866,8 +3880,13 @@ export function evaluateToolCall(
         || isMemoryWritePath(path)
         || writeContentLooksExecutable(writeContent));
     if (scanThisWrite) {
-      const hits = scanWriteContentPayload(writeContent);
       const memory = isMemoryWritePath(path);
+      // #341: memory markdown is instruction prose — neutralize quoted mentions
+      // before the command-pattern scan. Scripts keep raw bytes.
+      const scanBody = (memory && /\.md$/i.test(path) && !writeContentLooksExecutable(writeContent))
+        ? neutralizeMarkdownCommandMentions(writeContent)
+        : writeContent;
+      const hits = scanWriteContentPayload(scanBody);
       if (hits.catastrophic.length > 0) {
         const signals = ['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)];
         const span = hits.catastrophic[0]?.span;
