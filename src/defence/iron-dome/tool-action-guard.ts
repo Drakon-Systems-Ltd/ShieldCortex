@@ -274,6 +274,20 @@ const CATASTROPHIC: Pattern[] = [
   // above — so `export PATH=/opt/wipe/bin; echo /dev/null` no longer collides two
   // unrelated statements into a false catastrophic block (issue #89).
   { re: /\b(?:shred|wipe)\b[^|;&\n]*\/dev\/(?!null\b|stdout\b|stderr\b|fd\/\d)/i, signal: 'shred-device' },
+
+  // #342 — interpreter recursive delete of a root-ish path. Shell-verb-only
+  // detection missed python/node one-liners that perform the same effect with
+  // empty signals while a markdown note quoting the shell form was denied.
+  // These match CALLS with a path arg — not a dict of pattern strings (issue
+  // #89 mention class stays a mention).
+  { re: /\b(?:shutil\s*\.\s*rmtree|os\s*\.\s*removedirs)\s*\(\s*(['"])(?:\/|~|\$HOME|\.|\.\.\/)\1/i, signal: 'recursive-force-delete' },
+  { re: /\b(?:shutil\s*\.\s*rmtree)\s*\(\s*(['"])[^'"]+\1[^)]*\b(?:ignore_errors\s*=\s*True|onerror\s*=)/i, signal: 'recursive-force-delete' },
+  // Node fs.rmSync / fs.rm with recursive:true against root/home/cwd.
+  { re: /\b(?:fs\s*\.\s*)?(?:promises\s*\.\s*)?rm(?:Sync)?\s*\(\s*(['"])(?:\/[^'\"]*|~|\$HOME|\.|\.\.\/)\1[^)]*\brecursive\s*:\s*true/i, signal: 'recursive-force-delete' },
+  { re: /\b(?:fs\s*\.\s*)?(?:promises\s*\.\s*)?rm(?:Sync)?\s*\(\s*(['"])[^'"]+\1[^)]*\brecursive\s*:\s*true[^)]*\bforce\s*:\s*true/i, signal: 'recursive-force-delete' },
+  // Ruby FileUtils recursive remove of root-ish paths.
+  { re: /\bFileUtils\s*\.\s*rm_rf\s*\(\s*(['"])(?:\/|~|\.|\.\.\/)/i, signal: 'recursive-force-delete' },
+  { re: /\brm_rf\s*\(\s*(['"])(?:\/|~|\.|\.\.\/)/i, signal: 'recursive-force-delete' },
 ];
 
 /**
@@ -2355,6 +2369,13 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
 
 const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger']);
 
+/** #342 — interpreter-API recursive-delete call spans (not shell verbs). */
+const INTERPRETER_RECURSIVE_DELETE_SPAN =
+  /(?:shutil\s*\.\s*rmtree|os\s*\.\s*removedirs|FileUtils\s*\.\s*rm_rf|\brm\s*\(|(?:fs\s*\.\s*)?(?:promises\s*\.\s*)?rm(?:Sync)?\s*\()/i;
+
+
+
+
 
 /**
  * Byte ranges that came from a folded file in a NON-SHELL language (#165).
@@ -2422,7 +2443,13 @@ function matchSpansClassified(
     // Fast path: the first occurrence is executed → keep immediately (the common
     // case for a real command). Only search further when it's not.
     const s0 = m0.index ?? 0;
-    const c0 = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget);
+    const c0raw = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget);
+    // #342: interpreter API recursive-delete is the effect, not a mention.
+    const c0 = (c0raw === 'mention'
+      && p.signal === 'recursive-force-delete'
+      && INTERPRETER_RECURSIVE_DELETE_SPAN.test(m0[0]))
+      ? 'executed' as const
+      : c0raw;
     if (c0 === 'executed') {
       out.push(withProvenance(
         { signal: p.signal, span: fmtSpan(m0[0]), tier: 'executed' },
@@ -2445,7 +2472,12 @@ function matchSpansClassified(
     let iters = 0;
     for (const m of text.matchAll(g)) {
       const s = m.index ?? 0;
-      const c = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget);
+      const cRaw = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget);
+      const c = (cRaw === 'mention'
+        && p.signal === 'recursive-force-delete'
+        && INTERPRETER_RECURSIVE_DELETE_SPAN.test(m[0]))
+        ? 'executed' as const
+        : cRaw;
       if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
       if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
       sharedBudget--;
