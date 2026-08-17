@@ -2702,23 +2702,27 @@ export async function checkMemoryPlaneEmptyBrain(): Promise<CheckResult> {
   let db: InstanceType<typeof Database> | null = null;
   try {
     db = new Database(dbPath, { readonly: true, timeout: 3000, fileMustExist: true });
-    const admitted = Number(db.prepare(
+    const countOf = (sql: string, params: unknown[] = []): number => {
+      const row = db!.prepare(sql).get(...params) as { c?: number } | undefined;
+      return Number(row?.c ?? 0);
+    };
+    const admitted = countOf(
       `SELECT COUNT(*) AS c FROM memories
        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
          AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'`,
-    ).get()?.c ?? 0);
-    const total = Number(db.prepare(`SELECT COUNT(*) AS c FROM memories`).get()?.c ?? 0);
+    );
+    const total = countOf(`SELECT COUNT(*) AS c FROM memories`);
     let sessionEvents = 0;
     let hookInvocations = 0;
     try {
-      sessionEvents = Number(db.prepare(
+      sessionEvents = countOf(
         `SELECT COUNT(*) AS c FROM session_events WHERE created_at >= datetime('now', '-7 days')`,
-      ).get()?.c ?? 0);
+      );
     } catch { /* table may not exist on ancient DBs */ }
     try {
-      hookInvocations = Number(db.prepare(
+      hookInvocations = countOf(
         `SELECT COUNT(*) AS c FROM hook_invocations WHERE invoked_at >= datetime('now', '-7 days')`,
-      ).get()?.c ?? 0);
+      );
     } catch { /* optional */ }
     const activity = sessionEvents + hookInvocations;
 

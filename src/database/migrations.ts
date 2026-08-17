@@ -946,4 +946,20 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'session_events bare-ts retention index');
   }
+
+  // Memory SOTA A-min/B: host/agent scope + capture layer for inject eligibility.
+  try {
+    if (!columnNames.has('host_id')) {
+      database.exec('ALTER TABLE memories ADD COLUMN host_id TEXT');
+    }
+    if (!columnNames.has('agent_id')) {
+      database.exec('ALTER TABLE memories ADD COLUMN agent_id TEXT');
+    }
+    if (!columnNames.has('capture_layer')) {
+      database.exec('ALTER TABLE memories ADD COLUMN capture_layer TEXT');
+    }
+    database.exec('CREATE INDEX IF NOT EXISTS idx_memories_host_agent ON memories(host_id, agent_id)');
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'memories host_id/agent_id/capture_layer');
+  }
 }

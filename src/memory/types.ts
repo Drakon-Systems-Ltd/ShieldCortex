@@ -53,6 +53,9 @@ export interface Memory {
   cloudExcluded: boolean;
   memoryPurpose: MemoryPurpose;
   memoryScope: MemoryScope;
+  hostId: string | null;
+  agentId: string | null;
+  captureLayer: string | null;
 }
 
 export interface MemoryInput {
@@ -77,6 +80,9 @@ export interface MemoryInput {
   cloudExcluded?: boolean;
   memoryPurpose?: MemoryPurpose;
   memoryScope?: MemoryScope;
+  hostId?: string | null;
+  agentId?: string | null;
+  captureLayer?: string | null;
 }
 
 export interface SearchOptions {

@@ -39,6 +39,13 @@ export function getAutoMemoryConfig() {
     // fall through to defaults
   }
   const overrides = (raw && typeof raw.autoMemory === 'object' && raw.autoMemory) || {};
+  // Memory SOTA: openclawAutoMemory=true implies Claude capture gates unless
+  // explicitly forced off via autoMemory.enableStop/enableSessionEnd=false.
+  const planeOn = raw.openclawAutoMemory === true || raw.proactiveRecall === true;
+  const enableStop = overrides.enableStop === true
+    || (planeOn && overrides.enableStop !== false);
+  const enableSessionEnd = overrides.enableSessionEnd === true
+    || (planeOn && overrides.enableSessionEnd !== false);
   return {
     maxTranscriptBytes: pickPositiveInt(overrides.maxTranscriptBytes, DEFAULTS.maxTranscriptBytes),
     maxTranscriptLines: pickPositiveInt(overrides.maxTranscriptLines, DEFAULTS.maxTranscriptLines),
@@ -50,8 +57,8 @@ export function getAutoMemoryConfig() {
       ? overrides.stopHookSalienceBypass
       : DEFAULTS.stopHookSalienceBypass,
     stopHookWindowBytes: pickPositiveInt(overrides.stopHookWindowBytes, DEFAULTS.stopHookWindowBytes),
-    enableSessionEnd: overrides.enableSessionEnd === true,
-    enableStop: overrides.enableStop === true,
+    enableSessionEnd,
+    enableStop,
   };
 }
 
