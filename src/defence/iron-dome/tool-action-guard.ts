@@ -25,6 +25,7 @@
  * user's `autoApprove` list.
  */
 
+import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
 import { forEachWindow } from '../scan-windows.js';
 
@@ -1085,55 +1086,443 @@ const RM_STATEMENT_RE = /(^|[;&|(){}`\n]|\$\()\s*(?:sudo\s+)?rm\b([^;&|(){}`\n]*
 // (`build/rm-cache`, `src/rm/x`), which is not a delete verb at all and must
 // not cost the exemption.
 const RM_WORD_RE = /(?<![\w./-])rm(?![\w./-])/gi;
-const CONFINED_TEMP_TARGET_RE = /^(?:\/tmp|\/var\/tmp|\/private\/var\/folders)\/[^\s]+$/i;
-/** Beyond this many `rm` statements the line is not analysable — never exempt. */
+/** Beyond this many standalone delete statements the line is not analysable. */
 const RM_STATEMENT_SCAN_LIMIT = 64;
 
-/** At least one statement on the line begins with a standalone `rm`. */
+type ConfinedCwd =
+  | { kind: 'workspace'; rel: string }
+  | { kind: 'abs'; path: string }
+  | { kind: 'uncertain' };
+
+function joinPathParts(base: string, child: string): string {
+  const left = base.replace(/\/+$/, '');
+  const right = child.replace(/^\/+/, '');
+  if (!left) return `/${right}`;
+  if (!right) return left;
+  return `${left}/${right}`;
+}
+
+/** Darwin /private/tmp is /tmp; /private/var/tmp is /var/tmp. */
+function normalizeDarwinTempAliases(p: string): string {
+  return p
+    .replace(/^\/private\/tmp(?=\/|$)/i, '/tmp')
+    .replace(/^\/private\/var\/tmp(?=\/|$)/i, '/var/tmp')
+    .replace(/^\/private\/var\/folders(?=\/|$)/i, '/var/folders')
+    .replace(/\/{2,}/g, '/');
+}
+
+/**
+ * Lexical canonical form: `.` segments and duplicate slashes collapsed, no
+ * trailing slash, Darwin temp aliases applied. One path has one spelling here,
+ * so `./x`, `x`, `x/` and `/tmp/./x` vs `/tmp/x` stop being different strings.
+ *
+ * `..` is deliberately NOT resolved: a parent segment only means what the
+ * filesystem says it means once a symlink is in the path. Callers treat a
+ * token containing one as unreadable rather than pretending this walk read it.
+ */
+function canonicalisePathLexically(p: string): string {
+  const absolute = p.startsWith('/');
+  const body = p.split('/').filter(seg => seg !== '' && seg !== '.').join('/');
+  return normalizeDarwinTempAliases(absolute ? `/${body}` : body);
+}
+
+/** A confined temp child, never the temp root itself. */
+function isConfinedAbsolute(p: string): boolean {
+  const n = normalizeDarwinTempAliases(p).replace(/\/+$/, '');
+  const lower = n.toLowerCase();
+  return ['/tmp/', '/var/tmp/', '/var/folders/'].some(prefix => lower.startsWith(prefix));
+}
+
+/**
+ * Resolve existing components (so a symlink parent is followed) and append
+ * any missing tail lexically. Returns null on ELOOP / EACCES / special files.
+ */
+function resolveExistingPrefix(p: string): string | null {
+  const trimmed = p.length > 1 ? p.replace(/\/+$/, '') : p;
+  const parts = trimmed.split('/').filter(Boolean);
+  let current = '';
+  for (let i = 0; i < parts.length; i++) {
+    const next = `${current}/${parts[i]}`;
+    try {
+      const st = lstatSync(next);
+      if (st.isSymbolicLink()) {
+        try { current = realpathSync(next); }
+        catch { return null; }
+        continue;
+      }
+      if (!st.isDirectory() && !st.isFile()) return null;
+      try { current = realpathSync(next); }
+      catch { current = next; }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === 'ENOENT') {
+        const rest = parts.slice(i).join('/');
+        return current ? `${current}/${rest}` : `/${rest}`;
+      }
+      return null;
+    }
+  }
+  return current || trimmed;
+}
+
+function parseCdDest(stmt: string): string | 'bad' {
+  const m = stmt.match(/^\s*cd\b(.*)$/i);
+  if (!m) return 'bad';
+  const rest = (m[1] ?? '').trim();
+  if (!rest) return 'bad';
+  const positional = rest.split(/\s+/)
+    .map(t => t.replace(/^[\"']|[\"']$/g, ''))
+    .filter(t => t && !t.startsWith('-'));
+  if (positional.length !== 1) return 'bad';
+  const dest = positional[0]!;
+  if (dest === '-' || /[$`*?~]/.test(dest) || dest.includes('..')) return 'bad';
+  return dest;
+}
+
+function applyCdDest(cwd: ConfinedCwd, dest: string): ConfinedCwd {
+  if (cwd.kind === 'uncertain') return cwd;
+  if (dest.startsWith('/')) return { kind: 'abs', path: dest };
+  if (cwd.kind === 'abs') return { kind: 'abs', path: joinPathParts(cwd.path, dest) };
+  return { kind: 'workspace', rel: cwd.rel ? joinPathParts(cwd.rel, dest) : dest };
+}
+
+/**
+ * A statement stripped of the shell furniture that hides a `cd` from a
+ * leading-anchor test: the grouping characters a subshell / brace group leaves
+ * on the ends (`(cd /`, `{ cd /`) and the two wrappers that still leave `cd`
+ * the real command (`builtin cd /`, `command cd /`).
+ *
+ * Measured on the #339 build: every one of those spellings walked straight past
+ * `^cd\b`, so a root-level relative delete kept the workspace cwd and the
+ * exemption ALLOWED it — the fail-open direction, one wrapper away from the
+ * case #339 had just closed.
+ */
+function unwrapCdStatement(stmt: string): string {
+  let s = stmt.replace(/^[\s(){}]+/, '').replace(/[\s(){}]+$/, '');
+  for (let prev = ''; s !== prev; ) {
+    prev = s;
+    s = s.replace(/^(?:builtin|command)\s+/i, '');
+  }
+  return s;
+}
+
+function isInlineShellStatement(s: string): boolean {
+  return /^(?:(?:builtin|command|env|nohup|exec)\s+)*(?:bash|sh|zsh|ksh|dash|ash)\b/i.test(s);
+}
+
+/**
+ * Nested surfaces a relative delete can hide in: unquoted `(…)` / `$(…)` /
+ * backticks, plus `bash -c '…'` (and friends). Missing `-c` program text is
+ * unreadable — fail closed. Depth is owned by the caller.
+ */
+function nestedDeleteSurfaces(text: string): { bodies: string[]; unreadable: boolean } {
+  const bodies = collectExecutableBodies(text);
+  let unreadable = false;
+  for (const stmt of disposerStatements(text)) {
+    const tokens = tokeniseStatement(stmt);
+    for (let i = 0; i < tokens.length; i++) {
+      const base = commandBaseName(tokens[i]!);
+      if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) continue;
+      for (let j = i + 1; j < tokens.length; j++) {
+        if (isInlineProgramFlag(base, tokens[j]!)) {
+          const prog = tokens[j + 1];
+          if (!prog) unreadable = true;
+          else bodies.push(prog);
+          break;
+        }
+        if (BASH_VALUE_OPTION.test(tokens[j]!)) { j++; continue; }
+        if (!tokens[j]!.startsWith('-')) break;
+      }
+    }
+  }
+  return { bodies, unreadable };
+}
+
+// A `cd` / `pushd` / `popd` ANYWHERE in a statement the cd parser could not
+// read as a clean destination (`eval "cd /"`, `foo=$(cd /)`, a shell whose
+// program is quoted). The directory may have moved and this walk cannot say
+// where, so the only honest answer is "uncertain" — which costs the exemption
+// rather than betting the cwd is still the workspace. Hyphen excluded from the
+// boundary so a hyphenated identifier (`docker-cd-helper`) is not a cd (#188).
+const CD_WORD_RE = /(?<![\w-])(?:cd|pushd|popd)(?![\w-])/i;
+
+/** Cwd in effect just before `end`, walking cd / pushd and failing closed on ||. */
+function cwdBefore(text: string, end: number): ConfinedCwd {
+  const slice = text.slice(0, end);
+  let cwd: ConfinedCwd = { kind: 'workspace', rel: '' };
+  let quote: string | null = null;
+  let stmt = '';
+  const flush = (sep: string): void => {
+    const s = unwrapCdStatement(stmt);
+    stmt = '';
+    if (!s) return;
+    if (/^pushd\b|^popd\b/i.test(s)) {
+      cwd = { kind: 'uncertain' };
+    } else if (/^cd\b/i.test(s)) {
+      const dest = parseCdDest(s);
+      cwd = dest === 'bad' ? { kind: 'uncertain' } : applyCdDest(cwd, dest);
+    } else if (CD_WORD_RE.test(s) && !isInlineShellStatement(s)) {
+      cwd = { kind: 'uncertain' };
+    }
+    if (sep === '||' || sep === '|') cwd = { kind: 'uncertain' };
+  };
+  for (let i = 0; i < slice.length; i++) {
+    const c = slice[i]!;
+    if (c === '\\' && quote !== "'" && i + 1 < slice.length) {
+      stmt += c + slice[++i];
+      continue;
+    }
+    if (quote) {
+      stmt += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; stmt += c; continue; }
+    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') {
+      let sep = c;
+      if ((c === '&' || c === '|') && slice[i + 1] === c) { sep = c + c; i++; }
+      flush(sep);
+      continue;
+    }
+    stmt += c;
+  }
+  // The leftover statement, with no separator of its own. `rm` is at command
+  // position after openers cwdBefore does not split on (`` ` ``, `$(`, `(`), so
+  // dropping the tail dropped the `cd` in ``cd / `rm -rf x` `` entirely.
+  flush('');
+  return cwd;
+}
+
+function effectiveDeleteTarget(tok: string, cwd: ConfinedCwd): string | 'uncertain' {
+  if (tok.startsWith('/')) return tok;
+  if (cwd.kind === 'uncertain') return 'uncertain';
+  if (cwd.kind === 'abs') return joinPathParts(cwd.path, tok);
+  return cwd.rel ? joinPathParts(cwd.rel, tok) : tok;
+}
+
+/**
+ * Same-line ln -s / cp -s destinations. Unreadable dest taints the whole line.
+ *
+ * The mint is identified by ARGV, not by the statement's leading literal: the
+ * command word is located with the shared `commandWordIndex` walk, so a
+ * path-qualified (`/bin/ln`) or wrapper-fronted (`command ln`, `env FOO=1 ln`,
+ * `exec ln`) mint taints exactly like a bare `ln`. Matching the first word made
+ * one wrapper word enough to carry a mint straight past this rule (#339) — the
+ * same lesson as #188/#193, so it uses the same tokenising machinery rather
+ * than a longer list of spellings. `command -v ln` resolves to `ln` but carries
+ * no `-s`, so a lookup is still not a mint.
+ *
+ * The destination is READ OFF THE ARGV, not off the last positional: `ln -s -t
+ * DIR SRC` puts the link at `DIR/SRC`, and `-t`'s value is not an operand at
+ * all, so the last-positional rule recorded the SOURCE as the destination and
+ * left the real link untainted. It is then placed against the cwd in effect at
+ * the mint STATEMENT (the same `cwdBefore` walk the deletes use), because
+ * `cd /tmp && ln -s … ./x` and `ln -s … /tmp/x` mint the same link. An option
+ * shape this walk cannot place is not a proof of anything: fail closed (#339,
+ * Athena review).
+ */
+// The ln / cp option surface, split by whether an option eats the argv word
+// after it. Everything outside these tables is a shape this walk cannot place,
+// and an unplaced option is what turns a source into a "destination" — so the
+// parse fails closed rather than guessing. Long options carrying an OPTIONAL
+// value (`--backup`, `--preserve`, `--reflink`, `--update`, `--context`) only
+// ever take it as `--name=VALUE`, so they belong with the no-arg forms.
+const MINT_LONG_NO_ARG = new Set([
+  'symbolic', 'symbolic-link', 'force', 'interactive', 'logical', 'physical',
+  'dereference', 'no-dereference', 'no-target-directory', 'relative', 'verbose',
+  'directory', 'archive', 'attributes-only', 'copy-contents', 'link', 'no-clobber',
+  'parents', 'recursive', 'remove-destination', 'strip-trailing-slashes',
+  'one-file-system', 'backup', 'preserve', 'no-preserve', 'reflink', 'sparse',
+  'update', 'context', 'help', 'version',
+]);
+/** Long options whose value is the next argv word when written without `=`. */
+const MINT_LONG_ARG = new Set(['target-directory', 'suffix']);
+/** Short option letters that take no value, so they bundle in any order. */
+const MINT_SHORT_NO_ARG = 'abcdfFhHiLlnpPrRsTuvwxXZ';
+/** Short letters whose value is the rest of the bundle, else the next word. */
+const MINT_SHORT_ARG = 'tS';
+
+type MintArgv = { targetDir: string | null; positional: string[] };
+
+/**
+ * getopt for the mint verbs: operands separated from options, `-t` / `-S`
+ * values consumed rather than mistaken for operands. Returns 'unreadable' for
+ * every shape it cannot prove — an unknown option (which may or may not eat
+ * the next word), a value flag with nothing after it, a second `-t`.
+ */
+function parseMintArgv(args: readonly string[]): MintArgv | 'unreadable' {
+  const positional: string[] = [];
+  let targetDir: string | null = null;
+  let optionsEnded = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (optionsEnded || arg === '-' || !arg.startsWith('-')) { positional.push(arg); continue; }
+    if (arg === '--') { optionsEnded = true; continue; }
+    if (arg.startsWith('--')) {
+      const eq = arg.indexOf('=');
+      const name = (eq < 0 ? arg.slice(2) : arg.slice(2, eq)).toLowerCase();
+      if (MINT_LONG_ARG.has(name)) {
+        const value = eq < 0 ? args[++i] : arg.slice(eq + 1);
+        if (value === undefined) return 'unreadable';
+        if (name === 'target-directory') {
+          if (targetDir !== null) return 'unreadable';
+          targetDir = value;
+        }
+        continue;
+      }
+      if (!MINT_LONG_NO_ARG.has(name)) return 'unreadable';
+      continue;
+    }
+    for (let k = 1; k < arg.length; k++) {
+      const letter = arg[k]!;
+      if (MINT_SHORT_ARG.includes(letter)) {
+        const value = k + 1 < arg.length ? arg.slice(k + 1) : args[++i];
+        if (value === undefined) return 'unreadable';
+        if (letter === 't') {
+          if (targetDir !== null) return 'unreadable';
+          targetDir = value;
+        }
+        break;
+      }
+      if (!MINT_SHORT_NO_ARG.includes(letter)) return 'unreadable';
+    }
+  }
+  return { targetDir, positional };
+}
+
+/** The paths a parsed mint creates, as written — 'unreadable' if it cannot say. */
+function mintDestSpellings(argv: MintArgv): string[] | 'unreadable' {
+  const { targetDir, positional } = argv;
+  if (positional.length === 0) return 'unreadable';
+  // Two or more operands and no `-t`: the last one names the link. When it is
+  // an existing DIRECTORY the link lands underneath it instead, which the
+  // prefix test in `mintTaintsTarget` already covers — so the operand as
+  // written is the safe over-approximation, and no stat is needed.
+  if (targetDir === null && positional.length >= 2) {
+    return [positional[positional.length - 1]!];
+  }
+  // `-t DIR SRC…`, and the one-operand form whose DIR is the cwd: every source
+  // is linked as DIR/basename(SRC).
+  const dir = targetDir ?? '.';
+  const out: string[] = [];
+  for (const source of positional) {
+    const name = commandBaseName(source.replace(/\/+$/, ''));
+    if (!name || name === '.' || /[$`*?~]/.test(name)) return 'unreadable';
+    out.push(joinPathParts(dir, name));
+  }
+  return out;
+}
+
+/**
+ * A mint destination in the frame the delete targets are judged in: absolute
+ * where it can be, workspace-relative while the cwd walk is still in the
+ * workspace, 'uncertain' where it cannot be placed at all. A relative dest
+ * under a cwd this walk lost is NOT assumed to be in the workspace.
+ */
+function resolveMintDest(dest: string, cwd: ConfinedCwd): string | 'uncertain' {
+  if (!dest || /[$`*?~]/.test(dest) || dest.includes('..')) return 'uncertain';
+  const lexical = canonicalisePathLexically(dest);
+  if (!lexical) return 'uncertain';
+  if (lexical.startsWith('/')) return lexical;
+  if (cwd.kind === 'uncertain') return 'uncertain';
+  if (cwd.kind === 'abs') return canonicalisePathLexically(joinPathParts(cwd.path, lexical));
+  return canonicalisePathLexically(cwd.rel ? joinPathParts(cwd.rel, lexical) : lexical);
+}
+
+function symlinkMintTaint(text: string): { all: boolean; dests: string[] } {
+  const dests: string[] = [];
+  let all = false;
+  for (const stmt of quoteAwareStatementSpans(text)) {
+    const tokens = tokeniseStatement(stmt.text);
+    const cmd = commandWordIndex(tokens);
+    const base = commandBaseName(tokens[cmd] ?? '').toLowerCase();
+    if (base !== 'ln' && base !== 'cp') continue;
+    const args = tokens.slice(cmd + 1);
+    // Superset test, deliberately loose: it decides only whether this
+    // invocation is a mint AT ALL, so a `cp` with no `-s` never pays for the
+    // strict parse below. `--symbolic-link` is cp's spelling of `--symbolic`.
+    const symbolic = args.some(a => a.startsWith('--')
+      ? /^--symbolic(?:-link)?$/.test(a)
+      : a.startsWith('-') && a.includes('s'));
+    if (!symbolic) continue;
+    const argv = parseMintArgv(args);
+    if (argv === 'unreadable') { all = true; continue; }
+    const spellings = mintDestSpellings(argv);
+    if (spellings === 'unreadable') { all = true; continue; }
+    const cwd = cwdBefore(text, stmt.index);
+    for (const spelled of spellings) {
+      const resolved = resolveMintDest(spelled, cwd);
+      if (resolved === 'uncertain') { all = true; continue; }
+      dests.push(resolved);
+    }
+  }
+  return { all, dests };
+}
+
+/**
+ * Does a delete of `target` reach through the minted `dest`?
+ *
+ * Both sides are canonicalised first. Comparing the spellings as WRITTEN meant
+ * a mint could be renamed out of its own taint by a dot segment — `./x` did
+ * not taint `x/child`, `/tmp/./x` did not taint `/tmp/x/child` — while naming
+ * the very same link (#339, Athena review).
+ */
+function mintTaintsTarget(target: string, dest: string): boolean {
+  const a = canonicalisePathLexically(target);
+  const b = canonicalisePathLexically(dest);
+  if (!a || !b) return false;
+  return a === b || a.startsWith(b.endsWith('/') ? b : `${b}/`);
+}
+
+/** At least one statement on the line begins with a standalone delete verb. */
 function hasStandaloneRmStatement(text: string): boolean {
   RM_STATEMENT_RE.lastIndex = 0;
   return RM_STATEMENT_RE.test(text);
 }
 
-function deleteTargetsAreWorkspaceConfined(text: string): boolean {
+function deleteTargetsAreWorkspaceConfined(text: string, depth = 0): boolean {
+  const nested = nestedDeleteSurfaces(text);
+  if (nested.unreadable) return false;
+  for (const body of nested.bodies) {
+    if (!hasStandaloneRmStatement(body)) continue;
+    // Budget exhausted. The `bash -c` statement holding this body is exempt
+    // from the cd-uncertainty rule (`isInlineShellStatement`) precisely BECAUSE
+    // the recursion reads the body — so abandoning the recursion here handed
+    // that exemption to a delete nobody analysed, and a third nested `bash -c`
+    // could hide `cd /` plus a relative recursive delete (#339). A delete this
+    // walk cannot reach is not a proof of confinement: fail closed.
+    if (depth >= MAX_INLINE_RECURSION) return false;
+    if (!deleteTargetsAreWorkspaceConfined(body, depth + 1)) return false;
+  }
+  const mint = symlinkMintTaint(text);
+  if (mint.all) return false;
   RM_STATEMENT_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   let sawTarget = false;
   let statements = 0;
   while ((m = RM_STATEMENT_RE.exec(text)) !== null) {
-    // Truncating the scan used to fall out of the loop and return the verdict
-    // built from the statements already seen — so a long enough command was
-    // exempted on the strength of its first 64 deletes (measured, #196). An
-    // unanalysable line is never downgraded.
     if (++statements > RM_STATEMENT_SCAN_LIMIT) return false;
+    const cwd = cwdBefore(text, m.index);
     const args = m[2] ?? '';
     for (const raw of args.split(/\s+/)) {
       const tok = raw.trim().replace(/^["']|["']$/g, '');
-      if (!tok || tok.startsWith('-')) continue;          // flags, not targets
+      if (!tok || tok.startsWith('-')) continue;
       sawTarget = true;
-      // Never gamble on anything that can expand or climb.
       if (/[$`*?~]/.test(tok)) return false;
       if (tok.includes('..')) return false;
-      // The WHOLE current directory is not an innocuous confined subdir — it is
-      // every entry in cwd (`.git`, source, uncommitted work), the same blast
-      // radius as `./*`. Any token that is only dots and slashes normalises to
-      // cwd (`.`, `./`, `./.`, `.//`, `././`) — and the quote strip above means
-      // `'.'` / `"."` reach here as `.`. A NAMED relative dir (`.next`, `./build`)
-      // has a non-dot/slash char and stays confined. (#182 residual — Grok.)
       if (/^\.[.\/]*$/.test(tok)) return false;
-      if (tok.startsWith('/')) {
-        if (!CONFINED_TEMP_TARGET_RE.test(tok)) return false;
-        continue;
+      const effective = effectiveDeleteTarget(tok, cwd);
+      if (effective === 'uncertain') return false;
+      if (mint.dests.some(d => mintTaintsTarget(effective, d) || mintTaintsTarget(tok, d))) {
+        return false;
       }
-      // Relative and non-climbing — a workspace path.
+      if (!effective.startsWith('/')) continue;
+      const resolved = resolveExistingPrefix(effective);
+      if (resolved === null) return false;
+      if (!isConfinedAbsolute(resolved)) return false;
     }
   }
   if (!sawTarget) return false;
-  // Every `rm` on the line must have been one of the statements just examined.
-  // If the splitter could not account for one — `find … -exec rm -rf {} +`,
-  // `xargs rm`, any shape not yet understood — its target was never checked,
-  // and an unexamined delete must not inherit the exemption its neighbours
-  // earned. Fail-safe by construction rather than by enumeration.
   RM_WORD_RE.lastIndex = 0;
   const occurrences = (text.match(RM_WORD_RE) ?? []).length;
   return occurrences === statements;
@@ -1165,26 +1554,45 @@ function installsAreContainerConfined(text: string): boolean {
  * Kept local so the fail-safe splitter stays exactly as it is.
  */
 function quoteAwareStatements(text: string): string[] {
-  const out: string[] = [];
+  return quoteAwareStatementSpans(text).map(s => s.text);
+}
+
+/**
+ * The same split, keeping each statement's OFFSET in the original text. The
+ * mint rule needs it: "which directory was this `ln` run from" is a question
+ * about the statement's position, and `cwdBefore` answers it by walking the
+ * prefix (#339).
+ */
+function quoteAwareStatementSpans(text: string): Array<{ text: string; index: number }> {
+  const out: Array<{ text: string; index: number }> = [];
   let cur = '';
+  let start = 0;
   let quote: string | null = null;
+  const take = (at: number, part: string): void => {
+    if (!cur) start = at;
+    cur += part;
+  };
+  const flush = (): void => {
+    if (cur.trim()) out.push({ text: cur, index: start });
+    cur = '';
+  };
   for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '\\' && quote !== "'" && i + 1 < text.length) { cur += c + text[++i]; continue; }
+    const c = text[i]!;
+    if (c === '\\' && quote !== "'" && i + 1 < text.length) {
+      take(i, c + text[i + 1]!);
+      i++;
+      continue;
+    }
     if (quote) {
-      cur += c;
+      take(i, c);
       if (c === quote) quote = null;
       continue;
     }
-    if (c === '"' || c === "'") { quote = c; cur += c; continue; }
-    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') {
-      if (cur.trim()) out.push(cur);
-      cur = '';
-      continue;
-    }
-    cur += c;
+    if (c === '"' || c === "'") { quote = c; take(i, c); continue; }
+    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') { flush(); continue; }
+    take(i, c);
   }
-  if (cur.trim()) out.push(cur);
+  flush();
   return out;
 }
 
