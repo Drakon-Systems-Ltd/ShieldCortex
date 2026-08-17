@@ -435,3 +435,9 @@ Re-review this doc (§16 included) with the same frontier lanes. Freeze lifts fo
 - **BLOCKERS: none** on all lanes (or Michael explicitly accepts a residual blocker in writing)
 
 ---
+
+---
+
+## Normative addendum
+
+**Round-2 fold:** see [`2026-08-17-memory-sota-program-r2-appendix.md`](./2026-08-17-memory-sota-program-r2-appendix.md). That appendix **overrides** §0–§15 on conflict with pack schema, plane policy, inject ceilings, A-min boundary, compact rehydrate, and host native-inject contract.
