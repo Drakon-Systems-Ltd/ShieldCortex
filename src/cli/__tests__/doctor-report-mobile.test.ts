@@ -81,9 +81,17 @@ describe('extractFixCommands', () => {
     ]);
   });
 
-  it('surfaces allowConversationAccess guidance', () => {
+  it('surfaces allowConversationAccess as a note plus openclaw gateway restart', () => {
     const cmds = extractFixCommands(EDITH.find((r) => r.label === 'Conversation scanning')!.fix);
-    expect(cmds.some((c) => c.includes('allowConversationAccess'))).toBe(true);
+    expect(cmds).toEqual(['openclaw gateway restart']);
+    expect(cmds.join(' ')).not.toMatch(/^restart /);
+  });
+
+  it('never treats English restart prose as a command', () => {
+    expect(extractFixCommands('restart OpenClaw gateway')).toEqual(['openclaw gateway restart']);
+    expect(extractFixCommands('restart long-running ShieldCortex processes')).toEqual([
+      'openclaw gateway restart',
+    ]);
   });
 });
 
@@ -130,7 +138,10 @@ describe('formatDoctorReport — Edith case', () => {
     // commands on own lines
     expect(text).toMatch(/\$ shieldcortex config --action-guard-enforce/);
     expect(text).toMatch(/\$ shieldcortex doctor --fix-project-keys/);
+    expect(text).toMatch(/\$ openclaw gateway restart/);
     expect(text).toMatch(/allowConversationAccess/);
+    expect(text).not.toMatch(/\$ restart OpenClaw/);
+    expect(text).not.toMatch(/\$ restart MCP/);
     expect(text).toMatch(/\$ /);
 
     // passes collapsed
