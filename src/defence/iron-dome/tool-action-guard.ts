@@ -1111,6 +1111,21 @@ function normalizeDarwinTempAliases(p: string): string {
     .replace(/\/{2,}/g, '/');
 }
 
+/**
+ * Lexical canonical form: `.` segments and duplicate slashes collapsed, no
+ * trailing slash, Darwin temp aliases applied. One path has one spelling here,
+ * so `./x`, `x`, `x/` and `/tmp/./x` vs `/tmp/x` stop being different strings.
+ *
+ * `..` is deliberately NOT resolved: a parent segment only means what the
+ * filesystem says it means once a symlink is in the path. Callers treat a
+ * token containing one as unreadable rather than pretending this walk read it.
+ */
+function canonicalisePathLexically(p: string): string {
+  const absolute = p.startsWith('/');
+  const body = p.split('/').filter(seg => seg !== '' && seg !== '.').join('/');
+  return normalizeDarwinTempAliases(absolute ? `/${body}` : body);
+}
+
 /** A confined temp child, never the temp root itself. */
 function isConfinedAbsolute(p: string): boolean {
   const n = normalizeDarwinTempAliases(p).replace(/\/+$/, '');
@@ -1296,31 +1311,166 @@ function effectiveDeleteTarget(tok: string, cwd: ConfinedCwd): string | 'uncerta
  * same lesson as #188/#193, so it uses the same tokenising machinery rather
  * than a longer list of spellings. `command -v ln` resolves to `ln` but carries
  * no `-s`, so a lookup is still not a mint.
+ *
+ * The destination is READ OFF THE ARGV, not off the last positional: `ln -s -t
+ * DIR SRC` puts the link at `DIR/SRC`, and `-t`'s value is not an operand at
+ * all, so the last-positional rule recorded the SOURCE as the destination and
+ * left the real link untainted. It is then placed against the cwd in effect at
+ * the mint STATEMENT (the same `cwdBefore` walk the deletes use), because
+ * `cd /tmp && ln -s … ./x` and `ln -s … /tmp/x` mint the same link. An option
+ * shape this walk cannot place is not a proof of anything: fail closed (#339,
+ * Athena review).
  */
+// The ln / cp option surface, split by whether an option eats the argv word
+// after it. Everything outside these tables is a shape this walk cannot place,
+// and an unplaced option is what turns a source into a "destination" — so the
+// parse fails closed rather than guessing. Long options carrying an OPTIONAL
+// value (`--backup`, `--preserve`, `--reflink`, `--update`, `--context`) only
+// ever take it as `--name=VALUE`, so they belong with the no-arg forms.
+const MINT_LONG_NO_ARG = new Set([
+  'symbolic', 'symbolic-link', 'force', 'interactive', 'logical', 'physical',
+  'dereference', 'no-dereference', 'no-target-directory', 'relative', 'verbose',
+  'directory', 'archive', 'attributes-only', 'copy-contents', 'link', 'no-clobber',
+  'parents', 'recursive', 'remove-destination', 'strip-trailing-slashes',
+  'one-file-system', 'backup', 'preserve', 'no-preserve', 'reflink', 'sparse',
+  'update', 'context', 'help', 'version',
+]);
+/** Long options whose value is the next argv word when written without `=`. */
+const MINT_LONG_ARG = new Set(['target-directory', 'suffix']);
+/** Short option letters that take no value, so they bundle in any order. */
+const MINT_SHORT_NO_ARG = 'abcdfFhHiLlnpPrRsTuvwxXZ';
+/** Short letters whose value is the rest of the bundle, else the next word. */
+const MINT_SHORT_ARG = 'tS';
+
+type MintArgv = { targetDir: string | null; positional: string[] };
+
+/**
+ * getopt for the mint verbs: operands separated from options, `-t` / `-S`
+ * values consumed rather than mistaken for operands. Returns 'unreadable' for
+ * every shape it cannot prove — an unknown option (which may or may not eat
+ * the next word), a value flag with nothing after it, a second `-t`.
+ */
+function parseMintArgv(args: readonly string[]): MintArgv | 'unreadable' {
+  const positional: string[] = [];
+  let targetDir: string | null = null;
+  let optionsEnded = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (optionsEnded || arg === '-' || !arg.startsWith('-')) { positional.push(arg); continue; }
+    if (arg === '--') { optionsEnded = true; continue; }
+    if (arg.startsWith('--')) {
+      const eq = arg.indexOf('=');
+      const name = (eq < 0 ? arg.slice(2) : arg.slice(2, eq)).toLowerCase();
+      if (MINT_LONG_ARG.has(name)) {
+        const value = eq < 0 ? args[++i] : arg.slice(eq + 1);
+        if (value === undefined) return 'unreadable';
+        if (name === 'target-directory') {
+          if (targetDir !== null) return 'unreadable';
+          targetDir = value;
+        }
+        continue;
+      }
+      if (!MINT_LONG_NO_ARG.has(name)) return 'unreadable';
+      continue;
+    }
+    for (let k = 1; k < arg.length; k++) {
+      const letter = arg[k]!;
+      if (MINT_SHORT_ARG.includes(letter)) {
+        const value = k + 1 < arg.length ? arg.slice(k + 1) : args[++i];
+        if (value === undefined) return 'unreadable';
+        if (letter === 't') {
+          if (targetDir !== null) return 'unreadable';
+          targetDir = value;
+        }
+        break;
+      }
+      if (!MINT_SHORT_NO_ARG.includes(letter)) return 'unreadable';
+    }
+  }
+  return { targetDir, positional };
+}
+
+/** The paths a parsed mint creates, as written — 'unreadable' if it cannot say. */
+function mintDestSpellings(argv: MintArgv): string[] | 'unreadable' {
+  const { targetDir, positional } = argv;
+  if (positional.length === 0) return 'unreadable';
+  // Two or more operands and no `-t`: the last one names the link. When it is
+  // an existing DIRECTORY the link lands underneath it instead, which the
+  // prefix test in `mintTaintsTarget` already covers — so the operand as
+  // written is the safe over-approximation, and no stat is needed.
+  if (targetDir === null && positional.length >= 2) {
+    return [positional[positional.length - 1]!];
+  }
+  // `-t DIR SRC…`, and the one-operand form whose DIR is the cwd: every source
+  // is linked as DIR/basename(SRC).
+  const dir = targetDir ?? '.';
+  const out: string[] = [];
+  for (const source of positional) {
+    const name = commandBaseName(source.replace(/\/+$/, ''));
+    if (!name || name === '.' || /[$`*?~]/.test(name)) return 'unreadable';
+    out.push(joinPathParts(dir, name));
+  }
+  return out;
+}
+
+/**
+ * A mint destination in the frame the delete targets are judged in: absolute
+ * where it can be, workspace-relative while the cwd walk is still in the
+ * workspace, 'uncertain' where it cannot be placed at all. A relative dest
+ * under a cwd this walk lost is NOT assumed to be in the workspace.
+ */
+function resolveMintDest(dest: string, cwd: ConfinedCwd): string | 'uncertain' {
+  if (!dest || /[$`*?~]/.test(dest) || dest.includes('..')) return 'uncertain';
+  const lexical = canonicalisePathLexically(dest);
+  if (!lexical) return 'uncertain';
+  if (lexical.startsWith('/')) return lexical;
+  if (cwd.kind === 'uncertain') return 'uncertain';
+  if (cwd.kind === 'abs') return canonicalisePathLexically(joinPathParts(cwd.path, lexical));
+  return canonicalisePathLexically(cwd.rel ? joinPathParts(cwd.rel, lexical) : lexical);
+}
+
 function symlinkMintTaint(text: string): { all: boolean; dests: string[] } {
   const dests: string[] = [];
   let all = false;
-  for (const raw of quoteAwareStatements(text)) {
-    const tokens = tokeniseStatement(raw);
+  for (const stmt of quoteAwareStatementSpans(text)) {
+    const tokens = tokeniseStatement(stmt.text);
     const cmd = commandWordIndex(tokens);
     const base = commandBaseName(tokens[cmd] ?? '').toLowerCase();
     if (base !== 'ln' && base !== 'cp') continue;
     const args = tokens.slice(cmd + 1);
-    const flags = args.filter(a => a.startsWith('-'));
-    const positional = args.filter(a => !a.startsWith('-'));
-    const symbolic = flags.some(f =>
-      f === '--symbolic' || (!f.startsWith('--') && f.includes('s')));
+    // Superset test, deliberately loose: it decides only whether this
+    // invocation is a mint AT ALL, so a `cp` with no `-s` never pays for the
+    // strict parse below. `--symbolic-link` is cp's spelling of `--symbolic`.
+    const symbolic = args.some(a => a.startsWith('--')
+      ? /^--symbolic(?:-link)?$/.test(a)
+      : a.startsWith('-') && a.includes('s'));
     if (!symbolic) continue;
-    const dest = positional[positional.length - 1] ?? '';
-    if (!dest || /[$`*?~]/.test(dest)) { all = true; continue; }
-    dests.push(dest);
+    const argv = parseMintArgv(args);
+    if (argv === 'unreadable') { all = true; continue; }
+    const spellings = mintDestSpellings(argv);
+    if (spellings === 'unreadable') { all = true; continue; }
+    const cwd = cwdBefore(text, stmt.index);
+    for (const spelled of spellings) {
+      const resolved = resolveMintDest(spelled, cwd);
+      if (resolved === 'uncertain') { all = true; continue; }
+      dests.push(resolved);
+    }
   }
   return { all, dests };
 }
 
+/**
+ * Does a delete of `target` reach through the minted `dest`?
+ *
+ * Both sides are canonicalised first. Comparing the spellings as WRITTEN meant
+ * a mint could be renamed out of its own taint by a dot segment — `./x` did
+ * not taint `x/child`, `/tmp/./x` did not taint `/tmp/x/child` — while naming
+ * the very same link (#339, Athena review).
+ */
 function mintTaintsTarget(target: string, dest: string): boolean {
-  const a = normalizeDarwinTempAliases(target);
-  const b = normalizeDarwinTempAliases(dest);
+  const a = canonicalisePathLexically(target);
+  const b = canonicalisePathLexically(dest);
+  if (!a || !b) return false;
   return a === b || a.startsWith(b.endsWith('/') ? b : `${b}/`);
 }
 
@@ -1404,26 +1554,45 @@ function installsAreContainerConfined(text: string): boolean {
  * Kept local so the fail-safe splitter stays exactly as it is.
  */
 function quoteAwareStatements(text: string): string[] {
-  const out: string[] = [];
+  return quoteAwareStatementSpans(text).map(s => s.text);
+}
+
+/**
+ * The same split, keeping each statement's OFFSET in the original text. The
+ * mint rule needs it: "which directory was this `ln` run from" is a question
+ * about the statement's position, and `cwdBefore` answers it by walking the
+ * prefix (#339).
+ */
+function quoteAwareStatementSpans(text: string): Array<{ text: string; index: number }> {
+  const out: Array<{ text: string; index: number }> = [];
   let cur = '';
+  let start = 0;
   let quote: string | null = null;
+  const take = (at: number, part: string): void => {
+    if (!cur) start = at;
+    cur += part;
+  };
+  const flush = (): void => {
+    if (cur.trim()) out.push({ text: cur, index: start });
+    cur = '';
+  };
   for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '\\' && quote !== "'" && i + 1 < text.length) { cur += c + text[++i]; continue; }
+    const c = text[i]!;
+    if (c === '\\' && quote !== "'" && i + 1 < text.length) {
+      take(i, c + text[i + 1]!);
+      i++;
+      continue;
+    }
     if (quote) {
-      cur += c;
+      take(i, c);
       if (c === quote) quote = null;
       continue;
     }
-    if (c === '"' || c === "'") { quote = c; cur += c; continue; }
-    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') {
-      if (cur.trim()) out.push(cur);
-      cur = '';
-      continue;
-    }
-    cur += c;
+    if (c === '"' || c === "'") { quote = c; take(i, c); continue; }
+    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '\r') { flush(); continue; }
+    take(i, c);
   }
-  if (cur.trim()) out.push(cur);
+  flush();
   return out;
 }
 

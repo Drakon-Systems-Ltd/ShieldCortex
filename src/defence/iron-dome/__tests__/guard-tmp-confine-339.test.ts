@@ -21,6 +21,15 @@
  * re-asserted alongside every tightening: a security fix that takes the honest
  * build commands back down with it has not made anyone safer.
  *
+ * The same-line symlink MINT rule that closed (2) had two of its own, found in
+ * review: the destination was compared as WRITTEN, so a dot segment renamed a
+ * link out of its own taint (`ln -s /etc ./x` did not taint `x/child`), and the
+ * destination was read as the last positional, so `ln -s -t /tmp /etc` recorded
+ * the SOURCE and left the real link under the temp root untainted. Both are
+ * fail-open. Destinations are now canonicalised and placed against the cwd at
+ * the mint statement, argv is parsed rather than guessed, and an option shape
+ * the parser cannot place costs the exemption instead of being ignored.
+ *
  * Fixtures are assembled at runtime (the #196 house style) so no attack-shaped
  * literal sits on disk. Nothing here deletes anything: the live-filesystem
  * cases build a sandbox under the OS temp root, ask `evaluateToolCall` what it
@@ -191,6 +200,89 @@ describe('#339 — a symlink minted on the same line is not a proof of confineme
 
   it('a hard link is not a directory traversal and costs nothing', () => {
     expect(verdict(`ln a b && ${RMRF} dist`).decision).toBe('allow');
+  });
+
+  // The mint dest used to be compared AS WRITTEN, so a dot segment renamed a
+  // link out of its own taint while naming the very same file. Each case pairs
+  // with the same delete minus the mint, which is the #170 relief — so the
+  // assertion is that the MINT moved the decision, not the delete's spelling.
+  it('a dot segment does not rename a mint out of its own taint', () => {
+    expect(verdict(`ln -s ${ETC} ./sc339-x && ${RMRF} sc339-x/passwd`).decision).toBe('block');
+    expect(verdict(`ln -s ${ETC} /tmp/./sc339-x && ${RMRF} /tmp/sc339-x/passwd`).decision).toBe('block');
+    expect(verdict(`ln -s ${ETC} /tmp/sc339-x/ && ${RMRF} /tmp/sc339-x/passwd`).decision).toBe('block');
+    expect(verdict(`${RMRF} sc339-x/passwd`).decision).toBe('allow');
+    expect(verdict(`${RMRF} /tmp/sc339-x/passwd`).decision).toBe('allow');
+  });
+
+  it('a relative mint dest is placed against the cwd at the MINT statement', () => {
+    expect(verdict(`cd /tmp && ln -s ${ETC} ./sc339-x && ${RMRF} /tmp/sc339-x/passwd`).decision)
+      .toBe('block');
+    expect(verdict(`cd /tmp && ${RMRF} /tmp/sc339-x/passwd`).decision).toBe('allow');
+  });
+
+  it('a relative mint dest under a cwd this walk lost costs the exemption', () => {
+    const dollar = '$';
+    expect(verdict(`cd ${dollar}HOME && ln -s ${ETC} ./sc339-x && ${RMRF} /tmp/sc339-y`).decision)
+      .toBe('block');
+    expect(verdict(`ln -s ${ETC} ../sc339-x && ${RMRF} /tmp/sc339-y`).decision).toBe('block');
+    expect(verdict(`cd ${dollar}HOME && ${RMRF} /tmp/sc339-y`).decision).toBe('allow');
+  });
+
+  // `-t DIR SRC` puts the link at DIR/basename(SRC). Reading the last positional
+  // as the destination recorded the SOURCE instead, and left the real link — the
+  // one under the temp root — with no taint on it at all.
+  it('`-t DIR` names the link DIR/basename(SRC), not the source', () => {
+    const forms = [
+      '-s -t /tmp', '-s -t/tmp', '-st /tmp',
+      '-s --target-directory /tmp', '-s --target-directory=/tmp',
+    ];
+    for (const form of forms) {
+      const v = verdict(`ln ${form} ${ETC} && ${RMRF} /tmp/etc/passwd`);
+      expect(v.decision).toBe('block');
+      expect(v.signals).toContain('recursive-force-delete');
+    }
+    expect(verdict(`cp -s -t /tmp ${ETC}/passwd && ${RMRF} /tmp/passwd/x`).decision).toBe('block');
+    expect(verdict(`${RMRF} /tmp/passwd/x`).decision).toBe('allow');
+  });
+
+  it('every source of a `-t` mint gets its own destination', () => {
+    expect(verdict(`ln -s -t /tmp ${ETC} ${ETC}/hosts && ${RMRF} /tmp/hosts/x`).decision).toBe('block');
+    expect(verdict(`${RMRF} /tmp/hosts/x`).decision).toBe('allow');
+  });
+
+  it('a value flag does not donate its value as a destination', () => {
+    expect(verdict(`ln -s -S .bak ${ETC} /tmp/sc339-x && ${RMRF} /tmp/sc339-x/passwd`).decision)
+      .toBe('block');
+  });
+
+  it('`--` ends the options without losing the destination', () => {
+    expect(verdict(`ln -s -- ${ETC} /tmp/sc339-x && ${RMRF} /tmp/sc339-x/passwd`).decision)
+      .toBe('block');
+  });
+
+  it('a one-operand mint links basename(SRC) into the cwd', () => {
+    expect(verdict(`ln -s ${ETC}/sc339-x && ${RMRF} sc339-x/child`).decision).toBe('block');
+    expect(verdict(`${RMRF} sc339-x/child`).decision).toBe('allow');
+  });
+
+  it('a mint option shape this parser cannot place costs the exemption', () => {
+    const unplaceable = [
+      `-s ${ETC} -t`,                 // a value flag with nothing after it
+      `-s --sc339-unknown /tmp ${ETC}`, // an unknown long option, which may eat the next word
+      `-sQ ${ETC} /tmp/sc339-x`,      // an unknown letter in the bundle
+      `-s -t /tmp -t /var/tmp ${ETC}`, // two target dirs, so neither is provable
+    ];
+    for (const args of unplaceable) {
+      expect(verdict(`ln ${args} && ${RMRF} /tmp/sc339-y`).decision).toBe('block');
+    }
+    // The same delete under a mint this parser CAN place is untouched.
+    expect(verdict(`ln -s ${ETC} /tmp/sc339-x && ${RMRF} /tmp/sc339-y`).decision).toBe('allow');
+  });
+
+  it('a placed `-t` mint leaves an unrelated delete alone (#170 relief holds)', () => {
+    expect(verdict(`ln -s -t /tmp ${ETC} && ${RMRF} dist`).decision).toBe('allow');
+    expect(verdict(`ln -s ${ETC} /tmp/./sc339-x && ${RMRF} dist`).decision).toBe('allow');
+    expect(verdict(`ln -s ${ETC} ./sc339-x && ${RMRF} dist`).decision).toBe('allow');
   });
 });
 
