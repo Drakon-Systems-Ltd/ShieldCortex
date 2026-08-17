@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- **#341 Face 1 — memory markdown forensic quotes** — inline backticks and fenced blocks in MEMORY.md / `.claude/memory` writes are neutralized before the write-content danger scan so incident notes can quote ops forms without a promptless deny. Script-like targets still scan raw bytes. Face 2 (false realtime pointer) already shipped in 4.54.x (#284).
+
 - **Action Guard temp-root exemption is proven, not spelled (#339)** — lexical `/tmp/...` is no longer treated as confined when the path is a symlink out of the tree, a Darwin `/private/tmp` spelling of the same tree, or a relative target after `cd /`. Same-line `ln -s` / `cp -s` into a later delete dest fails closed. Wrapper/subshell/`bash -c`/`builtin`/`command` cd is walked the same way. Workspace `dist` / `cd dashboard && … .next` relief from #170 is unchanged.
 
 ## [4.54.4] - 2026-08-17
