@@ -6,9 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.54.4] - 2026-08-17
+
+**Patch — doctor `$` lines are real commands.**
+
+`threatGraph.trustModifier` stays **advisory**. SDK / PyPI stay **0.3.0**.
+
 ### Fixed
 
-- **Doctor `$` lines are real commands** — gateway restart prints `openclaw gateway restart`, never English `restart OpenClaw gateway`.
+- **Doctor `$` lines are real commands (#337)** — gateway restart prints `openclaw gateway restart`, never English `restart OpenClaw gateway`. `$` is only prefixed on a real binary.
+
+### References
+
+- #337
 
 ## [4.54.3] - 2026-08-16
 
