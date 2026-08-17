@@ -41,6 +41,18 @@ function verdict(command: string) {
   return evaluateToolCall('Bash', { command });
 }
 
+/** POSIX single-quote a word, so a nested program text survives one more level. */
+function singleQuote(word: string): string {
+  return `'${word.split("'").join("'\\''")}'`;
+}
+
+/** `inline('cd / && rm -rf x', 3)` → three `bash -c` levels around that program. */
+function inline(program: string, levels: number): string {
+  let out = program;
+  for (let i = 0; i < levels; i++) out = `bash -c ${singleQuote(out)}`;
+  return out;
+}
+
 describe('#339 — Darwin alias parity', () => {
   it('/private/tmp and /tmp are the same tree, so both are confined', () => {
     expect(verdict(`${RMRF} /tmp/sc339-missing`).decision).toBe('allow');
@@ -155,6 +167,24 @@ describe('#339 — a symlink minted on the same line is not a proof of confineme
     expect(verdict(`ln -s ${ETC} ${dollar}TARGET && ${RMRF} /tmp/sc339-x`).decision).toBe('block');
   });
 
+  it('a wrapper in front of the mint does not hide it', () => {
+    const mint = `ln -s ${ETC} /tmp/sc339-x`;
+    const del = `${RMRF} /tmp/sc339-x`;
+    for (const prefix of ['command', 'env', 'env SC339=1', 'exec']) {
+      expect(verdict(`${prefix} ${mint} && ${del}`).decision).toBe('block');
+    }
+  });
+
+  it('a path-qualified mint does not hide it', () => {
+    const del = `${RMRF} /tmp/sc339-x`;
+    expect(verdict(`/bin/ln -s ${ETC} /tmp/sc339-x && ${del}`).decision).toBe('block');
+    expect(verdict(`/usr/bin/cp -s ${ETC}/passwd /tmp/sc339-x && ${del}`).decision).toBe('block');
+  });
+
+  it('a wrapper LOOKUP is not a mint', () => {
+    expect(verdict(`command -v bash && ${RMRF} dist`).decision).toBe('allow');
+  });
+
   it('a symlink minted somewhere else does not cost an unrelated delete', () => {
     expect(verdict(`ln -s ../shared/node_modules node_modules && ${RMRF} dist`).decision).toBe('allow');
   });
@@ -181,6 +211,20 @@ describe('#339 — wrapper / subshell cd is still a cwd change', () => {
   it('builtin/command wrappers around cd still move cwd', () => {
     expect(verdict(`builtin cd / && ${RMRF} relative-target`).decision).toBe('block');
     expect(verdict(`command cd / && ${RMRF} relative-target`).decision).toBe('block');
+  });
+
+  it('nesting past the recursion budget fails closed instead of skipping', () => {
+    const escape = `cd / && ${RMRF} relative-target`;
+    for (const levels of [1, 2, 3, 4]) {
+      expect(verdict(inline(escape, levels)).decision).toBe('block');
+    }
+  });
+
+  it('the exhausted budget is fail-CLOSED, so a deep nest costs the exemption', () => {
+    const confined = `cd dashboard && ${RMRF} .next`;
+    expect(verdict(inline(confined, 1)).decision).toBe('allow');
+    expect(verdict(inline(confined, 2)).decision).toBe('allow');
+    expect(verdict(inline(confined, 3)).decision).not.toBe('allow');
   });
 
   it('#170 relief still holds inside wrappers that stay in the workspace', () => {

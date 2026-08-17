@@ -1285,20 +1285,29 @@ function effectiveDeleteTarget(tok: string, cwd: ConfinedCwd): string | 'uncerta
   return cwd.rel ? joinPathParts(cwd.rel, tok) : tok;
 }
 
-/** Same-line ln -s / cp -s destinations. Unreadable dest taints the whole line. */
+/**
+ * Same-line ln -s / cp -s destinations. Unreadable dest taints the whole line.
+ *
+ * The mint is identified by ARGV, not by the statement's leading literal: the
+ * command word is located with the shared `commandWordIndex` walk, so a
+ * path-qualified (`/bin/ln`) or wrapper-fronted (`command ln`, `env FOO=1 ln`,
+ * `exec ln`) mint taints exactly like a bare `ln`. Matching the first word made
+ * one wrapper word enough to carry a mint straight past this rule (#339) — the
+ * same lesson as #188/#193, so it uses the same tokenising machinery rather
+ * than a longer list of spellings. `command -v ln` resolves to `ln` but carries
+ * no `-s`, so a lookup is still not a mint.
+ */
 function symlinkMintTaint(text: string): { all: boolean; dests: string[] } {
   const dests: string[] = [];
   let all = false;
   for (const raw of quoteAwareStatements(text)) {
-    const stmt = raw.trim();
-    const isLn = /^ln\b/i.test(stmt);
-    const isCp = /^cp\b/i.test(stmt);
-    if (!isLn && !isCp) continue;
-    const args = stmt.split(/\s+/).slice(1);
+    const tokens = tokeniseStatement(raw);
+    const cmd = commandWordIndex(tokens);
+    const base = commandBaseName(tokens[cmd] ?? '').toLowerCase();
+    if (base !== 'ln' && base !== 'cp') continue;
+    const args = tokens.slice(cmd + 1);
     const flags = args.filter(a => a.startsWith('-'));
-    const positional = args
-      .filter(a => !a.startsWith('-'))
-      .map(a => a.replace(/^[\"']|[\"']$/g, ''));
+    const positional = args.filter(a => !a.startsWith('-'));
     const symbolic = flags.some(f =>
       f === '--symbolic' || (!f.startsWith('--') && f.includes('s')));
     if (!symbolic) continue;
@@ -1322,14 +1331,18 @@ function hasStandaloneRmStatement(text: string): boolean {
 }
 
 function deleteTargetsAreWorkspaceConfined(text: string, depth = 0): boolean {
-  if (depth < 2) {
-    const nested = nestedDeleteSurfaces(text);
-    if (nested.unreadable) return false;
-    for (const body of nested.bodies) {
-      if (hasStandaloneRmStatement(body) && !deleteTargetsAreWorkspaceConfined(body, depth + 1)) {
-        return false;
-      }
-    }
+  const nested = nestedDeleteSurfaces(text);
+  if (nested.unreadable) return false;
+  for (const body of nested.bodies) {
+    if (!hasStandaloneRmStatement(body)) continue;
+    // Budget exhausted. The `bash -c` statement holding this body is exempt
+    // from the cd-uncertainty rule (`isInlineShellStatement`) precisely BECAUSE
+    // the recursion reads the body — so abandoning the recursion here handed
+    // that exemption to a delete nobody analysed, and a third nested `bash -c`
+    // could hide `cd /` plus a relative recursive delete (#339). A delete this
+    // walk cannot reach is not a proof of confinement: fail closed.
+    if (depth >= MAX_INLINE_RECURSION) return false;
+    if (!deleteTargetsAreWorkspaceConfined(body, depth + 1)) return false;
   }
   const mint = symlinkMintTaint(text);
   if (mint.all) return false;
