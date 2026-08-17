@@ -1,6 +1,6 @@
 # ShieldCortex Memory SOTA Program
 
-**Status:** Design / no implementation until first cut is chosen  
+**Status:** Design (Round-1 frontier reviews folded) / no implementation until first cut is chosen  
 **Date:** 2026-08-17  
 **Anchor:** main `@e6e5b6a` (post #340/#343/#344/#345)  
 **Owner:** TARS (program) · Michael (cut selection)  
@@ -12,9 +12,9 @@
 
 ## 0. One-line thesis
 
-> For any bound agent, **ShieldCortex is the only durable memory plane**: every durable fact is captured with model-grade quality, defended on write, retrieved automatically with proven ranking, injected as **brief data (never instructions)**, and native files are either **projections of SC** or **read-only legacy**.
+> For **bound** agents with a writable integration surface, ShieldCortex is the **defended canonical durable memory plane**: model-grade capture, defence on every write, automatic **brief fact** recall (never instructions), proven ranking. Native files are **projection, untrusted import, or explicit legacy** — not a competing brain. MCP-only / unbound hosts stay honest side-cars with doctor limitations (not fake canonicity).
 
-Defence-on-the-memory-path remains the moat. Utility must stop losing to sticky notes.
+Defence-on-the-memory-path remains the moat. Utility must stop losing to sticky notes. Side-car-forever is security theatre.
 
 ---
 
@@ -71,7 +71,7 @@ A host is **Memory-SOTA ready** when **all** hold:
 3. **Brief:** injected pack is ranked top-k, token-budgeted, content-hashed, non-duplicating across turns  
 4. **Quality capture:** durable writes are model-distilled (or explicit user pin), not regex-only  
 5. **Defence on path:** every durable write still passes the pipeline; no fast-path skip  
-6. **Proof:** full LongMemEval-S scorecard + poison/recall-loop suite green in CI  
+6. **Proof (product):** poison/recall-loop + inject budget/hash-ring + empty-brain doctor green in CI. **Proof (honesty, parallel):** LongMemEval-S scorecard exists and is labeled — it is **not** the conjunction that defines Memory-SOTA-ready  
 7. **Doctor:** bound + auto-on + zero writes/recalls over N days is a **fail**, not a silent green  
 8. **Fleet-ready path:** per-agent scope design accepted (implementation may trail P0)
 
@@ -328,3 +328,110 @@ Before any implementation PR:
 ---
 
 *Program opened 2026-08-17. Implementation frozen until first-cut selection + review clear.*
+
+
+---
+
+## 16. Round-1 frontier review (2026-08-17)
+
+Independent reviews (no code). Full texts: `docs/design/memory-sota-reviews/`.
+
+| Lane | Model | Verdict |
+|---|---|---|
+| Heavy | `grok-4.20-multi-agent-0309` | **CHANGES_REQUESTED** |
+| SOL Pro | `gpt-5.6-sol-pro` | **CHANGES_REQUESTED** |
+| Grok | `grok-4.6` | **CHANGES_REQUESTED** |
+
+**Consensus first cut:** **1+2** (B then C) + **thin A** + **D parallel / non-gating**.  
+**Consensus order:** **B > C > A > D**.  
+**Consensus anti-pattern:** side-car forever · Full P0 first · LME-S as definition of SOTA · A2 multi-master in P0.
+
+### 16.1 Blockers absorbed into design (must be true before freeze lifts)
+
+| ID | Blocker | Design resolution |
+|---|---|---|
+| R1-1 | Empty-brain may be write-path/FP/quarantine/host-aim — not only “dumb capture” | **Prelude RCA** required before Cut 1+2 freezes: one-page why `defence_audit` moves and `memories` does not (per host class). Track C cannot assume intake works. |
+| R1-2 | Inject budgets were qualitative | **Hard ceilings in code** (config may only lower). See §16.2. Default mode **`start` only**, not `both`. |
+| R1-3 | Shared DB cross-host inject is P0 contamination | Inject/query default scope includes **host + agent_id + project** (deny-by-default if missing). Fleet Track G is deeper sharing — not “no scope until G”. |
+| R1-4 | Pack field `why` is instruction-shaped | Inject pack = **fact / source_ids / trust / age / tokens / content_hash** only. No rationale-to-model field. |
+| R1-5 | Distill “L0 or skip” is ambiguous | Fail closed = **skip + audit + doctor**. L0 only under explicit `memory.capture=regex` degraded mode — never silent fallback. Distill is tool-less, schema-bound, adversarial input. |
+| R1-6 | LongMemEval-S in SOTA-ready conjunction = RAG gravity | LME-S is **honesty scorecard (Track D)**, not a gate for “Memory-SOTA-ready”. Product gates: poison-loop, budget/hash, empty-brain doctor, no-bootstrap-explosion. |
+| R1-7 | Single-plane absolute vs dual_legacy / open A pick | Thesis is **directional for bound agents**. P0 plane policy: **A3 import-once + doctor drift** (or explicit best-effort canonical). **A2 out of P0**. A1 projections after B/C prove SC is worth SoT. Requires **host contract** notes (what OC/Claude/Hermes stop writing). |
+| R1-8 | Provenance missing on durable rows | Every durable row: `source_kind`, `source_id`, `agent_id`, `host_id`, `content_hash`, `defence_verdict`, `capture_layer` (L0/L1/L2). |
+| R1-9 | Success metrics conflicted with 1+2 cut | Metrics split: **product SLOs** (B/C/A-min) vs **retrieval honesty** (D). |
+| R1-10 | Open decision “native remains writable” is A-input | Escalated to **cut-time blocker decision**, not soft preference. |
+
+### 16.2 Inject v2 numeric defaults (Round-1 consensus band)
+
+Absolute ceilings are **coded maxima**; config may only go lower.
+
+| Pack | Default tokens | Default rows | Max tokens/row | Hard max tokens | Hard max rows |
+|---|---|---|---|---|---|
+| Session-start | **600** | **6** | **100** | **800** | **8** |
+| Turn (off by default) | 200 | 2 | 100 | 300 | 3 |
+| Session cumulative unique inject | **1500** | — | — | **2000** | — |
+
+Other rules:
+- Default mode: **`start`** until adversarial suite green one release; then optional `turn`
+- Hash ring: **whole session**; start pack **pinned at session open** (stable sort: rank desc, id asc)
+- Never inject quarantine / RESTRICTED (unless session cleared) / below trust threshold
+- Empty store → inject **nothing** (no placeholder essays)
+- Near-dup: exact hash in P0; optional normalized/near-dup later (explicit adversarial case)
+
+### 16.3 Distill fail-closed matrix
+
+| Condition | Behaviour |
+|---|---|
+| Provider error / timeout / invalid schema | **No L1 write**; audit; doctor degraded |
+| Defence fail / uncertain on L1 output | **Quarantine**, not partial commit |
+| `memory.capture=distill` outage | Skip L1; **do not** silent L0 |
+| `memory.capture=regex` | Explicit degraded mode only |
+| `memory.capture=distill_required` outage | Skip + doctor **fail** quality SLO (not dump transcript) |
+| Transcript tries to instruct distill | Schema reject / defence; treat as adversarial |
+| Billing | Default **no cloud call**; local/host OAuth only if configured |
+
+L1 salience cap proposal: **≤0.7**; **1.0 reserved for L2 pins** (pins still reviewable if poison).
+
+### 16.4 Plane policy (P0)
+
+| Step | Policy |
+|---|---|
+| Now | Document dual-plane as **defect**, not feature |
+| P0 ship | **A3-leaning:** defended import path + doctor drift; native writes treated untrusted if still allowed |
+| After B+C prove value | A1 projections (“GENERATED — do not edit”) optional |
+| Out of P0 | **A2 bidirectional multi-master** |
+| Always | SC-wins on trust; import never skips defence; no silent overwrite of higher-trust SC |
+
+### 16.5 Empty-brain RCA prelude (before Cut 1+2 implementation)
+
+Must answer on at least one live bound host + one clean fixture host:
+1. Are hooks actually invoking `save-memory` / MCP `remember`?
+2. Are writes dying in defence (block vs quarantine vs pipeline unavailable)?
+3. Project-key / path miss?
+4. Host writing native memory only?
+5. Dedup swallowing everything?
+
+Output: short RCA appendix in this folder + issue comment on #347. **No feature code in prelude.**
+
+### 16.6 Revised first-cut recommendation (post Round-1)
+
+**Ship:** Cut **1+2** = Track **B** (start-only inject v2) → Track **C** (distill + fail-closed)  
+**With:** Track **A-min** (policy + doctor drift + plane flag + provenance fields)  
+**Parallel:** Track **D** harness (non-gating honesty)  
+**Defer:** A2, turn inject, Full P0, fleet shared brain, RRF hard cutover as product gate, custom embedders, generic doc connectors
+
+### 16.7 Extra adversarial cases added to suite list
+
+Poison title/purpose · paraphrase 40× · start+turn double inject · unstable preamble hash · distill confused deputy · native import poison · quarantine exfil via titles · proactive capture→inject loop · cross-host shared DB spray · MCP `get_context` dump · ranking poison crowding top-k · salience stuffing · session-id churn reprint · doctor green-wash (only junk/quarantine) · defence FP empty brain · embedder-off keyword poison
+
+### 16.8 Anti-RAG gravity clause
+
+Any proposal whose primary beneficiary is **open-domain doc QA**, unbounded corpus connectors, or R@k without defence/plane/capture SLOs is **out of program** unless explicitly rechartered. LongMemEval informs ranker quality; it does not redefine the product.
+
+### 16.9 Round-2 review gate
+
+Re-review this doc (§16 included) with the same frontier lanes. Freeze lifts for a cut only when:
+- ≥2 lanes **APPROVE** or **APPROVE_WITH_NITS**
+- **BLOCKERS: none** on all lanes (or Michael explicitly accepts a residual blocker in writing)
+
+---
