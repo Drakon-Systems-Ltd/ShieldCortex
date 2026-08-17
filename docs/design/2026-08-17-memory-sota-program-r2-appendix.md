@@ -85,6 +85,75 @@ L1 salience cap **0.7**. L2 pins may use higher.
 4. **A-min** in parallel with B
 5. **D** LongMemEval harness parallel, non-gating
 
-## Round-3 gate
+## Freeze lift gate
 
 Need ≥2 frontier lanes **APPROVE** or **APPROVE_WITH_NITS** with **blockers: none** before freeze lifts for coding.
+
+---
+
+## Round-3 fold (2026-08-17) — freeze surface
+
+| Lane | Verdict |
+|---|---|
+| Heavy | CHANGES_REQUESTED → folded |
+| SOL Pro | CHANGES_REQUESTED → folded |
+| Grok 4.6 | APPROVE_WITH_NITS |
+
+### Single hash-ring + rehydrate law (wins)
+
+1. Session maintains a **pinned start-pack** (ordered ids + content hashes) chosen at session open.
+2. **Content hash preimage** = `id + newline + title + newline + fact` only (exclude age/trust/tokens so rehydrate identity is stable).
+3. **Hash ring** suppresses re-inject of any content hash already delivered **except** rehydrate case (4).
+4. **Rehydrate:** on host-signaled compact or prompt-reset only, re-deliver the pinned start-pack rows that **still pass live eligibility** (not deleted/forgotten, not quarantine, not RESTRICTED, trust floor still met, scope still matches).
+5. Rehydrate is **budget-neutral** for the 1500/2000 cumulative unique session budget (already charged on first inject). Hard per-pack ceilings still apply to the serialized envelope.
+6. If the host **cannot signal compact**, P0 = **no rehydrate** (not silent reprint).
+7. Serialized envelope (wrapper + fields) counts toward token/char caps, not bare fact alone.
+8. Char accounting: **chars/4** with hard char cap `tokens*4` (CJK undercount accepted P0 limit).
+
+### Native inject contract (P0 law)
+
+When `memory.inject != off` on a bound host, recorded choice must be exactly one of:
+- `disable_native_inject`
+- `sc_only`
+
+**`coexist_dedup` is out of P0** (no algorithm → dual-bus rope).
+**Illegal:** enable SC inject without a recorded per-host choice.
+Host contract is on the **B critical path**, not optional paperwork.
+
+### Unscoped rows
+
+Rows missing `host_id` / `agent_id` / `project` are **not injectable**. Doctor reports excluded count. No implicit "all hosts" backfill.
+
+### Pins under budget pressure
+
+Pins are **rank inputs with priority**, not infinite reserved slots. Assembly: candidate set → rank → **pin-priority stable trim** until all ceilings hold. Pin stuffing cannot exceed hard maxima.
+
+### Capture default after C
+
+Default `memory.capture=distill` when provider configured (fail-closed skip).
+`regex` only if explicitly configured. Unset must not silently mean legacy regex forever after C ships.
+
+### Trust floor (P0)
+
+Inject only if:
+- not quarantine, not RESTRICTED, and
+- (`trust >= medium` OR `source_attested` pin)
+
+Exact enum names aligned to existing SC trust types at first B PR — must be in the PR description.
+
+### Empty-brain doctor
+
+Fail when bound + auto-on + (zero durable admitted rows OR only quarantine/junk/below-floor rows) over N days with activity. Green-wash = fail.
+
+### Editorial before first B PR
+
+Scrub or mark SUPERSEDED any parent pack/`why` / open A2 / open cut-menu lines so grep cannot revive them. This appendix § Round-3 + parent §16 are the freeze surface.
+
+### First cut (unchanged)
+
+Prelude RCA → **B** (with host contract) → **C**; **A-min** parallel with B; **D** parallel non-gating.
+
+### Round-4 gate
+
+Target dual APPROVE / APPROVE_WITH_NITS, blockers none, on this full freeze surface.
+
