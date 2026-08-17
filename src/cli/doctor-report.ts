@@ -3,7 +3,8 @@
  *
  * Pure display layer only — does not change check logic, exit codes, or
  * severity. Default output collapses passes and duplicate warning themes so a
- * 40-col phone SSH pane shows what matters first.
+ * 40-col phone SSH pane shows what matters first. Fail/warn text is never
+ * truncated mid-sentence via ellipsis — it wraps in full at any width.
  */
 
 export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'info';
@@ -185,13 +186,17 @@ function unique(xs: string[]): string[] {
   return out;
 }
 
-export function oneLineWhy(message: string, width: number): string {
-  const cleaned = message
+/** Collapse whitespace and strip backticks — never ellipsizes. */
+export function cleanWhy(message: string): string {
+  return message
     .replace(/\s+/g, ' ')
     .replace(/`/g, '')
     .trim();
-  // Prefer text before em-dash / "—" explanation tail if very long
-  return ellipsize(cleaned, Math.max(12, width - 4));
+}
+
+/** Compact one-liner — used only for the INFO compact path and pass lines. */
+export function oneLineWhy(message: string, width: number): string {
+  return ellipsize(cleanWhy(message), Math.max(12, width - 4));
 }
 
 export function ellipsize(s: string, max: number): string {
@@ -325,25 +330,28 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
   const mark = STATUS_MARK[g.status];
   const col = statusColor(g.status, style);
   const xN = g.count > 1 ? `  x${g.count}` : '';
-  const head = `${col}${mark}${style.reset} ${g.theme.padEnd(6)} ${g.what}${xN}`;
   const lines: string[] = [];
-  // Head may need wrap — keep mark+theme on first line when possible
-  lines.push(...wrapLine(stripAnsiForWrap(head, style), width, 0, 4).map((ln, i) => {
+  // Title: wrap in full — never ellipsize fail/warn headings mid-label.
+  const titlePlain = `${mark} ${g.theme.padEnd(6)} ${g.what}${xN}`;
+  const titleWrapped = wrapLine(titlePlain, width, 0, 4);
+  for (let i = 0; i < titleWrapped.length; i++) {
+    const ln = titleWrapped[i]!;
     if (i === 0) {
-      // re-colour first line only
-      return `${col}${mark}${style.reset} ${g.theme.padEnd(6)} ${ellipsize(`${g.what}${xN}`, Math.max(8, width - 12))}`;
+      // Re-apply colour to mark only; body stays plain after theme.
+      const rest = ln.replace(mark, '').replace(/^\s*/, '');
+      lines.push(`${col}${mark}${style.reset} ${rest}`);
+    } else {
+      lines.push(ln);
     }
-    return ln;
-  }));
-  // Why
-  const why = oneLineWhy(g.why, width);
+  }
+  // Why: full text, wrapped. Ellipsis here is what made full-screen doctor look "cut off".
+  const why = cleanWhy(g.why);
   lines.push(...wrapLine(why, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
-  // Fix commands
-  // Fix lines: `$` only on a real binary. English notes stay notes.
+  // Fix commands — all of them. `$` only on a real binary. English notes stay notes.
   if (g.fixCommands.length === 0) {
     lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
   } else {
-    for (const cmd of g.fixCommands.slice(0, 3)) {
+    for (const cmd of g.fixCommands) {
       const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
         || cmd.startsWith('SHIELDCORTEX_');
       const prefixed = runnable ? `$ ${cmd}` : cmd;
@@ -359,19 +367,6 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     }
   }
   return lines;
-}
-
-/** Strip style codes we just added if wrap helper sees them — head path avoids this. */
-function stripAnsiForWrap(s: string, style: DoctorReportStyle): string {
-  if (!style.reset) return s;
-  return s
-    .split(style.bold).join('')
-    .split(style.reset).join('')
-    .split(style.green).join('')
-    .split(style.yellow).join('')
-    .split(style.red).join('')
-    .split(style.cyan).join('')
-    .split(style.dim).join('');
 }
 
 function renderPassLine(it: DoctorReportItem, width: number, style: DoctorReportStyle): string[] {
@@ -480,7 +475,8 @@ export function formatDoctorReport(
 
 function clampWidth(w: number): number {
   if (!Number.isFinite(w) || w < 40) return 40;
-  if (w > 120) return 120;
+  // Full-screen terminals are often 160–200+; 120 forced mid-sentence cutoffs.
+  if (w > 240) return 240;
   return Math.floor(w);
 }
 

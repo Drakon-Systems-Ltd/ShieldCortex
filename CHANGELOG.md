@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Doctor fail/warn text wraps in full on wide terminals — no mid-sentence ellipsis; width ceiling raised to 240.
+
 ### Security
 
 - **Action Guard temp-root exemption is proven, not spelled (#339)** — lexical `/tmp/...` is no longer treated as confined when the path is a symlink out of the tree, a Darwin `/private/tmp` spelling of the same tree, or a relative target after `cd /`. Same-line `ln -s` / `cp -s` into a later delete dest fails closed. Wrapper/subshell/`bash -c`/`builtin`/`command` cd is walked the same way. Workspace `dist` / `cd dashboard && … .next` relief from #170 is unchanged.
