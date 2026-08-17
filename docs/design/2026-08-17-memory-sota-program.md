@@ -4,7 +4,9 @@
 **Date:** 2026-08-17  
 **Anchor:** main `@e6e5b6a` (post #340/#343/#344/#345)  
 **Owner:** TARS (program) · Michael (cut selection)  
-**Related:** `SCOPE.md`, `docs/agent-trap-gap-analysis.md`, `benchmark/longmemeval/`, OpenClaw cortex-memory hook
+**Related:** `SCOPE.md`, `docs/agent-trap-gap-analysis.md`, `benchmark/longmemeval/`, OpenClaw cortex-memory hook  
+
+**GitHub:** Epic [#347](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/347) · A [#348](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/348) · B [#349](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/349) · C [#350](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/350) · D [#351](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/351) · Design PR [#346](https://github.com/Drakon-Systems-Ltd/ShieldCortex/pull/346)
 
 ---
 
