@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from '@jest/globals';
 import {
+  cleanWhy,
   collapseKey,
   extractFixCommands,
   formatDoctorReport,
@@ -103,8 +104,13 @@ describe('wrapLine / oneLineWhy', () => {
     }
   });
 
-  it('ellipsizes why to width', () => {
+  it('ellipsizes why to width (compact info/pass path only)', () => {
     expect(oneLineWhy('a'.repeat(100), 40).length).toBeLessThanOrEqual(40);
+  });
+
+  it('cleanWhy collapses whitespace and strips backticks without ellipsizing', () => {
+    const long = 'x'.repeat(200);
+    expect(cleanWhy(`a  \`b\`\n c ${long}`)).toBe(`a b c ${long}`);
   });
 });
 
@@ -194,5 +200,56 @@ describe('formatDoctorReport — Edith case', () => {
     expect(text.indexOf('FAILURES')).toBeGreaterThanOrEqual(0);
     expect(text.indexOf('FAILURES')).toBeLessThan(text.indexOf('NEEDS ATTENTION'));
     expect(text).toMatch(/\$ shieldcortex repair/);
+  });
+});
+
+describe('formatDoctorReport — full-screen terminals', () => {
+  const LONG_TOKEN = 'FULLY_VISIBLE_WHY_TOKEN_THAT_MUST_NOT_BE_CUT_BY_ELLIPSIS';
+  const LONG_FAIL: DoctorReportItem = {
+    label: 'Database',
+    status: 'fail',
+    message:
+      'integrity check failed on three tables and the write-ahead log cannot be replayed; ' +
+      'the previous backup completed four hours ago so restoring from it loses recent captures — ' +
+      `full details are recorded in the audit log under ${LONG_TOKEN}`,
+    fix: '`shieldcortex repair`',
+  };
+
+  it.each([120, 200])('long fail why appears in full at width %d — no mid-sentence ellipsis', (width) => {
+    const lines = formatDoctorReport([LONG_FAIL], { width, color: false });
+    const text = lines.join('\n');
+    expect(text).toContain(LONG_TOKEN);
+    expect(text).not.toContain('…');
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(width);
+    }
+  });
+
+  it('width 200 is not clamped down to 120 — long single token stays on one line', () => {
+    const token = 'A'.repeat(170);
+    const lines = formatDoctorReport(
+      [{ label: 'Database', status: 'fail', message: `token ${token} end`, fix: '`shieldcortex repair`' }],
+      { width: 200, color: false },
+    );
+    // If width were clamped to 120, wrapLine would hard-split the 170-char
+    // token across lines and no single line would contain it whole.
+    expect(lines.some((l) => l.includes(token))).toBe(true);
+  });
+
+  it('shows all fix commands for a fail item, not just the first three', () => {
+    const fix =
+      'Run `shieldcortex repair`, then `shieldcortex doctor --fix-project-keys`, ' +
+      '`shieldcortex config --action-guard-enforce`, `openclaw gateway restart`, ' +
+      'and `shieldcortex memories repair-project-keys --execute`';
+    const lines = formatDoctorReport(
+      [{ label: 'Database', status: 'fail', message: 'corrupt', fix }],
+      { width: 100, color: false },
+    );
+    const text = lines.join('\n');
+    expect(text).toContain('$ shieldcortex repair');
+    expect(text).toContain('$ shieldcortex doctor --fix-project-keys');
+    expect(text).toContain('$ shieldcortex config --action-guard-enforce');
+    expect(text).toContain('$ openclaw gateway restart');
+    expect(text).toContain('$ shieldcortex memories repair-project-keys --execute');
   });
 });
