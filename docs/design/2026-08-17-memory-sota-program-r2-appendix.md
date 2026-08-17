@@ -153,7 +153,35 @@ Scrub or mark SUPERSEDED any parent pack/`why` / open A2 / open cut-menu lines s
 
 Prelude RCA → **B** (with host contract) → **C**; **A-min** parallel with B; **D** parallel non-gating.
 
-### Round-4 gate
+### Prior gate (satisfied by Round-4)
 
 Target dual APPROVE / APPROVE_WITH_NITS, blockers none, on this full freeze surface.
+
+---
+
+## Round-4 result (2026-08-17) — design freeze CLEAR
+
+| Lane | Verdict | Blockers |
+|---|---|---|
+| Heavy | **APPROVE_WITH_NITS** | none |
+| SOL Pro | **APPROVE_WITH_NITS** | none |
+| Grok 4.6 | **APPROVE_WITH_NITS** | none |
+
+**Design freeze for coding may lift after Michael selects first cut.**
+
+Remaining items are **nits / pre-B checklist**, not freeze-lifters:
+- SUPERSEDED scrub of parent greppable contradictions before first B PR
+- Split A-min parallel vs **B-gating** host-contract
+- Doctor N default band (suggest **7 days**)
+- Post-C unset capture = distill skip (not legacy regex)
+- Candidate pool cap before rank; rehydrate drops ineligible without backfill
+- Hermes row = MCP side-car / no inject if applicable
+- Title length cap inside per-row budget
+- Rehydrate uses frozen snapshot fields + live eligibility drop
+
+### Operator decision still required
+
+1. First cut pick (recommended: **1+2** = B then C + A-min + D parallel)
+2. Native-writable post-bridge (yes/no)
+3. Per-host inject contract when enabling B (`disable_native_inject` | `sc_only`)
 
