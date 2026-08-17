@@ -44,3 +44,11 @@ Lower rank is better. `—` means no gold session was retrieved within top-k.
 - MRR is reciprocal of the *first* gold-session hit position, averaged across questions. Questions with no hit contribute 0.
 - Embeddings are loaded if available; if the model is missing, the harness still runs but vector recall is empty (FTS + graph only).
 - Each question runs against a fresh in-memory SQLite DB. Cross-question contamination is impossible by construction.
+
+---
+
+## Memory SOTA Track D note (2026-08-17)
+
+Full LongMemEval-S remains **honesty scorecard work**, not a Memory-SOTA-ready gate.
+Cut 1+2 ships product gates (inject/capture/doctor) first; expand this harness under issue #351 without claiming SOTA from the toy fixture.
+

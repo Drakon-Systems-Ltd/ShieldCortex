@@ -176,6 +176,8 @@
     "scripts/pre-tool-hook.mjs",
     "scripts/lib",
     "dashboard/.next/standalone",
-    "plugins/hermes"
+    "plugins/hermes",
+    "scripts/lib/inject-pack.mjs",
+    "scripts/lib/capture-distill.mjs"
   ]
 }

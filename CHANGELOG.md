@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Memory SOTA cut 1+2 (start):** empty-brain RCA, inject pack v2 library + session-start wiring, doctor empty-brain/native-contract check, capture-distill fail-closed scaffold, plane policy A-min doc (epic #347).
+
+
 ### Fixed
 - Doctor fail/warn text wraps in full on wide terminals — no mid-sentence ellipsis; width ceiling raised to 240.
 
