@@ -523,7 +523,21 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       tool_input: { command: 'sudo systemctl stop nginx' },
     }, { SHIELDCORTEX_TEST_POST_APPEND_VALIDATION_DELAY_MS: '250' }, 2500);
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-    rmSync(auditDir, { recursive: true, force: true });
+    // Race-hardening: concurrent lock writers can leave auditDir non-empty briefly (ENOTEMPTY).
+    {
+      const deadline = Date.now() + 2000;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          rmSync(auditDir, { recursive: true, force: true });
+          break;
+        } catch (err: any) {
+          if (err?.code !== 'ENOTEMPTY' && err?.code !== 'EBUSY') throw err;
+          if (Date.now() > deadline) throw err;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      }
+    }
     symlinkSync(outside, auditDir);
 
     const result = await pending;
@@ -545,7 +559,21 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       2500,
     );
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-    rmSync(auditDir, { recursive: true, force: true });
+    // Race-hardening: concurrent lock writers can leave auditDir non-empty briefly (ENOTEMPTY).
+    {
+      const deadline = Date.now() + 2000;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          rmSync(auditDir, { recursive: true, force: true });
+          break;
+        } catch (err: any) {
+          if (err?.code !== 'ENOTEMPTY' && err?.code !== 'EBUSY') throw err;
+          if (Date.now() > deadline) throw err;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      }
+    }
     symlinkSync(outside, auditDir);
 
     const result = await pending;
