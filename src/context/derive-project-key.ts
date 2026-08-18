@@ -139,6 +139,14 @@ export function deriveProjectKey(cwd: string | null | undefined): string | null 
     }
   }
 
+  // OpenClaw default cwd is often ~/.openclaw/workspace — bare "workspace"
+  // collides with canonical keys like edith-vitaetpax-edith-workspace.
+  // Refuse generic basenames unless projectAliases mapped them above.
+  const GENERIC_BASENAMES = new Set(['workspace', 'openclaw', 'home', 'tmp', 'temp']);
+  if (basename && GENERIC_BASENAMES.has(basename.toLowerCase())) {
+    return null;
+  }
+
   return basename;
 }
 

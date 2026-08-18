@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Project keys (Edith):** refuse bare generic basenames (`workspace`, `openclaw`, …) in `deriveProjectKey` unless `projectAliases` maps them; auto-heal legacy/canonical collisions at end of `shieldcortex update` so the KEY warn does not return after every upgrade.
 - **Doctor OpenClaw residue (Edith):** ClawHub `lock.json` `.skills.shieldcortex` is **not** an orphan when the skill directory is on disk (`~/.openclaw/workspace/skills/shieldcortex`). Stops a permanent warn after every healthy skill install.
 - **Doctor SCAN fix commands:** conversation-access warn now leads with `shieldcortex openclaw install --allow-conversation-access` then `openclaw gateway restart` — restart alone never clears the warn.
 

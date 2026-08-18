@@ -309,7 +309,7 @@ export function isPluginRegisteredInOpenClawConfig(cfg: unknown): boolean {
   return entryEnabled && inAllow;
 }
 
-function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolean } {
+function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolean; skillInstalled: boolean } {
   const home = resolveHome();
 
   // 1. Honour whatever path the installer recorded in openclaw.json.

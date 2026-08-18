@@ -768,6 +768,25 @@ export async function runUpdate(): Promise<void> {
     process.stdout.write('\n');
   }
 
+  // Edith / OpenClaw hosts: bare cwd basename "workspace" collides with
+  // canonical owner-repo keys. Heal after every update so doctor KEY warn
+  // does not reappear the moment new rows land under the legacy key.
+  try {
+    const { fixProjectKeyCollisions } = await import('./doctor.js');
+    const heal = await fixProjectKeyCollisions();
+    if (heal.applied > 0) {
+      process.stdout.write(
+        `  ${paint('green', '✓')}  ${paint('gray', `project keys: remapped ${heal.applied} legacy row(s)`)}\n`,
+      );
+    } else if (heal.skippedAmbiguous > 0) {
+      process.stdout.write(
+        `  ${paint('yellow', '⚠')}  ${paint('gray', `project keys: ${heal.skippedAmbiguous} ambiguous collision(s) — run shieldcortex doctor --fix-project-keys`)}\n`,
+      );
+    }
+  } catch {
+    /* update must not fail on project-key heal */
+  }
+
   // #309 — after the package is current, surface new/changed cron-referenced
   // scripts for TTY batch review. Headless updates only print a pointer line;
   // never auto-pin and never fail the update if discovery is weird.

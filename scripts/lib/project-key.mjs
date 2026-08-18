@@ -146,6 +146,18 @@ export function deriveProjectKey(cwd) {
   // Hot path post-#42 fix: this branch should only fire outside any git repo
   // or when origin parsing fails. If users see this often after upgrading,
   // the helper itself needs another look.
+  //
+  // OpenClaw's default agent cwd is often ~/.openclaw/workspace — basename
+  // "workspace" collides with canonical keys like edith-vitaetpax-edith-workspace
+  // (Edith: doctor KEY warn returns after every update). Refuse bare generic
+  // basenames unless the operator aliased them explicitly above.
+  const GENERIC_BASENAMES = new Set(['workspace', 'openclaw', 'home', 'tmp', 'temp']);
+  if (basename && GENERIC_BASENAMES.has(basename.toLowerCase())) {
+    if (process.env.SHIELDCORTEX_DEBUG) {
+      process.stderr.write(`[shieldcortex deriveProjectKey] refusing generic basename=${basename} cwd=${cwd}\n`);
+    }
+    return null;
+  }
   if (process.env.SHIELDCORTEX_DEBUG) {
     process.stderr.write(`[shieldcortex deriveProjectKey] basename fallback for cwd=${cwd}\n`);
   }
