@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- **#353 isolated cron envelope vs HEARTBEAT skip** — wrapped `Read HEARTBEAT.md` turns are recognised from host session identity (`agent:…:cron:<id>` / `*:heartbeat`) after stripping one leading `[cron:…]` line. Ordinary isolated cron and a user-authored cron-looking prefix still scan. Start-anchored unwrapped heartbeat skip is unchanged.
 - **Interpreter recursive-delete floor (#342)** — Python shutil remove-tree, Node fs recursive remove with recursive:true, and Ruby FileUtils remove-force against root/home/cwd are catastrophic. Shell-verb-only matching no longer leaves native interpreter one-liners with empty signals. Pattern-string mentions inside interpreter `-c` stay mentions (#89).
 - **#341 Face 1 — memory markdown forensic quotes** — inline backticks and fenced blocks in MEMORY.md / `.claude/memory` writes are neutralized before the write-content danger scan so incident notes can quote ops forms without a promptless deny. Script-like targets still scan raw bytes. Face 2 (false realtime pointer) already shipped in 4.54.x (#284).
 

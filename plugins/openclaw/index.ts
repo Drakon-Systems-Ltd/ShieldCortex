@@ -2251,7 +2251,10 @@ async function createNoveltyGate(config: SCConfig): Promise<{
 
 // ==================== HOOK HANDLERS ====================
 
-// Skip scanning internal OpenClaw content (boot checks, system prompts, heartbeats)
+// Skip scanning internal OpenClaw content (boot checks, system prompts, heartbeats).
+// #353: isolated cron prepends a host envelope (`[cron:<id> name]`) so the
+// heartbeat ritual is no longer at column 0. Recognition of THAT wrap uses
+// host session identity, never a spoofable prompt prefix.
 const SKIP_PATTERNS = [
   /^You are running a boot check/i,
   /^Read HEARTBEAT\.md/i,
@@ -2262,8 +2265,64 @@ const SKIP_PATTERNS = [
   /^A subagent task/i,
   /subagent.*completed/i,
 ];
-function isInternalContent(text: string): boolean {
-  return SKIP_PATTERNS.some(p => p.test(text.trim()));
+
+/** Host-generated isolated heartbeat / cron session keys. Prompt text is never
+ *  a substitute. Tight prefixes only — `direct:heartbeat` is not trusted. */
+const HOST_HEARTBEAT_SESSION =
+  /^(?:agent:[A-Za-z0-9._-]+:)+(?:main:)?heartbeat(?:$|:run:)/i;
+const HOST_CRON_SESSION =
+  /^(?:agent:[A-Za-z0-9._-]+:)*cron:[A-Za-z0-9._-]+(?:$|:run:)/i;
+
+export function isTrustedAutomationSession(sessionId?: string | null): boolean {
+  if (typeof sessionId !== 'string') return false;
+  const trimmed = sessionId.trim();
+  if (!trimmed || trimmed.length > 256 || /\s/.test(trimmed)) return false;
+  return HOST_HEARTBEAT_SESSION.test(trimmed) || HOST_CRON_SESSION.test(trimmed);
+}
+
+const HOST_CRON_ENVELOPE_LINE = /^\s*\[cron:[^\]]+\]\s*$/;
+const HOST_CRON_ENVELOPE_PREFIX = /^\s*\[cron:[^\]]+\][ \t]+/;
+
+/** Drop at most one leading host cron envelope (own line or same-line prefix).
+ *  Later `[cron:…]` tokens stay in the body so a user cannot bury an injection
+ *  after a fake wrap. */
+export function stripOneHostCronEnvelope(text: string): string {
+  const raw = String(text ?? '');
+  const nl = raw.search(/\r?\n/);
+  const first = nl === -1 ? raw : raw.slice(0, nl);
+  if (HOST_CRON_ENVELOPE_LINE.test(first)) {
+    return nl === -1 ? '' : raw.slice(nl).replace(/^\r?\n/, '');
+  }
+  if (HOST_CRON_ENVELOPE_PREFIX.test(first)) {
+    const strippedFirst = first.replace(HOST_CRON_ENVELOPE_PREFIX, '');
+    return nl === -1 ? strippedFirst : strippedFirst + raw.slice(nl);
+  }
+  return raw;
+}
+
+function matchesSkipPatterns(text: string): boolean {
+  return SKIP_PATTERNS.some((p) => p.test(text.trim()));
+}
+
+export function isInternalContent(text: string, sessionId?: string | null): boolean {
+  const body = String(text ?? '');
+  if (matchesSkipPatterns(body)) return true;
+  if (!isTrustedAutomationSession(sessionId)) return false;
+  const inner = stripOneHostCronEnvelope(body);
+  if (inner === body) return false;
+  return matchesSkipPatterns(inner);
+}
+
+function resolveHookSessionId(
+  event: { sessionId?: string } | undefined,
+  ctx?: AgentCtx,
+): string | undefined {
+  const fromEvent = typeof event?.sessionId === 'string' ? event.sessionId.trim() : '';
+  if (fromEvent) return fromEvent;
+  const fromCtx = typeof ctx?.sessionId === 'string' ? ctx.sessionId.trim() : '';
+  if (fromCtx) return fromCtx;
+  const fromKey = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey.trim() : '';
+  return fromKey || undefined;
 }
 
 // Awaitable scan body — extracted so the jest suite can verify behaviour
@@ -2304,8 +2363,9 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
       }
       return trustMemo;
     };
+    const sessionId = resolveHookSessionId(event, _ctx);
     const userTexts = extractUserContent(event.historyMessages).slice(-5);
-    const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t));
+    const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t, sessionId));
     for (const text of texts) {
       if (!text || text.length < 10) continue;
       const result = await scanRealtimeContent(text);
@@ -2896,11 +2956,11 @@ export async function handleBeforeAgentRun(
     if (posture === 'off') return gatePass();
 
     const text = String(event?.prompt ?? '');
-    if (!text || text.length < 10 || isInternalContent(text)) return gatePass();
-
     // sessionId/model come off the hook CONTEXT (PluginHookAgentContext); the
     // event carries neither. Both are optional there too, so both may be absent.
-    const sessionId = ctx?.sessionId ?? ctx?.sessionKey;
+    // Resolve BEFORE the internal-content skip so #353 can see the host key.
+    const sessionId = resolveHookSessionId(undefined, ctx);
+    if (!text || text.length < 10 || isInternalContent(text, sessionId)) return gatePass();
     const model = (ctx as { modelId?: string } | undefined)?.modelId;
 
     // scanRealtimeContent no longer throws on the paths that used to (it
