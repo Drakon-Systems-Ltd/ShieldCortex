@@ -85,22 +85,22 @@ describe('ShieldCortex system-prompt hash stability', () => {
     }
   });
 
-  it('HOOK.md documents that bootstrap context injection is disabled (matches handler.ts behaviour)', () => {
-    // handler.ts line ~500 comment states injection was disabled in v2026.2.26
-    // because it caused 40x duplication of CORTEX_MEMORY.md in the system prompt.
-    // HOOK.md must not claim injection still happens or operators will
-    // misconfigure their setups.
+  it('HOOK.md documents bounded inject-under-contract (no unbounded CORTEX_MEMORY dump)', () => {
+    // Unbounded CORTEX_MEMORY dump remains disabled (v2026.2.26 40x class).
+    // Memory SOTA B may inject a budgeted pack only when nativeContract is set.
+    // HOOK.md must not promise the old unbounded dump.
     const hookMd = fs.readFileSync(path.join(hookDir, 'HOOK.md'), 'utf-8');
     const handlerSource = fs.readFileSync(path.join(hookDir, 'handler.ts'), 'utf-8');
 
-    // Handler keeps its disabled-injection note; that's the source of truth.
-    expect(handlerSource).toMatch(/Context injection disabled as of v2026\.2\.26/);
+    expect(handlerSource).toMatch(/Unbounded CORTEX_MEMORY dump remains disabled \(v2026\.2\.26 40x class\)/);
+    expect(handlerSource).toMatch(/nativeContract/);
+    expect(handlerSource).toMatch(/maybeInjectBootstrapPack/);
 
-    // If HOOK.md still promises injection happens, fail.
     const bootstrapSection = hookMd.match(/### On Session Start[\s\S]*?(?=\n## |\n### )/);
     if (bootstrapSection) {
       const text = bootstrapSection[0];
       expect(text).not.toMatch(/Injects them into the agent's bootstrap context/);
+      expect(text).toMatch(/nativeContract|budgeted|40/);
     }
   });
 });
