@@ -12,8 +12,8 @@ import { existsSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const MODEL_LOAD_TIMEOUT_MS = 30_000;
-const INFERENCE_TIMEOUT_MS = 10_000;
+const MODEL_LOAD_TIMEOUT_MS = 120_000;
+const INFERENCE_TIMEOUT_MS = 30_000;
 const WORKER_UNAVAILABLE_MSG = 'Embedding worker unavailable. Run `npm run build` so dist/embeddings/worker.js exists.';
 
 let worker: Worker | null = null;
@@ -134,13 +134,26 @@ function sendMessage(type: string, text?: string, timeoutMs?: number): Promise<u
   });
 }
 
+// Single ONNX worker cannot safely run concurrent embeds — queue them.
+let embedChain: Promise<unknown> = Promise.resolve();
+
 /**
  * Generate embedding vector for text
  * @returns Float32Array of 384 dimensions
  */
 export async function generateEmbedding(text: string): Promise<Float32Array> {
-  const data = await sendMessage('embed', text, INFERENCE_TIMEOUT_MS) as number[];
-  return new Float32Array(data);
+  const run = async (): Promise<Float32Array> => {
+    const data = await sendMessage('embed', text, INFERENCE_TIMEOUT_MS) as number[];
+    return new Float32Array(data);
+  };
+  // Serialize: each call waits for prior embed (success or fail).
+  const next = embedChain.then(run, run);
+  // Keep chain alive without surfacing rejection to later waiters twice.
+  embedChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
 }
 
 /**
