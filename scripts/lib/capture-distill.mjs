@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { spawnSync } from 'child_process';
 
 export const CAPTURE_MODE = Object.freeze({
   REGEX: 'regex',
@@ -99,7 +100,12 @@ export function allowRegexFallback(mode) {
 
 /**
  * Resolve OpenAI-compatible chat credentials without logging secrets.
- * @returns {{ configured: boolean, apiKey?: string, baseUrl?: string, model?: string, source?: string }}
+ *
+ * Priority:
+ *   1. Explicit env/config API keys (SHIELDCORTEX_DISTILL_* / OPENAI_* / ANTHROPIC_*)
+ *   2. Hermes OAuth on disk (xai-oauth → openai-codex) — preferred on fleet hosts
+ *
+ * @returns {{ configured: boolean, apiKey?: string, baseUrl?: string, model?: string, source?: string, auth?: string }}
  */
 export function resolveDistillProvider(env = process.env, config = null) {
   const cfg = config && typeof config === 'object' ? config : loadScConfigSafe();
@@ -116,30 +122,36 @@ export function resolveDistillProvider(env = process.env, config = null) {
       typeof am.distillApiKey === 'string' ? am.distillApiKey : '',
     );
 
-  if (!apiKey) return { configured: false };
+  if (apiKey) {
+    const baseUrl = firstNonEmpty(
+      env.SHIELDCORTEX_DISTILL_BASE_URL,
+      env.OPENAI_BASE_URL,
+      typeof distill.baseUrl === 'string' ? distill.baseUrl : '',
+      'https://api.openai.com/v1',
+    ).replace(/\/+$/, '');
 
-  const baseUrl = firstNonEmpty(
-    env.SHIELDCORTEX_DISTILL_BASE_URL,
-    env.OPENAI_BASE_URL,
-    typeof distill.baseUrl === 'string' ? distill.baseUrl : '',
-    'https://api.openai.com/v1',
-  ).replace(/\/+$/, '');
+    const isAnthropicKey = apiKey.startsWith('sk-ant-');
+    const model = firstNonEmpty(
+      env.SHIELDCORTEX_DISTILL_MODEL,
+      typeof distill.model === 'string' ? distill.model : '',
+      isAnthropicKey ? 'claude-haiku-4-5-20251001' : 'gpt-4.1-mini',
+    );
 
-  // Anthropic key + default openai host → use Anthropic messages path marker
-  const isAnthropicKey = apiKey.startsWith('sk-ant-');
-  const model = firstNonEmpty(
-    env.SHIELDCORTEX_DISTILL_MODEL,
-    typeof distill.model === 'string' ? distill.model : '',
-    isAnthropicKey ? 'claude-haiku-4-5-20251001' : 'gpt-4.1-mini',
-  );
+    return {
+      configured: true,
+      apiKey,
+      baseUrl,
+      model,
+      source: isAnthropicKey ? 'anthropic' : 'openai-compatible',
+      auth: 'api-key',
+    };
+  }
 
-  return {
-    configured: true,
-    apiKey,
-    baseUrl,
-    model,
-    source: isAnthropicKey ? 'anthropic' : 'openai-compatible',
-  };
+  // Genius path: reuse Hermes OAuth already on the host (no new API key).
+  const oauth = resolveHermesOAuthProvider(env, cfg);
+  if (oauth.configured) return oauth;
+
+  return { configured: false };
 }
 
 function firstNonEmpty(...vals) {
@@ -159,6 +171,183 @@ function loadScConfigSafe() {
   } catch {
     return {};
   }
+}
+
+/**
+ * Resolve short-lived OpenAI-compatible credentials from Hermes OAuth on disk.
+ * Prefer xai-oauth, then openai-codex. Never logs token values.
+ */
+export function resolveHermesOAuthProvider(env = process.env, config = null) {
+  const cfg = config && typeof config === 'object' ? config : loadScConfigSafe();
+  const mem = (cfg.memory && typeof cfg.memory === 'object') ? cfg.memory : {};
+  const distill = (mem.distill && typeof mem.distill === 'object') ? mem.distill : {};
+
+  const disabled =
+    env.SHIELDCORTEX_DISTILL_OAUTH === '0'
+    || env.SHIELDCORTEX_DISTILL_OAUTH === 'false'
+    || distill.oauth === false;
+  if (disabled) return { configured: false };
+
+  const preferred = firstNonEmpty(
+    env.SHIELDCORTEX_DISTILL_OAUTH_PROVIDER,
+    typeof distill.oauthProvider === 'string' ? distill.oauthProvider : '',
+    'xai-oauth,openai-codex',
+  ).split(',').map((s) => s.trim()).filter(Boolean);
+
+  const hermesHome = firstNonEmpty(env.HERMES_HOME, join(homedir(), '.hermes'));
+  const agentRoot = firstNonEmpty(env.HERMES_AGENT_ROOT, join(hermesHome, 'hermes-agent'));
+
+  for (const providerId of preferred) {
+    const viaPy = resolveHermesProviderViaPython(providerId, agentRoot, hermesHome, env);
+    if (viaPy?.configured) {
+      return {
+        ...viaPy,
+        model: firstNonEmpty(
+          env.SHIELDCORTEX_DISTILL_MODEL,
+          typeof distill.model === 'string' ? distill.model : '',
+          defaultModelForProvider(providerId),
+        ),
+      };
+    }
+  }
+
+  for (const providerId of preferred) {
+    const viaFile = resolveHermesProviderFromAuthJson(providerId, hermesHome);
+    if (viaFile?.configured) {
+      return {
+        ...viaFile,
+        model: firstNonEmpty(
+          env.SHIELDCORTEX_DISTILL_MODEL,
+          typeof distill.model === 'string' ? distill.model : '',
+          defaultModelForProvider(providerId),
+        ),
+      };
+    }
+  }
+  return { configured: false };
+}
+
+function defaultModelForProvider(providerId) {
+  if (String(providerId).startsWith('xai')) return 'grok-4.6';
+  if (String(providerId).includes('codex') || String(providerId).includes('openai')) return 'gpt-5.5';
+  return 'grok-4.6';
+}
+
+/**
+ * Refresh-aware resolve via Hermes Python auth helpers.
+ * Spawns a tiny python one-shot; prints JSON with api_key/base_url only on stdout.
+ */
+function resolveHermesProviderViaPython(providerId, agentRoot, hermesHome, env) {
+  try {
+    const py = firstNonEmpty(env.PYTHON, env.SHIELDCORTEX_PYTHON, 'python3');
+    const nl = '\n';
+    const script = [
+      'import json,os,sys',
+      'sys.path.insert(0, ' + JSON.stringify(agentRoot) + ')',
+      'os.environ.setdefault("HERMES_HOME", ' + JSON.stringify(hermesHome) + ')',
+      'pid = ' + JSON.stringify(providerId),
+      'out = {"configured": False}',
+      'try:',
+      '  from hermes_cli import auth as A',
+      '  fn = None',
+      '  if pid in ("xai-oauth", "xai", "grok-oauth"):',
+      '    fn = getattr(A, "resolve_xai_oauth_runtime_credentials", None)',
+      '  elif pid in ("openai-codex", "codex"):',
+      '    fn = getattr(A, "resolve_codex_runtime_credentials", None)',
+      '  creds = fn() if callable(fn) else None',
+      '  if isinstance(creds, dict) and creds.get("api_key"):',
+      '    out = {',
+      '      "configured": True,',
+      '      "apiKey": creds.get("api_key"),',
+      '      "baseUrl": (creds.get("base_url") or "").rstrip("/"),',
+      '      "source": "openai-compatible",',
+      '      "auth": "hermes-oauth:" + str(creds.get("provider") or pid),',
+      '    }',
+      'except Exception as e:',
+      '  out = {"configured": False, "reason": type(e).__name__}',
+      'print(json.dumps(out))',
+    ].join(nl);
+    const res = spawnSync(py, ['-c', script], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+      env: { ...process.env, HERMES_HOME: hermesHome },
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    if (res.error || res.status !== 0) return null;
+    const line = String(res.stdout || '').trim().split(nl).filter(Boolean).pop();
+    if (!line) return null;
+    const parsed = JSON.parse(line);
+    if (!parsed || !parsed.configured || typeof parsed.apiKey !== 'string' || !parsed.apiKey) {
+      return null;
+    }
+    return {
+      configured: true,
+      apiKey: parsed.apiKey,
+      baseUrl: (parsed.baseUrl || defaultBaseForProvider(providerId)).replace(/\/+$/, ''),
+      source: 'openai-compatible',
+      auth: parsed.auth || `hermes-oauth:${providerId}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+
+/**
+ * Last-resort: read pool access_token from ~/.hermes/auth.json (no refresh).
+ */
+function resolveHermesProviderFromAuthJson(providerId, hermesHome) {
+  try {
+    const authPath = join(hermesHome, 'auth.json');
+    if (!existsSync(authPath)) return { configured: false };
+    const raw = JSON.parse(readFileSync(authPath, 'utf-8'));
+    const pool = raw?.credential_pool?.[providerId];
+    if (Array.isArray(pool)) {
+      for (const entry of pool) {
+        if (!entry || typeof entry !== 'object') continue;
+        const status = String(entry.last_status || 'ok').toLowerCase();
+        if (status && status !== 'ok' && status !== '2' && status !== 'active') {
+          // still try if access_token present — exhausted entries may still work briefly
+        }
+        const token = typeof entry.access_token === 'string' ? entry.access_token.trim() : '';
+        if (!token) continue;
+        const baseUrl = typeof entry.base_url === 'string' && entry.base_url.trim()
+          ? entry.base_url.trim().replace(/\/+$/, '')
+          : defaultBaseForProvider(providerId);
+        return {
+          configured: true,
+          apiKey: token,
+          baseUrl,
+          source: 'openai-compatible',
+          auth: `hermes-authjson:${providerId}`,
+        };
+      }
+    }
+    // providers.xai-oauth.tokens fallback (id_token sometimes used)
+    const prov = raw?.providers?.[providerId];
+    const tokens = prov?.tokens;
+    if (tokens && typeof tokens === 'object') {
+      const token = firstNonEmpty(tokens.access_token, tokens.id_token);
+      if (token) {
+        return {
+          configured: true,
+          apiKey: token,
+          baseUrl: defaultBaseForProvider(providerId),
+          source: 'openai-compatible',
+          auth: `hermes-provider-tokens:${providerId}`,
+        };
+      }
+    }
+  } catch {
+    return { configured: false };
+  }
+  return { configured: false };
+}
+
+function defaultBaseForProvider(providerId) {
+  if (String(providerId).startsWith('xai')) return 'https://api.x.ai/v1';
+  if (String(providerId).includes('codex')) return 'https://chatgpt.com/backend-api/codex';
+  return 'https://api.openai.com/v1';
 }
 
 export function buildDistillPrompt(conversationText) {

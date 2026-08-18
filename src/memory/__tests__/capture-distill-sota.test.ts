@@ -5,6 +5,7 @@ import {
   failClosedDistill,
   resolveCaptureMode,
   resolveDistillProvider,
+  resolveHermesOAuthProvider,
   parseDistillResponseText,
   extractCaptureMemories,
   buildDistillPrompt,
@@ -61,8 +62,16 @@ describe('capture-distill provider + parse', () => {
     expect(p.source).toBe('anthropic');
   });
 
-  it('resolveDistillProvider unconfigured without keys', () => {
-    const p = resolveDistillProvider({}, {});
+  it('resolveDistillProvider unconfigured without keys or oauth', () => {
+    const p = resolveDistillProvider(
+      { SHIELDCORTEX_DISTILL_OAUTH: '0', HOME: '/tmp/no-hermes-home-sc-test' },
+      {},
+    );
+    expect(p.configured).toBe(false);
+  });
+
+  it('resolveHermesOAuthProvider can be disabled', () => {
+    const p = resolveHermesOAuthProvider({ SHIELDCORTEX_DISTILL_OAUTH: '0' }, {});
     expect(p.configured).toBe(false);
   });
 
@@ -102,7 +111,7 @@ describe('extractCaptureMemories', () => {
     };
     const r = await extractCaptureMemories(transcript, {
       mode: 'distill',
-      env: { OPENAI_API_KEY: 'sk-test' },
+      env: { OPENAI_API_KEY: 'sk-test', SHIELDCORTEX_DISTILL_OAUTH: '0' },
       config: {},
       fetchImpl,
       regexExtract: () => [{ title: 'should-not', content: 'nope', category: 'note', salience: 0.5 }],
@@ -129,7 +138,7 @@ describe('extractCaptureMemories', () => {
     });
     const r = await extractCaptureMemories(transcript, {
       mode: 'distill',
-      env: { OPENAI_API_KEY: 'sk-test' },
+      env: { OPENAI_API_KEY: 'sk-test', SHIELDCORTEX_DISTILL_OAUTH: '0' },
       config: {},
       fetchImpl,
       regexExtract: () => [],
@@ -145,7 +154,7 @@ describe('extractCaptureMemories', () => {
   it('distill_required without provider skips', async () => {
     const r = await extractCaptureMemories(transcript, {
       mode: 'distill_required',
-      env: {},
+      env: { SHIELDCORTEX_DISTILL_OAUTH: '0', HOME: '/tmp/no-hermes-home-sc-test' },
       config: {},
       regexExtract: () => [{ title: 'nope', content: 'x', category: 'note', salience: 0.4 }],
       log: () => {},
