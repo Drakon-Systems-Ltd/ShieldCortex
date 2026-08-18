@@ -1,5 +1,8 @@
 ## Unreleased
 
+- **Doctor OpenClaw residue (Edith):** ClawHub `lock.json` `.skills.shieldcortex` is **not** an orphan when the skill directory is on disk (`~/.openclaw/workspace/skills/shieldcortex`). Stops a permanent warn after every healthy skill install.
+- **Doctor SCAN fix commands:** conversation-access warn now leads with `shieldcortex openclaw install --allow-conversation-access` then `openclaw gateway restart` — restart alone never clears the warn.
+
 - **Action Guard / conversation scan (#361):** bare `unknown` scan summaries no longer taint sessions or escalate Action Guard. Dirty non-injection scans keep an honest multi-layer THREAT summary instead of defaulting risk to `unknown`.
 
 # Changelog
