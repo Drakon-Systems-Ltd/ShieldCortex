@@ -7,6 +7,8 @@
  */
 
 import { initDatabase, closeDatabase } from '../../src/database/init.js';
+import { awaitPendingEmbeddings } from '../../src/memory/store.js';
+import { preloadModel } from '../../src/embeddings/index.js';
 import { searchMemoriesExplained } from '../../src/memory/search-recall.js';
 import { DEFAULT_CONFIG, type RankerEngine } from '../../src/memory/types.js';
 import { ingestQuestion } from './ingest.js';
@@ -34,6 +36,16 @@ export async function runEngine(opts: RunEngineOptions): Promise<EngineScorecard
   const start = Date.now();
   const perQuestion: QuestionResult[] = [];
 
+  // Warm embedding model once when embeddings are enabled (bench with vectors).
+  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
+    try {
+      await preloadModel();
+      console.log(`[bench/${opts.engine}] embedding model ready`);
+    } catch (e) {
+      console.warn(`[bench/${opts.engine}] embedding preload failed: ${(e as Error).message}`);
+    }
+  }
+
   for (let i = 0; i < opts.questions.length; i++) {
     const question = opts.questions[i];
 
@@ -42,6 +54,10 @@ export async function runEngine(opts: RunEngineOptions): Promise<EngineScorecard
 
     try {
       const ingest = ingestQuestion(question, project);
+      // addMemory embeds async — wait so vector ranker sees persisted vectors.
+      if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
+        await awaitPendingEmbeddings();
+      }
 
       const results = await searchMemoriesExplained(
         {

@@ -92,3 +92,37 @@ contract work.
 
 Artifacts (host-local, not in git):
 `~/.shieldcortex/benchmark/longmemeval/runs/subset50/{SCORECARD.md,report.json}`
+
+
+## Second measured run — embeddings ON (TARS, 2026-08-18)
+
+| Field | Value |
+|---|---|
+| Dataset | LongMemEval-S **labeled subset-50** (seed=42) |
+| Embeddings | **ON** (local MiniLM `Xenova/all-MiniLM-L6-v2`, serial ONNX worker) |
+| Defence | **ON** (blocked turns skipped) |
+| Harness fix | await async embed writes before search; serialize embed queue |
+
+### Headline (subset-50, embeddings ON)
+
+| Engine | R@5 | R@10 | MRR | Duration |
+|---|---|---|---|---|
+| rrf | **94.00%** | **96.00%** | 0.8915 | ~1432s |
+| legacy | **0.00%** | 0.00% | 0.0000 | ~1364s |
+
+### Compare to emb-off same subset
+
+| Engine | emb-off R@5 | emb-on R@5 |
+|---|---|---|
+| rrf | 4.00% | **94.00%** |
+| legacy | 0.00% | 0.00% |
+
+### Honesty
+
+- Still **subset-50**, not full 500. Not a SOTA claim.
+- Not comparable to agentmemory 95.2% full-S published number (different corpus run conditions).
+- Shows vectors matter: RRF jumps from ~FTS-noise to strong session recall when MiniLM is on.
+- Legacy stays near-zero on this multi-session haystack shape (expected under current legacy path).
+- PR #357 carries the embed-await + serial-queue fixes required for this measurement to be real.
+
+Artifacts: `~/.shieldcortex/benchmark/longmemeval/runs/subset50-emb/`
