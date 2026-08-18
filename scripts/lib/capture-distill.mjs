@@ -101,14 +101,17 @@ export function allowRegexFallback(mode) {
 /**
  * Resolve OpenAI-compatible chat credentials without logging secrets.
  *
- * Priority (zero-config on Hermes hosts):
+ * Priority (zero-config):
  *   1. Explicit env/config API keys (SHIELDCORTEX_DISTILL_* / OPENAI_* / ANTHROPIC_*)
- *   2. Hermes OAuth on disk (xai-oauth → openai-codex) with a **cheap** default model
- *      (grok-4.3 / gpt-5.5) — not the user's main chat model
+ *   2. On-disk auth already present:
+ *        Hermes active_provider → OAuth (xai/codex/qwen/minimax/nous) →
+ *        Hermes API-key pools (anthropic/openai/gemini/…) → Claude Max OAuth
+ *      Each provider gets a **cheap** default model (not the main chat model).
  *
- * Users do not need to set keys or models for distill if Hermes OAuth is already
- * logged in. Opt out: SHIELDCORTEX_DISTILL_OAUTH=0. Upgrade model only if needed:
- * SHIELDCORTEX_DISTILL_MODEL=grok-4.6
+ * Users do not need to set distill keys/models if Hermes or Claude is already
+ * logged in. Opt out: SHIELDCORTEX_DISTILL_OAUTH=0. Force provider list:
+ * SHIELDCORTEX_DISTILL_OAUTH_PROVIDER=xai-oauth,anthropic,claude-oauth
+ * Upgrade model: SHIELDCORTEX_DISTILL_MODEL=grok-4.6
  *
  * @returns {{ configured: boolean, apiKey?: string, baseUrl?: string, model?: string, source?: string, auth?: string }}
  */
@@ -179,8 +182,15 @@ function loadScConfigSafe() {
 }
 
 /**
- * Resolve short-lived OpenAI-compatible credentials from Hermes OAuth on disk.
- * Prefer xai-oauth, then openai-codex. Never logs token values.
+ * Zero-config on-disk credentials for distill.
+ *
+ * Covers:
+ *   - Hermes OAuth: xai-oauth, openai-codex, qwen-oauth, minimax-oauth, nous
+ *   - Hermes API-key pools: anthropic, openai-api, gemini, xai, deepseek, …
+ *   - Claude Max / Claude Code OAuth: ~/.claude/.credentials.json
+ *
+ * Preference: explicit SHIELDCORTEX_DISTILL_OAUTH_PROVIDER list, else Hermes
+ * active_provider first, then a cheap multi-provider chain. Never logs secrets.
  */
 export function resolveHermesOAuthProvider(env = process.env, config = null) {
   const cfg = config && typeof config === 'object' ? config : loadScConfigSafe();
@@ -193,86 +203,183 @@ export function resolveHermesOAuthProvider(env = process.env, config = null) {
     || distill.oauth === false;
   if (disabled) return { configured: false };
 
-  const preferred = firstNonEmpty(
-    env.SHIELDCORTEX_DISTILL_OAUTH_PROVIDER,
-    typeof distill.oauthProvider === 'string' ? distill.oauthProvider : '',
-    'xai-oauth,openai-codex',
-  ).split(',').map((s) => s.trim()).filter(Boolean);
-
   const hermesHome = firstNonEmpty(env.HERMES_HOME, join(homedir(), '.hermes'));
   const agentRoot = firstNonEmpty(env.HERMES_AGENT_ROOT, join(hermesHome, 'hermes-agent'));
+  const preferred = resolveProviderPreference(env, distill, hermesHome);
 
   for (const providerId of preferred) {
     const viaPy = resolveHermesProviderViaPython(providerId, agentRoot, hermesHome, env);
     if (viaPy?.configured) {
-      return {
-        ...viaPy,
-        model: firstNonEmpty(
-          env.SHIELDCORTEX_DISTILL_MODEL,
-          typeof distill.model === 'string' ? distill.model : '',
-          defaultModelForProvider(providerId),
-        ),
-      };
+      return withDefaultModel(viaPy, providerId, env, distill);
     }
   }
 
   for (const providerId of preferred) {
-    const viaFile = resolveHermesProviderFromAuthJson(providerId, hermesHome);
-    if (viaFile?.configured) {
-      return {
-        ...viaFile,
-        model: firstNonEmpty(
-          env.SHIELDCORTEX_DISTILL_MODEL,
-          typeof distill.model === 'string' ? distill.model : '',
-          defaultModelForProvider(providerId),
-        ),
-      };
+    if (providerId === 'claude-oauth' || providerId === 'claude-max' || providerId === 'claude') {
+      const viaClaude = resolveClaudeCodeOAuthProvider(env);
+      if (viaClaude?.configured) return withDefaultModel(viaClaude, 'claude-oauth', env, distill);
+      continue;
     }
+    const viaFile = resolveHermesProviderFromAuthJson(providerId, hermesHome);
+    if (viaFile?.configured) return withDefaultModel(viaFile, providerId, env, distill);
   }
+
+  // Final Claude Max fallback even if not listed (common non-Hermes hosts)
+  if (!preferred.includes('claude-oauth')) {
+    const viaClaude = resolveClaudeCodeOAuthProvider(env);
+    if (viaClaude?.configured) return withDefaultModel(viaClaude, 'claude-oauth', env, distill);
+  }
+
   return { configured: false };
+}
+
+/** @deprecated alias — resolveHermesOAuthProvider is now multi-provider on-disk auth */
+export function resolveOnDiskDistillProvider(env = process.env, config = null) {
+  return resolveHermesOAuthProvider(env, config);
+}
+
+function withDefaultModel(provider, providerId, env, distill) {
+  return {
+    ...provider,
+    model: firstNonEmpty(
+      env.SHIELDCORTEX_DISTILL_MODEL,
+      typeof distill?.model === 'string' ? distill.model : '',
+      defaultModelForProvider(providerId, provider),
+    ),
+  };
+}
+
+/**
+ * Build provider try-order.
+ * Explicit env/config wins; else active Hermes provider first, then broad chain.
+ */
+export function resolveProviderPreference(env = process.env, distill = {}, hermesHome = join(homedir(), '.hermes')) {
+  const explicit = firstNonEmpty(
+    env.SHIELDCORTEX_DISTILL_OAUTH_PROVIDER,
+    typeof distill?.oauthProvider === 'string' ? distill.oauthProvider : '',
+  );
+  if (explicit) {
+    return explicit.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
+  const chain = [];
+  const active = readHermesActiveProvider(hermesHome);
+  if (active) chain.push(normalizeProviderId(active));
+
+  // Broad zero-config chain — first configured wins. Cheap models applied per id.
+  const defaults = [
+    'xai-oauth',
+    'openai-codex',
+    'anthropic',
+    'claude-oauth',
+    'qwen-oauth',
+    'minimax-oauth',
+    'nous',
+    'openai-api',
+    'gemini',
+    'xai',
+    'deepseek',
+    'openrouter',
+  ];
+  for (const id of defaults) {
+    if (!chain.includes(id)) chain.push(id);
+  }
+  return chain;
+}
+
+function normalizeProviderId(id) {
+  const s = String(id || '').trim().toLowerCase();
+  if (!s) return s;
+  if (s === 'xai' || s === 'grok-oauth' || s === 'x-ai-oauth') return 'xai-oauth';
+  if (s === 'codex' || s === 'chatgpt') return 'openai-codex';
+  if (s === 'qwen' || s === 'qwen-cli') return 'qwen-oauth';
+  if (s === 'minimax') return 'minimax-oauth';
+  if (s === 'claude' || s === 'claude-max' || s === 'claude-code') return 'claude-oauth';
+  return s;
+}
+
+function readHermesActiveProvider(hermesHome) {
+  try {
+    const authPath = join(hermesHome, 'auth.json');
+    if (!existsSync(authPath)) return '';
+    const raw = JSON.parse(readFileSync(authPath, 'utf-8'));
+    return typeof raw.active_provider === 'string' ? raw.active_provider : '';
+  } catch {
+    return '';
+  }
 }
 
 /**
  * Cheap defaults for background distill (not the user's main chat model).
  * Override with SHIELDCORTEX_DISTILL_MODEL or memory.distill.model.
  */
-function defaultModelForProvider(providerId) {
-  const id = String(providerId || '');
+function defaultModelForProvider(providerId, provider = null) {
+  const id = String(providerId || provider?.auth || '');
+  if (id.includes('claude') || id.includes('anthropic')) return 'claude-haiku-4-5-20251001';
   if (id.startsWith('xai') || id.includes('grok')) return 'grok-4.3';
-  if (id.includes('codex') || id.includes('openai')) return 'gpt-5.5'; // lightest common Codex tier on file
-  if (id.includes('anthropic') || id.includes('claude')) return 'claude-haiku-4-5-20251001';
+  if (id.includes('codex')) return 'gpt-5.5';
+  if (id.includes('openai')) return 'gpt-4.1-mini';
+  if (id.includes('qwen')) return 'qwen3-coder-flash';
+  if (id.includes('minimax')) return 'MiniMax-M2';
+  if (id.includes('nous')) return 'hermes-3-llama-3.1-8b'; // portal default-ish; override if needed
+  if (id.includes('gemini') || id.includes('google')) return 'gemini-2.0-flash';
+  if (id.includes('deepseek')) return 'deepseek-chat';
+  if (id.includes('openrouter')) return 'openai/gpt-4.1-mini';
   return 'grok-4.3';
 }
 
 /**
  * Refresh-aware resolve via Hermes Python auth helpers.
- * Spawns a tiny python one-shot; prints JSON with api_key/base_url only on stdout.
+ * Spawns a tiny python one-shot; prints JSON with apiKey/baseUrl only on stdout.
  */
 function resolveHermesProviderViaPython(providerId, agentRoot, hermesHome, env) {
   try {
     const py = firstNonEmpty(env.PYTHON, env.SHIELDCORTEX_PYTHON, 'python3');
     const nl = '\n';
+    const pid = normalizeProviderId(providerId);
+    if (pid === 'claude-oauth') return null; // handled separately
     const script = [
       'import json,os,sys',
       'sys.path.insert(0, ' + JSON.stringify(agentRoot) + ')',
       'os.environ.setdefault("HERMES_HOME", ' + JSON.stringify(hermesHome) + ')',
-      'pid = ' + JSON.stringify(providerId),
+      'pid = ' + JSON.stringify(pid),
       'out = {"configured": False}',
       'try:',
       '  from hermes_cli import auth as A',
-      '  fn = None',
+      '  creds = None',
       '  if pid in ("xai-oauth", "xai", "grok-oauth"):',
       '    fn = getattr(A, "resolve_xai_oauth_runtime_credentials", None)',
+      '    creds = fn() if callable(fn) else None',
       '  elif pid in ("openai-codex", "codex"):',
       '    fn = getattr(A, "resolve_codex_runtime_credentials", None)',
-      '  creds = fn() if callable(fn) else None',
+      '    creds = fn() if callable(fn) else None',
+      '  elif pid in ("qwen-oauth", "qwen"):',
+      '    fn = getattr(A, "resolve_qwen_runtime_credentials", None)',
+      '    creds = fn() if callable(fn) else None',
+      '  elif pid in ("minimax-oauth", "minimax"):',
+      '    fn = getattr(A, "resolve_minimax_oauth_runtime_credentials", None)',
+      '    creds = fn() if callable(fn) else None',
+      '  elif pid in ("nous", "nous-portal"):',
+      '    fn = getattr(A, "resolve_nous_runtime_credentials", None)',
+      '    creds = fn() if callable(fn) else None',
+      '  else:',
+      '    # API-key / pool providers (anthropic, openai-api, gemini, xai, deepseek, …)',
+      '    fn = getattr(A, "resolve_api_key_provider_credentials", None)',
+      '    try:',
+      '      creds = fn(pid) if callable(fn) else None',
+      '    except Exception:',
+      '      creds = None',
       '  if isinstance(creds, dict) and creds.get("api_key"):',
+      '    prov = str(creds.get("provider") or pid)',
+      '    base = (creds.get("base_url") or "").rstrip("/")',
+      '    source = "anthropic" if ("anthropic" in prov or "claude" in prov or (base.find("anthropic.com") >= 0)) else "openai-compatible"',
+      '    # Gemini OpenAI-compat often needs /openai suffix — leave base as Hermes provided',
       '    out = {',
       '      "configured": True,',
       '      "apiKey": creds.get("api_key"),',
-      '      "baseUrl": (creds.get("base_url") or "").rstrip("/"),',
-      '      "source": "openai-compatible",',
-      '      "auth": "hermes-oauth:" + str(creds.get("provider") or pid),',
+      '      "baseUrl": base,',
+      '      "source": source,',
+      '      "auth": "hermes:" + prov,',
       '    }',
       'except Exception as e:',
       '  out = {"configured": False, "reason": type(e).__name__}',
@@ -294,48 +401,84 @@ function resolveHermesProviderViaPython(providerId, agentRoot, hermesHome, env) 
     return {
       configured: true,
       apiKey: parsed.apiKey,
-      baseUrl: (parsed.baseUrl || defaultBaseForProvider(providerId)).replace(/\/+$/, ''),
-      source: 'openai-compatible',
-      auth: parsed.auth || `hermes-oauth:${providerId}`,
+      baseUrl: (parsed.baseUrl || defaultBaseForProvider(pid)).replace(/\/+$/, ''),
+      source: parsed.source || 'openai-compatible',
+      auth: parsed.auth || `hermes:${pid}`,
     };
   } catch {
     return null;
   }
 }
 
+/**
+ * Claude Code / Claude Max OAuth on disk (~/.claude/.credentials.json).
+ */
+export function resolveClaudeCodeOAuthProvider(env = process.env) {
+  try {
+    const claudeHome = firstNonEmpty(env.CLAUDE_CONFIG_DIR, join(homedir(), '.claude'));
+    const credPath = join(claudeHome, '.credentials.json');
+    if (!existsSync(credPath)) return { configured: false };
+    const raw = JSON.parse(readFileSync(credPath, 'utf-8'));
+    const block = raw?.claudeAiOauth || raw?.claude || raw;
+    const token = firstNonEmpty(
+      block?.accessToken,
+      block?.access_token,
+      raw?.accessToken,
+      raw?.access_token,
+    );
+    if (!token) return { configured: false };
+    // Expiry check when present (ms epoch)
+    const exp = block?.expiresAt ?? block?.expires_at ?? null;
+    if (typeof exp === 'number' && Number.isFinite(exp) && exp > 0 && Date.now() > exp) {
+      return { configured: false, reason: 'claude-oauth-expired' };
+    }
+    return {
+      configured: true,
+      apiKey: token,
+      baseUrl: 'https://api.anthropic.com',
+      source: 'anthropic',
+      auth: 'claude-oauth',
+      anthropicAuth: 'bearer', // OAuth uses Authorization Bearer, not x-api-key
+    };
+  } catch {
+    return { configured: false };
+  }
+}
 
 /**
- * Last-resort: read pool access_token from ~/.hermes/auth.json (no refresh).
+ * Last-resort: read pool access_token / api keys from ~/.hermes/auth.json (no refresh).
  */
 function resolveHermesProviderFromAuthJson(providerId, hermesHome) {
   try {
     const authPath = join(hermesHome, 'auth.json');
     if (!existsSync(authPath)) return { configured: false };
     const raw = JSON.parse(readFileSync(authPath, 'utf-8'));
-    const pool = raw?.credential_pool?.[providerId];
+    const pid = normalizeProviderId(providerId);
+
+    const pool = raw?.credential_pool?.[pid] || raw?.credential_pool?.[providerId];
     if (Array.isArray(pool)) {
       for (const entry of pool) {
         if (!entry || typeof entry !== 'object') continue;
-        const status = String(entry.last_status || 'ok').toLowerCase();
-        if (status && status !== 'ok' && status !== '2' && status !== 'active') {
-          // still try if access_token present — exhausted entries may still work briefly
-        }
-        const token = typeof entry.access_token === 'string' ? entry.access_token.trim() : '';
+        const token = firstNonEmpty(entry.access_token, entry.api_key, entry.token);
         if (!token) continue;
         const baseUrl = typeof entry.base_url === 'string' && entry.base_url.trim()
           ? entry.base_url.trim().replace(/\/+$/, '')
-          : defaultBaseForProvider(providerId);
+          : defaultBaseForProvider(pid);
+        const source = (pid.includes('anthropic') || baseUrl.includes('anthropic.com'))
+          ? 'anthropic'
+          : 'openai-compatible';
         return {
           configured: true,
           apiKey: token,
           baseUrl,
-          source: 'openai-compatible',
-          auth: `hermes-authjson:${providerId}`,
+          source,
+          auth: `hermes-authjson:${pid}`,
+          anthropicAuth: source === 'anthropic' && !String(token).startsWith('sk-ant-') ? 'bearer' : undefined,
         };
       }
     }
-    // providers.xai-oauth.tokens fallback (id_token sometimes used)
-    const prov = raw?.providers?.[providerId];
+
+    const prov = raw?.providers?.[pid] || raw?.providers?.[providerId];
     const tokens = prov?.tokens;
     if (tokens && typeof tokens === 'object') {
       const token = firstNonEmpty(tokens.access_token, tokens.id_token);
@@ -343,9 +486,9 @@ function resolveHermesProviderFromAuthJson(providerId, hermesHome) {
         return {
           configured: true,
           apiKey: token,
-          baseUrl: defaultBaseForProvider(providerId),
+          baseUrl: defaultBaseForProvider(pid),
           source: 'openai-compatible',
-          auth: `hermes-provider-tokens:${providerId}`,
+          auth: `hermes-provider-tokens:${pid}`,
         };
       }
     }
@@ -356,8 +499,16 @@ function resolveHermesProviderFromAuthJson(providerId, hermesHome) {
 }
 
 function defaultBaseForProvider(providerId) {
-  if (String(providerId).startsWith('xai')) return 'https://api.x.ai/v1';
-  if (String(providerId).includes('codex')) return 'https://chatgpt.com/backend-api/codex';
+  const id = String(providerId || '');
+  if (id.startsWith('xai') || id.includes('grok')) return 'https://api.x.ai/v1';
+  if (id.includes('codex')) return 'https://chatgpt.com/backend-api/codex';
+  if (id.includes('anthropic') || id.includes('claude')) return 'https://api.anthropic.com';
+  if (id.includes('qwen')) return 'https://portal.qwen.ai/v1';
+  if (id.includes('minimax')) return 'https://api.minimax.io/v1';
+  if (id.includes('gemini')) return 'https://generativelanguage.googleapis.com/v1beta/openai';
+  if (id.includes('deepseek')) return 'https://api.deepseek.com/v1';
+  if (id.includes('openrouter')) return 'https://openrouter.ai/api/v1';
+  if (id.includes('nous')) return 'https://inference-api.nousresearch.com/v1';
   return 'https://api.openai.com/v1';
 }
 
@@ -428,17 +579,28 @@ export async function callDistillProvider(provider, conversationText, opts = {})
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    if (provider.source === 'anthropic' || provider.baseUrl.includes('anthropic.com')) {
-      const url = provider.baseUrl.includes('/v1')
+    if (provider.source === 'anthropic' || (provider.baseUrl || '').includes('anthropic.com')) {
+      const url = (provider.baseUrl || '').includes('/v1')
         ? `${provider.baseUrl.replace(/\/+$/, '')}/messages`
         : 'https://api.anthropic.com/v1/messages';
+      const useBearer = provider.anthropicAuth === 'bearer'
+        || provider.auth === 'claude-oauth'
+        || (typeof provider.auth === 'string' && provider.auth.includes('claude'))
+        || (typeof provider.apiKey === 'string' && !provider.apiKey.startsWith('sk-ant-'));
+      const headers = {
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01',
+      };
+      if (useBearer) {
+        headers.authorization = `Bearer ${provider.apiKey}`;
+        // Claude Code OAuth commonly requires this beta flag
+        headers['anthropic-beta'] = 'oauth-2025-04-20';
+      } else {
+        headers['x-api-key'] = provider.apiKey;
+      }
       const res = await fetchImpl(url, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': provider.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
+        headers,
         body: JSON.stringify({
           model: provider.model,
           max_tokens: 1200,

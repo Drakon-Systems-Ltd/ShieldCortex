@@ -6,6 +6,8 @@ import {
   resolveCaptureMode,
   resolveDistillProvider,
   resolveHermesOAuthProvider,
+  resolveProviderPreference,
+  resolveClaudeCodeOAuthProvider,
   parseDistillResponseText,
   extractCaptureMemories,
   buildDistillPrompt,
@@ -72,6 +74,28 @@ describe('capture-distill provider + parse', () => {
 
   it('resolveHermesOAuthProvider can be disabled', () => {
     const p = resolveHermesOAuthProvider({ SHIELDCORTEX_DISTILL_OAUTH: '0' }, {});
+    expect(p.configured).toBe(false);
+  });
+
+  it('resolveProviderPreference puts explicit list first', () => {
+    const list = resolveProviderPreference(
+      { SHIELDCORTEX_DISTILL_OAUTH_PROVIDER: 'anthropic,claude-oauth' },
+      {},
+      '/tmp/no-hermes-home-sc-test',
+    );
+    expect(list[0]).toBe('anthropic');
+    expect(list).toContain('claude-oauth');
+  });
+
+  it('resolveProviderPreference default chain covers major providers', () => {
+    const list = resolveProviderPreference({}, {}, '/tmp/no-hermes-home-sc-test');
+    for (const id of ['xai-oauth', 'openai-codex', 'anthropic', 'claude-oauth', 'gemini']) {
+      expect(list).toContain(id);
+    }
+  });
+
+  it('resolveClaudeCodeOAuthProvider missing file is unconfigured', () => {
+    const p = resolveClaudeCodeOAuthProvider({ HOME: '/tmp/no-claude-home-sc-test', CLAUDE_CONFIG_DIR: '/tmp/no-claude-home-sc-test' });
     expect(p.configured).toBe(false);
   });
 
