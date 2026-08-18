@@ -19,13 +19,14 @@
  */
 
 import Database from 'better-sqlite3';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
 import { orderByEffectiveSalience } from './lib/session-context.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
+import { buildStartPack, readInjectConfig } from './lib/inject-pack.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -237,17 +238,54 @@ process.stdin.on('end', async () => {
 
     let memories = [];
     let context = null;
+    const injectCfg = readInjectConfig(config);
+    const sessionKey = String(hookData.session_id || hookData.sessionId || `${project}:startup`);
+    const stateDir = join(homedir(), '.shieldcortex', 'state');
+    const statePath = join(stateDir, `inject-session-${sessionKey.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120)}.json`);
+    const loadInjectState = () => {
+      try {
+        if (existsSync(statePath)) return JSON.parse(readFileSync(statePath, 'utf-8'));
+      } catch { /* ignore */ }
+      return null;
+    };
     if (!existsSync(DB_PATH)) {
       console.error('[shieldcortex] Memory database not found, skipping context retrieval');
     } else {
       const db = new Database(DB_PATH, { readonly: true, timeout: 5000 });
+      // Over-fetch candidates for inject pack / legacy formatter
       memories = getProjectContext(db, project);
+      // Wider pool for inject v2 when host/agent scope columns exist
+      let injectCandidates = memories;
+      try {
+        const cols = db.prepare('PRAGMA table_info(memories)').all().map((c) => c.name);
+        if (cols.includes('host_id') || cols.includes('agent_id')) {
+          injectCandidates = db.prepare(`
+            SELECT id, title, content, category, type, salience, tags, created_at,
+                   pinned, access_count, last_accessed, trust_score, sensitivity_level,
+                   metadata, reviewed_at, status, source, defence_verdict,
+                   host_id, agent_id, project, transferable, source_attested
+            FROM memories
+            WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+            ORDER BY pinned DESC, salience DESC
+            LIMIT 64
+          `).all();
+        } else {
+          injectCandidates = db.prepare(`
+            SELECT id, title, content, category, type, salience, tags, created_at,
+                   pinned, trust_score, sensitivity_level, metadata, reviewed_at,
+                   status, source, defence_verdict, project
+            FROM memories
+            WHERE (project = ? OR project IS NULL)
+              AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+            ORDER BY pinned DESC, salience DESC
+            LIMIT 64
+          `).all(project);
+        }
+      } catch {
+        injectCandidates = memories;
+      }
       db.close();
 
-      // ── RECALL-BOUNDARY DEFENCE (Feature #1) ───────────────────────────
-      // Same shim as prompt-recall: drop poisoned / RESTRICTED / credential
-      // rows from the session preamble before they're formatted. FAIL-OPEN if
-      // the dist build is missing (recall preamble unchanged).
       if (config.recallDefence !== false && memories.length > 0) {
         try {
           const defence = await loadRecallDefence();
@@ -272,7 +310,41 @@ process.stdin.on('end', async () => {
         }
       }
 
-      context = formatContext(memories, project);
+      // Inject v2 (Memory SOTA B): preferred when native contract is set.
+      // Without contract, fall back to legacy formatContext (doctor will fail empty-brain / missing contract when inject mode on).
+      if (injectCfg.nativeContract && injectCfg.mode !== 'off' && injectCfg.mode !== 'turn') {
+        const source = typeof hookData.source === 'string' ? hookData.source : 'startup';
+        const rehydrate = source === 'compact' || hookData.compact === true || hookData.prompt_reset === true;
+        let sessionState = loadInjectState();
+        const pack = buildStartPack(injectCandidates, {
+          mode: injectCfg.mode,
+          nativeContract: injectCfg.nativeContract,
+          scope: {
+            hostId: injectCfg.hostId,
+            agentId: injectCfg.agentId,
+            project,
+            // Until host_id columns are widespread, allow unscoped if columns absent
+            requireScope: injectCandidates.some((r) => r.host_id != null || r.agent_id != null),
+          },
+          budgets: injectCfg.budgets,
+          sessionState,
+          rehydrate,
+          compactSignaled: rehydrate,
+        });
+        try {
+          if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+          writeFileSync(statePath, JSON.stringify(pack.sessionState), { mode: 0o600 });
+        } catch (e) {
+          console.error('[shieldcortex] inject state save skipped:', e?.message ?? e);
+        }
+        context = pack.text || null;
+        memories = pack.items;
+        if (pack.skipped) {
+          console.error(`[shieldcortex] inject-pack: ${pack.skipped}`);
+        }
+      } else {
+        context = formatContext(memories, project);
+      }
     }
 
     if (context) {

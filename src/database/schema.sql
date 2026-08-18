@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS memories (
   memory_scope TEXT DEFAULT 'private',
   downvote_count INTEGER DEFAULT 0,
   last_downvoted_at TIMESTAMP,
+  host_id TEXT,
+  agent_id TEXT,
+  capture_layer TEXT,
 
   -- Index for common queries
   CONSTRAINT valid_category CHECK(category IN (
@@ -105,6 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
 CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_source_kind ON memories(source_kind);
+CREATE INDEX IF NOT EXISTS idx_memories_host_agent ON memories(host_id, agent_id);
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
 

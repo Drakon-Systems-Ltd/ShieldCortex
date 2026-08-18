@@ -49,7 +49,10 @@ export function getInlineSchema(): string {
       memory_purpose TEXT DEFAULT 'project',
       memory_scope TEXT DEFAULT 'private',
       downvote_count INTEGER DEFAULT 0,
-      last_downvoted_at TIMESTAMP
+      last_downvoted_at TIMESTAMP,
+      host_id TEXT,
+      agent_id TEXT,
+      capture_layer TEXT
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -98,6 +101,7 @@ export function getInlineSchema(): string {
     CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
     CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned DESC);
     CREATE INDEX IF NOT EXISTS idx_memories_source_kind ON memories(source_kind);
+    CREATE INDEX IF NOT EXISTS idx_memories_host_agent ON memories(host_id, agent_id);
 
     CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

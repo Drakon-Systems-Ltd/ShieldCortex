@@ -6,6 +6,9 @@
  */
 
 import { randomUUID } from 'crypto';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 import { getDatabase, isDatabaseInitialized, withTransaction } from '../database/init.js';
 import { sourceKey } from '../threat-graph/keys.js';
 import { shouldAutoRelease, recordAutoRelease } from '../threat-graph/allowance.js';
@@ -74,6 +77,40 @@ export const MAX_CONTENT_SIZE = 10 * 1024;
 // force-quarantined (which would make every source-less write throw). Closing
 // the old `if (source)` defence-pipeline bypass.
 export const UNATTRIBUTED_SOURCE: DefenceSource = { type: 'web', identifier: 'unattributed' };
+
+/** Default host/agent scope for inject eligibility (Memory SOTA). */
+export function resolveDefaultHostId(): string | null {
+  const env = process.env.SHIELDCORTEX_HOST_ID || process.env.HOST || process.env.HOSTNAME;
+  if (env && String(env).trim()) return String(env).trim().slice(0, 128);
+  try {
+    const cfgPath = join(homedir(), '.shieldcortex', 'config.json');
+    if (existsSync(cfgPath)) {
+      const raw = JSON.parse(readFileSync(cfgPath, 'utf-8')) as Record<string, unknown>;
+      const mem = (raw.memory && typeof raw.memory === 'object') ? raw.memory as Record<string, unknown> : {};
+      const inject = (mem.inject && typeof mem.inject === 'object') ? mem.inject as Record<string, unknown> : {};
+      const v = inject.hostId ?? mem.hostId ?? raw.hostId;
+      if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 128);
+    }
+  } catch { /* ignore */ }
+  return 'local';
+}
+
+export function resolveDefaultAgentId(): string | null {
+  const env = process.env.SHIELDCORTEX_AGENT_ID;
+  if (env && String(env).trim()) return String(env).trim().slice(0, 128);
+  try {
+    const cfgPath = join(homedir(), '.shieldcortex', 'config.json');
+    if (existsSync(cfgPath)) {
+      const raw = JSON.parse(readFileSync(cfgPath, 'utf-8')) as Record<string, unknown>;
+      const mem = (raw.memory && typeof raw.memory === 'object') ? raw.memory as Record<string, unknown> : {};
+      const inject = (mem.inject && typeof mem.inject === 'object') ? mem.inject as Record<string, unknown> : {};
+      const v = inject.agentId ?? mem.agentId ?? raw.agentId;
+      if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 128);
+    }
+  } catch { /* ignore */ }
+  return 'default';
+}
+
 
 // Track truncation info globally for the last addMemory call
 let lastTruncationInfo: { wasTruncated: boolean; originalLength: number; truncatedLength: number } | null = null;
@@ -195,6 +232,9 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
     reviewedBy: (row.reviewed_by as string | null) ?? null,
     sourceKind: ((row.source_kind as MemorySourceKind | undefined) ?? 'user'),
     captureMethod: ((row.capture_method as MemoryCaptureMethod | undefined) ?? 'manual'),
+    hostId: (row.host_id as string | null | undefined) ?? null,
+    agentId: (row.agent_id as string | null | undefined) ?? null,
+    captureLayer: (row.capture_layer as string | null | undefined) ?? null,
     trustScore: Number(row.trust_score ?? 1),
     sensitivityLevel: (row.sensitivity_level as string | undefined) ?? 'INTERNAL',
     source: (row.source as string | null) ?? null,
@@ -615,9 +655,10 @@ export function addMemory(
   const stmt = db.prepare(`
     INSERT INTO memories (
       uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable,
-      status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, defence_verdict, cloud_excluded, memory_purpose, memory_scope, updated_at
+      status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, defence_verdict, cloud_excluded, memory_purpose, memory_scope,
+      host_id, agent_id, capture_layer, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -654,7 +695,10 @@ export function addMemory(
       defenceVerdict,
       cloudExcluded,
       input.memoryPurpose || 'project',
-      input.memoryScope || 'private'
+      input.memoryScope || 'private',
+      input.hostId ?? resolveDefaultHostId(),
+      input.agentId ?? resolveDefaultAgentId(),
+      input.captureLayer ?? null,
     );
 
     // defenceResult is always set now (every write is scanned), so always stamp

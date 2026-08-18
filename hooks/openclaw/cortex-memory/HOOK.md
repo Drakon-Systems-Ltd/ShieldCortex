@@ -28,9 +28,11 @@ When `openclawAutoMemory` is enabled:
 5. Skips exact and near-duplicate memories using novelty filtering
 
 ### On Session Start (Agent Bootstrap)
-Bootstrap context injection was **disabled in v2026.2.26**. OpenClaw's native Memory Search now handles context recall at session start, so the hook no longer pushes memories into the system prompt (which was producing ~40× duplication of CORTEX_MEMORY.md and eating most of the context window).
+Unbounded `CORTEX_MEMORY.md` dump remains **disabled** (v2026.2.26 ~40× context blow-up class).
 
-The hook still fires on `agent:bootstrap` for lifecycle wiring (warning-bootstrap-file handoff, etc.) but contributes nothing to the system prompt. This keeps `extraSystemPromptHash` stable across turns and prevents the session-binding reset loop documented in `src/setup/claude-md.ts`.
+**Memory SOTA B:** when `memory.inject.nativeContract` is set to `sc_only` or `disable_native_inject`, bootstrap may push a **single budgeted** `SHIELDCORTEX_INJECT_PACK.md` (hard ceilings; hash-ring; fact-only). Without that contract the hook does **not** reclaim the native memory bus.
+
+The hook still fires on `agent:bootstrap` for lifecycle wiring (threat scan warnings, optional inject pack, self-heal). It must never reintroduce unbounded memory dumps.
 
 ### Keyword Triggers
 

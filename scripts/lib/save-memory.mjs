@@ -2,6 +2,10 @@ import { randomUUID } from 'crypto';
 import { dirname, resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { isNearDuplicate } from './dedup.mjs';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+import { readInjectConfig } from './inject-pack.mjs';
 
 // Env-tunable dedup thresholds (pickNumber/env pattern — mirrors
 // scripts/prompt-recall-hook.mjs). A typo'd or empty env var falls back to the
@@ -37,6 +41,22 @@ const DEDUP_CANDIDATE_LIMIT = 200; // bound the candidate scan per write
 // source_attested NULL (never `false`→0: an explicit 0 under a real key is the
 // mute lever risk.ts's latest-non-null attestation resolution hands out).
 const KNOWN_HOOK_SOURCES = new Set(['session-end-hook', 'pre-compact-hook', 'stop-hook', 'hook']);
+
+function loadScConfig() {
+  try {
+    const p = join(homedir(), '.shieldcortex', 'config.json');
+    if (!existsSync(p)) return {};
+    return JSON.parse(readFileSync(p, 'utf-8'));
+  } catch { return {}; }
+}
+
+function resolveScopeIds() {
+  const cfg = readInjectConfig(loadScConfig());
+  const hostId = cfg.hostId || process.env.SHIELDCORTEX_HOST_ID || process.env.HOSTNAME || 'local';
+  const agentId = cfg.agentId || process.env.SHIELDCORTEX_AGENT_ID || 'default';
+  return { hostId: String(hostId).slice(0, 128), agentId: String(agentId).slice(0, 128) };
+}
+
 
 /**
  * Insert an auto-extracted memory into the SC database, routed through the
@@ -171,31 +191,64 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
     }
   }
 
-  db.prepare(`
-    INSERT INTO memories (
-      uuid, title, content, type, category, salience, tags, project,
-      memory_purpose, source, source_kind, capture_method,
-      trust_score, sensitivity_level,
-      created_at, last_accessed
-    )
-    VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?, ?, ?)
-  `).run(
-    randomUUID(),
-    memory.title,
-    memory.content,
-    memory.category,
-    memory.salience,
-    JSON.stringify(memory.tags),
-    project || null,
-    memory.memoryPurpose ?? 'project',
-    `hook:${sourceIdentifier}`,
-    // Computed by the scan above (hook source → 0.8). Fall back to the schema
-    // defaults only if the pipeline somehow returned no trust/sensitivity.
-    typeof trustScore === 'number' ? trustScore : 1.0,
-    sensitivityLevel ?? 'INTERNAL',
-    timestamp,
-    timestamp,
-  );
+  const scope = resolveScopeIds();
+  const captureLayer = memory.capture_layer || memory.captureLayer || 'L0';
+  // host_id/agent_id may be missing on pre-migration DBs — try/catch insert with fallback.
+  try {
+    db.prepare(`
+      INSERT INTO memories (
+        uuid, title, content, type, category, salience, tags, project,
+        memory_purpose, source, source_kind, capture_method,
+        trust_score, sensitivity_level,
+        host_id, agent_id, capture_layer,
+        created_at, last_accessed
+      )
+      VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      memory.title,
+      memory.content,
+      memory.category,
+      memory.salience,
+      JSON.stringify(memory.tags),
+      project || null,
+      memory.memoryPurpose ?? 'project',
+      `hook:${sourceIdentifier}`,
+      typeof trustScore === 'number' ? trustScore : 1.0,
+      sensitivityLevel ?? 'INTERNAL',
+      scope.hostId,
+      scope.agentId,
+      captureLayer,
+      timestamp,
+      timestamp,
+    );
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    if (!/no such column/i.test(msg)) throw err;
+    db.prepare(`
+      INSERT INTO memories (
+        uuid, title, content, type, category, salience, tags, project,
+        memory_purpose, source, source_kind, capture_method,
+        trust_score, sensitivity_level,
+        created_at, last_accessed
+      )
+      VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      memory.title,
+      memory.content,
+      memory.category,
+      memory.salience,
+      JSON.stringify(memory.tags),
+      project || null,
+      memory.memoryPurpose ?? 'project',
+      `hook:${sourceIdentifier}`,
+      typeof trustScore === 'number' ? trustScore : 1.0,
+      sensitivityLevel ?? 'INTERNAL',
+      timestamp,
+      timestamp,
+    );
+  }
 }
 
 function insertQuarantineRow(db, memory, project, source, result) {

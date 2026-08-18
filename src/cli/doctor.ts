@@ -2659,6 +2659,118 @@ export function runMemoryCaptureDropsCheck(dbPath: string): CheckResult {
   }
 }
 
+
+// ── Memory plane: empty-brain / green-wash (Memory SOTA A-min) ──
+/**
+ * Bound host with auto-memory and/or proactive recall on must not sit on an
+ * empty or junk-only store while other activity proves the product is in use.
+ * Default window: 7 days (freeze nit).
+ */
+export async function checkMemoryPlaneEmptyBrain(): Promise<CheckResult> {
+  const label = 'Memory plane (empty-brain)';
+  const dbPath = getDbPath();
+  if (!fs.existsSync(dbPath)) {
+    return { label, status: 'info', message: 'no database yet' };
+  }
+
+  let openclawAuto = false;
+  let proactive = false;
+  let injectMode = 'off';
+  let injectConfigured = false;
+  let nativeContract: string | null = null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(getShieldCortexDir(), 'config.json'), 'utf-8')) as Record<string, unknown>;
+    openclawAuto = raw.openclawAutoMemory === true;
+    proactive = raw.proactiveRecall === true;
+    const mem = (raw.memory && typeof raw.memory === 'object') ? raw.memory as Record<string, unknown> : {};
+    const inject = (mem.inject && typeof mem.inject === 'object') ? mem.inject as Record<string, unknown> : {};
+    injectConfigured = Object.keys(inject).length > 0 || raw.memoryInjectMode != null || raw.memoryNativeInjectContract != null;
+    if (typeof inject.mode === 'string') injectMode = inject.mode;
+    else if (typeof raw.memoryInjectMode === 'string') injectMode = raw.memoryInjectMode as string;
+    else if (injectConfigured) injectMode = 'start';
+    const nc = inject.nativeContract ?? raw.memoryNativeInjectContract ?? mem.nativeInjectContract;
+    nativeContract = typeof nc === 'string' ? nc : null;
+  } catch { /* defaults */ }
+
+  const bound = openclawAuto || proactive || injectMode === 'start' || injectMode === 'both';
+  if (!bound) {
+    return { label, status: 'info', message: 'auto-memory / proactive recall off — empty store is expected' };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const Database = (await import('better-sqlite3')).default;
+  let db: InstanceType<typeof Database> | null = null;
+  try {
+    db = new Database(dbPath, { readonly: true, timeout: 3000, fileMustExist: true });
+    const countOf = (sql: string, params: unknown[] = []): number => {
+      const row = db!.prepare(sql).get(...params) as { c?: number } | undefined;
+      return Number(row?.c ?? 0);
+    };
+    const admitted = countOf(
+      `SELECT COUNT(*) AS c FROM memories
+       WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+         AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'`,
+    );
+    const total = countOf(`SELECT COUNT(*) AS c FROM memories`);
+    let sessionEvents = 0;
+    let hookInvocations = 0;
+    try {
+      sessionEvents = countOf(
+        `SELECT COUNT(*) AS c FROM session_events WHERE created_at >= datetime('now', '-7 days')`,
+      );
+    } catch { /* table may not exist on ancient DBs */ }
+    try {
+      hookInvocations = countOf(
+        `SELECT COUNT(*) AS c FROM hook_invocations WHERE invoked_at >= datetime('now', '-7 days')`,
+      );
+    } catch { /* optional */ }
+    const activity = sessionEvents + hookInvocations;
+
+    if (injectConfigured && injectMode !== 'off' && !nativeContract) {
+      return {
+        label,
+        status: 'fail',
+        message: `memory.inject mode=${injectMode} without nativeContract (need sc_only or disable_native_inject)`,
+        fix: 'Set memory.inject.nativeContract to sc_only or disable_native_inject in ~/.shieldcortex/config.json before enabling inject',
+      };
+    }
+
+    if (admitted === 0 && activity > 0) {
+      return {
+        label,
+        status: 'fail',
+        message: `0 admitted memories with activity in 7d (session_events=${sessionEvents}, hooks=${hookInvocations}, total_rows=${total})`,
+        fix: 'Capture path is not filling the store — see docs/design/2026-08-17-memory-sota-empty-brain-rca.md; enable session capture / remember, or turn openclawAutoMemory off until fixed',
+      };
+    }
+    if (admitted === 0 && activity === 0) {
+      return {
+        label,
+        status: 'warn',
+        message: '0 memories and no recent activity — plane idle',
+      };
+    }
+    if (total > 0 && admitted === 0) {
+      return {
+        label,
+        status: 'fail',
+        message: `green-wash: ${total} row(s) but 0 admitted (quarantine/RESTRICTED/junk only)`,
+        fix: 'Review quarantine and sensitivity; admitted durable facts required for a healthy plane',
+      };
+    }
+    return {
+      label,
+      status: 'pass',
+      message: `${admitted} admitted memories (7d activity=${activity})`,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'warn', message: `check failed — ${msg}` };
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+}
+
 async function checkMemoryCaptureDist(): Promise<CheckResult[]> {
   const distResult = await runMemoryCaptureDistCheck(resolveSelfInstallDir());
   const dropsResult = runMemoryCaptureDropsCheck(getDbPath());
@@ -4153,6 +4265,7 @@ export async function runDoctor(
     checkHookTimeouts,
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
+    checkMemoryPlaneEmptyBrain,
     checkMemoryCaptureDist,
     checkBrainWorker,
     checkProjectKeyConsistency,

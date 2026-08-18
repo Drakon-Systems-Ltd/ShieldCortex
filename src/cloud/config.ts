@@ -1279,9 +1279,11 @@ export function getAutoMemoryEnableConfig(): AutoMemoryEnableConfig {
   const am = raw.autoMemory && typeof raw.autoMemory === 'object'
     ? raw.autoMemory as Record<string, unknown>
     : {};
+  // Memory SOTA: plane flags imply capture gates unless explicitly false.
+  const planeOn = raw.openclawAutoMemory === true || raw.proactiveRecall === true;
   return {
-    enableStop: am.enableStop === true,
-    enableSessionEnd: am.enableSessionEnd === true,
+    enableStop: am.enableStop === true || (planeOn && am.enableStop !== false),
+    enableSessionEnd: am.enableSessionEnd === true || (planeOn && am.enableSessionEnd !== false),
   };
 }
 
