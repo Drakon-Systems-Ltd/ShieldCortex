@@ -65,6 +65,8 @@ type DefenceModule = {
     mode?: 'advisory' | 'enforce',
   ) => {
     clean: boolean;
+    /** Multi-layer human summary — required for #361 non-injection dirty path. */
+    summary?: string;
     injection: { clean: boolean; riskLevel: string; detections: unknown[] };
   };
   /** #225 sink: the notify transport shared with the Action Guard (#143).
