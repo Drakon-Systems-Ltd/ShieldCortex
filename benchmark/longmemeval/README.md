@@ -71,3 +71,31 @@ public-by-default.
   diverge from the academic dataset.
 - Not gated CI — the workflow is a transparency tool, not a regression
   gate. Per-PR perf checks belong in the unit-test suite.
+
+## Track D — full / labeled LongMemEval-S (honesty)
+
+Dataset is **not** in git. Fetch the cleaned S release, convert if needed, run:
+
+```bash
+# 1) download (HF; ~respect upstream license)
+npm run bench:fetch-s
+# → ~/.shieldcortex/benchmark/longmemeval/longmemeval_s_cleaned.json
+
+# 2) convert official → harness JSONL (optional if using load.ts upstream support)
+npm run bench:convert --   --in ~/.shieldcortex/benchmark/longmemeval/longmemeval_s_cleaned.json   --out ~/.shieldcortex/benchmark/longmemeval/longmemeval-s.jsonl
+
+# labeled subset (deterministic, cite as subset not full-S)
+npm run bench:convert --   --in ~/.shieldcortex/benchmark/longmemeval/longmemeval_s_cleaned.json   --out ~/.shieldcortex/benchmark/longmemeval/longmemeval-s-subset50.jsonl   --limit 50 --seed 42
+
+# 3) measure (writes SCORECARD.md + report.json)
+npm run bench -- --dataset ~/.shieldcortex/benchmark/longmemeval/longmemeval-s.jsonl
+# or embeddings-off smoke-scale:
+SHIELDCORTEX_SKIP_EMBEDDINGS=1 npm run bench -- --dataset ~/.shieldcortex/benchmark/longmemeval/longmemeval-s-subset50.jsonl
+```
+
+**Honesty rules**
+
+- Toy fixture ≠ LongMemEval-S.
+- Subset-50 must be labeled **subset** in SCORECARD / epic comments.
+- agentmemory 95.2% is reference-only, different corpus run.
+- Not a merge gate.
