@@ -9,6 +9,7 @@ import {
   resolveProviderPreference,
   resolveClaudeCodeOAuthProvider,
   parseDistillResponseText,
+  // category path covered below
   extractCaptureMemories,
   buildDistillPrompt,
 } from '../../../scripts/lib/capture-distill.mjs';
@@ -186,4 +187,17 @@ describe('extractCaptureMemories', () => {
     expect(r.path).toBe('skip');
     expect(r.memories).toEqual([]);
   });
+
+  it('maps distill decision/bug categories onto schema-valid labels', () => {
+    const raw = [
+      { title: 'Dec', content: 'We decided X', category: 'decision', salience: 0.5 },
+      { title: 'Bug', content: 'Fixed Y', category: 'bug', salience: 0.5 },
+    ];
+    const res = failClosedDistill(null, raw);
+    expect(res.ok).toBe(true);
+    expect(res.memories).toHaveLength(2);
+    expect(res.memories[0].category).toBe('architecture');
+    expect(res.memories[1].category).toBe('error');
+  });
+
 });
