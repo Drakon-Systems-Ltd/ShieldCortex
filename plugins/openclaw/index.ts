@@ -34,6 +34,7 @@ import { createRequire } from "node:module";
 
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
+import { isTaintingScanSummary, severityFromScanSummary } from './scan-taint-policy.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
@@ -64,6 +65,8 @@ type DefenceModule = {
     mode?: 'advisory' | 'enforce',
   ) => {
     clean: boolean;
+    /** Multi-layer human summary — required for #361 non-injection dirty path. */
+    summary?: string;
     injection: { clean: boolean; riskLevel: string; detections: unknown[] };
   };
   /** #225 sink: the notify transport shared with the Action Guard (#143).
@@ -1895,12 +1898,26 @@ export async function scanRealtimeContent(text: string): Promise<ConversationSca
   if (defenceMod && typeof defenceMod.scanToolResponse === "function") {
     try {
       const scan = defenceMod.scanToolResponse("openclaw-realtime", text, "advisory");
-      // Reproduce the historical summary contract exactly: risk level + detection
-      // count only when the injection scan flagged something.
-      const risk = scan.injection.clean ? "unknown" : scan.injection.riskLevel;
-      const summary = scan.injection.clean
-        ? risk
-        : `${risk} (${scan.injection.detections.length} detections)`;
+      // #361: never summarise a dirty overall scan as bare "unknown".
+      // Historical path used injection.riskLevel only when injection fired; when
+      // another layer dirtied the scan (encoding/instructions/credentials/etc.)
+      // while injection stayed clean, risk defaulted to "unknown" and the llm_input
+      // path treated that as a positive detection → session taint → AG escalate →
+      // broker unavailable deadlock on benign threads.
+      // Prefer the scanner's own multi-layer summary when dirty; only use the
+      // compact "RISK (N detections)" form for pure injection hits.
+      let summary: string;
+      if (scan.clean) {
+        summary = 'NONE';
+      } else if (!scan.injection.clean) {
+        const risk = scan.injection.riskLevel || 'UNKNOWN';
+        summary = `${risk} (${scan.injection.detections.length} detections)`;
+      } else if (typeof scan.summary === 'string' && scan.summary.trim()) {
+        // e.g. 'THREAT in "openclaw-realtime" response: encoding: base64 (12ms)'
+        summary = scan.summary;
+      } else {
+        summary = 'THREAT (non-injection layer)';
+      }
       return { clean: scan.clean, summary, available: true };
     } catch (err) {
       // A scanner that THROWS is not a clean verdict either. Same treatment as
@@ -2412,8 +2429,15 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
         // logs" is an instruction, and treating it as an attack is the false
         // alarm that gets a control switched off. Everything the agent was
         // handed — including another agent on a closed channel — is data.
-        if (trust.mayTaint) {
-          sessionTaint.mark(event.sessionId, { reason: `conversation scan: ${result.summary}` });
+        // #361: taint only on a concrete detection summary. Bare "unknown" (and
+        // scanner-unavailable shapes) must not escalate Action Guard — they are
+        // degraded/uncertain states, not positive threats. Real injection keeps
+        // the HIGH/CRITICAL (N detections) form and still taints.
+        if (trust.mayTaint && isTaintingScanSummary(result.summary)) {
+          sessionTaint.mark(event.sessionId, {
+            severity: severityFromScanSummary(result.summary),
+            reason: `conversation scan: ${result.summary}`,
+          });
         }
         // #226: NO `preview`. This row carried the first 100 characters of the
         // prompt — the exact text that tripped an injection detector, i.e.
@@ -2432,7 +2456,8 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
           // Whether this detection tainted the session (threat-graph Phase D:
           // lets the threat graph attribute taint-raising events). Metadata
           // only — no content, same as the fields above.
-          tainted: trust.mayTaint,
+          // #361: mirrors the mark gate — unknown/unavailable never count as taint.
+          tainted: trust.mayTaint && isTaintingScanSummary(result.summary),
           // Writer-side attestation (attestation Phase 4): the hook identity
           // above is a hardcoded literal — no conversation content can reach
           // it. RECORD-ONLY at the reader (attribution metadata); the JSONL

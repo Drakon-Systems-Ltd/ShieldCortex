@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Action Guard / conversation scan (#361):** bare `unknown` scan summaries no longer taint sessions or escalate Action Guard. Dirty non-injection scans keep an honest multi-layer THREAT summary instead of defaulting risk to `unknown`.
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
