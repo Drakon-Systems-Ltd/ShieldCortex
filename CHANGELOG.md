@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **Memory SOTA Track C:** capture distill provider (OpenAI-compatible + Anthropic), fail-closed extract path on stop/session-end, L1 salience cap, no silent regex fallback (#350 / epic #347).
 - **Memory SOTA Track C (OAuth):** distill resolves Hermes OAuth on disk (xai-oauth → openai-codex) when no API key is set — fleet hosts reuse existing login; `SHIELDCORTEX_DISTILL_OAUTH=0` disables.
+- **Memory SOTA Track C (defaults):** distill defaults to cheap models (`grok-4.3` on xAI OAuth, not main chat `grok-4.6`); zero-config when Hermes is already logged in.
 
 
 ### Added

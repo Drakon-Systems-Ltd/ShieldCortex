@@ -101,9 +101,14 @@ export function allowRegexFallback(mode) {
 /**
  * Resolve OpenAI-compatible chat credentials without logging secrets.
  *
- * Priority:
+ * Priority (zero-config on Hermes hosts):
  *   1. Explicit env/config API keys (SHIELDCORTEX_DISTILL_* / OPENAI_* / ANTHROPIC_*)
- *   2. Hermes OAuth on disk (xai-oauth → openai-codex) — preferred on fleet hosts
+ *   2. Hermes OAuth on disk (xai-oauth → openai-codex) with a **cheap** default model
+ *      (grok-4.3 / gpt-5.5) — not the user's main chat model
+ *
+ * Users do not need to set keys or models for distill if Hermes OAuth is already
+ * logged in. Opt out: SHIELDCORTEX_DISTILL_OAUTH=0. Upgrade model only if needed:
+ * SHIELDCORTEX_DISTILL_MODEL=grok-4.6
  *
  * @returns {{ configured: boolean, apiKey?: string, baseUrl?: string, model?: string, source?: string, auth?: string }}
  */
@@ -227,10 +232,16 @@ export function resolveHermesOAuthProvider(env = process.env, config = null) {
   return { configured: false };
 }
 
+/**
+ * Cheap defaults for background distill (not the user's main chat model).
+ * Override with SHIELDCORTEX_DISTILL_MODEL or memory.distill.model.
+ */
 function defaultModelForProvider(providerId) {
-  if (String(providerId).startsWith('xai')) return 'grok-4.6';
-  if (String(providerId).includes('codex') || String(providerId).includes('openai')) return 'gpt-5.5';
-  return 'grok-4.6';
+  const id = String(providerId || '');
+  if (id.startsWith('xai') || id.includes('grok')) return 'grok-4.3';
+  if (id.includes('codex') || id.includes('openai')) return 'gpt-5.5'; // lightest common Codex tier on file
+  if (id.includes('anthropic') || id.includes('claude')) return 'claude-haiku-4-5-20251001';
+  return 'grok-4.3';
 }
 
 /**
