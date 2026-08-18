@@ -29,6 +29,7 @@ import { homedir } from 'os';
 import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
 import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
+import { extractCaptureMemories } from './lib/capture-distill.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
@@ -203,25 +204,41 @@ process.stdin.on('end', async () => {
         console.error(`[session-end] Memory status: ${totalMemories}/${maxMemories} (${(totalMemories/maxMemories*100).toFixed(0)}% full)`);
         console.error(`[session-end] Reason: ${reason}, Dynamic threshold: ${dynamicThreshold.toFixed(2)}`);
 
-        // Extract memorable segments
-        const segments = extractMemorableSegments(conversationText);
-        const processedSegments = processSegments(segments, dynamicThreshold, {
-          hookTag: 'session-end',
-          conversationText,
+        // Memory SOTA C: distill when provider configured; fail-closed (no silent regex).
+        const capture = await extractCaptureMemories(conversationText, {
+          mode: autoMemConfig.captureMode,
+          config: autoMemConfig.rawConfig,
+          regexExtract: () => {
+            const segments = extractMemorableSegments(conversationText);
+            return processSegments(segments, dynamicThreshold, {
+              hookTag: 'session-end',
+              conversationText,
+            });
+          },
+          log: (msg) => console.error(msg),
         });
+        notes = [notes, `capture=${capture.path}${capture.reason ? ':' + capture.reason : ''}`].filter(Boolean).join('; ');
 
-        for (const memory of processedSegments) {
+        for (const memory of capture.memories) {
           try {
+            // Ensure tags include capture path for telemetry
+            const tags = Array.isArray(memory.tags) ? memory.tags.slice() : [];
+            if (capture.path === 'distill' && !tags.includes('distill')) tags.push('distill');
+            if (capture.path === 'regex' && !tags.includes('session-end')) tags.push('session-end');
+            memory.tags = tags;
+            if (!memory.capture_layer && !memory.captureLayer) {
+              memory.capture_layer = capture.path === 'distill' ? 'L1' : 'L0';
+            }
             await saveMemory(db, memory, project);
             autoExtractedCount++;
             const boostInfo = memory.frequencyBoost > 0 ? ` +${memory.frequencyBoost.toFixed(2)} boost` : '';
-            console.error(`[session-end] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}${boostInfo}, category: ${memory.category})`);
+            console.error(`[session-end] Saved: ${memory.title} (salience: ${Number(memory.salience).toFixed(2)}${boostInfo}, category: ${memory.category}, path=${capture.path})`);
           } catch (err) {
             console.error(`[session-end] Failed to save "${memory.title}": ${err.message}`);
           }
         }
 
-        console.error(`[session-end] Complete: ${autoExtractedCount} memories auto-extracted on session ${reason}`);
+        console.error(`[session-end] Complete: ${autoExtractedCount} memories via ${capture.path} on session ${reason}`);
       } else {
         console.error('[session-end] Not enough conversation content to extract from');
         notes = 'no-content';

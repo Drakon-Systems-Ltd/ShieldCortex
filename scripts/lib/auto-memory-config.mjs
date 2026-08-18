@@ -46,6 +46,13 @@ export function getAutoMemoryConfig() {
     || (planeOn && overrides.enableStop !== false);
   const enableSessionEnd = overrides.enableSessionEnd === true
     || (planeOn && overrides.enableSessionEnd !== false);
+  const mem = (raw.memory && typeof raw.memory === 'object') ? raw.memory : {};
+  const distill = (mem.distill && typeof mem.distill === 'object') ? mem.distill : {};
+  // captureMode: regex | distill | distill_required (undefined = auto)
+  const captureMode = typeof overrides.captureMode === 'string'
+    ? overrides.captureMode
+    : (typeof distill.mode === 'string' ? distill.mode
+      : (typeof mem.captureMode === 'string' ? mem.captureMode : undefined));
   return {
     maxTranscriptBytes: pickPositiveInt(overrides.maxTranscriptBytes, DEFAULTS.maxTranscriptBytes),
     maxTranscriptLines: pickPositiveInt(overrides.maxTranscriptLines, DEFAULTS.maxTranscriptLines),
@@ -59,6 +66,8 @@ export function getAutoMemoryConfig() {
     stopHookWindowBytes: pickPositiveInt(overrides.stopHookWindowBytes, DEFAULTS.stopHookWindowBytes),
     enableSessionEnd,
     enableStop,
+    captureMode,
+    rawConfig: raw,
   };
 }
 
