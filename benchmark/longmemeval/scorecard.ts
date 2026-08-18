@@ -29,6 +29,20 @@ export function renderScorecard(report: BenchmarkReport): string {
   lines.push('> 2. The `agentmemory` reference line below is `rohitg00/agentmemory`\'s **published** result on the full LongMemEval-S corpus. ShieldCortex has not been evaluated against that corpus yet; we cite the number only to identify the algorithm (Reciprocal Rank Fusion, Cormack et al. 2009) that both implementations use.');
   lines.push('> 3. To reproduce: `npm run bench` from the repo root regenerates this file. Full-suite numbers against LongMemEval-S are on the roadmap; see <https://shieldcortex.ai/security> for status.');
   lines.push('');
+  const ds = report.dataset_path || '';
+  const isToy = /toy-dataset/i.test(ds);
+  const isSubset = /subset/i.test(ds);
+  const isFullS = /longmemeval-s\.jsonl$/i.test(ds) && !isSubset;
+  if (isToy) {
+    lines.push('> 4. **THIS RUN = TOY FIXTURE ONLY** (5 questions). Do not quote as LongMemEval-S.');
+  } else if (isSubset) {
+    lines.push('> 4. **THIS RUN = LABELED SUBSET** (not full 500). Cite as subset with seed/limit from convert stats. Not comparable to full-S or agentmemory.');
+  } else if (isFullS) {
+    lines.push('> 4. **THIS RUN = full LongMemEval-S harness JSONL (500)** after local convert. Still retrieval-only; not a generation score. agentmemory line remains reference-only.');
+  } else {
+    lines.push('> 4. Dataset path did not match toy/subset/full heuristics — read the path and question count before quoting.');
+  }
+  lines.push('> 5. Defence firewall stays ON during ingest; blocked turns are skipped (product-honest corpus).');
   lines.push(`- Dataset: \`${report.dataset_path}\``);
   lines.push(`- Top-k: ${report.k_top}`);
   lines.push(`- Generated: ${report.generated_at}`);

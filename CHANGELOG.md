@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - **Memory SOTA Track C:** capture distill provider (OpenAI-compatible + Anthropic), fail-closed extract path on stop/session-end, L1 salience cap, no silent regex fallback (#350 / epic #347).
 - **Memory SOTA Track C (OAuth):** distill resolves Hermes OAuth on disk (xai-oauth → openai-codex) when no API key is set — fleet hosts reuse existing login; `SHIELDCORTEX_DISTILL_OAUTH=0` disables.
 - **Memory SOTA Track C (defaults):** distill defaults to cheap models (`grok-4.3` on xAI OAuth, not main chat `grok-4.6`); zero-config when Hermes is already logged in.
+- **Memory SOTA Track D:** LongMemEval-S fetch script, upstream→harness convertor, loader accepts official Turn[][] sessions; honesty docs.
 - **Memory SOTA Track D kickoff:** LongMemEval-S honesty harness design + residual A/B host checklist.
 - **Memory SOTA Track C.2 (OpenClaw):** session extract uses optional L1 distill via OpenClaw auth/env (primary model family first); regex L0 fallback; gateway-safe (no DB in hook).
 - **Memory SOTA Track C (multi-provider zero-config):** distill on-disk auth chain covers Hermes active provider, xai/codex/qwen/minimax/nous OAuth, API-key pools (anthropic/openai/gemini/…), and Claude Max OAuth; cheap model per family.

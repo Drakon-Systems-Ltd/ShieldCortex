@@ -98,9 +98,31 @@ function normaliseQuestion(
       path,
     );
   }
-  const haystack_sessions: HaystackSession[] = haystackRaw.map((s, sIdx) =>
-    normaliseSession(s, question_id, sIdx, path),
-  );
+
+  // Official LongMemEval: haystack_sessions is Turn[][] parallel to haystack_session_ids.
+  // Harness shape: { session_id, turns }[]. Accept both.
+  const idList = Array.isArray(obj.haystack_session_ids)
+    ? (obj.haystack_session_ids as unknown[]).map(String)
+    : [];
+  const dateList = Array.isArray(obj.haystack_dates)
+    ? (obj.haystack_dates as unknown[]).map(String)
+    : [];
+
+  const haystack_sessions: HaystackSession[] = haystackRaw.map((s, sIdx) => {
+    if (Array.isArray(s)) {
+      // Official Turn[] form
+      const session_id = idList[sIdx] || `${question_id}-sess-${sIdx}`;
+      const turns: HaystackTurn[] = s.map((t, tIdx) => {
+        const turn = normaliseTurn(t, session_id, tIdx, path);
+        if (!turn.ts && dateList[sIdx]) {
+          return { ...turn, ts: `${dateList[sIdx]}#${tIdx}` };
+        }
+        return turn;
+      });
+      return { session_id, turns };
+    }
+    return normaliseSession(s, question_id, sIdx, path);
+  });
 
   return { question_id, question, answer_session_ids, haystack_sessions };
 }
