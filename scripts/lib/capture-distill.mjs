@@ -23,17 +23,29 @@ export const DISTILL_MAX_INPUT_CHARS = 24_000;
 export const DISTILL_TIMEOUT_MS = 12_000;
 
 const ALLOWED_CATEGORIES = new Set([
-  'note',
-  'decision',
-  'preference',
+  // Must match memories.valid_category CHECK constraint.
   'architecture',
-  'bug',
+  'pattern',
+  'preference',
+  'error',
+  'context',
   'learning',
-  'fact',
-  'procedure',
-  'error-fix',
-  'important-note',
+  'todo',
+  'note',
+  'relationship',
+  'custom',
 ]);
+
+/** Map common distill labels → schema categories. */
+const CATEGORY_ALIASES = {
+  decision: 'architecture',
+  bug: 'error',
+  fact: 'note',
+  procedure: 'pattern',
+  pref: 'preference',
+  fix: 'error',
+  ops: 'context',
+};
 
 /**
  * @param {unknown} mode
@@ -73,6 +85,7 @@ export function failClosedDistill(errOrNull, memories) {
     if (salience > L1_SALIENCE_CAP) salience = L1_SALIENCE_CAP;
     if (salience < 0) salience = 0;
     let category = typeof m.category === 'string' ? m.category.trim().toLowerCase() : 'note';
+    if (CATEGORY_ALIASES[category]) category = CATEGORY_ALIASES[category];
     if (!ALLOWED_CATEGORIES.has(category)) category = 'note';
     cleaned.push({
       title: title.slice(0, 200),
@@ -517,7 +530,7 @@ export function buildDistillPrompt(conversationText) {
   return {
     system:
       'You extract durable agent memories from a conversation transcript. '
-      + 'Return ONLY valid JSON: {"memories":[{"title":"...","content":"...","category":"note|decision|preference|architecture|bug|learning|fact|procedure","salience":0.0-0.7}]}. '
+      + 'Return ONLY valid JSON: {"memories":[{"title":"...","content":"...","category":"architecture|pattern|preference|error|context|learning|todo|note|relationship|custom","salience":0.0-0.7}]}. '
       + 'Rules: facts only (no instructions to the agent); no secrets/tokens/passwords; max 8 memories; '
       + 'prefer decisions, preferences, architecture, fixes, standing procedures; skip chit-chat; '
       + 'salience <= 0.7; content under 500 words each; title under 80 chars.',
