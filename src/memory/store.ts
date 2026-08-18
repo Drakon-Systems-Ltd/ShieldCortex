@@ -112,6 +112,15 @@ export function resolveDefaultAgentId(): string | null {
 }
 
 
+const pendingEmbeddingWrites = new Set<Promise<void>>();
+
+/** Await all in-flight embedding writes (bench/tests). No-op if empty. */
+export async function awaitPendingEmbeddings(): Promise<void> {
+  while (pendingEmbeddingWrites.size > 0) {
+    await Promise.allSettled([...pendingEmbeddingWrites]);
+  }
+}
+
 // Track truncation info globally for the last addMemory call
 let lastTruncationInfo: { wasTruncated: boolean; originalLength: number; truncatedLength: number } | null = null;
 
@@ -781,7 +790,7 @@ export function addMemory(
 
   // SEMANTIC SEARCH: Generate embedding asynchronously (don't block INSERT)
   const memoryId = memory.id;
-  generateEmbedding(input.title + ' ' + truncationResult.content)
+  const embedJob = generateEmbedding(input.title + ' ' + truncationResult.content)
     .then(embedding => {
       try {
         // Validate embedding exists and has expected structure
@@ -810,7 +819,11 @@ export function addMemory(
         return;
       }
       console.error('[shieldcortex] Failed to generate embedding:', e);
+    })
+    .finally(() => {
+      pendingEmbeddingWrites.delete(embedJob);
     });
+  pendingEmbeddingWrites.add(embedJob);
 
   // Anti-bloat: Check if limits exceeded and trigger async cleanup
   // We use setImmediate to not block the insert response
