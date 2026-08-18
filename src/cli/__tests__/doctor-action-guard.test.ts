@@ -205,10 +205,27 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     expect(results.find((r) => /webhookUrl|notify channel/i.test(r.message))).toBeUndefined();
   });
 
-  it('does not warn when notify.openclaw is the configured channel', async () => {
+  it('warns when notify.openclaw alone is set — not a DNP denial sink (#354)', async () => {
     writeConfig({ actionGuard: { notify: { enabled: true, openclaw: true } } });
     const results = await checkActionGuard();
-    expect(results.find((r) => /webhookUrl|notify channel/i.test(r.message))).toBeUndefined();
+    const warn = results.find((r) => r.status === 'warn' && /notify/i.test(r.label));
+    expect(warn).toBeDefined();
+    expect(warn!.message).toMatch(/openclaw only|denial-capable|webhookUrl/i);
+    expect(warn!.message).not.toMatch(/native OpenClaw approval card reaches a human/i);
+  });
+
+  it('does not warn when webhook denial sink is configured even if openclaw is also on', async () => {
+    writeConfig({
+      actionGuard: {
+        notify: {
+          enabled: true,
+          openclaw: true,
+          webhookUrl: 'https://hooks.example.invalid/sc',
+        },
+      },
+    });
+    const results = await checkActionGuard();
+    expect(results.find((r) => r.status === 'warn' && /notify/i.test(r.label))).toBeUndefined();
   });
 
   it('does not warn about notify when the guard is not enforcing', async () => {
@@ -234,7 +251,8 @@ describe('doctor — Action Guard notify fix is a signed CLI command (#275)', ()
     writeConfig({});
     const warn = await findNotifyWarn();
     expect(warn).toBeDefined();
-    expect(warn!.fix).toMatch(/shieldcortex config --action-guard-notify-(webhook|openclaw)/);
+    // #354: webhook is the denial sink; openclaw is not prescribed as the unattended fix.
+    expect(warn!.fix).toMatch(/shieldcortex config --action-guard-notify-webhook/);
     // The bare key-path prescription must no longer lead the fix.
     expect(warn!.fix).not.toMatch(/Set `actionGuard\.notify/);
   });
@@ -250,14 +268,15 @@ describe('doctor — Action Guard notify fix is a signed CLI command (#275)', ()
     expect(warn!.fix).not.toMatch(/(^|\.\s)(Edit|Add|Set)\b/);
   });
 
-  it('warn clears when the OpenClaw channel is enabled via the CLI (signed write)', async () => {
+  it('openclaw-only CLI enable does NOT clear the unattended-notify warn (#354)', async () => {
     fs.rmSync(configPath(), { force: true });
     fs.rmSync(legacySigPath(), { force: true });
     clearCloudConfigCache();
     jest.spyOn(console, 'log').mockImplementation(() => {});
     handleCloudConfig(['--action-guard-notify-openclaw']);
     const warn = await findNotifyWarn();
-    expect(warn).toBeUndefined();
+    expect(warn).toBeDefined();
+    expect(warn!.message).toMatch(/openclaw only|denial-capable|webhookUrl/i);
     const onDisk = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
     expect(typeof onDisk._sig).toBe('string');
   });

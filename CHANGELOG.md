@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
+## Unreleased
+
+- **Doctor / Action Guard (#354):** `notify.openclaw` alone no longer satisfies the unattended-notify check. DNP/headless denials need `notify.webhookUrl` (denial-capable sink). OpenClaw cards remain interactive-only per #310.
+
 ## [Unreleased]
 
 ### Added
