@@ -12,6 +12,25 @@ All notable changes to this project will be documented in this file.
 
 - **Doctor / Action Guard (#354):** `notify.openclaw` alone no longer satisfies the unattended-notify check. DNP/headless denials need `notify.webhookUrl` (denial-capable sink). OpenClaw cards remain interactive-only per #310.
 
+## [4.54.5] - 2026-08-18
+
+**Memory SOTA train + defence honesty patches for hosts.** Lands main-only Memory plane work and two production deadlock/diagnostic fixes so `shieldcortex update` picks them up.
+
+### Added
+- **Memory SOTA foundation (Tracks A–D harness):** inject pack v2 + `nativeContract` gate, capture distill (multi-provider OAuth / cheap default / OpenClaw C.2), provenance scope, LongMemEval-S fetch/convert/defence-honest ingest, embed-await + serial ONNX for honest emb-on runs (#352–#357, #355–#356).
+- **Scorecard dataset-class honesty:** `SCORECARD.md` caveats and headlines classify toy / labeled-subset / full LongMemEval-S from path+count — full-500 runs no longer claim "toy fixture" (#351 residual).
+
+### Fixed
+- **Distill category aliases** map model categories onto schema `valid_category` so admits are not dropped on CHECK (#359).
+- **Doctor:** `notify.openclaw` alone is **not** a DNP denial sink — unattended notify requires webhook (#354 / #360).
+- **Conversation scan:** bare `unknown` summaries no longer taint sessions or escalate Action Guard into broker-unavailable deadlock (#361 / #362).
+- **HEARTBEAT / cron envelope** recognition for host sessions (#353 / #358).
+
+### Notes
+- Full LongMemEval-S **500** emb-on host measurement (defence ON): RRF R@5 **92.00%** / R@10 **92.80%** / MRR **0.8593**; legacy ~0.6%. Retrieval-only; not a generation bake-off vs agentmemory 95.2%.
+- Action Guard warn-mode left as operator choice (TARS stays warn unless asked).
+- SDKs: no client API change this cut — leave 0.x unchanged intentional.
+
 ## [Unreleased]
 
 ### Added

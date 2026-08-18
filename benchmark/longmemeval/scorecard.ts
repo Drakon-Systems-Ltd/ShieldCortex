@@ -9,6 +9,10 @@
  *
  * Numbers are formatted to 4 decimal places — enough precision to
  * distinguish small deltas without implying false significance.
+ *
+ * Dataset-class honesty (#351 residual): caveats and headlines MUST match
+ * toy / labeled-subset / full LongMemEval-S. Never claim "toy only" on a
+ * full-500 run, and never claim product SOTA from retrieval alone.
  */
 
 import type { BenchmarkReport, EngineScorecard, QuestionResult } from './types.js';
@@ -16,8 +20,36 @@ import type { BenchmarkReport, EngineScorecard, QuestionResult } from './types.j
 /** agentmemory's published LongMemEval-S R@5. Used as a reference line. */
 const AGENTMEMORY_REFERENCE_R5 = 0.952;
 
+export type DatasetClass = 'toy' | 'subset' | 'full' | 'unknown';
+
+/** Exported for unit tests — path + question-count heuristics. */
+export function classifyDataset(report: BenchmarkReport): DatasetClass {
+  const ds = (report.dataset_path || '').replace(/\\/g, '/');
+  const q =
+    report.engines.find((e) => e.engine === 'rrf')?.question_count ??
+    report.engines[0]?.question_count ??
+    0;
+
+  if (/toy-dataset/i.test(ds) || q > 0 && q <= 10) return 'toy';
+  if (/subset/i.test(ds)) return 'subset';
+  // full.jsonl / longmemeval-s-full / longmemeval_s_cleaned converted harness
+  if (
+    /longmemeval-s-full/i.test(ds) ||
+    /longmemeval_s_cleaned/i.test(ds) ||
+    (/longmemeval-s\.jsonl$/i.test(ds) && !/subset/i.test(ds)) ||
+    q === 500
+  ) {
+    return 'full';
+  }
+  return 'unknown';
+}
+
 export function renderScorecard(report: BenchmarkReport): string {
   const lines: string[] = [];
+  const klass = classifyDataset(report);
+  const rrf = report.engines.find((e) => e.engine === 'rrf');
+  const legacy = report.engines.find((e) => e.engine === 'legacy');
+  const qLabel = rrf?.question_count ?? legacy?.question_count ?? '?';
 
   lines.push('# ShieldCortex retrieval scorecard');
   lines.push('');
@@ -25,24 +57,54 @@ export function renderScorecard(report: BenchmarkReport): string {
   lines.push('');
   lines.push('> ⚠️ **Caveats — read before quoting any number from this file.**');
   lines.push('>');
-  lines.push('> 1. The dataset below is a small toy fixture, not the full LongMemEval-S benchmark (500 questions). The numbers are useful to compare ShieldCortex\'s RRF engine against its own legacy engine on the same fixture, and to verify the harness runs end-to-end. They are **not** comparable to numbers published against the full LongMemEval-S corpus.');
-  lines.push('> 2. The `agentmemory` reference line below is `rohitg00/agentmemory`\'s **published** result on the full LongMemEval-S corpus. ShieldCortex has not been evaluated against that corpus yet; we cite the number only to identify the algorithm (Reciprocal Rank Fusion, Cormack et al. 2009) that both implementations use.');
-  lines.push('> 3. To reproduce: `npm run bench` from the repo root regenerates this file. Full-suite numbers against LongMemEval-S are on the roadmap; see <https://shieldcortex.ai/security> for status.');
-  lines.push('');
-  const ds = report.dataset_path || '';
-  const isToy = /toy-dataset/i.test(ds);
-  const isSubset = /subset/i.test(ds);
-  const isFullS = /longmemeval-s\.jsonl$/i.test(ds) && !isSubset;
-  if (isToy) {
-    lines.push('> 4. **THIS RUN = TOY FIXTURE ONLY** (5 questions). Do not quote as LongMemEval-S.');
-  } else if (isSubset) {
-    lines.push('> 4. **THIS RUN = LABELED SUBSET** (not full 500). Cite as subset with seed/limit from convert stats. Not comparable to full-S or agentmemory.');
-  } else if (isFullS) {
-    lines.push('> 4. **THIS RUN = full LongMemEval-S harness JSONL (500)** after local convert. Still retrieval-only; not a generation score. agentmemory line remains reference-only.');
+
+  if (klass === 'toy') {
+    lines.push(
+      '> 1. **THIS RUN = TOY FIXTURE** (harness smoke). Useful only to compare RRF vs legacy on the same tiny set and prove the harness runs. **Not** LongMemEval-S.',
+    );
+    lines.push(
+      '> 2. The `agentmemory` reference line is `rohitg00/agentmemory`\'s **published** full LongMemEval-S R@5. It identifies the algorithm (RRF); it is **not** a head-to-head on this toy set.',
+    );
+    lines.push(
+      '> 3. Reproduce smoke: `npm run bench:smoke`. Full-S / subset need the upstream dataset via `npm run bench:fetch-s` + convert — see `benchmark/longmemeval/README.md`.',
+    );
+  } else if (klass === 'subset') {
+    lines.push(
+      '> 1. **THIS RUN = LABELED SUBSET** of LongMemEval-S (not the full 500). Cite seed/limit from convert stats. Do not present as full-S.',
+    );
+    lines.push(
+      '> 2. Retrieval-only (session R@k / MRR). No generation / answer-quality judge. Defence stays ON during ingest; blocked turns are skipped.',
+    );
+    lines.push(
+      '> 3. `agentmemory` 95.2% is a **published full-S reference** from another project/stack — **not 1:1 comparable** to this subset run.',
+    );
+  } else if (klass === 'full') {
+    lines.push(
+      '> 1. **THIS RUN = full LongMemEval-S (500 questions)** via local convert of the upstream cleaned release. Retrieval-only (session R@k / MRR) — not a generation scorecard.',
+    );
+    lines.push(
+      '> 2. Defence firewall stays **ON** during ingest; blocked turns are skipped (product-honest corpus). Embeddings ON/OFF is an operator choice — read the run notes / env, not this file alone.',
+    );
+    lines.push(
+      '> 3. `agentmemory` 95.2% R@5 is a **published reference** from another project with a different stack. Cite both numbers with protocol differences; do not claim "we beat them" from this table alone.',
+    );
   } else {
-    lines.push('> 4. Dataset path did not match toy/subset/full heuristics — read the path and question count before quoting.');
+    lines.push(
+      '> 1. Dataset path/count did not match toy/subset/full heuristics — read path + question count before quoting.',
+    );
+    lines.push(
+      '> 2. Retrieval-only. Defence ON during ingest unless the operator disabled it.',
+    );
+    lines.push(
+      '> 3. `agentmemory` line is reference-only (algorithm identity), not a matched bake-off.',
+    );
   }
-  lines.push('> 5. Defence firewall stays ON during ingest; blocked turns are skipped (product-honest corpus).');
+
+  lines.push(
+    '> 4. Product SOTA is **not** proven by this file alone — it needs live capture → admit → inject on real hosts as well as retrieval.',
+  );
+  lines.push('');
+  lines.push(`- Dataset class: **${klass}**`);
   lines.push(`- Dataset: \`${report.dataset_path}\``);
   lines.push(`- Top-k: ${report.k_top}`);
   lines.push(`- Generated: ${report.generated_at}`);
@@ -51,15 +113,23 @@ export function renderScorecard(report: BenchmarkReport): string {
 
   lines.push('## Headline');
   lines.push('');
-  const rrf = report.engines.find((e) => e.engine === 'rrf');
-  const legacy = report.engines.find((e) => e.engine === 'legacy');
+  const runNoun =
+    klass === 'full' ? 'full LongMemEval-S' : klass === 'subset' ? 'labeled subset' : klass === 'toy' ? 'toy fixture' : 'run';
   if (rrf) {
-    lines.push(`- **RRF R@5 (${rrf.question_count}-question fixture):** ${formatPct(rrf.recall_at_5)}`);
+    lines.push(`- **RRF R@5 (${qLabel}-question ${runNoun}):** ${formatPct(rrf.recall_at_5)}`);
   }
   if (legacy) {
-    lines.push(`- **Legacy R@5 (${legacy.question_count}-question fixture):** ${formatPct(legacy.recall_at_5)}`);
+    lines.push(`- **Legacy R@5 (${qLabel}-question ${runNoun}):** ${formatPct(legacy.recall_at_5)}`);
   }
-  lines.push(`- \`agentmemory\` reference (full LongMemEval-S, 500 questions, R@5): ${formatPct(AGENTMEMORY_REFERENCE_R5)} — **not comparable**; published by a different project against a different corpus, cited only to identify the algorithm.`);
+  if (klass === 'full') {
+    lines.push(
+      `- \`agentmemory\` published full-S R@5: ${formatPct(AGENTMEMORY_REFERENCE_R5)} — **reference only** (different stack/protocol; not a matched bake-off).`,
+    );
+  } else {
+    lines.push(
+      `- \`agentmemory\` reference (full LongMemEval-S, 500 questions, R@5): ${formatPct(AGENTMEMORY_REFERENCE_R5)} — **not comparable** to this ${runNoun}; cited to identify RRF.`,
+    );
+  }
   lines.push('');
 
   lines.push('## Comparison');
@@ -95,10 +165,18 @@ export function renderScorecard(report: BenchmarkReport): string {
 
   lines.push('## Notes');
   lines.push('');
-  lines.push('- R@k is computed at session granularity (LongMemEval convention): a question scores a hit when at least one retrieved memory in top-k comes from a session listed in the question\'s `answer_session_ids`.');
-  lines.push('- MRR is reciprocal of the *first* gold-session hit position, averaged across questions. Questions with no hit contribute 0.');
-  lines.push('- Embeddings are loaded if available; if the model is missing, the harness still runs but vector recall is empty (FTS + graph only).');
-  lines.push('- Each question runs against a fresh in-memory SQLite DB. Cross-question contamination is impossible by construction.');
+  lines.push(
+    '- R@k is computed at session granularity (LongMemEval convention): a question scores a hit when at least one retrieved memory in top-k comes from a session listed in the question\'s `answer_session_ids`.',
+  );
+  lines.push(
+    '- MRR is reciprocal of the *first* gold-session hit position, averaged across questions. Questions with no hit contribute 0.',
+  );
+  lines.push(
+    '- Embeddings are loaded if available; if the model is missing or `SHIELDCORTEX_SKIP_EMBEDDINGS=1`, the harness still runs but vector recall is empty (FTS + graph only).',
+  );
+  lines.push(
+    '- Each question runs against a fresh in-memory SQLite DB. Cross-question contamination is impossible by construction.',
+  );
   lines.push('');
 
   return lines.join('\n');
