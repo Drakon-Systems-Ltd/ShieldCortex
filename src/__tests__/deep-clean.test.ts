@@ -371,7 +371,7 @@ describe('deep-clean — orphan detection (doctor path)', () => {
     expect(report.paths.some((p) => p.category === 'legacy-hook-dir' && p.description === legacyDir)).toBe(true);
   });
 
-  it('flags clawhub skill lock as orphan (SC does not manage skills automatically)', async () => {
+  it('flags clawhub skill lock as orphan only when skill dir is missing', async () => {
     installPluginDir();
     installHookDir();
     writeHealthyInstallConfig();
@@ -381,9 +381,17 @@ describe('deep-clean — orphan detection (doctor path)', () => {
     fs.writeFileSync(lockPath, JSON.stringify({ skills: { shieldcortex: { version: '4.10.5' } } }, null, 2), 'utf-8');
 
     const { scanForOrphans } = await loadModule();
-    const report = scanForOrphans();
-
+    let report = scanForOrphans();
+    expect(report.installState.skillInstalled).toBe(false);
     expect(report.paths.some((p) => p.category === 'clawhub-skill-lock')).toBe(true);
+
+    // Live skill on disk (Edith path) → lock is legitimate, not residue
+    const skillDir = path.join(tempHome, '.openclaw', 'workspace', 'skills', 'shieldcortex');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# shieldcortex\n', 'utf-8');
+    report = scanForOrphans();
+    expect(report.installState.skillInstalled).toBe(true);
+    expect(report.paths.some((p) => p.category === 'clawhub-skill-lock')).toBe(false);
   });
 
   it('does NOT flag the plugin extensions dir or the current hook dir themselves as orphans', async () => {

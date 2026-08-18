@@ -173,7 +173,15 @@ export function extractFixCommands(fix: string | undefined): string[] {
 
   // Config / restart guidance. Only emit a real binary — never English
   // that a phone user will copy after `$`.
-  if (/allowConversationAccess/i.test(fix) || /restart.{0,40}gateway/i.test(fix) || /restart long-running/i.test(fix)) {
+  // Conversation access: config grant FIRST, then restart. Restart alone
+  // never sticks (Edith 2026-08-18 — operators kept restarting, warn remained).
+  if (/allowConversationAccess/i.test(fix)) {
+    return [
+      'shieldcortex openclaw install --allow-conversation-access',
+      'openclaw gateway restart',
+    ];
+  }
+  if (/restart.{0,40}gateway/i.test(fix) || /restart long-running/i.test(fix)) {
     return ['openclaw gateway restart'];
   }
 
@@ -361,8 +369,10 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     }
   }
   if (g.theme === 'SCAN') {
-    const note = 'also set allowConversationAccess=true in ~/.openclaw/openclaw.json';
-    if (!g.fixCommands.some((c) => /allowConversationAccess/i.test(c))) {
+    // Prefer the install flag command (already in fixCommands). Footnote only
+    // when the extractor failed to surface a conversation-access grant.
+    const note = 'manual alt: set plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true';
+    if (!g.fixCommands.some((c) => /allow-conversation-access|allowConversationAccess/i.test(c))) {
       lines.push(...wrapLine(note, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
     }
   }

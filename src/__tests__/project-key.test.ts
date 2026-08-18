@@ -96,6 +96,13 @@ describe('deriveProjectKey', () => {
     expect(helper.deriveProjectKey(cwd)).toBe('solo-repo');
   });
 
+
+  it('refuses generic basename workspace without alias (OpenClaw home cwd)', async () => {
+    const cwd = path.join(tempRoot, 'workspace');
+    fs.mkdirSync(cwd, { recursive: true });
+    expect(helper.deriveProjectKey(cwd)).toBeNull();
+  });
+
   it('skips known noise directory segments when using cwd basename', async () => {
     // A bare cwd pointing at myrepo/src should resolve to 'myrepo', not 'src'.
     const cwd = path.join(tempRoot, 'myrepo', 'src');

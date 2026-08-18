@@ -83,6 +83,8 @@ export interface OrphanReport {
   installState: {
     pluginInstalled: boolean;
     hookInstalled: boolean;
+    /** True when a ClawHub shieldcortex skill dir is on disk. */
+    skillInstalled: boolean;
   };
 }
 
@@ -307,7 +309,7 @@ export function isPluginRegisteredInOpenClawConfig(cfg: unknown): boolean {
   return entryEnabled && inAllow;
 }
 
-function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolean } {
+function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolean; skillInstalled: boolean } {
   const home = resolveHome();
 
   // 1. Honour whatever path the installer recorded in openclaw.json.
@@ -359,7 +361,24 @@ function detectInstallState(): { pluginInstalled: boolean; hookInstalled: boolea
   ];
   const hookInstalled = hookCandidates.some((d) => fs.existsSync(d));
 
-  return { pluginInstalled, hookInstalled };
+  // ClawHub skill install lands under workspace/skills (Edith live path) or
+  // ~/.openclaw/skills. A lock entry matching an on-disk skill is legitimate.
+  const skillCandidates = [
+    path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
+    path.join(home, '.openclaw', 'skills', 'shieldcortex'),
+    path.join(home, '.clawhub', 'skills', 'shieldcortex'),
+  ];
+  const skillInstalled = skillCandidates.some((d) => {
+    try {
+      return fs.existsSync(d) && (
+        fs.existsSync(path.join(d, 'SKILL.md')) || fs.statSync(d).isDirectory()
+      );
+    } catch {
+      return false;
+    }
+  });
+
+  return { pluginInstalled, hookInstalled, skillInstalled };
 }
 
 /**
@@ -395,12 +414,11 @@ export function scanForOrphans(): OrphanReport {
         // Legacy paths should have been migrated off; always flag.
         return true;
       case 'clawhub-skill-lock':
-        // SC's openclaw install wrapper doesn't manage the skill. If the entry
-        // is present it was written by `openclaw skills install shieldcortex`
-        // and is either a matching live skill or an orphan. We can't confirm
-        // which without knowing where OpenClaw keeps skill artefacts, so we
-        // conservatively flag it so the operator can decide (purge or reinstall).
-        return true;
+        // Lock entry is legitimate when the skill directory is on disk
+        // (workspace/skills/shieldcortex etc.). Edith 2026-08-18: doctor kept
+        // warning after every update because we always-orphaned the lock even
+        // with a live skill — "recommendations don't stick" was a false positive.
+        return !installState.skillInstalled;
     }
   });
 

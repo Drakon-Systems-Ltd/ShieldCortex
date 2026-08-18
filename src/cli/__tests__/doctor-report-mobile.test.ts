@@ -82,10 +82,14 @@ describe('extractFixCommands', () => {
     ]);
   });
 
-  it('surfaces allowConversationAccess as a note plus openclaw gateway restart', () => {
-    const cmds = extractFixCommands(EDITH.find((r) => r.label === 'Conversation scanning')!.fix);
-    expect(cmds).toEqual(['openclaw gateway restart']);
-    expect(cmds.join(' ')).not.toMatch(/^restart /);
+  it('surfaces conversation-access grant before gateway restart', () => {
+    const cmds = extractFixCommands(
+      'Add "hooks": { "allowConversationAccess": true } to plugins.entries["shieldcortex-realtime"] in ~/.openclaw/openclaw.json, then restart the gateway.',
+    );
+    expect(cmds).toEqual([
+      'shieldcortex openclaw install --allow-conversation-access',
+      'openclaw gateway restart',
+    ]);
   });
 
   it('never treats English restart prose as a command', () => {
