@@ -2278,22 +2278,34 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // vanished for eight days while lastRunStatus stayed ok. WARN, never fail
     // — a missing webhook is a misconfiguration, not a broken evaluator.
     // OpenClaw lastRunStatus is not ours to write (#242 Defect A / #260).
+    //
+    // #354 / #310: `notify.openclaw` is NOT a DNP denial sink. It arms interactive
+    // held-approval cards only. Headless denials are `denied_no_prompt_surface`
+    // and travel via webhookUrl → denialChannel (or loud DNP digest on that sink).
+    // Doctor must not treat openclaw:true alone as "unattended notify configured".
     if (effective.enabled && effective.enforce) {
       const notify = isBlock(merged.notify) ? merged.notify : {};
       const notifyOn = notify.enabled === true;
       const webhook = typeof notify.webhookUrl === 'string' ? notify.webhookUrl.trim() : '';
       const openclaw = notify.openclaw === true;
-      if (!(notifyOn && (webhook || openclaw))) {
+      // Denial-capable sink for unattended/DNP path = enabled notify + webhook URL.
+      const denialSink = notifyOn && webhook.length > 0;
+      if (!denialSink) {
+        const openclawOnly = notifyOn && openclaw && !webhook;
         results.push({
           label: `${label} notify`,
           status: 'warn',
-          message:
-            `Action Guard is enforcing with no notify channel (actionGuard.notify.webhookUrl unset` +
-            `${notifyOn ? '' : ', notify.enabled is not true'}) — unattended denials stay in the ` +
-            `audit log and session-guard index only. The #242 cron incidents were this shape.`,
+          message: openclawOnly
+            ? `Action Guard is enforcing with notify.openclaw only — that arms interactive approval cards, ` +
+              `not unattended denial delivery. Headless denials (denied_no_prompt_surface / cron) stay local ` +
+              `unless actionGuard.notify.webhookUrl is set as the denial-capable sink (#354 / #310).`
+            : `Action Guard is enforcing with no denial-capable notify sink (actionGuard.notify.webhookUrl unset` +
+              `${notifyOn ? '' : ', notify.enabled is not true'}) — unattended denials stay in the ` +
+              `audit log and session-guard index only. The #242 cron incidents were this shape.`,
           fix:
-            'Run `shieldcortex config --action-guard-notify-webhook <https-url>` (or `shieldcortex config ' +
-            '--action-guard-notify-openclaw` for a native OpenClaw approval card) so a denied cron reaches a human. ' +
+            'Run `shieldcortex config --action-guard-notify-webhook <https-url>` so denied/unattended actions ' +
+            'reach a human via a denial-capable webhook sink. `notify.openclaw` is separate (interactive cards ' +
+            'for live require_approval holds) and does not replace the webhook for DNP. ' +
             'The CLI writes a signed config — hand-editing config.json invalidates its integrity signature and ' +
             'forces strict mode. OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
         });
