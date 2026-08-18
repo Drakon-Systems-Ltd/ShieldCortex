@@ -485,7 +485,29 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
     return;
   }
 
-  const memories = extract.extractSessionMemories(conversationText);
+  // Track C.2: L1 distill when OC/Hermes/env credentials resolve; else regex L0.
+  let memories;
+  let capturePath = "regex";
+  if (typeof extract.extractSessionMemoriesWithDistill === "function") {
+    try {
+      const captured = await extract.extractSessionMemoriesWithDistill(conversationText, {
+        log: (msg) => console.log(msg),
+      });
+      memories = captured.memories || [];
+      capturePath = captured.path || "regex";
+      if (captured.reason) {
+        console.log(`[cortex-memory] capture=${capturePath} reason=${captured.reason}`);
+      } else {
+        console.log(`[cortex-memory] capture=${capturePath} n=${memories.length}`);
+      }
+    } catch (err) {
+      console.log(`[cortex-memory] distill path error, falling back to regex: ${err?.message || err}`);
+      memories = extract.extractSessionMemories(conversationText);
+      capturePath = "regex-fallback";
+    }
+  } else {
+    memories = extract.extractSessionMemories(conversationText);
+  }
   if (memories.length === 0) {
     console.log("[cortex-memory] No high-salience content found");
     return;
@@ -501,6 +523,10 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
       continue;
     }
 
+    const memTags = typeof tags === "string"
+      ? `${tags}${capturePath === "distill" ? ",distill" : ""}`
+      : tags;
+
     const result = await callCortex("remember", {
       title: mem.title,
       content: mem.content,
@@ -509,7 +535,7 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
       project: "openclaw",
       scope: "global",
       importance: "normal",
-      tags,
+      tags: memTags,
       sourceType: "hook",
       sourceIdentifier,
       workspaceDir: context.workspaceDir || "",
