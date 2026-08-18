@@ -8,9 +8,11 @@
  * shell-out, which runs in a throwaway mcporter subprocess.
  *
  * This module exists so the hook gets the SAME extraction QUALITY as the
- * Claude-Code side (sentence-bounded capture, rejection corpus, deterministic
- * taxonomy, 0.6 salience cap) without importing anything native. It depends
- * ONLY on the pure chunker — string in, plain objects out, no DB, no runtime.
+ * Claude-Code side without opening a DB in the long-lived gateway process.
+ * Persistence stays on callCortex("remember").
+ *
+ * Track C.2: extractSessionMemoriesWithDistill adds optional L1 distill when
+ * OpenClaw/Hermes/env credentials resolve; otherwise regex L0.
  */
 
 import {
@@ -21,6 +23,8 @@ import {
   EXTRACTOR_TO_CATEGORY,
   EXTRACTOR_TO_PURPOSE,
 } from './extract-memorable-segments.mjs';
+import { extractCaptureMemories } from './capture-distill.mjs';
+import { resolveOpenClawDistillProvider } from './openclaw-distill-auth.mjs';
 
 // Session extraction uses the lighter session-end threshold band. 0.30 is the
 // same dynamic threshold the Claude-Code session-end hook passes; the chunker
@@ -55,6 +59,67 @@ export function extractSessionMemories(conversationText) {
 
   return Array.isArray(processed) ? processed : [];
 }
+
+/**
+ * Track C.2 — session extract with optional L1 distill.
+ * Fail-closed distill when a provider resolves; else regex L0.
+ * Still no DB / native bindings (gateway-safe).
+ *
+ * @param {string} conversationText
+ * @param {object} [opts]
+ * @returns {Promise<{ memories: object[], path: string, reason?: string }>}
+ */
+export async function extractSessionMemoriesWithDistill(conversationText, opts = {}) {
+  const log = opts.log || ((msg) => console.log(msg));
+  const runtimeEnv = opts.env || process.env;
+  const regexExtract = () => extractSessionMemories(conversationText);
+
+  const ocProvider = resolveOpenClawDistillProvider({
+    env: runtimeEnv,
+    openclawHome: opts.openclawHome,
+    config: opts.openclawConfig,
+  });
+
+  const distillEnv = { ...runtimeEnv };
+  if (ocProvider.configured && ocProvider.apiKey) {
+    if (ocProvider.source === 'anthropic') {
+      distillEnv["ANTHROPIC_API_KEY"] = ocProvider.apiKey;
+    } else {
+      distillEnv["OPENAI_API_KEY"] = ocProvider.apiKey;
+      if (ocProvider.baseUrl) distillEnv["OPENAI_BASE_URL"] = ocProvider.baseUrl;
+    }
+    if (ocProvider.model) distillEnv["SHIELDCORTEX_DISTILL_MODEL"] = ocProvider.model;
+    // Prefer OC-resolved creds; skip Hermes chain unless caller re-enabled it.
+    if (distillEnv["SHIELDCORTEX_DISTILL_OAUTH"] === undefined) {
+      distillEnv["SHIELDCORTEX_DISTILL_OAUTH"] = '0';
+    }
+  }
+
+  const capture = await extractCaptureMemories(conversationText, {
+    mode: opts.mode,
+    env: distillEnv,
+    config: opts.shieldConfig || {},
+    regexExtract,
+    log,
+  });
+
+  const memories = (capture.memories || []).map((m) => ({
+    title: m.title,
+    content: m.content,
+    category: m.category || 'note',
+    memoryPurpose: m.memoryPurpose || 'project',
+    tags: Array.isArray(m.tags) ? m.tags : [],
+    salience: m.salience,
+    capture_layer: m.capture_layer || m.captureLayer || (capture.path === 'distill' ? 'L1' : 'L0'),
+  }));
+
+  if (ocProvider.configured && capture.path === 'distill') {
+    log('[openclaw-extract] distill via ' + ocProvider.auth + ' model=' + ocProvider.model);
+  }
+
+  return { memories, path: capture.path, reason: capture.reason };
+}
+
 
 /**
  * Derive the chunker extractor type for an explicit keyword capture.

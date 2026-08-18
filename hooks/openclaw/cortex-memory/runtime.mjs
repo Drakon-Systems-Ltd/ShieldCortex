@@ -151,6 +151,9 @@ export function createOpenClawRuntime({
       _openClawExtract = {
         extractSessionMemories: mod.extractSessionMemories,
         extractKeywordMemory: mod.extractKeywordMemory,
+        extractSessionMemoriesWithDistill: typeof mod.extractSessionMemoriesWithDistill === "function"
+          ? mod.extractSessionMemoriesWithDistill
+          : null,
       };
       return _openClawExtract;
     } catch {

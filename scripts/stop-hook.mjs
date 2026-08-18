@@ -25,6 +25,7 @@ import { createHash, createHmac, randomBytes } from 'crypto';
 import { saveAutoExtractedMemory } from './lib/save-memory.mjs';
 import { readTranscriptText } from './lib/transcript-reader.mjs';
 import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
+import { extractCaptureMemories } from './lib/capture-distill.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import {
@@ -992,26 +993,40 @@ process.stdin.on('end', async () => {
         const max = MAX_SHORT_TERM_MEMORIES + MAX_LONG_TERM_MEMORIES;
         const dyn = getDynamicThreshold(total, max);
 
-        const segments = extractMemorableSegments(transcriptOut.text, { mode: 'stop' });
-        const processed = processSegments(segments, dyn, {
-          hookTag: 'source:stop-hook',
-          maxMemories: MAX_AUTO_MEMORIES,
-          categoryThresholds: PRE_COMPACT_CATEGORY_THRESHOLDS,
-          applyFrequencyBoost: false,
-          conversationText: transcriptOut.text,
+        const capture = await extractCaptureMemories(transcriptOut.text, {
+          mode: autoMemConfig.captureMode,
+          config: autoMemConfig.rawConfig,
+          regexExtract: () => {
+            const segments = extractMemorableSegments(transcriptOut.text, { mode: 'stop' });
+            return processSegments(segments, dyn, {
+              hookTag: 'source:stop-hook',
+              maxMemories: MAX_AUTO_MEMORIES,
+              categoryThresholds: PRE_COMPACT_CATEGORY_THRESHOLDS,
+              applyFrequencyBoost: false,
+              conversationText: transcriptOut.text,
+            });
+          },
+          log: (msg) => console.error(msg),
         });
+        notes = [notes, `capture=${capture.path}${capture.reason ? ':' + capture.reason : ''}`].filter(Boolean).join('; ');
 
-        for (const memory of processed) {
+        for (const memory of capture.memories) {
           try {
+            const tags = Array.isArray(memory.tags) ? memory.tags.slice() : [];
+            if (capture.path === 'distill' && !tags.includes('distill')) tags.push('distill');
+            memory.tags = tags;
+            if (!memory.capture_layer && !memory.captureLayer) {
+              memory.capture_layer = capture.path === 'distill' ? 'L1' : 'L0';
+            }
             await saveAutoExtractedMemory(db, memory, project, { source: 'stop-hook' });
             extractedCount++;
-            console.error(`[stop] Saved: ${memory.title} (salience: ${memory.salience.toFixed(2)}, category: ${memory.category})`);
+            console.error(`[stop] Saved: ${memory.title} (salience: ${Number(memory.salience).toFixed(2)}, category: ${memory.category}, path=${capture.path})`);
           } catch (err) {
             console.error(`[stop] Failed to save "${memory.title}": ${err.message}`);
           }
         }
         const sampleReason = salientBypass ? `bypass=salience turn=${turnCount}` : `turn=${turnCount}`;
-        console.error(`[stop] Sampled ${sampleReason}: ${extractedCount} memories extracted`);
+        console.error(`[stop] Sampled ${sampleReason}: ${extractedCount} memories via ${capture.path}`);
       }
     }
   } catch (err) {
