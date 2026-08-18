@@ -63,3 +63,32 @@ npm run bench:smoke
 
 D runs **after** C merge is fine; does not block host enablement or A/B
 contract work.
+
+
+## First measured run (TARS, 2026-08-18)
+
+| Field | Value |
+|---|---|
+| Dataset | LongMemEval-S **labeled subset-50** (seed=42) from `longmemeval_s_cleaned` HF |
+| Convert | `convert-upstream.ts --limit 50 --seed 42` |
+| Embeddings | **OFF** (`SHIELDCORTEX_SKIP_EMBEDDINGS=1`) |
+| Defence | **ON** (blocked turns skipped) |
+| Engines | rrf, legacy |
+
+### Headline (subset-50, no embeddings)
+
+| Engine | R@5 | R@10 | MRR | Duration |
+|---|---|---|---|---|
+| rrf | **4.00%** | 4.00% | 0.0400 | ~101s |
+| legacy | **0.00%** | 0.00% | 0.0000 | ~100s |
+
+### What this means (honesty)
+
+- **Not** a full-S number. **Not** comparable to agentmemory 95.2%.
+- Without embeddings, retrieval is FTS-only over large multi-session haystacks — weak by design.
+- Defence-on ingest means some gold turns never enter the store (product-honest).
+- Value of this run: harness + convert + fetch path **proven end-to-end** on real upstream data.
+- Next measurement upgrade: subset-50 **with** embeddings, then optional full-500 (still non-gating).
+
+Artifacts (host-local, not in git):
+`~/.shieldcortex/benchmark/longmemeval/runs/subset50/{SCORECARD.md,report.json}`
