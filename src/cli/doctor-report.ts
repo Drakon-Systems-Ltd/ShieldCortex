@@ -146,6 +146,13 @@ export function extractFixCommands(fix: string | undefined): string[] {
       cmds.push(c);
     }
   }
+  // Edith: fix prose backticks only the restart. Grant must lead or operators
+  // keep restarting and the SCAN warn never clears.
+  if (/allowConversationAccess/i.test(fix)) {
+    const grant = 'shieldcortex openclaw install --allow-conversation-access';
+    const rest = unique(cmds.filter((c) => !/allow-conversation-access/i.test(c)));
+    return unique([grant, ...rest.length ? rest : ['openclaw gateway restart']]);
+  }
   if (cmds.length > 0) return unique(cmds);
 
   // Bare shieldcortex/openclaw multi-word commands without backticks.

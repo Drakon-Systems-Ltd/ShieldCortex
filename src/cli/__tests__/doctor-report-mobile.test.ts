@@ -82,6 +82,15 @@ describe('extractFixCommands', () => {
     ]);
   });
 
+  it('promotes grant ahead of backticked restart-only fix prose (Edith live shape)', () => {
+    const cmds = extractFixCommands(
+      'Add hooks.allowConversationAccess=true in openclaw.json, then run `openclaw gateway restart`. Conversation content is sensitive.',
+    );
+    expect(cmds[0]).toBe('shieldcortex openclaw install --allow-conversation-access');
+    expect(cmds).toContain('openclaw gateway restart');
+  });
+
+
   it('surfaces conversation-access grant before gateway restart', () => {
     const cmds = extractFixCommands(
       'Add "hooks": { "allowConversationAccess": true } to plugins.entries["shieldcortex-realtime"] in ~/.openclaw/openclaw.json, then restart the gateway.',
