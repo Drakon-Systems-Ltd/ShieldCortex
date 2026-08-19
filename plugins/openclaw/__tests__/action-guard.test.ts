@@ -82,6 +82,30 @@ describe('interceptor — Action Guard wiring', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('#310: TypedApprovalRequest from requireApproval propagates (card bridge)', async () => {
+    const i = makeInterceptor({ actionGuard: { enabled: true, enforce: true } });
+    const bridge = new Error('mint card');
+    bridge.name = 'TypedApprovalRequest';
+    await expect(
+      i.handleToolCall({
+        toolName: 'Bash',
+        arguments: { command: 'rm /home/u/notes.txt' },
+        requireApproval: async () => { throw bridge; },
+      }),
+    ).rejects.toBe(bridge);
+  });
+
+  it('#310: a generic requireApproval error still fail-closes', async () => {
+    const i = makeInterceptor({ actionGuard: { enabled: true, enforce: true } });
+    await expect(
+      i.handleToolCall({
+        toolName: 'Bash',
+        arguments: { command: 'rm /home/u/notes.txt' },
+        requireApproval: async () => { throw new Error('transport down'); },
+      }),
+    ).rejects.toThrow(/approval error, failure policy: deny/);
+  });
+
   it('catastrophic ops are blocked even in enforce mode regardless of approval', async () => {
     const i = makeInterceptor({ actionGuard: { enabled: true, enforce: true } });
     await expect(

@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- **OpenClaw native approval cards (#310):** interactive `require_approval` now returns OpenClaw `{ requireApproval }` (allow-once / deny, 10-minute timeout, fail-closed) instead of swallowing the `TypedApprovalRequest` bridge throw as `failure_denied`. Cron/heartbeat host sessions stay immediately fail-closed (no #112 hang). Catastrophic stays hard-block. Secret-egress card copy withholds the command body.
 - **Denial alerts honesty (#369):** headless denials (`denied_no_prompt_surface`) render as `DENIED (headless session): nothing is waiting for approval` — never `approval needed`. Outcome alerts keep the hook's redaction-safe surface (`Tool: [redacted …] fields=file_path`) instead of flattening to a placeholder that rendered as `Command: (empty)`; the surface passes an allowlist regex so values/URLs/quoting can never smuggle through. Webhook POSTs carry `X-ShieldCortex-Outcome` so receivers can route pending-vs-dead without parsing the body.
 
 ## [4.54.7] - 2026-08-19
