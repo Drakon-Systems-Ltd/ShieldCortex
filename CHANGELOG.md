@@ -5,9 +5,14 @@ All notable changes to this project will be documented in this file.
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
 
-## [Unreleased]
+## [4.54.9] - 2026-08-19
+
+**Operator control plane, patch.** #378 hook-lane DNP fingerprints + `--denial` approvals (cards stay soak-dark), #372 card-decision audit rows, #375 sqlite cron discovery + denial↔cron honesty.
 
 - **Action Guard / Claude Code hook (#378):** `denied_no_prompt_surface` on the hook lane now always writes a retry fingerprint and honours `shieldcortex approve --denial <actionId>`, even when `actionGuard.retryCards` is off (the soak-dark default). Cards, waiter, and card-budget stay gated on exact `retryCards: true`. Catastrophic still has no retry path. Bare `shieldcortex approve` still lists #118 held calls only, but now points at `--denial` when fingerprints exist. Live-hold Telegram cards remain the OpenClaw interceptor path (#371) — PreToolUse still cannot pause.
+- **Card-decision audit rows (#372):** operator card decisions on both the action-guard and memory-write pipelines write `approved_once` / `card_denied` / `card_timeout` / `card_cancelled` intercept rows at decision time, with hold-time session attribution, indexed for #260 session summaries. Refused card outcomes count as guard degradation; approvals do not.
+- **Cron discovery + denial honesty (#375):** `allowlist scan` reads OpenClaw's migrated SQLite cron store (`~/.openclaw/state/openclaw.sqlite`, `cron_jobs`) as a new `openclaw-cron-db` source, unioned with the legacy `cron/jobs.json` when it still exists; `.bak`/`.migrated` leftovers are never read and never taken as proof the store is absent. Paths come from `payload_message`, `trigger_script` and a structural walk of `job_json` string leaves. `enabled` is coerced in JS over all rows, never `WHERE enabled = 1`, so a textual flag cannot report a live store as empty. Store access is read-only throughout (`readonly` + `fileMustExist`); no SQL writes to any OpenClaw store. An OpenClaw host where NEITHER cron source is readable is reported visibly and exits 1 — "we could not look" is not "all clear"; a host with no `~/.openclaw` stays empty-ok. Unreadable or schema-mismatched stores exit 1 as before. `--yes` is refused while any `openclaw-cron-db` script is still unpinned: the first sqlite backfill is per-item review only.
+- **Cron denial correlation (#375):** new `shieldcortex doctor` CRON check joins `~/.shieldcortex/denials.jsonl` (4 MiB tail, deduped by `actionId`) to `cron_run_logs` and WARNs when a guard denial landed inside a run OpenClaw recorded as `ok`, naming the job and offering `shieldcortex allowlist add <path>` per script the job itself declares. Attribution is exact-shape only (`agent:<agent>:cron:<uuid>:run:`); anything else is an unattributed count. The run row is matched by exact `session_key` inside an SQL-bounded window with no nearest-run fallback — no matching row is reported as unconfirmed, never as silent and never as a pass. An unreadable denial log or a missing/unreadable `cron_run_logs` is WARN cannot-correlate, never INFO and never `0 silent`. Denied scripts sort first in the scan review list. No denial surface or command body reaches any new output.
 
 ## [4.54.8] - 2026-08-19
 
@@ -49,17 +54,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-- Card-held approval decisions now leave an audit row (#372): operator card
-  decisions on both the action-guard and memory-write pipelines write
-  `approved_once` / `card_denied` / `card_timeout` / `card_cancelled` intercept
-  rows at decision time, with hold-time session attribution, indexed for #260
-  session summaries. Refused card outcomes count as guard degradation;
-  approvals do not.
-
 ### Added
-- **Cron discovery + denial honesty (#375):** `allowlist scan` reads OpenClaw's migrated SQLite cron store (`~/.openclaw/state/openclaw.sqlite`, `cron_jobs`) as a new `openclaw-cron-db` source, unioned with the legacy `cron/jobs.json` when it still exists; `.bak`/`.migrated` leftovers are never read and never taken as proof the store is absent. Paths come from `payload_message`, `trigger_script` and a structural walk of `job_json` string leaves. `enabled` is coerced in JS over all rows, never `WHERE enabled = 1`, so a textual flag cannot report a live store as empty. Store access is read-only throughout (`readonly` + `fileMustExist`); no SQL writes to any OpenClaw store. An OpenClaw host where NEITHER cron source is readable is reported visibly and exits 1 — "we could not look" is not "all clear"; a host with no `~/.openclaw` stays empty-ok. Unreadable or schema-mismatched stores exit 1 as before. `--yes` is refused while any `openclaw-cron-db` script is still unpinned: the first sqlite backfill is per-item review only.
-- **Cron denial correlation (#375):** new `shieldcortex doctor` CRON check joins `~/.shieldcortex/denials.jsonl` (4 MiB tail, deduped by `actionId`) to `cron_run_logs` and WARNs when a guard denial landed inside a run OpenClaw recorded as `ok`, naming the job and offering `shieldcortex allowlist add <path>` per script the job itself declares. Attribution is exact-shape only (`agent:<agent>:cron:<uuid>:run:`); anything else is an unattributed count. The run row is matched by exact `session_key` inside an SQL-bounded window with no nearest-run fallback — no matching row is reported as unconfirmed, never as silent and never as a pass. An unreadable denial log or a missing/unreadable `cron_run_logs` is WARN cannot-correlate, never INFO and never `0 silent`. Denied scripts sort first in the scan review list. No denial surface or command body reaches any new output.
 - **Memory SOTA Track C:** capture distill provider (OpenAI-compatible + Anthropic), fail-closed extract path on stop/session-end, L1 salience cap, no silent regex fallback (#350 / epic #347).
 - **Memory SOTA Track C (OAuth):** distill resolves Hermes OAuth on disk (xai-oauth → openai-codex) when no API key is set — fleet hosts reuse existing login; `SHIELDCORTEX_DISTILL_OAUTH=0` disables.
 - **Memory SOTA Track C (defaults):** distill defaults to cheap models (`grok-4.3` on xAI OAuth, not main chat `grok-4.6`); zero-config when Hermes is already logged in.
