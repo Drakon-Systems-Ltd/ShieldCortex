@@ -1,6 +1,6 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "4.54.5",
+  "version": "4.54.6",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
@@ -121,7 +121,7 @@
     },
     "interceptor.conversation.posture": {
       "label": "Conversation Firewall",
-      "description": "What the conversation firewall does with a detection on the input path. off = do not scan; observe = scan, audit and alert the operator but never stop the turn (default); enforce = block the run via before_agent_run. Requires plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true on this host — OpenClaw refuses conversation hooks without that operator grant, and ShieldCortex will never set it for you.",
+      "description": "What the conversation firewall does with a detection on the input path. off = do not scan; observe = scan, audit and alert the operator but never stop the turn (default); enforce = block the run via before_agent_run. Requires plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true on this host \u2014 OpenClaw refuses conversation hooks without that operator grant, and ShieldCortex will never set it for you.",
       "type": "string"
     },
     "interceptor.actionGuard.notify.enabled": {
@@ -132,7 +132,7 @@
     },
     "interceptor.actionGuard.notify.webhookUrl": {
       "label": "Notify Webhook URL",
-      "description": "http(s) endpoint the notification is POSTed to. Conversation-firewall alerts carry no approve/deny affordance — there is nothing to approve.",
+      "description": "http(s) endpoint the notification is POSTed to. Conversation-firewall alerts carry no approve/deny affordance \u2014 there is nothing to approve.",
       "type": "string",
       "advanced": true
     },
@@ -156,7 +156,7 @@
     "properties": {
       "enabled": {
         "type": "boolean",
-        "description": "Unused — plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
+        "description": "Unused \u2014 plugin on/off is controlled by plugins.entries[id].enabled on the host, not this nested config value. See #115."
       },
       "binaryPath": {
         "type": "string"
@@ -190,7 +190,7 @@
           "trustOwnerInput": {
             "type": "boolean",
             "default": true,
-            "description": "Default true: a message the host attributes to the gateway OWNER is an instruction, so a detection in it is audited and alerted but never taints the session or blocks the turn. Set false on a host where the owner routinely pastes untrusted content and you would rather have the caution than the quiet. Content from anyone else — including another agent on a trusted channel — is data regardless of this setting."
+            "description": "Default true: a message the host attributes to the gateway OWNER is an instruction, so a detection in it is audited and alerted but never taints the session or blocks the turn. Set false on a host where the owner routinely pastes untrusted content and you would rather have the caution than the quiet. Content from anyone else \u2014 including another agent on a trusted channel \u2014 is data regardless of this setting."
           }
         }
       },
@@ -368,7 +368,7 @@
               "notify": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "Operator-notify transport (#143), also used by the conversation firewall’s detection sink (#225). Off unless enabled is exactly true.",
+                "description": "Operator-notify transport (#143), also used by the conversation firewall\u2019s detection sink (#225). Off unless enabled is exactly true.",
                 "properties": {
                   "enabled": {
                     "type": "boolean",
@@ -491,7 +491,7 @@
           "notify": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Operator-notify transport (#143), also used by the conversation firewall’s detection sink (#225). Off unless enabled is exactly true.",
+            "description": "Operator-notify transport (#143), also used by the conversation firewall\u2019s detection sink (#225). Off unless enabled is exactly true.",
             "properties": {
               "enabled": {
                 "type": "boolean",
