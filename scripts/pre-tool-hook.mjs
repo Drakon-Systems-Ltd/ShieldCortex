@@ -51,7 +51,8 @@
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
 import { basename, dirname, join, resolve, sep } from 'path';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
+import { spawn } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { createHash, createHmac, randomBytes } from 'crypto';
 
@@ -113,6 +114,15 @@ function loadActionGuardConfig() {
       // malformed means no exemption ever fires, which is where the guard
       // started — the allowlist can only fail closed.
       reviewedScripts: Array.isArray(raw.reviewedScripts) ? raw.reviewedScripts : null,
+      // #310 operator retry control — RAW again, validated only by
+      // normaliseRetryControlConfig in dist. `retryCards` must be exactly
+      // true to arm anything; absent or junk means this hook behaves exactly
+      // as it did before #310 (DNP terminal, no fingerprint, no card).
+      retry: {
+        retryCards: raw.retryCards,
+        retryGrantTtlMs: raw.retryGrantTtlMs,
+        denySuppressionMs: raw.denySuppressionMs,
+      },
     };
   } catch {
     // Unreadable config → guard on with defaults. Enforce-by-default means a
@@ -227,6 +237,37 @@ async function loadApprovals() {
     return typeof mod.consumeApproval === 'function' && typeof mod.recordPending === 'function'
       ? mod
       : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the #310 retry-control plane. Returns null unless
+ * `actionGuard.retryCards` is exactly true AND the dist module is present and
+ * complete — the same discipline as loadBroker/loadNotify, for the same
+ * reason: a half-assembled trust surface must degrade to "not configured",
+ * never to a crash and never to a changed decision.
+ *
+ * Null is the normal answer. The feature ships dark (ADR rollout gate).
+ */
+async function loadRetryControl(rawRetry, digestWindowMs) {
+  if (!rawRetry || rawRetry.retryCards !== true) return null;
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'retry-control.js')).href
+    );
+    const required = [
+      'normaliseRetryControlConfig', 'recordDenialFingerprint', 'claimCardLaunch',
+      'releaseCardLaunch', 'consumeRetryGrant', 'hashToolCall', 'canonicaliseCwd',
+      'buildRetryCardParams', 'pruneRetryControl', 'drainLostActionIds',
+      'formatBudgetExhaustedNotice', 'formatUnspentExpiryNotice',
+    ];
+    if (required.some((fn) => typeof mod[fn] !== 'function')) return null;
+    const config = mod.normaliseRetryControlConfig(rawRetry, { digestWindowMs });
+    if (!config?.retryCards) return null;
+    return { config, mod };
   } catch {
     return null;
   }
@@ -354,12 +395,13 @@ async function loadNotify(rawNotifyConfig) {
     // look like faults. A configured webhook remains the fallback for a box
     // where the openclaw binary or the dist module has gone missing.
     let channel = null;
+    let openclawBin = null;
     if (
       normalised.openclaw === true &&
       typeof openclawMod?.createOpenClawApprovalChannel === 'function' &&
       typeof openclawMod?.resolveOpenClawBinaryLite === 'function'
     ) {
-      const openclawBin = openclawMod.resolveOpenClawBinaryLite();
+      openclawBin = openclawMod.resolveOpenClawBinaryLite();
       if (openclawBin) {
         channel = openclawMod.createOpenClawApprovalChannel({
           openclawBin,
@@ -405,6 +447,11 @@ async function loadNotify(rawNotifyConfig) {
        *  is the honest outcome until a non-interactive gateway send path
        *  exists to point it at. The terminal-hash floor is unchanged. */
       denialChannel: webhookChannel,
+      /** #310 — the retry card is raised by our OWN waiter, not by this
+       *  channel (whose send() correctly refuses a DNP: there is no live
+       *  decision behind one). What the card path needs from here is the
+       *  resolved binary and the operator's opt-in, nothing else. */
+      openclawBin,
       // `timeoutMs` is NOT a constructor option — the channel's `send()` is
       // handed the deadline per-call (see `pingOperator`, and
       // operator-notify.ts's `tryChannel`), so one channel object is timeout-
@@ -905,6 +952,16 @@ function recordLocalGuardOutcome(outcome) {
 function classifyNotifyStatus(notifyMod, result) {
   // #284 Face 4 — distinguish not_configured / no_channel / delivered / error.
   // #331 — coalesced is a successful volume decision, not a delivery failure.
+  // #310 — nor is suppressed: the operator DENIED this action, and windowed
+  // silence is what they asked for. Recorded distinctly so "we chose not to
+  // page" is never mistaken for "we tried and failed".
+  if (result?.suppressed === true) {
+    return {
+      status: 'suppressed',
+      deliveredVia: null,
+      ...(typeof result.suppressedUntilMs === 'number' ? { suppressedUntilMs: result.suppressedUntilMs } : {}),
+    };
+  }
   if (result?.coalesced === true) {
     return {
       status: 'coalesced',
@@ -938,7 +995,111 @@ function classifyNotifyStatus(notifyMod, result) {
   };
 }
 
-async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId }) {
+/**
+ * #310 — raise ONE operator retry card for a denial that already happened.
+ *
+ * Claim first (which debits the card budget in the same locked write as the
+ * nonce it mints), then launch the waiter that owns the card end-to-end. A
+ * launch that fails releases the slot, so a box where the waiter cannot start
+ * does not silently burn the window's budget.
+ *
+ * The claimNonce reaches the waiter on an INHERITED FD (fd 3), pointing at an
+ * already-unlinked 0600 temp file — so it is not in `/proc/<pid>/cmdline` for
+ * every other local process to read. R3 rule 4's argv fallback lives in the
+ * waiter's own parser and is deliberately not used from here.
+ */
+async function raiseRetryCard(retry, notify, ctx) {
+  const openclawBin = notify?.openclawBin;
+  if (!openclawBin) return { raised: false, reason: 'no-openclaw-card-channel' };
+
+  const claim = retry.mod.claimCardLaunch(
+    { id: ctx.id, actionId: ctx.actionId },
+    {
+      home: homedir(),
+      windowStartMs: ctx.windowStartMs,
+      windowMs: ctx.windowMs,
+      actionId: ctx.actionId,
+    },
+  );
+  if (!claim.ok) return { raised: false, reason: claim.reason, lostActionIds: claim.lostActionIds };
+
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const waiterEntry = resolve(distRoot, 'defence', 'iron-dome', 'dnp-retry-waiter.js');
+  const receiptDir = join(tmpdir(), 'shieldcortex-retry-receipts');
+  const token = randomBytes(8).toString('hex');
+  const receiptPath = join(receiptDir, `${token}.json`);
+  const noncePath = join(receiptDir, `${token}.nonce`);
+
+  let nonceFd;
+  try {
+    mkdirSync(receiptDir, { recursive: true, mode: 0o700 });
+    writeFileSync(noncePath, claim.nonce, { mode: 0o600, flag: 'wx' });
+    nonceFd = openSync(noncePath, 'r');
+    // Unlinked immediately: the fd is the only remaining handle to it, and
+    // that handle dies with the waiter.
+    unlinkSync(noncePath);
+
+    // `cronIntervalMs` is deliberately NOT passed: PreToolUse carries no cronId
+    // and no schedule (design B3), so this hook does not know the interval and
+    // will not guess one. The builder supports the caveat for a caller that
+    // does; until such a caller exists, the card stays silent about it rather
+    // than printing a number nobody measured.
+    const params = retry.mod.buildRetryCardParams({
+      tool: ctx.tool,
+      signals: ctx.signals,
+      redactedSurface: ctx.redactedSurface,
+      cwd: ctx.cwd,
+      ttlMs: retry.config.retryGrantTtlMs,
+    });
+    const child = spawn(
+      process.execPath,
+      [
+        waiterEntry,
+        '--params-b64', Buffer.from(JSON.stringify(params), 'utf8').toString('base64'),
+        '--fingerprint', claim.id,
+        ...(ctx.actionId ? ['--action-id', ctx.actionId] : []),
+        '--openclaw-bin', openclawBin,
+        '--receipt', receiptPath,
+        '--nonce-fd', '3',
+        '--ttl-ms', String(retry.config.retryGrantTtlMs),
+        '--suppress-ms', String(retry.config.denySuppressionMs),
+      ],
+      { detached: true, stdio: ['ignore', 'ignore', 'ignore', nonceFd] },
+    );
+    child.unref();
+    return { raised: true, id: claim.id };
+  } catch (err) {
+    try { retry.mod.releaseCardLaunch({ id: claim.id }, { home: homedir() }); } catch { /* self-heals at claim expiry */ }
+    try { unlinkSync(noncePath); } catch { /* already gone */ }
+    return { raised: false, reason: `waiter failed to start: ${safeDiagnosticReason(err?.message ?? err)}` };
+  } finally {
+    if (nonceFd !== undefined) {
+      try { closeSync(nonceFd); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * The card budget window START, which IS the digest window start (R3 rule 7) —
+ * read in this same handler so the two can never drift into independent
+ * first-event windows. When the digest is switched off entirely
+ * (`dnpDigestWindowMs: 0`) there is no shared window to read, so the budget
+ * falls back to a fixed epoch-aligned bucket: deterministic across the
+ * one-process-per-tool-call hooks, which is the property that matters.
+ */
+function retryBudgetWindow(digestDecision) {
+  if (digestDecision?.state && typeof digestDecision.state.windowStartMs === 'number') {
+    return {
+      windowStartMs: digestDecision.state.windowStartMs,
+      windowMs: digestDecision.state.windowMs,
+    };
+  }
+  const windowMs = 15 * 60 * 1000;
+  const nowMs = Date.now();
+  return { windowStartMs: Math.floor(nowMs / windowMs) * windowMs, windowMs };
+}
+
+async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId, retryCtx }) {
   const id = actionId || mintActionId();
   // #284 dual-review blocker (SOL): write the denial row FIRST with notify pending,
   // then attempt delivery and append/update status. A hang/crash during notify must
@@ -957,10 +1118,44 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   }
 
   let deliveryResult = null;
+
+  // ── #310 retry control, step 1: FINGERPRINT, then SUPPRESSION ─────────
+  // The order is binding (design B2): suppression check → digest/budget
+  // accounting → card. A suppressed event still writes its fingerprint and
+  // its denials.jsonl rows — audit truth is never what gets muted — but it
+  // never opens the siren window and never burns card budget.
+  let retry = null;
+  let retryStep = null;
+  if (outcome === 'denied_no_prompt_surface' && retryCtx?.rawConfig) {
+    retry = await loadRetryControl(retryCtx.rawConfig, notify?.config?.dnpDigestWindowMs);
+    if (retry) {
+      try {
+        retryStep = retry.mod.recordDenialFingerprint(
+          {
+            hash: retry.mod.hashToolCall(toolName, toolInput),
+            tool: safeToolName(toolName),
+            actionId: id,
+            signals: safeSignalList(verdict?.signals),
+            redactedSurface: redactedActionSurface(toolName, toolInput),
+            // From the HARNESS payload, never from tool input (design B3).
+            cwd: retryCtx.cwd,
+            sessionKey,
+          },
+          { home: homedir() },
+        );
+      } catch {
+        // A retry plane that cannot record must never change the denial the
+        // guard already made, and must never widen anything.
+        retryStep = null;
+      }
+    }
+  }
+  const retrySuppressed = retryStep?.suppressed === true;
+
   // #331 — DNP volume control. Always record forensics; outbound notify is
   // at most once per host window. Payload never decides mute.
   let digestDecision = null;
-  if (outcome === 'denied_no_prompt_surface' && notify) {
+  if (outcome === 'denied_no_prompt_surface' && notify && !retrySuppressed) {
     try {
       const dig = await import(
         pathToFileURL(resolve(process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist'), 'defence', 'iron-dome', 'dnp-digest.js')).href
@@ -986,7 +1181,44 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     }
   }
 
-  if (digestDecision?.action === 'coalesce') {
+  // ── #310 step 3: the CARD ─────────────────────────────────────────────
+  // Only for an event that survived the suppression check, and only once the
+  // digest window whose START it shares has been read (R3 rule 7).
+  let retryCard = null;
+  if (retry && retryStep?.ok && !retrySuppressed) {
+    try {
+      retryCard = await raiseRetryCard(retry, notify, {
+        id: retryStep.id,
+        actionId: id,
+        tool: safeToolName(toolName),
+        signals: safeSignalList(verdict?.signals),
+        redactedSurface: redactedActionSurface(toolName, toolInput),
+        cwd: retryStep.row?.originScope?.cwd,
+        ...retryBudgetWindow(digestDecision),
+      });
+    } catch {
+      retryCard = { raised: false, reason: 'card path error' };
+    }
+    if (retryCard?.raised) {
+      console.error(
+        `[shieldcortex] #310 retry card raised for ${safeToolName(toolName)} (${id}) — a tap authorises ONE scoped retry, nothing more.`,
+      );
+    }
+  }
+
+  if (retrySuppressed) {
+    // The operator already said no to this exact action. Windowed silence is
+    // what they asked for; the forensics rows above are unaffected.
+    deliveryResult = {
+      deliveredVia: null,
+      suppressed: true,
+      suppressedUntilMs: retryStep?.suppressedUntilMs,
+      attempts: [],
+    };
+    console.error(
+      `[shieldcortex] #310 retry control: silenced by your own Deny until ${new Date(retryStep?.suppressedUntilMs ?? Date.now()).toISOString()} — denial recorded, operator not paged.`,
+    );
+  } else if (digestDecision?.action === 'coalesce') {
     deliveryResult = {
       deliveredVia: null,
       coalesced: true,
@@ -1018,10 +1250,47 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
           reason: `${notification.reason} [digest: ${digestDecision.summary.count} DNP in window]`,
         };
       }
+      // #310 — the operator copy for the two things they cannot see from a
+      // denial row: denials that got no card because the window budget was
+      // spent, and grants that expired without ever being used. Both are
+      // DRAINED here, on the path that actually sends: an id claimed and then
+      // not delivered is an id the operator never hears about.
+      let drainedLostIds = [];
+      if (retry) {
+        const notices = [];
+        try {
+          const lost = [
+            ...(retryCard && !retryCard.raised && retryCard.reason === 'budget-exhausted'
+              ? retryCard.lostActionIds ?? []
+              : []),
+            ...retry.mod.drainLostActionIds({ home: homedir() }),
+          ];
+          const uniqueLost = [...new Set(lost.filter(Boolean))];
+          drainedLostIds = uniqueLost;
+          if (uniqueLost.length > 0) notices.push(retry.mod.formatBudgetExhaustedNotice(uniqueLost));
+          const swept = retry.mod.pruneRetryControl({ home: homedir() });
+          if (swept.expired.length > 0) notices.push(retry.mod.formatUnspentExpiryNotice(swept.expired));
+        } catch {
+          // A notice that cannot be built is a notice that is not sent — the
+          // denial row and the decision are untouched either way.
+        }
+        if (notices.length > 0) {
+          const block = notices.join('\n\n');
+          notification = typeof notification.digestText === 'string' && notification.digestText
+            ? { ...notification, digestText: `${notification.digestText}\n\n${block}` }
+            : { ...notification, reason: `${notification.reason} [#310: ${block.replace(/\s+/g, ' ')}]` };
+        }
+      }
       deliveryResult = await notify.deliverOperatorNotification(notification, {
         channels: [notify.denialChannel],
         timeoutMs: notify.config?.timeoutMs,
       }) ?? null;
+      // #310 — drained budget-exhaust ids are only "reported" if the send
+      // actually went out. A failed delivery puts them back for the next one.
+      if (retry && drainedLostIds.length > 0 && !deliveryResult?.deliveredVia
+          && typeof retry.mod.restoreLostActionIds === 'function') {
+        try { retry.mod.restoreLostActionIds(drainedLostIds, { home: homedir() }); } catch {}
+      }
       if (deliveryResult?.deliveredVia) {
         const via = safeNotifyLabel(deliveryResult.deliveredVia) ?? 'redacted-channel';
         console.error(`[shieldcortex] operator-notify: reported ${outcome} for ${safeToolName(toolName)} via ${via}.`);
@@ -1093,7 +1362,8 @@ function recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result) {
     status === 'delivered' ? 'notified'
       : status === 'not_configured' ? 'notify_not_configured'
         : status === 'no_channel' ? 'notify_no_channel'
-          : 'notify_failed';
+          : status === 'suppressed' ? 'notify_suppressed'
+            : 'notify_failed';
   writeAuditEntry(
     safeToolName(toolName),
     {
@@ -1522,7 +1792,7 @@ function emitDecision(permissionDecision, reason) {
  * differs — so `action` is unchanged and the distinction lives in `outcome`
  * plus the recorded `permissionMode`.
  */
-async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit, notify = null, baseExtra = {}) {
+async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit, notify = null, baseExtra = {}, retryCtx = null) {
   // `brokerAudit` rides along so a brokered call keeps its judge verdict on the
   // row whichever way this goes (#143 + #139): "was a model consulted, and did
   // the harness even have a prompt surface?" must both be answerable from one
@@ -1557,6 +1827,11 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
     event: 'action_guard_denial',
     sessionKey: baseExtra.sessionKey,
     actionId,
+    // #310. Null on every caller but the real dangerous-tier path: a DEGRADED
+    // guard (handleDegradedGuard) mints no retry affordance, because a scan
+    // that could not run is not a verdict an operator should be offered a
+    // one-tap retry of.
+    retryCtx,
   });
   recordNotifyAudit(toolName, { ...auditVerdict, reason }, toolInput, { ...baseExtra, actionId }, notified);
   console.error(
@@ -1832,6 +2107,15 @@ process.stdin.on('end', async () => {
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
+    // #310 operator retry control, loaded once for both halves: the consume
+    // just below, and the fingerprint/card on the DNP path further down. Null
+    // — the normal answer — unless `actionGuard.retryCards` is exactly true
+    // and the dist module is complete, in which case this hook behaves
+    // exactly as it did before #310.
+    const retryPlane = await loadRetryControl(cfg.retry);
+    const retryOriginCwd = retryPlane ? retryPlane.mod.canonicaliseCwd(hookData.cwd) : undefined;
+    const retryCtx = retryPlane ? { rawConfig: cfg.retry, cwd: retryOriginCwd } : null;
+
     // One-shot exact-command approval (#118). An operator who ran
     // `shieldcortex approve <hash>` in a terminal gets exactly one pass for
     // exactly this call; the approval is spent here. Everything else falls
@@ -1850,6 +2134,48 @@ process.stdin.on('end', async () => {
       } catch {
         // An unusable approvals store must never widen OR wedge the guard —
         // fall through to the broker and then to the standard refusal below.
+      }
+    }
+
+    // ── #310 retry grant consume ──────────────────────────────────────────
+    // The other half of operator retry control: this call may be the RETRY of
+    // something that was denied on this promptless box, for which a human has
+    // since authorised exactly one pass — by tapping a card the gateway
+    // authenticated, or by typing `shieldcortex approve --denial <actionId>`.
+    //
+    // Placed here, beside #118 and before the broker, for the same reason
+    // #118 is: an operator who has already spoken is not overruled by an AI.
+    // Placed AFTER the catastrophic branch (which returned long ago) because
+    // no retry path may ever exist for that tier.
+    //
+    // The origin is computed HERE, from this hook's own context — the harness
+    // payload's cwd (realpath-canonicalised) and the tool name — and never
+    // from tool input, which the agent controls.
+    if (retryPlane) {
+      try {
+        const spentRetry = retryPlane.mod.consumeRetryGrant(
+          {
+            hash: retryPlane.mod.hashToolCall(toolName, toolInput),
+            origin: { cwd: retryOriginCwd, tool: toolName },
+          },
+          { home: homedir() },
+        );
+        if (spentRetry) {
+          writeAuditEntry(
+            safeToolName(toolName),
+            safeAllowAuditVerdict(verdict, 'approved'),
+            redactedAuditArgs(toolName, toolInput),
+            'require_approval',
+            'approved',
+            { ...baseExtra, grantKind: 'retry', ...(spentRetry.actionId ? { actionId: spentRetry.actionId } : {}) },
+          );
+          console.error(
+            `[shieldcortex] action-guard: consumed operator RETRY grant for ${safeToolName(toolName)} (#310, single use, scoped to this directory).`,
+          );
+          process.exit(0); // Defer to the harness's own permission system.
+        }
+      } catch {
+        // Same discipline as #118 above: never widen, never wedge.
       }
     }
 
@@ -1969,6 +2295,7 @@ process.stdin.on('end', async () => {
       brokered?.audit,
       await getNotify(),
       baseExtra,
+      retryCtx,
     );
     process.exit(0);
   } catch (error) {
