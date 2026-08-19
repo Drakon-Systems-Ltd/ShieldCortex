@@ -61,9 +61,15 @@ function age(ms: number): string {
   return `${Math.round(s / 3600)}h ago`;
 }
 
-function renderList(records: ApprovalRecord[], now: number): string {
+function renderList(records: ApprovalRecord[], now: number, retryRows: RetryRow[] = []): string {
   if (records.length === 0) {
-    return `${DIM}No pending Action Guard approvals.${RESET}\n`;
+    const lines = [`${DIM}No pending Action Guard approvals.${RESET}`];
+    if (retryRows.length > 0) {
+      lines.push(
+        `${DIM}${retryRows.length} headless denial(s) on file — list with: shieldcortex approve --denial${RESET}`,
+      );
+    }
+    return `${lines.join('\n')}\n`;
   }
   const lines: string[] = [`${BOLD}Action Guard — recent refusals${RESET}\n`];
   for (const r of records) {
@@ -193,7 +199,7 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
   const hash = positional[0];
 
   if (!hash) {
-    log(renderList(listApprovals({ home, now }), now));
+    log(renderList(listApprovals({ home, now }), now, listRetryRows({ home, now })));
     return 0;
   }
 

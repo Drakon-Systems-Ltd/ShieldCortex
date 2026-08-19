@@ -114,10 +114,11 @@ function loadActionGuardConfig() {
       // malformed means no exemption ever fires, which is where the guard
       // started — the allowlist can only fail closed.
       reviewedScripts: Array.isArray(raw.reviewedScripts) ? raw.reviewedScripts : null,
-      // #310 operator retry control — RAW again, validated only by
-      // normaliseRetryControlConfig in dist. `retryCards` must be exactly
-      // true to arm anything; absent or junk means this hook behaves exactly
-      // as it did before #310 (DNP terminal, no fingerprint, no card).
+      // #310 / #378 operator retry control — RAW again, validated only by
+      // normaliseRetryControlConfig in dist. Fingerprint + `approve --denial`
+      // are always-on when the dist module is complete. `retryCards` must be
+      // exactly true to raise a card; absent or junk means DNP stays terminal
+      // with a fingerprint and no card (the soak-dark default).
       retry: {
         retryCards: raw.retryCards,
         retryGrantTtlMs: raw.retryGrantTtlMs,
@@ -243,16 +244,16 @@ async function loadApprovals() {
 }
 
 /**
- * Load the #310 retry-control plane. Returns null unless
- * `actionGuard.retryCards` is exactly true AND the dist module is present and
- * complete — the same discipline as loadBroker/loadNotify, for the same
- * reason: a half-assembled trust surface must degrade to "not configured",
- * never to a crash and never to a changed decision.
+ * Load the #310 retry-control plane. Returns null unless the dist module is
+ * present and complete — the same discipline as loadBroker/loadNotify: a
+ * half-assembled trust surface must degrade to "not configured", never to a
+ * crash and never to a changed decision.
  *
- * Null is the normal answer. The feature ships dark (ADR rollout gate).
+ * #378: fingerprint write + grant consume are always-on once the module
+ * loads. Cards stay dark unless `actionGuard.retryCards` is exactly true
+ * (normaliseRetryControlConfig). Null is only "dist missing/incomplete".
  */
 async function loadRetryControl(rawRetry, digestWindowMs) {
-  if (!rawRetry || rawRetry.retryCards !== true) return null;
   const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
   try {
     const mod = await import(
@@ -265,8 +266,7 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
       'formatBudgetExhaustedNotice', 'formatUnspentExpiryNotice',
     ];
     if (required.some((fn) => typeof mod[fn] !== 'function')) return null;
-    const config = mod.normaliseRetryControlConfig(rawRetry, { digestWindowMs });
-    if (!config?.retryCards) return null;
+    const config = mod.normaliseRetryControlConfig(rawRetry ?? {}, { digestWindowMs });
     return { config, mod };
   } catch {
     return null;
@@ -1009,6 +1009,8 @@ function classifyNotifyStatus(notifyMod, result) {
  * waiter's own parser and is deliberately not used from here.
  */
 async function raiseRetryCard(retry, notify, ctx) {
+  // Cards stay soak-gated. Fingerprints can exist with this switch off.
+  if (retry?.config?.retryCards !== true) return { raised: false, reason: 'retry-cards-off' };
   const openclawBin = notify?.openclawBin;
   if (!openclawBin) return { raised: false, reason: 'no-openclaw-card-channel' };
 
@@ -1185,7 +1187,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   // Only for an event that survived the suppression check, and only once the
   // digest window whose START it shares has been read (R3 rule 7).
   let retryCard = null;
-  if (retry && retryStep?.ok && !retrySuppressed) {
+  if (retry && retry?.config?.retryCards === true && retryStep?.ok && !retrySuppressed) {
     try {
       retryCard = await raiseRetryCard(retry, notify, {
         id: retryStep.id,
@@ -2107,11 +2109,12 @@ process.stdin.on('end', async () => {
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
-    // #310 operator retry control, loaded once for both halves: the consume
-    // just below, and the fingerprint/card on the DNP path further down. Null
-    // — the normal answer — unless `actionGuard.retryCards` is exactly true
-    // and the dist module is complete, in which case this hook behaves
-    // exactly as it did before #310.
+    // #310 / #378 operator retry control, loaded once for both halves: the
+    // consume just below, and the fingerprint (plus optional card) on the DNP
+    // path further down. Null only when the dist module is missing or
+    // incomplete. `retryPlane` being non-null does NOT mean cards are armed —
+    // consume/fingerprint are always-on; cards still require
+    // `actionGuard.retryCards === true` at the raise site.
     const retryPlane = await loadRetryControl(cfg.retry);
     const retryOriginCwd = retryPlane ? retryPlane.mod.canonicaliseCwd(hookData.cwd) : undefined;
     const retryCtx = retryPlane ? { rawConfig: cfg.retry, cwd: retryOriginCwd } : null;

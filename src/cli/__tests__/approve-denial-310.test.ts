@@ -268,7 +268,20 @@ describe('#310 — approve --denial', () => {
     const code = runApprove([], { home, now: t0, interactive: false, log: out.write, error: out.write });
     expect(code).toBe(0);
     expect(out.text()).toContain('No pending Action Guard approvals');
+    expect(out.text()).not.toContain('headless denial');
     // No store file was created just by looking.
     expect(getRetryRow({ hash: HASH, cwd }, { home })).toBeUndefined();
+  });
+
+  it('#378 bare approve points at --denial when fingerprints exist', () => {
+    denial();
+    const out = sink();
+    const code = runApprove([], { home, now: t0, interactive: false, log: out.write, error: out.write });
+    expect(code).toBe(0);
+    expect(out.text()).toContain('No pending Action Guard approvals');
+    expect(out.text()).toMatch(/1 headless denial/);
+    expect(out.text()).toContain('shieldcortex approve --denial');
+    // Looking still does not grant.
+    expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeUndefined();
   });
 });

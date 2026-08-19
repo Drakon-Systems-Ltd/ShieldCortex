@@ -10,7 +10,8 @@
  *
  * What is pinned here is the WIRING and its ordering, which is where this
  * feature can hurt:
- *   - it does not exist until `actionGuard.retryCards` is exactly true;
+ *   - cards do not exist until `actionGuard.retryCards` is exactly true;
+ *   - fingerprints + `approve --denial` consume ARE on even with cards off (#378);
  *   - a catastrophic call never reaches any of it;
  *   - suppression is checked BEFORE the digest window opens and before any
  *     budget is spent;
@@ -25,6 +26,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { grantRetry } from '../defence/iron-dome/retry-control.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -221,28 +223,54 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     return predicate();
   }
 
-  // ── Default OFF ────────────────────────────────────────────────────────
+  // ── Default OFF (cards) ────────────────────────────────────────────────
+  // #378 — the retry *plane* (fingerprint + TTY --denial) is always-on.
+  // Cards stay dark until retryCards is exactly true.
 
-  it('does not exist until switched on — same terminal denial as before #310', () => {
+  it('cards stay off by default — denial is still terminal, but a fingerprint is left', () => {
     writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
     const r = runHook(IRREVERSIBLE);
 
     expect(r.decision).toBe('deny');
-    expect(store()).toBeNull();
+    const rows = store()!.rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].grant).toBeUndefined();
+    expect(rows[0].claim).toBeUndefined();
+    expect(store()!.budget).toBeNull();
     expect(evidence()).toHaveLength(1);
-    // No retry copy anywhere on the operator's alert — the #331 digest text is
+    // No card copy on the operator's alert — the #331 digest text is
     // exactly what it was.
     const body = JSON.stringify(evidence());
     expect(body).not.toContain('budget_exhausted');
     expect(body).not.toContain('approve --denial');
+    expect(r.stderr).not.toMatch(/retry card raised/);
   });
 
-  it('stays off for a config that merely mentions retryCards without true', () => {
+  it('stays card-dark for a config that merely mentions retryCards without true', () => {
     writeConfig({ retryCards: 'yes', notify: { enabled: true, webhookUrl: webhookUrl() } });
     const r = runHook(IRREVERSIBLE);
 
     expect(r.decision).toBe('deny');
-    expect(store()).toBeNull();
+    const rows = store()!.rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].claim).toBeUndefined();
+    expect(rows[0].grant).toBeUndefined();
+    expect(r.stderr).not.toMatch(/retry card raised/);
+  });
+
+  it('#378 TTY --denial grant is consumable with cards off', () => {
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+    const row = store()!.rows[0];
+    expect(row.claim).toBeUndefined();
+
+    const granted = grantRetry({ id: row.id }, { isInteractive: true }, { home });
+    expect(granted.ok).toBe(true);
+
+    const retried = runHook(IRREVERSIBLE);
+    expect(retried.decision).toBeUndefined();
+    expect(retried.stderr).toContain('consumed operator RETRY grant');
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
   });
 
   // ── Fingerprint, and only a fingerprint ────────────────────────────────
