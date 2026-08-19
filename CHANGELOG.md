@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
 
+## [Unreleased]
+
+- **Action Guard / Claude Code hook (#378):** `denied_no_prompt_surface` on the hook lane now always writes a retry fingerprint and honours `shieldcortex approve --denial <actionId>`, even when `actionGuard.retryCards` is off (the soak-dark default). Cards, waiter, and card-budget stay gated on exact `retryCards: true`. Catastrophic still has no retry path. Bare `shieldcortex approve` still lists #118 held calls only, but now points at `--denial` when fingerprints exist. Live-hold Telegram cards remain the OpenClaw interceptor path (#371) — PreToolUse still cannot pause.
+
 ## [4.54.8] - 2026-08-19
 
 **Operator control plane.** #310 retry cards (dark), #371 live interactive cards, #369 honest denial alerts.

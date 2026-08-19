@@ -22,8 +22,14 @@ store either — a grant minted from a hook denial has no origin binding that me
 that surface. Anyone extending this to the interceptor is writing a new ADR, not a patch.
 
 ## Rollout
-Dark behind `actionGuard.retryCards=false`. Soak gate: ≥3 days on an Edith-class host,
-deny/approve/timeout matrix across ≥3 cron identities, empty-origin, grant-then-newer-DNP,
-budget-exhaustion. Default flips only after soak review against this ADR.
+Cards stay dark behind `actionGuard.retryCards=false`. Soak gate: ≥3 days on an
+Edith-class host, deny/approve/timeout matrix across ≥3 cron identities,
+empty-origin, grant-then-newer-DNP, budget-exhaustion. Default flips only after
+soak review against this ADR.
+
+#378 (2026-08-19): fingerprint write + TTY `approve --denial` consume on the
+Claude Code hook are **not** gated on `retryCards`. The soak switch arms cards
+only. A host that never flipped the switch still gets a CLI retry path; it does
+not get a card.
 
 Full mechanism: DESIGN-310.md (v3-final) in this directory.
