@@ -1187,7 +1187,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   // Only for an event that survived the suppression check, and only once the
   // digest window whose START it shares has been read (R3 rule 7).
   let retryCard = null;
-  if (retry && retry.config.retryCards === true && retryStep?.ok && !retrySuppressed) {
+  if (retry && retry?.config?.retryCards === true && retryStep?.ok && !retrySuppressed) {
     try {
       retryCard = await raiseRetryCard(retry, notify, {
         id: retryStep.id,
@@ -2112,7 +2112,9 @@ process.stdin.on('end', async () => {
     // #310 / #378 operator retry control, loaded once for both halves: the
     // consume just below, and the fingerprint (plus optional card) on the DNP
     // path further down. Null only when the dist module is missing or
-    // incomplete. Cards still require `actionGuard.retryCards === true`.
+    // incomplete. `retryPlane` being non-null does NOT mean cards are armed —
+    // consume/fingerprint are always-on; cards still require
+    // `actionGuard.retryCards === true` at the raise site.
     const retryPlane = await loadRetryControl(cfg.retry);
     const retryOriginCwd = retryPlane ? retryPlane.mod.canonicaliseCwd(hookData.cwd) : undefined;
     const retryCtx = retryPlane ? { rawConfig: cfg.retry, cwd: retryOriginCwd } : null;
