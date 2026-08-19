@@ -482,6 +482,26 @@ function safeDetectedAt(v: unknown): string {
     : '1970-01-01T00:00:00.000Z';
 }
 
+/** #369 — a values-free action surface for outcome alerts. The caller's
+ *  surface is already redacted (`Tool: [redacted...] fields=file_path`), but
+ *  this builder used to throw even that away and pin the literal string
+ *  `redacted action surface`, which rendered as `Command: (empty)` on the
+ *  operator's phone. Keep it: strip anything that looks like a value (quotes,
+ *  slashes-with-content beyond a bounded length), keep tool + field names. */
+const SAFE_SURFACE_RE =
+  /^[A-Za-z][A-Za-z0-9_.-]{0,63}: \[redacted[^\][]{0,120}\](?: fields=[a-z_][a-z0-9_,]{0,120}| no command field)?$/;
+
+function safeActionGuardSurface(raw: unknown): string {
+  if (typeof raw !== 'string') return 'redacted action surface';
+  const trimmed = raw.trim();
+  // ALLOWLIST, not blocklist: only the hook's own redacted-surface shape
+  // (`Tool: [redacted …] fields=a,b` / `… no command field`) passes. URLs,
+  // quoting, paths, free text — anything else — flattens to the placeholder,
+  // so this can never become a smuggling path for command text or secrets.
+  if (!SAFE_SURFACE_RE.test(trimmed)) return 'redacted action surface';
+  return truncate(trimmed, 200);
+}
+
 export function buildActionGuardOutcomeNotification(
   input: ActionGuardOutcomeInput,
 ): ActionGuardOutcomeNotification {
@@ -491,7 +511,7 @@ export function buildActionGuardOutcomeNotification(
     event,
     outcome,
     tool: safeActionGuardTool(input.tool),
-    surface: 'redacted action surface',
+    surface: safeActionGuardSurface((input as { surface?: unknown }).surface),
     signals: safeActionGuardSignals(input.signals),
     severity: safeActionGuardSeverity(input.severity, event),
     reason: safeActionGuardReason(event, outcome),
@@ -584,9 +604,12 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
     return truncate(extra.digestText, 4_000);
   }
   const denied = n.event === 'action_guard_denial';
+  const headless = n.outcome === 'denied_no_prompt_surface';
   const lines = [
     denied
-      ? '🛡️ ShieldCortex — Action Guard BLOCKED a tool call'
+      ? headless
+        ? '🛡️ ShieldCortex — DENIED (headless session): nothing is waiting for approval'
+        : '🛡️ ShieldCortex — Action Guard BLOCKED a tool call'
       : '🛡️ ShieldCortex — Action Guard warning: advisory-mode tool call ran',
     '',
     `Tool:      ${n.tool}`,

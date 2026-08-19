@@ -164,6 +164,11 @@ export function createWebhookNotifyChannel(opts: WebhookNotifyChannelOptions): N
         // of having a header at all.
         'X-ShieldCortex-Event': eventOf(notification),
       };
+      // #369 — receivers routing "is anything actually pending?" need the
+      // outcome without parsing the body. Only outcome-bearing alerts have one.
+      if (isActionGuardOutcomeNotification(notification)) {
+        headers['X-ShieldCortex-Outcome'] = notification.outcome;
+      }
       if (opts.secret) {
         headers['X-ShieldCortex-Signature'] = createHmac('sha256', opts.secret).update(body).digest('hex');
       }
