@@ -3,6 +3,7 @@ import plugin, {
   __resetConfigStateForTest,
   __setDefenceModuleForTest,
   __setRuntimeForTest,
+  __buildTypedApprovalRequestForTest,
 } from '../index.js';
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
 
@@ -143,18 +144,20 @@ describe('#112 — normaliseConfig() preserves nested interceptor config', () =>
 // ==================== 2. End-to-end: config → before_tool_call gate ====================
 
 describe('#112 — end-to-end: plugin config controls the before_tool_call gate', () => {
-  // "Gate armed" observable: the typed-hook bridge currently surfaces an armed
-  // gate either as { requireApproval } or as a failure-policy { block } (the
-  // interceptor catches the TypedApprovalRequest bridge throw as an approval
-  // error). Both mean the tool call was intercepted; neither may appear when
-  // the user disabled the gate.
+  // #310: an armed interactive gate must mint a native card. `block` remains
+  // valid for catastrophic / unattended; disabled-gate tests still use this
+  // helper to assert neither shape appears.
   const intercepted = (result: any): boolean => Boolean(result && (result.requireApproval || result.block));
 
-  it('CONTROL (harness validity): default config arms the gate — dangerous op is intercepted', async () => {
+  it('CONTROL (harness validity): default config arms the gate — dangerous op is a native card', async () => {
     const { api, hooks } = makeApi(rootConfigWith({}));
     plugin.register(api);
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });
-    expect(intercepted(result)).toBe(true);
+    expect(result?.requireApproval).toBeTruthy();
+    expect(result?.block).toBeUndefined();
+    expect(result.requireApproval.allowedDecisions).toEqual(['allow-once', 'deny']);
+    expect(result.requireApproval.timeoutBehavior).toBe('deny');
+    expect(result.requireApproval.timeoutMs).toBe(600_000);
   });
 
   it('interceptor.enabled:false → the before_tool_call hook is not registered at all (stronger contract post-#112-follow-up)', () => {
@@ -221,5 +224,37 @@ describe('#112 — deep-merge semantics: shield config + plugin override, per-ke
     plugin.register(api);
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });
     expect(result).toBeUndefined();
+  });
+});
+
+describe('#310 — OpenClaw native approval cards', () => {
+  it('cron/heartbeat sessions fail closed immediately — no card', async () => {
+    const { api, hooks } = makeApi(rootConfigWith({}));
+    plugin.register(api);
+    const event = { toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } };
+    const cron = await hooks['before_tool_call'](event, { sessionKey: 'agent:main:cron:abc' });
+    expect(cron?.requireApproval).toBeUndefined();
+    expect(cron?.block).toBe(true);
+    const beat = await hooks['before_tool_call'](event, { sessionKey: 'agent:main:heartbeat' });
+    expect(beat?.requireApproval).toBeUndefined();
+    expect(beat?.block).toBe(true);
+  });
+
+  it('secret-egress card copy withholds the payload', () => {
+    const req = __buildTypedApprovalRequestForTest([
+      'ShieldCortex — Action Intercepted',
+      'Tool:       Bash',
+      'Action:     exec',
+      'Risk:       dangerous',
+      'Signals:    secret-egress',
+      'Reason:     posted credential-material to example.invalid',
+    ].join('\n'));
+    expect(req.description).toContain('command withheld');
+    expect(req.description).not.toContain('credential-material');
+    expect(req.description).not.toContain('example.invalid');
+    expect(req.description).toMatch(/Signals:/i);
+    expect(req.allowedDecisions).toEqual(['allow-once', 'deny']);
+    expect(req.timeoutBehavior).toBe('deny');
+    expect(req.timeoutMs).toBe(600000);
   });
 });

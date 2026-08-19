@@ -547,6 +547,23 @@ export function formatActionGuardPrompt(toolName: string, v: ToolGuardVerdictLik
   ].join('\n');
 }
 
+/**
+ * #310: the OpenClaw-native approval card is delivered by THROWING out of the
+ * injected `requireApproval` — the plugin's typed-hook bridge catches that
+ * throw and hands `{ requireApproval }` back to the host, which draws the card.
+ * So this particular rejection is control flow, not a failure, and the catch
+ * blocks below must let it pass straight through.
+ *
+ * Matched by NAME, not by class: the class lives in the plugin entrypoint
+ * (index.ts) and this file is deliberately free of a compile-time dependency on
+ * it, the same discipline as ToolGuardVerdictLike. Swallowing it as an approval
+ * error is exactly what turned every native card into a `failure_denied` the
+ * operator never saw.
+ */
+function isTypedApprovalRequest(err: unknown): boolean {
+  return err instanceof Error && err.name === 'TypedApprovalRequest';
+}
+
 // --- Audit Logging (local JSONL) ---
 
 /** Resolve per write so isolated tests can redirect every realtime audit path.
@@ -1297,6 +1314,10 @@ export function createInterceptor(
         brokered ? brokerApprovalTimeoutMs(v.severity) : 0,
       );
     } catch (err) {
+      // #310: a minted approval card, not an error. Re-thrown untouched so the
+      // typed-hook bridge can turn it into the operator's card; auditing it
+      // here would write a denial for a decision nobody has made yet.
+      if (isTypedApprovalRequest(err)) throw err;
       if (brokered && err instanceof ApprovalTimeout) {
         // The asymmetric path. Silence is only ever a yes for something the
         // broker already pre-cleared — and that returned long before here — so
@@ -1477,6 +1498,9 @@ export function createInterceptor(
     try {
       approved = await context.requireApproval(message);
     } catch (err) {
+      // #310: same bridge, same rule — the card request is not an approval
+      // failure. Everything else below stays fail-closed.
+      if (isTypedApprovalRequest(err)) throw err;
       const failAction = config.failurePolicy[severity];
       log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
       const entry: InterceptAuditEntry = {

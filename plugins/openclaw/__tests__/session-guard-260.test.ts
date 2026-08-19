@@ -72,7 +72,7 @@ describe('#260 interceptor stamps origin + sessionKey and indexes a deny', () =>
   it('an unattended dangerous deny carries origin=openclaw-interceptor and a sc- sessionKey', async () => {
     const captured: InterceptAuditEntry[] = [];
     const indexed: InterceptAuditEntry[] = [];
-    const sessionId = 'openclaw-cron-backup';
+    const sessionId = 'agent:main:cron:backup';
     const { handleToolCall } = createInterceptor(DEFAULT_CONFIG, okPipeline as never, {
       evaluateToolCall: evaluateToolCall as never,
       onAuditEntry: (e) => captured.push(e),
@@ -164,7 +164,7 @@ describe('#260 plugin session_end / agent_end summarise the OpenClaw index', () 
     const { api, hooks } = makeApi();
     plugin.register(api);
 
-    const sessionId = 'openclaw-cron-backup';
+    const sessionId = 'agent:main:cron:backup';
     const result = await hooks.before_tool_call(
       { toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } },
       { sessionId },
@@ -195,7 +195,7 @@ describe('#260 plugin session_end / agent_end summarise the OpenClaw index', () 
     const { api, hooks } = makeApi();
     plugin.register(api);
 
-    const sessionId = 'once-only-oc';
+    const sessionId = 'agent:main:cron:once-only';
     await hooks.before_tool_call(
       { toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } },
       { sessionId },
