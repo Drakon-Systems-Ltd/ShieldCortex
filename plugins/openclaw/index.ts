@@ -400,6 +400,10 @@ type AgentCtx = {
 type TypedBeforeToolCallEvent = {
   toolName: string;
   params?: Record<string, unknown>;
+  // Not supplied by today's OpenClaw (the session rides on the tool context —
+  // see #233), but resolveHookSessionId prefers the event when a host does
+  // send one, and every other hook's event carries it.
+  sessionId?: string;
 };
 type TypedBeforeToolCallResult = {
   block?: boolean;
@@ -3302,6 +3306,19 @@ function truncateApprovalText(text: string, maxLength: number): string {
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+/** A held command can itself contain the credential that tripped the guard, and
+ *  an approval card is a chat surface. Same rule, same phrasing and same
+ *  trade as the Telegram card path (isSecretEgress / buildCardFields in
+ *  src/defence/iron-dome/openclaw-approval-channel.ts): the operator keeps the
+ *  tool, the signals and the severity, and loses exactly the text that must not
+ *  be forwarded. */
+const SECRET_EGRESS_PROMPT = /secret|credential/iu;
+const WITHHELD_COMMAND_TEXT = "(command withheld — contains credential material)";
+/** Prompt lines safe to forward on a secret-egress hold — label-only metadata.
+ *  `Reason:` (action guard) and `Content:` (memory write) are the two lines
+ *  that quote the payload, so anything not on this list is dropped. */
+const SAFE_APPROVAL_LINE = /^(?:Tool|Action|Risk|Signals|Threats):/iu;
+
 function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeToolCallResult["requireApproval"]> {
   const lines = message
     .split(/\r?\n/u)
@@ -3309,7 +3326,13 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
     .filter(Boolean)
     .filter((line) => !/^\[(?:Approve|Deny)\]/i.test(line));
   const rawTitle = (lines[0] || "ShieldCortex approval required").replace(/^🛡️\s*/u, "");
-  const details = lines.slice(1).join(" | ") || rawTitle;
+  const detailLines = lines.slice(1);
+  const withholdPayload = SECRET_EGRESS_PROMPT.test(message);
+  const details = (
+    withholdPayload
+      ? [WITHHELD_COMMAND_TEXT, ...detailLines.filter((line) => SAFE_APPROVAL_LINE.test(line))]
+      : detailLines
+  ).join(" | ") || rawTitle;
   const riskText = message.toLowerCase();
   const severity = /\b(?:critical|catastrophic|auto[-_\s]?deny|exfil|rm\s+-rf)\b/u.test(riskText)
     ? "critical"
@@ -3321,26 +3344,43 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
     title: truncateApprovalText(rawTitle, 80),
     description: truncateApprovalText(details, 256),
     severity,
-    timeoutMs: 120_000,
+    // The host's own ceiling (MAX_PLUGIN_APPROVAL_TIMEOUT_MS), matching
+    // CARD_TIMEOUT_MS on the Telegram card path. 120s was the old bridge's
+    // number and it expired cards the operator was still walking back to.
+    timeoutMs: 600_000,
     timeoutBehavior: "deny",
     allowedDecisions: ["allow-once", "deny"],
   };
 }
 
+export const __buildTypedApprovalRequestForTest = buildTypedApprovalRequest;
+
 async function handleTypedBeforeToolCall(
   event: TypedBeforeToolCallEvent,
   interceptor: ReturnType<typeof createInterceptor>,
   logger: PluginApi["logger"],
-  sessionId?: string,
+  ctx?: AgentCtx,
 ): Promise<TypedBeforeToolCallResult | void> {
+  const sessionId = resolveHookSessionId(event, ctx);
+  // #310: a card is only worth minting when a human is there to tap it. Cron
+  // and heartbeat runs are host-keyed automation with no operator attached, so
+  // offering OpenClaw an approval request there recreates #112 exactly — the
+  // turn waits out the timeout on a decision nobody can give. Withholding
+  // `requireApproval` puts the interceptor on its unattended branch instead,
+  // which denies on the failure policy immediately and loudly.
+  const attended = !isTrustedAutomationSession(sessionId);
   try {
     await interceptor.handleToolCall({
       toolName: event.toolName,
       arguments: event.params ?? {},
       sessionId,
-      requireApproval: async (message: string) => {
-        throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message));
-      },
+      ...(attended
+        ? {
+            requireApproval: async (message: string) => {
+              throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message));
+            },
+          }
+        : {}),
     });
   } catch (err) {
     if (err instanceof TypedApprovalRequest) {
@@ -3648,13 +3688,16 @@ export default {
     if (!interceptorDisabledInHostConfig) {
       // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
       // can block or require approval before the selected tool executes.
-      api.on('before_tool_call', async (event: TypedBeforeToolCallEvent, ctx?: { sessionId?: string }) => {
+      api.on('before_tool_call', async (event: TypedBeforeToolCallEvent, ctx?: AgentCtx) => {
         const interceptor = await initInterceptor();
         if (!interceptor) return;
         // #233: the host supplies the session on the tool CONTEXT, not the
         // event. Without it a taint cannot be matched to the call it should
         // gate, so the escalation would silently never fire.
-        return handleTypedBeforeToolCall(event, interceptor, api.logger, ctx?.sessionId);
+        // #310: the WHOLE context, not just `sessionId` — resolveHookSessionId
+        // also reads `sessionKey`, which is where a cron/heartbeat run's key
+        // actually arrives, and that key decides whether a card is minted.
+        return handleTypedBeforeToolCall(event, interceptor, api.logger, ctx);
       }, { priority: 80, timeoutMs: 30_000 });
       _beforeToolCallRegistered = true;
       // NOTE: session_end is NOT registered here — it moved out of this guard
