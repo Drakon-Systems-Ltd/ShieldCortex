@@ -24,6 +24,8 @@ import {
   canonicaliseCwd,
   claimCardLaunch,
   consumeRetryGrant,
+  drainLostActionIds,
+  restoreLostActionIds,
   fingerprintId,
   formatBudgetExhaustedNotice,
   formatUnspentExpiryNotice,
@@ -699,6 +701,71 @@ describe('#310 retry control — the one lock plane', () => {
     expect(params).not.toContain(HASH);
     expect(formatBudgetExhaustedNotice(['act-0000000000000001'])).not.toContain(nonce);
   });
+
+  // ── R-impl review fixes (Grok APPROVE_WITH_NITS / SOL REQUEST_CHANGES) ──
+
+  it('post-spend claim does not black out the next card (SOL blocker 1)', () => {
+    denial();
+    const c1 = claim();
+    expect(c1.ok).toBe(true);
+    expect(grantRetry({ hash: HASH, cwd }, { nonce: c1.ok ? c1.nonce : 'x' }, { home, now: t0 + 1_000 }).ok).toBe(true);
+    const spent = consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: t0 + 2_000 });
+    expect(spent?.consumedAt).toBe(t0 + 2_000);
+    // grant spent -> claim is inert history; a new DNP may card again
+    denial({ now: t0 + 3_000 });
+    const c2 = claim({ now: t0 + 3_000 });
+    expect(c2.ok).toBe(true);
+  });
+
+  it('card auth hard-drops smuggled TTY wideners (SOL blocker 2)', () => {
+    denial();
+    const c = claim();
+    expect(c.ok).toBe(true);
+    // Operator denies while the card is still up.
+    const denied = recordDenySuppression({ hash: HASH, cwd }, { home, now: t0 + 500, suppressionMs: 900_000, via: 'card' });
+    expect(denied.ok).toBe(true);
+    // A caller presenting the card nonce PLUS smuggled TTY flags: overrideDeny
+    // must be dropped — deny beats the card, wideners are TTY-only.
+    const out = grantRetry(
+      { hash: HASH, cwd },
+      { nonce: c.ok ? c.nonce : 'x', isInteractive: true, anyOrigin: true, overrideDeny: true },
+      { home, now: t0 + 1_000 },
+    );
+    expect(out.ok).toBe(false);
+    // Deny tore the claim down, so the card path dies as claim-missing —
+    // the point is it dies: wideners never resurrect it and nothing grants.
+    expect(out.ok === false && ['suppressed', 'claim-missing'].includes(out.reason)).toBe(true);
+    expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeUndefined();
+  });
+
+  it('restoreLostActionIds puts drained ids back, deduped (shared nit)', () => {
+    // burn the global budget so later denials record lost ids
+    const cwds = [cwd, otherCwd];
+    for (let i = 0; i < CARD_BUDGET_PER_WINDOW; i++) {
+      const h = hashToolCall('Bash', { command: `burn-${i}` });
+      denial({ hash: h, cwd: cwds[i % cwds.length] });
+      const cc = claimCardLaunch(
+        { id: fingerprintId(h, canonicaliseCwd(cwds[i % cwds.length])) },
+        { home, now: t0, windowStartMs: t0, windowMs: 900_000, actionId: `act-burn${String(i).padStart(11, '0')}` },
+      );
+      expect(cc.ok).toBe(true);
+    }
+    const h2 = hashToolCall('Bash', { command: 'the one that lost' });
+    denial({ hash: h2, actionId: 'act-00000000lost0001' });
+    const lostClaim = claimCardLaunch(
+      { id: fingerprintId(h2, canonicaliseCwd(cwd)) },
+      { home, now: t0 + 1, windowStartMs: t0, windowMs: 900_000, actionId: 'act-00000000lost0001' },
+    );
+    expect(lostClaim.ok).toBe(false);
+    const drained = drainLostActionIds({ home });
+    expect(drained).toContain('act-00000000lost0001');
+    expect(drainLostActionIds({ home })).toEqual([]);
+    restoreLostActionIds(drained, { home });
+    restoreLostActionIds(drained, { home });
+    const again = drainLostActionIds({ home });
+    expect(again.sort()).toEqual([...new Set(drained)].sort());
+  });
+
 });
 
 /** Long enough to outlive the fingerprint retention clock in the prune test. */

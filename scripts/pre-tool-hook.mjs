@@ -1255,6 +1255,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
       // spent, and grants that expired without ever being used. Both are
       // DRAINED here, on the path that actually sends: an id claimed and then
       // not delivered is an id the operator never hears about.
+      let drainedLostIds = [];
       if (retry) {
         const notices = [];
         try {
@@ -1265,6 +1266,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
             ...retry.mod.drainLostActionIds({ home: homedir() }),
           ];
           const uniqueLost = [...new Set(lost.filter(Boolean))];
+          drainedLostIds = uniqueLost;
           if (uniqueLost.length > 0) notices.push(retry.mod.formatBudgetExhaustedNotice(uniqueLost));
           const swept = retry.mod.pruneRetryControl({ home: homedir() });
           if (swept.expired.length > 0) notices.push(retry.mod.formatUnspentExpiryNotice(swept.expired));
@@ -1283,6 +1285,12 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
         channels: [notify.denialChannel],
         timeoutMs: notify.config?.timeoutMs,
       }) ?? null;
+      // #310 — drained budget-exhaust ids are only "reported" if the send
+      // actually went out. A failed delivery puts them back for the next one.
+      if (retry && drainedLostIds.length > 0 && !deliveryResult?.deliveredVia
+          && typeof retry.mod.restoreLostActionIds === 'function') {
+        try { retry.mod.restoreLostActionIds(drainedLostIds, { home: homedir() }); } catch {}
+      }
       if (deliveryResult?.deliveredVia) {
         const via = safeNotifyLabel(deliveryResult.deliveredVia) ?? 'redacted-channel';
         console.error(`[shieldcortex] operator-notify: reported ${outcome} for ${safeToolName(toolName)} via ${via}.`);

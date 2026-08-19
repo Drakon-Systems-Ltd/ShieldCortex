@@ -809,7 +809,15 @@ export function claimCardLaunch(ref: RetryRowRef, opts: LaunchClaimOptions): Lau
     // it is the one R3 rule 5 names (consume-before-card ordering — the retry
     // the operator already authorised has not been taken yet).
     if (grantIsLive(row.grant, now)) return { value: { failed: 'grant-live' }, commit: true };
-    if (claimIsLive(row.claim, now)) return { value: { failed: 'already-claimed' }, commit: true };
+    // A live UNANSWERED claim blocks a second card (two cards, one identity —
+    // never). A claim whose tap already produced a grant blocks only while
+    // that grant is itself live: once spent or expired, the claim is inert
+    // history and the next DNP may card again (SOL R-impl blocker 1 — the
+    // post-spend card blackout fought the flapping-retry case this exists
+    // for). Epoch pinning is unaffected: a NEW claim gets the CURRENT epoch.
+    if (claimIsLive(row.claim, now) && !(row.claim?.grantedAt && !grantIsLive(row.grant, now))) {
+      return { value: { failed: 'already-claimed' }, commit: true };
+    }
 
     if (
       !file.budget
@@ -949,7 +957,17 @@ export function grantRetry(
     boundedNumber(opts.ttlMs, MIN_RETRY_GRANT_TTL_MS, MAX_RETRY_GRANT_TTL_MS)
     ?? DEFAULT_RETRY_GRANT_TTL_MS;
   const viaCard = typeof auth.nonce === 'string' && auth.nonce.length > 0;
-  const viaTty = auth.isInteractive === true;
+  // Card authentication is EXCLUSIVE: a caller presenting a nonce is the
+  // waiter, and the waiter never carries TTY privileges. Hard-drop the
+  // interactive flag and both wideners the moment a nonce is present, so a
+  // confused (or malicious) caller supplying nonce + isInteractive cannot
+  // smuggle --any-origin / --override-deny onto a card grant (SOL R-impl
+  // blocker 2; spec B4 — the trust boundary is THIS function, not its
+  // callers).
+  const viaTty = !viaCard && auth.isInteractive === true;
+  if (viaCard) {
+    auth = { ...auth, isInteractive: false, anyOrigin: false, overrideDeny: false };
+  }
   if (!viaCard && !viaTty) return { ok: false, reason: 'not-authenticated' };
 
   let presentedHmac: string | null = null;
@@ -1153,6 +1171,23 @@ export function drainLostActionIds(opts: RetryStoreOptions = {}): string[] {
     return { value: [...lost], commit: true };
   });
   return result.ok ? result.value : [];
+}
+
+/**
+ * Put drained ids BACK when the delivery they were drained for did not
+ * happen (Grok/SOL R-impl shared nit — an id drained and then dropped on a
+ * failed send is an operator who never hears about a lost card). Deduped;
+ * a redelivery in between cannot double them.
+ */
+export function restoreLostActionIds(ids: string[], opts: RetryStoreOptions = {}): void {
+  const clean = [...new Set(ids.filter((i) => typeof i === 'string' && i.length > 0))];
+  if (clean.length === 0) return;
+  withLock<void>(opts.home, (file) => {
+    if (!file.budget) return { value: undefined, commit: false };
+    const merged = [...new Set([...(file.budget.lostActionIds ?? []), ...clean])];
+    file.budget.lostActionIds = merged.slice(0, 50);
+    return { value: undefined, commit: true };
+  });
 }
 
 /** Card budget as it stands, for the operator copy. Read-only. */
