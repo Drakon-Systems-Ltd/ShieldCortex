@@ -10,7 +10,7 @@
  * ~/.shieldcortex are never read.
  */
 import Database from 'better-sqlite3';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -438,6 +438,24 @@ describe('cron denial correlation (#375 P2)', () => {
     expect(runtimeGuardImports).toEqual([]);
     expect(imports).not.toContain('node:sqlite');
     expect(source).not.toMatch(/child_process|execFile|spawn/);
+  });
+
+  test('no guard-runtime module imports the audit/store modules (reverse direction)', () => {
+    // The correlation lane is CLI-only. If defence/* ever grows an import of
+    // these modules, the honesty surface has crept into the guard hot path.
+    const defenceDir = join(HERE, '..', '..', 'defence');
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { if (e.name !== '__tests__') walk(full); continue; }
+        if (!/\.(ts|mjs)$/.test(e.name)) continue;
+        const src = readFileSync(full, 'utf8');
+        if (/from\s+'[^']*(?:cron-denial-audit|openclaw-cron-store)[^']*'/.test(src)) offenders.push(full);
+      }
+    };
+    walk(defenceDir);
+    expect(offenders).toEqual([]);
   });
 });
 

@@ -778,8 +778,8 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     // against, 63 jobs at once. A batch pin there is one keystroke away from
     // blessing every payload the store happens to name, so the initial wave is
     // per-item only. Once those are pinned, `--yes` works as before.
-    const unreviewedBackfill = needsReview.filter((i) =>
-      i.sources.some((s) => FIRST_BACKFILL_SOURCES.has(s)),
+    const unreviewedBackfill = needsReview.filter(
+      (i) => i.status === 'new' && i.sources.some((s) => FIRST_BACKFILL_SOURCES.has(s)),
     );
     if (unreviewedBackfill.length > 0) {
       err(

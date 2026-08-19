@@ -331,7 +331,7 @@ export function discoverDbCronScripts(opts: { dbPath: string; home: string }): D
       const enabled = isJobEnabled(row.enabled);
       const job: DiscoveredCronJob = {
         jobId,
-        name: sanitiseJobName(row.name) || jobId,
+        name: sanitiseJobName(row.name) || sanitiseJobName(jobId) || 'unnamed-job',
         enabled,
         paths: [...paths].sort(),
       };
