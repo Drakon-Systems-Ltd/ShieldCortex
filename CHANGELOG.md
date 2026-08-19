@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
 
-## [4.54.6] - 2026-08-19
+## [4.54.7] - 2026-08-19
 
-**Edith doctor honesty patch (#364/#365).** Also carries late changelog notes for #354/#361 fixes whose code already shipped in 4.54.5.
+**Edith doctor honesty patch (#364/#365).** (4.54.6 tag exists but was never published — npm skipped straight to 4.54.7.) Also carries late changelog notes for #354/#361 fixes whose code already shipped in 4.54.5.
 
 - **Doctor SCAN fix extraction:** when fix prose only backticks `openclaw gateway restart`, still lead with `shieldcortex openclaw install --allow-conversation-access` (Edith live doctor shape).
 - **Project keys (Edith):** refuse bare generic basenames (`workspace`, `openclaw`, …) in `deriveProjectKey` unless `projectAliases` maps them; auto-heal legacy/canonical collisions at end of `shieldcortex update` so the KEY warn does not return after every upgrade.
