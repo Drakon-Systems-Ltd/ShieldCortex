@@ -66,6 +66,11 @@ import {
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
+import {
+  correlateCronDenials,
+  type CorrelateCronDenialsOptions,
+  type CronDenialReport,
+} from './cron-denial-audit.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -2406,6 +2411,116 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
   };
 }
 
+// ── Check 8a-bis: Cron denial honesty (#375) ──────────────
+/**
+ * A guard denial inside a scheduled turn does not fail the turn: OpenClaw
+ * records `last_run_status: ok` and the operator sees green while the job has
+ * done nothing. Two crons on Edith were dead 2+ weeks with green status.
+ *
+ * We cannot rewrite OpenClaw's status, so this check says the quiet part out
+ * loud — and it is deliberately harder to satisfy than most:
+ *
+ *   - It WARNs when denials landed inside runs that reported ok.
+ *   - It WARNs when it could not look (denial log unreadable, `cron_run_logs`
+ *     missing/unreadable). Never `info`, never a pass with a zeroed count: a
+ *     "0 silent denials" derived from a table we could not read is the same
+ *     green lie in different handwriting.
+ *   - It passes only when the sources were readable and nothing was denied.
+ *
+ * It is never auto-fixed. The remedy is a human reviewing a script and pinning
+ * it, which is the one thing `--fix` must not do on anyone's behalf.
+ */
+export interface CronDenialCheckDeps {
+  home?: string;
+  openclawDbPath?: string;
+  denialsPath?: string;
+  now?: number;
+  /** Test seam — production uses the real correlation. */
+  correlate?: (opts: CorrelateCronDenialsOptions) => CronDenialReport;
+}
+
+export const CRON_DENIALS_LABEL = 'Cron denials';
+
+export async function checkCronDenials(deps: CronDenialCheckDeps = {}): Promise<CheckResult> {
+  const label = CRON_DENIALS_LABEL;
+  let report: CronDenialReport;
+  try {
+    const correlate = deps.correlate ?? correlateCronDenials;
+    report = correlate({
+      ...(deps.home ? { home: deps.home } : {}),
+      ...(deps.openclawDbPath ? { openclawDbPath: deps.openclawDbPath } : {}),
+      ...(deps.denialsPath ? { denialsPath: deps.denialsPath } : {}),
+      ...(typeof deps.now === 'number' ? { now: deps.now } : {}),
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // A correlation that crashed is still a correlation that did not happen.
+    return { label, status: 'warn', message: `could not correlate cron denials — ${msg}` };
+  }
+
+  const days = Math.max(1, Math.round(report.windowMs / 86_400_000));
+
+  if (report.cannotCorrelate) {
+    const seen =
+      report.attributedCount > 0
+        ? ` — ${report.attributedCount} denial(s) are attributed to scheduled jobs and their run status is unknown`
+        : '';
+    return {
+      label,
+      status: 'warn',
+      message: `could not correlate cron denials (${report.cannotCorrelate})${seen}`,
+    };
+  }
+
+  const silentJobs = report.jobs.filter((j) => j.silentCount > 0);
+  if (silentJobs.length > 0) {
+    // Job names and counts only. No denial surface, no command body — the
+    // #284 redaction contract holds on every new surface.
+    const perJob = silentJobs
+      .map(
+        (j) =>
+          `${j.name}: ${j.silentCount} of ${j.denialCount} denial(s) inside runs reported ok` +
+          (j.enabled ? '' : ' (job disabled)'),
+      )
+      .join('; ');
+    const paths: string[] = [];
+    for (const j of silentJobs) for (const p of j.pinnablePaths) if (!paths.includes(p)) paths.push(p);
+    const fix =
+      paths.length > 0
+        ? `Review each script, then pin it: ${paths.map((p) => `\`shieldcortex allowlist add ${p}\``).join(' ')}`
+        : 'Open these jobs and check what the guard refused — no script path was discoverable from the job definition.';
+    return {
+      label,
+      status: 'warn',
+      message:
+        `${silentJobs.length} scheduled job(s) had guard denials in the last ${days} days ` +
+        `while their runs reported ok — ${perJob}`,
+      fix,
+    };
+  }
+
+  if (report.unconfirmedCount > 0) {
+    return {
+      label,
+      status: 'warn',
+      message:
+        `${report.unconfirmedCount} denial(s) could not be matched to a run row ` +
+        `(attributed to a scheduled job, no exact session match in the last ${days} days)`,
+    };
+  }
+
+  const notes: string[] = [];
+  if (report.unattributedCount > 0) notes.push(`${report.unattributedCount} not from a scheduled job`);
+  if (report.undatedCount > 0) notes.push(`${report.undatedCount} undated row(s) skipped`);
+  return {
+    label,
+    status: 'pass',
+    message:
+      `no guard denials landed inside scheduled runs in the last ${days} days` +
+      (notes.length > 0 ? ` (${notes.join(', ')})` : ''),
+  };
+}
+
 // ── Check 8b: Claude Code enforcement floor ───────────────
 /**
  * The Action Guard's Claude Code surface is only as strong as the harness that
@@ -4303,6 +4418,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkCronDenials,
     checkThreatGraph,
     checkAttestationCoverage,
     checkClaudeCodeVersion,
