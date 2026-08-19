@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
 
+## Unreleased
+
+- **Denial alerts honesty (#369):** headless denials (`denied_no_prompt_surface`) render as `DENIED (headless session): nothing is waiting for approval` — never `approval needed`. Outcome alerts keep the hook's redaction-safe surface (`Tool: [redacted …] fields=file_path`) instead of flattening to a placeholder that rendered as `Command: (empty)`; the surface passes an allowlist regex so values/URLs/quoting can never smuggle through. Webhook POSTs carry `X-ShieldCortex-Outcome` so receivers can route pending-vs-dead without parsing the body.
+
 ## [4.54.7] - 2026-08-19
 
 **Edith doctor honesty patch (#364/#365).** (4.54.6 tag exists but was never published — npm skipped straight to 4.54.7.) Also carries late changelog notes for #354/#361 fixes whose code already shipped in 4.54.5.

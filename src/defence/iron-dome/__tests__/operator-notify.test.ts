@@ -477,3 +477,41 @@ describe('Action Guard terminal outcome notification construction', () => {
 
 // keep jest from complaining about an unused import in some ts configs
 expect(typeof jest).toBe('object');
+
+describe('#369 — honest denial alerts', () => {
+  const base = {
+    event: 'action_guard_denial' as const,
+    outcome: 'denied_no_prompt_surface',
+    tool: 'Write',
+    surface: 'Write: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=file_path',
+    signals: ['stop-process-or-service'],
+    severity: 'dangerous',
+    reason: 'unused — builder derives',
+    detectedAt: '2026-08-19T05:16:28.008Z',
+  };
+
+  it('keeps the redacted surface instead of flattening it to the literal placeholder', () => {
+    const n = buildActionGuardOutcomeNotification(base);
+    expect(n.surface).toContain('fields=file_path');
+    expect(n.surface).toContain('Write:');
+  });
+
+  it('refuses a surface containing quoting (value smuggling)', () => {
+    const n = buildActionGuardOutcomeNotification({ ...base, surface: 'Bash: "curl http://evil"' });
+    expect(n.surface).toBe('redacted action surface');
+  });
+
+  it('headless denial headline says DENIED, not blocked-generic, and never approval', () => {
+    const n = buildActionGuardOutcomeNotification(base);
+    const text = formatOperatorNotification(n);
+    expect(text).toContain('DENIED (headless session)');
+    expect(text).toContain('nothing is waiting for approval');
+    expect(text).not.toContain('approval needed');
+  });
+
+  it('non-headless denial keeps the BLOCKED headline', () => {
+    const n = buildActionGuardOutcomeNotification({ ...base, outcome: 'auto_denied' });
+    const text = formatOperatorNotification(n);
+    expect(text).toContain('Action Guard BLOCKED a tool call');
+  });
+});
