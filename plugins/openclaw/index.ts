@@ -38,7 +38,7 @@ import { isTaintingScanSummary, severityFromScanSummary } from './scan-taint-pol
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
-import type { InterceptorConfig, BrokerRuntime } from './interceptor.js';
+import type { ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
@@ -405,6 +405,10 @@ type TypedBeforeToolCallEvent = {
   // send one, and every other hook's event carries it.
   sessionId?: string;
 };
+/** Every answer the host can report for a minted card. The first three are
+ *  buttons (a subset of which the card offers via `allowedDecisions`); the last
+ *  two are the host closing the card without one. */
+type CardDecision = "allow-once" | "allow-always" | "deny" | "timeout" | "cancelled";
 type TypedBeforeToolCallResult = {
   block?: boolean;
   blockReason?: string;
@@ -414,8 +418,8 @@ type TypedBeforeToolCallResult = {
     severity?: "info" | "warning" | "critical";
     timeoutMs?: number;
     timeoutBehavior?: "allow" | "deny";
-    allowedDecisions?: Array<"allow-once" | "allow-always" | "deny">;
-    onResolution?: (decision: "allow-once" | "allow-always" | "deny" | "timeout" | "cancelled") => Promise<void> | void;
+    allowedDecisions?: Array<Extract<CardDecision, "allow-once" | "allow-always" | "deny">>;
+    onResolution?: (decision: CardDecision) => Promise<void> | void;
   };
 };
 type PluginApi = {
@@ -3292,6 +3296,12 @@ function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
 
 class TypedApprovalRequest extends Error {
   request: NonNullable<TypedBeforeToolCallResult["requireApproval"]>;
+  /** #372 — one-shot audit writer the interceptor hangs on this error at hold
+   *  time, carrying the guard's audit base and the session the hold belongs to.
+   *  Absent when the hold came from a path with no guard audit base (an older
+   *  installed interceptor, the memory-write pipeline): then no `onResolution`
+   *  is wired at all and the card behaves exactly as it did before #372. */
+  decisionAudit?: ApprovalDecisionAudit;
 
   constructor(message: string, request: NonNullable<TypedBeforeToolCallResult["requireApproval"]>) {
     super(message);
@@ -3355,6 +3365,28 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
 
 export const __buildTypedApprovalRequestForTest = buildTypedApprovalRequest;
 
+/** #372 — the operator's answer, as the audit stream records it.
+ *
+ * `allow-always` is defensive: today's card only offers allow-once/deny (see
+ * `allowedDecisions`), but a host that grows the button must not be able to
+ * produce an approval nobody can find afterwards. It maps to `approved_once`
+ * rather than a sticky outcome because ShieldCortex grants nothing durable
+ * here — the next call is gated again. */
+/** The decision label as it may appear in a gateway log line. Host-supplied,
+ *  so it is reduced to an identifier shape first — a log line is not a place to
+ *  render whatever a caller passed. */
+function safeDecisionLabel(decision: unknown): string {
+  return String(decision).replace(/[^A-Za-z0-9_.:-]/gu, "?").slice(0, 32) || "unknown";
+}
+
+const CARD_DECISION_OUTCOME: Record<CardDecision, ApprovalDecisionOutcome> = {
+  "allow-once": "approved_once",
+  "allow-always": "approved_once",
+  deny: "card_denied",
+  timeout: "card_timeout",
+  cancelled: "card_cancelled",
+};
+
 async function handleTypedBeforeToolCall(
   event: TypedBeforeToolCallEvent,
   interceptor: ReturnType<typeof createInterceptor>,
@@ -3384,6 +3416,27 @@ async function handleTypedBeforeToolCall(
     });
   } catch (err) {
     if (err instanceof TypedApprovalRequest) {
+      const decisionAudit = err.decisionAudit;
+      if (decisionAudit) {
+        // #372: the hold writes no row because no decision exists yet — THIS is
+        // where the operator's answer becomes one. The host owns this callback
+        // and awaits it, so it must never see a throw: a broken audit sink is
+        // not a reason to disturb a decision the operator already made.
+        err.request.onResolution = (decision: CardDecision) => {
+          try {
+            const outcome = CARD_DECISION_OUTCOME[decision];
+            if (!outcome) {
+              // A decision this build does not know. Say so loudly rather than
+              // guess — inventing an outcome would forge the operator's answer.
+              (logger as any)?.warn?.(`[shieldcortex] unrecognised approval decision '${safeDecisionLabel(decision)}' — no audit row written`);
+              return;
+            }
+            decisionAudit(outcome);
+          } catch (auditErr) {
+            (logger as any)?.warn?.(`[shieldcortex] approval decision audit failed (${safeDecisionLabel(decision)}): ${auditErr instanceof Error ? auditErr.message : auditErr}`);
+          }
+        };
+      }
       return { requireApproval: err.request };
     }
 

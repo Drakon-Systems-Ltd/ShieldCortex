@@ -22,6 +22,13 @@ export const GUARD_DEGRADED_OUTCOMES = new Set([
   'failure_allowed',
   'warned',
   'denied',
+  // #372: operator card decisions that ended in NO. A held dangerous action
+  // the operator refused (or let time out / cancelled) is guard degradation a
+  // #260 summary must surface. `approved_once` stays out on the same logic
+  // that keeps `approved` out — a granted approval is not degradation.
+  'card_denied',
+  'card_timeout',
+  'card_cancelled',
 ]);
 
 export const GUARD_INDEX_ORIGINS = new Set(['claude-code-hook', 'openclaw-interceptor']);

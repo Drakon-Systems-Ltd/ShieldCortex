@@ -45,6 +45,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Card-held approval decisions now leave an audit row (#372): operator card
+  decisions on both the action-guard and memory-write pipelines write
+  `approved_once` / `card_denied` / `card_timeout` / `card_cancelled` intercept
+  rows at decision time, with hold-time session attribution, indexed for #260
+  session summaries. Refused card outcomes count as guard degradation;
+  approvals do not.
+
 ### Added
 - **Cron discovery + denial honesty (#375):** `allowlist scan` reads OpenClaw's migrated SQLite cron store (`~/.openclaw/state/openclaw.sqlite`, `cron_jobs`) as a new `openclaw-cron-db` source, unioned with the legacy `cron/jobs.json` when it still exists; `.bak`/`.migrated` leftovers are never read and never taken as proof the store is absent. Paths come from `payload_message`, `trigger_script` and a structural walk of `job_json` string leaves. `enabled` is coerced in JS over all rows, never `WHERE enabled = 1`, so a textual flag cannot report a live store as empty. Store access is read-only throughout (`readonly` + `fileMustExist`); no SQL writes to any OpenClaw store. An OpenClaw host where NEITHER cron source is readable is reported visibly and exits 1 — "we could not look" is not "all clear"; a host with no `~/.openclaw` stays empty-ok. Unreadable or schema-mismatched stores exit 1 as before. `--yes` is refused while any `openclaw-cron-db` script is still unpinned: the first sqlite backfill is per-item review only.
 - **Cron denial correlation (#375):** new `shieldcortex doctor` CRON check joins `~/.shieldcortex/denials.jsonl` (4 MiB tail, deduped by `actionId`) to `cron_run_logs` and WARNs when a guard denial landed inside a run OpenClaw recorded as `ok`, naming the job and offering `shieldcortex allowlist add <path>` per script the job itself declares. Attribution is exact-shape only (`agent:<agent>:cron:<uuid>:run:`); anything else is an unattributed count. The run row is matched by exact `session_key` inside an SQL-bounded window with no nearest-run fallback — no matching row is reported as unconfirmed, never as silent and never as a pass. An unreadable denial log or a missing/unreadable `cron_run_logs` is WARN cannot-correlate, never INFO and never `0 silent`. Denied scripts sort first in the scan review list. No denial surface or command body reaches any new output.

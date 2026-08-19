@@ -198,6 +198,43 @@ export interface ToolCallContext {
   sessionId?: string;
 }
 
+/**
+ * #372 — outcomes only an OpenClaw-native approval card can produce.
+ *
+ * The card is minted by throwing (see isTypedApprovalRequest) and the
+ * operator's answer comes back through the host minutes later, long after the
+ * hook returned. These outcomes are deliberately distinct from the synchronous
+ * `approved`/`denied` pair: a row that says `approved_once` is a human tapping
+ * a button on a card, not an approver function returning true inside the turn.
+ */
+export type ApprovalDecisionOutcome =
+  | 'approved_once'
+  | 'card_denied'
+  | 'card_timeout'
+  | 'card_cancelled';
+
+/** #372 — one-shot writer for the decision a held card eventually receives.
+ *  Hung on the thrown approval request by the interceptor; invoked by the
+ *  plugin bridge from the host's `onResolution`. Never throws. */
+export type ApprovalDecisionAudit = (outcome: ApprovalDecisionOutcome) => void;
+
+/** Structural view of the plugin's TypedApprovalRequest error. Matched by
+ *  shape and never imported — the same compile-time-independence discipline as
+ *  isTypedApprovalRequest and ToolGuardVerdictLike. */
+interface DecisionAuditCarrier {
+  decisionAudit?: ApprovalDecisionAudit;
+}
+
+/** #372 — what an audit row needs from the tool call that produced it,
+ *  snapshotted at hold time. A card decision lands minutes later, by which
+ *  point the interceptor's live `lastSessionId`/`lastCallArgs` may describe a
+ *  completely different call — attributing the decision to THAT call would be
+ *  a forgery in exactly the record forensics trusts. */
+interface CapturedAuditContext {
+  sessionKey?: string;
+  args?: Record<string, unknown>;
+}
+
 export interface InterceptAuditEntry {
   type: 'intercept';
   tool: string;
@@ -210,7 +247,10 @@ export interface InterceptAuditEntry {
   fragmentationScore: number | null;  // from the pipeline result's fragmentation score, or null
   pipelineDurationMs: number;         // wall-clock ms around the runDefencePipeline call
   action: InterceptAction | 'auto_deny' | 'rate_limit' | 'allow' | 'gate_degraded';
-  outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied' | 'allowed';
+  outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied' | 'allowed'
+    // #372 — card-held decisions, written when the operator answers rather than
+    // when the hold is taken. `action` for these rows is 'require_approval'.
+    | ApprovalDecisionOutcome;
   preview: string;
   ts: string;
   /** The approval broker's record for this call (#143). Present on exactly the
@@ -560,7 +600,7 @@ export function formatActionGuardPrompt(toolName: string, v: ToolGuardVerdictLik
  * error is exactly what turned every native card into a `failure_denied` the
  * operator never saw.
  */
-function isTypedApprovalRequest(err: unknown): boolean {
+function isTypedApprovalRequest(err: unknown): err is Error & DecisionAuditCarrier {
   return err instanceof Error && err.name === 'TypedApprovalRequest';
 }
 
@@ -907,17 +947,61 @@ export function createInterceptor(
   /** Bare tool names seen this session, newest last. See buildSessionSummary. */
   const recentTools: string[] = [];
 
-  function emitAudit(entry: InterceptAuditEntry): void {
-    const sessionKey = options?.sessionGuard?.keyFor(lastSessionId) ?? undefined;
+  /** The one write path every intercept row takes. `captured` is normally the
+   *  in-flight call (emitAudit below); #372 hands it a hold-time snapshot so a
+   *  decision that arrives after the turn moved on still lands on ITS call. */
+  function emitAuditWith(entry: InterceptAuditEntry, captured: CapturedAuditContext): void {
     const withOrigin: InterceptAuditEntry = {
       ...entry,
       origin: 'openclaw-interceptor',
-      ...(sessionKey ? { sessionKey } : {}),
+      ...(captured.sessionKey ? { sessionKey: captured.sessionKey } : {}),
     };
-    const bound = bindAudit ? bindAudit(withOrigin, lastCallArgs) : withOrigin;
+    const bound = bindAudit ? bindAudit(withOrigin, captured.args) : withOrigin;
     writeAuditEntry(bound);
     try { options?.sessionGuard?.index(bound); } catch { /* never wedge the turn */ }
     onAuditEntry?.(bound);
+  }
+
+  function emitAudit(entry: InterceptAuditEntry): void {
+    emitAuditWith(entry, {
+      sessionKey: options?.sessionGuard?.keyFor(lastSessionId) ?? undefined,
+      args: lastCallArgs,
+    });
+  }
+
+  /**
+   * #372 — hang a one-shot decision writer on a minted approval card.
+   *
+   * The hold itself is still unaudited by design: no decision exists yet. What
+   * was missing is the other end — the host reports the operator's answer on
+   * the request's `onResolution`, and nothing on that path knew what the guard
+   * saw, so an operator-APPROVED dangerous action left no intercept row at all
+   * (invisible to the #260 session summaries).
+   *
+   * Everything the row needs is captured HERE: the guard's audit base, the
+   * session key, and the args behind the #224 actionKey. Nothing about the
+   * approval prompt is retained — the preview is the guard's own already-bounded
+   * one, so the secret-egress discipline the card copy follows holds here too.
+   */
+  function attachDecisionAudit(
+    err: Error & DecisionAuditCarrier,
+    auditBase: Omit<InterceptAuditEntry, 'action' | 'outcome'>,
+  ): void {
+    let sessionKey: string | undefined;
+    // Resolving the key is new work on the card path — nothing used to call
+    // keyFor here. A throwing resolver costs the row its key; it must never
+    // turn a mintable card into an approval error.
+    try { sessionKey = options?.sessionGuard?.keyFor(lastSessionId) ?? undefined; } catch { /* unkeyed row */ }
+    const captured: CapturedAuditContext = { sessionKey, args: lastCallArgs };
+    const held: Omit<InterceptAuditEntry, 'action' | 'outcome'> = { ...auditBase };
+    let written = false;
+    err.decisionAudit = (outcome) => {
+      // The host resolves a card once. Enforcing it here is cheaper than
+      // trusting it: a duplicate row would double-count in every summary.
+      if (written) return;
+      written = true;
+      emitAuditWith({ ...held, action: 'require_approval', outcome }, captured);
+    };
   }
 
   function guardAuditBase(toolName: string, v: ToolGuardVerdictLike, preview: string): Omit<InterceptAuditEntry, 'action' | 'outcome'> {
@@ -1317,7 +1401,12 @@ export function createInterceptor(
       // #310: a minted approval card, not an error. Re-thrown untouched so the
       // typed-hook bridge can turn it into the operator's card; auditing it
       // here would write a denial for a decision nobody has made yet.
-      if (isTypedApprovalRequest(err)) throw err;
+      if (isTypedApprovalRequest(err)) {
+        // #372: still no row for the hold — but the card leaves carrying the
+        // closure that writes one the moment the operator answers.
+        attachDecisionAudit(err, auditBase);
+        throw err;
+      }
       if (brokered && err instanceof ApprovalTimeout) {
         // The asymmetric path. Silence is only ever a yes for something the
         // broker already pre-cleared — and that returned long before here — so
@@ -1500,7 +1589,17 @@ export function createInterceptor(
     } catch (err) {
       // #310: same bridge, same rule — the card request is not an approval
       // failure. Everything else below stays fail-closed.
-      if (isTypedApprovalRequest(err)) throw err;
+      // #372: this path (memory-write pipeline) mints cards too — its
+      // operator decision must leave the same audit row as the action-guard
+      // lane, captured at hold time for the same attribution reasons.
+      if (isTypedApprovalRequest(err)) {
+        attachDecisionAudit(err, {
+          type: 'intercept', tool: context.toolName, severity, firewallResult,
+          threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
+          preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
+        });
+        throw err;
+      }
       const failAction = config.failurePolicy[severity];
       log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
       const entry: InterceptAuditEntry = {
