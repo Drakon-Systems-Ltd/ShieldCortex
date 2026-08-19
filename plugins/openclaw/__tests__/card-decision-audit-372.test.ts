@@ -164,6 +164,55 @@ describe('#372 interceptor — a held card carries its own decision writer', () 
     expect(decision!.actionKey).toBe(DANGEROUS_COMMAND);
   });
 
+  it('snapshots args at hold time: in-place mutation cannot forge the binding', async () => {
+    const h = makeHarness();
+    const args: Record<string, unknown> = { command: DANGEROUS_COMMAND };
+    const thrown = await h.handleToolCall({
+      toolName: 'Bash',
+      arguments: args,
+      sessionId: 'sess-A',
+      requireApproval: async () => { throw mintCard(); },
+    }).then(() => null, (err: unknown) => err);
+    const card = thrown as CardError;
+
+    // The attacker's move: mutate the SAME object the interceptor saw, then
+    // let the operator's approval land. A reference capture would bind the
+    // decision row to the rewritten command.
+    args.command = 'ls -la';
+    card.decisionAudit!('approved_once');
+
+    const decision = h.captured[h.captured.length - 1];
+    expect(decision!.actionKey).toBe(DANGEROUS_COMMAND);
+  });
+
+  it('stamps decision time as ts and keeps the hold time as heldAtTs', async () => {
+    const h = makeHarness();
+    const card = await holdCard(h, 'sess-A');
+    const heldTs = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, 10));
+
+    card.decisionAudit!('approved_once');
+
+    const decision = h.captured[h.captured.length - 1];
+    expect(typeof decision!.heldAtTs).toBe('string');
+    expect(decision!.heldAtTs! <= heldTs).toBe(true);
+    expect(decision!.ts > decision!.heldAtTs!).toBe(true);
+  });
+
+  it('the writer refuses an outcome outside the card union at runtime', async () => {
+    const h = makeHarness();
+    const card = await holdCard(h, 'sess-A');
+    const rowsBefore = h.captured.length;
+
+    (card.decisionAudit as unknown as (o: string) => void)('failure_allowed');
+    (card.decisionAudit as unknown as (o: string) => void)('constructor');
+    expect(h.captured.length).toBe(rowsBefore);
+
+    // The junk attempts must not have eaten the one-shot latch.
+    card.decisionAudit!('card_denied');
+    expect(h.captured[h.captured.length - 1]).toMatchObject({ outcome: 'card_denied' });
+  });
+
   it('indexes the decision row into the session guard (#260 can see it)', async () => {
     const h = makeHarness();
     const card = await holdCard(h, 'sess-index');
@@ -367,8 +416,10 @@ describe('#372 plugin — the host decision reaches the audit stream', () => {
 
     expect(() => request.onResolution('allow-once')).not.toThrow();
 
+    // The closure now contains the failure itself (review hardening): the row
+    // is lost, the host sees nothing, and the bridge's own failure warn is the
+    // backstop for throws ABOVE the closure, not inside it.
     expect(auditRows()).toHaveLength(0);
-    expect(warnings.some((w) => /approval decision audit failed/.test(w))).toBe(true);
   });
 
   it('the memory-write pipeline card also writes a decision row (#372 second site)', async () => {

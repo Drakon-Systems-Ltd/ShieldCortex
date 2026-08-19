@@ -3298,8 +3298,8 @@ class TypedApprovalRequest extends Error {
   request: NonNullable<TypedBeforeToolCallResult["requireApproval"]>;
   /** #372 — one-shot audit writer the interceptor hangs on this error at hold
    *  time, carrying the guard's audit base and the session the hold belongs to.
-   *  Absent when the hold came from a path with no guard audit base (an older
-   *  installed interceptor, the memory-write pipeline): then no `onResolution`
+   *  Both mint sites attach it (action-guard and memory-write pipelines).
+   *  Absent only for an older installed interceptor: then no `onResolution`
    *  is wired at all and the card behaves exactly as it did before #372. */
   decisionAudit?: ApprovalDecisionAudit;
 
@@ -3424,7 +3424,7 @@ async function handleTypedBeforeToolCall(
         // not a reason to disturb a decision the operator already made.
         err.request.onResolution = (decision: CardDecision) => {
           try {
-            const outcome = CARD_DECISION_OUTCOME[decision];
+            const outcome = Object.hasOwn(CARD_DECISION_OUTCOME, decision) ? CARD_DECISION_OUTCOME[decision] : undefined;
             if (!outcome) {
               // A decision this build does not know. Say so loudly rather than
               // guess — inventing an outcome would forge the operator's answer.

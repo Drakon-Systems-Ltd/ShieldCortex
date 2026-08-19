@@ -213,6 +213,12 @@ export type ApprovalDecisionOutcome =
   | 'card_timeout'
   | 'card_cancelled';
 
+/** #372 — the runtime mirror of ApprovalDecisionOutcome: the closure crosses a
+ *  plugin boundary, so the union is enforced with a Set, not just the compiler. */
+const CARD_AUDIT_OUTCOMES: ReadonlySet<string> = new Set([
+  'approved_once', 'card_denied', 'card_timeout', 'card_cancelled',
+]);
+
 /** #372 — one-shot writer for the decision a held card eventually receives.
  *  Hung on the thrown approval request by the interceptor; invoked by the
  *  plugin bridge from the host's `onResolution`. Never throws. */
@@ -238,6 +244,9 @@ interface CapturedAuditContext {
 export interface InterceptAuditEntry {
   type: 'intercept';
   tool: string;
+  /** #372 — card decision rows only: when the action was HELD. `ts` on those
+   *  rows is the operator's decision time; the pair bounds the wait. */
+  heldAtTs?: string;
   severity: Severity;
   firewallResult: string;
   threats: string[];
@@ -992,15 +1001,31 @@ export function createInterceptor(
     // keyFor here. A throwing resolver costs the row its key; it must never
     // turn a mintable card into an approval error.
     try { sessionKey = options?.sessionGuard?.keyFor(lastSessionId) ?? undefined; } catch { /* unkeyed row */ }
-    const captured: CapturedAuditContext = { sessionKey, args: lastCallArgs };
+    // Shallow-snapshot the args: reference capture would let in-place mutation
+    // of the params object between hold and resolution rewrite the one
+    // forensic binding this row exists to protect (review nit, both reviewers).
+    const captured: CapturedAuditContext = { sessionKey, args: lastCallArgs ? { ...lastCallArgs } : undefined };
     const held: Omit<InterceptAuditEntry, 'action' | 'outcome'> = { ...auditBase };
     let written = false;
     err.decisionAudit = (outcome) => {
+      // The closure's type says CardAuditOutcome, but it crosses a plugin
+      // boundary — make the union real at runtime rather than trusting the
+      // caller's compiler (defence-in-depth, both reviewers).
+      if (!CARD_AUDIT_OUTCOMES.has(outcome)) return;
       // The host resolves a card once. Enforcing it here is cheaper than
       // trusting it: a duplicate row would double-count in every summary.
       if (written) return;
       written = true;
-      emitAuditWith({ ...held, action: 'require_approval', outcome }, captured);
+      // Never throws, by contract — even if the audit plumbing does. The latch
+      // is consumed either way: never-double-write beats a retried row.
+      try {
+        // ts is the DECISION time; the hold time stays in heldAtTs so
+        // forensics can see both ends of the operator's think.
+        emitAuditWith(
+          { ...held, heldAtTs: held.ts, ts: new Date().toISOString(), action: 'require_approval', outcome },
+          captured,
+        );
+      } catch { /* audit is best-effort; the decision itself already happened */ }
     };
   }
 
