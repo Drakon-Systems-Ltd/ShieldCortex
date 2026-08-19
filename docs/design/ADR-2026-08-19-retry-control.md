@@ -15,6 +15,12 @@ fingerprint (claim ticket), never a spendable record. Operator control surfaces:
 2. TTY `shieldcortex approve --denial <actionId>` (isInteractive-gated) → same grant path.
 Webhook alerts carry actionIds, never spendable tokens. Catastrophic tier: no path, ever.
 
+Scope in this phase is the **Claude Code hook path only**. The OpenClaw interceptor
+(`plugins/openclaw/interceptor.ts`) is out for CARDS *and* for CONSUME: its unattended path
+never reads the #118 store today, and it must not be "helpfully" wired to the retry-control
+store either — a grant minted from a hook denial has no origin binding that means anything on
+that surface. Anyone extending this to the interceptor is writing a new ADR, not a patch.
+
 ## Rollout
 Dark behind `actionGuard.retryCards=false`. Soak gate: ≥3 days on an Edith-class host,
 deny/approve/timeout matrix across ≥3 cron identities, empty-origin, grant-then-newer-DNP,
