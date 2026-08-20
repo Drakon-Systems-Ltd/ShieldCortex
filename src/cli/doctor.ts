@@ -1187,7 +1187,7 @@ export async function checkAutoMemoryHooks(): Promise<CheckResult[]> {
         label,
         status: 'warn',
         message: 'wired in settings.json but runtime gate is off — hook will exit silently every turn',
-        fix: `Run \`shieldcortex setup ${flag}\` to flip the gate, or set autoMemory.enableStop/enableSessionEnd=true in ~/.shieldcortex/config.json`,
+        fix: `Run \`shieldcortex setup ${flag}\` to flip the gate`,
       };
     }
     // gate && !wired
@@ -2616,7 +2616,7 @@ function readShieldcortexPeerRange(pkgJson: string): string | null {
  * Reads the config file directly rather than importing the .mjs helper so
  * doctor doesn't depend on path layout between dist/ and scripts/.
  */
-async function checkAutoMemorySampling(): Promise<CheckResult> {
+export async function checkAutoMemorySampling(): Promise<CheckResult> {
   try {
     const configPath = path.join(getShieldCortexDir(), 'config.json');
     let raw: { autoMemory?: { stopHookSamplingTurns?: number; stopHookSalienceBypass?: boolean } } = {};
@@ -2648,7 +2648,7 @@ async function checkAutoMemorySampling(): Promise<CheckResult> {
       label: 'Auto-memory sampling',
       status: 'warn',
       message: `every ${sampling} turn(s), salience-bypass ${bypass} — sparser than recommended`,
-      fix: 'Edit ~/.shieldcortex/config.json autoMemory.stopHookSamplingTurns (≤ 5 recommended)',
+      fix: 'Run `shieldcortex config --auto-memory-sampling 5` — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2858,7 +2858,7 @@ export async function checkMemoryPlaneEmptyBrain(): Promise<CheckResult> {
         label,
         status: 'fail',
         message: `memory.inject mode=${injectMode} without nativeContract (need sc_only or disable_native_inject)`,
-        fix: 'Set memory.inject.nativeContract to sc_only or disable_native_inject in ~/.shieldcortex/config.json before enabling inject',
+        fix: 'Run `shieldcortex config --memory-inject-contract sc_only` (or `disable_native_inject`) — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
       };
     }
 

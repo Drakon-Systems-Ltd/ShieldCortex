@@ -82,6 +82,28 @@ describe('checkMemoryPlaneEmptyBrain', () => {
     expect(r.message).toMatch(/nativeContract/i);
   });
 
+  it('nativeContract fail fix prescribes the signed CLI flag, never a config.json hand-edit', async () => {
+    writeConfig({
+      openclawAutoMemory: true,
+      memory: { inject: { mode: 'start' } },
+    });
+    const db = openDb();
+    db.prepare(
+      `INSERT INTO memories (title, content, status, sensitivity_level) VALUES ('a','b','active','INTERNAL')`,
+    ).run();
+    db.close();
+    const r = await runCheck();
+    expect(r.status).toBe('fail');
+    const fix = r.fix ?? '';
+    expect(fix).toMatch(/shieldcortex config --memory-inject-contract/);
+    // The fix must never OPEN with an imperative hand-edit verb (#275 class).
+    expect(fix).not.toMatch(/(^|\.\s)(Edit|Add|Set)\b/);
+    // config.json may appear only inside the warning-against-editing clause,
+    // never as the action itself.
+    const withoutWarning = fix.replace(/hand-editing config\.json invalidates its integrity signature/i, '');
+    expect(withoutWarning).not.toMatch(/config\.json/i);
+  });
+
   it('passes with admitted memories and contract', async () => {
     writeConfig({
       openclawAutoMemory: true,

@@ -72,6 +72,7 @@ All notable changes to this project will be documented in this file.
 
 
 ### Fixed
+- Doctor memory-plane / auto-memory Suggested fixes no longer tell operators to hand-edit `config.json` (that invalidates `_sig` and forces defenceMode strict). New signed flags: `shieldcortex config --memory-inject-contract sc_only|disable_native_inject` and `--auto-memory-sampling <n>`.
 - Doctor fail/warn text wraps in full on wide terminals — no mid-sentence ellipsis; width ceiling raised to 240.
 
 ### Security

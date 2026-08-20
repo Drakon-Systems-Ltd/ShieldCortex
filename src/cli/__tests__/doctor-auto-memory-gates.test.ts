@@ -89,4 +89,36 @@ describe('doctor surfaces auto-memory hook gate state (#41)', () => {
     expect(stop?.status).toBe('warn');
     expect(stop?.message).toMatch(/not wired/i);
   });
+
+  it('wired-but-gate-off warn fix prescribes `shieldcortex setup`, never a config.json hand-edit', async () => {
+    writeSettings(true, false);
+    writeGate(false, false);
+    const results = await runChecks();
+    const stop = results.find(r => r.label === 'Auto-memory: Stop hook');
+    expect(stop?.status).toBe('warn');
+    expect(stop?.fix).toMatch(/shieldcortex setup/);
+    // The old fix carried an "or set autoMemory.enableStop/… in
+    // ~/.shieldcortex/config.json" clause — following it invalidated the
+    // `_sig` HMAC and forced defenceMode strict (#275 class).
+    expect(stop?.fix).not.toMatch(/config\.json/i);
+    expect(stop?.fix).not.toMatch(/enableStop|enableSessionEnd/);
+  });
+
+  it('sampling warn fix prescribes the signed --auto-memory-sampling flag, not an Edit of config.json', async () => {
+    // checkAutoMemorySampling reads ~/.shieldcortex/config.json off homedir
+    // (not SHIELDCORTEX_CONFIG_DIR) — seed a sparser-than-recommended cadence.
+    const scDir = path.join(tmpHome, '.shieldcortex');
+    fs.mkdirSync(scDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(scDir, 'config.json'),
+      JSON.stringify({ autoMemory: { stopHookSamplingTurns: 12 } }, null, 2) + '\n',
+    );
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    const mod = await import('../doctor.js');
+    const r = await mod.checkAutoMemorySampling();
+    expect(r.status).toBe('warn');
+    const fix = r.fix ?? '';
+    expect(fix).toMatch(/shieldcortex config --auto-memory-sampling/);
+    expect(fix).not.toMatch(/(^|\.\s)(Edit|Add|Set)\b/);
+  });
 });
