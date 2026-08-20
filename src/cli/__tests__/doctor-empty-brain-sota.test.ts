@@ -82,6 +82,23 @@ describe('checkMemoryPlaneEmptyBrain', () => {
     expect(r.message).toMatch(/nativeContract/i);
   });
 
+  it('a junk nativeContract string is treated as unset, not vouched for (#381 review)', async () => {
+    // coexist_dedup is rejected by the signed CLI and by the runtime — doctor
+    // passing it would make doctor more lenient than the code it vouches for.
+    writeConfig({
+      openclawAutoMemory: true,
+      memory: { inject: { mode: 'start', nativeContract: 'coexist_dedup' } },
+    });
+    const db = openDb();
+    db.prepare(
+      `INSERT INTO memories (title, content, status, sensitivity_level) VALUES ('a','b','active','INTERNAL')`,
+    ).run();
+    db.close();
+    const r = await runCheck();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/nativeContract/i);
+  });
+
   it('nativeContract fail fix prescribes the signed CLI flag, never a config.json hand-edit', async () => {
     writeConfig({
       openclawAutoMemory: true,

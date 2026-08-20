@@ -59,7 +59,10 @@ export function getAutoMemoryConfig() {
     keepSlashCommandProse: typeof overrides.keepSlashCommandProse === 'boolean'
       ? overrides.keepSlashCommandProse
       : DEFAULTS.keepSlashCommandProse,
-    stopHookSamplingTurns: pickPositiveInt(overrides.stopHookSamplingTurns, DEFAULTS.stopHookSamplingTurns),
+    // #381 review: the CLI clamps 1-20 on write, but a pre-CLI or hand-written
+    // value bypasses that — the read side enforces the same ceiling so a
+    // sampling of 10000 cannot silently disable capture-by-sampling.
+    stopHookSamplingTurns: Math.min(pickPositiveInt(overrides.stopHookSamplingTurns, DEFAULTS.stopHookSamplingTurns), 20),
     stopHookSalienceBypass: typeof overrides.stopHookSalienceBypass === 'boolean'
       ? overrides.stopHookSalienceBypass
       : DEFAULTS.stopHookSalienceBypass,
