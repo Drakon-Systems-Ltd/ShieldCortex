@@ -935,7 +935,10 @@ process.stdin.on('end', async () => {
       // per session so the failure is visible (was silent-amnesia in #41).
       logDisabledOnceForSession(
         guardSummary.sessionKey || sessionKeyFor(hookData.session_id),
-        `disabled — set autoMemory.enableStop=true in ~/.shieldcortex/config.json (or re-run \`shieldcortex setup --with-stop-hook\`)`,
+        // #381 class: never prescribe hand-editing the signed config — that
+        // invalidates _sig and forces strict mode. The setup flag is the
+        // signed write path for this gate.
+        `disabled — re-run \`shieldcortex setup --with-stop-hook\` to enable auto-memory (this sets autoMemory.enableStop via the signed config path)`,
       );
       if (guardHealthNote) {
         recordStopTelemetry(startedAt, { exitCode: hookTelemetryExitCode, notes: guardHealthNote });

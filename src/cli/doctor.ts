@@ -2816,7 +2816,11 @@ export async function checkMemoryPlaneEmptyBrain(): Promise<CheckResult> {
     else if (typeof raw.memoryInjectMode === 'string') injectMode = raw.memoryInjectMode as string;
     else if (injectConfigured) injectMode = 'start';
     const nc = inject.nativeContract ?? raw.memoryNativeInjectContract ?? mem.nativeInjectContract;
-    nativeContract = typeof nc === 'string' ? nc : null;
+    // #381 review: only the two values the runtime accepts count as "set".
+    // A junk string (or the rejected coexist_dedup) previously PASSED doctor
+    // and then failed at runtime — doctor must not be more lenient than the
+    // code it vouches for.
+    nativeContract = typeof nc === 'string' && (nc === 'sc_only' || nc === 'disable_native_inject') ? nc : null;
   } catch { /* defaults */ }
 
   const bound = openclawAuto || proactive || injectMode === 'start' || injectMode === 'both';
