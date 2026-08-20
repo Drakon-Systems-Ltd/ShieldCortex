@@ -76,7 +76,7 @@ async function loadModel(): Promise<void> {
       type: 'error',
       error:
         `Embedding model cache looked corrupt (${message}). ` +
-        `${q.detail}. Retrying download once.`,
+        `${q.detail}. Attempting one re-download (process heal latch armed).`,
     });
     extractor = await pipelineFn(
       'feature-extraction',

@@ -287,7 +287,7 @@ async function startMcpServer(dbPath?: string): Promise<void> {
       // #383: worker quarantines a corrupt on-disk weight and retries once.
       // If we still land here, the heal did not recover — operator should run doctor.
       console.error(
-        '[shieldcortex] Model preload failed (will retry on first use; run `shieldcortex doctor` if this repeats):',
+        '[shieldcortex] Model preload failed (worker heals a corrupt cache at most once per process; run `shieldcortex doctor` if this repeats):',
         err instanceof Error ? err.message : err,
       );
     });
