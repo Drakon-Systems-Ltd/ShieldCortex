@@ -10,3 +10,6 @@ export {
   defaultEmbeddingCacheRoot,
   isCorruptModelLoadError,
 } from './model-cache.js';
+export { hasAttemptedModelCacheHeal } from './model-cache.js';
+export { markModelCacheHealAttempted } from './model-cache.js';
+export { resetModelCacheHealLatchForTests } from './model-cache.js';

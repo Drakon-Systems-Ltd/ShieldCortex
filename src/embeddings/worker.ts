@@ -49,7 +49,12 @@ async function loadModel(): Promise<void> {
   // #383: a truncated/corrupt on-disk weight used to fail every launch forever
   // against the same bad bytes. Quarantine once, then let transformers.js
   // re-download. A second failure surfaces — we never loop.
-  const { isCorruptModelLoadError, quarantineEmbeddingOnnx } = await import('./model-cache.js');
+  const {
+    isCorruptModelLoadError,
+    quarantineEmbeddingOnnx,
+    hasAttemptedModelCacheHeal,
+    markModelCacheHealAttempted,
+  } = await import('./model-cache.js');
   try {
     extractor = await pipelineFn(
       'feature-extraction',
@@ -59,6 +64,13 @@ async function loadModel(): Promise<void> {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     if (!isCorruptModelLoadError(message)) throw err;
+    // One heal per worker process — never pile up .bak files or hammer the network.
+    if (hasAttemptedModelCacheHeal()) {
+      throw new Error(
+        `Embedding model cache still corrupt after one heal attempt: ${message}`,
+      );
+    }
+    markModelCacheHealAttempted();
     const q = quarantineEmbeddingOnnx({ reason: 'load-failed' });
     parentPort?.postMessage({
       type: 'error',

@@ -12,7 +12,9 @@
  *  - known size + sha256 of the upstream fp32 ONNX weight
  *  - inspect never throws
  *  - quarantine renames aside (keeps the bad bytes for forensics)
- *  - one re-download attempt is the caller's job (worker load path)
+ *  - sidecar is always invalidated when the weight is quarantined
+ *  - one heal attempt per process (caller uses the latch)
+ *  - doctor wording never claims a live sha when only a sidecar attested
  */
 import { createHash } from 'node:crypto';
 import {
@@ -23,6 +25,7 @@ import {
   renameSync,
   statSync,
   writeFileSync,
+  type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -56,6 +59,8 @@ export type ModelCacheStatus =
   | 'sha_mismatch'
   | 'unreadable';
 
+export type ModelCacheOkVia = 'sidecar' | 'live_sha';
+
 export interface ModelCacheInspection {
   status: ModelCacheStatus;
   cacheDir: string;
@@ -65,6 +70,8 @@ export interface ModelCacheInspection {
   expectedBytes: number;
   expectedSha256: string;
   detail?: string;
+  /** Present only when status === 'ok'. */
+  verifiedVia?: ModelCacheOkVia;
 }
 
 export interface ModelCachePaths {
@@ -93,6 +100,9 @@ export interface ModelCacheSidecar {
   bytes: number;
   modelId: string;
   verifiedAt: string;
+  /** File identity binding — stale sidecar must not green-lie after replace. */
+  mtimeMs: number;
+  ino: number;
 }
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
@@ -118,7 +128,9 @@ export function readModelCacheSidecar(sidecarPath: string): ModelCacheSidecar | 
       typeof raw.sha256 !== 'string' ||
       typeof raw.bytes !== 'number' ||
       typeof raw.modelId !== 'string' ||
-      typeof raw.verifiedAt !== 'string'
+      typeof raw.verifiedAt !== 'string' ||
+      typeof raw.mtimeMs !== 'number' ||
+      typeof raw.ino !== 'number'
     ) {
       return null;
     }
@@ -127,6 +139,8 @@ export function readModelCacheSidecar(sidecarPath: string): ModelCacheSidecar | 
       bytes: raw.bytes,
       modelId: raw.modelId,
       verifiedAt: raw.verifiedAt,
+      mtimeMs: raw.mtimeMs,
+      ino: raw.ino,
     };
   } catch {
     return null;
@@ -138,15 +152,22 @@ export function writeModelCacheSidecar(sidecarPath: string, sidecar: ModelCacheS
   writeFileSync(sidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`, { mode: 0o600 });
 }
 
+function sidecarMatchesFile(sidecar: ModelCacheSidecar, st: Stats): boolean {
+  return (
+    sidecar.bytes === st.size &&
+    sidecar.bytes === EMBEDDING_ONNX_EXPECTED_BYTES &&
+    sidecar.sha256 === EMBEDDING_ONNX_EXPECTED_SHA256 &&
+    sidecar.modelId === EMBEDDING_MODEL_ID &&
+    sidecar.mtimeMs === st.mtimeMs &&
+    sidecar.ino === st.ino
+  );
+}
+
 /**
  * Fast path: size must match. Sha is checked when:
  *  - size already mismatches (skip — status is size_mismatch), or
- *  - no trusted sidecar, or
- *  - sidecar disagrees with expected constants, or
+ *  - no trusted sidecar bound to this inode/mtime, or
  *  - opts.forceSha is true (doctor --deep / post-download verify).
- *
- * A matching sidecar written by us after a verified load lets doctor stay
- * cheap on the happy path without re-hashing 90 MB every run.
  */
 export async function inspectEmbeddingModelCache(
   opts: {
@@ -167,14 +188,15 @@ export async function inspectEmbeddingModelCache(
     return { ...base, status: 'missing', detail: 'model.onnx not present' };
   }
 
-  let bytes: number;
+  let st: Stats;
   try {
-    bytes = statSync(paths.onnxPath).size;
+    st = statSync(paths.onnxPath);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ...base, status: 'unreadable', detail: msg };
   }
 
+  const bytes = st.size;
   if (bytes !== EMBEDDING_ONNX_EXPECTED_BYTES) {
     return {
       ...base,
@@ -185,19 +207,16 @@ export async function inspectEmbeddingModelCache(
   }
 
   const sidecar = readModelCacheSidecar(paths.sidecarPath);
-  const sidecarTrusted =
-    sidecar != null &&
-    sidecar.bytes === EMBEDDING_ONNX_EXPECTED_BYTES &&
-    sidecar.sha256 === EMBEDDING_ONNX_EXPECTED_SHA256 &&
-    sidecar.modelId === EMBEDDING_MODEL_ID;
+  const sidecarTrusted = sidecar != null && sidecarMatchesFile(sidecar, st);
 
   if (sidecarTrusted && !opts.forceSha) {
     return {
       ...base,
       status: 'ok',
       bytes,
-      sha256: sidecar.sha256,
-      detail: 'size + sidecar sha match',
+      sha256: sidecar!.sha256,
+      verifiedVia: 'sidecar',
+      detail: 'size + sidecar attestation match file identity',
     };
   }
 
@@ -214,25 +233,64 @@ export async function inspectEmbeddingModelCache(
     }
     // Refresh sidecar so subsequent doctor runs stay cheap.
     try {
+      // Re-stat after hash in case something replaced the file mid-read.
+      const st2 = statSync(paths.onnxPath);
+      if (st2.size !== EMBEDDING_ONNX_EXPECTED_BYTES) {
+        return {
+          ...base,
+          status: 'size_mismatch',
+          bytes: st2.size,
+          detail: 'model.onnx size changed during verification',
+        };
+      }
       writeModelCacheSidecar(paths.sidecarPath, {
         sha256,
-        bytes,
+        bytes: st2.size,
         modelId: EMBEDDING_MODEL_ID,
         verifiedAt: (opts.now ?? (() => new Date()))().toISOString(),
+        mtimeMs: st2.mtimeMs,
+        ino: st2.ino,
       });
     } catch {
       // Sidecar is an optimisation; integrity already passed.
     }
-    return { ...base, status: 'ok', bytes, sha256, detail: 'size + sha match' };
+    return {
+      ...base,
+      status: 'ok',
+      bytes,
+      sha256,
+      verifiedVia: 'live_sha',
+      detail: 'size + live sha match',
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ...base, status: 'unreadable', bytes, detail: msg };
   }
 }
 
+function moveSidecarAside(sidecarPath: string, destWeightPath: string): void {
+  if (!existsSync(sidecarPath)) return;
+  const dest = `${destWeightPath}.shieldcortex.json`;
+  try {
+    renameSync(sidecarPath, dest);
+  } catch {
+    // Last resort: overwrite sidecar with an invalid marker so it can never
+    // attest the next weight. Prefer rename; this is the honesty backstop.
+    try {
+      writeFileSync(
+        sidecarPath,
+        `${JSON.stringify({ invalidated: true, at: new Date().toISOString() })}\n`,
+        { mode: 0o600 },
+      );
+    } catch {
+      /* ignore — inspect will live-hash if sidecar is unreadable/untrusted */
+    }
+  }
+}
+
 /**
  * Move a suspect weight aside. Keeps the bad bytes for forensics.
- * Returns the quarantine path, or null if the file was already gone / rename failed.
+ * Always invalidates the sidecar when the weight moves (main + EEXIST paths).
  */
 export function quarantineEmbeddingOnnx(
   opts: {
@@ -253,55 +311,83 @@ export function quarantineEmbeddingOnnx(
   const stamp =
     opts.stamp ??
     new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z');
-  const reason = (opts.reason ?? 'suspect').replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 48);
+  // Suffix only — never path-join the reason. Strip dots so ".." cannot appear.
+  const reason = (opts.reason ?? 'suspect').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 48);
   const dest = `${paths.onnxPath}.bak-${reason}-${stamp}`;
 
+  const tryRename = (target: string): boolean => {
+    try {
+      renameSync(paths.onnxPath, target);
+      moveSidecarAside(paths.sidecarPath, target);
+      return true;
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'EEXIST') return false;
+      throw err;
+    }
+  };
+
   try {
-    renameSync(paths.onnxPath, dest);
-    // Sidecar is meaningless without the weight it attests.
-    if (existsSync(paths.sidecarPath)) {
-      try {
-        renameSync(paths.sidecarPath, `${dest}.shieldcortex.json`);
-      } catch {
-        /* ignore */
-      }
+    if (tryRename(dest)) {
+      return {
+        quarantinedPath: dest,
+        onnxPath: paths.onnxPath,
+        detail: `quarantined to ${dest}`,
+      };
+    }
+    const dest2 = `${dest}-${process.pid}`;
+    if (tryRename(dest2)) {
+      return {
+        quarantinedPath: dest2,
+        onnxPath: paths.onnxPath,
+        detail: `quarantined to ${dest2}`,
+      };
     }
     return {
-      quarantinedPath: dest,
+      quarantinedPath: null,
       onnxPath: paths.onnxPath,
-      detail: `quarantined to ${dest}`,
+      detail: 'quarantine rename failed (destination exists)',
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // EEXIST: pick a unique suffix once.
-    if (isNodeError(err) && err.code === 'EEXIST') {
-      const dest2 = `${dest}-${process.pid}`;
-      try {
-        renameSync(paths.onnxPath, dest2);
-        return {
-          quarantinedPath: dest2,
-          onnxPath: paths.onnxPath,
-          detail: `quarantined to ${dest2}`,
-        };
-      } catch (err2) {
-        const msg2 = err2 instanceof Error ? err2.message : String(err2);
-        return { quarantinedPath: null, onnxPath: paths.onnxPath, detail: msg2 };
-      }
-    }
     return { quarantinedPath: null, onnxPath: paths.onnxPath, detail: msg };
   }
 }
 
-/** Load failures that mean "the on-disk weight is garbage", not "network/auth". */
+/**
+ * Load failures that mean "the on-disk weight is garbage", not network/auth.
+ * Kept tight on purpose: over-broad matching would quarantine a healthy weight
+ * on transient native errors (review blocker).
+ */
 export function isCorruptModelLoadError(message: string): boolean {
   const m = message.toLowerCase();
-  if (m.includes('protobuf parsing failed') || m.includes('protobuf')) return true;
+  if (m.includes('protobuf parsing failed')) return true;
   if (m.includes('invalid flatbuffer')) return true;
-  if (m.includes('failed to load model from') || m.includes('load model from')) return true;
-  if (m.includes('onnx') && m.includes('failed')) return true;
-  if (m.includes('file is too small') || m.includes('unexpected eof')) return true;
+  if (m.includes('unexpected eof')) return true;
+  if (m.includes('file is too small')) return true;
   if (m.includes('truncated')) return true;
+  // transformers.js phrasing when the ONNX protobuf itself will not parse:
+  // "Load model from <path> failed:Protobuf parsing failed."
+  // Require both the load-from cue AND a parse/integrity cue.
+  if (m.includes('load model from') && (m.includes('protobuf') || m.includes('parse'))) {
+    return true;
+  }
   return false;
+}
+
+/** Process-level latch: at most one quarantine+redownload heal per worker. */
+let healAttemptedThisProcess = false;
+
+export function hasAttemptedModelCacheHeal(): boolean {
+  return healAttemptedThisProcess;
+}
+
+export function markModelCacheHealAttempted(): void {
+  healAttemptedThisProcess = true;
+}
+
+/** Test-only reset. */
+export function resetModelCacheHealLatchForTests(): void {
+  healAttemptedThisProcess = false;
 }
 
 export function formatModelCacheDoctorMessage(insp: ModelCacheInspection): {
@@ -316,9 +402,17 @@ export function formatModelCacheDoctorMessage(insp: ModelCacheInspection): {
         message: 'model not cached — will download on first recall',
       };
     case 'ok':
+      if (insp.verifiedVia === 'live_sha') {
+        return {
+          status: 'pass',
+          message: `model cached and live-sha verified (${insp.bytes ?? EMBEDDING_ONNX_EXPECTED_BYTES} bytes)`,
+        };
+      }
       return {
         status: 'pass',
-        message: `model cached and verified (${insp.bytes ?? EMBEDDING_ONNX_EXPECTED_BYTES} bytes, sha ok)`,
+        message:
+          `model cached; size + sidecar attestation ok (${insp.bytes ?? EMBEDDING_ONNX_EXPECTED_BYTES} bytes) ` +
+          `— not a live content hash this run`,
       };
     case 'size_mismatch':
     case 'sha_mismatch':
@@ -327,7 +421,7 @@ export function formatModelCacheDoctorMessage(insp: ModelCacheInspection): {
         message:
           `embedding model cache is corrupt (${insp.detail ?? insp.status}) — semantic search/dedup may be degraded until it is re-downloaded`,
         fix:
-          'Remove the bad weight (or let the next preload quarantine it) and re-run a recall, or: ' +
+          'Let the next preload quarantine the bad weight and re-download, or: ' +
           `mv "${insp.onnxPath}" "${insp.onnxPath}.bak-manual" && shieldcortex doctor`,
       };
     case 'unreadable':
