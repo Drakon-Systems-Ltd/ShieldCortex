@@ -45,11 +45,45 @@ async function loadModel(): Promise<void> {
   // user-facing `remember`/`scan` output on a healthy install (#129). fp32 is
   // exactly what it was defaulting to on CPU, so behaviour is unchanged; the
   // defence judge worker pins its dtype the same way.
-  extractor = await pipelineFn(
-    'feature-extraction',
-    'Xenova/all-MiniLM-L6-v2',
-    { dtype: 'fp32' },
-  );
+  //
+  // #383: a truncated/corrupt on-disk weight used to fail every launch forever
+  // against the same bad bytes. Quarantine once, then let transformers.js
+  // re-download. A second failure surfaces — we never loop.
+  const {
+    isCorruptModelLoadError,
+    quarantineEmbeddingOnnx,
+    hasAttemptedModelCacheHeal,
+    markModelCacheHealAttempted,
+  } = await import('./model-cache.js');
+  try {
+    extractor = await pipelineFn(
+      'feature-extraction',
+      'Xenova/all-MiniLM-L6-v2',
+      { dtype: 'fp32' },
+    );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!isCorruptModelLoadError(message)) throw err;
+    // One heal per worker process — never pile up .bak files or hammer the network.
+    if (hasAttemptedModelCacheHeal()) {
+      throw new Error(
+        `Embedding model cache still corrupt after one heal attempt: ${message}`,
+      );
+    }
+    markModelCacheHealAttempted();
+    const q = quarantineEmbeddingOnnx({ reason: 'load-failed' });
+    parentPort?.postMessage({
+      type: 'error',
+      error:
+        `Embedding model cache looked corrupt (${message}). ` +
+        `${q.detail}. Attempting one re-download (process heal latch armed).`,
+    });
+    extractor = await pipelineFn(
+      'feature-extraction',
+      'Xenova/all-MiniLM-L6-v2',
+      { dtype: 'fp32' },
+    );
+  }
 }
 
 async function embed(text: string): Promise<number[]> {

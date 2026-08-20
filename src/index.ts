@@ -284,7 +284,12 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   // Fire-and-forget: failure is fine — searchMemories falls back to FTS-only.
   if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
     preloadModel().catch(err => {
-      console.error('[shieldcortex] Model preload failed (will retry on first use):', err.message);
+      // #383: worker quarantines a corrupt on-disk weight and retries once.
+      // If we still land here, the heal did not recover — operator should run doctor.
+      console.error(
+        '[shieldcortex] Model preload failed (worker heals a corrupt cache at most once per process; run `shieldcortex doctor` if this repeats):',
+        err instanceof Error ? err.message : err,
+      );
     });
   }
 

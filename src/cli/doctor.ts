@@ -4174,33 +4174,21 @@ export async function checkStatePermissions(stateDir: string = getShieldCortexDi
 
 // ── Check 8: Model cache ─────────────────────────────────
 async function checkModelCache(): Promise<CheckResult> {
-  const cacheDir = path.join(os.homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2');
-
-  if (!fs.existsSync(cacheDir)) {
-    return {
-      label: 'Embeddings',
-      status: 'info',
-      message: 'model not cached — will download on first recall',
-    };
-  }
-
+  // #383: "directory non-empty" was a green lie for truncated model.onnx.
+  // Integrity is size (+ trusted sidecar sha, or live sha). Never pass a
+  // corrupt weight; never fail the whole doctor run on a missing optional model.
   try {
-    let totalSize = 0;
-    const entries = fs.readdirSync(cacheDir);
-    for (const entry of entries) {
-      const fullPath = path.join(cacheDir, entry);
-      try {
-        const stat = fs.statSync(fullPath);
-        if (stat.isFile()) totalSize += stat.size;
-      } catch {
-        // Skip
-      }
-    }
-
+    const {
+      inspectEmbeddingModelCache,
+      formatModelCacheDoctorMessage,
+    } = await import('../embeddings/model-cache.js');
+    const insp = await inspectEmbeddingModelCache();
+    const formatted = formatModelCacheDoctorMessage(insp);
     return {
       label: 'Embeddings',
-      status: 'pass',
-      message: `model cached (${formatBytes(totalSize)})`,
+      status: formatted.status,
+      message: formatted.message,
+      ...(formatted.fix ? { fix: formatted.fix } : {}),
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
