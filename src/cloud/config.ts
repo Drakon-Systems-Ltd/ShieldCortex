@@ -1306,6 +1306,73 @@ export function setAutoMemoryEnableConfig(updates: Partial<AutoMemoryEnableConfi
   });
 }
 
+// ── Memory inject contract / auto-memory sampling (signed doctor-fix paths) ──
+
+/** The only legal host native-inject contracts (Memory SOTA Track B). Mirrors
+ *  NATIVE_INJECT_CONTRACT in scripts/lib/inject-pack.mjs, which stays the
+ *  runtime's boundary — normalizeNativeContract there returns null for
+ *  anything else (the retired `coexist_dedup` included). */
+export const NATIVE_INJECT_CONTRACTS = ['sc_only', 'disable_native_inject'] as const;
+export type NativeInjectContract = (typeof NATIVE_INJECT_CONTRACTS)[number];
+
+/**
+ * The SIGNED write path for `memory.inject.nativeContract` — what the
+ * `shieldcortex config --memory-inject-contract` flag calls. Same discipline
+ * as setActionGuardNotifyConfig (#275): routed through mutateRawConfig so the
+ * `_sig` HMAC is recomputed — the hand-edit doctor's empty-brain fix used to
+ * prescribe invalidated the signature and forced defenceMode strict.
+ * Read-modify-write on the inject block: sibling keys (mode, hostId, agentId,
+ * budgets) survive untouched. Deliberately does NOT write the legacy aliases
+ * `memoryNativeInjectContract` / `memory.nativeInjectContract` — every read
+ * surface resolves `memory.inject.nativeContract` first, and minting fresh
+ * copies of a deprecated spelling would just create drift.
+ */
+export function setMemoryInjectContract(value: string): void {
+  if (!(NATIVE_INJECT_CONTRACTS as readonly string[]).includes(value)) {
+    throw new Error(
+      `Invalid native-inject contract "${value}". Legal values: ${NATIVE_INJECT_CONTRACTS.join(', ')}.`,
+    );
+  }
+  mutateRawConfig((raw) => {
+    const memory = raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory)
+      ? raw.memory as Record<string, unknown>
+      : {};
+    const inject = memory.inject && typeof memory.inject === 'object' && !Array.isArray(memory.inject)
+      ? memory.inject as Record<string, unknown>
+      : {};
+    inject.nativeContract = value;
+    memory.inject = inject;
+    raw.memory = memory;
+  });
+}
+
+const AUTO_MEMORY_SAMPLING_MIN = 1;
+const AUTO_MEMORY_SAMPLING_MAX = 20;
+
+/**
+ * The SIGNED write path for `autoMemory.stopHookSamplingTurns` — what the
+ * `shieldcortex config --auto-memory-sampling` flag calls. Same #275
+ * discipline as setMemoryInjectContract: doctor's sampling warn used to say
+ * "Edit ~/.shieldcortex/config.json", and following it tripped the tamper
+ * check into strict mode. Read-modify-write on the autoMemory block so
+ * sibling keys (enableStop, enableSessionEnd, stopHookSalienceBypass)
+ * survive untouched.
+ */
+export function setAutoMemorySamplingTurns(n: number): void {
+  if (!Number.isInteger(n) || n < AUTO_MEMORY_SAMPLING_MIN || n > AUTO_MEMORY_SAMPLING_MAX) {
+    throw new Error(
+      `Invalid sampling cadence "${n}". Provide an integer between ${AUTO_MEMORY_SAMPLING_MIN} and ${AUTO_MEMORY_SAMPLING_MAX} (≤ 5 recommended).`,
+    );
+  }
+  mutateRawConfig((raw) => {
+    const existing = raw.autoMemory && typeof raw.autoMemory === 'object' && !Array.isArray(raw.autoMemory)
+      ? raw.autoMemory as Record<string, unknown>
+      : {};
+    existing.stopHookSamplingTurns = n;
+    raw.autoMemory = existing;
+  });
+}
+
 // ── Tool Response Scan Config ─────────────────────────
 
 export interface ToolResponseScanConfig {

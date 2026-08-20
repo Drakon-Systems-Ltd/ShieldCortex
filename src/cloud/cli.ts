@@ -24,6 +24,9 @@ import {
   setActionGuardNotifyConfig,
   getActionGuardCoreConfig,
   setActionGuardCoreConfig,
+  setMemoryInjectContract,
+  setAutoMemorySamplingTurns,
+  NATIVE_INJECT_CONTRACTS,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -363,6 +366,50 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  // ── Memory plane signed writes (empty-brain / sampling doctor fixes) ──
+  // The SIGNED path for what doctor's memory-plane and auto-memory checks
+  // prescribe. Hand-editing config.json for these keys invalidates the `_sig`
+  // HMAC and forces defenceMode strict — these flags exist so nobody has to.
+
+  const memInjectContractIdx = args.indexOf('--memory-inject-contract');
+  if (memInjectContractIdx !== -1) {
+    const contract = args[memInjectContractIdx + 1];
+    if (!contract || contract.startsWith('--')) {
+      console.error(`Missing value for --memory-inject-contract. Legal values: ${NATIVE_INJECT_CONTRACTS.join(', ')}.`);
+      process.exit(1);
+    }
+    try {
+      setMemoryInjectContract(contract);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    console.log(`Memory inject nativeContract set to ${contract} (signed write — config re-signed, integrity check stays green).`);
+    changed = true;
+  }
+
+  const autoMemSamplingIdx = args.indexOf('--auto-memory-sampling');
+  if (autoMemSamplingIdx !== -1) {
+    const rawTurns = args[autoMemSamplingIdx + 1];
+    if (!rawTurns || rawTurns.startsWith('--')) {
+      console.error('Missing value for --auto-memory-sampling. Provide an integer between 1 and 20 (≤ 5 recommended).');
+      process.exit(1);
+    }
+    const turns = Number(rawTurns);
+    if (!Number.isInteger(turns) || turns < 1 || turns > 20) {
+      console.error(`Invalid value for --auto-memory-sampling: "${rawTurns}". Provide an integer between 1 and 20 (≤ 5 recommended).`);
+      process.exit(1);
+    }
+    try {
+      setAutoMemorySamplingTurns(turns);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    console.log(`Auto-memory Stop sampling set to every ${turns} turn(s) (signed write).`);
+    changed = true;
+  }
+
   if (args.includes('--allow-revoke-by-source')) {
     setRevokeBySourceEnabled(true);
     console.log('Revoke-by-source ENABLED. `forget --fromSource` can now bulk-delete a source\'s memories (trust-hierarchy ACL still applies). Disable again with --disallow-revoke-by-source when done.');
@@ -415,6 +462,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
     console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
     console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
+    console.log('  --memory-inject-contract <sc_only|disable_native_inject>  Set the memory-inject native contract (signed write)');
+    console.log('  --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('');
     console.log('LLM Verification:');
