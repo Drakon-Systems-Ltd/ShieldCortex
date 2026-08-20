@@ -54,6 +54,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#383 — corrupt embedding model cache no longer fails silently.** A truncated
+  `~/.cache/shieldcortex/models/.../onnx/model.onnx` (Edith ran 3.5 months on a
+  50 MB stub vs the known-good 90 MB weight) made every preload log-and-retry the
+  same bad bytes forever while `doctor` still printed green for "model cached".
+  Doctor now verifies size (+ trusted sidecar sha); the embedding worker
+  quarantines a corrupt weight on load failure and retries download once.
+
 ### Added
 - **Memory SOTA Track C:** capture distill provider (OpenAI-compatible + Anthropic), fail-closed extract path on stop/session-end, L1 salience cap, no silent regex fallback (#350 / epic #347).
 - **Memory SOTA Track C (OAuth):** distill resolves Hermes OAuth on disk (xai-oauth → openai-codex) when no API key is set — fleet hosts reuse existing login; `SHIELDCORTEX_DISTILL_OAUTH=0` disables.
