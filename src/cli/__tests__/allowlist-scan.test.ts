@@ -250,7 +250,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
     writeHermesCron({ jobs: [{ prompt: `python3 ${scriptPath}` }] });
     const code = await runAllowlistScan([], deps({ interactive: true, prompt: answers(['y', '']) }));
     expect(code).toBe(0);
-    expect(logs.join('\n')).toContain('changed');
+    expect(logs.join('\n').toLowerCase()).toContain('changed');
     expect(stored).toHaveLength(1);
     expect((stored[0] as Record<string, unknown>).sha256).toBe(hashScriptSource(SOURCE));
   });

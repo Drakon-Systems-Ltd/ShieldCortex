@@ -28,6 +28,19 @@
 
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
+import {
+  getWidth,
+  chip,
+  renderPinCard,
+  renderBatchIdentity,
+  shortSourceLabel,
+  sanitiseDisplayField,
+  wrapText,
+  basenameOf,
+  defaultColorStyle,
+  NO_STYLE,
+  supportsColor,
+} from './term-ui.js';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { isInteractive } from './approve.js';
 import { pinReviewedScript, MAX_REVIEWABLE_BYTES, type AllowlistDeps } from './allowlist.js';
@@ -475,84 +488,113 @@ export function markCronDenials(items: ScanItem[], report: CronDenialReport | nu
 
 // ── Rendering ───────────────────────────────────────────────
 
-function statusPaint(status: ScanStatus): string {
-  if (status === 'new') return `${YELLOW}new${RESET}`;
-  if (status === 'changed') return `${YELLOW}changed${RESET}`;
-  if (status === 'current') return `${GREEN}current${RESET}`;
-  if (status === 'missing') return `${RED}missing${RESET}`;
-  return `${RED}too_large${RESET}`;
+function statusPaint(status: ScanStatus, style = supportsColor() ? defaultColorStyle() : NO_STYLE): string {
+  return chip(status, style);
 }
 
 function renderSummary(items: ScanItem[], sources?: CronSources): string {
+  const width = getWidth();
+  const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
   const lines: string[] = [];
   if (sources) {
     for (const s of [sources.hermes, sources.openclaw, sources.openclawDb]) {
       if (s.status === 'absent') continue;
       if (s.status === 'ok') {
-        lines.push(`${DIM}source ok: ${s.path}${RESET}`);
+        lines.push(...wrapText(`${style.dim}source ok: ${sanitiseDisplayField(s.path)}${style.reset}`, width));
       } else if (s.status === 'invalid_json') {
-        lines.push(`${RED}source INVALID JSON (did not scan): ${s.path}${RESET}`);
+        lines.push(...wrapText(`${style.red}source INVALID JSON (did not scan): ${sanitiseDisplayField(s.path)}${style.reset}`, width));
       } else if (s.status === 'schema_mismatch') {
-        lines.push(`${RED}source SCHEMA MISMATCH (did not scan): ${s.path}${RESET}`);
+        lines.push(...wrapText(`${style.red}source SCHEMA MISMATCH (did not scan): ${sanitiseDisplayField(s.path)}${style.reset}`, width));
       } else {
-        lines.push(`${RED}source UNREADABLE (did not scan): ${s.path}${RESET}`);
+        lines.push(...wrapText(`${style.red}source UNREADABLE (did not scan): ${sanitiseDisplayField(s.path)}${style.reset}`, width));
       }
     }
     if (sources.openclawCronUnverifiable) {
-      // Both absent while OpenClaw is installed. Absent sources are normally
-      // silent; this pair is the one case where silence would be the bug.
-      lines.push(
-        `${RED}OpenClaw is installed but NO cron source is readable — discovery incomplete, not empty:${RESET}`,
-      );
-      lines.push(`${RED}  absent: ${sources.openclaw.path}${RESET}`);
-      lines.push(`${RED}  absent: ${sources.openclawDb.path}${RESET}`);
+      lines.push(`${style.red}OpenClaw is installed but NO cron source is readable — discovery incomplete, not empty:${style.reset}`);
+      lines.push(...wrapText(`${style.red}  absent: ${sanitiseDisplayField(sources.openclaw.path)}${style.reset}`, width));
+      lines.push(...wrapText(`${style.red}  absent: ${sanitiseDisplayField(sources.openclawDb.path)}${style.reset}`, width));
     }
   }
   if (items.length === 0) {
     lines.push(
-      `${DIM}Reviewed-script scan — no scripts discovered from readable Hermes/OpenClaw cron jobs ` +
-        `(absolute or ~/ paths with script extensions only; relative names are not extracted).${RESET}`,
+      ...wrapText(
+        `${style.dim}Reviewed-script scan — no scripts discovered from readable Hermes/OpenClaw cron jobs ` +
+          `(absolute or ~/ paths with script extensions only; relative names are not extracted).${style.reset}`,
+        width,
+      ),
     );
     return lines.join('\n');
   }
   const count = (s: ScanStatus): number => items.filter((i) => i.status === s).length;
+  const reviewN = count('new') + count('changed');
+  lines.push(`${style.bold}allowlist scan${style.reset}`);
   lines.push(
-    `${BOLD}Reviewed-script scan${RESET} — ${items.length} script(s) discovered: ` +
-      `${count('current')} current · ${count('new')} new · ${count('changed')} changed · ` +
-      `${count('missing')} missing · ${count('too_large')} too large`,
+    ...wrapText(
+      `${items.length} found · ${count('current')} current · ${reviewN} review · ` +
+        `${count('missing')} missing · ${count('too_large')} too large`,
+      width,
+    ),
   );
   lines.push('');
   for (const i of items) {
-    const notes: string[] = [i.sources.join(', ')];
-    if (i.sha256) notes.push(`sha256 ${i.sha256.slice(0, 12)}…`);
-    if (i.status === 'changed' && i.pinnedSha256) notes.push(`pinned ${i.pinnedSha256.slice(0, 12)}…`);
-    if (i.status === 'missing') notes.push('path does not resolve — cannot pin');
-    if (i.status === 'too_large') notes.push('>256KB — never folded, nothing to exempt');
-    if (i.networkHint) notes.push(`${YELLOW}network?${RESET}`);
-    if (i.deniedNote) notes.push(`${YELLOW}${i.deniedNote}${RESET}`);
-    lines.push(`  ${statusPaint(i.status)}  ${BOLD}${i.path}${RESET}`);
-    lines.push(`     ${DIM}${notes.join(' · ')}${RESET}`);
+    lines.push(
+      ...renderBatchIdentity(
+        {
+          status: i.status,
+          path: i.path,
+          sha256: i.sha256,
+          networkHint: i.networkHint,
+          deniedNote: Boolean(i.deniedNote),
+        },
+        { width, style },
+      ),
+    );
+    if (i.deniedNote) {
+      lines.push(...wrapText(`${style.yellow}${sanitiseDisplayField(i.deniedNote)}${style.reset}`, width, 2, 2));
+    }
   }
   return lines.join('\n');
 }
 
-function renderReviewItem(item: ScanItem, index: number, total: number): string {
-  const lines: string[] = [
-    '',
-    `${BOLD}── ${index}/${total} · ${item.status === 'changed' ? 'CHANGED' : 'NEW'} · ${item.path}${RESET}`,
-  ];
-  const meta: string[] = [`sha256 ${(item.sha256 ?? '').slice(0, 16)}…`];
-  if (item.status === 'changed' && item.pinnedSha256) meta.push(`was ${item.pinnedSha256.slice(0, 16)}…`);
-  meta.push(`sources: ${item.sources.join(', ')}`);
-  if (item.networkHint) meta.push(`${YELLOW}network calls likely (advisory sniff)${RESET}`);
-  lines.push(`   ${DIM}${meta.join(' · ')}${RESET}`);
-  if (item.deniedNote) lines.push(`   ${YELLOW}${item.deniedNote}${RESET}`);
-  if (item.preview) {
-    lines.push(`   ${DIM}┄┄ first ${PREVIEW_MAX_LINES} lines ┄┄${RESET}`);
-    for (const l of item.preview.split('\n')) lines.push(`   ${DIM}│${RESET} ${l}`);
-    lines.push(`   ${DIM}┄┄${RESET}`);
+const VIEW_PAGE_LINES = 12;
+
+function previewPages(preview: string | undefined): string[][] {
+  if (!preview) return [];
+  const all = preview.split('\n');
+  const pages: string[][] = [];
+  for (let i = 0; i < all.length; i += VIEW_PAGE_LINES) {
+    pages.push(all.slice(i, i + VIEW_PAGE_LINES));
   }
-  return lines.join('\n');
+  return pages;
+}
+
+function renderReviewItem(
+  item: ScanItem,
+  index: number,
+  total: number,
+  previewPage = 0,
+): string {
+  const width = getWidth();
+  const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
+  const pages = previewPages(item.preview);
+  const pageLines = previewPage > 0 && previewPage <= pages.length ? pages[previewPage - 1] : undefined;
+  return renderPinCard(
+    {
+      index,
+      total,
+      status: item.status === 'changed' ? 'changed' : 'new',
+      path: item.path,
+      sha256: item.sha256,
+      pinnedSha256: item.pinnedSha256,
+      sources: item.sources,
+      networkHint: item.networkHint,
+      deniedNote: item.deniedNote,
+      previewLines: pageLines,
+      previewPage: pageLines ? previewPage : undefined,
+      previewTotalLines: item.preview ? item.preview.split('\n').length : undefined,
+    },
+    { width, style },
+  ).join('\n');
 }
 
 // ── Interactive review ──────────────────────────────────────
@@ -595,31 +637,54 @@ export async function reviewScanItems(items: ScanItem[], deps: ScanDeps = {}): P
   }
 
   const ask = deps.prompt ?? ttyPrompt;
+  const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
   for (let i = 0; i < reviewable.length; i++) {
     const item = reviewable[i];
-    log(renderReviewItem(item, i + 1, reviewable.length));
-    const answer = (await ask(`  [y] pin / [n] skip / [q] quit > `)).trim().toLowerCase();
-    if (answer === 'q' || answer === 'quit') {
-      result.quit = true;
-      log(`${DIM}Stopped — ${result.pinned} pinned this run stay pinned; the rest fold as usual.${RESET}`);
+    let previewPage = 0;
+    const pages = previewPages(item.preview);
+    // re-prompt loop for same item (view paging)
+    for (;;) {
+      log(renderReviewItem(item, i + 1, reviewable.length, previewPage));
+      const answer = (await ask(`> `)).trim().toLowerCase();
+      if (answer === 'q' || answer === 'quit') {
+        result.quit = true;
+        log(`${style.dim}Stopped — ${result.pinned} pinned this run stay pinned; the rest fold as usual.${style.reset}`);
+        return result;
+      }
+      if (answer === 'v' || answer === 'view') {
+        if (pages.length === 0) {
+          log(`${style.dim}no source preview available${style.reset}`);
+          continue;
+        }
+        if (previewPage >= pages.length) {
+          // exhausted — further v is skip (default-deny, no hang)
+          result.skipped += 1;
+          log(`${style.dim}no more source — skipped${style.reset}`);
+          break;
+        }
+        previewPage += 1;
+        continue;
+      }
+      if (answer === 'y' || answer === 'yes') {
+        const note = (await ask('note (optional, why trusted): ')).trim() || undefined;
+        const pin = pinReviewedScript(item.path, note, {
+          ...deps,
+          ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
+        });
+        if (pin.ok) {
+          result.pinned += 1;
+          log(`  ${style.green}✓${style.reset} pinned ${style.bold}${basenameOf(pin.entry.path)}${style.reset} · edit re-gates`);
+        } else {
+          result.failed += 1;
+          err(`  ✗ ${pin.error}`);
+        }
+        break;
+      }
+      // empty / n / other / EOF-as-empty → skip
+      result.skipped += 1;
       break;
     }
-    if (answer !== 'y' && answer !== 'yes') {
-      result.skipped += 1;
-      continue;
-    }
-    const note = (await ask('  note (optional, why is this trusted): ')).trim() || undefined;
-    const pin = pinReviewedScript(item.path, note, {
-      ...deps,
-      ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
-    });
-    if (pin.ok) {
-      result.pinned += 1;
-      log(`  ${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET} — any edit re-gates it.`);
-    } else {
-      result.failed += 1;
-      err(`  ✗ ${pin.error}`);
-    }
+    if (result.quit) break;
   }
   return result;
 }
@@ -790,9 +855,17 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
       return 1;
     }
 
-    // Show the same previews the per-item loop would before batch approve.
-    for (let i = 0; i < needsReview.length; i++) {
-      log(renderReviewItem(needsReview[i], i + 1, needsReview.length));
+    // Compact identity only — no N×40 source walls on --yes batch.
+    const batchStyle = supportsColor() ? defaultColorStyle() : NO_STYLE;
+    const batchWidth = getWidth();
+    for (const item of needsReview) {
+      log(renderBatchIdentity({
+        status: item.status,
+        path: item.path,
+        sha256: item.sha256,
+        networkHint: item.networkHint,
+        deniedNote: Boolean(item.deniedNote),
+      }, { width: batchWidth, style: batchStyle }).join('\n'));
     }
     const ask = deps.prompt ?? ttyPrompt;
     const answer = (

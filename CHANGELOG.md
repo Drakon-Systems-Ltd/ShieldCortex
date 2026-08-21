@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Terminal UX pass (mobile SSH first):** shared `src/cli/term-ui.ts` width/wrap/box/chip/verdict primitives (40-col floor, no new deps). `allowlist scan` review cards are decision-first — no 40-line source wall by default; `[v]iew` pages 12 sanitised lines; `[y]/[n]/[q]` default-deny unchanged. `--yes` batch uses compact identity rows. `shieldcortex update` ends with a closing VERDICT panel (OK / NEEDS ATTENTION / FAILED) from a step ledger; narrow terminals drop spinner redraw junk; `paint()` honours `NO_COLOR` / `TERM=dumb`. Design lock: `docs/design/2026-08-21-terminal-ux.md`.
+
 ### Fixed
 - **#386 — content ≠ intent for package-install on write tools; honest human-auth copy.**
   Forensic writes that *mention* a global install (Friday: log after a real deny)
