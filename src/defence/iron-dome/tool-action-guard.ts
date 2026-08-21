@@ -895,83 +895,30 @@ const PACKAGE_INSTALLERS = /^(?:npm|yarn|pnpm|bun|pip\d?|pipx|gem|cargo|apt|apt-
 const NPM_FAMILY = /^(?:npm|yarn|pnpm|bun)$/i;
 const INSTALL_VERB = /^(?:install|add|i|isntall|isnt|in|ins|inst|insta|instal)$/i;
 const GLOBAL_FLAG = /^(?:\-g|--global|--location=global)$/i;
-/** Local to the install disposer — do NOT add these to COMMAND_WRAPPER. */
-const INSTALL_LAUNCHERS = /^(?:npx|pnpx|corepack)$/i;
-const INTERPRETER_EXEC_API_RE = /\b(?:os\.system|os\.popen|subprocess\.(?:run|call|Popen|check_output|check_call)|(?:child_process\.)?(?:exec(?:File)?(?:Sync)?|spawn(?:Sync)?))\s*\(/i;
-
-function hasInstallGlobalVocabulary(text: string): boolean {
-  return /\b(?:npm|yarn|pnpm|bun)\b/i.test(text)
-    && /(?:\binstall\b|\badd\b|\-g\b|--global|--location=global|\bglobal\s+add\b)/i.test(text);
-}
-
-function restHasGlobalFlag(rest: readonly string[]): boolean {
-  return rest.some((a, idx) =>
-    GLOBAL_FLAG.test(a)
-    || a === 'global'
-    || (a === '--location' && String(rest[idx + 1] ?? '').replace(/^=/, '') === 'global')
-  );
-}
-
-function npmFamilyInstallGlobalFromTokens(tokens: readonly string[], start: number): boolean {
-  const base = commandBaseName(tokens[start] ?? '');
-  if (!NPM_FAMILY.test(base)) return false;
-  const rest = tokens.slice(start + 1);
-  const hasInstall = rest.some(a => INSTALL_VERB.test(a));
-  const yarnGlobalAdd = base.toLowerCase() === 'yarn'
-    && rest.some((a, idx) => a === 'global' && INSTALL_VERB.test(rest[idx + 1] ?? ''));
-  return (hasInstall && restHasGlobalFlag(rest)) || yarnGlobalAdd;
-}
-
-function stripOuterQuotes(tok: string): string {
-  if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) {
-    return tok.slice(1, -1);
-  }
-  return tok;
-}
-
-/** String / argv-list literals passed to interpreter exec APIs. */
-function collectInterpreterExecBodies(text: string): { bodies: string[]; hadNonLiteral: boolean } {
-  const bodies: string[] = [];
-  let hadNonLiteral = false;
-  const callRe = /\b(?:os\.system|os\.popen|subprocess\.(?:run|call|Popen|check_output|check_call)|(?:child_process\.)?(?:exec(?:File)?(?:Sync)?|spawn(?:Sync)?))\s*\(/gi;
-  let m: RegExpExecArray | null;
-  while ((m = callRe.exec(text)) !== null) {
-    const taken = takeParenBody(text, m.index + m[0].length, m.index + m[0].length);
-    const arg = taken.body;
-    const strLits = [...arg.matchAll(/(['"])([\s\S]*?)\1/g)].map(x => x[2]);
-    const list = arg.match(/\[([\s\S]*?)\]/);
-    const listParts = list
-      ? [...list[1].matchAll(/(['"])((?:\\.|(?!\1).)*)\1/g)].map(x => x[2])
-      : [];
-    if (listParts.length > 0) bodies.push(listParts.join(' '));
-    // spawn("npm", ["install", "-g", "x"]) — binary is the first string, argv is the list.
-    if (listParts.length > 0 && strLits.length > 0 && strLits[0] !== listParts[0]) {
-      bodies.push([strLits[0], ...listParts].join(' '));
-    }
-    for (const s of strLits) bodies.push(s);
-    const trimmed = arg.trim();
-    if (/^[A-Za-z_][\w.]*$/.test(trimmed)) hadNonLiteral = true;
-    else if (trimmed && strLits.length === 0 && !list) hadNonLiteral = true;
-  }
-  return { bodies, hadNonLiteral };
-}
 
 /**
  * #386 — install-package-global must be an INVOCATION, not vocabulary.
  * Write-content and shell DATA args often quote package installs in logs
  * (Friday: forensic note after a real deny). Same discipline as
  * gitForcePushInvoked: tokenise, command-position only, recurse into
- * bash -c / interpreter exec string programs; fail closed on eval/$,
- * non-literal exec args, and unparsed exec APIs that still carry the vocab.
+ * bash -c / os.system string programs; fail closed on eval/$.
  */
 function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
-  if (depth === 0 && INTERPRETER_EXEC_API_RE.test(text)) {
-    const { bodies, hadNonLiteral } = collectInterpreterExecBodies(text);
-    for (const body of bodies) {
-      if (body && packageInstallGlobalInvoked(body, depth + 1)) return true;
-    }
-    if ((hadNonLiteral || bodies.length === 0) && hasInstallGlobalVocabulary(text)) return true;
+  // Explicit interpreter / process APIs that run a string or argv containing a
+  // global install. Order of install vs global flag does not matter.
+  // Fail-closed on these sinks: write-time authoring of "run this install" is intent.
+  // Sinks: python os/subprocess, node child_process, bare exec/spawn (incl. .execSync after require()).
+  if (/(?:os\.(?:system|popen)|subprocess\.(?:run|call|Popen|check_call|check_output)|child_process\.(?:exec|execSync|spawn|spawnSync)|\.exec(?:Sync|File|FileSync)?|\.spawn(?:Sync)?|(?:^|[^\w.])(?:exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)\s*\()/i.test(text)
+      && /\b(?:npm|yarn|pnpm|bun|npx|corepack)\b/i.test(text)
+      && /\b(?:install|add|i|isntall|in|ins|inst|insta|instal)\b/i.test(text)
+      && /(?:\s-g\b|\s--global\b|--location=global|\bglobal\s+add\b)/i.test(text)) {
+    return true;
+  }
+  // cmd = "…install -g…"; os.system(cmd)  — variable indirection
+  if (/(?:os\.system|os\.popen|subprocess\.(?:run|call|Popen|check_call|check_output))\s*\(\s*[A-Za-z_]\w*\s*\)/.test(text)
+      && /(?:npm|yarn|pnpm|bun)[^;\n]{0,80}(?:install|add)[^;\n]{0,40}(?:-g|--global|--location=global)/i.test(text)) {
+    return true;
   }
   if (depth < MAX_INLINE_RECURSION) {
     for (const body of collectExecutableBodies(text)) {
@@ -979,9 +926,14 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
     }
   }
   for (const stmt of disposerStatements(text)) {
-    if (!/\b(?:npm|yarn|pnpm|bun)\b/i.test(stmt)) continue;
+    if (!/\b(?:npm|yarn|pnpm|bun|npx|corepack)\b/i.test(stmt)) continue;
     if (/\beval\b/.test(stmt)) return true;
-    const tokens = tokeniseStatement(stmt).map(stripOuterQuotes);
+    const tokens = tokeniseStatement(stmt).map(tok => {
+      if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) {
+        return tok.slice(1, -1);
+      }
+      return tok;
+    });
     if (depth < MAX_INLINE_RECURSION) {
       for (let i = 0; i < tokens.length; i++) {
         const b = commandBaseName(tokens[i]);
@@ -999,22 +951,25 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i].startsWith('$') && gitAtCommandPosition(tokens, i)) return true;
       const base = commandBaseName(tokens[i]);
-      if (INSTALL_LAUNCHERS.test(base) && gitAtCommandPosition(tokens, i)) {
-        for (let k = i + 1; k < tokens.length; k++) {
-          if (tokens[k].startsWith('-')) continue;
-          if (npmFamilyInstallGlobalFromTokens(tokens, k)) return true;
-          break;
-        }
-      }
-      if (!NPM_FAMILY.test(base)) continue;
+      // npx/corepack often wrap package managers — treat as installer family.
+      const isNpmFamily = NPM_FAMILY.test(base) || /^(?:npx|corepack)$/i.test(base);
+      if (!isNpmFamily) continue;
       if (!gitAtCommandPosition(tokens, i)) continue;
-      if (npmFamilyInstallGlobalFromTokens(tokens, i)) return true;
+      const rest = tokens.slice(i + 1);
+      const hasInstall = rest.some(a => INSTALL_VERB.test(a));
+      const hasGlobal = rest.some((a, idx) =>
+        GLOBAL_FLAG.test(a)
+        || a === 'global'
+        || (a === '--location' && String(rest[idx + 1] ?? '').replace(/^=/, '') === 'global')
+      );
+      const yarnGlobalAdd = base.toLowerCase() === 'yarn'
+        && rest.some((a, idx) => a === 'global' && INSTALL_VERB.test(rest[idx + 1] ?? ''));
+      if ((hasInstall && hasGlobal) || yarnGlobalAdd) return true;
     }
   }
   return false;
 }
 
-/** Non-global host/system package install invocation (apt/pip/brew/…). */
 function packageInstallInvoked(text: string, depth = 0): boolean {
   if (packageInstallGlobalInvoked(text, depth)) return true;
   if (depth > MAX_INLINE_RECURSION + 2) return true;
@@ -3996,12 +3951,6 @@ function scanWriteContentPayload(content: string): {
       if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
       if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;
       if (!seen.has(m.signal)) { seen.add(m.signal); dangerous.push(m); }
-    }
-    // Regex lookarounds miss argv-list / split spawn forms. If the disposer
-    // confirms a real invocation, propose the signal anyway.
-    if (!seen.has('install-package-global') && packageInstallGlobalInvoked(text)) {
-      seen.add('install-package-global');
-      dangerous.push({ signal: 'install-package-global', span: 'install-package-global' });
     }
   });
   return { catastrophic, dangerous };
