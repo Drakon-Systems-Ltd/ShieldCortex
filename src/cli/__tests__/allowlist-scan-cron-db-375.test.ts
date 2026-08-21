@@ -76,6 +76,28 @@ function buildStore(
   }
 }
 
+
+
+
+/** Paths may soft/hard-wrap for 40-col TUI; assert against whitespace-collapsed logs.
+ *  macOS realpath often adds a `/private` prefix — accept both forms. */
+function flatLogs(logs: string[]): string {
+  return logs.join('\n').replace(/\s+/g, '');
+}
+function normPath(path: string): string {
+  const p = path.replace(/\s+/g, '');
+  return p.startsWith('/private/') ? p.slice('/private'.length) : p;
+}
+function expectLogPath(logs: string[], path: string): void {
+  const hay = flatLogs(logs);
+  const needle = path.replace(/\s+/g, '');
+  const ok =
+    hay.includes(needle) ||
+    hay.includes(normPath(needle)) ||
+    hay.includes(`/private${normPath(needle)}`);
+  expect(ok).toBe(true);
+}
+
 describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
   const NOW = 1_760_000_000_000;
   let dir: string;
@@ -139,7 +161,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     const code = await runAllowlistScan([], deps());
     expect(code).toBe(3);
     expect(logs.join('\n')).toContain('openclaw-cron-db');
-    expect(logs.join('\n')).toContain(realpathSync(scriptPath));
+    expectLogPath(logs, realpathSync(scriptPath));
     expect(stored).toEqual([]);
   });
 
@@ -201,7 +223,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
 
     const code = await runAllowlistScan([], deps());
     expect(code).toBe(1);
-    expect(logs.join('\n')).toContain(dbPath);
+    expectLogPath([...logs, ...errs], dbPath);
     expect(`${logs.join('\n')}\n${errs.join('\n')}`).toMatch(/could not look|not readable|incomplete/i);
   });
 
@@ -231,7 +253,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     expect(code).toBe(1);
     expect(stored).toEqual([]);
     expect(logs.join('\n')).toContain('UNREADABLE');
-    expect(errs.join('\n')).toContain(dbPath);
+    expect(errs.join('\n').replace(/\s+/g, '')).toContain(String(dbPath).replace(/\s+/g, ''));
   });
 
   test('a cron_jobs table missing a column we read exits 1 as schema_mismatch', async () => {
@@ -266,7 +288,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     });
     const code = await runAllowlistScan(['--openclaw-cron-db', elsewhere], deps({ openclawDbPath: undefined }));
     expect(code).toBe(3);
-    expect(logs.join('\n')).toContain(realpathSync(scriptPath));
+    expectLogPath(logs, realpathSync(scriptPath));
   });
 
   // -- Denied-first ordering ------------------------------------
@@ -299,7 +321,16 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     expect(code).toBe(3);
     const out = logs.join('\n');
     expect(out).toContain('guard-denied in the last 7 days (job: inbox sweep)');
-    expect(out.indexOf(realpathSync(scriptPath))).toBeLessThan(out.indexOf(realpathSync(quiet)));
+    // Paths may wrap at 40 cols — compare on whitespace-collapsed text and
+    // tolerate macOS /private realpath prefix.
+    const flat = flatLogs(logs);
+    const denied = normPath(realpathSync(scriptPath));
+    const other = normPath(realpathSync(quiet));
+    const di = Math.max(flat.indexOf(denied), flat.indexOf(`/private${denied}`));
+    const oi = Math.max(flat.indexOf(other), flat.indexOf(`/private${other}`));
+    expect(di).toBeGreaterThanOrEqual(0);
+    expect(oi).toBeGreaterThanOrEqual(0);
+    expect(di).toBeLessThan(oi);
     // The denial surface never reaches the review list.
     expect(out).not.toContain('act-0000000000000001');
   });
@@ -323,8 +354,8 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     const code = await runAllowlistScan(['--yes'], deps({ interactive: true, prompt: answers(['approve']) }));
     expect(code).toBe(1);
     expect(stored).toEqual([]);
-    expect(errs.join('\n')).toContain('openclaw-cron-db');
-    expect(errs.join('\n')).toContain('without --yes');
+    expect(errs.join('\n').replace(/\s+/g, '')).toContain(String('openclaw-cron-db').replace(/\s+/g, ''));
+    expect(errs.join('\n').replace(/\s+/g, '')).toContain(String('without --yes').replace(/\s+/g, ''));
   });
 
   test('--yes works again once the SQLite backfill has been reviewed per item', async () => {

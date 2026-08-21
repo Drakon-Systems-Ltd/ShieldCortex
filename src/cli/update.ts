@@ -19,6 +19,18 @@ import { fileURLToPath } from 'url';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 import { describeRunFailure, sanitiseForReport } from '../integrations/child-output.js';
 import type { CapturedError } from '../integrations/child-output.js';
+import {
+  getWidth,
+  supportsColor,
+  supportsUnicode,
+  renderUpdatePanel,
+  deriveUpdateVerdict,
+  defaultColorStyle,
+  NO_STYLE,
+  type VerdictKind,
+  type UpdatePanelRow,
+  sanitiseDisplayField,
+} from './term-ui.js';
 
 // ── ANSI ────────────────────────────────────────────────────
 
@@ -37,7 +49,8 @@ const ANSI = {
 const isTTY = Boolean(process.stdout.isTTY);
 
 function paint(color: keyof typeof ANSI, s: string): string {
-  return isTTY ? `${ANSI[color]}${s}${ANSI.reset}` : s;
+  // Color follows NO_COLOR / TERM=dumb / FORCE_COLOR — not bare isTTY alone.
+  return supportsColor() ? `${ANSI[color]}${s}${ANSI.reset}` : s;
 }
 
 // ── Progress runner ─────────────────────────────────────────
@@ -46,7 +59,7 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 const LABEL_WIDTH = 24;
 
 interface StepResult {
-  status: 'ok' | 'warn' | 'skip';
+  status: 'ok' | 'warn' | 'skip' | 'failed' | 'blocked' | 'unproven';
   summary?: string;
   /**
    * What the failing child process actually said (#221). `summary` is padded
@@ -68,15 +81,17 @@ export async function step(
   let frame = 0;
   let timer: NodeJS.Timeout | null = null;
 
-  if (isTTY) {
+  const width = getWidth();
+  const narrow = width < 60;
+  if (isTTY && !narrow) {
     process.stdout.write(`  ${paint('cyan', SPINNER_FRAMES[0])}  ${padded}`);
     timer = setInterval(() => {
       frame = (frame + 1) % SPINNER_FRAMES.length;
       process.stdout.write(`\r  ${paint('cyan', SPINNER_FRAMES[frame])}  ${padded}`);
     }, 80);
     timer.unref();
-  } else {
-    process.stdout.write(`  ◦  ${label}…\n`);
+  } else if (!isTTY) {
+    process.stdout.write(`  ·  ${label}…\n`);
   }
 
   try {
@@ -94,11 +109,12 @@ export async function step(
     const summary = result.summary
       ? paint('gray', result.summary).padEnd(LABEL_WIDTH + 9)
       : ''.padEnd(LABEL_WIDTH);
-    if (isTTY) {
+    if (isTTY && !narrow) {
       process.stdout.write(`\r  ${icon}  ${padded}  ${summary}  ${paint('gray', elapsed)}\n`);
     } else {
+      const mark = result.status === 'ok' ? '✓' : result.status === 'warn' ? '!' : '·';
       process.stdout.write(
-        `  ${result.status === 'ok' ? '✓' : result.status === 'warn' ? '⚠' : '·'}  ${label}: ${result.summary ?? 'done'} (${elapsed})\n`,
+        `  ${mark}  ${label}: ${result.summary ?? 'done'} (${elapsed})\n`,
       );
     }
     // #221: print what the child actually said, indented under its step. This
@@ -687,36 +703,36 @@ async function stepStatePermissions(): Promise<StepResult> {
  * disk, so importing here loads the FRESHLY INSTALLED reconcile/self-check —
  * the new version verifies itself with its own logic, not last release's.
  */
-export async function stepVerifyProtection(home: string): Promise<void> {
-  // #248: `isRealtimePluginRegistered` collapses "genuinely not installed"
-  // and "installs.json exists but could not be confirmed" into the same
-  // `false`, which made an unreadable registry return here silently — the
-  // protection self-check never ran, and the run still ended green with no
-  // hint it had been skipped. Read the split result so "unreadable" gets
-  // its own branch instead of falling through the same gate as "absent".
+export async function stepVerifyProtection(home: string): Promise<StepResult> {
+  // #248: split unreadable vs absent. Caller owns process.exitCode from ledger.
   const registration = readRealtimePluginRegistration(home);
   if (registration.unreadable) {
     process.stdout.write('\n');
+    const detail = registration.detail ?? 'could not confirm install state';
     process.stdout.write(
-      `  ${paint('yellow', '!')}  ${paint('gray', `protection check skipped — plugin registry unreadable: ${registration.detail ?? 'could not confirm install state'}`)}\n`,
+      `  ${paint('yellow', '!')}  ${paint('gray', `protection check skipped — plugin registry unreadable: ${detail}`)}\n`,
     );
-    return;
+    return { status: 'unproven', summary: 'registry unreadable', detail: [detail] };
   }
-  if (!registration.registered) return;
+  if (!registration.registered) return { status: 'skip', summary: 'plugin not registered' };
   process.stdout.write('\n');
   try {
     const { reconcileOpenClawPluginState, formatReconcileReport } = await import('../setup/openclaw-reconcile.js');
-    // Expected version read fresh from disk — after the npm step this is the
-    // NEW build, and pinning expectations to the in-process (old) version
-    // would certify the very staleness this step exists to end.
     const result = await reconcileOpenClawPluginState({ home, expectedVersion: readPackageVersion() });
     for (const line of formatReconcileReport(result)) {
       process.stdout.write(`  ${line}\n`);
     }
-    if (result.applied && !result.ok) process.exitCode = 1;
+    if (result.applied && !result.ok) {
+      return { status: 'failed', summary: 'reconcile not ok' };
+    }
+    if (!result.ok) {
+      return { status: 'unproven', summary: 'protection unproven' };
+    }
+    return { status: 'ok', summary: 'protected' };
   } catch (err) {
     const msg = sanitiseForReport(err instanceof Error ? err.message : String(err), { home });
     process.stdout.write(`  ${paint('gray', `protection check skipped — ${msg}`)}\n`);
+    return { status: 'unproven', summary: 'protection check skipped', detail: [msg] };
   }
 }
 
@@ -737,11 +753,14 @@ export async function runUpdate(): Promise<void> {
   }
 
   let mainUpdated = false;
+  let npmStatus: StepResult['status'] = 'ok';
   try {
     const npmStep = await stepNpmPackage(currentVersion, latest, force);
     mainUpdated = npmStep.updated;
+    npmStatus = npmStep.result?.status ?? 'ok';
   } catch {
     // npm failure already surfaced by step(); continue with reconcile.
+    npmStatus = 'failed';
   }
 
   // Verify (and self-heal) the native DB binding after the install completes.
@@ -755,9 +774,7 @@ export async function runUpdate(): Promise<void> {
 
   footer(Date.now() - flowStart, mainUpdated, latest);
 
-  // The verdict comes AFTER the footer so the last thing on screen is the one
-  // line that answers "am I protected?" — not a spinner summary.
-  await stepVerifyProtection(home);
+  const protection = await stepVerifyProtection(home);
 
   // If the binding couldn't be auto-healed, print the exact copy-paste fix.
   if (engineResult.remediation) {
@@ -768,9 +785,7 @@ export async function runUpdate(): Promise<void> {
     process.stdout.write('\n');
   }
 
-  // Edith / OpenClaw hosts: bare cwd basename "workspace" collides with
-  // canonical owner-repo keys. Heal after every update so doctor KEY warn
-  // does not reappear the moment new rows land under the legacy key.
+  let keyAttention = false;
   try {
     const { fixProjectKeyCollisions } = await import('./doctor.js');
     const heal = await fixProjectKeyCollisions();
@@ -779,6 +794,7 @@ export async function runUpdate(): Promise<void> {
         `  ${paint('green', '✓')}  ${paint('gray', `project keys: remapped ${heal.applied} legacy row(s)`)}\n`,
       );
     } else if (heal.skippedAmbiguous > 0) {
+      keyAttention = true;
       process.stdout.write(
         `  ${paint('yellow', '⚠')}  ${paint('gray', `project keys: ${heal.skippedAmbiguous} ambiguous collision(s) — run shieldcortex doctor --fix-project-keys`)}\n`,
       );
@@ -787,9 +803,7 @@ export async function runUpdate(): Promise<void> {
     /* update must not fail on project-key heal */
   }
 
-  // #309 — after the package is current, surface new/changed cron-referenced
-  // scripts for TTY batch review. Headless updates only print a pointer line;
-  // never auto-pin and never fail the update if discovery is weird.
+  // #309 — allowlist review / pointer before the closing panel.
   try {
     const { maybeReviewAllowlistAfterUpdate } = await import('./allowlist-scan.js');
     await maybeReviewAllowlistAfterUpdate({
@@ -801,4 +815,59 @@ export async function runUpdate(): Promise<void> {
 
   maybePrint411Notice(currentVersion, mainUpdated);
   await maybePrintDashboardHint();
+
+  // Closing panel — last write (design lock v3).
+  const rows: UpdatePanelRow[] = [
+    { label: 'package', status: npmStatus === 'failed' ? 'failed' : npmStatus === 'warn' ? 'warn' : 'ok' },
+    { label: 'engine', status: engineResult.remediation ? 'warn' : 'ok' },
+    {
+      label: 'selfchk',
+      status:
+        protection.status === 'failed' ? 'failed' :
+        protection.status === 'unproven' ? 'unproven' :
+        protection.status === 'skip' ? 'skipped' :
+        protection.status === 'warn' ? 'warn' : 'ok',
+    },
+  ];
+  const details: string[] = [];
+  if (protection.detail?.length) {
+    for (const d of protection.detail) details.push(`selfchk: ${d}`);
+  }
+  if (engineResult.remediation) details.push('engine: database binding needs manual rebuild');
+  if (keyAttention) details.push('keys: ambiguous project-key collisions remain');
+
+  const failed = protection.status === 'failed' || npmStatus === 'failed';
+  const attention =
+    keyAttention ||
+    Boolean(engineResult.remediation) ||
+    protection.status === 'unproven' ||
+    protection.status === 'warn' ||
+    protection.status === 'blocked';
+
+  if (failed) process.exitCode = 1;
+  const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
+  const verdict: VerdictKind = deriveUpdateVerdict({
+    exitCode,
+    failed,
+    attention,
+  });
+
+  const next: string[] = [];
+  if (attention || failed) next.push('shieldcortex doctor --ai');
+  if (keyAttention) next.push('shieldcortex doctor --fix-project-keys');
+
+  const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
+  const panel = renderUpdatePanel(
+    {
+      fromVersion: currentVersion,
+      toVersion: latest.version || currentVersion,
+      verdict,
+      rows,
+      details,
+      next,
+    },
+    { width: getWidth(), style, unicode: supportsUnicode() },
+  );
+  process.stdout.write('\n');
+  for (const line of panel) process.stdout.write(`${line}\n`);
 }
