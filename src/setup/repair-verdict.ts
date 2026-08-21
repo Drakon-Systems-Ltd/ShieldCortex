@@ -121,6 +121,18 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
       };
   }
 
+  // Canary proved enforcement live, version OK, but boot roster unread.
+  // Not unprotected — never scream FAILED for "install healthy, load line missing".
+  // versionProof===false already returned unprotected above; remaining is true|undefined.
+  if (sc?.canaryProof === true && sc.rosterState === 'unproven') {
+    return {
+      outcome: 'protected-unproven',
+      headline:
+        'Enforcement is live (probe denied and audited). Boot roster unread — install looks healthy; load line not proven.',
+      nextCommand: 'openclaw gateway restart',
+    };
+  }
+
   if (input.readinessUnproven) {
     return {
       outcome: 'unknown',

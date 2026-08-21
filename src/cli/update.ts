@@ -717,18 +717,23 @@ export async function stepVerifyProtection(home: string): Promise<StepResult> {
   if (!registration.registered) return { status: 'skip', summary: 'plugin not registered' };
   process.stdout.write('\n');
   try {
-    const { reconcileOpenClawPluginState, formatReconcileReport } = await import('../setup/openclaw-reconcile.js');
+    const {
+      reconcileOpenClawPluginState,
+      formatReconcileReport,
+      protectionLedgerFromReconcile,
+    } = await import('../setup/openclaw-reconcile.js');
     const result = await reconcileOpenClawPluginState({ home, expectedVersion: readPackageVersion() });
-    for (const line of formatReconcileReport(result)) {
+    // Compact by default on update (mobile-first). Full forensic dump only with --verbose.
+    const compact = !process.argv.includes('--verbose') && process.env.SHIELDCORTEX_VERBOSE !== '1';
+    for (const line of formatReconcileReport(result, { compact })) {
       process.stdout.write(`  ${line}\n`);
     }
-    if (result.applied && !result.ok) {
-      return { status: 'failed', summary: 'reconcile not ok' };
-    }
-    if (!result.ok) {
-      return { status: 'unproven', summary: 'protection unproven' };
-    }
-    return { status: 'ok', summary: 'protected' };
+    const ledger = protectionLedgerFromReconcile(result);
+    return {
+      status: ledger.status === 'warn' ? 'warn' : ledger.status,
+      summary: ledger.summary,
+      detail: ledger.detail,
+    };
   } catch (err) {
     const msg = sanitiseForReport(err instanceof Error ? err.message : String(err), { home });
     process.stdout.write(`  ${paint('gray', `protection check skipped — ${msg}`)}\n`);
@@ -821,7 +826,7 @@ export async function runUpdate(): Promise<void> {
     { label: 'package', status: npmStatus === 'failed' ? 'failed' : npmStatus === 'warn' ? 'warn' : 'ok' },
     { label: 'engine', status: engineResult.remediation ? 'warn' : 'ok' },
     {
-      label: 'selfchk',
+      label: 'guard',
       status:
         protection.status === 'failed' ? 'failed' :
         protection.status === 'unproven' ? 'unproven' :
@@ -830,12 +835,17 @@ export async function runUpdate(): Promise<void> {
     },
   ];
   const details: string[] = [];
+  // Prefer the plain-English ledger headline once — not "selfchk:" jargon.
   if (protection.detail?.length) {
-    for (const d of protection.detail) details.push(`selfchk: ${d}`);
+    for (const d of protection.detail) {
+      if (d.startsWith('next:')) continue;
+      details.push(d);
+    }
   }
   if (engineResult.remediation) details.push('engine: database binding needs manual rebuild');
   if (keyAttention) details.push('keys: ambiguous project-key collisions remain');
 
+  // Unproven is attention, not failure. Only true unprotected / npm fail exit 1.
   const failed = protection.status === 'failed' || npmStatus === 'failed';
   const attention =
     keyAttention ||
@@ -853,7 +863,14 @@ export async function runUpdate(): Promise<void> {
   });
 
   const next: string[] = [];
-  if (attention || failed) next.push('shieldcortex doctor --ai');
+  // Prefer next from protection detail (openclaw gateway restart) over generic doctor when present.
+  const nextFromGuard = (protection.detail ?? [])
+    .filter((d) => d.startsWith('next:'))
+    .map((d) => d.replace(/^next:\s*/, ''));
+  for (const n of nextFromGuard) if (!next.includes(n)) next.push(n);
+  if ((attention || failed) && !next.some((n) => n.includes('doctor'))) {
+    next.push('shieldcortex doctor --ai');
+  }
   if (keyAttention) next.push('shieldcortex doctor --fix-project-keys');
 
   const style = supportsColor() ? defaultColorStyle() : NO_STYLE;

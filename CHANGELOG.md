@@ -66,6 +66,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **`shieldcortex update` protection footer (mobile-first):** compact reconcile report by default — English headline + short proof chips (`guard live · v4.54.10 · roster unread`), no double `FAILED` essay, no full self-check reason dump. Full forensic report with `--verbose` / `SHIELDCORTEX_VERBOSE=1`. Closing VERDICT panel labels the row `guard` (not `selfchk`). Canary-live + roster-unread is **NEEDS ATTENTION** (exit 0), not FAILED (exit 1). True unprotected (roster absent / version downgrade) still fails closed.
+
+### Fixed
+- **False FAILED after successful canary:** when the live enforcement probe denies+audits and the build matches, but the gateway boot roster cannot be read, repair/update no longer scream `FAILED: could not confirm loaded AND enforcing` with a duplicated SQLite/roster essay. Outcome is `protected-unproven` with next step `openclaw gateway restart`.
+- **Canary log noise on update:** synthetic canary no longer prints raw Action Guard block lines for the expected probe deny during `update` (still audited).
+
 ### Added
 - **Memory SOTA Track C:** capture distill provider (OpenAI-compatible + Anthropic), fail-closed extract path on stop/session-end, L1 salience cap, no silent regex fallback (#350 / epic #347).
 - **Memory SOTA Track C (OAuth):** distill resolves Hermes OAuth on disk (xai-oauth → openai-codex) when no API key is set — fleet hosts reuse existing login; `SHIELDCORTEX_DISTILL_OAUTH=0` disables.

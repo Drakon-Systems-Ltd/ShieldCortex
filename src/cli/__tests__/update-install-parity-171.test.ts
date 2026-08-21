@@ -63,11 +63,12 @@ describe('#171 — update ends by verifying protection, like repair', () => {
   });
 
   it('an applied-but-failed verify sets a non-zero exit code — no false all-clear', () => {
-    // v3 TUI: step returns failed; runUpdate sets process.exitCode from ledger.
+    // Ledger maps true unprotected → failed; unproven (canary live / roster unread)
+    // stays attention. runUpdate exits 1 only on protection.status === 'failed'.
     const stepBody = bodyOf('stepVerifyProtection');
     const runBody = bodyOf('runUpdate');
-    expect(stepBody).toMatch(/result\.applied && !result\.ok/);
-    expect(stepBody).toMatch(/status:\s*'failed'/);
+    expect(stepBody).toMatch(/protectionLedgerFromReconcile/);
+    expect(stepBody).toMatch(/ledger\.status/);
     expect(runBody).toMatch(/process\.exitCode\s*=\s*1/);
     expect(runBody).toMatch(/protection\.status === 'failed'/);
   });
