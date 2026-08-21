@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
 
+## [4.54.11] - 2026-08-21
+
+**Update footer honesty patch.** Phone-SSH readable protection check after `shieldcortex update` — no double FAILED essay when the guard is live.
+
+### Changed
+- **`shieldcortex update` protection footer (mobile-first) (#390):** compact reconcile report by default — English headline + short proof chips (`guard live · v4.54.11 · roster unread`), no double `FAILED` essay, no full self-check reason dump. Full forensic report with `--verbose` / `SHIELDCORTEX_VERBOSE=1`. Closing VERDICT panel labels the row `guard` (not `selfchk`). Canary-live + roster-unread is **NEEDS ATTENTION** (exit 0), not FAILED (exit 1). True unprotected (roster absent / version downgrade) still fails closed.
+
+### Fixed
+- **False FAILED after successful canary (#390):** when the live enforcement probe denies+audits and the build matches, but the gateway boot roster cannot be read, repair/update no longer scream `FAILED: could not confirm loaded AND enforcing` with a duplicated SQLite/roster essay. Outcome is `protected-unproven` with next step `openclaw gateway restart`.
+- **Canary log noise on update (#390):** synthetic canary no longer prints raw Action Guard block lines for the expected probe deny during `update` (still audited).
+
 ## [4.54.10] - 2026-08-21
 
 **Mobile terminal UX + guard honesty patch.** Ships the phone-SSH readable CLI pass, content≠intent install FP fix, corrupt embedding-model heal, and doctor inject-contract nits that landed on main after 4.54.9.
@@ -65,13 +76,6 @@ All notable changes to this project will be documented in this file.
 - SDKs: no client API change this cut — leave 0.x unchanged intentional.
 
 ## [Unreleased]
-
-### Changed
-- **`shieldcortex update` protection footer (mobile-first):** compact reconcile report by default — English headline + short proof chips (`guard live · v4.54.10 · roster unread`), no double `FAILED` essay, no full self-check reason dump. Full forensic report with `--verbose` / `SHIELDCORTEX_VERBOSE=1`. Closing VERDICT panel labels the row `guard` (not `selfchk`). Canary-live + roster-unread is **NEEDS ATTENTION** (exit 0), not FAILED (exit 1). True unprotected (roster absent / version downgrade) still fails closed.
-
-### Fixed
-- **False FAILED after successful canary:** when the live enforcement probe denies+audits and the build matches, but the gateway boot roster cannot be read, repair/update no longer scream `FAILED: could not confirm loaded AND enforcing` with a duplicated SQLite/roster essay. Outcome is `protected-unproven` with next step `openclaw gateway restart`.
-- **Canary log noise on update:** synthetic canary no longer prints raw Action Guard block lines for the expected probe deny during `update` (still audited).
 
 ### Added
 - **Memory SOTA Track C:** capture distill provider (OpenAI-compatible + Anthropic), fail-closed extract path on stop/session-end, L1 salience cap, no silent regex fallback (#350 / epic #347).
