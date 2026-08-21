@@ -422,15 +422,47 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
  * and the self-check passed, and points a dry-run operator at the consent env
  * needed to actually remediate.
  */
-export function formatReconcileReport(result: ReconcileExecResult): string[] {
+export interface FormatReconcileReportOptions {
+  /**
+   * Operator-facing short form (mobile / update footer). Headline + short
+   * proof chips + one next step. Full forensic dump only when false/omitted
+   * Update passes compact unless --verbose or SHIELDCORTEX_VERBOSE=1.
+   */
+  compact?: boolean;
+}
+
+function shortProofChips(result: ReconcileExecResult): string {
+  const sc = result.selfCheck;
+  const bits: string[] = [];
+  if (sc) {
+    if (sc.canaryProof) bits.push('guard live');
+    else if (sc.canary?.ran) bits.push('guard unproven');
+    const verStep = result.stepResults.find((s) => s.kind === 'openclaw-update' && s.ok);
+    if (verStep) {
+      const m = verStep.detail.match(/(\d+\.\d+\.\d+)/);
+      if (m) bits.push(`v${m[1]}`);
+    } else if (result.postVerdict?.onDiskVersion) {
+      bits.push(`v${result.postVerdict.onDiskVersion}`);
+    }
+    if (sc.rosterState === 'loaded') bits.push('roster ok');
+    else if (sc.rosterState === 'absent') bits.push('roster absent');
+    else bits.push('roster unread');
+  }
+  const pruned = result.stepResults.find((s) => s.kind === 'prune-duplicate-dirs' && s.ok);
+  if (pruned) bits.push('pruned dups');
+  const reload = result.stepResults.find((s) => s.kind === 'gateway-reload' && s.ok);
+  if (reload) bits.push('gateway reloaded');
+  return bits.filter(Boolean).join(' · ');
+}
+
+export function formatReconcileReport(
+  result: ReconcileExecResult,
+  opts?: FormatReconcileReportOptions,
+): string[] {
   const lines: string[] = [];
   const { verdict } = result;
 
-  // #156: the operator's question first, in English. The evidence still follows
-  // in full — this codebase has spent a week learning not to hide evidence —
-  // but it stops being the headline. An operator wants to know whether they are
-  // protected and what the single next thing is; they should not have to parse
-  // "roster proof"/"plugins_json"/"the 4.25.4 class" to find out.
+  // Always compute the English headline first (#156).
   const summary = summariseRepair({
     applied: result.applied,
     canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
@@ -448,6 +480,24 @@ export function formatReconcileReport(result: ReconcileExecResult): string[] {
     ...(result.postVerdict ? { postState: result.postVerdict.state } : {}),
   });
   lines.push(...renderRepairHeadline(summary));
+
+  // Compact operator path (update footer / mobile): no double FAIL essay.
+  if (opts?.compact) {
+    const chips = shortProofChips(result);
+    if (chips) lines.push(`   ${chips}`);
+    // One short post-state line when useful — never dump full reasons twice.
+    if (result.postVerdict && result.postVerdict.state !== 'healthy') {
+      lines.push(`   state  ${result.postVerdict.state}`);
+    } else if (result.applied && result.postVerdict?.state === 'healthy' && summary.outcome === 'protected-unproven') {
+      lines.push('   state  installed · enabled · load line unread');
+    }
+    // Do NOT print ✗ FAILED when outcome is merely unproven.
+    if (summary.outcome === 'unprotected') {
+      lines.push('   status unprotected');
+    }
+    return lines;
+  }
+
   lines.push('');
 
   lines.push(`Plugin load state: ${verdict.state} [${verdict.severity}]`);
@@ -484,19 +534,72 @@ export function formatReconcileReport(result: ReconcileExecResult): string[] {
     for (const r of result.postVerdict.reasons) lines.push(`  • ${r}`);
     lines.push('');
   }
-  if (result.ok) {
-    lines.push('✓ reconciled: plugin confirmed loaded (roster) and enforcing (canary).');
-  } else {
-    lines.push('✗ FAILED: could not confirm the plugin is loaded AND enforcing.');
+  if (result.ok || summary.outcome === 'protected' || summary.outcome === 'protected-unproven') {
+    if (result.ok) {
+      lines.push('✓ reconciled: plugin confirmed loaded (roster) and enforcing (canary).');
+    } else {
+      // Unproven is not FAILED — keep evidence without a red banner.
+      lines.push(`⚠ ${summary.headline}`);
+    }
+  } else if (summary.outcome === 'unprotected') {
+    lines.push('✗ FAILED: plugin is not protecting this gateway.');
     for (const m of result.messages) {
-      // Never echo the PRE-remediation state under the failure banner — that
-      // is the exact false red #145 documents. Post-state and self-check
-      // messages carry the current truth.
+      if (m.startsWith('state before remediation')) continue;
+      if (/fail|not confirmed|not run|did not|absent|OLDER/i.test(m)) lines.push(`  ${m}`);
+    }
+  } else {
+    lines.push(`⚠ ${summary.headline}`);
+    for (const m of result.messages) {
       if (m.startsWith('state before remediation')) continue;
       if (/fail|not confirmed|not run|did not/i.test(m)) lines.push(`  ${m}`);
     }
   }
   return lines;
+}
+
+/** Map reconcile+self-check to the update step ledger without false FAILED. */
+export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
+  status: 'ok' | 'unproven' | 'failed' | 'warn';
+  summary: string;
+  detail: string[];
+  outcome: ReturnType<typeof summariseRepair>['outcome'];
+} {
+  const summary = summariseRepair({
+    applied: result.applied,
+    canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
+    readinessUnproven: result.stepResults.some(s => s.kind === 'gateway-reload' && /readiness (timed out|could not be observed)/.test(s.detail)),
+    ...(result.selfCheck
+      ? {
+        selfCheck: {
+          ok: result.selfCheck.ok,
+          rosterState: result.selfCheck.rosterState,
+          canaryProof: result.selfCheck.canaryProof,
+          versionProof: result.selfCheck.versionProof,
+        },
+      }
+      : {}),
+    ...(result.postVerdict ? { postState: result.postVerdict.state } : {}),
+  });
+  const detail: string[] = [summary.headline];
+  if (summary.nextCommand) detail.push(`next: ${summary.nextCommand}`);
+  if (summary.outcome === 'protected') {
+    return { status: 'ok', summary: 'protected', detail, outcome: summary.outcome };
+  }
+  if (summary.outcome === 'unprotected') {
+    return { status: 'failed', summary: 'unprotected', detail, outcome: summary.outcome };
+  }
+  if (summary.outcome === 'protected-unproven') {
+    // Do not hardcode Friday-class chips — other unproven classes exist
+    // (roster loaded, canary not consented). Prefer the English headline.
+    const chip = shortProofChips(result);
+    return {
+      status: 'unproven',
+      summary: chip || 'protection unproven',
+      detail,
+      outcome: summary.outcome,
+    };
+  }
+  return { status: 'unproven', summary: 'protection unproven', detail, outcome: summary.outcome };
 }
 
 /**

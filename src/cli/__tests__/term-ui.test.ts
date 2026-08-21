@@ -130,14 +130,14 @@ describe('renderUpdatePanel + verdict', () => {
       verdict: 'NEEDS ATTENTION',
       rows: [
         { label: 'package', status: 'ok' },
-        { label: 'selfchk', status: 'unproven' },
+        { label: 'guard', status: 'unproven' },
       ],
-      details: ['selfchk: roster could not be read'],
+      details: ['Enforcement is live; roster unread'],
       next: ['shieldcortex doctor --ai'],
     }, { width: 40, style: NO_STYLE, unicode: false });
     const text = lines.join('\n');
     expect(text).toMatch(/VERDICT  NEEDS ATTENTION/);
-    expect(text).toMatch(/selfchk\s+unproven/);
+    expect(text).toMatch(/guard\s+unproven/);
     expect(text).toMatch(/detail/);
     expect(text).toMatch(/shieldcortex doctor --ai/);
     for (const l of lines) {

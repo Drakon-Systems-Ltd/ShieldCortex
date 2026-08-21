@@ -581,7 +581,11 @@ export async function dispatchCanaryThroughInstalledInterceptor(
 
   let interceptor: ReturnType<InterceptorLikeModule['createInterceptor']>;
   try {
-    interceptor = mod.createInterceptor(resolveBoxInterceptorConfig(home, mod.DEFAULT_CONFIG), benignPipeline, { evaluateToolCall: deps.evaluator });
+    // Quiet logger: canary deny is expected. Dumping action-guard BLOCKED on
+    // stderr during `update` scares customers into thinking the upgrade failed.
+    const baseCfg: any = resolveBoxInterceptorConfig(home, mod.DEFAULT_CONFIG);
+    const quietCfg = { ...baseCfg, logger: { info: () => {}, warn: () => {} } };
+    interceptor = mod.createInterceptor(quietCfg, benignPipeline, { evaluateToolCall: deps.evaluator });
   } catch (err) {
     return { dispatched: false, detail: `failed to construct the installed interceptor: ${errMsg(err)}` };
   }

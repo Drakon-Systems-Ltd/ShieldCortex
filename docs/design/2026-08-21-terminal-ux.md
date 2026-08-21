@@ -196,3 +196,10 @@ Optional adopt shared `getWidth`/`wrapText`. No check-logic change required in v
 2. `allowlist-scan` summary + cards + prompt `v` paging  
 3. `update` narrow steps + end panel from ledger  
 4. CHANGELOG + PR
+
+## Follow-on (landed): update protection footer
+
+- Compact `formatReconcileReport({ compact: true })` on `shieldcortex update`.
+- Canary-live + roster-unread → `protected-unproven` / NEEDS ATTENTION, never double FAILED.
+- Quiet canary logger (no raw Action Guard block scare line on stderr for the probe).
+- `--verbose` restores full forensic dump for repair-class diagnosis.

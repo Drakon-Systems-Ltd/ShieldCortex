@@ -115,6 +115,19 @@ describe('#156 — no internal vocabulary reaches the headline', () => {
     }
   });
 
+  
+  it('canary live + roster unread is protected-unproven, never unprotected/FAILED', () => {
+    const v = summariseRepair({
+      applied: true,
+      canaryConsented: true,
+      selfCheck: { ok: false, rosterState: 'unproven', canaryProof: true, versionProof: true },
+    });
+    expect(v.outcome).toBe('protected-unproven');
+    expect(v.headline).toMatch(/Enforcement is live|probe denied/i);
+    expect(v.headline).not.toMatch(/FAILED|Not protected/i);
+    expect(v.nextCommand).toMatch(/gateway restart/);
+  });
+
   it('never claims protection without BOTH proofs — the words changed, the standard did not', () => {
     for (const c of cases) {
       const v = summariseRepair(c);
