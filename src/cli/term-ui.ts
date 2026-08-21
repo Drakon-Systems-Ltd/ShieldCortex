@@ -361,8 +361,12 @@ export function renderBatchIdentity(item: {
   const sha = item.sha256 ? item.sha256.slice(0, 12) + '…' : '';
   const srcFull = (item.sources ?? []).map(sanitiseDisplayField).join(',');
   const line1 = `${chip(item.status, style)}  ${style.bold}${base}${style.reset}`;
-  const line2 = [truncatePath(path, Math.max(12, width - 2)), sha, srcFull, ...flags].filter(Boolean).join(' · ');
-  return [line1, ...wrapText(`${style.dim}${line2}${style.reset}`, width, 2, 2)];
+  // Full path wrapped (macOS tests + operators need the canonical path visible;
+  // never rely on truncatePath alone in the scan summary).
+  const out = [line1, ...wrapText(path, width, 2, 2)];
+  const meta = [sha, srcFull, ...flags].filter(Boolean).join(' · ');
+  if (meta) out.push(...wrapText(`${style.dim}${meta}${style.reset}`, width, 2, 2));
+  return out;
 }
 
 /** Closed-vocab status tokens allowed inside update panel frames. */
