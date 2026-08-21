@@ -868,7 +868,10 @@ export async function runUpdate(): Promise<void> {
     .filter((d) => d.startsWith('next:'))
     .map((d) => d.replace(/^next:\s*/, ''));
   for (const n of nextFromGuard) if (!next.includes(n)) next.push(n);
-  if ((attention || failed) && !next.some((n) => n.includes('doctor'))) {
+  // Prefer the single best next. If guard already named a restart, don't stack doctor on 40-col.
+  if ((attention || failed) && next.length === 0) {
+    next.push('shieldcortex doctor --ai');
+  } else if (failed && !next.some((n) => n.includes('doctor'))) {
     next.push('shieldcortex doctor --ai');
   }
   if (keyAttention) next.push('shieldcortex doctor --fix-project-keys');

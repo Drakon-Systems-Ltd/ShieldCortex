@@ -426,7 +426,7 @@ export interface FormatReconcileReportOptions {
   /**
    * Operator-facing short form (mobile / update footer). Headline + short
    * proof chips + one next step. Full forensic dump only when false/omitted
-   * or SHIELDCORTEX_UPDATE=1 / --verbose is set by the caller.
+   * Update passes compact unless --verbose or SHIELDCORTEX_VERBOSE=1.
    */
   compact?: boolean;
 }
@@ -589,7 +589,15 @@ export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
     return { status: 'failed', summary: 'unprotected', detail, outcome: summary.outcome };
   }
   if (summary.outcome === 'protected-unproven') {
-    return { status: 'unproven', summary: 'guard live · roster unread', detail, outcome: summary.outcome };
+    // Do not hardcode Friday-class chips — other unproven classes exist
+    // (roster loaded, canary not consented). Prefer the English headline.
+    const chip = shortProofChips(result);
+    return {
+      status: 'unproven',
+      summary: chip || 'protection unproven',
+      detail,
+      outcome: summary.outcome,
+    };
   }
   return { status: 'unproven', summary: 'protection unproven', detail, outcome: summary.outcome };
 }

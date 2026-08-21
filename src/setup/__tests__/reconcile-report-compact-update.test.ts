@@ -103,3 +103,41 @@ describe('protectionLedgerFromReconcile', () => {
     expect(ledger.summary).toMatch(/guard live|roster unread/i);
   });
 });
+
+describe('protectionLedgerFromReconcile fail-closed', () => {
+  it('roster absent → failed unprotected', () => {
+    const r = fridayClassResult();
+    r.selfCheck = {
+      ok: false,
+      rosterProof: false,
+      rosterState: 'absent',
+      canaryProof: false,
+      versionProof: true,
+      reasons: ['ABSENT from running gateway'],
+      canary: { ran: true, denied: false, auditEntryFound: false },
+    };
+    r.ok = false;
+    const ledger = protectionLedgerFromReconcile(r);
+    expect(ledger.status).toBe('failed');
+    expect(ledger.outcome).toBe('unprotected');
+    const compact = formatReconcileReport(r, { compact: true }).join('\n');
+    expect(compact).toMatch(/roster absent|Not protected/i);
+    expect(compact).toMatch(/unprotected/i);
+  });
+
+  it('version downgrade → failed unprotected', () => {
+    const r = fridayClassResult();
+    r.selfCheck = {
+      ok: false,
+      rosterProof: true,
+      rosterState: 'loaded',
+      canaryProof: true,
+      versionProof: false,
+      reasons: ['on-disk older than expected'],
+      canary: { ran: true, denied: true, auditEntryFound: true },
+    };
+    const ledger = protectionLedgerFromReconcile(r);
+    expect(ledger.status).toBe('failed');
+    expect(ledger.outcome).toBe('unprotected');
+  });
+});
