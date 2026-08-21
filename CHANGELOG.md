@@ -58,8 +58,9 @@ All notable changes to this project will be documented in this file.
 - **#386 — content ≠ intent for package-install on write tools; honest human-auth copy.**
   Forensic writes that *mention* a global install (Friday: log after a real deny)
   no longer inherit `install-package-global` from write-content scanning — only
-  real invocations (command position, `os.system` / `bash -c`, shebang scripts
-  that run the install) still gate. Headless deny copy now points at
+  real invocations (command position, interpreter exec APIs, `npx`/`corepack`
+  launchers, `--location=global`, `bash -c`, shebang scripts that run the install)
+  still gate, fail-closed on unparsed exec args. Headless deny copy points at
   `shieldcortex approve --denial <actionId>` / a real terminal, **not**
   `actionGuard.enforce:false`.
 

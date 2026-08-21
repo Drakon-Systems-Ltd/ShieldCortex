@@ -129,9 +129,13 @@ describe('Action Guard hook — prompt-surface rule', () => {
       const decision = decisionOf(result.stdout);
       expect(decision.permissionDecision).toBe('deny');
       // The deny reason reaches Claude (an "ask" reason does not), so it has to
-      // carry both the original verdict and a way forward.
+      // carry both the original verdict and a way forward. #386: that way
+      // forward is a real terminal / `approve --denial`, never "turn the
+      // guard off". Non-install DNPs must not talk about installs.
       expect(decision.permissionDecisionReason).toMatch(/ShieldCortex Action Guard/);
-      expect(decision.permissionDecisionReason).toMatch(/autoApprove|enforce/);
+      expect(decision.permissionDecisionReason).toMatch(/approve --denial|real terminal/i);
+      expect(decision.permissionDecisionReason).not.toMatch(/legitimate install/i);
+      expect(decision.permissionDecisionReason).not.toMatch(/autoApprove for this exact/i);
       expect(decision.permissionDecisionReason).not.toMatch(/shieldcortex approve [0-9a-f]{12}/);
     });
 
