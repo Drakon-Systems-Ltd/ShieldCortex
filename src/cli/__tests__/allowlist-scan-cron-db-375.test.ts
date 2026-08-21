@@ -321,7 +321,16 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     expect(code).toBe(3);
     const out = logs.join('\n');
     expect(out).toContain('guard-denied in the last 7 days (job: inbox sweep)');
-    expect(out.indexOf(realpathSync(scriptPath))).toBeLessThan(out.indexOf(realpathSync(quiet)));
+    // Paths may wrap at 40 cols — compare on whitespace-collapsed text and
+    // tolerate macOS /private realpath prefix.
+    const flat = flatLogs(logs);
+    const denied = normPath(realpathSync(scriptPath));
+    const other = normPath(realpathSync(quiet));
+    const di = Math.max(flat.indexOf(denied), flat.indexOf(`/private${denied}`));
+    const oi = Math.max(flat.indexOf(other), flat.indexOf(`/private${other}`));
+    expect(di).toBeGreaterThanOrEqual(0);
+    expect(oi).toBeGreaterThanOrEqual(0);
+    expect(di).toBeLessThan(oi);
     // The denial surface never reaches the review list.
     expect(out).not.toContain('act-0000000000000001');
   });
