@@ -891,6 +891,104 @@ function gitForcePushInvoked(text: string, depth = 0): boolean {
   );
 }
 
+const PACKAGE_INSTALLERS = /^(?:npm|yarn|pnpm|bun|pip\d?|pipx|gem|cargo|apt|apt-get|yum|dnf|brew)$/i;
+const NPM_FAMILY = /^(?:npm|yarn|pnpm|bun)$/i;
+const INSTALL_VERB = /^(?:install|add|i|isntall|isnt|in|ins|inst|insta|instal)$/i;
+const GLOBAL_FLAG = /^(?:\-g|--global)$/i;
+
+/**
+ * #386 — install-package-global must be an INVOCATION, not vocabulary.
+ * Write-content and shell DATA args often quote package installs in logs
+ * (Friday: forensic note after a real deny). Same discipline as
+ * gitForcePushInvoked: tokenise, command-position only, recurse into
+ * bash -c / os.system string programs; fail closed on eval/$.
+ */
+function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
+  if (depth > MAX_INLINE_RECURSION + 2) return true;
+  // Explicit interpreter exec of an install string — real intent.
+  if (/(?:\bos\.system\b|\bsubprocess\.(?:run|call|Popen)\b|\bexec(?:Sync|File|FileSync)?\b|\bspawn(?:Sync)?\b)\s*\([^\n)]*(?:npm|yarn|pnpm|bun)[^\n)]*(?:install|add)[^\n)]*(?:\-g|--global)/i.test(text)) {
+    return true;
+  }
+  if (depth < MAX_INLINE_RECURSION) {
+    for (const body of collectExecutableBodies(text)) {
+      if (body && packageInstallGlobalInvoked(body, depth + 1)) return true;
+    }
+  }
+  for (const stmt of disposerStatements(text)) {
+    if (!/\b(?:npm|yarn|pnpm|bun)\b/i.test(stmt)) continue;
+    if (/\beval\b/.test(stmt)) return true;
+    const tokens = tokeniseStatement(stmt).map(tok => {
+      if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) {
+        return tok.slice(1, -1);
+      }
+      return tok;
+    });
+    if (depth < MAX_INLINE_RECURSION) {
+      for (let i = 0; i < tokens.length; i++) {
+        const b = commandBaseName(tokens[i]);
+        if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (isInlineProgramFlag(b, tokens[j])) {
+            if (packageInstallGlobalInvoked(tokens[j + 1] ?? '', depth + 1)) return true;
+            break;
+          }
+          if (BASH_VALUE_OPTION.test(tokens[j])) { j++; continue; }
+          if (!tokens[j].startsWith('-')) break;
+        }
+      }
+    }
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i].startsWith('$') && gitAtCommandPosition(tokens, i)) return true;
+      const base = commandBaseName(tokens[i]);
+      if (!NPM_FAMILY.test(base)) continue;
+      if (!gitAtCommandPosition(tokens, i)) continue;
+      const rest = tokens.slice(i + 1);
+      const hasInstall = rest.some(a => INSTALL_VERB.test(a));
+      const hasGlobal = rest.some(a => GLOBAL_FLAG.test(a) || a === 'global');
+      const yarnGlobalAdd = base.toLowerCase() === 'yarn'
+        && rest.some((a, idx) => a === 'global' && INSTALL_VERB.test(rest[idx + 1] ?? ''));
+      if ((hasInstall && hasGlobal) || yarnGlobalAdd) return true;
+    }
+  }
+  return false;
+}
+
+/** Non-global host/system package install invocation (apt/pip/brew/…). */
+function packageInstallInvoked(text: string, depth = 0): boolean {
+  if (packageInstallGlobalInvoked(text, depth)) return true;
+  if (depth > MAX_INLINE_RECURSION + 2) return true;
+  if (/(?:\bos\.system\b|\bsubprocess\.(?:run|call|Popen)\b)\s*\([^\n)]*\b(?:pip\d?|apt-get|brew|gem|cargo)\b[^\n)]*\binstall\b/i.test(text)) {
+    return true;
+  }
+  if (depth < MAX_INLINE_RECURSION) {
+    for (const body of collectExecutableBodies(text)) {
+      if (body && packageInstallInvoked(body, depth + 1)) return true;
+    }
+  }
+  for (const stmt of disposerStatements(text)) {
+    if (!/\b(?:pip\d?|pipx|apt|apt-get|yum|dnf|brew|gem|cargo)\b/i.test(stmt)) continue;
+    if (/\beval\b/.test(stmt)) return true;
+    const tokens = tokeniseStatement(stmt).map(tok => {
+      if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) {
+        return tok.slice(1, -1);
+      }
+      return tok;
+    });
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i].startsWith('$') && gitAtCommandPosition(tokens, i)) return true;
+      const base = commandBaseName(tokens[i]);
+      if (!PACKAGE_INSTALLERS.test(base) || NPM_FAMILY.test(base)) continue;
+      if (!gitAtCommandPosition(tokens, i)) continue;
+      if (restHasInstall(tokens.slice(i + 1))) return true;
+    }
+  }
+  return false;
+}
+
+function restHasInstall(rest: readonly string[]): boolean {
+  return rest.some(a => /^(?:install|add)$/i.test(a));
+}
+
 // Short-flag classifiers for a `git branch` delete. A branch flag is a single
 // dash cluster and git parses `-df`/`-fd` as delete+force together, so each
 // tests for the presence of its letter anywhere in the cluster. Case-sensitive:
@@ -2518,8 +2616,8 @@ const REMEDIATION: Record<string, string> = {
   'pipe-download-stdin-exec': 'the inline program executes its stdin, so the fetched bytes still run as code — download to a file and inspect it first',
   'decode-pipe-to-shell': 'the decoded/fetched bytes are executed as code by a bare interpreter — download to a file and inspect it first',
   'pipe-download-module-exec': 'the interpreter module (code/pty/pdb) runs its stdin as code, so the fetched bytes still execute — download to a file and inspect it first',
-  'install-package-global': 'review the package + source, then install it explicitly if intended (a workspace-local install needs no global flag)',
-  'install-package': 'review the package + source, then run the install yourself if intended',
+  'install-package-global': 'human authorisation required — run it yourself in a real terminal, or after a headless deny: shieldcortex approve --denial <actionId> (one-shot retry). Workspace-local install needs no global flag.',
+  'install-package': 'human authorisation required — run the install yourself if intended, or shieldcortex approve --denial <actionId> after a headless deny',
   'registry-code-exec': 'review the package + source on the registry before running (npx/bunx/uvx/dlx fetch and execute immediately)',
   'privilege-escalation': 'run the specific privileged step yourself, or approve this exact command from your own terminal with `shieldcortex approve`',
   'external-egress': 'confirm the destination and payload before data leaves the host',
@@ -3833,6 +3931,9 @@ function scanWriteContentPayload(content: string): {
       if (m.signal === 'git-delete-branch' && !gitDeleteBranchInvoked(text)) continue;
       if (m.signal === 'modify-network-firewall' && firewallCallsAreReadOnly(text)) continue;
       if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
+      // #386: quoted install vocabulary in scripts/logs is not an install.
+      if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
+      if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;
       if (!seen.has(m.signal)) { seen.add(m.signal); dangerous.push(m); }
     }
   });

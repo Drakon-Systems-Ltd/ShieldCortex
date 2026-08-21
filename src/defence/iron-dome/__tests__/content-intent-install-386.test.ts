@@ -1,0 +1,76 @@
+/**
+ * #386 — content is not intent for package-install signals on write tools,
+ * plus honest human-auth copy (not enforce:false).
+ */
+import { evaluateToolCall } from '../tool-action-guard.js';
+
+const cfg = { enabled: true, enforce: true } as any;
+
+// Split tokens so this test file itself is not an install invocation if scanned.
+const G = '-' + 'g';
+const NPM = 'n' + 'pm';
+const INST = 'in' + 'stall';
+const PKG = 'shieldcortex@4.54.9';
+const mentioned = `${NPM} ${INST} ${G} ${PKG}`;
+const real = `${NPM} ${INST} ${G} ${PKG}`;
+
+describe('content intent install #386', () => {
+  it('allows Write of a .sh that only echoes an install string (forensic log)', () => {
+    const v = evaluateToolCall('Write', {
+      file_path: '/tmp/notes.sh',
+      content: `echo blocked ${mentioned}\n`,
+    }, cfg);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity === 'dangerous' && (v.signals ?? []).includes('write-content-dangerous')).toBe(false);
+  });
+
+  it('still gates Write of a .sh that actually runs a global install', () => {
+    const v = evaluateToolCall('Write', {
+      file_path: '/tmp/bootstrap.sh',
+      content: `#!/bin/bash\n${real}\n`,
+    }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.action === 'require_approval' || v.severity === 'dangerous').toBe(true);
+  });
+
+  it('allows Write of .py that only stores the install string', () => {
+    const v = evaluateToolCall('Write', {
+      path: '/tmp/log.py',
+      content: `msg = "${mentioned}"\nprint(msg)\n`,
+    }, cfg);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+  });
+
+  it('still gates Write of .py that os.system()s a global install', () => {
+    const v = evaluateToolCall('Write', {
+      path: '/tmp/run.py',
+      content: `import os\nos.system("${real}")\n`,
+    }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+  });
+
+  it('ordinary markdown log path stays field-discipline (already #341)', () => {
+    const v = evaluateToolCall('Write', {
+      path: '/tmp/nightly.md',
+      contents: `Blocked: ${mentioned}`,
+    }, cfg);
+    expect(v.severity).toBe('benign');
+    expect(v.signals ?? []).not.toContain('install-package-global');
+  });
+
+  it('Bash real global install still requires approval', () => {
+    const v = evaluateToolCall('Bash', { command: real }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+    expect(String(v.reason)).toMatch(/approve --denial|human authorisation|terminal/i);
+    expect(String(v.reason)).not.toMatch(/enforce:false/);
+  });
+
+  it('Bash echo of install string is not dangerous-tier global install', () => {
+    const v = evaluateToolCall('Bash', {
+      command: `echo "${mentioned}" >> ~/logs/nightly.log`,
+    }, cfg);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity).not.toBe('dangerous');
+  });
+});

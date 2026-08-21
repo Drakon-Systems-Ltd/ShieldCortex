@@ -55,6 +55,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **#386 — content ≠ intent for package-install on write tools; honest human-auth copy.**
+  Forensic writes that *mention* a global install (Friday: log after a real deny)
+  no longer inherit `install-package-global` from write-content scanning — only
+  real invocations (command position, `os.system` / `bash -c`, shebang scripts
+  that run the install) still gate. Headless deny copy now points at
+  `shieldcortex approve --denial <actionId>` / a real terminal, **not**
+  `actionGuard.enforce:false`.
+
+### Fixed
 - **#383 — corrupt embedding model cache no longer fails silently.** A truncated
   `~/.cache/shieldcortex/models/.../onnx/model.onnx` (Edith ran 3.5 months on a
   50 MB stub vs the known-good 90 MB weight) made every preload log-and-retry the

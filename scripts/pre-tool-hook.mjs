@@ -908,7 +908,14 @@ function terminalDecisionReason(verdict, outcome, event) {
   const signals = safeSignalList(verdict?.signals);
   const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
   const nextStep = outcome === 'denied_no_prompt_surface'
-    ? ' Configure actionGuard.autoApprove for this exact safe pattern or set actionGuard.enforce:false to downgrade dangerous-tier calls to warnings.'
+    ? (
+      // #386: do NOT steer operators toward enforce:false / broad autoApprove for
+      // legit installs. Human auth paths: interactive TTY, retry card when
+      // retryCards is on, or `shieldcortex approve --denial <actionId>`.
+      ' Authorise a legitimate install yourself in a real terminal, or after this '
+      + 'headless deny run: shieldcortex approve --denial <actionId> (one-shot retry). '
+      + 'Do not set actionGuard.enforce:false to finish an agent task.'
+    )
     : '';
   const severity = safeSeverity(verdict?.severity, event);
   const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
