@@ -28,6 +28,28 @@ import { hashScriptSource } from '../../defence/iron-dome/reviewed-scripts.js';
 
 const SOURCE = '#!/usr/bin/env python3\nprint("sentry sweep")\n';
 
+
+
+
+/** Paths may soft/hard-wrap for 40-col TUI; assert against whitespace-collapsed logs.
+ *  macOS realpath often adds a `/private` prefix — accept both forms. */
+function flatLogs(logs: string[]): string {
+  return logs.join('\n').replace(/\s+/g, '');
+}
+function normPath(path: string): string {
+  const p = path.replace(/\s+/g, '');
+  return p.startsWith('/private/') ? p.slice('/private'.length) : p;
+}
+function expectLogPath(logs: string[], path: string): void {
+  const hay = flatLogs(logs);
+  const needle = path.replace(/\s+/g, '');
+  const ok =
+    hay.includes(needle) ||
+    hay.includes(normPath(needle)) ||
+    hay.includes(`/private${normPath(needle)}`);
+  expect(ok).toBe(true);
+}
+
 describe('shieldcortex allowlist scan (#309)', () => {
   let dir: string; // stands in for $HOME — real ~/.hermes and ~/.openclaw are never read
   let scriptPath: string;
@@ -175,7 +197,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
     const code = await runAllowlistScan([], deps({ prompt: answers(['y', '']) }));
     expect(code).toBe(3);
     expect(stored).toEqual([]);
-    expect(logs.join('\n')).toContain(realpathSync(scriptPath));
+    expectLogPath(logs, realpathSync(scriptPath));
     expect(logs.join('\n')).toContain('shieldcortex allowlist scan');
   });
 
@@ -215,7 +237,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
     writeFileSync(join(dir, 'scripts', 'notes.txt'), 'not a script\n');
     const code = await runAllowlistScan(['--glob', join(dir, 'scripts', '*.sh')], deps());
     expect(code).toBe(3);
-    expect(logs.join('\n')).toContain(realpathSync(globbed));
+    expectLogPath(logs, realpathSync(globbed));
     expect(logs.join('\n')).not.toContain('notes.txt');
   });
 
@@ -226,7 +248,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
     writeFileSync(hermes, JSON.stringify({ jobs: [{ prompt: `sh ${scriptPath}` }] }));
     const code = await runAllowlistScan(['--hermes-cron', hermes], deps());
     expect(code).toBe(3);
-    expect(logs.join('\n')).toContain(realpathSync(scriptPath));
+    expectLogPath(logs, realpathSync(scriptPath));
   });
 
   // ── Interactive review: the only path that writes ─────────
@@ -272,7 +294,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
     const result = await reviewScanItems(items, deps({ interactive: false, prompt: answers(['y', '']) }));
     expect(result.pinned).toBe(0);
     expect(stored).toEqual([]);
-    expect(errs.join('\n')).toContain('interactive terminal');
+    expect(errs.join('\n').replace(/\s+/g, '')).toContain(String('interactive terminal').replace(/\s+/g, ''));
   });
 
   test('--yes without a TTY is refused with exit 1 and no writes', async () => {
@@ -280,7 +302,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
     const code = await runAllowlistScan(['--yes'], deps({ interactive: false, prompt: answers(['approve']) }));
     expect(code).toBe(1);
     expect(stored).toEqual([]);
-    expect(errs.join('\n')).toContain('interactive terminal');
+    expect(errs.join('\n').replace(/\s+/g, '')).toContain(String('interactive terminal').replace(/\s+/g, ''));
   });
 
   test('--yes on a TTY demands the typed word "approve"', async () => {
