@@ -753,11 +753,14 @@ export async function runUpdate(): Promise<void> {
   }
 
   let mainUpdated = false;
+  let npmStatus: StepResult['status'] = 'ok';
   try {
     const npmStep = await stepNpmPackage(currentVersion, latest, force);
     mainUpdated = npmStep.updated;
+    npmStatus = npmStep.result?.status ?? 'ok';
   } catch {
     // npm failure already surfaced by step(); continue with reconcile.
+    npmStatus = 'failed';
   }
 
   // Verify (and self-heal) the native DB binding after the install completes.
@@ -815,7 +818,7 @@ export async function runUpdate(): Promise<void> {
 
   // Closing panel — last write (design lock v3).
   const rows: UpdatePanelRow[] = [
-    { label: 'package', status: mainUpdated ? 'ok' : 'ok' },
+    { label: 'package', status: npmStatus === 'failed' ? 'failed' : npmStatus === 'warn' ? 'warn' : 'ok' },
     { label: 'engine', status: engineResult.remediation ? 'warn' : 'ok' },
     {
       label: 'selfchk',
@@ -833,7 +836,7 @@ export async function runUpdate(): Promise<void> {
   if (engineResult.remediation) details.push('engine: database binding needs manual rebuild');
   if (keyAttention) details.push('keys: ambiguous project-key collisions remain');
 
-  const failed = protection.status === 'failed';
+  const failed = protection.status === 'failed' || npmStatus === 'failed';
   const attention =
     keyAttention ||
     Boolean(engineResult.remediation) ||

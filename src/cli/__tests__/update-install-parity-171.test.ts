@@ -63,8 +63,13 @@ describe('#171 — update ends by verifying protection, like repair', () => {
   });
 
   it('an applied-but-failed verify sets a non-zero exit code — no false all-clear', () => {
-    const body = bodyOf('stepVerifyProtection');
-    expect(body).toMatch(/result\.applied && !result\.ok.*exitCode = 1/s);
+    // v3 TUI: step returns failed; runUpdate sets process.exitCode from ledger.
+    const stepBody = bodyOf('stepVerifyProtection');
+    const runBody = bodyOf('runUpdate');
+    expect(stepBody).toMatch(/result\.applied && !result\.ok/);
+    expect(stepBody).toMatch(/status:\s*'failed'/);
+    expect(runBody).toMatch(/process\.exitCode\s*=\s*1/);
+    expect(runBody).toMatch(/protection\.status === 'failed'/);
   });
 
   it('runUpdate invokes it', () => {

@@ -348,6 +348,8 @@ export function renderBatchIdentity(item: {
   sha256?: string;
   networkHint?: boolean;
   deniedNote?: boolean;
+  /** Full source ids (kept for --json parity / tests); short labels also shown. */
+  sources?: string[];
 }, opts: { width?: number; style?: TermStyle } = {}): string[] {
   const width = getWidth({ width: opts.width });
   const style = opts.style ?? NO_STYLE;
@@ -357,8 +359,9 @@ export function renderBatchIdentity(item: {
   if (item.networkHint) flags.push('net');
   if (item.deniedNote) flags.push('denied');
   const sha = item.sha256 ? item.sha256.slice(0, 12) + '…' : '';
+  const srcFull = (item.sources ?? []).map(sanitiseDisplayField).join(',');
   const line1 = `${chip(item.status, style)}  ${style.bold}${base}${style.reset}`;
-  const line2 = [truncatePath(path, Math.max(12, width - 2)), sha, ...flags].filter(Boolean).join(' · ');
+  const line2 = [truncatePath(path, Math.max(12, width - 2)), sha, srcFull, ...flags].filter(Boolean).join(' · ');
   return [line1, ...wrapText(`${style.dim}${line2}${style.reset}`, width, 2, 2)];
 }
 

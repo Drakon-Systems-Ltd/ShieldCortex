@@ -545,6 +545,7 @@ function renderSummary(items: ScanItem[], sources?: CronSources): string {
           sha256: i.sha256,
           networkHint: i.networkHint,
           deniedNote: Boolean(i.deniedNote),
+          sources: i.sources,
         },
         { width, style },
       ),
@@ -865,6 +866,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
         sha256: item.sha256,
         networkHint: item.networkHint,
         deniedNote: Boolean(item.deniedNote),
+        sources: item.sources,
       }, { width: batchWidth, style: batchStyle }).join('\n'));
     }
     const ask = deps.prompt ?? ttyPrompt;
