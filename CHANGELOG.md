@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
 
+## [4.54.10] - 2026-08-21
+
+**Mobile terminal UX + guard honesty patch.** Ships the phone-SSH readable CLI pass, content≠intent install FP fix, corrupt embedding-model heal, and doctor inject-contract nits that landed on main after 4.54.9.
+
+### Changed
+- **Terminal UX pass (mobile SSH first) (#388):** shared `src/cli/term-ui.ts` width/wrap/box/chip/verdict primitives (40-col floor, no new deps). `allowlist scan` review cards are decision-first — no 40-line source wall by default; `[v]iew` pages 12 sanitised lines; `[y]`/`[n]`/`[q]` default-deny unchanged. `--yes` batch uses compact identity rows. `shieldcortex update` ends with a closing VERDICT panel (OK / NEEDS ATTENTION / FAILED) from a step ledger; narrow terminals drop spinner redraw junk; `paint()` honours `NO_COLOR` / `TERM=dumb`. Design lock: `docs/design/2026-08-21-terminal-ux.md`.
+
+### Fixed
+- **#386 — content ≠ intent for package-install on write tools; honest human-auth copy.** Forensic writes that *mention* a global install no longer inherit `install-package-global` from write-content scanning — only real invocations (command position, `os.system` / `bash -c` / `child_process.execSync`, shebang scripts, `--location=global`) still gate. Headless deny copy points at `shieldcortex approve --denial <actionId>` / a real terminal, **not** `actionGuard.enforce:false`.
+- **#383 — corrupt embedding model cache no longer fails silently.** Truncated ONNX weights no longer loop forever while doctor stayed green. Doctor verifies size (+ trusted sidecar sha bound to mtime/ino/size); the embedding worker quarantines a corrupt weight once and retries download (process latch prevents bak pile-up).
+- **#381 / #382 — doctor + stop-hook nits:** doctor validates real `nativeContract` values only; stop-hook no longer prescribes hand-editing signed config; `stopHookSamplingTurns` clamped on read (max 20).
+
 ## [4.54.9] - 2026-08-19
 
 **Operator control plane, patch.** #378 hook-lane DNP fingerprints + `--denial` approvals (cards stay soak-dark), #372 card-decision audit rows, #375 sqlite cron discovery + denial↔cron honesty.
@@ -54,26 +66,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
-- **Terminal UX pass (mobile SSH first):** shared `src/cli/term-ui.ts` width/wrap/box/chip/verdict primitives (40-col floor, no new deps). `allowlist scan` review cards are decision-first — no 40-line source wall by default; `[v]iew` pages 12 sanitised lines; `[y]/[n]/[q]` default-deny unchanged. `--yes` batch uses compact identity rows. `shieldcortex update` ends with a closing VERDICT panel (OK / NEEDS ATTENTION / FAILED) from a step ledger; narrow terminals drop spinner redraw junk; `paint()` honours `NO_COLOR` / `TERM=dumb`. Design lock: `docs/design/2026-08-21-terminal-ux.md`.
-
-### Fixed
-- **#386 — content ≠ intent for package-install on write tools; honest human-auth copy.**
-  Forensic writes that *mention* a global install (Friday: log after a real deny)
-  no longer inherit `install-package-global` from write-content scanning — only
-  real invocations (command position, `os.system` / `bash -c`, shebang scripts
-  that run the install) still gate. Headless deny copy now points at
-  `shieldcortex approve --denial <actionId>` / a real terminal, **not**
-  `actionGuard.enforce:false`.
-
-### Fixed
-- **#383 — corrupt embedding model cache no longer fails silently.** A truncated
-  `~/.cache/shieldcortex/models/.../onnx/model.onnx` (Edith ran 3.5 months on a
-  50 MB stub vs the known-good 90 MB weight) made every preload log-and-retry the
-  same bad bytes forever while `doctor` still printed green for "model cached".
-  Doctor now verifies size (+ trusted sidecar sha); the embedding worker
-  quarantines a corrupt weight on load failure and retries download once.
-
 ### Added
 - **Memory SOTA Track C:** capture distill provider (OpenAI-compatible + Anthropic), fail-closed extract path on stop/session-end, L1 salience cap, no silent regex fallback (#350 / epic #347).
 - **Memory SOTA Track C (OAuth):** distill resolves Hermes OAuth on disk (xai-oauth → openai-codex) when no API key is set — fleet hosts reuse existing login; `SHIELDCORTEX_DISTILL_OAUTH=0` disables.
@@ -85,11 +77,9 @@ All notable changes to this project will be documented in this file.
 - **Memory SOTA Track C.2 (OpenClaw):** session extract uses optional L1 distill via OpenClaw auth/env (primary model family first); regex L0 fallback; gateway-safe (no DB in hook).
 - **Memory SOTA Track C (multi-provider zero-config):** distill on-disk auth chain covers Hermes active provider, xai/codex/qwen/minimax/nous OAuth, API-key pools (anthropic/openai/gemini/…), and Claude Max OAuth; cheap model per family.
 
-
 ### Added
 - **Memory SOTA cut 1+2 (start):** empty-brain RCA, inject pack v2 library + session-start wiring, doctor empty-brain/native-contract check, capture-distill fail-closed scaffold, plane policy A-min doc (epic #347).
 - **Memory SOTA cut 1+2 (continue):** `host_id`/`agent_id`/`capture_layer` provenance on memories; stamp on `addMemory` + hook saves; OpenClaw bootstrap budgeted inject under nativeContract; `openclawAutoMemory` implies stop/session-end capture gates; doctor TS build fix.
-
 
 ### Fixed
 - Doctor memory-plane / auto-memory Suggested fixes no longer tell operators to hand-edit `config.json` (that invalidates `_sig` and forces defenceMode strict). New signed flags: `shieldcortex config --memory-inject-contract sc_only|disable_native_inject` and `--auto-memory-sampling <n>`.
