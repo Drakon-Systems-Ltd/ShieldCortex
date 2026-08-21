@@ -912,8 +912,8 @@ function terminalDecisionReason(verdict, outcome, event) {
       // #386: do NOT steer operators toward enforce:false / broad autoApprove for
       // legit installs. Human auth paths: interactive TTY, retry card when
       // retryCards is on, or `shieldcortex approve --denial <actionId>`.
-      ' Authorise a legitimate install yourself in a real terminal, or after this '
-      + 'headless deny run: shieldcortex approve --denial <actionId> (one-shot retry). '
+      ' Authorise this action yourself in a real terminal, or after this headless '
+      + 'deny run: shieldcortex approve --denial <actionId> (one-shot retry). '
       + 'Do not set actionGuard.enforce:false to finish an agent task.'
     )
     : '';

@@ -457,7 +457,7 @@ const DANGEROUS: Pattern[] = [
   // quote is admitted on either side of `-g`. `--global` gets a `(?![\w-])` tail
   // so npm's real `--global-style` layout flag (workspace-local install) does not
   // over-gate.
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-]))/i, signal: 'install-package-global' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-]))/i, signal: 'install-package-global' },
   // Scheduler MUTATION only: `crontab` in command position that edits/installs
   // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
   // never the bare word mentioned inside an echo/string (issue #89). Env-var and
@@ -894,7 +894,7 @@ function gitForcePushInvoked(text: string, depth = 0): boolean {
 const PACKAGE_INSTALLERS = /^(?:npm|yarn|pnpm|bun|pip\d?|pipx|gem|cargo|apt|apt-get|yum|dnf|brew)$/i;
 const NPM_FAMILY = /^(?:npm|yarn|pnpm|bun)$/i;
 const INSTALL_VERB = /^(?:install|add|i|isntall|isnt|in|ins|inst|insta|instal)$/i;
-const GLOBAL_FLAG = /^(?:\-g|--global)$/i;
+const GLOBAL_FLAG = /^(?:\-g|--global|--location=global)$/i;
 
 /**
  * #386 — install-package-global must be an INVOCATION, not vocabulary.
@@ -906,7 +906,7 @@ const GLOBAL_FLAG = /^(?:\-g|--global)$/i;
 function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
   // Explicit interpreter exec of an install string — real intent.
-  if (/(?:\bos\.system\b|\bsubprocess\.(?:run|call|Popen)\b|\bexec(?:Sync|File|FileSync)?\b|\bspawn(?:Sync)?\b)\s*\([^\n)]*(?:npm|yarn|pnpm|bun)[^\n)]*(?:install|add)[^\n)]*(?:\-g|--global)/i.test(text)) {
+  if (/(?:\bos\.system\b|\bsubprocess\.(?:run|call|Popen)\b|\bexec(?:Sync|File|FileSync)?\b|\bspawn(?:Sync)?\b)\s*\([^\n)]*(?:npm|yarn|pnpm|bun)[^\n)]*(?:install|add)[^\n)]*(?:\-g|--global|--location=global)/i.test(text)) {
     return true;
   }
   if (depth < MAX_INLINE_RECURSION) {
@@ -944,7 +944,11 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
       if (!gitAtCommandPosition(tokens, i)) continue;
       const rest = tokens.slice(i + 1);
       const hasInstall = rest.some(a => INSTALL_VERB.test(a));
-      const hasGlobal = rest.some(a => GLOBAL_FLAG.test(a) || a === 'global');
+      const hasGlobal = rest.some((a, idx) =>
+        GLOBAL_FLAG.test(a)
+        || a === 'global'
+        || (a === '--location' && String(rest[idx + 1] ?? '').replace(/^=/, '') === 'global')
+      );
       const yarnGlobalAdd = base.toLowerCase() === 'yarn'
         && rest.some((a, idx) => a === 'global' && INSTALL_VERB.test(rest[idx + 1] ?? ''));
       if ((hasInstall && hasGlobal) || yarnGlobalAdd) return true;
