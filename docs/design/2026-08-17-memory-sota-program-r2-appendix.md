@@ -185,3 +185,11 @@ Remaining items are **nits / pre-B checklist**, not freeze-lifters:
 2. Native-writable post-bridge (yes/no)
 3. Per-host inject contract when enabling B (`disable_native_inject` | `sc_only`)
 
+## 2026-08-22 triple-review fold (Track A residual)
+
+Grok 4.6 + GPT 5.6 SOL Pro + Claude Opus reviewed issue **#348**.
+
+- **Authoritative residual plan:** [`2026-08-22-memory-sota-track-a-residual.md`](./2026-08-22-memory-sota-track-a-residual.md)
+- **Plane policy (folded):** [`2026-08-17-memory-plane-policy-amin.md`](./2026-08-17-memory-plane-policy-amin.md)
+- **Consensus:** A-min ≠ Track A done; A2/`coexist_dedup` forbidden; A3-leaning; Opus blockers B1–B4 before import product code.
+- **Do not close #348** until residual exit criteria are met.
