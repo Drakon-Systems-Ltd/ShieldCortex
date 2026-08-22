@@ -125,6 +125,15 @@ End dual-brain. Agent and human have one truth.
 
 ---
 
+
+### Status 2026-08-22 (triple review)
+
+A-min shipped (#352/#381). Full Track A **not** done. Residual plan + Opus blockers:
+
+→ [`2026-08-22-memory-sota-track-a-residual.md`](./2026-08-22-memory-sota-track-a-residual.md)
+
+Do not close #348 on A-min alone.
+
 ## 6. Track B — P0 Inject v2 (session-start + turn recall)
 
 ### Goal

@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Memory SOTA Track A residual fold (#348):** triple frontier review (Grok 4.6 + GPT 5.6 SOL + Opus) folded into design — A-min ≠ done; A3-leaning locks; Opus blockers B1–B4; tickets T1–T3. See `docs/design/2026-08-22-memory-sota-track-a-residual.md`.
+
 ### Fixed
 - **#387 leftover — system/pip install write-then-exec fail-open.** `#386` made write-content require an *invocation* before keeping `install-package`. The npm-global disposer grew interpreter sinks (`os.system` / `os.popen` / `subprocess` / `child_process`); the pip/apt/brew/gem/cargo disposer did not. Combined with `hasUnscopedPipInstall` only running on the exec path, a Write of `cmd = "pip install …"; os.system(cmd)` (and the same shape for apt/brew) was allowed. Write now proposes pip the same way exec does, and `systemInstallInvoked` shares the global sink set. Venv/`--target` pip stays allowed. `npm i --location=global` now proposes.
 
