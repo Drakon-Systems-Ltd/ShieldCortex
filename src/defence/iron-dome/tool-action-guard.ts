@@ -457,7 +457,11 @@ const DANGEROUS: Pattern[] = [
   // quote is admitted on either side of `-g`. `--global` gets a `(?![\w-])` tail
   // so npm's real `--global-style` layout flag (workspace-local install) does not
   // over-gate.
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-]))/i, signal: 'install-package-global' },
+  // The abbreviated-verb alternative accepts `--location=global` as well (#387):
+  // it is npm's own long spelling of `-g`, the first alternative and the argv
+  // disposer's GLOBAL_FLAG both already treat the three as one, and omitting it
+  // here meant `npm i --location=global pkg` was never even PROPOSED.
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-]))/i, signal: 'install-package-global' },
   // Scheduler MUTATION only: `crontab` in command position that edits/installs
   // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
   // never the bare word mentioned inside an echo/string (issue #89). Env-var and
@@ -897,6 +901,18 @@ const INSTALL_VERB = /^(?:install|add|i|isntall|isnt|in|ins|inst|insta|instal)$/
 const GLOBAL_FLAG = /^(?:\-g|--global|--location=global)$/i;
 
 /**
+ * Explicit interpreter / process APIs that RUN a string or an argv: python
+ * os/subprocess, node child_process, and the bare `exec`/`spawn` family (incl.
+ * `.execSync` on a `require('child_process')` result).
+ *
+ * One home, shared by the global (#386) and system (#387) install disposers, so
+ * the two families fail closed on the IDENTICAL sink set rather than drifting
+ * apart — which is exactly how #387 happened: the npm rule grew this sink list
+ * and the pip/apt rule kept a narrower same-parens regex.
+ */
+const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|Popen|check_call|check_output)|child_process\.(?:exec|execSync|spawn|spawnSync)|\.exec(?:Sync|File|FileSync)?|\.spawn(?:Sync)?|(?:^|[^\w.])(?:exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)\s*\()/i;
+
+/**
  * #386 — install-package-global must be an INVOCATION, not vocabulary.
  * Write-content and shell DATA args often quote package installs in logs
  * (Friday: forensic note after a real deny). Same discipline as
@@ -909,7 +925,7 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   // global install. Order of install vs global flag does not matter.
   // Fail-closed on these sinks: write-time authoring of "run this install" is intent.
   // Sinks: python os/subprocess, node child_process, bare exec/spawn (incl. .execSync after require()).
-  if (/(?:os\.(?:system|popen)|subprocess\.(?:run|call|Popen|check_call|check_output)|child_process\.(?:exec|execSync|spawn|spawnSync)|\.exec(?:Sync|File|FileSync)?|\.spawn(?:Sync)?|(?:^|[^\w.])(?:exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)\s*\()/i.test(text)
+  if (INTERPRETER_EXEC_SINK.test(text)
       && /\b(?:npm|yarn|pnpm|bun|npx|corepack)\b/i.test(text)
       && /\b(?:install|add|i|isntall|in|ins|inst|insta|instal)\b/i.test(text)
       && /(?:\s-g\b|\s--global\b|--location=global|\bglobal\s+add\b)/i.test(text)) {
@@ -970,15 +986,102 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   return false;
 }
 
-function packageInstallInvoked(text: string, depth = 0): boolean {
-  if (packageInstallGlobalInvoked(text, depth)) return true;
-  if (depth > MAX_INLINE_RECURSION + 2) return true;
-  if (/(?:\bos\.system\b|\bsubprocess\.(?:run|call|Popen)\b)\s*\([^\n)]*\b(?:pip\d?|apt-get|brew|gem|cargo)\b[^\n)]*\binstall\b/i.test(text)) {
+// ── #387: the SYSTEM installer family must fail closed like the npm one ──────
+//
+// #386 gave `install-package-global` an invocation disposer with an interpreter
+// sink (os.system / subprocess / child_process) so a written script that RUNS a
+// global install is still gated. `install-package` got the disposer but not the
+// sink: it only matched installer+install INSIDE ONE set of parens, so
+// `cmd = "apt-get install -y curl"` + `os.system(cmd)` — and every argv-list or
+// os.popen spelling — dropped the signal at write time and re-opened the
+// write-then-exec lane for apt/brew/gem/cargo/pip. Same shape as the npm side
+// here, deliberately: one sink set (INTERPRETER_EXEC_SINK), one vocabulary
+// window, no third installer family.
+
+// apt/yum/brew/gem/cargo/pipx have no scoped form — sink + install verb is the
+// whole test. Windowed to 80 chars so the verb belongs to THIS installer.
+const SYSTEM_INSTALLER_WINDOW_RE = /\b(?:pipx|apt|apt-get|yum|dnf|brew|gem|cargo)\b[^;\n]{0,80}?\b(?:install|add)\b/i;
+// pip is read separately because a pip install can be venv-scoped (#89 class 4).
+// The capture keeps any path prefix on the pip binary (`.venv/bin/pip`) and the
+// trailing window carries the scope flags, which sit AFTER the verb
+// (`pip install --target ./vendor x`).
+const PIP_INSTALL_WINDOW_RE = /(?:^|[^\w./-])((?:[^\s;\n"'`]+)\/)?pip\d?(?:\.\d+)?(?![\w./-])[^;\n]{0,80}?\binstall\b[^;\n]{0,80}/gi;
+const PIP_WINDOW_SCOPE_FLAG_RE = /(?:^|[\s"'])(?:--target|-t|--prefix|--root|--python)(?:=|\s)/i;
+
+/**
+ * A pip install on this surface that mutates the HOST, not a venv.
+ *
+ * `hasUnscopedPipInstall` reads argv and stays authoritative whenever the
+ * install IS a shell statement. When a sink hides the argv inside a STRING
+ * (`os.system("pip install x")`) the tokeniser sees one opaque token, so the
+ * SAME scope proofs are applied to the window instead: an explicit target
+ * prefix, a venv-pathed pip binary, or a venv created in the same payload.
+ * The #89 class 4 relief has to survive the write path —
+ * `.venv/bin/pip install -r requirements.txt` is not a host mutation and must
+ * not be re-gated just because the file also contains an exec sink.
+ */
+function pipInstallMutatesHost(text: string): boolean {
+  if (hasUnscopedPipInstall(text)) return true;
+  const venvs = venvPrefixesCreatedIn(text);
+  PIP_INSTALL_WINDOW_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PIP_INSTALL_WINDOW_RE.exec(text)) !== null) {
+    if (PIP_WINDOW_SCOPE_FLAG_RE.test(m[0])) continue;                // --target/--prefix/--root/--python
+    const prefix = (m[1] ?? '').replace(/\/$/, '').replace(/\/bin$/i, '');
+    if (prefix) {
+      if (VENV_DIR_MARKER.test(prefix)) continue;                     // …/my-venv/bin/pip
+      if (venvs.some(v => v === prefix || prefix.endsWith(`/${v.replace(/^\.\//, '')}`) || v === `./${prefix}`)) continue;
+    }
     return true;
   }
+  return false;
+}
+
+/**
+ * An interpreter sink on this surface that runs a non-npm install.
+ *
+ * Sink, installer vocabulary and install verb are read off the whole authored
+ * surface, which covers the inline shape (`os.system("apt-get install -y
+ * curl")`) AND the variable-indirection shape (`cmd = "apt-get install -y
+ * curl"; os.system(cmd)`) with one test — the string and the sink that runs it
+ * are authored together either way, at any distance, which is strictly more
+ * than a proximity window would catch.
+ *
+ * #386 relief is intact: a payload with NO sink, that only stores/prints/echoes
+ * the install string, never reaches the vocabulary test.
+ */
+function interpreterSinkRunsInstall(text: string): boolean {
+  if (!INTERPRETER_EXEC_SINK.test(text)) return false;
+  if (SYSTEM_INSTALLER_WINDOW_RE.test(text)) return true;
+  return pipInstallMutatesHost(text);
+}
+
+/** True when the surface genuinely INVOKES a package install of any family. */
+function packageInstallInvoked(text: string, depth = 0): boolean {
+  return packageInstallGlobalInvoked(text, depth) || systemInstallInvoked(text, depth);
+}
+
+/**
+ * The non-npm half — pip/pipx/apt/apt-get/yum/dnf/brew/gem/cargo. Split out of
+ * `packageInstallInvoked` so the write-content proposer (#387) can ask about a
+ * SYSTEM install without an npm-global invocation answering for it (that one
+ * already proposes its own, louder signal).
+ *
+ * Same discipline as the global disposer: interpreter sink, then the bodies the
+ * shell executes, then tokenised command-position statements; fail closed on
+ * `eval` and on a `$`-hidden command word.
+ */
+function systemInstallInvoked(text: string, depth = 0): boolean {
+  if (depth > MAX_INLINE_RECURSION + 2) return true;
+  // pip is answered by its own argv walk, wherever it appears: it is the one
+  // installer whose scope has to be read off argv (#89 class 4), and it is the
+  // one the DANGEROUS table does not carry, so this is also what makes the
+  // write path PROPOSE the installs the exec path proposes (#387).
+  if (hasUnscopedPipInstall(text)) return true;
+  if (interpreterSinkRunsInstall(text)) return true;
   if (depth < MAX_INLINE_RECURSION) {
     for (const body of collectExecutableBodies(text)) {
-      if (body && packageInstallInvoked(body, depth + 1)) return true;
+      if (body && systemInstallInvoked(body, depth + 1)) return true;
     }
   }
   for (const stmt of disposerStatements(text)) {
@@ -990,10 +1093,32 @@ function packageInstallInvoked(text: string, depth = 0): boolean {
       }
       return tok;
     });
+    // `bash -c '…'` / `sh -c '…'` inline programs, stepping over value-taking
+    // options so the `-c` is still reached — the global disposer already walks
+    // these and the system family was the only one that did not.
+    if (depth < MAX_INLINE_RECURSION) {
+      for (let i = 0; i < tokens.length; i++) {
+        const b = commandBaseName(tokens[i]);
+        if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (isInlineProgramFlag(b, tokens[j])) {
+            if (systemInstallInvoked(tokens[j + 1] ?? '', depth + 1)) return true;
+            break;
+          }
+          if (BASH_VALUE_OPTION.test(tokens[j])) { j++; continue; }
+          if (!tokens[j].startsWith('-')) break;
+        }
+      }
+    }
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i].startsWith('$') && gitAtCommandPosition(tokens, i)) return true;
       const base = commandBaseName(tokens[i]);
-      if (!PACKAGE_INSTALLERS.test(base) || NPM_FAMILY.test(base)) continue;
+      // pip/pip3 deliberately excluded here: `restHasInstall` cannot see a venv
+      // or `--target` prefix, so confirming pip on the verb alone would re-gate
+      // `.venv/bin/pip install -r requirements.txt`. `hasUnscopedPipInstall`
+      // above owns it — argv-accurately, including a venv created earlier in
+      // the same payload — and reaches inside `bash -c '…'` by recursion.
+      if (!PACKAGE_INSTALLERS.test(base) || NPM_FAMILY.test(base) || PIP_TOKEN_RE.test(base)) continue;
       if (!gitAtCommandPosition(tokens, i)) continue;
       if (restHasInstall(tokens.slice(i + 1))) return true;
     }
@@ -3951,6 +4076,27 @@ function scanWriteContentPayload(content: string): {
       if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
       if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;
       if (!seen.has(m.signal)) { seen.add(m.signal); dangerous.push(m); }
+    }
+    // #387 — PROPOSE what the exec path proposes. The DANGEROUS table carries
+    // SYSTEM_INSTALL_RE (apt/yum/brew/gem/cargo) only: `pip` was moved out to
+    // `hasUnscopedPipInstall` because it has to be read as argv to tell a host
+    // mutation from a venv-scoped one, and `evaluateToolCall` calls that on the
+    // EXEC surface alone. So a written script whose body really runs
+    // `pip install x` — even a plain shebang `.sh` — was never proposed here,
+    // let alone confirmed, and an install reached only through an interpreter
+    // sink is not table vocabulary at all. The confirmations above are the same
+    // functions, so nothing widens: this only asks the question on this path.
+    if (!seen.has('install-package')
+        && systemInstallInvoked(text)
+        // #128 stays exactly as strong: an install sealed inside a throwaway
+        // container mutates the container, not the host.
+        && !installsAreContainerConfined(text)) {
+      seen.add('install-package');
+      PIP_INSTALL_WINDOW_RE.lastIndex = 0;
+      const span = SYSTEM_INSTALL_RE.exec(text)?.[0]
+        ?? PIP_INSTALL_WINDOW_RE.exec(text)?.[0]
+        ?? 'package install';
+      dangerous.push({ signal: 'install-package', span: fmtSpan(span) });
     }
   });
   return { catastrophic, dangerous };

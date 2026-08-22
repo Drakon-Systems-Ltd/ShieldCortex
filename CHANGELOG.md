@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 > **Coverage note**: 49 v4 versions are documented below — typically every minor (`X.Y.0`) plus significant patches. Many small patch releases between 4.0.0 and 4.20.x are not individually documented (~50 versions, mostly behaviour-preserving fixes). For a specific diff between adjacent npm versions, see `git log vX.Y.Z..vX.Y.W` or compare tarballs. Audited and reconciled 2026-05-27 — gap is intentional, not a sign of release-note drift going forward.
 
 
+## [Unreleased]
+
+### Fixed
+- **#387 leftover — system/pip install write-then-exec fail-open.** `#386` made write-content require an *invocation* before keeping `install-package`. The npm-global disposer grew interpreter sinks (`os.system` / `os.popen` / `subprocess` / `child_process`); the pip/apt/brew/gem/cargo disposer did not. Combined with `hasUnscopedPipInstall` only running on the exec path, a Write of `cmd = "pip install …"; os.system(cmd)` (and the same shape for apt/brew) was allowed. Write now proposes pip the same way exec does, and `systemInstallInvoked` shares the global sink set. Venv/`--target` pip stays allowed. `npm i --location=global` now proposes.
+
 ## [4.54.11] - 2026-08-21
 
 **Update footer honesty patch.** Phone-SSH readable protection check after `shieldcortex update` — no double FAILED essay when the guard is live.
