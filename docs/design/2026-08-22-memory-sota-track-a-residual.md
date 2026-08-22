@@ -192,7 +192,7 @@ Until then: **keep #348 open. No false close.**
 | B1 attestation≠trust + salience + unverified | **Landed** (this PR) |
 | B2 signed `--memory-plane` + planeSetAt | **Landed** (this PR) |
 | B3 drift doctor + scope not data-derived | **Landed** (this PR) — drift signals heuristic; deepen with host telemetry as available |
-| B4 side-car API position | Doc-only deprecate+doctor-fail under sc_canonical/import_only (host contract / drift); full rewire deferred |
+| B4 side-car API position | **Deferred** — no dedicated doctor check yet; do not claim doctor-fail for GuardedMemoryBridge |
 | T1 #393 host contract enforcement | **Initial** doctor proof (`checkMemoryHostContract`) — deepen per-host disable of Memory Search |
 | T2 #394 | Partially overlapped by B2/B3; keep open until fail/warn matrix + FP fixtures complete |
 | T3 #395 | **Not started** (blocked) |

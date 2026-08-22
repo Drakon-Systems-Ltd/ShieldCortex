@@ -3078,28 +3078,79 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
       } catch { /* absent */ }
     }
 
+    // Unscoped / injectable counts (best-effort; columns may be absent)
+    let unscoped = 0;
+    let injectableApprox = 0;
+    try {
+      const cols = (db.prepare(`PRAGMA table_info(memories)`).all() as Array<{ name: string }>).map((c) => c.name);
+      if (cols.includes('host_id') && cols.includes('agent_id')) {
+        unscoped = countOf(
+          `SELECT COUNT(*) AS c FROM memories
+           WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')
+             AND (host_id IS NULL OR host_id = '' OR agent_id IS NULL OR agent_id = '')`,
+        );
+        // Approx inject-eligible: scoped + not restricted + trust floor when column exists
+        if (cols.includes('trust_score')) {
+          injectableApprox = countOf(
+            `SELECT COUNT(*) AS c FROM memories
+             WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')
+               AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'
+               AND host_id IS NOT NULL AND host_id != ''
+               AND agent_id IS NOT NULL AND agent_id != ''
+               AND COALESCE(trust_score, 0) >= 0.5`,
+          );
+        } else {
+          injectableApprox = countOf(
+            `SELECT COUNT(*) AS c FROM memories
+             WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')
+               AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'
+               AND host_id IS NOT NULL AND host_id != ''
+               AND agent_id IS NOT NULL AND agent_id != ''`,
+          );
+        }
+      } else {
+        telemetryOk = false;
+      }
+    } catch {
+      telemetryOk = false;
+    }
+
+    const detail =
+      `native_touched_7d=${nativeTouched7d} native_bytes≈${nativeBytes} ` +
+      `sc_durable_admits_7d=${durableAdmits7d} activity_7d=${activity} ` +
+      `injectable≈${injectableApprox} unscoped=${unscoped}`;
+
+    // Quiet host with no native signal and weak telemetry → cannot determine (never PASS)
     if (!telemetryOk && activity === 0 && !nativeTouched7d) {
       return {
         label,
         status: 'warn',
-        message: `plane=${cfg.plane}: cannot determine drift — insufficient telemetry`,
+        message: `plane=${cfg.plane}: cannot determine drift — insufficient telemetry (${detail})`,
       };
     }
 
-    // Drift: activity or native growth with ~0 SC durable admits in window
-    const drifting = (activity > 0 || nativeTouched7d) && durableAdmits7d === 0;
+    // Canonical planes: native SoT growth/touch is FAIL even if SC also has admits
+    // (that is dual-brain, not "healthy because SC has rows").
+    if ((cfg.plane === 'import_only' || cfg.plane === 'sc_canonical') && nativeTouched7d) {
+      return {
+        label,
+        status: 'fail',
+        message: `dual-plane drift under plane=${cfg.plane}: native memory artifact touched while plane forbids native SoT (${detail})`,
+        fix: 'Stop native MEMORY.md / memory-dir growth as agent brain; import via defended path or archive — docs/design/2026-08-22-memory-sota-track-a-residual.md',
+      };
+    }
 
-    if (drifting) {
-      const detail = `native_touched_7d=${nativeTouched7d} native_bytes≈${nativeBytes} sc_durable_admits_7d=${durableAdmits7d} activity_7d=${activity}`;
+    // Empty-SC-under-activity (all planes)
+    const emptyScUnderActivity = (activity > 0 || nativeTouched7d) && durableAdmits7d === 0;
+    if (emptyScUnderActivity) {
       if (cfg.plane === 'import_only' || cfg.plane === 'sc_canonical') {
         return {
           label,
           status: 'fail',
           message: `dual-plane drift under plane=${cfg.plane}: ${detail}`,
-          fix: 'Import native via defended path or stop native SoT growth; see docs/design/2026-08-22-memory-sota-track-a-residual.md',
+          fix: 'Capture/import into SC or stop claiming canonicity; see residual plan',
         };
       }
-      // dual_legacy = time-boxed defect
       let aged = false;
       if (cfg.planeSetAt) {
         const setMs = Date.parse(cfg.planeSetAt);
@@ -3113,10 +3164,20 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
       };
     }
 
+    // dual_legacy + native touch + SC admits still WARN (defect mode, not PASS green-wash)
+    if (cfg.plane === 'dual_legacy' && nativeTouched7d && activity > 0) {
+      return {
+        label,
+        status: 'warn',
+        message: `dual_legacy: native still active alongside SC (${detail})`,
+        fix: 'Time-box dual_legacy; move to import_only after host contract + import',
+      };
+    }
+
     return {
       label,
       status: 'pass',
-      message: `plane=${cfg.plane}: no dual-plane drift signal (sc_durable_admits_7d=${durableAdmits7d}, activity_7d=${activity})`,
+      message: `plane=${cfg.plane}: no dual-plane drift signal (${detail})`,
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -3158,7 +3219,16 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   // OpenClaw: memory search / bootstrap markers that still own the bus
   const ocPath = process.env.OPENCLAW_CONFIG_PATH?.trim()
     || path.join(home, '.openclaw', 'openclaw.json');
-  if (fs.existsSync(ocPath)) {
+  // OpenClaw Memory Search defaults ON when the key is absent (host default-on).
+  // Under sc_only / disable_native_inject we only PASS when native is proven OFF.
+  let ocPresent = fs.existsSync(ocPath);
+  if (!ocPresent && (cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject')) {
+    // Bound inject hosts without openclaw.json: cannot prove — not PASS
+    if (cfg.openclawAuto || cfg.plane === 'sc_canonical' || cfg.plane === 'import_only') {
+      findings.push('openclaw.json absent — cannot prove native Memory Search is off');
+    }
+  }
+  if (ocPresent) {
     try {
       const oc = JSON.parse(fs.readFileSync(ocPath, 'utf-8')) as Record<string, unknown>;
       const agents = (oc.agents && typeof oc.agents === 'object') ? oc.agents as Record<string, unknown> : {};
@@ -3167,13 +3237,35 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
         : {};
       if (cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject') {
         const ms = defaults.memorySearch;
-        if (ms === true) {
-          findings.push('openclaw agents.defaults.memorySearch enabled while SC contract claims native off-bus');
-        } else if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
+        // Resolve like OC: undefined → default ON
+        let enabled: boolean | 'unknown' = true;
+        if (ms === false) enabled = false;
+        else if (ms === true) enabled = true;
+        else if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
           const mse = (ms as Record<string, unknown>).enabled;
-          if (mse === true) {
-            findings.push('openclaw agents.defaults.memorySearch.enabled while SC contract claims native off-bus');
+          if (mse === false) enabled = false;
+          else if (mse === true) enabled = true;
+          else enabled = true; // absent .enabled → default on
+        } else if (ms === undefined || ms === null) {
+          enabled = true; // key absent → default on
+        }
+        // Per-agent overrides that re-enable
+        const list = Array.isArray(agents.list) ? agents.list as unknown[] : [];
+        for (const entry of list) {
+          if (!entry || typeof entry !== 'object') continue;
+          const e = entry as Record<string, unknown>;
+          const ems = e.memorySearch;
+          if (ems === true) {
+            findings.push('per-agent memorySearch enabled while SC contract claims native off-bus');
+          } else if (ems && typeof ems === 'object' && !Array.isArray(ems)
+            && (ems as Record<string, unknown>).enabled === true) {
+            findings.push('per-agent memorySearch.enabled while SC contract claims native off-bus');
           }
+        }
+        if (enabled === true) {
+          findings.push(
+            'openclaw Memory Search not proven off (default-on unless agents.defaults.memorySearch.enabled===false) while SC contract claims native off-bus',
+          );
         }
       }
     } catch {
@@ -3187,8 +3279,8 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   try {
     if (fs.existsSync(agentsMd)) {
       const text = fs.readFileSync(agentsMd, 'utf-8');
-      if (/read\s+memory\.md/i.test(text) && /every\s+session|always|soT|source of truth/i.test(text)) {
-        findings.push('workspace AGENTS.md still orders MEMORY.md as session brain under SC nativeContract');
+      if (/memory\.md/i.test(text) && /read\s+|every\s+session|always|soul\.md|user\.md/i.test(text)) {
+        findings.push('workspace AGENTS.md still references MEMORY.md as session brain under SC nativeContract');
       }
     }
   } catch { /* ignore */ }
@@ -3206,13 +3298,12 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   }
 
   if (findings.length > 0) {
-    const severe = cfg.plane === 'sc_canonical' || cfg.plane === 'import_only'
-      || findings.some((f) => /memorySearch enabled/i.test(f));
+    // Paper contract is always FAIL when inject contract is set — never warn-wash.
     return {
       label,
-      status: severe ? 'fail' : 'warn',
+      status: 'fail',
       message: `host contract ${cfg.nativeContract} not fully enforced: ${findings.join('; ')}`,
-      fix: 'Disable native Memory Search / stop MEMORY.md as SoT; prove SC start-pack is the only automatic bus — see #393',
+      fix: 'Set agents.defaults.memorySearch.enabled=false (OC default is ON when absent), stop MEMORY.md as SoT; prove SC start-pack is the only automatic bus — see #393',
     };
   }
 

@@ -127,5 +127,60 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const r = await runHost();
     expect(r.status).toBe('info');
   });
+
+  it('host contract fails when memorySearch key absent (OC default-on)', async () => {
+    writeConfig({
+      openclawAutoMemory: true,
+      memory: {
+        plane: 'dual_legacy',
+        inject: { mode: 'start', nativeContract: 'sc_only', hostId: 'tars', agentId: 'h' },
+      },
+    });
+    const ocDir = path.join(tmpHome, '.openclaw');
+    fs.mkdirSync(ocDir, { recursive: true });
+    fs.writeFileSync(path.join(ocDir, 'openclaw.json'), JSON.stringify({ agents: { defaults: {} } }, null, 2));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/default-on|not proven off|Memory Search/i);
+  });
+
+  it('host contract passes only when memorySearch.enabled === false', async () => {
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        inject: { mode: 'start', nativeContract: 'sc_only', hostId: 'tars', agentId: 'h' },
+      },
+    });
+    const ocDir = path.join(tmpHome, '.openclaw');
+    fs.mkdirSync(ocDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ocDir, 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('pass');
+  });
+
+  it('import_only fails on native touch even when SC has 7d admits', async () => {
+    writeConfig({
+      memory: {
+        plane: 'import_only',
+        inject: { mode: 'start', nativeContract: 'sc_only', hostId: 't', agentId: 'a' },
+      },
+    });
+    const db = openDb();
+    db.prepare(
+      `INSERT INTO memories (title, content, status, sensitivity_level, created_at)
+       VALUES ('fresh', 'fact', 'active', 'INTERNAL', datetime('now'))`,
+    ).run();
+    db.prepare(`INSERT INTO session_events (created_at) VALUES (datetime('now'))`).run();
+    db.close();
+    const ws = path.join(tmpHome, '.openclaw', 'workspace');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(ws, 'MEMORY.md'), '# still the brain\n'.repeat(10));
+    const r = await runDrift();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/native memory artifact touched|drift/i);
+  });
 });
 
