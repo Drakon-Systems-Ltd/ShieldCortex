@@ -323,8 +323,9 @@ process.stdin.on('end', async () => {
             hostId: injectCfg.hostId,
             agentId: injectCfg.agentId,
             project,
-            // Until host_id columns are widespread, allow unscoped if columns absent
-            requireScope: injectCandidates.some((r) => r.host_id != null || r.agent_id != null),
+            // Opus B3 / #348: deny-by-default is config, never data-derived.
+            // Explicit inject.requireScope === false is the only off switch.
+            requireScope: injectCfg.requireScope !== false,
           },
           budgets: injectCfg.budgets,
           sessionState,

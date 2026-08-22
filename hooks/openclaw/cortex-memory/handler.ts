@@ -687,7 +687,8 @@ async function maybeInjectBootstrapPack(context, wsDir, event) {
     scope: {
       hostId: injectCfg.hostId,
       agentId: injectCfg.agentId,
-      requireScope: rows.some((r) => r.host_id != null || r.agent_id != null),
+      // #348 B3: config default-true — never data-derive from unscoped rows
+      requireScope: injectCfg.requireScope !== false,
     },
     budgets: injectCfg.budgets,
     sessionState,

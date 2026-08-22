@@ -146,23 +146,44 @@ export function isInjectEligible(row, scope = {}) {
   const sens = String(row.sensitivity_level || row.sensitivity || 'INTERNAL').toUpperCase();
   if (sens === 'RESTRICTED') return false;
 
-  // Trust: numeric trust_score >= 0.5 (medium) OR source_attested OR trust label >= medium
+  // Trust floor (Opus B1 / #348): attestation is channel identity, NOT trust.
+  // source_attested alone must not bypass the floor for non-pin rows.
+  // Escape: source_attested AND pinned AND trust_score >= 0.5 (or missing trust with allow verdict).
   const attested = row.source_attested === true || row.sourceAttested === true;
-  let trustOk = attested;
-  if (!trustOk && typeof row.trust_score === 'number') {
+  const pinned = row.pinned === true || row.pinned === 1;
+  let trustOk = false;
+  if (typeof row.trust_score === 'number') {
     trustOk = row.trust_score >= 0.5;
-  }
-  if (!trustOk && typeof row.trust === 'string') {
+  } else if (typeof row.trust === 'string') {
     const t = TRUST_ORDER[row.trust.toLowerCase()];
     trustOk = typeof t === 'number' && t >= TRUST_ORDER.medium;
-  }
-  if (!trustOk && row.trust_score == null && row.trust == null) {
-    // Legacy rows without trust: admit only if defence_verdict is allow-like
+  } else {
+    // Legacy rows without trust: only explicit allow-like defence — never "unverified"
     const v = String(row.defence_verdict || '').toLowerCase();
-    trustOk = v === 'allow' || v === 'allowed' || v === 'pass' || v === 'unverified';
+    trustOk = v === 'allow' || v === 'allowed' || v === 'pass';
+  }
+  // Attested pin escape still requires meeting the trust floor when trust is known.
+  if (!trustOk && attested && pinned) {
+    if (typeof row.trust_score === 'number') {
+      trustOk = row.trust_score >= 0.5;
+    } else if (typeof row.trust === 'string') {
+      const t = TRUST_ORDER[row.trust.toLowerCase()];
+      trustOk = typeof t === 'number' && t >= TRUST_ORDER.medium;
+    } else {
+      const v = String(row.defence_verdict || '').toLowerCase();
+      trustOk = v === 'allow' || v === 'allowed' || v === 'pass';
+    }
   }
   if (!trustOk) return false;
 
+  // Never inject never-scanned / unverified legacy (Opus B1)
+  {
+    const v = String(row.defence_verdict || '').toLowerCase();
+    if (v === 'unverified' || v === 'unknown' || v === 'unscanned') return false;
+  }
+
+  // requireScope: default TRUE. Explicit false only via config/caller — never
+  // data-derived from "DB has no scoped rows" (Opus B3 / #348).
   const requireScope = scope.requireScope !== false;
   if (requireScope) {
     const host = row.host_id ?? row.hostId;
@@ -198,7 +219,22 @@ export function clipToTokens(text, maxTokens) {
  * @param {object} row
  * @param {{ perRowTokens: number, now?: Date }} opts
  */
+/** Import / inject salience ceiling (Opus B1). Never let native import claim 1.0. */
+export const INJECT_SALIENCE_CEILING = 0.7;
+
+/**
+ * @param {unknown} raw
+ * @returns {number}
+ */
+export function clampInjectSalience(raw) {
+  const n = typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
+  if (n < 0) return 0;
+  if (n > INJECT_SALIENCE_CEILING) return INJECT_SALIENCE_CEILING;
+  return n;
+}
+
 export function toPackItem(row, opts) {
+
   const factRaw = row.fact != null ? String(row.fact) : String(row.content || '');
   const titleRaw = String(row.title || 'memory');
   // Title cannot consume the whole row budget
@@ -218,6 +254,7 @@ export function toPackItem(row, opts) {
     id: row.id,
     title,
     fact,
+    salience: clampInjectSalience(row.salience),
     source_ids: sourceIds,
     trust,
     age,
@@ -398,11 +435,16 @@ export function readInjectConfig(config = {}) {
   );
   const hostId = inject.hostId ?? mem.hostId ?? config.hostId ?? null;
   const agentId = inject.agentId ?? mem.agentId ?? config.agentId ?? null;
+  // requireScope: default true. Only explicit false disables (signed/config).
+  const requireScope = inject.requireScope === false || mem.requireScope === false
+    ? false
+    : true;
   return {
     mode,
     nativeContract,
     hostId: hostId == null ? null : String(hostId),
     agentId: agentId == null ? null : String(agentId),
+    requireScope,
     budgets: {
       tokens: inject.tokens,
       rows: inject.rows,
