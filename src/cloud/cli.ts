@@ -25,8 +25,10 @@ import {
   getActionGuardCoreConfig,
   setActionGuardCoreConfig,
   setMemoryInjectContract,
+  setMemoryPlane,
   setAutoMemorySamplingTurns,
   NATIVE_INJECT_CONTRACTS,
+  MEMORY_PLANE_VALUES,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -388,6 +390,23 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  const memPlaneIdx = args.indexOf('--memory-plane');
+  if (memPlaneIdx !== -1) {
+    const plane = args[memPlaneIdx + 1];
+    if (!plane || plane.startsWith('--')) {
+      console.error(`Missing value for --memory-plane. Legal values: ${MEMORY_PLANE_VALUES.join(', ')}.`);
+      process.exit(1);
+    }
+    try {
+      setMemoryPlane(plane);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    console.log(`Memory plane set to ${plane} (signed write — config re-signed; planeSetAt stamped).`);
+    changed = true;
+  }
+
   const autoMemSamplingIdx = args.indexOf('--auto-memory-sampling');
   if (autoMemSamplingIdx !== -1) {
     const rawTurns = args[autoMemSamplingIdx + 1];
@@ -463,6 +482,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
     console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
     console.log('  --memory-inject-contract <sc_only|disable_native_inject>  Set the memory-inject native contract (signed write)');
+    console.log('  --memory-plane <dual_legacy|import_only|sc_canonical>  Set memory.plane (signed write; stamps planeSetAt)');
     console.log('  --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('');

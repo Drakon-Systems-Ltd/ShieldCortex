@@ -1346,6 +1346,54 @@ export function setMemoryInjectContract(value: string): void {
   });
 }
 
+/** Legal memory.plane values (Track A / #348). dual_legacy is deprecated defect mode. */
+export const MEMORY_PLANE_VALUES = ['dual_legacy', 'import_only', 'sc_canonical'] as const;
+export type MemoryPlaneValue = (typeof MEMORY_PLANE_VALUES)[number];
+
+/**
+ * SIGNED write path for `memory.plane` — `shieldcortex config --memory-plane`.
+ * Same #275 discipline as setMemoryInjectContract. Also stamps planeSetAt so
+ * drift doctor can time-box dual_legacy. Does not mint legacy memoryPlane alias.
+ */
+export function setMemoryPlane(value: string): void {
+  if (!(MEMORY_PLANE_VALUES as readonly string[]).includes(value)) {
+    throw new Error(
+      `Invalid memory.plane "${value}". Legal values: ${MEMORY_PLANE_VALUES.join(', ')}.`,
+    );
+  }
+  mutateRawConfig((raw) => {
+    const memory = raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory)
+      ? raw.memory as Record<string, unknown>
+      : {};
+    memory.plane = value;
+    memory.planeSetAt = new Date().toISOString();
+    raw.memory = memory;
+  });
+}
+
+/** Read normalized plane from a raw config object (doctor / tooling). */
+export function readMemoryPlane(raw: Record<string, unknown> | null | undefined): {
+  plane: MemoryPlaneValue | null;
+  planeSetAt: string | null;
+  illegal: boolean;
+} {
+  const mem = (raw?.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory))
+    ? raw.memory as Record<string, unknown>
+    : {};
+  const p = mem.plane ?? raw?.memoryPlane;
+  if (p == null || p === '') {
+    return { plane: 'dual_legacy', planeSetAt: typeof mem.planeSetAt === 'string' ? mem.planeSetAt : null, illegal: false };
+  }
+  if (typeof p === 'string' && (MEMORY_PLANE_VALUES as readonly string[]).includes(p)) {
+    return {
+      plane: p as MemoryPlaneValue,
+      planeSetAt: typeof mem.planeSetAt === 'string' ? mem.planeSetAt : null,
+      illegal: false,
+    };
+  }
+  return { plane: null, planeSetAt: null, illegal: true };
+}
+
 const AUTO_MEMORY_SAMPLING_MIN = 1;
 const AUTO_MEMORY_SAMPLING_MAX = 20;
 

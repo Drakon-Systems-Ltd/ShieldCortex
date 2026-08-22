@@ -74,6 +74,48 @@ describe('inject-pack v2', () => {
     expect(isInjectEligible(row(), scope)).toBe(true);
   });
 
+  it('attestation alone does not bypass trust floor (Opus B1 / #348)', () => {
+    expect(isInjectEligible(row({
+      trust_score: 0.2,
+      source_attested: true,
+      pinned: false,
+    }), scope)).toBe(false);
+  });
+
+  it('attested+pinned still requires trust floor', () => {
+    expect(isInjectEligible(row({
+      trust_score: 0.2,
+      source_attested: true,
+      pinned: true,
+    }), scope)).toBe(false);
+    expect(isInjectEligible(row({
+      trust_score: 0.6,
+      source_attested: true,
+      pinned: true,
+    }), scope)).toBe(true);
+  });
+
+  it('unverified defence_verdict never injects', () => {
+    const r = row({ defence_verdict: 'unverified', source_attested: false });
+    delete r.trust_score;
+    expect(isInjectEligible(r, scope)).toBe(false);
+    // even with high trust_score, unverified is hard reject
+    expect(isInjectEligible(row({
+      trust_score: 0.95,
+      defence_verdict: 'unverified',
+    }), scope)).toBe(false);
+  });
+
+  it('requireScope defaults true; unscoped rejected even if other rows scoped', () => {
+    expect(isInjectEligible(row({ host_id: null, agent_id: null }), { requireScope: true })).toBe(false);
+    expect(isInjectEligible(row({ host_id: null, agent_id: null }), {})).toBe(false);
+  });
+
+  it('clamps pack item salience to 0.7', () => {
+    const item = toPackItem(row({ salience: 1.0 }), { perRowTokens: 80 });
+    expect(item.salience).toBeLessThanOrEqual(0.7);
+  });
+
   it('builds empty pack when store empty or contract missing', () => {
     const a = buildStartPack([], baseOpts);
     expect(a.items).toEqual([]);
@@ -191,7 +233,7 @@ describe('inject-pack v2', () => {
   it('toPackItem never includes why', () => {
     const item = toPackItem(row({ title: 'x', content: 'y' }), { perRowTokens: 50 });
     expect(Object.keys(item).sort()).toEqual(
-      ['age', 'content_hash', 'fact', 'id', 'source_ids', 'title', 'tokens', 'trust'].sort(),
+      ['age', 'content_hash', 'fact', 'id', 'salience', 'source_ids', 'title', 'tokens', 'trust'].sort(),
     );
   });
 });

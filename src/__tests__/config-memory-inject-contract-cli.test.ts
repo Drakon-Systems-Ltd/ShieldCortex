@@ -19,6 +19,7 @@ import {
   readRawConfig,
   isConfigTampered,
   setMemoryInjectContract,
+  setMemoryPlane,
   setAutoMemorySamplingTurns,
 } from '../cloud/config.js';
 
@@ -184,5 +185,45 @@ describe('config --auto-memory-sampling (signed sampling fix path)', () => {
     expect(() => setAutoMemorySamplingTurns(2.5)).toThrow(/between 1 and 20/);
     expect(() => setAutoMemorySamplingTurns(Number.NaN)).toThrow(/between 1 and 20/);
     expect(fs.existsSync(configFile())).toBe(false);
+  });
+});
+
+describe('config --memory-plane (signed Track A / #348)', () => {
+  it('import_only writes memory.plane + planeSetAt with _sig', () => {
+    handleCloudConfig(['--memory-plane', 'import_only']);
+    const onDisk = readOnDisk();
+    expect(onDisk.memory.plane).toBe('import_only');
+    expect(onDisk.memory.planeSetAt).toMatch(/^\d{4}-/);
+    expect(onDisk._sig).toMatch(/^[0-9a-f]{64}$/);
+    clearCloudConfigCache();
+    expect(isConfigTampered()).toBe(false);
+  });
+
+  it('rejects illegal plane and leaves config untouched', () => {
+    handleCloudConfig(['--mode', 'balanced']);
+    const before = fs.readFileSync(configFile(), 'utf-8');
+    const exitSpy = mockExit();
+    expect(() => handleCloudConfig(['--memory-plane', 'bidir'])).toThrow('exit');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(before);
+  });
+
+  it('setMemoryPlane API rejects illegal values', () => {
+    expect(() => setMemoryPlane('multi_master')).toThrow(/Invalid memory\.plane/);
+    expect(fs.existsSync(configFile())).toBe(false);
+  });
+
+  it('preserves inject sibling keys when setting plane', () => {
+    fs.writeFileSync(configFile(), JSON.stringify({
+      memory: {
+        inject: { mode: 'start', nativeContract: 'sc_only', hostId: 'tars' },
+      },
+    }, null, 2) + '\n');
+    clearCloudConfigCache();
+    handleCloudConfig(['--memory-plane', 'sc_canonical']);
+    const onDisk = readOnDisk();
+    expect(onDisk.memory.plane).toBe('sc_canonical');
+    expect(onDisk.memory.inject.nativeContract).toBe('sc_only');
+    expect(onDisk.memory.inject.hostId).toBe('tars');
   });
 });

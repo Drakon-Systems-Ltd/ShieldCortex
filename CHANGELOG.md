@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Track A harden + T1 (#348 / #393 / #394):** signed `shieldcortex config --memory-plane`; doctor `checkMemoryPlaneDrift` + `checkMemoryHostContract` (paper-contract / dual-plane drift).
+
+### Fixed
+- **Inject trust floor (Opus B1):** `source_attested` alone no longer bypasses inject eligibility; unverified defence never injects; pack salience clamped to 0.7.
+- **Scope gate (Opus B3):** session-start `requireScope` is config default-true, not data-derived from unscoped DB rows.
+
 ### Changed
 - **Memory SOTA Track A residual fold (#348):** triple frontier review (Grok 4.6 + GPT 5.6 SOL + Opus) folded into design — A-min ≠ done; A3-leaning locks; Opus blockers B1–B4; tickets T1–T3. See `docs/design/2026-08-22-memory-sota-track-a-residual.md`.
 
