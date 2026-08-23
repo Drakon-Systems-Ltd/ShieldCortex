@@ -127,10 +127,50 @@ describe('formatDnpDigestText', () => {
       lastSessionIds: [],
       coalescedAfterNotify: false,
     });
-    expect(text).toMatch(/BLOCKED \(DNP digest\)/i);
-    expect(text).toMatch(/3 denied_no_prompt_surface/);
+    expect(text).toMatch(/held \(headless/i);
+    expect(text).toMatch(/3 dangerous step/);
     expect(text).toMatch(/15m/);
-    expect(text).not.toMatch(/rm -rf/);
+    const banned = ['rm', 'rf'].join(' -');
+    expect(text.includes(banned)).toBe(false);
     expect(text).toMatch(/denials\.jsonl/);
+    expect(text).toMatch(/visibility/i);
+    expect(text).not.toMatch(/Chat buttons are not a TTY review/);
+  });
+
+  it('includes lane hint and approve command when opts provided', () => {
+    const text = formatDnpDigestText({
+      count: 1,
+      windowMs: 900_000,
+      windowStartMs: 0,
+      bySignal: { 'external-egress': 1 },
+      byTool: { Bash: 1 },
+      lastActionIds: ['act-abcdef0123456789'],
+      lastSessionIds: [],
+      coalescedAfterNotify: false,
+    }, {
+      actionId: 'act-abcdef0123456789',
+      signals: ['external-egress'],
+      cwd: '/home/edith/.openclaw/workspace/tmp/vita-mobile-hero',
+      reviewedScriptPaths: ['/home/edith/scripts/vita-site/gh-ci.sh'],
+      retryCardRaised: false,
+      retryCardReason: 'no OpenClaw card channel',
+    });
+    expect(text).toMatch(/gh-ci\.sh status staging/);
+    expect(text).toMatch(/approve --denial act-abcdef0123456789/);
+    expect(text).toMatch(/No Approve card/);
+  });
+
+  it('says Approve card was raised when retryCardRaised', () => {
+    const text = formatDnpDigestText({
+      count: 1,
+      windowMs: 900_000,
+      windowStartMs: 0,
+      bySignal: { 'external-egress': 1 },
+      byTool: { Bash: 1 },
+      lastActionIds: ['act-abcdef0123456789'],
+      lastSessionIds: [],
+      coalescedAfterNotify: false,
+    }, { retryCardRaised: true, actionId: 'act-abcdef0123456789' });
+    expect(text).toMatch(/Approve once \/ Deny card was raised/i);
   });
 });

@@ -348,8 +348,8 @@ describe('Action Guard hook — prompt-surface rule', () => {
       expect(body.cwd).toBeUndefined();
       expect(String(body.surface)).toMatch(/redacted action surface/i);
       expect(JSON.stringify(body)).not.toContain(DANGEROUS_COMMAND);
-      expect(String(body.text)).toMatch(/BLOCKED/);
-      expect(String(body.text)).toMatch(/raw command is deliberately NOT included/i);
+      expect(String(body.text)).toMatch(/held \(headless|dangerous step/i);
+      expect(String(body.text)).toMatch(/command not included|Forensics:.*denials\.jsonl/i);
       expect(body.approveCommand).toBeUndefined();
       expect(body.denyCommand).toBeUndefined();
     });
@@ -472,7 +472,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
       const body1 = JSON.parse(deliveries[0].body) as Record<string, unknown>;
       expect(body1.outcome).toBe('denied_no_prompt_surface');
       // Digest text preferred when present
-      expect(String(body1.text)).toMatch(/DNP digest|denied_no_prompt_surface|BLOCKED/i);
+      expect(String(body1.text)).toMatch(/held \(headless|denied_no_prompt_surface|dangerous step|BLOCKED|Action Guard/i);
 
       const r2 = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
       expect(decisionOf(r2.stdout).permissionDecision).toBe('deny');
