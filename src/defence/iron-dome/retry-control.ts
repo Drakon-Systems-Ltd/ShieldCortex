@@ -350,8 +350,13 @@ const LOCK_STALE_MS = 10_000;
 function sleepSync(ms: number): void {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    return;
   } catch {
-    /* SharedArrayBuffer unavailable — spin rather than fail */
+    /* SharedArrayBuffer / Atomics.wait unavailable — wall-clock wait */
+  }
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    /* bounded spin so lock retries actually back off */
   }
 }
 

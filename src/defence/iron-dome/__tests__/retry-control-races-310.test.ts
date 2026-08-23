@@ -68,7 +68,7 @@ describe('#310 — concurrency on the one lock plane', () => {
    * purpose. `spawnSync` in a loop would serialise the very thing under test
    * and every assertion below would pass for the wrong reason.
    */
-  function child(body: string): Promise<{ stdout: string; status: number | null }> {
+  function child(body: string): Promise<{ stdout: string; stderr: string; status: number | null }> {
     const script = [
       `const store = await import(${JSON.stringify(pathToFileURL(DIST_STORE).href)});`,
       `const home = ${JSON.stringify(home)};`,
@@ -82,14 +82,15 @@ describe('#310 — concurrency on the one lock plane', () => {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let stdout = '';
+      let stderr = '';
       proc.stdout.on('data', (c) => { stdout += String(c); });
-      proc.stderr.on('data', () => { /* diagnostics only */ });
-      proc.on('close', (status) => resolvePromise({ stdout, status }));
+      proc.stderr.on('data', (c) => { stderr += String(c); });
+      proc.on('close', (status) => resolvePromise({ stdout, stderr, status }));
     });
   }
 
   /** Fan out N snippets and let them collide. */
-  function race(bodies: string[]): Promise<Array<{ stdout: string; status: number | null }>> {
+  function race(bodies: string[]): Promise<Array<{ stdout: string; stderr: string; status: number | null }>> {
     return Promise.all(bodies.map((b) => child(b)));
   }
 
@@ -146,8 +147,20 @@ describe('#310 — concurrency on the one lock plane', () => {
       + `${windowStartMs}, windowMs: 900000 });\n`
       + 'process.stdout.write(c.ok ? "CLAIMED" : "refused:" + c.reason);'));
 
-    expect(results.filter((r) => r.stdout.includes('CLAIMED'))).toHaveLength(1);
-    expect(results.filter((r) => r.stdout.includes('refused:already-claimed'))).toHaveLength(5);
+    // Security invariant: exactly one mint. Losers must be fail-closed.
+    // Under CI contention a loser can time out the lock spin (`locked`)
+    // instead of observing the committed claim (`already-claimed`). Both
+    // mint nothing. A crash / empty stdout / not-found is still a fail.
+    const dump = results.map((r) => ({ status: r.status, stdout: r.stdout, stderr: r.stderr.slice(0, 200) }));
+    expect(results.every((r) => r.status === 0)).toBe(true);
+    const claimed = results.filter((r) => r.stdout.includes('CLAIMED'));
+    const failClosed = results.filter((r) =>
+      r.stdout.includes('refused:already-claimed') || r.stdout.includes('refused:locked'));
+    expect({ claimed: claimed.length, failClosed: failClosed.length, dump }).toEqual({
+      claimed: 1,
+      failClosed: 5,
+      dump,
+    });
     expect(storeFile().rows[0].claim).toBeDefined();
   });
 
