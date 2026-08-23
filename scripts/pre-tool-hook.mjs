@@ -912,7 +912,7 @@ function terminalDecisionReason(verdict, outcome, event) {
       // UX: tell the AGENT what to do next — pinned lane or one-shot human approve.
       // Never steer toward enforce:false / broad autoApprove (#386).
       ' Headless session: do NOT retry freehand network/gh/curl. '
-      + 'If a reviewed work lane exists (e.g. /home/edith/scripts/vita-site/gh-ci.sh status staging), use that path. '
+      + 'If a reviewed/pinned work-lane script exists for this job, run that path instead. '
       + 'Otherwise wait for operator: shieldcortex approve --denial <actionId> (one-shot), or an Approve-once card if raised. '
       + 'Do not set actionGuard.enforce:false.'
     )

@@ -238,12 +238,13 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     expect(rows[0].claim).toBeUndefined();
     expect(store()!.budget).toBeNull();
     expect(evidence()).toHaveLength(1);
-    // No card copy on the operator's alert — the #331 digest text is
-    // exactly what it was.
+    // Cards off: no budget_exhausted / no card-raised. Digest may still name
+    // the terminal one-shot path (operator UX) — that is not a card.
     const body = JSON.stringify(evidence());
     expect(body).not.toContain('budget_exhausted');
-    expect(body).not.toContain('approve --denial');
-    expect(r.stderr).not.toMatch(/retry card raised/);
+    expect(body).toMatch(/held \(headless/i);
+    expect(body).toMatch(/No Approve card/i);
+    expect(r.stderr).not.toMatch(/retry card raised|Approve-once card raised/);
   });
 
   it('stays card-dark for a config that merely mentions retryCards without true', () => {

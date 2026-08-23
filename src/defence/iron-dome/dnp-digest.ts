@@ -329,8 +329,8 @@ export function formatDnpDigestText(
   lines.push(
     '',
     summary.coalescedAfterNotify
-      ? 'Note:    Further holds in this window are quiet (coalesced).'
-      : 'Note:    Further holds in this window are quiet (coalesced).',
+      ? 'Note:    Coalesced into the open window (no extra page).'
+      : 'Note:    First hold in this window; further holds are quiet (coalesced).',
     'Forensics: ~/.shieldcortex/denials.jsonl (command not included here).',
     'This message is visibility — not a tappable Approve surface.',
   );

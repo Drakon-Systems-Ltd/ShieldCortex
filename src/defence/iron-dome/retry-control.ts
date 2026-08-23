@@ -71,7 +71,6 @@ import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import { mkdirSecure } from '../../setup/state-permissions.js';
 import { DEFAULT_DNP_DIGEST_WINDOW_MS } from './dnp-digest.js';
-import { suggestWorkLane } from './work-lane-hints.js';
 
 /** The hash every fingerprint, card and grant is bound to is the SAME #118
  *  canonical tool-call hash — re-exported so callers (the hook, the CLI) have
@@ -1265,12 +1264,6 @@ export function buildRetryCardFields(input: RetryCardCopyInput): RetryCardFields
 
   const minutes = Math.max(1, Math.round(input.ttlMs / 60_000));
   const trust = `held headless — Approve = ONE retry (${minutes}m, ${scopeTail(input.cwd)})`;
-  const lane = suggestWorkLane({
-    signals: input.signals,
-    cwd: input.cwd,
-    tool: input.tool,
-  });
-  const laneBit = lane ? ` · lane: ${lane.command}` : '';
   const cronCaveat =
     typeof input.cronIntervalMs === 'number'
     && Number.isFinite(input.cronIntervalMs)
@@ -1279,7 +1272,7 @@ export function buildRetryCardFields(input: RetryCardCopyInput): RetryCardFields
       : '';
 
   const withheld = isSecretEgress(input.signals ?? []);
-  let description = `${trust}${laneBit}${cronCaveat}`;
+  let description = `${trust}${cronCaveat}`;
   let surfaceTruncated = false;
   if (!withheld) {
     const remaining = CARD_DESCRIPTION_MAX - description.length - 3; // " · "
