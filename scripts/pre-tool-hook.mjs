@@ -909,12 +909,12 @@ function terminalDecisionReason(verdict, outcome, event) {
   const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
   const nextStep = outcome === 'denied_no_prompt_surface'
     ? (
-      // #386: do NOT steer operators toward enforce:false / broad autoApprove for
-      // legit installs. Human auth paths: interactive TTY, retry card when
-      // retryCards is on, or `shieldcortex approve --denial <actionId>`.
-      ' Authorise this action yourself in a real terminal, or after this headless '
-      + 'deny run: shieldcortex approve --denial <actionId> (one-shot retry). '
-      + 'Do not set actionGuard.enforce:false to finish an agent task.'
+      // UX: tell the AGENT what to do next — pinned lane or one-shot human approve.
+      // Never steer toward enforce:false / broad autoApprove (#386).
+      ' Headless session: do NOT retry freehand network/gh/curl. '
+      + 'If a reviewed/pinned work-lane script exists for this job, run that path instead. '
+      + 'Otherwise wait for operator: shieldcortex approve --denial <actionId> (one-shot), or an Approve-once card if raised. '
+      + 'Do not set actionGuard.enforce:false.'
     )
     : '';
   const severity = safeSeverity(verdict?.severity, event);
@@ -1210,7 +1210,12 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     }
     if (retryCard?.raised) {
       console.error(
-        `[shieldcortex] #310 retry card raised for ${safeToolName(toolName)} (${id}) — a tap authorises ONE scoped retry, nothing more.`,
+        `[shieldcortex] Approve-once card raised for ${safeToolName(toolName)} (${id}) — operator can tap Approve once or Deny. Do not freehand-retry network.`,
+      );
+    } else if (retry?.config?.retryCards === true && retryCard && !retryCard.raised) {
+      console.error(
+        `[shieldcortex] No Approve card (${retryCard.reason || 'unknown'}) for ${id}. `
+        + 'Use a pinned work lane if one exists, or: shieldcortex approve --denial ' + id,
       );
     }
   }
@@ -1247,16 +1252,37 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
         digestDecision.summary &&
         typeof notify.formatDnpDigestText === 'function'
       ) {
+        // Load reviewed script paths for lane hints (best-effort, never throws).
+        let reviewedScriptPaths = [];
+        try {
+          const rawCfg = retryCtx?.rawConfig;
+          const ag = rawCfg?.actionGuard && typeof rawCfg.actionGuard === 'object' ? rawCfg.actionGuard : {};
+          const rs = Array.isArray(ag.reviewedScripts) ? ag.reviewedScripts : [];
+          reviewedScriptPaths = rs.map((e) => (e && typeof e === 'object' ? e.path : e)).filter((p) => typeof p === 'string');
+        } catch { /* ignore */ }
+        const digestOpts = {
+          actionId: id,
+          tool: safeToolName(toolName),
+          signals: safeSignalList(verdict?.signals),
+          cwd: retryCtx?.cwd ?? retryStep?.row?.originScope?.cwd ?? null,
+          retryCardRaised: retryCard?.raised === true,
+          retryCardReason: retryCard?.raised === true
+            ? undefined
+            : (retryCard?.reason
+              || (retry?.config?.retryCards === true ? undefined : 'retry cards off')
+              || (!notify?.openclawBin ? 'no OpenClaw card channel' : 'card not raised')),
+          reviewedScriptPaths,
+        };
         notification = {
           ...notification,
-          digestText: notify.formatDnpDigestText(digestDecision.summary),
+          digestText: notify.formatDnpDigestText(digestDecision.summary, digestOpts),
           digestCount: digestDecision.summary.count,
         };
       } else if (digestDecision?.action === 'notify' && digestDecision.summary) {
         // Inline fallback so older dist still gets a rolled-up reason line.
         notification = {
           ...notification,
-          reason: `${notification.reason} [digest: ${digestDecision.summary.count} DNP in window]`,
+          reason: `${notification.reason} [held: ${digestDecision.summary.count} in window — use pinned lane or approve --denial]`,
         };
       }
       // #310 — the operator copy for the two things they cannot see from a

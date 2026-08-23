@@ -15,6 +15,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { formatWorkLaneHintLines, suggestWorkLane, type WorkLaneHintInput } from './work-lane-hints.js';
 
 export const DEFAULT_DNP_DIGEST_WINDOW_MS = 15 * 60 * 1000;
 export const MIN_DNP_DIGEST_WINDOW_MS = 60 * 1000;
@@ -238,8 +239,25 @@ export function recordDnpDigestEvent(
   return { action: 'coalesce', state, summary: toSummary(state, true) };
 }
 
-/** Operator-facing one-liner / multi-line body. Never includes raw command. */
-export function formatDnpDigestText(summary: DnpDigestSummary): string {
+/** Extra context for operator-facing digest copy (never raw command). */
+export interface DnpDigestFormatOpts {
+  /** Latest action id (for one-shot approve command). */
+  actionId?: string;
+  tool?: string;
+  signals?: string[];
+  cwd?: string | null;
+  /** Whether a separate #310 Approve-once/Deny card was raised. */
+  retryCardRaised?: boolean;
+  /** Why the card was not raised (budget, no openclaw, off, …). */
+  retryCardReason?: string;
+  reviewedScriptPaths?: string[];
+}
+
+/** Operator-facing multi-line body. Never includes raw command. */
+export function formatDnpDigestText(
+  summary: DnpDigestSummary,
+  opts: DnpDigestFormatOpts = {},
+): string {
   const mins = Math.max(1, Math.round(summary.windowMs / 60_000));
   const topSignals = Object.entries(summary.bySignal)
     .sort((a, b) => b[1] - a[1])
@@ -252,19 +270,69 @@ export function formatDnpDigestText(summary: DnpDigestSummary): string {
     .map(([k, v]) => `${k}×${v}`)
     .join(', ') || 'none';
   const lastActs = summary.lastActionIds.slice(-3).join(', ') || 'none';
+  const actionId = (opts.actionId && /^act-[0-9a-f]{8,}$/i.test(opts.actionId))
+    ? opts.actionId
+    : (summary.lastActionIds.filter((id) => /^act-[0-9a-f]/i.test(id)).slice(-1)[0] ?? '');
+
+  const hintInput: WorkLaneHintInput = {
+    signals: opts.signals ?? Object.keys(summary.bySignal),
+    cwd: opts.cwd,
+    tool: opts.tool,
+    reviewedScriptPaths: opts.reviewedScriptPaths,
+  };
+  const lane = suggestWorkLane(hintInput);
+  const laneLines = formatWorkLaneHintLines(lane);
+
+  // Title: held + visibility — not "the product is broken"
   const lines = [
-    '🛡️ ShieldCortex — Action Guard BLOCKED (DNP digest)',
+    'ShieldCortex — held (headless, no prompt)',
     '',
-    `Count:     ${summary.count} denied_no_prompt_surface in this ${mins}m window`,
-    `Tools:     ${topTools}`,
-    `Signals:   ${topSignals}`,
-    `Last act:  ${lastActs}`,
+    `What:    ${summary.count} dangerous step(s) blocked in this ${mins}m window`,
+    `Tools:   ${topTools}`,
+    `Why:     ${topSignals}`,
+    `Last:    ${lastActs}`,
+  ];
+
+  if (laneLines.length) {
+    lines.push('', ...laneLines);
+  }
+
+  lines.push('');
+  if (opts.retryCardRaised === true) {
+    lines.push(
+      'Retry:   A separate Approve once / Deny card was raised on OpenClaw.',
+      '         Tap Approve once for a single scoped retry, or Deny to silence.',
+    );
+  } else if (opts.retryCardReason) {
+    lines.push(
+      `Retry:   No Approve card this time (${opts.retryCardReason}).`,
+    );
+  } else {
+    lines.push('Retry:   No Approve card on this path — use the terminal command below.');
+  }
+
+  if (actionId) {
+    lines.push(
+      '',
+      'One-shot from a real terminal on that host:',
+      `  shieldcortex approve --denial ${actionId}`,
+      'Then retry the same action once. Approve is not forever.',
+    );
+  } else {
+    lines.push(
+      '',
+      'One-shot from a real terminal on that host:',
+      '  shieldcortex approve --denial <actionId>',
+    );
+  }
+
+  lines.push(
     '',
     summary.coalescedAfterNotify
-      ? 'This event was coalesced into the open window (no extra page).'
-      : 'First DNP in this window. Further DNPs in the window are coalesced.',
-    'Full forensics: ~/.shieldcortex/denials.jsonl — the raw command is deliberately NOT included in this alert.',
-    'Chat buttons are not a TTY review (#310). This is visibility only (#331).',
-  ];
+      ? 'Note:    Coalesced into the open window (no extra page).'
+      : 'Note:    First hold in this window; further holds are quiet (coalesced).',
+    'Forensics: ~/.shieldcortex/denials.jsonl (command not included here).',
+    'This message is visibility — not a tappable Approve surface.',
+  );
   return lines.join('\n');
 }

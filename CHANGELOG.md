@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **DNP / Action Guard operator UX:** digest is “held (headless)” with lane hints, one-shot `approve --denial` command, and clear Approve-card status — not a fake BLOCKED button card. Agent deny text steers to pinned work lanes (e.g. Vita `gh-ci.sh`) instead of freehand network retry. #310 card title **Approve once?**
+
+### Added
+- `work-lane-hints` — suggest reviewed script paths on DNP digest / retry card copy.
+
 ### Added
 - **Track A harden + T1 (#348 / #393 / #394):** signed `shieldcortex config --memory-plane`; doctor `checkMemoryPlaneDrift` + `checkMemoryHostContract` (paper-contract / dual-plane drift).
 

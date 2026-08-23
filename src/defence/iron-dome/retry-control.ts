@@ -1246,7 +1246,7 @@ export interface RetryCardFields {
 
 /**
  * The 256-character budget, spent in a fixed order (design: "Card copy"):
- *   1. the mandatory TRUST copy — already denied, ONE retry, the TTL, the
+ *   1. the mandatory TRUST copy — held headless, ONE retry, the TTL, the
  *      scope — which is never truncated, because it is the whole reason a tap
  *      is safe to make;
  *   2. the cron-interval caveat, when the schedule outruns the spend TTL;
@@ -1259,11 +1259,11 @@ export interface RetryCardFields {
 export function buildRetryCardFields(input: RetryCardCopyInput): RetryCardFields {
   const tool = String(input.tool || 'tool').slice(0, 32);
   const topSignal = String(input.signals?.[0] ?? 'action-guard').slice(0, 32);
-  const rawTitle = `SC retry? ${tool} · ${topSignal}`;
+  const rawTitle = `Approve once? ${tool} · ${topSignal}`;
   const title = rawTitle.length <= CARD_TITLE_MAX ? rawTitle : `${rawTitle.slice(0, CARD_TITLE_MAX - 1)}…`;
 
   const minutes = Math.max(1, Math.round(input.ttlMs / 60_000));
-  const trust = `already denied — approving authorises ONE retry, ${minutes}m, scope ${scopeTail(input.cwd)}`;
+  const trust = `held headless — Approve = ONE retry (${minutes}m, ${scopeTail(input.cwd)})`;
   const cronCaveat =
     typeof input.cronIntervalMs === 'number'
     && Number.isFinite(input.cronIntervalMs)
