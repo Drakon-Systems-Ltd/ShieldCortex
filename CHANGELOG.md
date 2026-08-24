@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Design:** Intent-first doctrine + target architecture (Dashboard/X-Ray/Graph retained) — `docs/design/2026-08-24-intent-first-*.md`
+
+### Added
 - **Design:** SOTA memory + memory defence + work-not-frustration program fold (Grok/SOL/Opus) — `docs/design/2026-08-24-memory-sota-defence-work-not-frustration.md`
 
 ### Changed

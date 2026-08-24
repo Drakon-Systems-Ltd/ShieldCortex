@@ -25,6 +25,7 @@
 Opus’s two REWORK items are **accepted as Phase-0/1 structural locks**, not optional polish.
 
 ---
+> **2026-08-24 operator redirect:** Day-1 product personality is now **intent-first** — see `2026-08-24-intent-first-doctrine.md` and `2026-08-24-intent-first-target-architecture.md`. This fold remains engineering background; it must not override the plain-card / trusted-task law.
 
 ## 1. North star (hold this)
 
