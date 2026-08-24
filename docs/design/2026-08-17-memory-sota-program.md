@@ -8,6 +8,9 @@
 
 **GitHub:** Epic [#347](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/347) · A [#348](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/348) · B [#349](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/349) · C [#350](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/350) · D [#351](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/351) · Design PR [#346](https://github.com/Drakon-Systems-Ltd/ShieldCortex/pull/346)
 
+
+> **2026-08-24 fold:** Post-Edith program design for SOTA memory + memory defence + work-not-frustration is normative in `docs/design/2026-08-24-memory-sota-defence-work-not-frustration.md` (Grok + SOL + Opus). Phase order amended: doors/lanes → classifier valve → Track A finish → fill/inject → proof. Does not weaken hard constraints in §2.
+
 ---
 
 ## 0. One-line thesis
