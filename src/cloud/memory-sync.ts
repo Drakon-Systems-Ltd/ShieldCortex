@@ -182,7 +182,7 @@ export function syncMemoryUpsertToCloud(memory: Memory): void {
 
 /**
  * #405 — content-free cloud deletion record.
- * Identifiers + deleted_at only. Never title/content/tags/metadata/source.
+ * No title/content/tags/metadata/source. Keeps ids + type/category/project/scope timestamps for reconciliation only.
  */
 export function buildMemoryDeleteTombstone(memory: Memory): SyncedMemoryRecord {
   const now = new Date().toISOString();
@@ -226,7 +226,7 @@ export function deletionPolicyFromMemory(memory: Memory): {
   if (typeof memory.cloudExcluded !== 'boolean') {
     return { ok: false, reason: 'missing-cloud-excluded' };
   }
-  if (typeof memory.sensitivityLevel !== 'string') {
+  if (typeof memory.sensitivityLevel !== 'string' || !memory.sensitivityLevel.trim()) {
     return { ok: false, reason: 'missing-sensitivity' };
   }
   return {

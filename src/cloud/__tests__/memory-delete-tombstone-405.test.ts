@@ -145,4 +145,11 @@ describe('#405 cloud delete tombstone privacy', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(posted).toHaveLength(0);
   });
+
+  it('fail-closed on blank sensitivity string', async () => {
+    const { syncMemoryDeleteToCloud } = await import('../memory-sync.js');
+    syncMemoryDeleteToCloud(baseMemory({ sensitivityLevel: '   ' }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(posted).toHaveLength(0);
+  });
 });
