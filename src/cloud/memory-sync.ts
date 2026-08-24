@@ -180,31 +180,75 @@ export function syncMemoryUpsertToCloud(memory: Memory): void {
   });
 }
 
-export function syncMemoryDeleteToCloud(memory: Memory): void {
-  const config = getCloudConfig();
-  if (!config.cloudEnabled || !config.cloudApiKey) return;
-
-  const record: SyncedMemoryRecord = {
+/**
+ * #405 — content-free cloud deletion record.
+ * No title/content/tags/metadata/source. Keeps ids + type/category/project/scope timestamps for reconciliation only.
+ */
+export function buildMemoryDeleteTombstone(memory: Memory): SyncedMemoryRecord {
+  const now = new Date().toISOString();
+  return {
     external_id: memory.uuid,
     local_id: memory.id,
     type: memory.type,
     category: memory.category,
-    title: memory.title,
-    content: memory.content,
+    title: '',
+    content: '',
     project: memory.project ?? null,
-    tags: memory.tags,
-    salience: memory.salience,
+    tags: [],
+    salience: 0,
     scope: memory.scope,
-    transferable: memory.transferable,
+    transferable: false,
     trust_score: null,
+    // Policy is evaluated locally before send; do not re-emit sensitivity/source/metadata.
     sensitivity_level: null,
     source: null,
-    metadata: memory.metadata,
+    metadata: {},
+    cloud_excluded: false,
     created_at: memory.createdAt.toISOString(),
     updated_at: memory.updatedAt.toISOString(),
-    deleted_at: new Date().toISOString(),
+    deleted_at: now,
   };
+}
 
+/**
+ * Policy fields for a delete event. Fail-closed when the original record's
+ * privacy controls cannot be established (missing uuid / unknown exclusion).
+ */
+export function deletionPolicyFromMemory(memory: Memory): {
+  ok: true;
+  policy: Pick<SyncedMemoryRecord, 'project' | 'sensitivity_level' | 'cloud_excluded'>;
+} | { ok: false; reason: string } {
+  if (!memory || typeof memory.uuid !== 'string' || !memory.uuid.trim()) {
+    return { ok: false, reason: 'missing-external-id' };
+  }
+  // cloudExcluded / sensitivityLevel are required columns on Memory; treat
+  // non-boolean exclusion as untrustworthy rather than defaulting to share.
+  if (typeof memory.cloudExcluded !== 'boolean') {
+    return { ok: false, reason: 'missing-cloud-excluded' };
+  }
+  if (typeof memory.sensitivityLevel !== 'string' || !memory.sensitivityLevel.trim()) {
+    return { ok: false, reason: 'missing-sensitivity' };
+  }
+  return {
+    ok: true,
+    policy: {
+      project: memory.project ?? null,
+      sensitivity_level: memory.sensitivityLevel,
+      cloud_excluded: memory.cloudExcluded,
+    },
+  };
+}
+
+export function syncMemoryDeleteToCloud(memory: Memory): void {
+  const config = getCloudConfig();
+  if (!config.cloudEnabled || !config.cloudApiKey) return;
+
+  // #405 — same privacy gate as upsert. Never reconstruct a full body on delete.
+  const gate = deletionPolicyFromMemory(memory);
+  if (!gate.ok) return;
+  if (!shouldSyncRecord(gate.policy)) return;
+
+  const record = buildMemoryDeleteTombstone(memory);
   const envelope = buildEnvelope([record]);
   postEnvelope(envelope).then((ok) => {
     if (!ok) {

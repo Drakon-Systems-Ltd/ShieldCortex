@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#405 P0 security:** cloud memory delete sends content-free tombstones and honours `shouldSyncRecord` / original privacy fields; graph full-sync SELECT includes `cloud_excluded`; graph delete prune gated the same way.
+
 ### Added
 - **Design:** Intent-first doctrine + target architecture (Dashboard/X-Ray/Graph retained) — `docs/design/2026-08-24-intent-first-*.md`
 

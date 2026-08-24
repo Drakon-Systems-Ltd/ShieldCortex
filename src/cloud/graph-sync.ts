@@ -10,6 +10,7 @@ import {
 } from './config.js';
 import { enqueueFailedGraphSync } from './sync-queue.js';
 import type { Memory } from '../memory/types.js';
+import { deletionPolicyFromMemory, shouldSyncRecord } from './memory-sync.js';
 
 export interface SyncedGraphEntityRecord {
   external_id: string;
@@ -268,6 +269,12 @@ export function syncGraphDeleteForMemoryToCloud(memory: Memory): void {
   const config = getCloudConfig();
   if (!config.cloudEnabled || !config.cloudApiKey) return;
 
+  // #405 — UUID prune is content-free, but still honour original privacy gate
+  // so excluded/sensitive records never generate cloud traffic on delete.
+  const gate = deletionPolicyFromMemory(memory);
+  if (!gate.ok) return;
+  if (!shouldSyncRecord(gate.policy)) return;
+
   const envelope = buildEnvelope([], [], [], [memory.uuid]);
   postGraphEnvelope(envelope).then((ok) => {
     if (!ok) enqueueFailedGraphSync(envelope);
@@ -284,10 +291,13 @@ export async function syncAllGraphToCloud(): Promise<{
   failedBatches: number;
 }> {
   const db = getDatabase();
-  const memoryRows = db.prepare('SELECT uuid, project, sensitivity_level FROM memories ORDER BY id ASC').all() as Array<{
+  const memoryRows = db.prepare(
+    'SELECT uuid, project, sensitivity_level, cloud_excluded FROM memories ORDER BY id ASC',
+  ).all() as Array<{
     uuid: string;
     project: string | null;
     sensitivity_level: string | null;
+    cloud_excluded: number | null;
   }>;
   const allowedMemoryExternalIds = buildAllowedMemoryExternalIdSet(memoryRows);
 
