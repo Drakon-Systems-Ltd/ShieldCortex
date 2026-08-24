@@ -196,3 +196,9 @@ Until then: **keep #348 open. No false close.**
 | T1 #393 host contract enforcement | **Initial** doctor proof (`checkMemoryHostContract`) — deepen per-host disable of Memory Search |
 | T2 #394 | Partially overlapped by B2/B3; keep open until fail/warn matrix + FP fixtures complete |
 | T3 #395 | **Not started** (blocked) |
+
+---
+
+## Related program fold (2026-08-24)
+
+Post-Edith SOTA memory + defence + work-not-frustration: `2026-08-24-memory-sota-defence-work-not-frustration.md`. Track A residual locks unchanged; Phase 0 doors/lanes may run in parallel with T1 but **T3 import still waits on T1 + B1–B3**.

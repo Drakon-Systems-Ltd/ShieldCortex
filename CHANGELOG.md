@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Design:** SOTA memory + memory defence + work-not-frustration program fold (Grok/SOL/Opus) — `docs/design/2026-08-24-memory-sota-defence-work-not-frustration.md`
+
 ### Changed
 - **DNP / Action Guard operator UX:** digest is “held (headless)” with lane hints, one-shot `approve --denial` command, and clear Approve-card status — not a fake BLOCKED button card. Agent deny text steers to pinned work lanes (e.g. Vita `gh-ci.sh`) instead of freehand network retry. #310 card title **Approve once?**
 
