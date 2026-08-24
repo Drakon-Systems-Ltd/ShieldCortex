@@ -11,10 +11,14 @@
  *   - concurrent denial writes never lose an update;
  *   - two waiters cannot both hold a launch claim for one identity;
  *   - a deny racing a tap leaves the store readable, with the deny winning.
+ *
+ * HMAC-key first-use (`wx` + reread) is covered in retryHmacKey itself
+ * (retry then null). This suite pre-warms the key so children race the lock.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from '@jest/globals';
+import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,6 +30,7 @@ import {
   grantRetry,
   hashToolCall,
   recordDenialFingerprint,
+  retryControlDir,
 } from '../retry-control.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -54,6 +59,14 @@ describe('#310 — concurrency on the one lock plane', () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'sc-retry-race-'));
     mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+    // Pre-warm the HMAC key so the six claim children race the lock plane,
+    // not first-use key creation (`no-key` is fail-closed but is not the
+    // property this suite is proving).
+    const approvals = retryControlDir(home);
+    mkdirSync(approvals, { recursive: true, mode: 0o700 });
+    writeFileSync(join(approvals, 'retry-control.key'), `${randomBytes(32).toString('hex')}\n`, {
+      mode: 0o600,
+    });
     cwd = mkdtempSync(join(tmpdir(), 'sc-retry-race-cwd-'));
   });
 
@@ -148,17 +161,24 @@ describe('#310 — concurrency on the one lock plane', () => {
       + 'process.stdout.write(c.ok ? "CLAIMED" : "refused:" + c.reason);'));
 
     // Security invariant: exactly one mint. Losers must be fail-closed.
-    // Under CI contention a loser can time out the lock spin (`locked`)
-    // instead of observing the committed claim (`already-claimed`). Both
-    // mint nothing. A crash / empty stdout / not-found is still a fail.
+    // Under CI contention a loser can time out the lock spin (`locked`),
+    // lose the HMAC-key first-use race (`no-key`), or fail the locked
+    // write (`unwritable`) instead of observing `already-claimed`. All
+    // three mint nothing. not-found / budget-exhausted / empty stdout
+    // / crash still fail — those are not this race's valid losers.
     const dump = results.map((r) => ({ status: r.status, stdout: r.stdout, stderr: r.stderr.slice(0, 200) }));
     expect(results.every((r) => r.status === 0)).toBe(true);
     const claimed = results.filter((r) => r.stdout.includes('CLAIMED'));
+    const failClosedReasons = ['already-claimed', 'locked', 'unwritable', 'no-key'];
     const failClosed = results.filter((r) =>
-      r.stdout.includes('refused:already-claimed') || r.stdout.includes('refused:locked'));
-    expect({ claimed: claimed.length, failClosed: failClosed.length, dump }).toEqual({
+      failClosedReasons.some((reason) => r.stdout.includes(`refused:${reason}`)));
+    const unexpected = results.filter((r) =>
+      !r.stdout.includes('CLAIMED')
+      && !failClosedReasons.some((reason) => r.stdout.includes(`refused:${reason}`)));
+    expect({ claimed: claimed.length, failClosed: failClosed.length, unexpected, dump }).toEqual({
       claimed: 1,
       failClosed: 5,
+      unexpected: [],
       dump,
     });
     expect(storeFile().rows[0].claim).toBeDefined();

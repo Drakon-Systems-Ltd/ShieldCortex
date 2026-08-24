@@ -318,8 +318,19 @@ function retryHmacKey(home?: string): string | null {
       writeFileSync(p, `${key}\n`, { mode: 0o600, flag: 'wx' });
       return key;
     } catch {
-      const raced = readFileSync(p, 'utf8').trim();
-      return /^[0-9a-f]{64}$/i.test(raced) ? raced.toLowerCase() : null;
+      // Another process won wx. A same-tick read can still see an empty
+      // or partial file on some hosts (macOS CI after #399); retry briefly
+      // then fail closed — no key means no card claim.
+      for (let attempt = 0; attempt < HMAC_KEY_REREAD_ATTEMPTS; attempt += 1) {
+        try {
+          const raced = readFileSync(p, 'utf8').trim();
+          if (/^[0-9a-f]{64}$/i.test(raced)) return raced.toLowerCase();
+        } catch {
+          /* still missing */
+        }
+        sleepSync(HMAC_KEY_REREAD_SLEEP_MS);
+      }
+      return null;
     }
   } catch {
     return null;
@@ -343,6 +354,9 @@ function constantTimeEquals(a: string, b: string): boolean {
 
 const LOCK_ATTEMPTS = 60;
 const LOCK_SLEEP_MS = 20;
+/** After losing exclusive key create, how long we wait to observe the winner's 64-hex write (~40ms). */
+const HMAC_KEY_REREAD_ATTEMPTS = 8;
+const HMAC_KEY_REREAD_SLEEP_MS = 5;
 /** A lock older than this is presumed abandoned (the holder is a one-shot
  *  hook process; every operation here is milliseconds of file IO). */
 const LOCK_STALE_MS = 10_000;

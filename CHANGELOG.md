@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - **Track A harden + T1 (#348 / #393 / #394):** signed `shieldcortex config --memory-plane`; doctor `checkMemoryPlaneDrift` + `checkMemoryHostContract` (paper-contract / dual-plane drift).
 
 ### Fixed
+- **#310 waiter-race CI flake (macos-test after #399):** leftover after #398 — a child can return `no-key` / `unwritable` (HMAC key first-use `wx` race before the store lock) instead of `already-claimed`/`locked`. Both mint nothing. Key reread now retries briefly; the race test pre-warms the key and scores those fail-closed losers.
 - **#310 waiter-race CI flake:** a lock-spin timeout (`claimCardLaunch` → `locked`) is fail-closed and must not be scored as a missing `already-claimed`. Lock sleep now wall-clock waits if `Atomics.wait` is unavailable instead of burning 60 no-op retries.
 - **Inject trust floor (Opus B1):** `source_attested` alone no longer bypasses inject eligibility; unverified defence never injects; pack salience clamped to 0.7.
 - **Scope gate (Opus B3):** session-start `requireScope` is config default-true, not data-derived from unscoped DB rows.
