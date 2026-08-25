@@ -12,6 +12,12 @@ import { existsSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
 import { resolve, join } from 'path';
 import { generateSessionToken, cleanupSessionToken, validateSessionToken, getSessionToken } from './session-token.js';
+import {
+  evaluateBindPolicy,
+  formatBindPolicyDiagnostic,
+  isLoopbackHost,
+  NON_LOOPBACK_ALLOW_ENV,
+} from './bind-policy.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import { getDatabase, initDatabase, checkpointWal } from '../database/init.js';
 import { MemoryConfig, DEFAULT_CONFIG } from '../memory/types.js';
@@ -364,10 +370,17 @@ export function startVisualizationServer(dbPath?: string): void {
 
   // ── Session Auth ────────────────────────────────────────
   // Generate per-session token (written to ~/.shieldcortex/.api-token)
+  // or honour SHIELDCORTEX_API_TOKEN when set.
   generateSessionToken();
 
+  // #411 — bind policy evaluated before listen; public bootstrap token endpoint
+  // is loopback-only (never on non-loopback network binds).
+  const HOST = process.env.SHIELDCORTEX_HOST || '127.0.0.1';
+  const bindLoopback = isLoopbackHost(HOST);
   // Auth middleware: require Bearer token on all requests except public paths
-  const publicPaths = ['/api/health', '/api/auth/session-token'];
+  const publicPaths = bindLoopback
+    ? ['/api/health', '/api/auth/session-token']
+    : ['/api/health'];
   app.use((req: Request, res: Response, next) => {
     // Dashboard pages and static assets must load before the client can fetch
     // its API session token. Protect API routes, not the Next.js shell.
@@ -401,15 +414,24 @@ export function startVisualizationServer(dbPath?: string): void {
   // the DOM. The row stays visible so the owner can manage it. See the middleware.
   app.use(redactRestrictedResponses);
 
-  // Token handshake — dashboard claims on load (survives page refresh)
-  app.get('/api/auth/session-token', (_req: Request, res: Response) => {
-    const token = getSessionToken();
-    if (!token) {
-      res.status(500).json({ error: 'No session token available' });
-      return;
-    }
-    res.json({ token });
-  });
+  // Token handshake — dashboard claims on load (survives page refresh).
+  // #411: only registered when bound to loopback. Still refuse if the TCP peer
+  // is non-loopback (defence in depth; never trust X-Forwarded-For).
+  if (bindLoopback) {
+    app.get('/api/auth/session-token', (req: Request, res: Response) => {
+      const peer = req.socket.remoteAddress || '';
+      if (!isLoopbackHost(peer) && peer !== '::ffff:127.0.0.1') {
+        res.status(403).json({ error: 'session-token is loopback-only', code: 'LOOPBACK_ONLY' });
+        return;
+      }
+      const token = getSessionToken();
+      if (!token) {
+        res.status(500).json({ error: 'No session token available' });
+        return;
+      }
+      res.json({ token });
+    });
+  }
 
   // ============================================
   // KILL SWITCH GUARD MIDDLEWARE
@@ -1152,7 +1174,24 @@ export function startVisualizationServer(dbPath?: string): void {
     process.exit(1);
   });
 
-  const HOST = process.env.SHIELDCORTEX_HOST || '127.0.0.1';
+  // HOST resolved earlier for public-path policy (#411)
+  const bindDecision = evaluateBindPolicy({
+    host: HOST,
+    allowNonLoopback: process.env[NON_LOOPBACK_ALLOW_ENV] === '1',
+    apiToken: getSessionToken(),
+  });
+  for (const line of formatBindPolicyDiagnostic(HOST, bindDecision)) {
+    if (bindDecision.ok) console.log(line);
+    else console.error(line);
+  }
+  if (!bindDecision.ok) {
+    brainWorker.stop();
+    clearInterval(eventPollInterval);
+    clearInterval(cleanupInterval);
+    cleanupSessionToken();
+    process.exit(1);
+  }
+
   server.listen(Number(PORT), HOST, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
