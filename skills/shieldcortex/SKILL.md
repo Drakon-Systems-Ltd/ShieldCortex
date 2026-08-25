@@ -309,3 +309,9 @@ Public tiers are **Free** and **Enterprise** (sales@drakonsystems.com). Every lo
 - **npm:** https://www.npmjs.com/package/shieldcortex
 - **Issues:** https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues
 - **Changelog:** https://shieldcortex.ai/changelog
+
+## API bind (#411)
+- Default bind is loopback (`127.0.0.1`).
+- Non-loopback requires `SHIELDCORTEX_ALLOW_NON_LOOPBACK=1` **and** `SHIELDCORTEX_API_TOKEN` (≥32 chars).
+- Public `/api/auth/session-token` is loopback-only.
+
