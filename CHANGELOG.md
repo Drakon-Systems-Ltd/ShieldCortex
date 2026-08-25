@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.54.12] - 2026-08-25
+
+**Athena P0/HIGH security + integrity patch.** Ships cloud delete privacy tombstones, consolidation decay fix, FTS/ACL recall correctness, non-loopback API bind auth, closed Action Guard tool-input schemas, DNP/operator UX from main, and intent-first architecture docs.
+
 ### Security
 - **#412:** closed tool-input schema on Action Guard exec/git paths (unknown keys fail closed, including empty unknown fields); MCP remember/recall execute-path safeParse; env/headers are primitive-valued maps (open keys, closed value types — nested objects rejected); command/path/url values must be strings (objects/arrays/numbers/booleans fail closed). Non-exec families annotate (strip unknowns) but **retain extractor keys** so `Workflow.script` / non-exec `code` surfaces are not blinded. GitHub-API tool names (`github_*`) are not treated as git/exec for schema enforce. Write-family tools such as `create_issue` stay annotate — enforcing a closed write key set would false-block GitHub-shaped payloads.
 
