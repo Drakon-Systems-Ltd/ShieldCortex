@@ -8,7 +8,7 @@ import {
   shouldSyncProject,
   updateLastSyncAt,
 } from './config.js';
-import { enqueueFailedMemorySync } from './sync-queue.js';
+import { enqueueFailedMemorySync, enqueueMemoryOutbox } from './sync-queue.js';
 import type { Memory } from '../memory/types.js';
 
 export interface SyncedMemoryRecord {
@@ -161,23 +161,104 @@ async function postEnvelope(envelope: MemorySyncEnvelope): Promise<boolean> {
   }
 }
 
-export function syncMemoryUpsertToCloud(memory: Memory): void {
+
+/**
+ * #409 — build the outbound memory record for an upsert (policy-gated).
+ * Returns null when cloud sync is off or the record must not leave the host.
+ */
+export function buildMemoryUpsertOutboxRecord(memoryId: number): SyncedMemoryRecord | null {
   const config = getCloudConfig();
-  if (!config.cloudEnabled || !config.cloudApiKey) return;
+  if (!config.cloudEnabled || !config.cloudApiKey) return null;
+  const record = hydrateMemoryRecord(memoryId);
+  if (!record) return null;
+  if (!shouldSyncRecord(record)) return null;
+  return applyContentMode(record);
+}
 
-  const record = hydrateMemoryRecord(memory.id);
-  if (!record) return;
+/**
+ * #409 — build the outbound tombstone for a delete (policy-gated).
+ */
+export function buildMemoryDeleteOutboxRecord(memory: Memory): SyncedMemoryRecord | null {
+  const config = getCloudConfig();
+  if (!config.cloudEnabled || !config.cloudApiKey) return null;
+  const gate = deletionPolicyFromMemory(memory);
+  if (!gate.ok) return null;
+  if (!shouldSyncRecord(gate.policy)) return null;
+  return buildMemoryDeleteTombstone(memory);
+}
 
-  if (!shouldSyncRecord(record)) return;
-
-  const envelope = buildEnvelope([applyContentMode(record)]);
-  postEnvelope(envelope).then((ok) => {
-    if (!ok) {
-      enqueueFailedMemorySync(envelope.memories[0]);
-    }
-  }).catch(() => {
-    enqueueFailedMemorySync(envelope.memories[0]);
+/**
+ * #409 — durable outbox write for memory upsert/delete.
+ * Call inside the same SQLite transaction as the local mutation.
+ * delivery_key: memory:{uuid}:{op}:{updatedAt|deletedAt}
+ */
+export function writeMemorySyncOutbox(
+  record: SyncedMemoryRecord,
+  options: {
+    op: 'upsert' | 'delete';
+    db?: ReturnType<typeof getDatabase>;
+  },
+): { inserted: boolean; id: number | null; deliveryKey: string } {
+  const stamp = options.op === 'delete'
+    ? (record.deleted_at ?? new Date().toISOString())
+    : (record.updated_at ?? new Date().toISOString());
+  const deliveryKey = `memory:${record.external_id}:${options.op}:${stamp}`;
+  const result = enqueueMemoryOutbox(record, {
+    deliveryKey,
+    db: options.db,
+    dueNow: true,
   });
+  return { ...result, deliveryKey };
+}
+
+/**
+ * #409 — after the mutation transaction commits, attempt immediate dispatch.
+ * On failure the outbox row remains pending for processRetryQueue (#408).
+ * Never throws into the store path.
+ */
+export function dispatchMemoryOutboxBestEffort(record: SyncedMemoryRecord): void {
+  const envelope = buildEnvelope([record]);
+  postEnvelope(envelope).then((ok) => {
+    if (ok) {
+      // Mark matching pending outbox row(s) synced by external_id + deleted_at presence.
+      try {
+        acknowledgeMemoryOutbox(record);
+      } catch { /* worker will retry */ }
+    }
+    // On !ok the durable outbox row stays pending — no second enqueue.
+  }).catch(() => {
+    /* outbox retains the event */
+  });
+}
+
+function acknowledgeMemoryOutbox(record: SyncedMemoryRecord): void {
+  const db = getDatabase();
+  // Prefer delivery_key prefix match for this external id + op.
+  const op = record.deleted_at ? 'delete' : 'upsert';
+  const prefix = `memory:${record.external_id}:${op}:`;
+  db.prepare(`
+    UPDATE sync_queue
+    SET status = 'synced', synced_at = ?, last_error = NULL,
+        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
+    WHERE status = 'pending'
+      AND delivery_key IS NOT NULL
+      AND delivery_key LIKE ?
+  `).run(new Date().toISOString(), prefix + '%');
+}
+
+export function syncMemoryUpsertToCloud(memory: Memory): void {
+  // #409 — outbox-first even for non-transactional callers: durable row then dispatch.
+  const record = buildMemoryUpsertOutboxRecord(memory.id);
+  if (!record) return;
+  try {
+    writeMemorySyncOutbox(record, { op: 'upsert' });
+  } catch {
+    // Degraded: outbox write failed (e.g. DB unavailable) — still try live
+    // dispatch, and legency-enqueue on network failure inside dispatch path
+    // is not automatic, so park a legacy row best-effort.
+    try { enqueueFailedMemorySync(record); } catch { /* silent */ }
+  }
+  dispatchMemoryOutboxBestEffort(record);
 }
 
 /**
@@ -240,23 +321,15 @@ export function deletionPolicyFromMemory(memory: Memory): {
 }
 
 export function syncMemoryDeleteToCloud(memory: Memory): void {
-  const config = getCloudConfig();
-  if (!config.cloudEnabled || !config.cloudApiKey) return;
-
-  // #405 — same privacy gate as upsert. Never reconstruct a full body on delete.
-  const gate = deletionPolicyFromMemory(memory);
-  if (!gate.ok) return;
-  if (!shouldSyncRecord(gate.policy)) return;
-
-  const record = buildMemoryDeleteTombstone(memory);
-  const envelope = buildEnvelope([record]);
-  postEnvelope(envelope).then((ok) => {
-    if (!ok) {
-      enqueueFailedMemorySync(record);
-    }
-  }).catch(() => {
-    enqueueFailedMemorySync(record);
-  });
+  // #409 outbox-first; #405 privacy gate stays inside buildMemoryDeleteOutboxRecord.
+  const record = buildMemoryDeleteOutboxRecord(memory);
+  if (!record) return;
+  try {
+    writeMemorySyncOutbox(record, { op: 'delete' });
+  } catch {
+    try { enqueueFailedMemorySync(record); } catch { /* silent */ }
+  }
+  dispatchMemoryOutboxBestEffort(record);
 }
 
 export async function syncAllMemoriesToCloud(): Promise<{ total: number; synced: number; failed: number }> {

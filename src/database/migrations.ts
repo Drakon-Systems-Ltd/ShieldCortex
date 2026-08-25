@@ -350,10 +350,13 @@ export function runMigrations(database: Database.Database): void {
         synced_at TEXT,
         lease_owner TEXT,
         lease_token TEXT,
-        lease_expires_at TEXT
+        lease_expires_at TEXT,
+        delivery_key TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at);
       CREATE INDEX IF NOT EXISTS idx_sync_queue_lease_exp ON sync_queue(lease_expires_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_queue_delivery_key
+        ON sync_queue(delivery_key) WHERE delivery_key IS NOT NULL;
     `);
   } catch (err) {
     logIfUnexpectedDdlError(err, 'sync_queue table + index');
@@ -977,14 +980,17 @@ export function runMigrations(database: Database.Database): void {
     if (sq) {
       const cols = database.prepare('PRAGMA table_info(sync_queue)').all() as { name: string }[];
       const have = new Set(cols.map((c) => c.name));
-      for (const col of ['lease_owner', 'lease_token', 'lease_expires_at'] as const) {
+      for (const col of ['lease_owner', 'lease_token', 'lease_expires_at', 'delivery_key'] as const) {
         if (!have.has(col)) {
           database.exec(`ALTER TABLE sync_queue ADD COLUMN ${col} TEXT`);
         }
       }
       database.exec('CREATE INDEX IF NOT EXISTS idx_sync_queue_lease_exp ON sync_queue(lease_expires_at)');
+      database.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_queue_delivery_key ON sync_queue(delivery_key) WHERE delivery_key IS NOT NULL',
+      );
     }
   } catch (err) {
-    logIfUnexpectedDdlError(err, 'sync_queue lease columns (#408)');
+    logIfUnexpectedDdlError(err, 'sync_queue lease/outbox columns (#408/#409)');
   }
 }

@@ -51,8 +51,21 @@ import type { TripleProvenance } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { resolveDisposition } from '../defence/disposition.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
-import { syncGraphDeleteForMemoryToCloud, syncGraphForMemoryToCloud } from '../cloud/graph-sync.js';
-import { syncMemoryDeleteToCloud, syncMemoryUpsertToCloud } from '../cloud/memory-sync.js';
+import {
+  buildEnvelope as buildGraphEnvelope,
+  dispatchGraphOutboxBestEffort,
+  syncGraphDeleteForMemoryToCloud,
+  syncGraphForMemoryToCloud,
+  writeGraphSyncOutbox,
+} from '../cloud/graph-sync.js';
+import {
+  buildMemoryDeleteOutboxRecord,
+  buildMemoryUpsertOutboxRecord,
+  dispatchMemoryOutboxBestEffort,
+  syncMemoryDeleteToCloud,
+  syncMemoryUpsertToCloud,
+  writeMemorySyncOutbox,
+} from '../cloud/memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult, AuditOperation } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
@@ -680,7 +693,9 @@ export function addMemory(
     truncatedLength: truncationResult.content.length,
   };
 
-  // Transaction: INSERT + defence UPDATE must be atomic to prevent wrong trust scores
+  // Transaction: INSERT + defence UPDATE + #409 memory outbox must be atomic so a
+  // crash cannot commit the local row without a durable outbound event (or vice versa).
+  let createOutboxRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
   const insertedId = db.transaction(() => {
     const memoryUuid = randomUUID();
     const result = stmt.run(
@@ -719,7 +734,14 @@ export function addMemory(
       // >10KB memories too (where the STORED content is truncated).
       .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
 
-    return result.lastInsertRowid as number;
+    const id = result.lastInsertRowid as number;
+    if (isFeatureEnabled('cloud_sync')) {
+      createOutboxRecord = buildMemoryUpsertOutboxRecord(id);
+      if (createOutboxRecord) {
+        writeMemorySyncOutbox(createOutboxRecord, { op: 'upsert', db });
+      }
+    }
+    return id;
   })();
 
   const memory = getMemoryById(insertedId)!;
@@ -764,7 +786,13 @@ export function addMemory(
   dispatchWebhook('memory_created', { id: memory.id, title: memory.title, category: memory.category });
 
   if (isFeatureEnabled('cloud_sync')) {
-    syncMemoryUpsertToCloud(memory);
+    // #409 — outbox row committed with the INSERT; dispatch best-effort now.
+    if (createOutboxRecord) {
+      dispatchMemoryOutboxBestEffort(createOutboxRecord);
+    } else {
+      // Policy excluded or cloud off mid-flight — legacy path is a no-op then.
+      syncMemoryUpsertToCloud(memory);
+    }
   }
 
   // ORGANIC FEATURE: Auto-link to related memories
@@ -1069,7 +1097,17 @@ export function updateMemory(
   if (fields.length === 0) return existing;
 
   values.push(id);
-  db.prepare(`UPDATE memories SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
+  // #409 — UPDATE + memory outbox in one transaction.
+  let updateOutboxRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  db.transaction(() => {
+    db.prepare(`UPDATE memories SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
+    if (isFeatureEnabled('cloud_sync')) {
+      updateOutboxRecord = buildMemoryUpsertOutboxRecord(id);
+      if (updateOutboxRecord) {
+        writeMemorySyncOutbox(updateOutboxRecord, { op: 'upsert', db });
+      }
+    }
+  })();
 
   const updatedMemory = getMemoryById(id)!;
 
@@ -1128,7 +1166,12 @@ export function updateMemory(
   persistEvent('memory_updated', { memory: updatedMemory });
 
   if (isFeatureEnabled('cloud_sync')) {
-    syncMemoryUpsertToCloud(updatedMemory);
+    if (updateOutboxRecord) {
+      dispatchMemoryOutboxBestEffort(updateOutboxRecord);
+    } else {
+      syncMemoryUpsertToCloud(updatedMemory);
+    }
+    // Graph refresh may depend on extraction above; still outbox-first inside helper.
     syncGraphForMemoryToCloud(updatedMemory.id);
   }
 
@@ -1347,10 +1390,33 @@ export function deleteMemory(
     }
   }
 
-  const result = db.prepare('DELETE FROM memories WHERE id = ?').run(id);
+  // #409 — DELETE + durable outbox rows in one SQLite transaction.
+  let deleteMemoryRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  let deleteGraphDeliveryKey: string | null = null;
+  let deleteGraphEnvelope: ReturnType<typeof buildGraphEnvelope> | null = null;
+
+  const deleted = db.transaction(() => {
+    const result = db.prepare('DELETE FROM memories WHERE id = ?').run(id);
+    if (result.changes <= 0 || !memory) return false;
+
+    if (isFeatureEnabled('cloud_sync')) {
+      deleteMemoryRecord = buildMemoryDeleteOutboxRecord(memory);
+      if (deleteMemoryRecord) {
+        writeMemorySyncOutbox(deleteMemoryRecord, { op: 'delete', db });
+        // Graph prune outbox — same privacy gate as memory delete (record non-null).
+        deleteGraphEnvelope = buildGraphEnvelope([], [], [], [memory.uuid]);
+        deleteGraphDeliveryKey = `graph:prune:${memory.uuid}:${deleteMemoryRecord.deleted_at ?? new Date().toISOString()}`;
+        writeGraphSyncOutbox(deleteGraphEnvelope, {
+          deliveryKey: deleteGraphDeliveryKey,
+          db,
+        });
+      }
+    }
+    return true;
+  })();
 
   // Emit event for real-time dashboard (in-process)
-  if (result.changes > 0 && memory) {
+  if (deleted && memory) {
     // Provenance ledger: record the allowed delete (one row per memory) when the
     // caller is attributed. Internal source-less deletes (merge/consolidation)
     // are machinery, not user actions, so they're not audited here.
@@ -1358,15 +1424,19 @@ export function deleteMemory(
       logAllowedDelete(id, source, (memory.project as string | undefined) ?? null, aclOp, attested);
     }
     if (isFeatureEnabled('cloud_sync')) {
-      syncMemoryDeleteToCloud(memory);
-      syncGraphDeleteForMemoryToCloud(memory);
+      if (deleteMemoryRecord) {
+        dispatchMemoryOutboxBestEffort(deleteMemoryRecord);
+      }
+      if (deleteGraphEnvelope && deleteGraphDeliveryKey) {
+        dispatchGraphOutboxBestEffort(deleteGraphEnvelope, deleteGraphDeliveryKey);
+      }
     }
     emitMemoryDeleted(id, memory.title);
     // Persist event for cross-process IPC (MCP → Dashboard)
     persistEvent('memory_deleted', { memoryId: id, title: memory.title });
   }
 
-  return result.changes > 0;
+  return deleted;
 }
 
 

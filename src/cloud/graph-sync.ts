@@ -8,7 +8,7 @@ import {
   shouldSyncProject,
   updateLastSyncAt,
 } from './config.js';
-import { enqueueFailedGraphSync } from './sync-queue.js';
+import { enqueueFailedGraphSync, enqueueGraphOutbox } from './sync-queue.js';
 import type { Memory } from '../memory/types.js';
 import { deletionPolicyFromMemory, shouldSyncRecord } from './memory-sync.js';
 
@@ -99,7 +99,7 @@ function buildAllowedMemoryExternalIdSet(rows: Array<{
   );
 }
 
-function buildEnvelope(
+export function buildEnvelope(
   entities: SyncedGraphEntityRecord[],
   triples: SyncedGraphTripleRecord[],
   memoryEntities: SyncedGraphMemoryEntityRecord[],
@@ -251,6 +251,40 @@ function getMemoryScopedEnvelope(memoryId: number): GraphSyncEnvelope | null {
   );
 }
 
+
+/**
+ * #409 — durable outbox write for a graph envelope (upsert or prune).
+ */
+export function writeGraphSyncOutbox(
+  envelope: GraphSyncEnvelope,
+  options: {
+    deliveryKey: string;
+    db?: ReturnType<typeof getDatabase>;
+  },
+): { inserted: boolean; id: number | null; deliveryKey: string } {
+  const result = enqueueGraphOutbox(envelope, {
+    deliveryKey: options.deliveryKey,
+    db: options.db,
+    dueNow: true,
+  });
+  return { ...result, deliveryKey: options.deliveryKey };
+}
+
+export function dispatchGraphOutboxBestEffort(envelope: GraphSyncEnvelope, deliveryKey: string): void {
+  postGraphEnvelope(envelope).then((ok) => {
+    if (!ok) return;
+    try {
+      const db = getDatabase();
+      db.prepare(`
+        UPDATE sync_queue
+        SET status = 'synced', synced_at = ?, last_error = NULL,
+            lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
+        WHERE status = 'pending' AND delivery_key = ?
+      `).run(new Date().toISOString(), deliveryKey);
+    } catch { /* worker retries */ }
+  }).catch(() => { /* outbox retains */ });
+}
+
 export function syncGraphForMemoryToCloud(memoryId: number): void {
   const config = getCloudConfig();
   if (!config.cloudEnabled || !config.cloudApiKey) return;
@@ -258,11 +292,14 @@ export function syncGraphForMemoryToCloud(memoryId: number): void {
   const envelope = getMemoryScopedEnvelope(memoryId);
   if (!envelope) return;
 
-  postGraphEnvelope(envelope).then((ok) => {
-    if (!ok) enqueueFailedGraphSync(envelope);
-  }).catch(() => {
-    enqueueFailedGraphSync(envelope);
-  });
+  // #409 outbox-first
+  const deliveryKey = `graph:upsert:${memoryId}:${Date.now()}`;
+  try {
+    writeGraphSyncOutbox(envelope, { deliveryKey });
+  } catch {
+    try { enqueueFailedGraphSync(envelope); } catch { /* silent */ }
+  }
+  dispatchGraphOutboxBestEffort(envelope, deliveryKey);
 }
 
 export function syncGraphDeleteForMemoryToCloud(memory: Memory): void {
@@ -276,11 +313,14 @@ export function syncGraphDeleteForMemoryToCloud(memory: Memory): void {
   if (!shouldSyncRecord(gate.policy)) return;
 
   const envelope = buildEnvelope([], [], [], [memory.uuid]);
-  postGraphEnvelope(envelope).then((ok) => {
-    if (!ok) enqueueFailedGraphSync(envelope);
-  }).catch(() => {
-    enqueueFailedGraphSync(envelope);
-  });
+  // #409 — delivery key ties prune to memory uuid so ordering is stable per delete
+  const deliveryKey = `graph:prune:${memory.uuid}:${new Date().toISOString()}`;
+  try {
+    writeGraphSyncOutbox(envelope, { deliveryKey });
+  } catch {
+    try { enqueueFailedGraphSync(envelope); } catch { /* silent */ }
+  }
+  dispatchGraphOutboxBestEffort(envelope, deliveryKey);
 }
 
 export async function syncAllGraphToCloud(): Promise<{

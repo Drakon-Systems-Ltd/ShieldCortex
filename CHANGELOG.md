@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **#409:** transactional outbox — memory/graph sync events written in the same SQLite transaction as the local mutation; delivery_key idempotency; dispatch after commit with durable ack/retry.
+
+### Fixed
 - **#408:** cloud sync retry queue uses atomic claim + lease (owner/token/expiry); completion/failure updates are claim-conditional; expired leases are reclaimable.
 
 ## [4.54.12] - 2026-08-25

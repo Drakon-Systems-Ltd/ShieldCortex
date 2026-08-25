@@ -429,11 +429,15 @@ CREATE TABLE IF NOT EXISTS sync_queue (
   -- #408 atomic claim / lease (NULL = unowned; expired lease is reclaimable)
   lease_owner TEXT,
   lease_token TEXT,
-  lease_expires_at TEXT
+  lease_expires_at TEXT,
+  -- #409 transactional outbox idempotency key (NULL for legacy failed-retry enqueues)
+  delivery_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_lease_exp ON sync_queue(lease_expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_queue_delivery_key
+  ON sync_queue(delivery_key) WHERE delivery_key IS NOT NULL;
 
 -- Pro feature: Custom injection patterns
 CREATE TABLE IF NOT EXISTS custom_patterns (

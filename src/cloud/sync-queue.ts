@@ -220,6 +220,53 @@ export function enqueueFailedGraphSync(entry: GraphSyncEnvelope): void {
   enqueuePayload({ kind: 'graph', entry });
 }
 
+/** #409 durable outbox enqueue for memory sync records (same txn as mutation). */
+export function enqueueMemoryOutbox(
+  entry: SyncedMemoryRecord,
+  options: {
+    deliveryKey: string;
+    db?: ReturnType<typeof getDatabase>;
+    dueNow?: boolean;
+  },
+): { inserted: boolean; id: number | null } {
+  return enqueuePayload(
+    {
+      kind: 'memory',
+      entry: {
+        record: entry,
+        device_id: getDeviceId(),
+        device_name: getDeviceName(),
+        platform: `${process.platform}/${process.arch}`,
+      },
+    },
+    {
+      deliveryKey: options.deliveryKey,
+      db: options.db,
+      dueNow: options.dueNow ?? true,
+    },
+  );
+}
+
+/** #409 durable outbox enqueue for graph sync envelopes. */
+export function enqueueGraphOutbox(
+  entry: GraphSyncEnvelope,
+  options: {
+    deliveryKey: string;
+    db?: ReturnType<typeof getDatabase>;
+    dueNow?: boolean;
+  },
+): { inserted: boolean; id: number | null } {
+  return enqueuePayload(
+    { kind: 'graph', entry },
+    {
+      deliveryKey: options.deliveryKey,
+      db: options.db,
+      dueNow: options.dueNow ?? true,
+    },
+  );
+}
+
+
 /**
  * Hard ceiling on total sync_queue rows. The 7-day TTL (purgeOldEntries) only
  * runs when the brain worker is alive; MCP-only installs have no worker, so
@@ -270,23 +317,62 @@ export function enforceQueueCap(maxRows: number = MAX_SYNC_QUEUE_ROWS): number {
   return removed;
 }
 
-function enqueuePayload(payload: QueuePayload): void {
-  const db = getDatabase();
-  const payloadJson = JSON.stringify(payload);
-  const nextRetryAt = new Date(Date.now() + 30_000).toISOString(); // First retry in 30s
+export interface EnqueueOptions {
+  /**
+   * #409 — when set, INSERT is idempotent on delivery_key (UNIQUE partial index).
+   * Same key re-enqueue is a no-op (one outbox row per logical event).
+   */
+  deliveryKey?: string;
+  /**
+   * Optional shared connection (same better-sqlite3 Database). When the caller
+   * is already inside db.transaction(), pass that db so the INSERT joins the
+   * outer transaction. Defaults to getDatabase().
+   */
+  db?: ReturnType<typeof getDatabase>;
+  /**
+   * When true, next_retry_at = now so the dispatcher can claim immediately.
+   * Outbox rows use this; legacy failed-after-live-send rows keep +30s.
+   */
+  dueNow?: boolean;
+}
 
-  db.prepare(`
+function enqueuePayload(payload: QueuePayload, options: EnqueueOptions = {}): { inserted: boolean; id: number | null } {
+  const db = options.db ?? getDatabase();
+  const payloadJson = JSON.stringify(payload);
+  const nextRetryAt = options.dueNow
+    ? new Date().toISOString()
+    : new Date(Date.now() + 30_000).toISOString(); // First retry in 30s
+  const deliveryKey = options.deliveryKey ?? null;
+
+  if (deliveryKey) {
+    // Idempotent insert — UNIQUE(delivery_key) WHERE NOT NULL
+    const info = db.prepare(`
+      INSERT OR IGNORE INTO sync_queue (payload, attempts, next_retry_at, status, delivery_key)
+      VALUES (?, 0, ?, 'pending', ?)
+    `).run(payloadJson, nextRetryAt, deliveryKey);
+    const inserted = Number(info.changes ?? 0) === 1;
+    let id: number | null = null;
+    if (inserted) {
+      id = Number(info.lastInsertRowid);
+    } else {
+      const row = db.prepare('SELECT id FROM sync_queue WHERE delivery_key = ?').get(deliveryKey) as { id: number } | undefined;
+      id = row?.id ?? null;
+    }
+    try { enforceQueueCap(); } catch { /* best-effort */ }
+    return { inserted, id };
+  }
+
+  const info = db.prepare(`
     INSERT INTO sync_queue (payload, attempts, next_retry_at, status)
     VALUES (?, 0, ?, 'pending')
   `).run(payloadJson, nextRetryAt);
 
-  // Keep the queue bounded even with no brain worker running. Best-effort:
-  // a failure here must never block the (already-completed) enqueue.
   try {
     enforceQueueCap();
   } catch {
     /* truly silent — fire-and-forget contract */
   }
+  return { inserted: true, id: Number(info.lastInsertRowid) };
 }
 
 function buildRetryRequest(payloadText: string): { path: string; body: string } {
