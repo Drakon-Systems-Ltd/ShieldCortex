@@ -18,11 +18,32 @@ const TOKEN_FILE = join(CONFIG_DIR, '.api-token');
 // In-memory cache — avoids repeated file reads
 let cachedToken: string | null = null;
 
+/** Operator-configured long-lived token (non-loopback / automation). */
+function envApiToken(): string | null {
+  const v = (process.env.SHIELDCORTEX_API_TOKEN || '').trim();
+  return v.length > 0 ? v : null;
+}
+
 /**
  * Generate a new session token, write to disk, and return it.
  * Called once on server start.
  */
 export function generateSessionToken(): string {
+  // Prefer operator env token when set (required for non-loopback binds).
+  const fromEnv = envApiToken();
+  if (fromEnv) {
+    cachedToken = fromEnv;
+    // Still write a session file for local dashboard tooling when possible,
+    // but never log the value.
+    try {
+      mkdirSecure(CONFIG_DIR);
+      writeFileSync(TOKEN_FILE, fromEnv, { mode: 0o600 });
+      try { chmodSync(TOKEN_FILE, 0o600); } catch { /* best-effort */ }
+    } catch {
+      // Env token alone is enough to authenticate; disk write is convenience.
+    }
+    return fromEnv;
+  }
   const token = randomBytes(32).toString('hex');
   mkdirSecure(CONFIG_DIR);
   writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
@@ -40,6 +61,11 @@ export function generateSessionToken(): string {
  */
 export function getSessionToken(): string | null {
   if (cachedToken) return cachedToken;
+  const fromEnv = envApiToken();
+  if (fromEnv) {
+    cachedToken = fromEnv;
+    return cachedToken;
+  }
   try {
     if (existsSync(TOKEN_FILE)) {
       cachedToken = readFileSync(TOKEN_FILE, 'utf-8').trim();

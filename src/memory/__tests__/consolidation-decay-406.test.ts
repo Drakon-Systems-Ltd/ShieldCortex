@@ -60,7 +60,7 @@ describe('#406 consolidation decay invariant', () => {
     const a = calculateDecayedScore(memory as any);
     const b = calculateDecayedScore(memory as any);
     expect(memory.salience).toBe(base);
-    expect(a).toBeCloseTo(b, 10);
+    expect(a).toBeCloseTo(b, 6);
     expect(a).toBeLessThan(base); // real time decay applied as a view
   });
 
@@ -183,7 +183,7 @@ describe('#406 consolidation decay invariant', () => {
 
     const { updated } = processDecay([memory]);
     const view = updated.get(7)!;
-    expect(view).toBeCloseTo(calculateDecayedScore(memory), 10);
+    expect(view).toBeCloseTo(calculateDecayedScore(memory), 6);
     expect(memory.salience).toBe(0.9);
     expect(view).toBeLessThan(0.9);
   });

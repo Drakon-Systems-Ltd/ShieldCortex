@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **#411:** refuse non-loopback API bind unless `SHIELDCORTEX_ALLOW_NON_LOOPBACK=1` and a strong `SHIELDCORTEX_API_TOKEN` (≥32 chars); disable public `/api/auth/session-token` on non-loopback; loopback default unchanged.
+
 ### Fixed
 - **#407 / #410:** FTS candidate window orders by BM25 (`fts.rank`) before LIMIT; ACL filters scored candidates before top-k slice with bounded over-fetch so unauthorized rows cannot starve authorized matches.
 
