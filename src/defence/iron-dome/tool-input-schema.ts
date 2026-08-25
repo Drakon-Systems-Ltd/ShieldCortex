@@ -9,7 +9,9 @@
  *      objects validated recursively)
  *   3. Rejects unknown keys (fail closed) when `mode: 'enforce'`
  *   4. In `mode: 'annotate'` (default for hash/approve stability), strips
- *      unknown keys but never invents values
+ *      unknown keys but never invents values — EXCEPT the extractor keys
+ *      (see EXTRACTOR_KEYS), which always survive so annotate cannot blind
+ *      the guard on non-exec surfaces such as `Workflow.script`
  */
 
 export type ToolInputMode = 'enforce' | 'annotate';
@@ -40,6 +42,8 @@ const WRITE_KEYS = new Set([
   'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
   'new_string', 'old_string', 'content', 'contents', 'file_text', 'body', 'text',
   'description',
+  // Non-exec tools may still carry these keys; extractors + field discipline decide weight.
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
 ]);
 
 const READ_KEYS = new Set([
@@ -58,10 +62,34 @@ const MEMORY_KEYS = new Set([
   'includeDecayed', 'includeGlobal', 'mode', 'id', 'memoryId',
 ]);
 
+/**
+ * Keys the downstream extractors (extractCommand / extractPath / extractUrl /
+ * extractWriteContent) actually read. Stripping one of these in annotate mode
+ * blinds the guard: `Workflow.script` carrying a force-push scanned clean and
+ * returned `allow`. These survive annotate for EVERY family, and must be
+ * strings — a smuggled object/array here is fail-closed, not silently ignored.
+ */
+const EXTRACTOR_KEYS = new Set([
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'url', 'uri', 'endpoint', 'href', 'host', 'to',
+  'stdin', 'new_string', 'old_string', 'content', 'contents', 'file_text', 'body', 'text',
+]);
+
+/** Command/path/url keys the scanners actually read as strings. Object/array here is fail-closed. Messaging `content`/`body`/`text` are NOT in this set — Block Kit payloads must not trip the guard. */
+const STRING_SCAN_KEYS = new Set([
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run', 'stdin',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'url', 'uri', 'endpoint', 'href', 'host', 'to',
+]);
+
 const UNKNOWN_FAMILY_KEYS = new Set([
   'description', 'timeout', 'title', 'name', 'id',
   // Messaging / notification tools: free-form body is data, not shell (field discipline).
   'content', 'message', 'text', 'body', 'channel', 'to', 'subject',
+  // Extractor keys may appear on unknown tools; keep for scan, do not invent semantics.
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  'path', 'file_path', 'filePath', 'file', 'url', 'uri',
 ]);
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -79,7 +107,7 @@ export function schemaFamilyForTool(
   }
   if (
     /(^|_)(bash|shell|exec|terminal|run_terminal|powershell|cmd|run_command|script|eval|spawn|process|system|sh|zsh)(_|$)/.test(seg)
-    || /^(bash|shell|sh|zsh|exec|cmd|powershell)$/.test(seg)
+    || /^(bash|shell|sh|zsh|exec|cmd|powershell|run|command)$/.test(seg)
     || /(bash|shell|exec|terminal)/.test(n)
   ) {
     return 'exec';
@@ -188,15 +216,35 @@ export function validateToolInput(
   const unknown: string[] = [];
 
   for (const [key, value] of Object.entries(raw)) {
-    // Empty strings are absent payload (hosts/tests often send command:'' alongside
-    // url/query). Drop them before unknown-key checks so they do not fail closed.
-    if (value === '' || value === null || value === undefined) {
-      continue;
-    }
+    const isAbsent = value === '' || value === null || value === undefined;
+
     if (!allowed.has(key)) {
-      if (mode === 'enforce') unknown.push(key);
-      else strippedKeys.push(key);
-      continue;
+      // An empty value does NOT excuse an unknown key: skipping it here would
+      // let `{command:'ok', evil:''}` fail open on the enforcement path.
+      if (mode === 'enforce') {
+        unknown.push(key);
+        continue;
+      }
+      // annotate: keep extractor-critical keys so unknown tool names are not blinded
+      if (!EXTRACTOR_KEYS.has(key)) {
+        strippedKeys.push(key);
+        continue;
+      }
+    }
+
+    // Allowed (or retained extractor) key with no payload: absent, not invalid.
+    // Hosts routinely send `command: ''` alongside the field they actually used.
+    if (isAbsent) continue;
+
+    // Command/path/url scanners only accept strings. Object/array here cannot
+    // be scanned, so it must never reach the extractors as a silent empty.
+    // `content`/`body`/`text` stay out of STRING_SCAN_KEYS (structured messages).
+    if (STRING_SCAN_KEYS.has(key) && (isPlainObject(value) || Array.isArray(value))) {
+      return {
+        ok: false,
+        code: 'NESTED_INVALID',
+        reason: `Field "${key}" must be a string, got ${Array.isArray(value) ? 'array' : 'object'}`,
+      };
     }
 
     const nestedErr = validateNested(value, key);

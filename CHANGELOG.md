@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Security
-- **#412:** closed tool-input schema on Action Guard exec/git paths; MCP remember/recall execute-path safeParse; nested maps primitive-only; non-exec families strip unknown keys (annotate) to avoid FP blocks.
+- **#412:** closed tool-input schema on Action Guard exec/git paths (unknown keys fail closed, including empty unknown fields); MCP remember/recall execute-path safeParse; nested maps primitive-only; command/path/url values must be strings. Non-exec families annotate (strip unknowns) but **retain extractor keys** so `Workflow.script` / non-exec `code` surfaces are not blinded. Write-family tools such as `create_issue` stay annotate — enforcing a closed write key set would false-block GitHub-shaped payloads.
 
 ### Security
 - **#411:** refuse non-loopback API bind unless `SHIELDCORTEX_ALLOW_NON_LOOPBACK=1` and a strong `SHIELDCORTEX_API_TOKEN` (≥32 chars); disable public `/api/auth/session-token` on non-loopback; loopback default unchanged.
