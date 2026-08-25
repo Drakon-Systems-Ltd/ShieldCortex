@@ -696,6 +696,7 @@ export function addMemory(
   // Transaction: INSERT + defence UPDATE + #409 memory outbox must be atomic so a
   // crash cannot commit the local row without a durable outbound event (or vice versa).
   let createOutboxRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  let createOutboxKey: string | null = null;
   const insertedId = db.transaction(() => {
     const memoryUuid = randomUUID();
     const result = stmt.run(
@@ -738,7 +739,7 @@ export function addMemory(
     if (isFeatureEnabled('cloud_sync')) {
       createOutboxRecord = buildMemoryUpsertOutboxRecord(id);
       if (createOutboxRecord) {
-        writeMemorySyncOutbox(createOutboxRecord, { op: 'upsert', db });
+        createOutboxKey = writeMemorySyncOutbox(createOutboxRecord, { op: 'upsert', db }).deliveryKey;
       }
     }
     return id;
@@ -788,7 +789,7 @@ export function addMemory(
   if (isFeatureEnabled('cloud_sync')) {
     // #409 — outbox row committed with the INSERT; dispatch best-effort now.
     if (createOutboxRecord) {
-      dispatchMemoryOutboxBestEffort(createOutboxRecord);
+      dispatchMemoryOutboxBestEffort(createOutboxRecord, createOutboxKey ?? undefined);
     } else {
       // Policy excluded or cloud off mid-flight — legacy path is a no-op then.
       syncMemoryUpsertToCloud(memory);
@@ -1099,12 +1100,13 @@ export function updateMemory(
   values.push(id);
   // #409 — UPDATE + memory outbox in one transaction.
   let updateOutboxRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  let updateOutboxKey: string | null = null;
   db.transaction(() => {
     db.prepare(`UPDATE memories SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
     if (isFeatureEnabled('cloud_sync')) {
       updateOutboxRecord = buildMemoryUpsertOutboxRecord(id);
       if (updateOutboxRecord) {
-        writeMemorySyncOutbox(updateOutboxRecord, { op: 'upsert', db });
+        updateOutboxKey = writeMemorySyncOutbox(updateOutboxRecord, { op: 'upsert', db }).deliveryKey;
       }
     }
   })();
@@ -1167,7 +1169,7 @@ export function updateMemory(
 
   if (isFeatureEnabled('cloud_sync')) {
     if (updateOutboxRecord) {
-      dispatchMemoryOutboxBestEffort(updateOutboxRecord);
+      dispatchMemoryOutboxBestEffort(updateOutboxRecord, updateOutboxKey ?? undefined);
     } else {
       syncMemoryUpsertToCloud(updatedMemory);
     }
@@ -1392,6 +1394,7 @@ export function deleteMemory(
 
   // #409 — DELETE + durable outbox rows in one SQLite transaction.
   let deleteMemoryRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  let deleteMemoryKey: string | null = null;
   let deleteGraphDeliveryKey: string | null = null;
   let deleteGraphEnvelope: ReturnType<typeof buildGraphEnvelope> | null = null;
 
@@ -1402,14 +1405,19 @@ export function deleteMemory(
     if (isFeatureEnabled('cloud_sync')) {
       deleteMemoryRecord = buildMemoryDeleteOutboxRecord(memory);
       if (deleteMemoryRecord) {
-        writeMemorySyncOutbox(deleteMemoryRecord, { op: 'delete', db });
+        deleteMemoryKey = writeMemorySyncOutbox(deleteMemoryRecord, { op: 'delete', db }).deliveryKey;
         // Graph prune outbox — same privacy gate as memory delete (record non-null).
+        // next_retry_at slightly after memory row so claim order prefers tombstone first.
         deleteGraphEnvelope = buildGraphEnvelope([], [], [], [memory.uuid]);
-        deleteGraphDeliveryKey = `graph:prune:${memory.uuid}:${deleteMemoryRecord.deleted_at ?? new Date().toISOString()}`;
+        deleteGraphDeliveryKey = `graph:prune:${memory.uuid}:${deleteMemoryRecord.deleted_at ?? new Date().toISOString()}:0`;
         writeGraphSyncOutbox(deleteGraphEnvelope, {
           deliveryKey: deleteGraphDeliveryKey,
           db,
         });
+        // Bump graph row retry a hair later for claim ORDER BY next_retry_at
+        db.prepare(
+          `UPDATE sync_queue SET next_retry_at = ? WHERE delivery_key = ? AND status = 'pending'`,
+        ).run(new Date(Date.now() + 5).toISOString(), deleteGraphDeliveryKey);
       }
     }
     return true;
@@ -1425,7 +1433,7 @@ export function deleteMemory(
     }
     if (isFeatureEnabled('cloud_sync')) {
       if (deleteMemoryRecord) {
-        dispatchMemoryOutboxBestEffort(deleteMemoryRecord);
+        dispatchMemoryOutboxBestEffort(deleteMemoryRecord, deleteMemoryKey ?? undefined);
       }
       if (deleteGraphEnvelope && deleteGraphDeliveryKey) {
         dispatchGraphOutboxBestEffort(deleteGraphEnvelope, deleteGraphDeliveryKey);

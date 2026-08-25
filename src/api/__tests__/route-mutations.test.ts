@@ -203,9 +203,13 @@ describe('API route mutation regressions', () => {
         enqueueFailedMemorySync: jest.fn(),
         enqueueFailedGraphSync: jest.fn(),
         enqueueFailedQuarantineSync: jest.fn(),
+        enqueueMemoryOutbox: jest.fn(() => ({ inserted: true, id: 1 })),
+        enqueueGraphOutbox: jest.fn(() => ({ inserted: true, id: 1 })),
         processRetryQueue: jest.fn(),
         purgeOldEntries: jest.fn(),
         reconcileSyncQueue: jest.fn(() => ({ removed: 0 })),
+        claimRetryBatch: jest.fn(() => []),
+        SYNC_QUEUE_LEASE_MS: 60_000,
       }));
 
       const routeModule = await import('../routes/system.js');

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { getDatabase } from '../database/init.js';
 import {
   getCloudConfig,
@@ -197,12 +198,17 @@ export function writeMemorySyncOutbox(
   options: {
     op: 'upsert' | 'delete';
     db?: ReturnType<typeof getDatabase>;
+    /** Stable key for this logical event. Auto-minted unique when omitted. */
+    deliveryKey?: string;
   },
 ): { inserted: boolean; id: number | null; deliveryKey: string } {
+  // Unique per mutation (ms + nonce). Second-resolution updated_at alone collides
+  // and a LIKE ack would mark later pending rows synced without sending them.
   const stamp = options.op === 'delete'
     ? (record.deleted_at ?? new Date().toISOString())
     : (record.updated_at ?? new Date().toISOString());
-  const deliveryKey = `memory:${record.external_id}:${options.op}:${stamp}`;
+  const deliveryKey = options.deliveryKey
+    ?? `memory:${record.external_id}:${options.op}:${stamp}:${Date.now()}:${randomBytes(6).toString('hex')}`;
   const result = enqueueMemoryOutbox(record, {
     deliveryKey,
     db: options.db,
@@ -216,13 +222,15 @@ export function writeMemorySyncOutbox(
  * On failure the outbox row remains pending for processRetryQueue (#408).
  * Never throws into the store path.
  */
-export function dispatchMemoryOutboxBestEffort(record: SyncedMemoryRecord): void {
+export function dispatchMemoryOutboxBestEffort(
+  record: SyncedMemoryRecord,
+  deliveryKey?: string,
+): void {
   const envelope = buildEnvelope([record]);
   postEnvelope(envelope).then((ok) => {
     if (ok) {
-      // Mark matching pending outbox row(s) synced by external_id + deleted_at presence.
       try {
-        acknowledgeMemoryOutbox(record);
+        acknowledgeMemoryOutbox(deliveryKey);
       } catch { /* worker will retry */ }
     }
     // On !ok the durable outbox row stays pending — no second enqueue.
@@ -231,34 +239,31 @@ export function dispatchMemoryOutboxBestEffort(record: SyncedMemoryRecord): void
   });
 }
 
-function acknowledgeMemoryOutbox(record: SyncedMemoryRecord): void {
+/** #409 — ack exactly one outbox row. Never LIKE-prefix (would drop later events). */
+function acknowledgeMemoryOutbox(deliveryKey?: string): void {
+  if (!deliveryKey) return;
   const db = getDatabase();
-  // Prefer delivery_key prefix match for this external id + op.
-  const op = record.deleted_at ? 'delete' : 'upsert';
-  const prefix = `memory:${record.external_id}:${op}:`;
   db.prepare(`
     UPDATE sync_queue
     SET status = 'synced', synced_at = ?, last_error = NULL,
         lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
-    WHERE status = 'pending'
-      AND delivery_key IS NOT NULL
-      AND delivery_key LIKE ?
-  `).run(new Date().toISOString(), prefix + '%');
+    WHERE status = 'pending' AND delivery_key = ?
+  `).run(new Date().toISOString(), deliveryKey);
 }
 
 export function syncMemoryUpsertToCloud(memory: Memory): void {
   // #409 — outbox-first even for non-transactional callers: durable row then dispatch.
   const record = buildMemoryUpsertOutboxRecord(memory.id);
   if (!record) return;
+  let deliveryKey: string | undefined;
   try {
-    writeMemorySyncOutbox(record, { op: 'upsert' });
+    deliveryKey = writeMemorySyncOutbox(record, { op: 'upsert' }).deliveryKey;
   } catch {
     // Degraded: outbox write failed (e.g. DB unavailable) — still try live
-    // dispatch, and legency-enqueue on network failure inside dispatch path
-    // is not automatic, so park a legacy row best-effort.
+    // dispatch; park a legacy row best-effort.
     try { enqueueFailedMemorySync(record); } catch { /* silent */ }
   }
-  dispatchMemoryOutboxBestEffort(record);
+  dispatchMemoryOutboxBestEffort(record, deliveryKey);
 }
 
 /**
@@ -324,12 +329,13 @@ export function syncMemoryDeleteToCloud(memory: Memory): void {
   // #409 outbox-first; #405 privacy gate stays inside buildMemoryDeleteOutboxRecord.
   const record = buildMemoryDeleteOutboxRecord(memory);
   if (!record) return;
+  let deliveryKey: string | undefined;
   try {
-    writeMemorySyncOutbox(record, { op: 'delete' });
+    deliveryKey = writeMemorySyncOutbox(record, { op: 'delete' }).deliveryKey;
   } catch {
     try { enqueueFailedMemorySync(record); } catch { /* silent */ }
   }
-  dispatchMemoryOutboxBestEffort(record);
+  dispatchMemoryOutboxBestEffort(record, deliveryKey);
 }
 
 export async function syncAllMemoriesToCloud(): Promise<{ total: number; synced: number; failed: number }> {

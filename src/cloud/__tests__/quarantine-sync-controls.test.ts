@@ -44,6 +44,8 @@ async function loadModule() {
   // sync-queue is a leaf import; stub so a failed/queued path doesn't touch disk.
   jest.unstable_mockModule('../sync-queue.js', () => ({
     enqueueFailedQuarantineSync: jest.fn(),
+    enqueueMemoryOutbox: jest.fn(() => ({ inserted: true, id: 1 })),
+    enqueueGraphOutbox: jest.fn(() => ({ inserted: true, id: 1 })),
   }));
   return import('../quarantine-sync.js');
 }

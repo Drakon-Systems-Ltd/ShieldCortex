@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { getDatabase } from '../database/init.js';
 import {
   getCloudConfig,
@@ -293,7 +294,7 @@ export function syncGraphForMemoryToCloud(memoryId: number): void {
   if (!envelope) return;
 
   // #409 outbox-first
-  const deliveryKey = `graph:upsert:${memoryId}:${Date.now()}`;
+  const deliveryKey = `graph:upsert:${memoryId}:${Date.now()}:${randomBytes(6).toString('hex')}`;
   try {
     writeGraphSyncOutbox(envelope, { deliveryKey });
   } catch {
@@ -314,7 +315,7 @@ export function syncGraphDeleteForMemoryToCloud(memory: Memory): void {
 
   const envelope = buildEnvelope([], [], [], [memory.uuid]);
   // #409 — delivery key ties prune to memory uuid so ordering is stable per delete
-  const deliveryKey = `graph:prune:${memory.uuid}:${new Date().toISOString()}`;
+  const deliveryKey = `graph:prune:${memory.uuid}:${new Date().toISOString()}:${randomBytes(6).toString('hex')}`;
   try {
     writeGraphSyncOutbox(envelope, { deliveryKey });
   } catch {
