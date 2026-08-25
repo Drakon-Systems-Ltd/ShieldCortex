@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import type { MemoryConfig } from '../types.js';
-import { DEFAULT_CONFIG } from '../types.js';
+import { DEFAULT_CONFIG, DEFAULT_RANKER_CONFIG } from '../types.js';
 
 const PROJECT = 'fts-407-410';
 
@@ -49,7 +49,8 @@ describe('#407 FTS BM25 before LIMIT', () => {
       db.prepare('UPDATE memories SET salience = 0.95, decayed_score = 0.95 WHERE id = ?').run(m.id);
     }
 
-    // Perfect lexical hit, intentionally low salience (would lose a salience ORDER BY LIMIT 5).
+    // Perfect lexical hit, intentionally lower salience (would lose a salience ORDER BY LIMIT 5).
+    // Stay above default salienceThreshold (0.2) so scoring does not drop the row.
     const perfect = addMemory({
       title: 'deploy staging pipeline runbook',
       content:
@@ -67,7 +68,6 @@ describe('#407 FTS BM25 before LIMIT', () => {
 
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]?.memory.id).toBe(perfect.id);
-    // Still present after re-fetch (not a phantom id)
     expect(getMemoryById(perfect.id)?.title).toContain('deploy staging pipeline');
   });
 
@@ -118,7 +118,6 @@ describe('#410 ACL before LIMIT with over-fetch', () => {
     const { searchMemories } = await import('../search-recall.js');
     const db = getDatabase();
 
-    // High-rank unauthorized (RESTRICTED owned by another agent)
     for (let i = 0; i < 15; i++) {
       const m = addMemory({
         title: `secret credential vault ${i}`,
@@ -133,7 +132,6 @@ describe('#410 ACL before LIMIT with over-fetch', () => {
       ).run(m.id);
     }
 
-    // Authorized owner row (medium-trust agent can read own only if low; use own source match)
     const ownerSource = 'agent:user-spawned>task-410';
     const allowed = addMemory({
       title: 'credential vault runbook public notes',
@@ -147,7 +145,6 @@ describe('#410 ACL before LIMIT with over-fetch', () => {
       `UPDATE memories SET salience = 0.4, decayed_score = 0.4, sensitivity_level = 'INTERNAL', source = ? WHERE id = ?`,
     ).run(ownerSource, allowed.id);
 
-    // Caller is the owner medium-trust agent — can read own; cannot read others' RESTRICTED.
     const source = { type: 'agent' as const, identifier: 'user-spawned>task-410' };
 
     const results = await searchMemories(
@@ -157,10 +154,55 @@ describe('#410 ACL before LIMIT with over-fetch', () => {
     );
 
     expect(results.some((r) => r.memory.id === allowed.id)).toBe(true);
-    // No unauthorized restricted content leaked
     for (const r of results) {
       expect(r.memory.sensitivityLevel).not.toBe('RESTRICTED');
     }
     expect(results[0]?.memory.id).toBe(allowed.id);
+  });
+
+  it('RRF default path also ACL-filters before user top-k (Grok #410 hole)', async () => {
+    const { addMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const { searchMemories } = await import('../search-recall.js');
+    const db = getDatabase();
+
+    for (let i = 0; i < 12; i++) {
+      const m = addMemory({
+        title: `secret credential vault rrf ${i}`,
+        content: `credential vault secret material rrf ${i} credential vault`,
+        type: 'long_term',
+        salience: 0.99,
+        project: PROJECT,
+        sensitivityLevel: 'RESTRICTED',
+      });
+      db.prepare(
+        `UPDATE memories SET salience = 0.99, decayed_score = 0.99, sensitivity_level = 'RESTRICTED', source = 'cli:other-agent' WHERE id = ?`,
+      ).run(m.id);
+    }
+
+    const ownerSource = 'agent:user-spawned>task-410-rrf';
+    const allowed = addMemory({
+      title: 'credential vault runbook public notes rrf',
+      content: 'credential vault operational notes for the owner agent rrf',
+      type: 'long_term',
+      salience: 0.4,
+      project: PROJECT,
+      sensitivityLevel: 'INTERNAL',
+    });
+    db.prepare(
+      `UPDATE memories SET salience = 0.4, decayed_score = 0.4, sensitivity_level = 'INTERNAL', source = ? WHERE id = ?`,
+    ).run(ownerSource, allowed.id);
+
+    const source = { type: 'agent' as const, identifier: 'user-spawned>task-410-rrf' };
+    const results = await searchMemories(
+      { query: 'credential vault', project: PROJECT, limit: 3 },
+      cfg({ ranker: { ...DEFAULT_RANKER_CONFIG, engine: 'rrf' } }),
+      source,
+    );
+
+    expect(results.some((r) => r.memory.id === allowed.id)).toBe(true);
+    for (const r of results) {
+      expect(r.memory.sensitivityLevel).not.toBe('RESTRICTED');
+    }
   });
 });

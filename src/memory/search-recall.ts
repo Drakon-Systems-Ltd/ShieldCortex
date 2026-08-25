@@ -200,6 +200,9 @@ async function searchMemoriesInternal(
 
   let sortedResults: SearchResult[];
   if (rankerConfig.engine === 'rrf') {
+    // #410 — Do not let RRF slice to the user `limit` before ACL. Fuse at least
+    // the full FTS candidate window (and vector/graph extras), then ACL+slice.
+    const rrfLimit = Math.max(candidateLimit, rows.length, limit);
     sortedResults = scoreWithRrf({
       rows,
       ftsScores,
@@ -209,7 +212,7 @@ async function searchMemoriesInternal(
       db,
       config,
       rankerConfig,
-      limit,
+      limit: rrfLimit,
       includeExplanation: execution.includeExplanation,
     });
   } else {
@@ -224,38 +227,6 @@ async function searchMemoriesInternal(
       includeExplanation: execution.includeExplanation,
       scoringContext,
     });
-  }
-
-  if (execution.enableSideEffects) {
-    const topResults = sortedResults.slice(0, 5);
-    for (const result of topResults) {
-      reinforceFromSearch(result.memory.id);
-    }
-
-    // NOTE (Phase 17 B2): the automatic all-pairs "co-access" linking that used
-    // to run here was removed. It linked every pair of the top-K results as
-    // `related` (strength 0.2), creating C(K,2) ≈ K² spurious graph edges and
-    // running one `SELECT existing` + INSERT/UPDATE per pair on every recall.
-    // Co-appearing in a single search is not a genuine relationship — these
-    // edges polluted the knowledge graph and drove an N² per-pair query storm.
-    // Genuine links are still created elsewhere (addMemory similarity links,
-    // explicit contradiction/relationship links); recall now only reinforces
-    // individual results above.
-
-    if (sortedResults.length > 0 && options.query && options.query.length > 30) {
-      const topResult = sortedResults[0];
-      const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-      const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
-      const newWords = [...queryWords].filter(w => !contentWords.has(w));
-
-      if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
-        try {
-          enrichMemory(topResult.memory.id, options.query, 'search');
-        } catch {
-          // enrichment is best-effort
-        }
-      }
-    }
   }
 
   // #410 — ACL-filter the scored candidate set BEFORE slicing to `limit`, so
@@ -327,6 +298,30 @@ async function searchMemoriesInternal(
       }));
       if (result.explanation) {
         result.explanation.reasons.push(`${contradictions.length} contradiction link${contradictions.length === 1 ? '' : 's'} attached`);
+      }
+    }
+  }
+
+  // Side effects only on authorized top-k (post-ACL), never on denied candidates.
+  if (execution.enableSideEffects) {
+    const topResults = finalResults.slice(0, 5);
+    for (const result of topResults) {
+      reinforceFromSearch(result.memory.id);
+    }
+
+    // NOTE (Phase 17 B2): automatic all-pairs co-access linking removed.
+    if (finalResults.length > 0 && options.query && options.query.length > 30) {
+      const topResult = finalResults[0];
+      const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+      const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
+      const newWords = [...queryWords].filter(w => !contentWords.has(w));
+
+      if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
+        try {
+          enrichMemory(topResult.memory.id, options.query, 'search');
+        } catch {
+          // enrichment is best-effort
+        }
       }
     }
   }
