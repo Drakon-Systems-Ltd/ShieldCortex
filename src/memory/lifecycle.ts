@@ -331,6 +331,9 @@ export function getEnrichmentCooldownStatus(memoryId: number): {
  * Update persisted decay scores for all memories
  * Called during consolidation and periodically by the API server
  * Returns the number of memories updated
+ *
+ * #406: Writes ONLY `decayed_score`. Base `salience` is left untouched so
+ * repeated runs with unchanged last_accessed are stable (modulo wall clock).
  */
 export function updateDecayScores(): number {
   const db = getDatabase();

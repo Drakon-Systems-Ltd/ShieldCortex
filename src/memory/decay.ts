@@ -10,7 +10,11 @@ import { applyExpiryRules } from './expiry.js';
 
 /**
  * Calculate the current decayed score for a memory
- * Uses exponential decay: score = base_score * (decay_rate ^ effective_hours)
+ * Uses exponential decay: score = base_salience * (decay_rate ^ effective_hours)
+ *
+ * #406 invariant: `memory.salience` is the BASE (event-derived). This function
+ * returns a VIEW into time-decayed importance. Callers must persist the result
+ * only to `decayed_score`, never back into `salience`.
  *
  * Memory types have different decay rates:
  * - Short-term: hourly decay (fastest)
@@ -178,7 +182,7 @@ export function processDecay(
 ): {
   toDelete: number[];
   toPromote: number[];
-  updated: Map<number, number>; // id -> new decayed score
+  updated: Map<number, number>; // id -> decayed_score (NOT base salience)
 } {
   const toDelete: number[] = [];
   const toPromote: number[] = [];

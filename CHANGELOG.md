@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **#406 P0:** consolidation no longer writes temporal decay into base `salience` — only `decayed_score` (repeated consolidate/updateDecayScores stay invariant on the base).
+
+### Fixed
 - **#405 P0 security:** cloud memory delete sends content-free tombstones and honours `shouldSyncRecord` / original privacy fields; graph full-sync SELECT includes `cloud_excluded`; graph delete prune gated the same way.
 
 ### Added

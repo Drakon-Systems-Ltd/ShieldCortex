@@ -92,8 +92,11 @@ export function consolidate(
       }
     }
 
-    // Update decayed scores in database
-    const updateStmt = db.prepare('UPDATE memories SET salience = ? WHERE id = ?');
+    // #406 — Persist TEMPORAL decay only into decayed_score.
+    // Base salience is event-derived (access/reinforce/structure) and must never
+    // be overwritten by processDecay output, or the next calculateDecayedScore
+    // call compounds decay with unchanged last_accessed.
+    const updateStmt = db.prepare('UPDATE memories SET decayed_score = ? WHERE id = ?');
     for (const [id, score] of updated) {
       if (!toDelete.includes(id)) {
         updateStmt.run(score, id);
