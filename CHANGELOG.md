@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#408:** cloud sync retry queue uses atomic claim + lease (owner/token/expiry); completion/failure updates are claim-conditional; expired leases are reclaimable.
+
 ## [4.54.12] - 2026-08-25
 
 **Athena P0/HIGH security + integrity patch.** Ships cloud delete privacy tombstones, consolidation decay fix, FTS/ACL recall correctness, non-loopback API bind auth, closed Action Guard tool-input schemas, DNP/operator UX from main, and intent-first architecture docs.

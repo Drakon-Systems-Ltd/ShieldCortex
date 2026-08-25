@@ -355,10 +355,14 @@ export function getInlineSchema(): string {
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','failed','synced')),
       last_error TEXT,
       created_at TEXT DEFAULT (datetime('now')),
-      synced_at TEXT
+      synced_at TEXT,
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_expires_at TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at);
+    CREATE INDEX IF NOT EXISTS idx_sync_queue_lease_exp ON sync_queue(lease_expires_at);
 
     CREATE TABLE IF NOT EXISTS custom_patterns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
