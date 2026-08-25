@@ -33,6 +33,7 @@ const EXEC_KEYS = new Set([
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
   'description', 'timeout', 'run_in_background', 'dangerouslyDisableSandbox',
   'cwd', 'working_directory', 'env',
+  'stdin', 'stdout', 'stderr', 'args', 'argv',
 ]);
 
 const WRITE_KEYS = new Set([
@@ -47,7 +48,7 @@ const READ_KEYS = new Set([
 
 const NETWORK_KEYS = new Set([
   'url', 'uri', 'endpoint', 'href', 'host', 'to', 'method', 'headers', 'body',
-  'description', 'timeout',
+  'query', 'description', 'timeout',
 ]);
 
 const MEMORY_KEYS = new Set([
@@ -57,7 +58,7 @@ const MEMORY_KEYS = new Set([
   'includeDecayed', 'includeGlobal', 'mode', 'id', 'memoryId',
 ]);
 
-const GENERIC_SAFE_KEYS = new Set([
+const UNKNOWN_FAMILY_KEYS = new Set([
   'description', 'timeout', 'title', 'name', 'id',
 ]);
 
@@ -65,35 +66,60 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 }
 
-function familyForTool(toolName: string): 'exec' | 'write' | 'read' | 'network' | 'memory' | 'generic' {
-  const n = String(toolName || '').toLowerCase();
-  if (/(^|_)(bash|shell|exec|terminal|run_terminal|powershell|cmd)(_|$)/.test(n) || n === 'bash') return 'exec';
-  if (/(write|edit|create_file|apply_patch|strreplace)/.test(n)) return 'write';
-  if (/(^read|read_file|cat$|view_file|get_file)/.test(n)) return 'read';
-  if (/(http|fetch|curl|wget|web_request|browser)/.test(n)) return 'network';
-  if (/(remember|recall|forget|memory|get_context)/.test(n)) return 'memory';
-  return 'generic';
+/** Align with classifyFamily so exec-class tools never use the unknown bag. */
+export function schemaFamilyForTool(
+  toolName: string,
+): 'exec' | 'write' | 'read' | 'network' | 'memory' | 'git' | 'unknown' {
+  const n = String(toolName || '').toLowerCase().trim();
+  const seg = n.split(/__|\.|:|\//).filter(Boolean).pop() ?? n;
+  if (/(remember|recall|forget|memory|get_context|getcontext)/.test(seg) || /(remember|recall|forget|memory)/.test(n)) {
+    return 'memory';
+  }
+  if (
+    /(^|_)(bash|shell|exec|terminal|run_terminal|powershell|cmd|run_command|script|eval|spawn|process|system|sh|zsh)(_|$)/.test(seg)
+    || /^(bash|shell|sh|zsh|exec|cmd|powershell)$/.test(seg)
+    || /(bash|shell|exec|terminal)/.test(n)
+  ) {
+    return 'exec';
+  }
+  if (/(^git$|git_|_git|github)/.test(seg) || seg === 'git') return 'git';
+  if (/(^read|read_file|cat$|view_file|get_file|search_files|grep|glob)/.test(seg)) return 'read';
+  if (/(write|edit|create_file|apply_patch|strreplace|mkdir|save|copy)/.test(seg)) return 'write';
+  if (/(http|fetch|curl|wget|web_request|browser|web_fetch|web_search|email)/.test(seg) || /(web_fetch|web_search|fetch)/.test(n)) {
+    return 'network';
+  }
+  return 'unknown';
 }
 
-function allowedKeysFor(toolName: string): Set<string> | null {
-  const fam = familyForTool(toolName);
+function allowedKeysFor(toolName: string): Set<string> {
+  const fam = schemaFamilyForTool(toolName);
   switch (fam) {
-    case 'exec': return EXEC_KEYS;
-    case 'write': return WRITE_KEYS;
-    case 'read': return READ_KEYS;
-    case 'network': return NETWORK_KEYS;
-    case 'memory': return MEMORY_KEYS;
-    default: return null; // unknown family — only generic-safe + no nested smuggle
+    case 'exec':
+    case 'git':
+      return EXEC_KEYS;
+    case 'write':
+      return WRITE_KEYS;
+    case 'read':
+      return READ_KEYS;
+    case 'network':
+      return NETWORK_KEYS;
+    case 'memory':
+      return MEMORY_KEYS;
+    default:
+      return UNKNOWN_FAMILY_KEYS;
   }
 }
 
-function validateNested(value: unknown, path: string): ToolInputValidationErr | null {
+function validateNested(value: unknown, path: string, depth = 0): ToolInputValidationErr | null {
   if (value === null || value === undefined) return null;
   const t = typeof value;
   if (t === 'string' || t === 'number' || t === 'boolean') return null;
+  if (depth > 3) {
+    return { ok: false, code: 'NESTED_INVALID', reason: `Nesting too deep at ${path}` };
+  }
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const err = validateNested(value[i], `${path}[${i}]`);
+      const err = validateNested(value[i], `${path}[${i}]`, depth + 1);
       if (err) return err;
     }
     return null;
@@ -105,16 +131,18 @@ function validateNested(value: unknown, path: string): ToolInputValidationErr | 
       reason: `Unsupported nested type at ${path}`,
     };
   }
-  // Nested plain objects: only string/number/boolean/array-of-primitives leaves.
   for (const [k, v] of Object.entries(value)) {
-    if (typeof k !== 'string' || !k) {
+    if (!k) {
       return { ok: false, code: 'NESTED_INVALID', reason: `Invalid nested key at ${path}` };
     }
-    // Reject prototype pollution keys always
     if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
       return { ok: false, code: 'NESTED_INVALID', reason: `Forbidden key ${k} at ${path}` };
     }
-    const err = validateNested(v, `${path}.${k}`);
+    // env/headers maps: one level of primitives only — no nested objects.
+    if (isPlainObject(v)) {
+      return { ok: false, code: 'NESTED_INVALID', reason: `Nested object not allowed at ${path}.${k}` };
+    }
+    const err = validateNested(v, `${path}.${k}`, depth + 1);
     if (err) return err;
   }
   return null;
@@ -134,8 +162,12 @@ export function validateToolInput(
     return { ok: true, args: {}, strippedKeys: [] };
   }
   if (typeof raw === 'string') {
-    // Some hosts pass a raw command string for Bash — box it.
-    return { ok: true, args: { command: raw }, strippedKeys: [] };
+    // Only box raw strings as command for exec/git families.
+    const fam = schemaFamilyForTool(toolName);
+    if (fam === 'exec' || fam === 'git') {
+      return { ok: true, args: { command: raw }, strippedKeys: [] };
+    }
+    return { ok: false, code: 'NOT_OBJECT', reason: 'tool input must be a plain object' };
   }
   if (!isPlainObject(raw)) {
     return { ok: false, code: 'NOT_OBJECT', reason: 'tool input must be a plain object' };
@@ -151,30 +183,33 @@ export function validateToolInput(
   const allowed = allowedKeysFor(toolName);
   const strippedKeys: string[] = [];
   const out: Record<string, unknown> = {};
+  const unknown: string[] = [];
 
   for (const [key, value] of Object.entries(raw)) {
-    const permitted = allowed
-      ? allowed.has(key)
-      : GENERIC_SAFE_KEYS.has(key) || typeof value !== 'object' || value === null;
-
-    if (!permitted) {
-      if (mode === 'enforce') {
-        return {
-          ok: false,
-          code: 'UNKNOWN_KEYS',
-          reason: `Unknown tool input field "${key}" rejected`,
-          unknownKeys: [key],
-        };
-      }
-      strippedKeys.push(key);
+    // Empty strings are absent payload (hosts/tests often send command:'' alongside
+    // url/query). Drop them before unknown-key checks so they do not fail closed.
+    if (value === '' || value === null || value === undefined) {
+      continue;
+    }
+    if (!allowed.has(key)) {
+      if (mode === 'enforce') unknown.push(key);
+      else strippedKeys.push(key);
       continue;
     }
 
     const nestedErr = validateNested(value, key);
     if (nestedErr) return nestedErr;
 
-    // No type coercion: numbers must be numbers, etc. (leave as-is if already correct)
     out[key] = value;
+  }
+
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      code: 'UNKNOWN_KEYS',
+      reason: `Unknown tool input field "${unknown[0]}" rejected`,
+      unknownKeys: unknown,
+    };
   }
 
   return { ok: true, args: out, strippedKeys };

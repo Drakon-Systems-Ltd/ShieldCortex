@@ -54,6 +54,13 @@ export async function executeRecall(input: RecallInput & { sourceAttested?: bool
   count?: number;
   error?: string;
 }> {
+  // #412 live execute path schema gate
+  {
+    const checked = recallSchema.safeParse(input);
+    if (!checked.success) {
+      return { success: false, error: 'Invalid recall input: ' + (checked.error.issues[0]?.message ?? 'schema validation failed') };
+    }
+  }
   try {
     // Resolve project (auto-detect if not provided)
     const resolvedProject = resolveProject(input.project);
