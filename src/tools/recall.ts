@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod';
+import { strictObject } from '../lib/zod-strict.js';
 import { searchMemories, recallWithEmbeddings, accessMemory, getRecentMemories, getHighPriorityMemories, getRelatedMemories, logAllowedRead } from '../memory/store.js';
 import { formatTimeSinceAccess } from '../memory/decay.js';
 import { Memory, SearchResult } from '../memory/types.js';
@@ -14,13 +15,13 @@ import { memoryFreshnessWarning } from '../memory/staleness.js';
 import type { DefenceSource } from '../defence/types.js';
 import { guardReadMemories, guardReadMemory } from '../defence/trust/read-guard.js';
 
-const sourceSchema = z.object({
+const sourceSchema = strictObject({
   type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
   identifier: z.string(),
 }).optional().describe('Caller identity for access control');
 
 // Input schema for the recall tool
-export const recallSchema = z.object({
+export const recallSchema = strictObject({
   query: z.string().optional().describe('Search query (semantic search)'),
   category: z.enum([
     'architecture', 'pattern', 'preference', 'error',
@@ -214,7 +215,7 @@ export function formatRecallResult(
 /**
  * Get a single memory by ID
  */
-export const getMemorySchema = z.object({
+export const getMemorySchema = strictObject({
   id: z.number().describe('Memory ID to retrieve'),
   source: sourceSchema,
 });

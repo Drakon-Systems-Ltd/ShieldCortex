@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod';
+import { strictObject } from '../lib/zod-strict.js';
 import { deleteMemory, searchMemories, getMemoryById } from '../memory/store.js';
 import { getDatabase, withTransaction } from '../database/init.js';
 import {
@@ -24,7 +25,7 @@ import type { DefenceSource } from '../defence/types.js';
 const MAX_REVOKE_ROWS = 500;
 
 // Input schema for the forget tool
-export const forgetSchema = z.object({
+export const forgetSchema = strictObject({
   id: z.number().optional().describe('Specific memory ID to delete'),
   query: z.string().optional().describe('Delete memories matching this query'),
   category: z.enum([
@@ -39,7 +40,7 @@ export const forgetSchema = z.object({
     .describe('Preview what would be deleted without actually deleting'),
   confirm: z.boolean().optional().default(false)
     .describe('Confirm bulk deletion (required for operations affecting multiple memories)'),
-  source: z.object({
+  source: strictObject({
     type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
   }).optional().describe('Caller identity for access control'),

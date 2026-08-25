@@ -27,6 +27,7 @@
 
 import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
+import { validateToolInput } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
@@ -4143,6 +4144,21 @@ export function evaluateToolCall(
   config?: IronDomeConfig,
   options?: ToolGuardOptions,
 ): ToolGuardVerdict {
+  // #412 — closed tool-input schema on the enforcement path. Unknown keys and
+  // malformed nested shapes fail closed before any extractor reads the bag.
+  const validated = validateToolInput(toolName, args, 'enforce');
+  if (!validated.ok) {
+    return verdict(
+      'block',
+      'dangerous',
+      classifyFamily(toolName),
+      'invalid_tool_input',
+      `tool input rejected: ${validated.reason}`,
+      ['invalid-tool-input', validated.code.toLowerCase().replace(/_/g, '-')],
+    );
+  }
+  args = validated.args;
+
   const family = classifyFamily(toolName);
   const command = deobfuscateIfs(extractCommand(args));
   const path = extractPath(args);

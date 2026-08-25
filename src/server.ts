@@ -7,6 +7,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { strictObject } from './lib/zod-strict.js';
 import { initDatabase } from './database/init.js';
 import { resolveMemoryConfig } from './memory/config.js';
 import { getCurrentVersion } from './api/version.js';
@@ -66,7 +67,7 @@ import type { OperationKind } from './api/control.js';
 // quarantine band and RESTRICTED read gating. The 'user' type still exists
 // internally for things like dashboard-originated writes, but it must never
 // be honoured when it arrives over the MCP transport.
-const sourceParam = z.object({
+const sourceParam = strictObject({
   type: z.enum(['cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
   identifier: z.string(),
 }).optional().describe('Caller identity for access control (agents should pass this). type:"user" is rejected — MCP is never a human channel.');
