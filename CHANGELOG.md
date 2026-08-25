@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **#407 / #410:** FTS candidate window orders by BM25 (`fts.rank`) before LIMIT; ACL filters scored candidates before top-k slice with bounded over-fetch so unauthorized rows cannot starve authorized matches.
+
+### Fixed
 - **#406 P0:** consolidation no longer writes temporal decay into base `salience` — only `decayed_score` (repeated consolidate/updateDecayScores stay invariant on the base).
 
 ### Fixed
