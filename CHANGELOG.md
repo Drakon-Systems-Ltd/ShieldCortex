@@ -7,11 +7,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-- **#409:** transactional outbox — memory/graph sync events written in the same SQLite transaction as the local mutation; delivery_key idempotency; dispatch after commit with durable ack/retry.
+## [4.54.13] - 2026-08-25
+
+**Cloud sync durability patch.** Ships the last two Athena HIGHs that sit on the host engine: atomic retry claim/lease and a transactional outbox so local memory mutations cannot commit without a durable outbound event (and vice versa).
 
 ### Fixed
-- **#408:** cloud sync retry queue uses atomic claim + lease (owner/token/expiry); completion/failure updates are claim-conditional; expired leases are reclaimable.
+- **#409:** transactional outbox — memory/graph sync events written in the same SQLite transaction as the local mutation; unique `delivery_key` per event with exact-key ack (no LIKE prefix); dispatch after commit; failures stay on the #408 retry path.
+- **#408:** cloud sync retry queue uses atomic claim + lease (owner/token/expiry); claim-one-then-send vs batch budget; completion/failure updates are claim-conditional; expired leases are reclaimable.
 
 ## [4.54.12] - 2026-08-25
 
