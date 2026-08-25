@@ -583,15 +583,13 @@ export async function processRetryQueue(options: ProcessRetryOptions = {}): Prom
 
   const now = new Date().toISOString();
 
-  // #408 — Atomically claim due rows (lease). Concurrent workers cannot both
-  // own the same id; completion is conditional on the claim token.
-  const rows = claimRetryBatch(limit, now);
-
-  if (rows.length === 0) {
-    return result;
-  }
-
-  for (const row of rows) {
+  // #408 — Claim-one-then-send (not claim-N-then-walk). Holding a batch of
+  // leases for sequential HTTP would let a second worker reclaim later rows
+  // after lease expiry while the first is still mid-batch (Grok nit).
+  for (let i = 0; i < limit; i++) {
+    const claimed = claimRetryBatch(1, new Date().toISOString());
+    if (claimed.length === 0) break;
+    const row = claimed[0];
     result.processed++;
     const newAttempts = row.attempts + 1;
 
@@ -613,7 +611,6 @@ export async function processRetryQueue(options: ProcessRetryOptions = {}): Prom
       clearTimeout(timeoutId);
 
       if (res.ok) {
-        // Success — mark as synced only if we still hold the claim
         const ok = updateIfClaimed(
           row.id,
           row.leaseToken,
@@ -632,13 +629,11 @@ export async function processRetryQueue(options: ProcessRetryOptions = {}): Prom
           result.permanentlyFailed++;
         }
       } else {
-        // 5xx / 429 — transient, keep retrying with capped backoff.
         if (scheduleRetryClaimed(row.id, row.leaseToken, row.attempts, newAttempts, `HTTP ${res.status}`)) {
           result.failed++;
         }
       }
     } catch (err) {
-      // Network errors, timeouts (AbortError) — all transient.
       const errorMsg = formatQueueError(err);
       if (scheduleRetryClaimed(row.id, row.leaseToken, row.attempts, newAttempts, errorMsg)) {
         result.failed++;
