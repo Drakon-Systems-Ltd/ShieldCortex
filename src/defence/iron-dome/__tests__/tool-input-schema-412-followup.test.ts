@@ -120,4 +120,21 @@ describe('#412 annotate must not blind the extractors', () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect((r.args.content as { text: string }).text).toBe('hello');
   });
+
+  it('github-named tools are not git-enforce (title/body stay allowed)', () => {
+    expect(evaluateToolCall('github_create_issue', {
+      title: 'Track the flaky gate',
+      body: 'The notify suite is red on main.',
+      labels: 'bug',
+    }).decision).toBe('allow');
+    expect(evaluateToolCall('list_github_repos', { owner: 'Drakon-Systems-Ltd' }).decision).toBe('allow');
+  });
+
+  it('non-string command/path primitives fail closed', () => {
+    const n = enforceToolInput('Bash', { command: 1 });
+    expect(n.ok).toBe(false);
+    if (!n.ok) expect(n.code).toBe('TYPE_COERCION');
+    expect(enforceToolInput('Bash', { command: true }).ok).toBe(false);
+    expect(enforceToolInput('Bash', { path: 0 }).ok).toBe(false);
+  });
 });

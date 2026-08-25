@@ -4149,14 +4149,14 @@ export function evaluateToolCall(
   // Other families: annotate (strip unknowns) so messaging/read tools with
   // free-form fields are not false-positive blocked; extractors never see junk keys.
   {
-    // Enforce is scoped to exec/git under EITHER classifier: those are the only
-    // families whose closed key set matches every real host payload. Widening it
-    // to write/network would false-block GitHub-shaped calls (create_issue sends
-    // title/labels). Annotate keeps extractor keys, so nothing goes blind.
+    // Enforce iff the SCHEMA family is exec/git, or the guard family is exec.
+    // Do NOT use classifyFamily==='git': that regex includes substring `github`,
+    // which would fail-closed GitHub-API tools under EXEC_KEYS (title/labels).
     const schemaFam = schemaFamilyForTool(toolName);
     const guardFam = classifyFamily(toolName);
-    const isExecOrGit = (f: string) => f === 'exec' || f === 'git';
-    const mode = (isExecOrGit(schemaFam) || isExecOrGit(guardFam)) ? 'enforce' : 'annotate';
+    const mode = (schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec')
+      ? 'enforce'
+      : 'annotate';
     const validated = validateToolInput(toolName, args, mode);
     if (!validated.ok) {
       return verdict(

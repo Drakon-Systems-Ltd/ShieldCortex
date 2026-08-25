@@ -112,7 +112,8 @@ export function schemaFamilyForTool(
   ) {
     return 'exec';
   }
-  if (/(^git$|git_|_git|github)/.test(seg) || seg === 'git') return 'git';
+  // Real git CLIs only. Do not substring-match `_git` inside `_github`.
+  if (/(^git$|^git_|_git$|_git_)/.test(seg) || seg === 'git') return 'git';
   if (/(^read|read_file|cat$|view_file|get_file|search_files|grep|glob)/.test(seg)) return 'read';
   if (/(write|edit|create_file|apply_patch|strreplace|mkdir|save|copy|remove_file|delete_file)/.test(seg)) return 'write';
   if (/(http|fetch|curl|wget|web_request|browser|web_fetch|web_search|email)/.test(seg) || /(web_fetch|web_search|fetch)/.test(n)) {
@@ -236,14 +237,14 @@ export function validateToolInput(
     // Hosts routinely send `command: ''` alongside the field they actually used.
     if (isAbsent) continue;
 
-    // Command/path/url scanners only accept strings. Object/array here cannot
-    // be scanned, so it must never reach the extractors as a silent empty.
+    // Command/path/url scanners only accept strings. Object/array/number/boolean
+    // cannot be scanned (extractors are pickString) so they must not fail open.
     // `content`/`body`/`text` stay out of STRING_SCAN_KEYS (structured messages).
-    if (STRING_SCAN_KEYS.has(key) && (isPlainObject(value) || Array.isArray(value))) {
+    if (STRING_SCAN_KEYS.has(key) && typeof value !== 'string') {
       return {
         ok: false,
-        code: 'NESTED_INVALID',
-        reason: `Field "${key}" must be a string, got ${Array.isArray(value) ? 'array' : 'object'}`,
+        code: typeof value === 'object' ? 'NESTED_INVALID' : 'TYPE_COERCION',
+        reason: `Field "${key}" must be a string, got ${Array.isArray(value) ? 'array' : typeof value}`,
       };
     }
 
