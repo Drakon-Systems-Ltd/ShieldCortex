@@ -347,9 +347,13 @@ export function runMigrations(database: Database.Database): void {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','failed','synced')),
         last_error TEXT,
         created_at TEXT DEFAULT (datetime('now')),
-        synced_at TEXT
+        synced_at TEXT,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at);
+      CREATE INDEX IF NOT EXISTS idx_sync_queue_lease_exp ON sync_queue(lease_expires_at);
     `);
   } catch (err) {
     logIfUnexpectedDdlError(err, 'sync_queue table + index');
@@ -961,5 +965,26 @@ export function runMigrations(database: Database.Database): void {
     database.exec('CREATE INDEX IF NOT EXISTS idx_memories_host_agent ON memories(host_id, agent_id)');
   } catch (err) {
     logIfUnexpectedDdlError(err, 'memories host_id/agent_id/capture_layer');
+  }
+
+  // Migration: #408 — sync_queue atomic claim / lease columns.
+  // Existing installs created sync_queue without lease_*; CREATE IF NOT EXISTS
+  // does not add them. Guarded ADD COLUMN so upgrades pick up the claim path.
+  try {
+    const sq = database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sync_queue'")
+      .get();
+    if (sq) {
+      const cols = database.prepare('PRAGMA table_info(sync_queue)').all() as { name: string }[];
+      const have = new Set(cols.map((c) => c.name));
+      for (const col of ['lease_owner', 'lease_token', 'lease_expires_at'] as const) {
+        if (!have.has(col)) {
+          database.exec(`ALTER TABLE sync_queue ADD COLUMN ${col} TEXT`);
+        }
+      }
+      database.exec('CREATE INDEX IF NOT EXISTS idx_sync_queue_lease_exp ON sync_queue(lease_expires_at)');
+    }
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'sync_queue lease columns (#408)');
   }
 }

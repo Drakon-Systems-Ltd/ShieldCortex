@@ -6,6 +6,8 @@
  * Uses SQLite sync_queue table with exponential backoff.
  */
 
+import { randomBytes } from 'node:crypto';
+import { hostname } from 'node:os';
 import { getDatabase } from '../database/init.js';
 import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
 import type { SyncedMemoryRecord } from './memory-sync.js';
@@ -84,6 +86,105 @@ export interface SyncQueueResult {
 export interface ReconcileQueueResult {
   removed: number;
 }
+
+/** #408 — how long a worker may hold a claimed row before another may reclaim it. */
+export const SYNC_QUEUE_LEASE_MS = 60_000;
+
+export interface SyncQueueClaim {
+  id: number;
+  payload: string;
+  attempts: number;
+  leaseToken: string;
+  leaseOwner: string;
+  leaseExpiresAt: string;
+}
+
+function workerIdentity(): string {
+  return `sc-retry/${hostname()}/${process.pid}`;
+}
+
+function mintLeaseToken(): string {
+  return randomBytes(16).toString('hex');
+}
+
+/**
+ * #408 — Atomically claim up to `limit` due pending rows.
+ * Eligible: status=pending, next_retry_at <= now, and (no lease OR lease expired).
+ * Each claim sets owner/token/expiry in the same UPDATE that selects the row.
+ */
+export function claimRetryBatch(limit: number, nowIso = new Date().toISOString()): SyncQueueClaim[] {
+  const db = getDatabase();
+  const owner = workerIdentity();
+  const claimed: SyncQueueClaim[] = [];
+  const leaseMs = SYNC_QUEUE_LEASE_MS;
+
+  const pick = db.prepare(`
+    SELECT id, payload, attempts
+    FROM sync_queue
+    WHERE status = 'pending'
+      AND next_retry_at <= ?
+      AND (
+        lease_expires_at IS NULL
+        OR lease_expires_at = ''
+        OR lease_expires_at <= ?
+      )
+    ORDER BY next_retry_at ASC
+    LIMIT 1
+  `);
+
+  const take = db.prepare(`
+    UPDATE sync_queue
+    SET lease_owner = ?,
+        lease_token = ?,
+        lease_expires_at = ?
+    WHERE id = ?
+      AND status = 'pending'
+      AND next_retry_at <= ?
+      AND (
+        lease_expires_at IS NULL
+        OR lease_expires_at = ''
+        OR lease_expires_at <= ?
+      )
+  `);
+
+  // better-sqlite3 serialises writers; loop claim-one under implicit lock.
+  while (claimed.length < limit) {
+    const row = pick.get(nowIso, nowIso) as { id: number; payload: string; attempts: number } | undefined;
+    if (!row) break;
+    const token = mintLeaseToken();
+    const exp = new Date(Date.now() + leaseMs).toISOString();
+    const info = take.run(owner, token, exp, row.id, nowIso, nowIso);
+    if (info.changes !== 1) {
+      // Lost the race — try another row
+      continue;
+    }
+    claimed.push({
+      id: row.id,
+      payload: row.payload,
+      attempts: row.attempts,
+      leaseToken: token,
+      leaseOwner: owner,
+      leaseExpiresAt: exp,
+    });
+  }
+  return claimed;
+}
+
+/** Completion/failure updates must still hold the active claim token. */
+function updateIfClaimed(
+  id: number,
+  leaseToken: string,
+  sql: string,
+  ...params: unknown[]
+): boolean {
+  const db = getDatabase();
+  // sql should end with WHERE id = ? — we append claim predicates
+  const full = `${sql} AND lease_token = ? AND status = 'pending'`;
+  const info = db.prepare(full).run(...params, id, leaseToken);
+  return info.changes === 1;
+}
+
+
 
 /**
  * Enqueue a failed sync entry for later retry.
@@ -412,7 +513,49 @@ export interface ProcessRetryOptions {
  *   - HTTP 4xx (≠429) → permanent: mark failed, no further retries.
  *   - network/timeout/5xx/429 → transient: keep pending with capped (≤1h)
  *     backoff, retrying until the 7-day TTL purge — survives long outages.
+ *
+ * #408 — claims rows with a lease before processing; completion is conditional
+ * on still holding the claim token.
  */
+
+/** #408 — permanent fail only if claim still held; clears lease. */
+function markPermanentlyFailedClaimed(
+  id: number,
+  leaseToken: string,
+  attempts: number,
+  error: string,
+): boolean {
+  const db = getDatabase();
+  const info = db.prepare(`
+    UPDATE sync_queue
+    SET status = 'failed', attempts = ?, last_error = ?,
+        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
+    WHERE id = ? AND lease_token = ? AND status = 'pending'
+  `).run(attempts, error, id, leaseToken);
+  return info.changes === 1;
+}
+
+/** #408 — schedule retry only if claim still held; clears lease so row is free after backoff. */
+function scheduleRetryClaimed(
+  id: number,
+  leaseToken: string,
+  priorAttempts: number,
+  attempts: number,
+  error: string,
+): boolean {
+  const db = getDatabase();
+  // Same capped exponential backoff as scheduleRetry (min(2^prior*30s, 1h)).
+  const backoffMs = Math.min(Math.pow(2, priorAttempts) * BASE_BACKOFF_MS, MAX_BACKOFF_MS);
+  const next = new Date(Date.now() + backoffMs).toISOString();
+  const info = db.prepare(`
+    UPDATE sync_queue
+    SET status = 'pending', attempts = ?, next_retry_at = ?, last_error = ?,
+        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
+    WHERE id = ? AND lease_token = ? AND status = 'pending'
+  `).run(attempts, next, error, id, leaseToken);
+  return info.changes === 1;
+}
+
 export async function processRetryQueue(options: ProcessRetryOptions = {}): Promise<SyncQueueResult> {
   const db = getDatabase();
   const config = getCloudConfig();
@@ -440,18 +583,9 @@ export async function processRetryQueue(options: ProcessRetryOptions = {}): Prom
 
   const now = new Date().toISOString();
 
-  // Fetch pending items ready for retry, bounded by the budget.
-  const rows = db.prepare(`
-    SELECT id, payload, attempts
-    FROM sync_queue
-    WHERE status = 'pending' AND next_retry_at <= ?
-    ORDER BY next_retry_at ASC
-    LIMIT ?
-  `).all(now, limit) as Array<{
-    id: number;
-    payload: string;
-    attempts: number;
-  }>;
+  // #408 — Atomically claim due rows (lease). Concurrent workers cannot both
+  // own the same id; completion is conditional on the claim token.
+  const rows = claimRetryBatch(limit, now);
 
   if (rows.length === 0) {
     return result;
@@ -479,26 +613,36 @@ export async function processRetryQueue(options: ProcessRetryOptions = {}): Prom
       clearTimeout(timeoutId);
 
       if (res.ok) {
-        // Success — mark as synced
-        db.prepare(`
-          UPDATE sync_queue SET status = 'synced', attempts = ?, synced_at = ?, last_error = NULL
-          WHERE id = ?
-        `).run(newAttempts, new Date().toISOString(), row.id);
-        result.succeeded++;
-        try { updateLastSyncAt(); } catch { /* non-critical */ }
+        // Success — mark as synced only if we still hold the claim
+        const ok = updateIfClaimed(
+          row.id,
+          row.leaseToken,
+          `UPDATE sync_queue SET status = 'synced', attempts = ?, synced_at = ?, last_error = NULL,
+              lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
+           WHERE id = ?`,
+          newAttempts,
+          new Date().toISOString(),
+        );
+        if (ok) {
+          result.succeeded++;
+          try { updateLastSyncAt(); } catch { /* non-critical */ }
+        }
       } else if (classifyHttpStatus(res.status) === 'permanent') {
-        markPermanentlyFailed(row.id, newAttempts, `HTTP ${res.status}`);
-        result.permanentlyFailed++;
+        if (markPermanentlyFailedClaimed(row.id, row.leaseToken, newAttempts, `HTTP ${res.status}`)) {
+          result.permanentlyFailed++;
+        }
       } else {
         // 5xx / 429 — transient, keep retrying with capped backoff.
-        scheduleRetry(row.id, row.attempts, newAttempts, `HTTP ${res.status}`);
-        result.failed++;
+        if (scheduleRetryClaimed(row.id, row.leaseToken, row.attempts, newAttempts, `HTTP ${res.status}`)) {
+          result.failed++;
+        }
       }
     } catch (err) {
       // Network errors, timeouts (AbortError) — all transient.
       const errorMsg = formatQueueError(err);
-      scheduleRetry(row.id, row.attempts, newAttempts, errorMsg);
-      result.failed++;
+      if (scheduleRetryClaimed(row.id, row.leaseToken, row.attempts, newAttempts, errorMsg)) {
+        result.failed++;
+      }
     }
   }
 
