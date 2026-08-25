@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod';
+import { strictObject } from '../lib/zod-strict.js';
 import { addMemory, updateMemory, searchMemories, detectRelationships, createMemoryLink, getLastTruncationInfo } from '../memory/store.js';
 import { calculateSalience, analyzeSalienceFactors, explainSalience } from '../memory/salience.js';
 import { MemoryCategory, MemoryType, MemoryPurpose, MemoryScope } from '../memory/types.js';
@@ -13,7 +14,7 @@ import { resolveProject } from '../context/project-context.js';
 import { shouldFilterMemory } from '../memory/save-filter.js';
 
 // Input schema for the remember tool
-export const rememberSchema = z.object({
+export const rememberSchema = strictObject({
   title: z.string().describe('Short title for the memory (what to remember)'),
   content: z.string().describe('Detailed content of the memory'),
   category: z.enum([
@@ -34,7 +35,7 @@ export const rememberSchema = z.object({
     .describe('Purpose of memory: user (preferences), feedback (corrections/confirmations), project (work context), reference (docs/specs)'),
   memoryScope: z.enum(['private', 'team']).optional()
     .describe('Scope: private (agent-specific) or team (shared across agents)'),
-  source: z.object({
+  source: strictObject({
     type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
   }).optional().describe('Source of this memory for trust scoring (agents should pass this)'),
@@ -78,6 +79,14 @@ export async function executeRemember(input: RememberInput): Promise<{
   };
   error?: string;
 }> {
+  // #412 live execute path schema gate
+  {
+    const { sourceAttested: _omitAttested, ...publicInput } = input as Record<string, unknown>;
+    const checked = rememberSchema.safeParse(publicInput);
+    if (!checked.success) {
+      return { success: false, error: 'Invalid remember input: ' + (checked.error.issues[0]?.message ?? 'schema validation failed') };
+    }
+  }
   try {
     // Validate non-empty title and content
     const title = input.title?.trim();

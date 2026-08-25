@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { strictObject } from '../lib/zod-strict.js';
 import {
   generateContextSummary,
   formatContextSummary,
@@ -26,12 +27,12 @@ import { guardReadBySensitivity, guardContextSummary } from '../defence/trust/re
 import type { DefenceSource } from '../defence/types.js';
 
 // Input schema for getting context
-export const getContextSchema = z.object({
+export const getContextSchema = strictObject({
   project: z.string().optional().describe('Project to get context for'),
   query: z.string().optional().describe('Current query/task to find relevant context for'),
   format: z.enum(['summary', 'detailed', 'raw']).optional().default('summary')
     .describe('Output format'),
-  source: z.object({
+  source: strictObject({
     type: z.enum(['user', 'cli', 'hook', 'email', 'web', 'agent', 'file', 'api', 'tool_response']),
     identifier: z.string(),
   }).optional().describe('Caller identity for access control'),
@@ -179,7 +180,7 @@ function formatDetailedContext(summary: ContextSummary, relevant: Memory[]): str
 }
 
 // Session management
-export const startSessionSchema = z.object({
+export const startSessionSchema = strictObject({
   project: z.string().optional().describe('Project for this session'),
 });
 
@@ -213,7 +214,7 @@ export async function executeStartSession(input: { project?: string }): Promise<
   }
 }
 
-export const endSessionSchema = z.object({
+export const endSessionSchema = strictObject({
   sessionId: z.number().describe('Session ID to end'),
   summary: z.string().optional().describe('Summary of what was accomplished'),
 });
@@ -242,7 +243,7 @@ export function executeEndSession(input: { sessionId: number; summary?: string }
 }
 
 // Consolidation
-export const consolidateSchema = z.object({
+export const consolidateSchema = strictObject({
   force: z.boolean().optional().default(false)
     .describe('Force consolidation even if not due'),
   dryRun: z.boolean().optional().default(false)
@@ -286,7 +287,7 @@ export function executeConsolidate(input: { force?: boolean; dryRun?: boolean })
 }
 
 // Stats
-export const statsSchema = z.object({
+export const statsSchema = strictObject({
   project: z.string().optional().describe('Get stats for specific project'),
 });
 
@@ -347,7 +348,7 @@ export function formatStats(stats: ReturnType<typeof getMemoryStats>, salience?:
 }
 
 // Export/Import
-export const exportSchema = z.object({
+export const exportSchema = strictObject({
   project: z.string().optional().describe('Export only memories for this project'),
 });
 
@@ -385,7 +386,7 @@ export function executeExport(input: { project?: string; source?: DefenceSource;
   }
 }
 
-export const importSchema = z.object({
+export const importSchema = strictObject({
   data: z.string().describe('JSON data to import'),
 });
 

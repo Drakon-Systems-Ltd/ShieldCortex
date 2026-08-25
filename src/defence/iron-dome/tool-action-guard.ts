@@ -27,6 +27,7 @@
 
 import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
+import { validateToolInput, schemaFamilyForTool } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
@@ -4143,6 +4144,33 @@ export function evaluateToolCall(
   config?: IronDomeConfig,
   options?: ToolGuardOptions,
 ): ToolGuardVerdict {
+  // #412 — close the tool-input bag before extractors run.
+  // Exec/git: enforce (unknown keys fail closed — smuggled payloads cannot hide).
+  // Other families: annotate (strip unknowns) so messaging/read tools with
+  // free-form fields are not false-positive blocked; extractors never see junk keys.
+  {
+    // Enforce iff the SCHEMA family is exec/git, or the guard family is exec.
+    // Do NOT use classifyFamily==='git': that regex includes substring `github`,
+    // which would fail-closed GitHub-API tools under EXEC_KEYS (title/labels).
+    const schemaFam = schemaFamilyForTool(toolName);
+    const guardFam = classifyFamily(toolName);
+    const mode = (schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec')
+      ? 'enforce'
+      : 'annotate';
+    const validated = validateToolInput(toolName, args, mode);
+    if (!validated.ok) {
+      return verdict(
+        'block',
+        'dangerous',
+        classifyFamily(toolName),
+        'invalid_tool_input',
+        `tool input rejected: ${validated.reason}`,
+        ['invalid-tool-input', validated.code.toLowerCase().replace(/_/g, '-')],
+      );
+    }
+    args = validated.args;
+  }
+
   const family = classifyFamily(toolName);
   const command = deobfuscateIfs(extractCommand(args));
   const path = extractPath(args);
