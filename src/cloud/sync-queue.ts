@@ -10,8 +10,6 @@ import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { getDatabase } from '../database/init.js';
 import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
-import type { SyncedMemoryRecord } from './memory-sync.js';
-import type { GraphSyncEnvelope } from './graph-sync.js';
 
 export interface SyncEntry {
   source_type: string;
@@ -49,11 +47,11 @@ export interface QuarantineSyncEntry {
 type QueuePayload =
   | { kind: 'audit'; entry: SyncEntry }
   | { kind: 'quarantine'; entry: QuarantineSyncEntry }
-  | { kind: 'graph'; entry: GraphSyncEnvelope }
+  | { kind: 'graph'; entry: Record<string, unknown> }
   | {
       kind: 'memory';
       entry: {
-        record: SyncedMemoryRecord;
+        record: Record<string, unknown>;
         device_id: string;
         device_name: string;
         platform: string;
@@ -204,11 +202,11 @@ export function enqueueFailedQuarantineSync(entry: QuarantineSyncEntry): void {
 /**
  * Enqueue a failed memory sync entry for later retry.
  */
-export function enqueueFailedMemorySync(entry: SyncedMemoryRecord): void {
+export function enqueueFailedMemorySync(entry: object): void {
   enqueuePayload({
     kind: 'memory',
     entry: {
-      record: entry,
+      record: entry as Record<string, unknown>,
       device_id: getDeviceId(),
       device_name: getDeviceName(),
       platform: `${process.platform}/${process.arch}`,
@@ -216,13 +214,13 @@ export function enqueueFailedMemorySync(entry: SyncedMemoryRecord): void {
   });
 }
 
-export function enqueueFailedGraphSync(entry: GraphSyncEnvelope): void {
-  enqueuePayload({ kind: 'graph', entry });
+export function enqueueFailedGraphSync(entry: object): void {
+  enqueuePayload({ kind: 'graph', entry: entry as Record<string, unknown> });
 }
 
 /** #409 durable outbox enqueue for memory sync records (same txn as mutation). */
 export function enqueueMemoryOutbox(
-  entry: SyncedMemoryRecord,
+  entry: object,
   options: {
     deliveryKey: string;
     db?: ReturnType<typeof getDatabase>;
@@ -233,7 +231,7 @@ export function enqueueMemoryOutbox(
     {
       kind: 'memory',
       entry: {
-        record: entry,
+        record: entry as Record<string, unknown>,
         device_id: getDeviceId(),
         device_name: getDeviceName(),
         platform: `${process.platform}/${process.arch}`,
@@ -249,7 +247,7 @@ export function enqueueMemoryOutbox(
 
 /** #409 durable outbox enqueue for graph sync envelopes. */
 export function enqueueGraphOutbox(
-  entry: GraphSyncEnvelope,
+  entry: object,
   options: {
     deliveryKey: string;
     db?: ReturnType<typeof getDatabase>;
@@ -257,7 +255,7 @@ export function enqueueGraphOutbox(
   },
 ): { inserted: boolean; id: number | null } {
   return enqueuePayload(
-    { kind: 'graph', entry },
+    { kind: 'graph', entry: entry as Record<string, unknown> },
     {
       deliveryKey: options.deliveryKey,
       db: options.db,
@@ -424,7 +422,7 @@ function buildRetryRequest(payloadText: string): { path: string; body: string } 
     const payload = parsed as {
       kind: 'memory';
       entry: {
-        record: SyncedMemoryRecord;
+        record: Record<string, unknown>;
         device_id: string;
         device_name: string;
         platform: string;
@@ -450,7 +448,7 @@ function buildRetryRequest(payloadText: string): { path: string; body: string } 
     'kind' in parsed &&
     (parsed as { kind: string }).kind === 'graph'
   ) {
-    const payload = parsed as { kind: 'graph'; entry: GraphSyncEnvelope };
+    const payload = parsed as { kind: 'graph'; entry: Record<string, unknown> };
     return {
       path: '/v1/sync/graph',
       body: JSON.stringify(payload.entry),

@@ -286,6 +286,28 @@ export function dispatchGraphOutboxBestEffort(envelope: GraphSyncEnvelope, deliv
   }).catch(() => { /* outbox retains */ });
 }
 
+
+/**
+ * #409 — write graph prune outbox for a memory delete inside the caller's txn.
+ * Returns null when cloud/policy blocks; otherwise delivery key + envelope for post-commit dispatch.
+ */
+export function writeGraphPruneOutboxForMemory(
+  memory: Memory,
+  options: { db?: ReturnType<typeof getDatabase>; deliveryKey?: string } = {},
+): { deliveryKey: string; envelope: GraphSyncEnvelope } | null {
+  const config = getCloudConfig();
+  if (!config.cloudEnabled || !config.cloudApiKey) return null;
+  const gate = deletionPolicyFromMemory(memory);
+  if (!gate.ok) return null;
+  if (!shouldSyncRecord(gate.policy)) return null;
+
+  const envelope = buildEnvelope([], [], [], [memory.uuid]);
+  const deliveryKey = options.deliveryKey
+    ?? `graph:prune:${memory.uuid}:${new Date().toISOString()}:${randomBytes(6).toString('hex')}`;
+  writeGraphSyncOutbox(envelope, { deliveryKey, db: options.db });
+  return { deliveryKey, envelope };
+}
+
 export function syncGraphForMemoryToCloud(memoryId: number): void {
   const config = getCloudConfig();
   if (!config.cloudEnabled || !config.cloudApiKey) return;
