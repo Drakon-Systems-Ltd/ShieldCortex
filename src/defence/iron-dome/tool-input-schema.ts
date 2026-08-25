@@ -60,6 +60,8 @@ const MEMORY_KEYS = new Set([
 
 const UNKNOWN_FAMILY_KEYS = new Set([
   'description', 'timeout', 'title', 'name', 'id',
+  // Messaging / notification tools: free-form body is data, not shell (field discipline).
+  'content', 'message', 'text', 'body', 'channel', 'to', 'subject',
 ]);
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -84,7 +86,7 @@ export function schemaFamilyForTool(
   }
   if (/(^git$|git_|_git|github)/.test(seg) || seg === 'git') return 'git';
   if (/(^read|read_file|cat$|view_file|get_file|search_files|grep|glob)/.test(seg)) return 'read';
-  if (/(write|edit|create_file|apply_patch|strreplace|mkdir|save|copy)/.test(seg)) return 'write';
+  if (/(write|edit|create_file|apply_patch|strreplace|mkdir|save|copy|remove_file|delete_file)/.test(seg)) return 'write';
   if (/(http|fetch|curl|wget|web_request|browser|web_fetch|web_search|email)/.test(seg) || /(web_fetch|web_search|fetch)/.test(n)) {
     return 'network';
   }

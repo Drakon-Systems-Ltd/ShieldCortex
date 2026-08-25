@@ -56,7 +56,8 @@ export async function executeRecall(input: RecallInput & { sourceAttested?: bool
 }> {
   // #412 live execute path schema gate
   {
-    const checked = recallSchema.safeParse(input);
+    const { sourceAttested: _omitAttested, ...publicInput } = input as Record<string, unknown>;
+    const checked = recallSchema.safeParse(publicInput);
     if (!checked.success) {
       return { success: false, error: 'Invalid recall input: ' + (checked.error.issues[0]?.message ?? 'schema validation failed') };
     }

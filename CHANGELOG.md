@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Security
-- **#412:** closed-by-default tool/MCP schemas — unknown keys rejected; nested shapes validated; Action Guard fails closed on invalid tool input (`tool-input-schema`).
+- **#412:** closed tool-input schema on Action Guard exec/git paths; MCP remember/recall execute-path safeParse; nested maps primitive-only; non-exec families strip unknown keys (annotate) to avoid FP blocks.
 
 ### Security
 - **#411:** refuse non-loopback API bind unless `SHIELDCORTEX_ALLOW_NON_LOOPBACK=1` and a strong `SHIELDCORTEX_API_TOKEN` (≥32 chars); disable public `/api/auth/session-token` on non-loopback; loopback default unchanged.

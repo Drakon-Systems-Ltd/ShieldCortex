@@ -81,7 +81,8 @@ export async function executeRemember(input: RememberInput): Promise<{
 }> {
   // #412 live execute path schema gate
   {
-    const checked = rememberSchema.safeParse(input);
+    const { sourceAttested: _omitAttested, ...publicInput } = input as Record<string, unknown>;
+    const checked = rememberSchema.safeParse(publicInput);
     if (!checked.success) {
       return { success: false, error: 'Invalid remember input: ' + (checked.error.issues[0]?.message ?? 'schema validation failed') };
     }
