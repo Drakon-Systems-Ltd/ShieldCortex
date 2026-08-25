@@ -6,6 +6,15 @@
  */
 
 import { randomUUID } from 'crypto';
+import { createRequire } from 'node:module';
+const requireCloud = createRequire(import.meta.url);
+/** Lazy cloud outbox APIs — createRequire avoids Jest ESM circular live-binding TDZ. */
+function cloudMemorySync(): typeof import('../cloud/memory-sync.js') {
+  return requireCloud('../cloud/memory-sync.js') as typeof import('../cloud/memory-sync.js');
+}
+function cloudGraphSync(): typeof import('../cloud/graph-sync.js') {
+  return requireCloud('../cloud/graph-sync.js') as typeof import('../cloud/graph-sync.js');
+}
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -51,8 +60,14 @@ import type { TripleProvenance } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { resolveDisposition } from '../defence/disposition.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
-import { syncGraphDeleteForMemoryToCloud, syncGraphForMemoryToCloud } from '../cloud/graph-sync.js';
-import { syncMemoryDeleteToCloud, syncMemoryUpsertToCloud } from '../cloud/memory-sync.js';
+import {
+  syncGraphDeleteForMemoryToCloud,
+  syncGraphForMemoryToCloud,
+} from '../cloud/graph-sync.js';
+import {
+  syncMemoryDeleteToCloud,
+  syncMemoryUpsertToCloud,
+} from '../cloud/memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult, AuditOperation } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
@@ -680,7 +695,10 @@ export function addMemory(
     truncatedLength: truncationResult.content.length,
   };
 
-  // Transaction: INSERT + defence UPDATE must be atomic to prevent wrong trust scores
+  // Transaction: INSERT + defence UPDATE + #409 memory outbox must be atomic so a
+  // crash cannot commit the local row without a durable outbound event (or vice versa).
+  let createOutboxRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  let createOutboxKey: string | null = null;
   const insertedId = db.transaction(() => {
     const memoryUuid = randomUUID();
     const result = stmt.run(
@@ -719,7 +737,14 @@ export function addMemory(
       // >10KB memories too (where the STORED content is truncated).
       .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
 
-    return result.lastInsertRowid as number;
+    const id = result.lastInsertRowid as number;
+    if (isFeatureEnabled('cloud_sync')) {
+      createOutboxRecord = cloudMemorySync().buildMemoryUpsertOutboxRecord(id);
+      if (createOutboxRecord) {
+        createOutboxKey = cloudMemorySync().writeMemorySyncOutbox(createOutboxRecord, { op: 'upsert', db }).deliveryKey;
+      }
+    }
+    return id;
   })();
 
   const memory = getMemoryById(insertedId)!;
@@ -764,7 +789,13 @@ export function addMemory(
   dispatchWebhook('memory_created', { id: memory.id, title: memory.title, category: memory.category });
 
   if (isFeatureEnabled('cloud_sync')) {
-    syncMemoryUpsertToCloud(memory);
+    // #409 — outbox row committed with the INSERT; dispatch best-effort now.
+    if (createOutboxRecord) {
+      cloudMemorySync().dispatchMemoryOutboxBestEffort(createOutboxRecord, createOutboxKey ?? undefined);
+    } else {
+      // Policy excluded or cloud off mid-flight — legacy path is a no-op then.
+      syncMemoryUpsertToCloud(memory);
+    }
   }
 
   // ORGANIC FEATURE: Auto-link to related memories
@@ -1069,7 +1100,18 @@ export function updateMemory(
   if (fields.length === 0) return existing;
 
   values.push(id);
-  db.prepare(`UPDATE memories SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
+  // #409 — UPDATE + memory outbox in one transaction.
+  let updateOutboxRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  let updateOutboxKey: string | null = null;
+  db.transaction(() => {
+    db.prepare(`UPDATE memories SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...values);
+    if (isFeatureEnabled('cloud_sync')) {
+      updateOutboxRecord = cloudMemorySync().buildMemoryUpsertOutboxRecord(id);
+      if (updateOutboxRecord) {
+        updateOutboxKey = cloudMemorySync().writeMemorySyncOutbox(updateOutboxRecord, { op: 'upsert', db }).deliveryKey;
+      }
+    }
+  })();
 
   const updatedMemory = getMemoryById(id)!;
 
@@ -1128,7 +1170,12 @@ export function updateMemory(
   persistEvent('memory_updated', { memory: updatedMemory });
 
   if (isFeatureEnabled('cloud_sync')) {
-    syncMemoryUpsertToCloud(updatedMemory);
+    if (updateOutboxRecord) {
+      cloudMemorySync().dispatchMemoryOutboxBestEffort(updateOutboxRecord, updateOutboxKey ?? undefined);
+    } else {
+      syncMemoryUpsertToCloud(updatedMemory);
+    }
+    // Graph refresh may depend on extraction above; still outbox-first inside helper.
     syncGraphForMemoryToCloud(updatedMemory.id);
   }
 
@@ -1347,10 +1394,37 @@ export function deleteMemory(
     }
   }
 
-  const result = db.prepare('DELETE FROM memories WHERE id = ?').run(id);
+  // #409 — DELETE + durable outbox rows in one SQLite transaction.
+  let deleteMemoryRecord: import('../cloud/memory-sync.js').SyncedMemoryRecord | null = null;
+  let deleteMemoryKey: string | null = null;
+  let deleteGraphDeliveryKey: string | null = null;
+  let deleteGraphEnvelope: import('../cloud/graph-sync.js').GraphSyncEnvelope | null = null;
+
+  const deleted = db.transaction(() => {
+    const result = db.prepare('DELETE FROM memories WHERE id = ?').run(id);
+    if (result.changes <= 0 || !memory) return false;
+
+    if (isFeatureEnabled('cloud_sync')) {
+      deleteMemoryRecord = cloudMemorySync().buildMemoryDeleteOutboxRecord(memory);
+      if (deleteMemoryRecord) {
+        deleteMemoryKey = cloudMemorySync().writeMemorySyncOutbox(deleteMemoryRecord, { op: 'delete', db }).deliveryKey;
+        // Graph prune outbox via graph-sync helper (avoids circular ESM on buildEnvelope).
+        const prune = cloudGraphSync().writeGraphPruneOutboxForMemory(memory, { db });
+        if (prune) {
+          deleteGraphEnvelope = prune.envelope;
+          deleteGraphDeliveryKey = prune.deliveryKey;
+          // Bump graph row retry a hair later so claim ORDER BY prefers memory tombstone.
+          db.prepare(
+            `UPDATE sync_queue SET next_retry_at = ? WHERE delivery_key = ? AND status = 'pending'`,
+          ).run(new Date(Date.now() + 5).toISOString(), deleteGraphDeliveryKey);
+        }
+      }
+    }
+    return true;
+  })();
 
   // Emit event for real-time dashboard (in-process)
-  if (result.changes > 0 && memory) {
+  if (deleted && memory) {
     // Provenance ledger: record the allowed delete (one row per memory) when the
     // caller is attributed. Internal source-less deletes (merge/consolidation)
     // are machinery, not user actions, so they're not audited here.
@@ -1358,15 +1432,19 @@ export function deleteMemory(
       logAllowedDelete(id, source, (memory.project as string | undefined) ?? null, aclOp, attested);
     }
     if (isFeatureEnabled('cloud_sync')) {
-      syncMemoryDeleteToCloud(memory);
-      syncGraphDeleteForMemoryToCloud(memory);
+      if (deleteMemoryRecord) {
+        cloudMemorySync().dispatchMemoryOutboxBestEffort(deleteMemoryRecord, deleteMemoryKey ?? undefined);
+      }
+      if (deleteGraphEnvelope && deleteGraphDeliveryKey) {
+        cloudGraphSync().dispatchGraphOutboxBestEffort(deleteGraphEnvelope, deleteGraphDeliveryKey);
+      }
     }
     emitMemoryDeleted(id, memory.title);
     // Persist event for cross-process IPC (MCP → Dashboard)
     persistEvent('memory_deleted', { memoryId: id, title: memory.title });
   }
 
-  return result.changes > 0;
+  return deleted;
 }
 
 
