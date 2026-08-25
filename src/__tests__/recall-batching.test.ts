@@ -226,20 +226,20 @@ describe('recall-path N+1 batching (Phase 9b)', () => {
     expect(results.map((r) => r.memory.id)).toContain(winner.id);
   });
 
-  it('decayed_score prefilter falls back to raw salience for rows with NULL decayed_score (fresh writes not buried)', async () => {
-    // addMemory leaves decayed_score NULL. Under a naive `decayed_score DESC`,
-    // NULL sorts LAST and a fresh high-salience memory would be buried out of a
-    // LIMIT-1 prefilter. COALESCE(decayed_score, salience) must keep it on top.
+  it('non-query browse still COALESCE(decayed_score, salience) so fresh NULL decay is not buried (#407 keeps this on browse path)', async () => {
+    // #407 moved FTS query ordering to bm25. The COALESCE salience prefilter
+    // remains for non-query browse (empty query). Fresh writes leave
+    // decayed_score NULL — without COALESCE they sort last under DESC.
     const freshHigh = addMemory({
-      title: 'Fresh high salience zeta',
-      content: 'zeta eta theta iota kappa — fresh write, no persisted decay yet.',
+      title: 'Fresh high salience browse',
+      content: 'browse-path fresh write, no persisted decay yet.',
       category: 'note',
       project: PROJECT,
       type: 'long_term',
     });
     const oldLow = addMemory({
-      title: 'Old low salience zeta',
-      content: 'zeta eta theta iota kappa — older, persisted low decay.',
+      title: 'Old low salience browse',
+      content: 'browse-path older, persisted low decay.',
       category: 'note',
       project: PROJECT,
       type: 'long_term',
@@ -250,11 +250,10 @@ describe('recall-path N+1 batching (Phase 9b)', () => {
     db.prepare('UPDATE memories SET salience = ?, decayed_score = ? WHERE id = ?').run(0.3, 0.2, oldLow.id);
 
     const results = await searchMemoriesExplained(
-      { query: 'zeta eta theta', project: PROJECT, limit: 1 },
+      { project: PROJECT, limit: 1 }, // no query → browse path
       DEFAULT_CONFIG,
     );
 
-    // NULL decayed_score → COALESCE to salience 0.9, which beats oldLow's 0.2.
     expect(results[0]?.memory.id).toBe(freshHigh.id);
   });
 });

@@ -150,14 +150,30 @@ async function searchMemoriesInternal(
     params.push(...options.tags);
   }
 
-  // Prefilter on the persisted decayed-score index (CLAUDE.md: "Persisted decay
-  // scores for efficient sorting", idx_memories_decayed_score). decayed_score is
-  // NULL until updateDecayScores() persists it (addMemory leaves it unset), so
-  // COALESCE back to raw salience for un-scored rows — identical to rowToMemory's
-  // `decayed_score ?? salience`. Without the COALESCE, NULL sorts last under DESC
-  // and would bury freshly-written high-salience memories out of the prefilter.
-  sql += ' ORDER BY COALESCE(m.decayed_score, m.salience) DESC, m.last_accessed DESC LIMIT ?';
-  params.push(limit);
+  // #407 — When FTS is active, order by FTS5 rank (bm25) BEFORE LIMIT so the
+  // candidate window is true top-k lexical relevance, not salience insertion
+  // order. Tie-break on m.id for stability under insertion-order changes.
+  // Non-query browse still uses persisted decayed_score/salience.
+  //
+  // #410 — When a DefenceSource ACL will filter after scoring, over-fetch the
+  // candidate window so unauthorized high-rank rows cannot starve authorized
+  // matches. Final slice still enforces `limit` after ACL.
+  const hasFtsQuery = Boolean(options.query && options.query.trim());
+  const aclOverfetch = Boolean(source);
+  // Bound over-fetch: enough to fill top-k after heavy ACL drop, not whole table.
+  const candidateLimit = aclOverfetch
+    ? Math.min(Math.max(limit * 10, limit + 40), Math.max(limit * 25, 250))
+    : limit;
+
+  if (hasFtsQuery) {
+    // fts.rank is FTS5 bm25 (lower = better). ASC + stable id tie-break.
+    sql += ' ORDER BY fts.rank ASC, m.id ASC LIMIT ?';
+  } else {
+    // Prefilter on the persisted decayed-score index. decayed_score is NULL
+    // until updateDecayScores() persists it, so COALESCE back to raw salience.
+    sql += ' ORDER BY COALESCE(m.decayed_score, m.salience) DESC, m.last_accessed DESC, m.id ASC LIMIT ?';
+  }
+  params.push(candidateLimit);
 
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
   const scoringContext: SearchScoringContext = {
@@ -184,6 +200,9 @@ async function searchMemoriesInternal(
 
   let sortedResults: SearchResult[];
   if (rankerConfig.engine === 'rrf') {
+    // #410 — Do not let RRF slice to the user `limit` before ACL. Fuse at least
+    // the full FTS candidate window (and vector/graph extras), then ACL+slice.
+    const rrfLimit = Math.max(candidateLimit, rows.length, limit);
     sortedResults = scoreWithRrf({
       rows,
       ftsScores,
@@ -193,7 +212,7 @@ async function searchMemoriesInternal(
       db,
       config,
       rankerConfig,
-      limit,
+      limit: rrfLimit,
       includeExplanation: execution.includeExplanation,
     });
   } else {
@@ -210,44 +229,39 @@ async function searchMemoriesInternal(
     });
   }
 
-  if (execution.enableSideEffects) {
-    const topResults = sortedResults.slice(0, 5);
-    for (const result of topResults) {
-      reinforceFromSearch(result.memory.id);
+  // #410 — ACL-filter the scored candidate set BEFORE slicing to `limit`, so
+  // unauthorized high-rank rows cannot starve authorized matches. Then enrich
+  // only the authorized top-k (keeps contradiction fan-out bounded).
+  let authorizedResults = sortedResults;
+  if (source) {
+    const db2 = getDatabase();
+    const aclIds = authorizedResults.map((result) => result.memory.id);
+    const aclRows = new Map<number, Record<string, unknown>>();
+    if (aclIds.length > 0) {
+      const placeholders = aclIds.map(() => '?').join(',');
+      const fetched = db2.prepare(
+        `SELECT id, source, sensitivity_level FROM memories WHERE id IN (${placeholders})`,
+      ).all(...aclIds) as Record<string, unknown>[];
+      for (const row of fetched) aclRows.set(row.id as number, row);
     }
-
-    // NOTE (Phase 17 B2): the automatic all-pairs "co-access" linking that used
-    // to run here was removed. It linked every pair of the top-K results as
-    // `related` (strength 0.2), creating C(K,2) ≈ K² spurious graph edges and
-    // running one `SELECT existing` + INSERT/UPDATE per pair on every recall.
-    // Co-appearing in a single search is not a genuine relationship — these
-    // edges polluted the knowledge graph and drove an N² per-pair query storm.
-    // Genuine links are still created elsewhere (addMemory similarity links,
-    // explicit contradiction/relationship links); recall now only reinforces
-    // individual results above.
-
-    if (sortedResults.length > 0 && options.query && options.query.length > 30) {
-      const topResult = sortedResults[0];
-      const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-      const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
-      const newWords = [...queryWords].filter(w => !contentWords.has(w));
-
-      if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
-        try {
-          enrichMemory(topResult.memory.id, options.query, 'search');
-        } catch {
-          // enrichment is best-effort
-        }
+    authorizedResults = authorizedResults.filter(result => {
+      const row = aclRows.get(result.memory.id);
+      const policy = checkAccess(
+        { id: result.memory.id, source: row?.source as string | null, sensitivity_level: row?.sensitivity_level as string | null },
+        source,
+        'read',
+      );
+      if (!policy.canRead) {
+        logAccessDenial(result.memory.id, source, policy.reason, 'read', execution.attested);
+        return false;
       }
-    }
+      return true;
+    });
   }
 
-  const finalResults = sortedResults.slice(0, limit);
+  const finalResults = authorizedResults.slice(0, limit);
 
-  // Per-result contradiction links, then their counterpart titles. The title
-  // lookup was an N+1-within-N+1 (one SELECT title per contradiction per
-  // result); collect every counterpart id first and resolve all titles with a
-  // single `WHERE id IN (...)`, then read from the id→title map below.
+  // Per-result contradiction links on the authorized top-k only.
   const contradictionsByResult = new Map<number, Array<{ strength: number; other_id: number }>>();
   const counterpartIds = new Set<number>();
   for (const result of finalResults) {
@@ -288,34 +302,28 @@ async function searchMemoriesInternal(
     }
   }
 
-  if (source) {
-    const db2 = getDatabase();
-    // ACL lookup was an N+1 (one `SELECT source, sensitivity_level WHERE id = ?`
-    // per result); fetch all result rows in one `WHERE id IN (...)` and read the
-    // per-result source/sensitivity from the map. checkAccess/logAccessDenial
-    // logic and filter order are unchanged.
-    const aclIds = finalResults.map((result) => result.memory.id);
-    const aclRows = new Map<number, Record<string, unknown>>();
-    if (aclIds.length > 0) {
-      const placeholders = aclIds.map(() => '?').join(',');
-      const fetched = db2.prepare(
-        `SELECT id, source, sensitivity_level FROM memories WHERE id IN (${placeholders})`,
-      ).all(...aclIds) as Record<string, unknown>[];
-      for (const row of fetched) aclRows.set(row.id as number, row);
+  // Side effects only on authorized top-k (post-ACL), never on denied candidates.
+  if (execution.enableSideEffects) {
+    const topResults = finalResults.slice(0, 5);
+    for (const result of topResults) {
+      reinforceFromSearch(result.memory.id);
     }
-    return finalResults.filter(result => {
-      const row = aclRows.get(result.memory.id);
-      const policy = checkAccess(
-        { id: result.memory.id, source: row?.source as string | null, sensitivity_level: row?.sensitivity_level as string | null },
-        source,
-        'read',
-      );
-      if (!policy.canRead) {
-        logAccessDenial(result.memory.id, source, policy.reason, 'read', execution.attested);
-        return false;
+
+    // NOTE (Phase 17 B2): automatic all-pairs co-access linking removed.
+    if (finalResults.length > 0 && options.query && options.query.length > 30) {
+      const topResult = finalResults[0];
+      const queryWords = new Set(options.query.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+      const contentWords = new Set(topResult.memory.content.toLowerCase().split(/\s+/));
+      const newWords = [...queryWords].filter(w => !contentWords.has(w));
+
+      if (newWords.length > queryWords.size * 0.3 && options.query.length > 50) {
+        try {
+          enrichMemory(topResult.memory.id, options.query, 'search');
+        } catch {
+          // enrichment is best-effort
+        }
       }
-      return true;
-    });
+    }
   }
 
   return finalResults;
