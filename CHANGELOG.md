@@ -8,6 +8,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **#402 (Phase 1 — memory defence intelligence):** poison≠genuine disposition valve + inject hard gate.
+  - **6-way disposition** (`resolveDispositionV2` in `src/defence/disposition.ts`): admit / admit-low-trust / inert / quarantine / reject / escalate, layered on the existing binary `resolveDisposition` (backward compatible — never relaxes a base hold). Fact-shaped firewall holds **escalate** for operator review; BLOCK → **reject** (forensic hold); directive/mixed/unknown forms store **inert** and are never injectable (B1 fail-closed); low-trust facts store with trust clamped below the inject floor.
+  - **Work-fact vs directive form classifier** (`src/defence/form-classifier.ts`): pure structural/heuristic (no ML/ONNX) → `fact | directive | mixed | unknown`; any failure ⇒ `unknown` (directive-adjacent, never auto-admit).
+  - **Genuine-work FPR corpus** (`src/defence/corpus/genuine-work-corpus.ts`, 210 Class-E facts) as a CI peer to the poison TPR corpus. Dual-corpus gate asserts FPR_genuine ≤ 5% and TPR_poison ≥ 95% (achieved **FPR 0.0%**, **TPR 100%**).
+  - **`content_form` column** (migration + schema, backward-safe, no backfill — legacy NULL rows stay fail-closed non-injectable); stamped at write time by `addMemory`.
+  - **Two-key inject** (`scripts/lib/inject-pack.mjs`): `isInjectEligible` now requires BOTH the provenance key (trust/scope) AND the form key (`content_form='fact'`, or operator-pinned legacy). A pinned directive is still refused.
+  - **Fact-frame renderer**: injected items render as data-framed lines (`- [fact|source:agent|trust:0.8] "…"`) with directive-neutralising escaping (newline/control/bidi/quote-breakout stripped) — frame, don't rewrite.
+  - **Class-B cross-row cluster quarantine** (`src/defence/cluster-quarantine.ts`): ≥3 directive/mixed-form fragments from one source within a window (default 10m) pull the whole cluster into quarantine, wired into the `addMemory` write path.
+  - Tests: `form-classifier-402`, `disposition-v2-402`, `genuine-work-fpr-402`, `cluster-quarantine-402` (defence); `inject-two-key-402`, `inject-safety-402` (memory, inject-safety=0 over a mixed DB).
 - **#401:** work-lane pack v1 — pin-able `lan-diag` template (`templates/work-lanes/lan-diag.sh`: read-mostly status, private-only bounded ping/GET, fails closed on public destinations), `lan-diag` lane in the work-lane hint catalog (after vita-ci/jotform; pin + external-egress + lan-shaped cwd or network tool), and a denial→door matrix test (`denial-doors-401.test.ts`) locking "no deny without a door": catastrophic stays a hard stop, DNP digests always carry `shieldcortex approve --denial`, no siren-only class. Runbook: `docs/runbooks/work-lane-pack-v1.md`.
 
 ## [4.54.13] - 2026-08-25
