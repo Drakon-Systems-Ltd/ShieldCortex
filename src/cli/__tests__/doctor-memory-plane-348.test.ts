@@ -161,6 +161,146 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.status).toBe('pass');
   });
 
+  // ── T1 host runtime matrix (#393) ──
+  // The live TARS shape: Hermes primary, no OpenClaw binary, contract sc_only.
+  // The pre-#393 check reported PASS here ("no paper-contract signals on disk")
+  // and, when it did fail, prescribed an OpenClaw edit the box cannot act on.
+
+  function writeHermes(opts: { memoryEnabled?: boolean; userProfile?: boolean; plugin?: boolean } = {}): void {
+    const hermesDir = path.join(tmpHome, '.hermes');
+    fs.mkdirSync(hermesDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hermesDir, 'config.yaml'),
+      [
+        'context:',
+        '  engine: compressor',
+        'memory:',
+        `  memory_enabled: ${opts.memoryEnabled ?? true}`,
+        `  user_profile_enabled: ${opts.userProfile ?? true}`,
+        '  write_approval: false',
+        'delegation:',
+        '  model: claude-sonnet-5',
+        '',
+      ].join('\n'),
+    );
+    if (opts.plugin !== false) {
+      fs.mkdirSync(path.join(hermesDir, 'plugins', 'shieldcortex'), { recursive: true });
+    }
+  }
+
+  const busContract = (plane = 'dual_legacy'): Record<string, unknown> => ({
+    memory: {
+      plane,
+      inject: { mode: 'start', nativeContract: 'sc_only', hostId: 'tars', agentId: 'hermes-primary' },
+    },
+  });
+
+  it('host contract fails a Hermes-primary paper contract and remediates on Hermes, not OpenClaw', async () => {
+    writeConfig(busContract());
+    writeHermes({ memoryEnabled: true, userProfile: true });
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/paper contract/);
+    expect(r.message).toMatch(/Hermes: native ON/);
+    expect(r.fix).toMatch(/memory_enabled=false/);
+    expect(r.fix).not.toMatch(/memorySearch/);
+  });
+
+  it('host contract fails when a Hermes native MEMORY.md was written this week, even with switches off', async () => {
+    writeConfig(busContract());
+    writeHermes({ memoryEnabled: false, userProfile: false });
+    const memDir = path.join(tmpHome, '.hermes', 'memories');
+    fs.mkdirSync(memDir, { recursive: true });
+    fs.writeFileSync(path.join(memDir, 'MEMORY.md'), '# hermes brain\n'.repeat(20));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/written within 7d/);
+  });
+
+  it('host contract cannot determine when no host runtime is on the box — warn on dual_legacy, fail on import_only', async () => {
+    writeConfig(busContract());
+    const warned = await runHost();
+    expect(warned.status).toBe('warn');
+    expect(warned.message).toMatch(/no bound host runtime found/);
+
+    writeConfig(busContract('import_only'));
+    const failed = await runHost();
+    expect(failed.status).toBe('fail');
+    expect(failed.message).toMatch(/cannot determine/);
+  });
+
+  it('host contract never passes on an unreadable openclaw.json', async () => {
+    writeConfig(busContract());
+    // A directory at the config path is present-but-unreadable, deterministically
+    // (chmod 000 proves nothing when the test runner is root).
+    fs.mkdirSync(path.join(tmpHome, '.openclaw', 'openclaw.json'), { recursive: true });
+    const r = await runHost();
+    expect(r.status).not.toBe('pass');
+    expect(r.message).toMatch(/cannot determine/);
+    expect(r.fix).toMatch(/readable/);
+  });
+
+  it('host contract passes when every bound runtime proves native off', async () => {
+    writeConfig(busContract());
+    writeHermes({ memoryEnabled: false, userProfile: false });
+    const ocDir = path.join(tmpHome, '.openclaw');
+    fs.mkdirSync(ocDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ocDir, 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/sc_only enforced/);
+  });
+
+  it('host contract passes an honest sidecar and rejects sidecar-plus-contract', async () => {
+    writeHermes({ memoryEnabled: true, userProfile: true });
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { posture: 'mcp_sidecar_no_inject', runtimes: ['hermes'] },
+        inject: { mode: 'off', hostId: 'tars', agentId: 'hermes-primary' },
+      },
+    });
+    const sidecar = await runHost();
+    expect(sidecar.status).toBe('pass');
+    expect(sidecar.message).toMatch(/honest sidecar/);
+
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { posture: 'mcp_sidecar_no_inject' },
+        inject: { mode: 'start', nativeContract: 'sc_only' },
+      },
+    });
+    const both = await runHost();
+    expect(both.status).toBe('fail');
+    expect(both.message).toMatch(/mutually exclusive/);
+  });
+
+  it('host contract rejects a junk posture instead of ignoring it', async () => {
+    writeConfig({
+      memory: { plane: 'dual_legacy', hostContract: { posture: 'coexist_dedup' }, inject: { mode: 'off' } },
+    });
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/illegal memory\.hostContract\.posture/);
+  });
+
+  it('host contract fails when a declared runtime cannot be proven (intent is not enforcement)', async () => {
+    writeConfig({
+      memory: {
+        plane: 'sc_canonical',
+        hostContract: { runtimes: ['hermes'] },
+        inject: { mode: 'start', nativeContract: 'sc_only' },
+      },
+    });
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/Hermes/);
+  });
+
   it('import_only fails on native touch even when SC has 7d admits', async () => {
     writeConfig({
       memory: {

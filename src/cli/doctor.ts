@@ -38,6 +38,17 @@ import {
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
+import {
+  evaluateHostContract,
+  parseHermesMemoryBlock,
+  resolveClaudeCodeEvidence,
+  resolveHermesEvidence,
+  resolveOpenClawEvidence,
+  type ArtifactProbe,
+  type HostRuntimeEvidence,
+  type HostRuntimeId,
+  type ProbeRead,
+} from '../memory/host-contract.js';
 import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
@@ -2915,6 +2926,10 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
   nativeContract: string | null;
   openclawAuto: boolean;
   injectConfigured: boolean;
+  /** Raw `memory.hostContract.posture` — kept raw so junk fails instead of vanishing. */
+  posture: string | null;
+  /** Operator-declared bound runtimes. Intent only: adds scrutiny, never proof. */
+  declaredRuntimes: HostRuntimeId[];
 } {
   const mem = (raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory))
     ? raw.memory as Record<string, unknown>
@@ -2946,6 +2961,13 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     && (nc === 'sc_only' || nc === 'disable_native_inject')
     ? nc
     : null;
+  const hostContract = (mem.hostContract && typeof mem.hostContract === 'object' && !Array.isArray(mem.hostContract))
+    ? mem.hostContract as Record<string, unknown>
+    : {};
+  const postureRaw = hostContract.posture;
+  const posture = typeof postureRaw === 'string' && postureRaw.trim() !== '' ? postureRaw.trim() : null;
+  const declaredRuntimes = (Array.isArray(hostContract.runtimes) ? hostContract.runtimes : [])
+    .filter((r): r is HostRuntimeId => r === 'openclaw' || r === 'claude_code' || r === 'hermes');
   return {
     plane,
     planeSetAt,
@@ -2954,6 +2976,8 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     nativeContract,
     openclawAuto: raw.openclawAutoMemory === true,
     injectConfigured,
+    posture,
+    declaredRuntimes,
   };
 }
 
@@ -3189,9 +3213,122 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
 
 /**
  * Host contract enforcement proof (#348 T1 / #393).
- * Paper contract: config claims sc_only|disable_native_inject but native
- * automatic memory still looks enabled on disk.
+ *
+ * The disk-reading half: gather per-runtime evidence, then let the pure model in
+ * `src/memory/host-contract.ts` decide. Every read distinguishes absent from
+ * unreadable — the previous version returned PASS ("no paper-contract signals on
+ * disk") whenever it found nothing, which is exactly how a Hermes-primary box
+ * with a live native MEMORY plane green-washed an `sc_only` paper contract while
+ * being handed OpenClaw remediation it could not act on.
  */
+function readJsonProbe(target: string): ProbeRead<Record<string, unknown>> {
+  const probe = probePath(target);
+  if (probe.kind === 'absent') return { kind: 'absent' };
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    return { kind: 'unreadable', detail: `${probe.code}: ${probe.message}` };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(target, 'utf-8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { kind: 'unreadable', detail: 'not a JSON object' };
+    }
+    return { kind: 'present', value: parsed as Record<string, unknown> };
+  } catch (err: unknown) {
+    return { kind: 'unreadable', detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function readTextProbe(target: string): ProbeRead<string> {
+  const probe = probePath(target);
+  if (probe.kind === 'absent') return { kind: 'absent' };
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    return { kind: 'unreadable', detail: `${probe.code}: ${probe.message}` };
+  }
+  try {
+    return { kind: 'present', value: fs.readFileSync(target, 'utf-8') };
+  } catch (err: unknown) {
+    return { kind: 'unreadable', detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** stat-only: doctor proves a native store is live without reading its contents. */
+function artifactProbe(target: string): ArtifactProbe {
+  const probe = probePath(target);
+  if (probe.kind === 'absent') return { kind: 'absent', path: target };
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    return { kind: 'unreadable', path: target, detail: `${probe.code}: ${probe.message}` };
+  }
+  return { kind: 'present', path: target, mtimeMs: probe.stat.mtimeMs, size: probe.stat.isFile() ? probe.stat.size : 1 };
+}
+
+/**
+ * Claude Code's native plane is the memory-tool store itself: `~/.claude/memory`
+ * and the per-project `~/.claude/projects/<key>/memory` directories. Scans are
+ * bounded, and a directory we cannot list returns scanComplete=false rather than
+ * an empty list — "could not look" must never read as "nothing there".
+ */
+function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanComplete: boolean } {
+  const stores: ArtifactProbe[] = [];
+  let scanComplete = true;
+  const collectDir = (dir: string): void => {
+    const dirProbe = probePath(dir);
+    if (dirProbe.kind === 'absent') return;
+    if (dirProbe.kind !== 'present') {
+      stores.push({ kind: 'unreadable', path: dir, detail: `${dirProbe.code}: ${dirProbe.message}` });
+      return;
+    }
+    try {
+      for (const name of fs.readdirSync(dir).slice(0, 50)) {
+        if (!name.endsWith('.md')) continue;
+        stores.push(artifactProbe(path.join(dir, name)));
+      }
+    } catch (err: unknown) {
+      scanComplete = false;
+      stores.push({ kind: 'unreadable', path: dir, detail: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  collectDir(path.join(home, '.claude', 'memory'));
+
+  const projectsDir = path.join(home, '.claude', 'projects');
+  const projectsProbe = probePath(projectsDir);
+  if (projectsProbe.kind === 'present') {
+    try {
+      for (const entry of fs.readdirSync(projectsDir).slice(0, 200)) {
+        collectDir(path.join(projectsDir, entry, 'memory'));
+      }
+    } catch {
+      scanComplete = false;
+    }
+  } else if (projectsProbe.kind === 'denied' || projectsProbe.kind === 'error') {
+    scanComplete = false;
+  }
+
+  return { stores, scanComplete };
+}
+
+/** Hermes native memory artifacts: top-level store plus per-profile stores. */
+function scanHermesArtifacts(home: string): ArtifactProbe[] {
+  const out: ArtifactProbe[] = [
+    artifactProbe(path.join(home, '.hermes', 'memories', 'MEMORY.md')),
+    artifactProbe(path.join(home, '.hermes', 'MEMORY.md')),
+  ];
+  const profilesDir = path.join(home, '.hermes', 'profiles');
+  const probe = probePath(profilesDir);
+  if (probe.kind === 'present') {
+    try {
+      for (const entry of fs.readdirSync(profilesDir).slice(0, 20)) {
+        out.push(artifactProbe(path.join(profilesDir, entry, 'memories', 'MEMORY.md')));
+      }
+    } catch (err: unknown) {
+      out.push({ kind: 'unreadable', path: profilesDir, detail: err instanceof Error ? err.message : String(err) });
+    }
+  } else if (probe.kind === 'denied' || probe.kind === 'error') {
+    out.push({ kind: 'unreadable', path: profilesDir, detail: `${probe.code}: ${probe.message}` });
+  }
+  return out;
+}
+
 export async function checkMemoryHostContract(): Promise<CheckResult> {
   const label = 'Memory plane (host contract)';
   let raw: Record<string, unknown> = {};
@@ -3201,116 +3338,69 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
     return { label, status: 'info', message: 'no config yet' };
   }
   const cfg = readMemoryPlaneFromConfig(raw);
-  if (!cfg.injectConfigured || cfg.injectMode === 'off') {
-    return { label, status: 'info', message: 'inject off — host contract not required' };
-  }
-  if (!cfg.nativeContract) {
-    return {
-      label,
-      status: 'fail',
-      message: 'inject on without legal nativeContract (paper contract impossible)',
-      fix: 'Run `shieldcortex config --memory-inject-contract sc_only` (or disable_native_inject)',
-    };
-  }
-
   const home = os.homedir();
-  const findings: string[] = [];
+  const nowMs = Date.now();
+  const ctx = { contract: cfg.nativeContract ?? '', plane: cfg.plane, nowMs };
+  const declared = (id: HostRuntimeId): boolean => cfg.declaredRuntimes.includes(id);
 
-  // OpenClaw: memory search / bootstrap markers that still own the bus
-  const ocPath = process.env.OPENCLAW_CONFIG_PATH?.trim()
-    || path.join(home, '.openclaw', 'openclaw.json');
-  // OpenClaw Memory Search defaults ON when the key is absent (host default-on).
-  // Under sc_only / disable_native_inject we only PASS when native is proven OFF.
-  let ocPresent = fs.existsSync(ocPath);
-  if (!ocPresent && (cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject')) {
-    // Bound inject hosts without openclaw.json: cannot prove — not PASS
-    if (cfg.openclawAuto || cfg.plane === 'sc_canonical' || cfg.plane === 'import_only') {
-      findings.push('openclaw.json absent — cannot prove native Memory Search is off');
-    }
-  }
-  if (ocPresent) {
-    try {
-      const oc = JSON.parse(fs.readFileSync(ocPath, 'utf-8')) as Record<string, unknown>;
-      const agents = (oc.agents && typeof oc.agents === 'object') ? oc.agents as Record<string, unknown> : {};
-      const defaults = (agents.defaults && typeof agents.defaults === 'object')
-        ? agents.defaults as Record<string, unknown>
-        : {};
-      if (cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject') {
-        const ms = defaults.memorySearch;
-        // Resolve like OC: undefined → default ON
-        let enabled: boolean | 'unknown' = true;
-        if (ms === false) enabled = false;
-        else if (ms === true) enabled = true;
-        else if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
-          const mse = (ms as Record<string, unknown>).enabled;
-          if (mse === false) enabled = false;
-          else if (mse === true) enabled = true;
-          else enabled = true; // absent .enabled → default on
-        } else if (ms === undefined || ms === null) {
-          enabled = true; // key absent → default on
-        }
-        // Per-agent overrides that re-enable
-        const list = Array.isArray(agents.list) ? agents.list as unknown[] : [];
-        for (const entry of list) {
-          if (!entry || typeof entry !== 'object') continue;
-          const e = entry as Record<string, unknown>;
-          const ems = e.memorySearch;
-          if (ems === true) {
-            findings.push('per-agent memorySearch enabled while SC contract claims native off-bus');
-          } else if (ems && typeof ems === 'object' && !Array.isArray(ems)
-            && (ems as Record<string, unknown>).enabled === true) {
-            findings.push('per-agent memorySearch.enabled while SC contract claims native off-bus');
-          }
-        }
-        if (enabled === true) {
-          findings.push(
-            'openclaw Memory Search not proven off (default-on unless agents.defaults.memorySearch.enabled===false) while SC contract claims native off-bus',
-          );
-        }
-      }
-    } catch {
-      findings.push('openclaw.json unreadable — cannot prove host contract');
-    }
-  }
+  const ocPath = process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(home, '.openclaw', 'openclaw.json');
+  const runtimes: HostRuntimeEvidence[] = [
+    resolveOpenClawEvidence(
+      {
+        config: readJsonProbe(ocPath),
+        scHookInstalled: probePath(path.join(home, '.openclaw', 'hooks', 'cortex-memory')).kind === 'present',
+        scAutoMemory: cfg.openclawAuto,
+        agentsMd: readTextProbe(path.join(home, '.openclaw', 'workspace', 'AGENTS.md')),
+        memoryMd: artifactProbe(path.join(home, '.openclaw', 'workspace', 'MEMORY.md')),
+        declared: declared('openclaw'),
+      },
+      ctx,
+    ),
+    resolveClaudeCodeEvidence(
+      (() => {
+        const scan = scanClaudeNativeStores(home);
+        return {
+          settings: readJsonProbe(path.join(home, '.claude', 'settings.json')),
+          nativeStores: scan.stores,
+          storeScanComplete: scan.scanComplete,
+          declared: declared('claude_code'),
+        };
+      })(),
+      ctx,
+    ),
+    resolveHermesEvidence(
+      (() => {
+        const text = readTextProbe(path.join(home, '.hermes', 'config.yaml'));
+        return {
+          config: text.kind === 'present'
+            ? { kind: 'present' as const, value: parseHermesMemoryBlock(text.value) }
+            : text,
+          scPluginInstalled: probePath(path.join(home, '.hermes', 'plugins', 'shieldcortex')).kind === 'present',
+          nativeArtifacts: scanHermesArtifacts(home),
+          declared: declared('hermes'),
+        };
+      })(),
+      ctx,
+    ),
+  ];
 
-  // AGENTS.md / workspace instructions still ordering Read MEMORY.md as brain
-  const agentsMd = path.join(home, '.openclaw', 'workspace', 'AGENTS.md');
-  const memoryMd = path.join(home, '.openclaw', 'workspace', 'MEMORY.md');
-  try {
-    if (fs.existsSync(agentsMd)) {
-      const text = fs.readFileSync(agentsMd, 'utf-8');
-      if (/memory\.md/i.test(text) && /read\s+|every\s+session|always|soul\.md|user\.md/i.test(text)) {
-        findings.push('workspace AGENTS.md still references MEMORY.md as session brain under SC nativeContract');
-      }
-    }
-  } catch { /* ignore */ }
-
-  // sc_canonical / import_only: native MEMORY.md recent write is FAIL (bus law)
-  if (cfg.plane === 'sc_canonical' || cfg.plane === 'import_only') {
-    try {
-      if (fs.existsSync(memoryMd)) {
-        const st = fs.statSync(memoryMd);
-        if (st.mtimeMs >= Date.now() - 7 * 24 * 60 * 60 * 1000 && st.size > 64) {
-          findings.push(`MEMORY.md touched in 7d (${st.size}B) under plane=${cfg.plane} + contract=${cfg.nativeContract}`);
-        }
-      }
-    } catch { /* ignore */ }
-  }
-
-  if (findings.length > 0) {
-    // Paper contract is always FAIL when inject contract is set — never warn-wash.
-    return {
-      label,
-      status: 'fail',
-      message: `host contract ${cfg.nativeContract} not fully enforced: ${findings.join('; ')}`,
-      fix: 'Set agents.defaults.memorySearch.enabled=false (OC default is ON when absent), stop MEMORY.md as SoT; prove SC start-pack is the only automatic bus — see #393',
-    };
-  }
+  const verdict = evaluateHostContract({
+    plane: cfg.plane,
+    injectConfigured: cfg.injectConfigured,
+    injectMode: cfg.injectMode,
+    nativeContract: cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject'
+      ? cfg.nativeContract
+      : null,
+    postureRaw: cfg.posture,
+    runtimes,
+    nowMs,
+  });
 
   return {
     label,
-    status: 'pass',
-    message: `nativeContract=${cfg.nativeContract} plane=${cfg.plane}: no paper-contract signals on disk`,
+    status: verdict.status,
+    message: verdict.message,
+    ...(verdict.fix ? { fix: verdict.fix } : {}),
   };
 }
 
