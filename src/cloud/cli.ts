@@ -26,6 +26,10 @@ import {
   setActionGuardCoreConfig,
   setMemoryInjectContract,
   setMemoryPlane,
+  setMemoryHostPosture,
+  setMemoryHostRuntimes,
+  MEMORY_HOST_POSTURES,
+  MEMORY_HOST_RUNTIMES,
   setAutoMemorySamplingTurns,
   NATIVE_INJECT_CONTRACTS,
   MEMORY_PLANE_VALUES,
@@ -407,6 +411,53 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  // #393 T1: the honest-sidecar / bus-contract switch doctor's host-contract
+  // remediation prescribes. Sidecar also turns inject off in the same signed
+  // write — "sidecar with inject still on" is the exact both-at-once state the
+  // check fails on, so the fix path must not be able to create it.
+  const hostPostureIdx = args.indexOf('--memory-host-posture');
+  if (hostPostureIdx !== -1) {
+    const posture = args[hostPostureIdx + 1];
+    if (!posture || posture.startsWith('--')) {
+      console.error(`Missing value for --memory-host-posture. Legal values: ${MEMORY_HOST_POSTURES.join(', ')}.`);
+      process.exit(1);
+    }
+    try {
+      setMemoryHostPosture(posture);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    console.log(
+      posture === 'mcp_sidecar_no_inject'
+        ? 'Host posture set to mcp_sidecar_no_inject and memory.inject.mode set to off (signed write) — '
+          + 'native host memory keeps the automatic bus; ShieldCortex claims no canonicity.'
+        : 'Host posture cleared to bus_contract (signed write) — the memory.inject nativeContract governs the bus. '
+          + 'Inject mode is unchanged; turn it on deliberately.',
+    );
+    changed = true;
+  }
+
+  const hostRuntimeIdx = args.indexOf('--memory-host-runtime');
+  if (hostRuntimeIdx !== -1) {
+    const runtimeArg = args[hostRuntimeIdx + 1];
+    if (!runtimeArg || runtimeArg.startsWith('--')) {
+      console.error(`Missing value for --memory-host-runtime. Legal values: ${MEMORY_HOST_RUNTIMES.join(', ')} (comma-separated).`);
+      process.exit(1);
+    }
+    try {
+      setMemoryHostRuntimes(runtimeArg.split(',').map((v) => v.trim()).filter(Boolean));
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    console.log(
+      `Bound host runtime(s) declared: ${runtimeArg} (signed write). Declaring a runtime only makes doctor prove `
+      + 'its native-memory state — it never counts as proof that native memory is off.',
+    );
+    changed = true;
+  }
+
   const autoMemSamplingIdx = args.indexOf('--auto-memory-sampling');
   if (autoMemSamplingIdx !== -1) {
     const rawTurns = args[autoMemSamplingIdx + 1];
@@ -483,6 +534,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
     console.log('  --memory-inject-contract <sc_only|disable_native_inject>  Set the memory-inject native contract (signed write)');
     console.log('  --memory-plane <dual_legacy|import_only|sc_canonical>  Set memory.plane (signed write; stamps planeSetAt)');
+    console.log('  --memory-host-posture <mcp_sidecar_no_inject|bus_contract>  Honest sidecar (also turns inject off) or bus-contract posture (signed write)');
+    console.log('  --memory-host-runtime <openclaw|claude_code|hermes>[,…]  Declare the bound host runtime(s) doctor must prove (signed write)');
     console.log('  --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
     console.log('');

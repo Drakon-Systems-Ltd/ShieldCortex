@@ -20,6 +20,8 @@ import {
   isConfigTampered,
   setMemoryInjectContract,
   setMemoryPlane,
+  setMemoryHostPosture,
+  setMemoryHostRuntimes,
   setAutoMemorySamplingTurns,
 } from '../cloud/config.js';
 
@@ -225,5 +227,56 @@ describe('config --memory-plane (signed Track A / #348)', () => {
     expect(onDisk.memory.plane).toBe('sc_canonical');
     expect(onDisk.memory.inject.nativeContract).toBe('sc_only');
     expect(onDisk.memory.inject.hostId).toBe('tars');
+  });
+});
+
+describe('config --memory-host-posture / --memory-host-runtime (#393 T1 signed fix path)', () => {
+  it('mcp_sidecar_no_inject records the posture AND turns inject off in one signed write', () => {
+    handleCloudConfig(['--memory-inject-contract', 'sc_only']);
+    handleCloudConfig(['--memory-host-posture', 'mcp_sidecar_no_inject']);
+    const onDisk = readOnDisk();
+    expect(onDisk.memory.hostContract.posture).toBe('mcp_sidecar_no_inject');
+    expect(typeof onDisk.memory.hostContract.postureSetAt).toBe('string');
+    // Never both: the sidecar posture cannot coexist with a live inject bus.
+    expect(onDisk.memory.inject.mode).toBe('off');
+    // The contract value survives so flipping back does not lose it.
+    expect(onDisk.memory.inject.nativeContract).toBe('sc_only');
+    expect(onDisk._sig).toMatch(/^[0-9a-f]{64}$/);
+    clearCloudConfigCache();
+    expect(isConfigTampered()).toBe(false);
+    expect(readRawConfig().defenceMode).not.toBe('strict');
+  });
+
+  it('bus_contract clears the posture without switching inject on behind the operator', () => {
+    handleCloudConfig(['--memory-host-posture', 'mcp_sidecar_no_inject']);
+    handleCloudConfig(['--memory-host-posture', 'bus_contract']);
+    const onDisk = readOnDisk();
+    expect(onDisk.memory.hostContract.posture).toBeUndefined();
+    expect(onDisk.memory.inject.mode).toBe('off');
+    expect(onDisk._sig).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('rejects a junk posture and a junk runtime, leaving the config untouched', () => {
+    handleCloudConfig(['--mode', 'balanced']);
+    const before = fs.readFileSync(configFile(), 'utf-8');
+    const exitSpy = mockExit();
+    expect(() => handleCloudConfig(['--memory-host-posture', 'coexist_dedup'])).toThrow('exit');
+    expect(() => handleCloudConfig(['--memory-host-runtime', 'openclaw,gemini'])).toThrow('exit');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(before);
+  });
+
+  it('declares bound runtimes, deduped, without inventing any proof of native-off', () => {
+    handleCloudConfig(['--memory-host-runtime', 'hermes,hermes,claude_code']);
+    const onDisk = readOnDisk();
+    expect(onDisk.memory.hostContract.runtimes).toEqual(['hermes', 'claude_code']);
+    expect(onDisk.memory.hostContract.nativeOff).toBeUndefined();
+    expect(onDisk.memory.hostContract.posture).toBeUndefined();
+  });
+
+  it('rejects illegal values at the API layer too', () => {
+    expect(() => setMemoryHostPosture('sc_only')).toThrow(/mcp_sidecar_no_inject, bus_contract/);
+    expect(() => setMemoryHostRuntimes([])).toThrow(/openclaw, claude_code, hermes/);
+    expect(fs.existsSync(configFile())).toBe(false);
   });
 });
