@@ -60,3 +60,128 @@ export function resolveDisposition(input: DispositionInput): Disposition {
   }
   return { action: 'store', firewallResult: 'ALLOW', reason: input.reason, subAgentHold: false };
 }
+
+// ═══════════════════════ #402 Phase 1 — multi-way valve ═══════════════════════
+//
+// The binary store|quarantine disposition becomes a 6-way valve layered ON TOP
+// of resolveDisposition: everything that quarantines today still quarantines
+// (the base decision is computed first and only ever refined, never relaxed).
+// The v2 kinds map onto storage actions:
+//   admit           → store; injectable if the read-time gate agrees
+//   admit-low-trust → store with trust clamped below the inject floor;
+//                     reaches packs only after operator promotion/pin
+//   inert           → store, content_form 'directive'|'mixed'|'unknown' keeps
+//                     it out of packs via the form key (B1: never injectable)
+//   quarantine      → quarantine table hold (parent/operator review)
+//   escalate        → quarantine table hold flagged for OPERATOR review — a
+//                     fact-shaped write the firewall still flagged (boundary
+//                     case a human should adjudicate, not auto-expire)
+//   reject          → quarantine table hold with BLOCK preserved forensically
+//                     (auto-rejected at review), exactly today's BLOCK path.
+
+export type ContentFormLabel = 'fact' | 'directive' | 'mixed' | 'unknown';
+
+export type DispositionKind =
+  | 'admit'
+  | 'admit-low-trust'
+  | 'inert'
+  | 'quarantine'
+  | 'reject'
+  | 'escalate';
+
+/** Trust stamp ceiling for admit-low-trust rows: strictly below the 0.5
+ *  read-time inject trust floor, so a low-trust admit can NEVER reach a pack
+ *  until an operator promotes it. */
+export const LOW_TRUST_CLAMP = 0.45;
+
+/** ALLOW trust floor below which a work-fact is admitted low-trust (thin
+ *  provenance). Matches the inject-pack trust floor. */
+export const ADMIT_TRUST_FLOOR = 0.5;
+
+export interface DispositionInputV2 extends DispositionInput {
+  /** classifyContentForm(content); omitted/invalid ⇒ treated as 'unknown'
+   *  (fail-closed — never auto-admit on a missing classification). */
+  contentForm?: ContentFormLabel | null;
+  /** Pipeline threat indicators (soft signals demote admit → admit-low-trust). */
+  threatIndicators?: readonly unknown[];
+  /** Pipeline anomaly score (soft signal, same demotion). */
+  anomalyScore?: number;
+  /** B1 lock: attestation is channel identity, NEVER trust — accepted here
+   *  only so callers can pass their full context; it grants nothing. */
+  sourceAttested?: boolean;
+}
+
+export interface DispositionV2 extends Disposition {
+  kind: DispositionKind;
+  /** The content form the decision was made on (normalized, fail-closed). */
+  contentForm: ContentFormLabel;
+  /** Write-time injectability stamp. The live read gate (two-key) still
+   *  applies at pack build — this alone never puts a row in a pack. */
+  injectable: boolean;
+  /** For admit-low-trust: the ceiling to clamp the stored trust_score to. */
+  trustClamp?: number;
+}
+
+function normalizeForm(form: unknown): ContentFormLabel {
+  return form === 'fact' || form === 'directive' || form === 'mixed' ? form : 'unknown';
+}
+
+/** Soft-signal test: an ALLOWED write that still tripped indicators or scored
+ *  anomalous is admitted low-trust rather than clean-admitted. */
+function hasSoftSignals(input: DispositionInputV2): boolean {
+  if (Array.isArray(input.threatIndicators) && input.threatIndicators.length > 0) return true;
+  return typeof input.anomalyScore === 'number' && input.anomalyScore >= 0.3;
+}
+
+/**
+ * Resolve the 6-way disposition. Refines resolveDisposition — never relaxes it:
+ * base 'quarantine' stays a hold (kind reject/escalate/quarantine); base
+ * 'store' splits into admit / admit-low-trust / inert on form + soft signals.
+ */
+export function resolveDispositionV2(input: DispositionInputV2): DispositionV2 {
+  const base = resolveDisposition(input);
+  const contentForm = normalizeForm(input.contentForm);
+
+  if (base.action === 'quarantine') {
+    let kind: DispositionKind;
+    if (base.firewallResult === 'BLOCK') {
+      kind = 'reject';
+    } else if (base.subAgentHold) {
+      kind = 'quarantine'; // parent-approval flow, not operator escalation
+    } else if (contentForm === 'fact') {
+      // Fact-shaped content the firewall still flagged: boundary case —
+      // hold it flagged for a human, don't let it auto-expire unseen.
+      kind = 'escalate';
+    } else {
+      kind = 'quarantine';
+    }
+    return { ...base, kind, contentForm, injectable: false };
+  }
+
+  // base.action === 'store'
+  if (contentForm !== 'fact') {
+    // directive / mixed / unknown ⇒ INERT: stored for forensics + operator
+    // promotion (re-scan on promote), never injectable (B1 fail-closed).
+    return {
+      ...base,
+      kind: 'inert',
+      contentForm,
+      injectable: false,
+      reason: base.reason
+        ? `${base.reason}; inert: content form '${contentForm}' is not a work-fact`
+        : `inert: content form '${contentForm}' is not a work-fact`,
+    };
+  }
+
+  if (input.trustScore < ADMIT_TRUST_FLOOR || hasSoftSignals(input)) {
+    return {
+      ...base,
+      kind: 'admit-low-trust',
+      contentForm,
+      injectable: false,
+      trustClamp: Math.min(input.trustScore, LOW_TRUST_CLAMP),
+    };
+  }
+
+  return { ...base, kind: 'admit', contentForm, injectable: true };
+}
