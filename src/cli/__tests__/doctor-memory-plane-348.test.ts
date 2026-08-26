@@ -584,6 +584,22 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(both.message).toMatch(/mutually exclusive/);
   });
 
+  it('host contract fails a hand-crafted posture-only blob — sidecar needs inject.mode explicitly off (SOL r2 B4)', async () => {
+    writeHermes({ memoryEnabled: true, userProfile: true });
+    // No memory.inject at all: the emitter would default to start and emit
+    // legacy sidecar recall while doctor certified "SC inject off".
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { posture: 'mcp_sidecar_no_inject', runtimes: ['hermes'] },
+      },
+    });
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/not explicitly off/);
+    expect(r.fix).toMatch(/--memory-host-posture mcp_sidecar_no_inject/);
+  });
+
   it('host contract rejects a junk posture instead of ignoring it', async () => {
     writeConfig({
       memory: { plane: 'dual_legacy', hostContract: { posture: 'coexist_dedup' }, inject: { mode: 'off' } },

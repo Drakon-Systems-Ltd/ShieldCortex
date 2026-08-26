@@ -815,6 +815,33 @@ describe('contract verdict', () => {
     expect(v.message).toMatch(/no canonicity claimed/);
   });
 
+  it('fails sidecar posture unless inject mode is EXPLICITLY off — a posture-only blob is not a sidecar (SOL r2 B4)', () => {
+    // Hand-crafted config with only hostContract.posture: the emitter would
+    // default to start and still emit legacy sidecar recall. The signed
+    // setter cannot mint this shape (it forces inject.mode=off).
+    const blob = verdictFor([liveHermes], {
+      injectConfigured: false,
+      injectMode: 'start',
+      injectModeExplicit: false,
+      nativeContract: null,
+      postureRaw: SIDECAR_POSTURE,
+    });
+    expect(blob.status).toBe('fail');
+    expect(blob.message).toMatch(/not explicitly off/);
+    expect(blob.message).toMatch(/legacy sidecar recall/);
+    expect(blob.fix).toMatch(/--memory-host-posture mcp_sidecar_no_inject/);
+    // The legitimate setter-produced shape still passes.
+    const legit = verdictFor([liveHermes], {
+      injectConfigured: true,
+      injectMode: 'off',
+      injectModeExplicit: true,
+      nativeContract: null,
+      postureRaw: SIDECAR_POSTURE,
+    });
+    expect(legit.status).toBe('pass');
+    expect(legit.message).toMatch(/explicitly off/);
+  });
+
   it('stays info when inject is simply off with no posture declared', () => {
     const v = verdictFor([liveHermes], { injectConfigured: false, injectMode: 'off', nativeContract: null });
     expect(v.status).toBe('info');

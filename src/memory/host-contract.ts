@@ -863,20 +863,38 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
       };
     }
     if (posture === SIDECAR_POSTURE) {
+      // #393 SOL r2 B4: the sidecar promise is "SC puts NOTHING on the
+      // automatic bus", and only an EXPLICITLY normalized mode=off proves it.
+      // Posture present with inject unconfigured is a hand-crafted blob the
+      // signed setter cannot mint (it forces inject.mode=off): the emitter
+      // would default to start and still put legacy sidecar recall on the
+      // session-start bus.
+      if (!(input.injectConfigured && input.injectMode === 'off' && input.injectModeExplicit !== false)) {
+        return {
+          status: 'fail',
+          message:
+            `posture=${SIDECAR_POSTURE} declared but memory.inject.mode is not explicitly off — ` +
+            'the emitter defaults to mode=start and still emits legacy sidecar recall on the session-start bus, ' +
+            'so the sidecar promise is not proven',
+          fix: `Run \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` — the signed setter forces memory.inject.mode=off; do not hand-edit config.json`,
+        };
+      }
       return {
         status: 'pass',
-        message: `honest sidecar (${SIDECAR_POSTURE}): SC inject off, native host memory keeps the automatic bus — no canonicity claimed`,
+        message: `honest sidecar (${SIDECAR_POSTURE}): SC inject explicitly off, native host memory keeps the automatic bus — no canonicity claimed`,
       };
     }
     if (!input.injectConfigured) {
-      // SOL nit: the emitter's default for an unconfigured box is mode=start,
-      // not off — it just emits nothing without a legal nativeContract. Saying
-      // "inject off" here misstated the runtime.
+      // SOL nit (r2): the emitter's default for an unconfigured box is
+      // mode=start, and WITHOUT a legal nativeContract it still emits legacy
+      // sidecar recall (advisory SIDECAR header — see session-start-hook.mjs
+      // case 3). The old text claimed it "emits nothing", misstating the
+      // runtime: SC content is on the bus, merely without a canonicity claim.
       return {
         status: 'info',
         message:
-          'memory.inject not configured — the emitter defaults to mode=start but emits nothing without a ' +
-          'legal nativeContract, so SC is not on the automatic bus and no host contract is claimed',
+          'memory.inject not configured — the emitter defaults to mode=start and emits legacy sidecar recall ' +
+          '(advisory, no canonicity claimed), so no host contract is claimed but SC content is on the session-start bus',
         fix: `Declare it explicitly with \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` if this box runs SC as a sidecar`,
       };
     }
