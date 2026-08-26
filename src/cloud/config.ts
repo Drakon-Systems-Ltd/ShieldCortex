@@ -1385,6 +1385,9 @@ export function setMemoryHostPosture(value: string): void {
       : {};
     if (value === 'bus_contract') {
       delete hostContract.posture;
+      // A stale postureSetAt with no posture reads as "sidecar was set at T"
+      // to any forensic pass — the stamp travels with the posture (#393 SOL nit).
+      delete hostContract.postureSetAt;
     } else {
       hostContract.posture = value;
       hostContract.postureSetAt = new Date().toISOString();

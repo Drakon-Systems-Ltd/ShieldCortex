@@ -247,11 +247,13 @@ describe('config --memory-host-posture / --memory-host-runtime (#393 T1 signed f
     expect(readRawConfig().defenceMode).not.toBe('strict');
   });
 
-  it('bus_contract clears the posture without switching inject on behind the operator', () => {
+  it('bus_contract clears the posture AND its postureSetAt stamp without switching inject on behind the operator', () => {
     handleCloudConfig(['--memory-host-posture', 'mcp_sidecar_no_inject']);
     handleCloudConfig(['--memory-host-posture', 'bus_contract']);
     const onDisk = readOnDisk();
     expect(onDisk.memory.hostContract.posture).toBeUndefined();
+    // SOL nit: a stale stamp with no posture reads as "sidecar was set at T".
+    expect(onDisk.memory.hostContract.postureSetAt).toBeUndefined();
     expect(onDisk.memory.inject.mode).toBe('off');
     expect(onDisk._sig).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -262,6 +264,27 @@ describe('config --memory-host-posture / --memory-host-runtime (#393 T1 signed f
     const exitSpy = mockExit();
     expect(() => handleCloudConfig(['--memory-host-posture', 'coexist_dedup'])).toThrow('exit');
     expect(() => handleCloudConfig(['--memory-host-runtime', 'openclaw,gemini'])).toThrow('exit');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(before);
+  });
+
+  it('combined flags are all-or-nothing: a later invalid arg aborts before ANY signed write lands (SOL nit)', () => {
+    handleCloudConfig(['--mode', 'balanced']);
+    const before = fs.readFileSync(configFile(), 'utf-8');
+    const exitSpy = mockExit();
+    // Valid posture followed by junk runtime: pre-preflight this committed the
+    // posture (inject forced off!) and then exited on the runtime.
+    expect(() =>
+      handleCloudConfig(['--memory-host-posture', 'mcp_sidecar_no_inject', '--memory-host-runtime', 'bogus']),
+    ).toThrow('exit');
+    // Valid contract followed by junk plane; valid runtime followed by junk
+    // sampling — nothing may land in either order.
+    expect(() =>
+      handleCloudConfig(['--memory-inject-contract', 'sc_only', '--memory-plane', 'multi_master']),
+    ).toThrow('exit');
+    expect(() =>
+      handleCloudConfig(['--memory-host-runtime', 'hermes', '--auto-memory-sampling', 'lots']),
+    ).toThrow('exit');
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(fs.readFileSync(configFile(), 'utf-8')).toBe(before);
   });

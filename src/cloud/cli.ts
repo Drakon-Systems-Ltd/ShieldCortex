@@ -87,6 +87,62 @@ export function handleCloudConfig(args: string[]): void {
 
   let changed = false;
 
+  // ── #393 SOL nit: no partial commits across combined flags ──
+  // Every signed write below lands immediately, so a valid flag used to commit
+  // before a later flag's invalid value called process.exit(1) — e.g.
+  // `--memory-host-posture mcp_sidecar_no_inject --memory-host-runtime bogus`
+  // wrote the posture and then exited. The closed-enum memory-plane family is
+  // therefore validated up front, before ANY mutation runs; messages mirror
+  // the per-flag handlers (which stay as defence in depth).
+  const memoryFlagPreflightError = ((): string | null => {
+    const valueOf = (flag: string): { present: boolean; value?: string } => {
+      const idx = args.indexOf(flag);
+      if (idx === -1) return { present: false };
+      const v = args[idx + 1];
+      return { present: true, value: v && !v.startsWith('--') ? v : undefined };
+    };
+    const closed = (
+      flag: string,
+      legal: readonly string[],
+      what: string,
+    ): string | null => {
+      const f = valueOf(flag);
+      if (!f.present) return null;
+      if (!f.value) return `Missing value for ${flag}. Legal values: ${legal.join(', ')}.`;
+      if (!legal.includes(f.value)) return `Invalid ${what} "${f.value}". Legal values: ${legal.join(', ')}.`;
+      return null;
+    };
+    const enumError = closed('--memory-inject-contract', NATIVE_INJECT_CONTRACTS, 'memory inject contract')
+      ?? closed('--memory-plane', MEMORY_PLANE_VALUES, 'memory plane')
+      ?? closed('--memory-host-posture', MEMORY_HOST_POSTURES, 'memory host posture');
+    if (enumError) return enumError;
+    const runtime = valueOf('--memory-host-runtime');
+    if (runtime.present) {
+      if (!runtime.value) {
+        return `Missing value for --memory-host-runtime. Legal values: ${MEMORY_HOST_RUNTIMES.join(', ')} (comma-separated).`;
+      }
+      const values = runtime.value.split(',').map((v) => v.trim()).filter(Boolean);
+      const illegal = values.filter((v) => !(MEMORY_HOST_RUNTIMES as readonly string[]).includes(v));
+      if (values.length === 0 || illegal.length > 0) {
+        return `Invalid memory host runtime(s) "${illegal.join(', ') || '(none given)'}". ` +
+          `Legal values: ${MEMORY_HOST_RUNTIMES.join(', ')}.`;
+      }
+    }
+    const sampling = valueOf('--auto-memory-sampling');
+    if (sampling.present) {
+      if (!sampling.value) return 'Missing value for --auto-memory-sampling. Provide an integer between 1 and 20 (≤ 5 recommended).';
+      const turns = Number(sampling.value);
+      if (!Number.isInteger(turns) || turns < 1 || turns > 20) {
+        return `Invalid value for --auto-memory-sampling: "${sampling.value}". Provide an integer between 1 and 20 (≤ 5 recommended).`;
+      }
+    }
+    return null;
+  })();
+  if (memoryFlagPreflightError) {
+    console.error(memoryFlagPreflightError);
+    process.exit(1);
+  }
+
   const modeIdx = args.indexOf('--mode');
   if (modeIdx !== -1 && args[modeIdx + 1]) {
     const mode = args[modeIdx + 1] as DefenceMode;
