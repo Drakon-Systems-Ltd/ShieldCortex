@@ -26,6 +26,8 @@
  * (T1, residual lock 9 — Hermes honest sidecar vs contract).
  */
 
+import { isShieldCortexHookCommand } from '../setup/hook-command-resolution.js';
+
 export const HOST_RUNTIMES = ['openclaw', 'claude_code', 'hermes'] as const;
 export type HostRuntimeId = (typeof HOST_RUNTIMES)[number];
 
@@ -38,8 +40,13 @@ export const SIDECAR_POSTURE = 'mcp_sidecar_no_inject';
  */
 export type NativeBusState = 'off_proven' | 'on' | 'unknown';
 
-/** Whether ShieldCortex's own automatic pack is wired on that runtime. */
-export type ScBusState = 'wired' | 'not_wired' | 'unknown';
+/**
+ * Whether ShieldCortex's own automatic pack is wired on that runtime.
+ * `wired_proven` is STATIC proof only — the artifact set and host config are
+ * verified on disk, but doctor cannot attest that the host actually delivered
+ * a pack at runtime, so no message downstream may claim a delivered receipt.
+ */
+export type ScBusState = 'wired_proven' | 'not_wired' | 'unknown';
 
 export type ProbeRead<T> =
   | { kind: 'present'; value: T }
@@ -92,7 +99,7 @@ export const RUNTIME_CAPABILITY: Record<HostRuntimeId, RuntimeCapability> = {
   },
   hermes: {
     label: 'Hermes',
-    nativeOffSetting: 'memory.memory_enabled=false and memory.user_profile_enabled=false in ~/.hermes/config.yaml',
+    nativeOffSetting: 'memory.memory_enabled=false and memory.user_profile_enabled=false in ~/.hermes/config.yaml (and in every ~/.hermes/profiles/*/config.yaml)',
     // SC ships a pre_tool_call action-guard plugin for Hermes, not a bootstrap
     // inject surface. Claiming SC-pack parity on Hermes would be fake (lock 9).
     scInjectSurface: false,
@@ -117,23 +124,77 @@ function shortPath(p: string): string {
   return home && p.startsWith(home) ? p.replace(home, '~') : p;
 }
 
+// ── Inject mode law (#393 SOL H5) ───────────────────────────────────────────
+
+/** Closed legal set for `memory.inject.mode` — shared law with the emitter. */
+export const INJECT_MODES = ['off', 'start', 'turn', 'both'] as const;
+export type InjectMode = (typeof INJECT_MODES)[number];
+
+export interface InjectModeReading {
+  /** Normalized mode when legal, null when the value is junk. */
+  mode: InjectMode | null;
+  legal: boolean;
+  /** False when the operator wrote nothing and the emitter default applies. */
+  explicit: boolean;
+  /** Printable raw value for diagnostics. */
+  raw: string;
+}
+
+/**
+ * Doctor-side mirror of `normalizeInjectMode` in scripts/lib/inject-pack.mjs:
+ * same closed enum, same trim/lowercase, same `false`/`0` → off, same
+ * unset/empty → default `start` — with ONE sanctioned divergence. The runtime
+ * quietly normalizes junk to `start` (fail-open toward injecting); doctor
+ * refuses to grade junk and reports it illegal, so the contract verdict fails
+ * instead of green-washing (`mode:"bogus"` used to PASS while the runtime
+ * injected). Parity is pinned by test against the runtime module.
+ */
+export function readInjectModeStrict(raw: unknown): InjectModeReading {
+  if (raw === undefined || raw === null || raw === '') {
+    return { mode: 'start', legal: true, explicit: false, raw: '(unset)' };
+  }
+  if (raw === false || raw === 0) return { mode: 'off', legal: true, explicit: true, raw: String(raw) };
+  if (typeof raw === 'string') {
+    const m = raw.trim().toLowerCase();
+    if ((INJECT_MODES as readonly string[]).includes(m)) {
+      return { mode: m as InjectMode, legal: true, explicit: true, raw };
+    }
+  }
+  return { mode: null, legal: false, explicit: true, raw: String(raw) };
+}
+
 // ── OpenClaw ────────────────────────────────────────────────────────────────
+
+/**
+ * State of the SC cortex-memory hook artifact set under ~/.openclaw/hooks.
+ * A bare directory is NOT wiring (SOL #393 H1): `complete` requires every
+ * installer-authoritative file (HOOK_FILES: HOOK.md, handler.ts, runtime.mjs)
+ * present, non-empty, and byte-current against the packaged source. `stale`
+ * means files exist but differ from the packaged source, so what would run
+ * cannot be proven to be the SC pack emitter.
+ */
+export type OpenClawHookArtifacts = 'complete' | 'stale' | 'incomplete' | 'absent' | 'unreadable';
+
+export interface OpenClawWorkspaceProbe {
+  /** Workspace root this evidence was read from. */
+  path: string;
+  /** AGENTS.md text (sc_only: native MD must not be the session brain). */
+  agentsMd: ProbeRead<string>;
+  /** MEMORY.md stat. */
+  memoryMd: ArtifactProbe;
+}
 
 export interface OpenClawProbe {
   /** `~/.openclaw/openclaw.json` (or OPENCLAW_CONFIG_PATH). */
   config: ProbeRead<Record<string, unknown>>;
-  /**
-   * SC's cortex-memory hook under ~/.openclaw/hooks. Tri-state because pack
-   * delivery is contract evidence (H4): absent is a positive "not delivered"
-   * reading, while a hook dir doctor could not stat proves nothing either way.
-   */
-  scHook: 'installed' | 'absent' | 'unreadable';
+  /** SC's cortex-memory hook artifact state — see OpenClawHookArtifacts. */
+  scHook: OpenClawHookArtifacts;
   /** SC config `openclawAutoMemory` — intent only; adds scrutiny, never proof. */
   scAutoMemory: boolean;
-  /** Workspace AGENTS.md text (sc_only: native MD must not be the session brain). */
-  agentsMd: ProbeRead<string>;
-  /** Workspace MEMORY.md stat. */
-  memoryMd: ArtifactProbe;
+  /** Stock ~/.openclaw/workspace plus every configured defaults/per-agent workspace. */
+  workspaces: OpenClawWorkspaceProbe[];
+  /** False when configured workspaces could not all be enumerated. */
+  workspaceScanComplete: boolean;
   declared: boolean;
 }
 
@@ -149,6 +210,20 @@ function resolveMemorySearchFlag(value: unknown): boolean {
   return true;
 }
 
+/**
+ * `hooks.internal.entries.cortex-memory.enabled` — the host-side switch that
+ * disables an installed hook without deleting it (#393 SOL H1). Absent key =
+ * default enabled (installed hooks load); explicit false = positively
+ * disabled; a config that cannot be read proves nothing either way.
+ */
+function openClawHookConfigEnabled(config: ProbeRead<Record<string, unknown>>): boolean | 'unknown' {
+  if (config.kind !== 'present') return 'unknown';
+  const obj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const entry = obj(obj(obj(config.value.hooks).internal).entries)['cortex-memory'];
+  return obj(entry).enabled === false ? false : true;
+}
+
 export function resolveOpenClawEvidence(
   probe: OpenClawProbe,
   ctx: { contract: string; plane: string; nowMs: number },
@@ -158,8 +233,7 @@ export function resolveOpenClawEvidence(
   const boundSignals: string[] = [];
   if (probe.config.kind === 'present') boundSignals.push('openclaw.json present');
   if (probe.config.kind === 'unreadable') boundSignals.push('openclaw.json present but unreadable');
-  if (probe.scHook === 'installed') boundSignals.push('SC cortex-memory hook installed');
-  if (probe.scHook === 'unreadable') boundSignals.push('SC cortex-memory hook dir present but unreadable');
+  if (probe.scHook !== 'absent') boundSignals.push(`SC cortex-memory hook dir present (${probe.scHook})`);
   if (probe.scAutoMemory) boundSignals.push('openclawAutoMemory=true');
   if (probe.declared) boundSignals.push('declared in memory.hostContract.runtimes');
 
@@ -227,30 +301,85 @@ export function resolveOpenClawEvidence(
     }
   }
 
-  // sc_only additionally demotes native MD to non-brain. `disable_native_inject`
-  // only governs automatic recall/inject, so a directed "read MEMORY.md" in
-  // AGENTS.md is not a violation of that weaker contract.
-  if (ctx.contract === 'sc_only' && probe.agentsMd.kind === 'present') {
-    const text = probe.agentsMd.value;
-    if (/memory\.md/i.test(text) && /(read|every\s+session|always|session\s+brain|soul\.md|user\.md)/i.test(text)) {
-      nativeBus = 'on';
-      proof.push('workspace AGENTS.md still names MEMORY.md as the session brain');
-      remediation = remediation
-        || `${cap.label}: stop AGENTS.md pointing the agent at MEMORY.md as its brain (sc_only makes native MD archive/view only)`;
+  // Every configured workspace is contract surface (SOL H4), not just the
+  // stock one. sc_only additionally demotes native MD to non-brain;
+  // `disable_native_inject` only governs automatic recall/inject, so a
+  // directed "read MEMORY.md" in AGENTS.md is not a violation of that weaker
+  // contract. Evidence that WOULD have been consulted but cannot be read caps
+  // the proof at unknown — never PASS past an unreadable file.
+  const unreadableEvidence: string[] = [];
+  for (const ws of probe.workspaces) {
+    if (ctx.contract === 'sc_only') {
+      if (ws.agentsMd.kind === 'present') {
+        const text = ws.agentsMd.value;
+        if (/memory\.md/i.test(text) && /(read|every\s+session|always|session\s+brain|soul\.md|user\.md)/i.test(text)) {
+          nativeBus = 'on';
+          proof.push(`${shortPath(ws.path)}/AGENTS.md still names MEMORY.md as the session brain`);
+          remediation = remediation
+            || `${cap.label}: stop AGENTS.md pointing the agent at MEMORY.md as its brain (sc_only makes native MD archive/view only)`;
+        }
+      } else if (ws.agentsMd.kind === 'unreadable') {
+        unreadableEvidence.push(`${shortPath(ws.path)}/AGENTS.md (${ws.agentsMd.detail})`);
+      }
+    }
+    if (ctx.plane === 'sc_canonical' || ctx.plane === 'import_only') {
+      if (ws.memoryMd.kind === 'present') {
+        if (ws.memoryMd.size > 64 && ws.memoryMd.mtimeMs >= ctx.nowMs - WEEK_MS) {
+          nativeBus = 'on';
+          proof.push(`${shortPath(ws.path)}/MEMORY.md written within 7d (${ws.memoryMd.size}B) under plane=${ctx.plane}`);
+          remediation = remediation
+            || `${cap.label}: MEMORY.md is still growing as SoT — archive it or import via the defended path`;
+        }
+      } else if (ws.memoryMd.kind === 'unreadable') {
+        unreadableEvidence.push(`${shortPath(ws.path)}/MEMORY.md (${ws.memoryMd.detail})`);
+      }
     }
   }
 
-  if ((ctx.plane === 'sc_canonical' || ctx.plane === 'import_only') && probe.memoryMd.kind === 'present') {
-    if (probe.memoryMd.size > 64 && probe.memoryMd.mtimeMs >= ctx.nowMs - WEEK_MS) {
-      nativeBus = 'on';
-      proof.push(`workspace MEMORY.md written within 7d (${probe.memoryMd.size}B) under plane=${ctx.plane}`);
-      remediation = remediation
-        || `${cap.label}: MEMORY.md is still growing as SoT — archive it or import via the defended path`;
-    }
+  if (nativeBus === 'off_proven' && (unreadableEvidence.length > 0 || !probe.workspaceScanComplete)) {
+    nativeBus = 'unknown';
+    proof.push(
+      unreadableEvidence.length > 0
+        ? `workspace evidence unreadable: ${unreadableEvidence.join(', ')}`
+        : 'configured workspaces could not all be enumerated — native workspace evidence cannot be proven off',
+    );
+    remediation = remediation
+      || `${cap.label}: make every configured workspace's AGENTS.md / MEMORY.md readable so the contract can be proven`;
   }
 
-  if (probe.scHook === 'unreadable') {
-    proof.push('SC cortex-memory hook dir unreadable — pack delivery cannot be proven');
+  // SC bus: a bare directory is not delivery (SOL H1). Static wiring proof
+  // needs the full installer artifact set, byte-current content, and a host
+  // config that does not disable the hook — and even then the strongest claim
+  // is `wired_proven` (static), never a delivered receipt.
+  let scBus: ScBusState;
+  const hookEnabled = openClawHookConfigEnabled(probe.config);
+  switch (probe.scHook) {
+    case 'absent':
+      scBus = 'not_wired';
+      break;
+    case 'incomplete':
+      scBus = 'not_wired';
+      proof.push('SC cortex-memory hook dir present but required files (HOOK.md/handler.ts/runtime.mjs) missing or empty — a directory is not delivery');
+      break;
+    case 'unreadable':
+      scBus = 'unknown';
+      proof.push('SC cortex-memory hook artifacts unreadable — pack delivery cannot be proven');
+      break;
+    case 'stale':
+      scBus = 'unknown';
+      proof.push('installed SC hook differs from the packaged source — what runs cannot be proven to deliver the pack');
+      break;
+    default:
+      if (hookEnabled === false) {
+        scBus = 'not_wired';
+        proof.push('hooks.internal.entries.cortex-memory.enabled=false — the host disables the installed hook');
+      } else if (hookEnabled === 'unknown') {
+        scBus = 'unknown';
+        proof.push('openclaw.json not readable — cannot confirm the host has the SC hook enabled');
+      } else {
+        scBus = 'wired_proven';
+      }
+      break;
   }
 
   return {
@@ -258,7 +387,7 @@ export function resolveOpenClawEvidence(
     bound: true,
     boundReason: boundSignals.join(', '),
     nativeBus,
-    scBus: probe.scHook === 'installed' ? 'wired' : probe.scHook === 'absent' ? 'not_wired' : 'unknown',
+    scBus,
     proof,
     remediation,
   };
@@ -286,8 +415,13 @@ function claudeSessionStartWired(settings: Record<string, unknown>): boolean {
     const inner = (entry as { hooks?: unknown }).hooks;
     if (!Array.isArray(inner)) return false;
     return inner.some((h) => {
-      const cmd = h && typeof h === 'object' ? (h as { command?: unknown }).command : undefined;
-      return typeof cmd === 'string' && cmd.includes('shieldcortex');
+      if (!h || typeof h !== 'object') return false;
+      const hook = h as { type?: unknown; command?: unknown };
+      // Exact supported command shape only (SOL H3): a substring match let
+      // `echo shieldcortex`, stale wrappers, and lookalike binaries count as
+      // SC owning session-start.
+      if (hook.type !== undefined && hook.type !== 'command') return false;
+      return isShieldCortexHookCommand(hook.command, 'session-start');
     });
   });
 }
@@ -300,13 +434,20 @@ export function resolveClaudeCodeEvidence(
   const boundSignals: string[] = [];
   if (probe.settings.kind === 'present') boundSignals.push('~/.claude/settings.json present');
   if (probe.settings.kind === 'unreadable') boundSignals.push('~/.claude/settings.json present but unreadable');
+  // A native memory-tool store IS Claude Code on this box (SOL H2): store
+  // evidence binds the runtime even with no settings.json, and an unlistable
+  // ~/.claude path is still presence evidence — otherwise a live store could
+  // vanish from the verdict while another proven runtime carries it to PASS.
+  if (probe.nativeStores.some((p) => p.kind !== 'absent') || !probe.storeScanComplete) {
+    boundSignals.push('native memory-tool store evidence on disk');
+  }
   if (probe.declared) boundSignals.push('declared in memory.hostContract.runtimes');
 
   if (boundSignals.length === 0) {
     return {
       runtime: 'claude_code',
       bound: false,
-      boundReason: 'no ~/.claude/settings.json on this box',
+      boundReason: 'no ~/.claude settings or native memory-tool store on this box',
       nativeBus: 'unknown',
       scBus: 'unknown',
       proof: [],
@@ -323,10 +464,10 @@ export function resolveClaudeCodeEvidence(
     scBus = 'not_wired';
     proof.push('no settings.json — the SC session-start pack is not on this host bus');
   } else {
-    scBus = claudeSessionStartWired(probe.settings.value) ? 'wired' : 'not_wired';
-    proof.push(scBus === 'wired'
-      ? 'SC SessionStart hook wired in settings.json'
-      : 'SC SessionStart hook NOT wired in settings.json');
+    scBus = claudeSessionStartWired(probe.settings.value) ? 'wired_proven' : 'not_wired';
+    proof.push(scBus === 'wired_proven'
+      ? 'SC SessionStart hook statically wired in settings.json (supported shieldcortex command shape; runtime delivery not attested)'
+      : 'no supported SC SessionStart hook command in settings.json');
   }
 
   let nativeBus: NativeBusState;
@@ -387,9 +528,20 @@ export interface HermesMemorySwitches {
   blockFound: boolean;
 }
 
+export interface HermesProfileProbe {
+  /** Profile directory name under ~/.hermes/profiles. */
+  name: string;
+  /** Parsed switches from that profile's config.yaml; `absent` = no config.yaml. */
+  config: ProbeRead<HermesMemorySwitches>;
+}
+
 export interface HermesProbe {
   /** Parsed switches from `~/.hermes/config.yaml`. */
   config: ProbeRead<HermesMemorySwitches>;
+  /** Per-profile configs under ~/.hermes/profiles/<name>/config.yaml (#393 SOL H6). */
+  profiles: HermesProfileProbe[];
+  /** False when the profiles dir could not be fully enumerated. */
+  profileScanComplete: boolean;
   /** SC's Hermes plugin under ~/.hermes/plugins/shieldcortex. */
   scPluginInstalled: boolean;
   /** `~/.hermes/memories/MEMORY.md`, per-profile stores, … */
@@ -494,6 +646,49 @@ export function resolveHermesEvidence(
     }
   }
 
+  // Profiles are runtime surface (SOL H6): a ~/.hermes/profiles/*/config.yaml
+  // can re-enable native memory that the root config disabled, and doctor
+  // cannot prove Hermes' profile-inheritance semantics — so each profile
+  // config is evaluated INDEPENDENTLY. A profile whose switches cannot be
+  // proven off from its own config caps the proof at unknown, and an
+  // incomplete profile scan can never PASS.
+  const profilesOn: string[] = [];
+  const profilesUnknown: string[] = [];
+  for (const p of probe.profiles) {
+    if (p.config.kind === 'unreadable') {
+      profilesUnknown.push(`${p.name} (config.yaml unreadable: ${p.config.detail})`);
+      continue;
+    }
+    if (p.config.kind === 'absent') {
+      profilesUnknown.push(`${p.name} (no config.yaml — its memory switches cannot be proven off)`);
+      continue;
+    }
+    const v = p.config.value;
+    if (!v.blockFound) {
+      profilesUnknown.push(`${p.name} (no memory block — defaults cannot be proven off)`);
+      continue;
+    }
+    const onSwitches: string[] = [];
+    if (v.memoryEnabled !== false) {
+      onSwitches.push(`memory_enabled=${v.memoryEnabled === null ? 'unset (default ON)' : v.memoryEnabled}`);
+    }
+    if (v.userProfileEnabled !== false) {
+      onSwitches.push(`user_profile_enabled=${v.userProfileEnabled === null ? 'unset (default ON)' : v.userProfileEnabled}`);
+    }
+    if (onSwitches.length > 0) profilesOn.push(`${p.name}: ${onSwitches.join(', ')}`);
+  }
+  if (profilesOn.length > 0) {
+    nativeBus = 'on';
+    proof.push(`profile config keeps native memory on: ${profilesOn.join(' | ')}`);
+  } else if (nativeBus === 'off_proven' && (profilesUnknown.length > 0 || !probe.profileScanComplete)) {
+    nativeBus = 'unknown';
+    proof.push(
+      profilesUnknown.length > 0
+        ? `profile switches not proven off: ${profilesUnknown.join(' | ')}`
+        : 'profiles dir could not be fully enumerated — profile switches cannot be proven off',
+    );
+  }
+
   if (unreadableArtifact && nativeBus === 'off_proven') {
     nativeBus = 'unknown';
     proof.push(`native memory path unreadable at ${shortPath(unreadableArtifact.path)} (${unreadableArtifact.detail})`);
@@ -528,8 +723,14 @@ export function resolveHermesEvidence(
 
 export interface HostContractInput {
   plane: string;
+  /** True when ANY inject/bus config exists (mode, legacy keys, or a contract in any location). */
   injectConfigured: boolean;
+  /** Normalized mode from readInjectModeStrict — the raw junk string when illegal. */
   injectMode: string;
+  /** False when the raw mode is junk the runtime would fail-open to `start` (SOL H5). Default true. */
+  injectModeLegal?: boolean;
+  /** False when the mode is the emitter default rather than operator-written. Default true. */
+  injectModeExplicit?: boolean;
   nativeContract: 'sc_only' | 'disable_native_inject' | null;
   /** Raw `memory.hostContract.posture`, so junk values fail instead of vanishing. */
   postureRaw: string | null;
@@ -565,7 +766,6 @@ function describe(evidence: HostRuntimeEvidence): string {
 }
 
 export function evaluateHostContract(input: HostContractInput): HostContractVerdict {
-  const injectOn = input.injectConfigured && input.injectMode !== 'off';
   const posture = input.postureRaw === null ? null : input.postureRaw.trim();
 
   if (posture !== null && posture !== SIDECAR_POSTURE) {
@@ -576,12 +776,30 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
     };
   }
 
+  // SOL H5: doctor and the runtime emitter must share inject-mode semantics.
+  // The runtime fail-opens junk to `start` and injects; doctor fails it as
+  // illegal instead of grading a mode it cannot prove — either way, no PASS.
+  if (input.injectModeLegal === false) {
+    return {
+      status: 'fail',
+      message:
+        `illegal memory.inject.mode "${input.injectMode}" — the runtime emitter normalizes junk to "start" ` +
+        'and would put the SC pack on the session-start bus, so doctor refuses to grade it',
+      fix: `Set memory.inject.mode to one of ${INJECT_MODES.join('|')} (or remove it to accept the default start) — signed write; do not hand-edit config.json`,
+    };
+  }
+
+  const injectOn = input.injectConfigured && input.injectMode !== 'off';
+  const modeLabel = input.injectModeExplicit === false
+    ? `${input.injectMode} (emitter default)`
+    : input.injectMode;
+
   // Residual lock 9: honest sidecar OR a bus-law contract, never both.
   if (posture === SIDECAR_POSTURE && injectOn) {
     return {
       status: 'fail',
       message:
-        `posture=${SIDECAR_POSTURE} declared while inject mode=${input.injectMode} is on` +
+        `posture=${SIDECAR_POSTURE} declared while inject mode=${modeLabel} is on` +
         `${input.nativeContract ? ` with nativeContract=${input.nativeContract}` : ''} — sidecar and bus contract are mutually exclusive`,
       fix: `Pick one: \`shieldcortex config --memory-host-posture bus_contract\` to keep the inject bus law, or \`--memory-host-posture ${SIDECAR_POSTURE}\` to turn SC inject off and stay an honest sidecar`,
     };
@@ -601,9 +819,21 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
         message: `honest sidecar (${SIDECAR_POSTURE}): SC inject off, native host memory keeps the automatic bus — no canonicity claimed`,
       };
     }
+    if (!input.injectConfigured) {
+      // SOL nit: the emitter's default for an unconfigured box is mode=start,
+      // not off — it just emits nothing without a legal nativeContract. Saying
+      // "inject off" here misstated the runtime.
+      return {
+        status: 'info',
+        message:
+          'memory.inject not configured — the emitter defaults to mode=start but emits nothing without a ' +
+          'legal nativeContract, so SC is not on the automatic bus and no host contract is claimed',
+        fix: `Declare it explicitly with \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` if this box runs SC as a sidecar`,
+      };
+    }
     return {
       status: 'info',
-      message: 'inject off — SC is not on the automatic bus, so no host contract is claimed',
+      message: 'inject mode=off — SC is not on the automatic bus, so no host contract is claimed',
       fix: `Declare it explicitly with \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` if this box runs SC as a sidecar`,
     };
   }
@@ -611,7 +841,7 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
   if (!input.nativeContract) {
     return {
       status: 'fail',
-      message: `inject mode=${input.injectMode} without a legal nativeContract — the bus law cannot even be claimed`,
+      message: `inject mode=${modeLabel} without a legal nativeContract — the bus law cannot even be claimed`,
       fix: 'Run `shieldcortex config --memory-inject-contract sc_only` (or disable_native_inject) — signed write',
     };
   }
@@ -706,8 +936,13 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
     };
   }
 
+  // "Enforced" here means: native proven off AND the SC pack statically wired
+  // on every bound runtime. Doctor cannot attest live runtime delivery, and
+  // the message must never read as a delivered receipt (SOL H1).
   return {
     status: 'pass',
-    message: `${input.nativeContract} enforced (plane=${input.plane}): ${bound.map(describe).join(' | ')}`,
+    message:
+      `${input.nativeContract} enforced (plane=${input.plane}; static wiring proven — runtime delivery not attested): ` +
+      bound.map(describe).join(' | '),
   };
 }

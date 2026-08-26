@@ -43,7 +43,7 @@ function resolvePluginSource(): string {
 }
 const PLUGIN_PACKAGE_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw');
 const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
-const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
+export const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
 const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL';
 
 // REFACTOR (May 2026 audit): consolidate to 'native' | 'local' (with trusted boolean) | 'skipped'.

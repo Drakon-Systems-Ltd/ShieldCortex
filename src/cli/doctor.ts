@@ -41,12 +41,16 @@ import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
   evaluateHostContract,
   parseHermesMemoryBlock,
+  readInjectModeStrict,
   resolveClaudeCodeEvidence,
   resolveHermesEvidence,
   resolveOpenClawEvidence,
+  INJECT_MODES,
   type ArtifactProbe,
+  type HermesProfileProbe,
   type HostRuntimeEvidence,
   type HostRuntimeId,
+  type OpenClawHookArtifacts,
   type ProbeRead,
 } from '../memory/host-contract.js';
 import { getCanonicalSchema } from '../database/init.js';
@@ -2923,6 +2927,10 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
   planeSetAt: string | null;
   illegal: boolean;
   injectMode: string;
+  /** False when the raw mode is junk the runtime would fail-open to `start` (#393 SOL H5). */
+  injectModeLegal: boolean;
+  /** False when no mode was written and the emitter default (`start`) applies. */
+  injectModeExplicit: boolean;
   nativeContract: string | null;
   openclawAuto: boolean;
   injectConfigured: boolean;
@@ -2949,13 +2957,23 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     plane = String(pRaw);
   }
   const planeSetAt = typeof mem.planeSetAt === 'string' ? mem.planeSetAt : null;
-  let injectMode = 'off';
+  // #393 SOL H5: mode semantics mirror the runtime emitter
+  // (scripts/lib/inject-pack.mjs readInjectConfig) — same key precedence, same
+  // normalization — except junk is surfaced as illegal instead of silently
+  // kept ('bogus' used to dodge the start-bus delivery requirement while the
+  // runtime injected).
+  const rawMode = inject.mode != null
+    ? inject.mode
+    : (raw.memoryInjectMode != null ? raw.memoryInjectMode : undefined);
+  const modeReading = readInjectModeStrict(rawMode);
   const injectConfigured = Object.keys(inject).length > 0
     || raw.memoryInjectMode != null
-    || raw.memoryNativeInjectContract != null;
-  if (typeof inject.mode === 'string') injectMode = inject.mode;
-  else if (typeof raw.memoryInjectMode === 'string') injectMode = raw.memoryInjectMode as string;
-  else if (injectConfigured) injectMode = 'start';
+    || raw.memoryNativeInjectContract != null
+    // The emitter also reads a contract from memory.nativeInjectContract — a
+    // contract alone puts the default-start pack on the bus, so it counts as
+    // configured (the old reading called this state "inject off").
+    || mem.nativeInjectContract != null;
+  const injectMode = modeReading.legal ? (modeReading.mode as string) : modeReading.raw;
   const nc = inject.nativeContract ?? raw.memoryNativeInjectContract ?? mem.nativeInjectContract;
   const nativeContract = typeof nc === 'string'
     && (nc === 'sc_only' || nc === 'disable_native_inject')
@@ -2973,6 +2991,8 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     planeSetAt,
     illegal,
     injectMode,
+    injectModeLegal: modeReading.legal,
+    injectModeExplicit: modeReading.explicit,
     nativeContract,
     openclawAuto: raw.openclawAutoMemory === true,
     injectConfigured,
@@ -3002,6 +3022,17 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
       status: 'fail',
       message: `illegal memory.plane value "${cfg.plane}" (need dual_legacy|import_only|sc_canonical)`,
       fix: 'Run `shieldcortex config --memory-plane dual_legacy` (or import_only|sc_canonical) — signed write; do not hand-edit config.json',
+    };
+  }
+
+  // Illegal inject mode (#393 SOL H5): the runtime would fail-open junk to
+  // `start` and inject — doctor fails it here rather than grading around it.
+  if (!cfg.injectModeLegal) {
+    return {
+      label,
+      status: 'fail',
+      message: `illegal memory.inject.mode "${cfg.injectMode}" (need ${INJECT_MODES.join('|')}) — the runtime emitter would treat this as start`,
+      fix: 'Set memory.inject.mode to a legal value (or remove it to accept the default start) — signed write; do not hand-edit config.json',
     };
   }
 
@@ -3264,9 +3295,14 @@ function artifactProbe(target: string): ArtifactProbe {
 /**
  * Claude Code's native plane is the memory-tool store itself: `~/.claude/memory`
  * and the per-project `~/.claude/projects/<key>/memory` directories. Scans are
- * bounded, and a directory we cannot list returns scanComplete=false rather than
- * an empty list — "could not look" must never read as "nothing there".
+ * bounded, and BOTH failure shapes surface as scanComplete=false — a directory
+ * we cannot list, and a listing that exceeds the cap (#393 SOL H2: a truncated
+ * scan used to keep scanComplete=true, so a live store past the slice could
+ * vanish from the verdict). "Could not look everywhere" must never read as
+ * "nothing there".
  */
+const CLAUDE_STORE_FILE_CAP = 50;
+const CLAUDE_PROJECT_CAP = 200;
 function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanComplete: boolean } {
   const stores: ArtifactProbe[] = [];
   let scanComplete = true;
@@ -3278,7 +3314,9 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
       return;
     }
     try {
-      for (const name of fs.readdirSync(dir).slice(0, 50)) {
+      const names = fs.readdirSync(dir);
+      if (names.length > CLAUDE_STORE_FILE_CAP) scanComplete = false;
+      for (const name of names.slice(0, CLAUDE_STORE_FILE_CAP)) {
         if (!name.endsWith('.md')) continue;
         stores.push(artifactProbe(path.join(dir, name)));
       }
@@ -3294,7 +3332,9 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
   const projectsProbe = probePath(projectsDir);
   if (projectsProbe.kind === 'present') {
     try {
-      for (const entry of fs.readdirSync(projectsDir).slice(0, 200)) {
+      const entries = fs.readdirSync(projectsDir);
+      if (entries.length > CLAUDE_PROJECT_CAP) scanComplete = false;
+      for (const entry of entries.slice(0, CLAUDE_PROJECT_CAP)) {
         collectDir(path.join(projectsDir, entry, 'memory'));
       }
     } catch {
@@ -3307,26 +3347,122 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
   return { stores, scanComplete };
 }
 
-/** Hermes native memory artifacts: top-level store plus per-profile stores. */
-function scanHermesArtifacts(home: string): ArtifactProbe[] {
-  const out: ArtifactProbe[] = [
-    artifactProbe(path.join(home, '.hermes', 'memories', 'MEMORY.md')),
-    artifactProbe(path.join(home, '.hermes', 'MEMORY.md')),
-  ];
+/**
+ * Hermes profile surface (#393 SOL H6): per-profile config.yaml switches plus
+ * per-profile native stores. Bounded by HERMES_PROFILE_CAP; exceeding the cap
+ * or failing to list marks the scan incomplete so the evidence model refuses
+ * to prove off from a partial look.
+ */
+const HERMES_PROFILE_CAP = 20;
+function scanHermesProfiles(home: string): {
+  profiles: HermesProfileProbe[];
+  artifacts: ArtifactProbe[];
+  scanComplete: boolean;
+} {
   const profilesDir = path.join(home, '.hermes', 'profiles');
+  const out = { profiles: [] as HermesProfileProbe[], artifacts: [] as ArtifactProbe[], scanComplete: true };
   const probe = probePath(profilesDir);
-  if (probe.kind === 'present') {
-    try {
-      for (const entry of fs.readdirSync(profilesDir).slice(0, 20)) {
-        out.push(artifactProbe(path.join(profilesDir, entry, 'memories', 'MEMORY.md')));
+  if (probe.kind === 'absent') return out;
+  if (probe.kind !== 'present') {
+    out.scanComplete = false;
+    out.artifacts.push({ kind: 'unreadable', path: profilesDir, detail: `${probe.code}: ${probe.message}` });
+    return out;
+  }
+  try {
+    const entries = fs.readdirSync(profilesDir);
+    if (entries.length > HERMES_PROFILE_CAP) out.scanComplete = false;
+    for (const entry of entries.slice(0, HERMES_PROFILE_CAP)) {
+      const dir = path.join(profilesDir, entry);
+      const dirProbe = probePath(dir);
+      if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
+        out.profiles.push({
+          name: entry,
+          config: { kind: 'unreadable', detail: `${dirProbe.code}: ${dirProbe.message}` },
+        });
+        continue;
       }
-    } catch (err: unknown) {
-      out.push({ kind: 'unreadable', path: profilesDir, detail: err instanceof Error ? err.message : String(err) });
+      if (dirProbe.kind !== 'present' || !dirProbe.stat.isDirectory()) continue; // stray file, not a profile
+      const text = readTextProbe(path.join(dir, 'config.yaml'));
+      out.profiles.push({
+        name: entry,
+        config: text.kind === 'present'
+          ? { kind: 'present', value: parseHermesMemoryBlock(text.value) }
+          : text,
+      });
+      out.artifacts.push(artifactProbe(path.join(dir, 'memories', 'MEMORY.md')));
     }
-  } else if (probe.kind === 'denied' || probe.kind === 'error') {
-    out.push({ kind: 'unreadable', path: profilesDir, detail: `${probe.code}: ${probe.message}` });
+  } catch (err: unknown) {
+    out.scanComplete = false;
+    out.artifacts.push({ kind: 'unreadable', path: profilesDir, detail: err instanceof Error ? err.message : String(err) });
   }
   return out;
+}
+
+/**
+ * Workspace roots doctor must inspect: the stock ~/.openclaw/workspace PLUS
+ * every configured defaults/per-agent workspace (#393 SOL H4). Bounded by
+ * OPENCLAW_WORKSPACE_CAP; overflow or an unreadable config marks the
+ * enumeration incomplete so the evidence model refuses to prove off.
+ */
+const OPENCLAW_WORKSPACE_CAP = 16;
+function openClawWorkspacePaths(
+  home: string,
+  config: ProbeRead<Record<string, unknown>>,
+): { paths: string[]; complete: boolean } {
+  const paths = [path.join(home, '.openclaw', 'workspace')];
+  let complete = true;
+  const asObj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const add = (v: unknown): void => {
+    if (typeof v !== 'string' || v.trim() === '') return;
+    let p = v.trim();
+    if (p === '~') p = home;
+    else if (p.startsWith('~/')) p = path.join(home, p.slice(2));
+    if (!paths.includes(p)) paths.push(p);
+  };
+  if (config.kind === 'present') {
+    const agents = asObj(config.value.agents);
+    add(asObj(agents.defaults).workspace);
+    const list = Array.isArray(agents.list) ? agents.list : [];
+    for (const entry of list) add(asObj(entry).workspace);
+  } else if (config.kind === 'unreadable') {
+    // Cannot enumerate configured workspaces at all — never claim we did.
+    complete = false;
+  }
+  if (paths.length > OPENCLAW_WORKSPACE_CAP) {
+    paths.length = OPENCLAW_WORKSPACE_CAP;
+    complete = false;
+  }
+  return { paths, complete };
+}
+
+/**
+ * SC hook artifact probe (#393 SOL H1): a bare directory is not wiring. The
+ * required file set and byte-currency come from the installer's own
+ * authorities (HOOK_FILES / hookFilesStale in src/setup/openclaw.ts) — the
+ * same ones `shieldcortex openclaw install` and the installer doctor use.
+ */
+function probeOpenClawScHookArtifacts(
+  dir: string,
+  hookFiles: readonly string[],
+  stale: (destDir?: string) => boolean,
+): OpenClawHookArtifacts {
+  const dirProbe = probePath(dir);
+  if (dirProbe.kind === 'absent') return 'absent';
+  if (dirProbe.kind !== 'present') return 'unreadable';
+  let incomplete = false;
+  for (const file of hookFiles) {
+    const p = probePath(path.join(dir, file));
+    if (p.kind === 'absent') incomplete = true;
+    else if (p.kind !== 'present') return 'unreadable';
+    else if (p.stat.isFile() && p.stat.size === 0) incomplete = true;
+  }
+  if (incomplete) return 'incomplete';
+  try {
+    return stale(dir) ? 'stale' : 'complete';
+  } catch {
+    return 'unreadable';
+  }
 }
 
 export async function checkMemoryHostContract(): Promise<CheckResult> {
@@ -3343,18 +3479,30 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   const ctx = { contract: cfg.nativeContract ?? '', plane: cfg.plane, nowMs };
   const declared = (id: HostRuntimeId): boolean => cfg.declaredRuntimes.includes(id);
 
+  // The installer's own authorities for what a wired hook IS (#393 SOL H1).
+  // Dynamic import mirrors checkOpenClawHookFreshness — setup/openclaw.js is
+  // heavy and only needed here.
+  const { HOOK_FILES, hookFilesStale } = await import('../setup/openclaw.js');
+
   const ocPath = process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(home, '.openclaw', 'openclaw.json');
+  const ocConfig = readJsonProbe(ocPath);
+  const ocWorkspaces = openClawWorkspacePaths(home, ocConfig);
   const runtimes: HostRuntimeEvidence[] = [
     resolveOpenClawEvidence(
       {
-        config: readJsonProbe(ocPath),
-        scHook: (() => {
-          const hook = probePath(path.join(home, '.openclaw', 'hooks', 'cortex-memory'));
-          return hook.kind === 'present' ? 'installed' : hook.kind === 'absent' ? 'absent' : 'unreadable';
-        })(),
+        config: ocConfig,
+        scHook: probeOpenClawScHookArtifacts(
+          path.join(home, '.openclaw', 'hooks', 'cortex-memory'),
+          HOOK_FILES,
+          hookFilesStale,
+        ),
         scAutoMemory: cfg.openclawAuto,
-        agentsMd: readTextProbe(path.join(home, '.openclaw', 'workspace', 'AGENTS.md')),
-        memoryMd: artifactProbe(path.join(home, '.openclaw', 'workspace', 'MEMORY.md')),
+        workspaces: ocWorkspaces.paths.map((ws) => ({
+          path: ws,
+          agentsMd: readTextProbe(path.join(ws, 'AGENTS.md')),
+          memoryMd: artifactProbe(path.join(ws, 'MEMORY.md')),
+        })),
+        workspaceScanComplete: ocWorkspaces.complete,
         declared: declared('openclaw'),
       },
       ctx,
@@ -3374,12 +3522,19 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
     resolveHermesEvidence(
       (() => {
         const text = readTextProbe(path.join(home, '.hermes', 'config.yaml'));
+        const profileScan = scanHermesProfiles(home);
         return {
           config: text.kind === 'present'
             ? { kind: 'present' as const, value: parseHermesMemoryBlock(text.value) }
             : text,
+          profiles: profileScan.profiles,
+          profileScanComplete: profileScan.scanComplete,
           scPluginInstalled: probePath(path.join(home, '.hermes', 'plugins', 'shieldcortex')).kind === 'present',
-          nativeArtifacts: scanHermesArtifacts(home),
+          nativeArtifacts: [
+            artifactProbe(path.join(home, '.hermes', 'memories', 'MEMORY.md')),
+            artifactProbe(path.join(home, '.hermes', 'MEMORY.md')),
+            ...profileScan.artifacts,
+          ],
           declared: declared('hermes'),
         };
       })(),
@@ -3391,6 +3546,8 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
     plane: cfg.plane,
     injectConfigured: cfg.injectConfigured,
     injectMode: cfg.injectMode,
+    injectModeLegal: cfg.injectModeLegal,
+    injectModeExplicit: cfg.injectModeExplicit,
     nativeContract: cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject'
       ? cfg.nativeContract
       : null,

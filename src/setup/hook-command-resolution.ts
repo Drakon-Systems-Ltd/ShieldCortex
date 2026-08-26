@@ -139,6 +139,29 @@ export function hookCommandResolves(command: string): boolean {
   }
 }
 
+/**
+ * Strict shape check for a ShieldCortex hook command (#393 SOL H3).
+ *
+ * `command.includes('shieldcortex')` proves ownership of nothing: `echo
+ * shieldcortex`, a stale wrapper, or `shieldcortex-evil hook session-start`
+ * all match it. A command counts as ours only when the executable token itself
+ * is the shieldcortex binary — bare, or any path whose basename is exactly
+ * `shieldcortex` (a `.cmd`/`.exe`/`.bat` wrapper of that name on Windows) —
+ * and the arguments are exactly `hook <subcommand>`: the one shape
+ * `buildHookCommand` writes and the hook dispatcher supports. Env-assignment
+ * prefixes are allowed because our own installer emits them.
+ */
+export function isShieldCortexHookCommand(command: unknown, subcommand: string): boolean {
+  if (typeof command !== 'string') return false;
+  const withoutEnv = command.trim().replace(ENV_PREFIX, '');
+  const m = withoutEnv.match(/^("([^"]+)"|'([^']+)'|\S+)([\s\S]*)$/);
+  if (!m) return false;
+  const exe = m[2] ?? m[3] ?? m[1];
+  const base = exe.replace(/\\/g, '/').split('/').pop() ?? '';
+  if (base !== BARE && base.replace(/\.(cmd|exe|bat)$/i, '') !== BARE) return false;
+  return (m[4] ?? '').trim().replace(/\s+/g, ' ') === `hook ${subcommand}`;
+}
+
 /** Is this one of OUR commands, written in the fragile bare form? */
 export function needsAbsolutePathRepair(command: string): boolean {
   const exe = executableToken(command);

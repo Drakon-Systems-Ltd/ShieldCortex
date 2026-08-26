@@ -9,16 +9,21 @@ import { describe, expect, it } from '@jest/globals';
 import {
   evaluateHostContract,
   parseHermesMemoryBlock,
+  readInjectModeStrict,
   resolveClaudeCodeEvidence,
   resolveHermesEvidence,
   resolveOpenClawEvidence,
+  INJECT_MODES,
   SIDECAR_POSTURE,
   type ArtifactProbe,
   type ClaudeCodeProbe,
   type HermesProbe,
   type HostRuntimeEvidence,
   type OpenClawProbe,
+  type OpenClawWorkspaceProbe,
 } from '../host-contract.js';
+// The runtime emitter's own normalization — parity is a test-pinned law (SOL H5).
+import { normalizeInjectMode } from '../../../scripts/lib/inject-pack.mjs';
 
 const NOW = Date.UTC(2026, 7, 26, 12, 0, 0);
 const DAY = 24 * 60 * 60 * 1000;
@@ -28,13 +33,22 @@ function file(p: string, ageDays: number, size = 512): ArtifactProbe {
   return { kind: 'present', path: p, mtimeMs: NOW - ageDays * DAY, size };
 }
 
+function ws(over: Partial<OpenClawWorkspaceProbe> = {}): OpenClawWorkspaceProbe {
+  return {
+    path: '/home/x/.openclaw/workspace',
+    agentsMd: { kind: 'absent' },
+    memoryMd: { kind: 'absent', path: '/home/x/.openclaw/workspace/MEMORY.md' },
+    ...over,
+  };
+}
+
 function ocProbe(over: Partial<OpenClawProbe> = {}): OpenClawProbe {
   return {
     config: { kind: 'absent' },
     scHook: 'absent',
     scAutoMemory: false,
-    agentsMd: { kind: 'absent' },
-    memoryMd: { kind: 'absent', path: '/home/x/.openclaw/workspace/MEMORY.md' },
+    workspaces: [ws()],
+    workspaceScanComplete: true,
     declared: false,
     ...over,
   };
@@ -53,6 +67,8 @@ function ccProbe(over: Partial<ClaudeCodeProbe> = {}): ClaudeCodeProbe {
 function hermesProbe(over: Partial<HermesProbe> = {}): HermesProbe {
   return {
     config: { kind: 'absent' },
+    profiles: [],
+    profileScanComplete: true,
     scPluginInstalled: false,
     nativeArtifacts: [],
     declared: false,
@@ -126,18 +142,53 @@ describe('OpenClaw evidence', () => {
   });
 
   it('reports unknown (never off) when openclaw.json is absent but SC is integrated', () => {
-    const e = resolveOpenClawEvidence(ocProbe({ scHook: 'installed', scAutoMemory: true }), CTX);
+    const e = resolveOpenClawEvidence(ocProbe({ scHook: 'complete', scAutoMemory: true }), CTX);
     expect(e.bound).toBe(true);
     expect(e.nativeBus).toBe('unknown');
   });
 
-  it('resolves the SC bus from the hook tri-state: installed=wired, absent=not_wired, unreadable=unknown', () => {
+  it('proves the SC bus only from a complete, current artifact set: never from a bare directory', () => {
     const config = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
-    expect(resolveOpenClawEvidence(ocProbe({ config, scHook: 'installed' }), CTX).scBus).toBe('wired');
+    expect(resolveOpenClawEvidence(ocProbe({ config, scHook: 'complete' }), CTX).scBus).toBe('wired_proven');
     expect(resolveOpenClawEvidence(ocProbe({ config, scHook: 'absent' }), CTX).scBus).toBe('not_wired');
+    // H1: an empty/partial hook dir is a positive "not delivered", not wiring.
+    const incomplete = resolveOpenClawEvidence(ocProbe({ config, scHook: 'incomplete' }), CTX);
+    expect(incomplete.scBus).toBe('not_wired');
+    expect(incomplete.proof.join(' ')).toMatch(/a directory is not delivery/);
+    // Stale content: what would run cannot be proven to be the SC emitter.
+    const stale = resolveOpenClawEvidence(ocProbe({ config, scHook: 'stale' }), CTX);
+    expect(stale.scBus).toBe('unknown');
+    expect(stale.proof.join(' ')).toMatch(/differs from the packaged source/);
     const unreadable = resolveOpenClawEvidence(ocProbe({ config, scHook: 'unreadable' }), CTX);
     expect(unreadable.scBus).toBe('unknown');
     expect(unreadable.proof.join(' ')).toMatch(/pack delivery cannot be proven/);
+  });
+
+  it('treats hooks.internal.entries.cortex-memory.enabled=false as not wired, and an unreadable config as unknown', () => {
+    const disabled = resolveOpenClawEvidence(
+      ocProbe({
+        config: {
+          kind: 'present',
+          value: {
+            agents: { defaults: { memorySearch: { enabled: false } } },
+            hooks: { internal: { entries: { 'cortex-memory': { enabled: false } } } },
+          },
+        },
+        scHook: 'complete',
+      }),
+      CTX,
+    );
+    expect(disabled.scBus).toBe('not_wired');
+    expect(disabled.proof.join(' ')).toMatch(/enabled=false/);
+    // Config unreadable: full artifacts on disk still cannot prove the host
+    // has the hook enabled — unknown, never wired.
+    const unreadableCfg = resolveOpenClawEvidence(
+      ocProbe({ config: { kind: 'unreadable', detail: 'EACCES' }, scHook: 'complete' }),
+      CTX,
+    );
+    expect(unreadableCfg.scBus).toBe('unknown');
+    // Config absent: nothing confirms the host loads hooks at all.
+    expect(resolveOpenClawEvidence(ocProbe({ scHook: 'complete' }), CTX).scBus).toBe('unknown');
   });
 
   it('reports unknown when openclaw.json is unreadable', () => {
@@ -152,10 +203,10 @@ describe('OpenClaw evidence', () => {
   it('treats AGENTS.md naming MEMORY.md as the brain as native-on under sc_only only', () => {
     const agentsMd = { kind: 'present' as const, value: 'Always read MEMORY.md at the start of every session.' };
     const off = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
-    const scOnly = resolveOpenClawEvidence(ocProbe({ config: off, agentsMd }), CTX);
+    const scOnly = resolveOpenClawEvidence(ocProbe({ config: off, workspaces: [ws({ agentsMd })] }), CTX);
     expect(scOnly.nativeBus).toBe('on');
     const weaker = resolveOpenClawEvidence(
-      ocProbe({ config: off, agentsMd }),
+      ocProbe({ config: off, workspaces: [ws({ agentsMd })] }),
       { ...CTX, contract: 'disable_native_inject' },
     );
     expect(weaker.nativeBus).toBe('off_proven');
@@ -165,18 +216,86 @@ describe('OpenClaw evidence', () => {
     const e = resolveOpenClawEvidence(
       ocProbe({
         config: { kind: 'present', value: { agents: { defaults: { memorySearch: { enabled: false } } } } },
-        memoryMd: file('/home/x/.openclaw/workspace/MEMORY.md', 1, 4096),
+        workspaces: [ws({ memoryMd: file('/home/x/.openclaw/workspace/MEMORY.md', 1, 4096) })],
       }),
       { ...CTX, plane: 'import_only' },
     );
     expect(e.nativeBus).toBe('on');
     expect(e.proof.join(' ')).toMatch(/MEMORY\.md written within 7d/);
   });
+
+  it('inspects configured custom and per-agent workspaces, not just the stock one (SOL H4)', () => {
+    const off = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
+    const brainy = { kind: 'present' as const, value: 'Read MEMORY.md every session — it is your brain.' };
+    const custom = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws(), ws({ path: '/srv/agents/case-ws', agentsMd: brainy })] }),
+      CTX,
+    );
+    expect(custom.nativeBus).toBe('on');
+    expect(custom.proof.join(' ')).toMatch(/case-ws\/AGENTS\.md/);
+
+    const perAgentMemory = resolveOpenClawEvidence(
+      ocProbe({
+        config: off,
+        workspaces: [ws(), ws({ path: '/srv/agents/case-ws', memoryMd: file('/srv/agents/case-ws/MEMORY.md', 1, 4096) })],
+      }),
+      { ...CTX, plane: 'import_only' },
+    );
+    expect(perAgentMemory.nativeBus).toBe('on');
+  });
+
+  it('demotes off_proven to unknown on unreadable workspace evidence — never PASS past a file it could not read', () => {
+    const off = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
+    const unreadableAgents = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws({ agentsMd: { kind: 'unreadable', detail: 'EACCES' } })] }),
+      CTX,
+    );
+    expect(unreadableAgents.nativeBus).toBe('unknown');
+    expect(unreadableAgents.proof.join(' ')).toMatch(/workspace evidence unreadable/);
+    expect(unreadableAgents.remediation).toMatch(/readable/);
+
+    const unreadableMemory = resolveOpenClawEvidence(
+      ocProbe({
+        config: off,
+        workspaces: [ws({ memoryMd: { kind: 'unreadable', path: '/home/x/.openclaw/workspace/MEMORY.md', detail: 'EACCES' } })],
+      }),
+      { ...CTX, plane: 'import_only' },
+    );
+    expect(unreadableMemory.nativeBus).toBe('unknown');
+
+    const incompleteScan = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaceScanComplete: false }),
+      CTX,
+    );
+    expect(incompleteScan.nativeBus).toBe('unknown');
+    expect(incompleteScan.proof.join(' ')).toMatch(/could not all be enumerated/);
+  });
 });
 
 describe('Claude Code evidence', () => {
-  it('is not bound without settings.json or a declaration', () => {
+  it('is not bound without settings.json, store evidence, or a declaration', () => {
     expect(resolveClaudeCodeEvidence(ccProbe(), CTX).bound).toBe(false);
+  });
+
+  it('binds Claude from native store presence alone — a live store must never vanish from the verdict (SOL H2)', () => {
+    const live = resolveClaudeCodeEvidence(
+      ccProbe({ nativeStores: [file('/home/x/.claude/projects/p/memory/MEMORY.md', 1)] }),
+      CTX,
+    );
+    expect(live.bound).toBe(true);
+    expect(live.nativeBus).toBe('on');
+    expect(live.scBus).toBe('not_wired');
+
+    const staleStore = resolveClaudeCodeEvidence(
+      ccProbe({ nativeStores: [file('/home/x/.claude/memory/MEMORY.md', 40)] }),
+      CTX,
+    );
+    expect(staleStore.bound).toBe(true);
+    expect(staleStore.nativeBus).toBe('unknown');
+
+    const unlistable = resolveClaudeCodeEvidence(ccProbe({ storeScanComplete: false }), CTX);
+    expect(unlistable.bound).toBe(true);
+    expect(unlistable.nativeBus).toBe('unknown');
   });
 
   it('proves native off when no memory-tool store exists and SC owns session-start', () => {
@@ -185,7 +304,7 @@ describe('Claude Code evidence', () => {
       CTX,
     );
     expect(e.nativeBus).toBe('off_proven');
-    expect(e.scBus).toBe('wired');
+    expect(e.scBus).toBe('wired_proven');
   });
 
   it('fails when the native memory-tool store was written this week', () => {
@@ -234,6 +353,31 @@ describe('Claude Code evidence', () => {
       CTX,
     );
     expect(e.scBus).toBe('not_wired');
+  });
+
+  it('accepts only the exact supported command shape — brand-token substrings do not own session-start (SOL H3)', () => {
+    const wiredWith = (command: string) =>
+      resolveClaudeCodeEvidence(
+        ccProbe({
+          settings: {
+            kind: 'present',
+            value: { hooks: { SessionStart: [{ hooks: [{ type: 'command', command }] }] } },
+          },
+        }),
+        CTX,
+      ).scBus;
+    // Supported shapes: bare or absolute binary, quoted path, env prefix.
+    expect(wiredWith('shieldcortex hook session-start')).toBe('wired_proven');
+    expect(wiredWith('/usr/local/bin/shieldcortex hook session-start')).toBe('wired_proven');
+    expect(wiredWith('"/opt/my tools/shieldcortex" hook session-start')).toBe('wired_proven');
+    expect(wiredWith('SHIELDCORTEX_RECALL_ENFORCE=1 shieldcortex hook session-start')).toBe('wired_proven');
+    // Adversarial / stale shapes that the substring match used to accept.
+    expect(wiredWith('echo shieldcortex')).toBe('not_wired');
+    expect(wiredWith('echo shieldcortex hook session-start')).toBe('not_wired');
+    expect(wiredWith('shieldcortex-evil hook session-start')).toBe('not_wired');
+    expect(wiredWith('/usr/bin/shieldcortex hook session-end')).toBe('not_wired');
+    expect(wiredWith('bash -c "shieldcortex hook session-start"')).toBe('not_wired');
+    expect(wiredWith('shieldcortex hook session-start && curl evil')).toBe('not_wired');
   });
 });
 
@@ -341,6 +485,76 @@ describe('Hermes evidence', () => {
     expect(e.scBus).toBe('not_wired');
     expect(e.proof.join(' ')).toMatch(/no automatic inject surface on Hermes/);
   });
+
+  it('turns Hermes native ON when any profile config enables memory, even with root false/false (SOL H6)', () => {
+    const rootOff = {
+      kind: 'present' as const,
+      value: { memoryEnabled: false, userProfileEnabled: false, blockFound: true },
+    };
+    const e = resolveHermesEvidence(
+      hermesProbe({
+        config: rootOff,
+        scPluginInstalled: true,
+        profiles: [
+          { name: 'work', config: { kind: 'present', value: { memoryEnabled: false, userProfileEnabled: false, blockFound: true } } },
+          { name: 'research', config: { kind: 'present', value: { memoryEnabled: true, userProfileEnabled: null, blockFound: true } } },
+        ],
+      }),
+      CTX,
+    );
+    expect(e.nativeBus).toBe('on');
+    expect(e.proof.join(' ')).toMatch(/research: memory_enabled=true/);
+  });
+
+  it('proves off only when root AND every profile config prove off with a complete scan', () => {
+    const rootOff = {
+      kind: 'present' as const,
+      value: { memoryEnabled: false, userProfileEnabled: false, blockFound: true },
+    };
+    const offProfile = {
+      name: 'work',
+      config: {
+        kind: 'present' as const,
+        value: { memoryEnabled: false, userProfileEnabled: false, blockFound: true },
+      },
+    };
+    const allOff = resolveHermesEvidence(
+      hermesProbe({ config: rootOff, scPluginInstalled: true, profiles: [offProfile] }),
+      CTX,
+    );
+    expect(allOff.nativeBus).toBe('off_proven');
+
+    // Missing, unreadable, block-less, or truncated profile evidence → unknown.
+    const missing = resolveHermesEvidence(
+      hermesProbe({ config: rootOff, scPluginInstalled: true, profiles: [{ name: 'p', config: { kind: 'absent' } }] }),
+      CTX,
+    );
+    expect(missing.nativeBus).toBe('unknown');
+    const unreadable = resolveHermesEvidence(
+      hermesProbe({
+        config: rootOff,
+        scPluginInstalled: true,
+        profiles: [{ name: 'p', config: { kind: 'unreadable', detail: 'EACCES' } }],
+      }),
+      CTX,
+    );
+    expect(unreadable.nativeBus).toBe('unknown');
+    const blockless = resolveHermesEvidence(
+      hermesProbe({
+        config: rootOff,
+        scPluginInstalled: true,
+        profiles: [{ name: 'p', config: { kind: 'present', value: { memoryEnabled: null, userProfileEnabled: null, blockFound: false } } }],
+      }),
+      CTX,
+    );
+    expect(blockless.nativeBus).toBe('unknown');
+    const truncated = resolveHermesEvidence(
+      hermesProbe({ config: rootOff, scPluginInstalled: true, profileScanComplete: false }),
+      CTX,
+    );
+    expect(truncated.nativeBus).toBe('unknown');
+    expect(truncated.proof.join(' ')).toMatch(/could not be fully enumerated/);
+  });
 });
 
 describe('contract verdict', () => {
@@ -349,7 +563,7 @@ describe('contract verdict', () => {
     bound: true,
     boundReason: 'openclaw.json present',
     nativeBus: 'off_proven',
-    scBus: 'wired',
+    scBus: 'wired_proven',
     proof: ['memorySearch.enabled=false'],
     remediation: '',
   };
@@ -367,7 +581,7 @@ describe('contract verdict', () => {
     bound: true,
     boundReason: 'settings.json present',
     nativeBus: 'unknown',
-    scBus: 'wired',
+    scBus: 'wired_proven',
     proof: ['native memory-tool store present but not written in 7d'],
     remediation: 'Claude Code: archive the native memory-tool store …',
   };
@@ -486,6 +700,48 @@ describe('contract verdict', () => {
     const v = verdictFor([liveHermes], { injectConfigured: false, injectMode: 'off', nativeContract: null });
     expect(v.status).toBe('info');
     expect(v.fix).toMatch(new RegExp(SIDECAR_POSTURE));
+  });
+
+  it('describes an unconfigured box with the emitter default (start), never as "inject off" (SOL nit)', () => {
+    const v = verdictFor([liveHermes], {
+      injectConfigured: false,
+      injectMode: 'start',
+      injectModeExplicit: false,
+      nativeContract: null,
+    });
+    expect(v.status).toBe('info');
+    expect(v.message).toMatch(/defaults to mode=start/);
+    expect(v.message).not.toMatch(/inject off/);
+  });
+
+  it('fails an illegal inject mode instead of grading around it — no bogus PASS (SOL H5)', () => {
+    // 'bogus' with disable_native_inject used to dodge the start-bus delivery
+    // requirement (raw !== start|both) and PASS, while the runtime normalized
+    // it to start and injected.
+    const v = verdictFor([provenOc], {
+      nativeContract: 'disable_native_inject',
+      injectMode: 'bogus',
+      injectModeLegal: false,
+    });
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/illegal memory\.inject\.mode "bogus"/);
+    expect(v.fix).toMatch(/off\|start\|turn\|both/);
+  });
+
+  it('pins doctor/runtime inject-mode parity: legal values agree, junk is illegal for doctor while the runtime fail-opens to start', () => {
+    for (const legal of ['off', 'start', 'turn', 'both', ' START ', 'Both', '', false, 0, undefined, null]) {
+      const reading = readInjectModeStrict(legal);
+      expect(reading.legal).toBe(true);
+      expect(reading.mode).toBe(normalizeInjectMode(legal));
+    }
+    for (const junk of ['bogus', 'coexist_dedup', 'on', true, 1, {}, [], 'start-ish']) {
+      const reading = readInjectModeStrict(junk);
+      expect(reading.legal).toBe(false);
+      // Documented runtime fail-open: junk injects as start. Doctor must
+      // therefore fail it, not ignore it.
+      expect(normalizeInjectMode(junk)).toBe('start');
+      expect(INJECT_MODES).not.toContain(reading.raw);
+    }
   });
 
   it('fails sc_canonical claimed with inject off (canonicity without a bus)', () => {
