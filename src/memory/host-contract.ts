@@ -180,8 +180,12 @@ export interface OpenClawWorkspaceProbe {
   path: string;
   /** AGENTS.md text (sc_only: native MD must not be the session brain). */
   agentsMd: ProbeRead<string>;
-  /** MEMORY.md stat. */
-  memoryMd: ArtifactProbe;
+  /**
+   * Workspace bootstrap memory files — BOTH `MEMORY.md` and `memory.md`
+   * (#393 SOL r2 B1: OpenClaw bootstraps either spelling into session context
+   * natively, so lowercase must not escape the probe).
+   */
+  memoryFiles: ArtifactProbe[];
 }
 
 export interface OpenClawProbe {
@@ -322,16 +326,23 @@ export function resolveOpenClawEvidence(
         unreadableEvidence.push(`${shortPath(ws.path)}/AGENTS.md (${ws.agentsMd.detail})`);
       }
     }
-    if (ctx.plane === 'sc_canonical' || ctx.plane === 'import_only') {
-      if (ws.memoryMd.kind === 'present') {
-        if (ws.memoryMd.size > 64 && ws.memoryMd.mtimeMs >= ctx.nowMs - WEEK_MS) {
+    // #393 SOL r2 B1: OpenClaw bootstraps MEMORY.md / memory.md into session
+    // context natively, regardless of AGENTS.md wording and regardless of
+    // plane — a live one IS native automatic memory on the bus under
+    // dual_legacy just as under the canonical planes. AGENTS.md wording is
+    // corroboration, never a precondition.
+    for (const md of ws.memoryFiles) {
+      if (md.kind === 'present') {
+        if (md.size > 64 && md.mtimeMs >= ctx.nowMs - WEEK_MS) {
           nativeBus = 'on';
-          proof.push(`${shortPath(ws.path)}/MEMORY.md written within 7d (${ws.memoryMd.size}B) under plane=${ctx.plane}`);
+          proof.push(
+            `${shortPath(md.path)} written within 7d (${md.size}B) — OpenClaw bootstraps workspace memory files into session context natively`,
+          );
           remediation = remediation
-            || `${cap.label}: MEMORY.md is still growing as SoT — archive it or import via the defended path`;
+            || `${cap.label}: a live workspace memory file is still the session brain — archive it or import via the defended path`;
         }
-      } else if (ws.memoryMd.kind === 'unreadable') {
-        unreadableEvidence.push(`${shortPath(ws.path)}/MEMORY.md (${ws.memoryMd.detail})`);
+      } else if (md.kind === 'unreadable') {
+        unreadableEvidence.push(`${shortPath(md.path)} (${md.detail})`);
       }
     }
   }
@@ -595,6 +606,17 @@ export function resolveHermesEvidence(
   if (probe.config.kind === 'present') boundSignals.push('~/.hermes/config.yaml present');
   if (probe.config.kind === 'unreadable') boundSignals.push('~/.hermes/config.yaml present but unreadable');
   if (probe.scPluginInstalled) boundSignals.push('SC Hermes plugin installed');
+  // A profile tree or native memory artifact IS Hermes on this box (#393 SOL
+  // r2 B2): a live ~/.hermes/profiles/*/config.yaml must bind the runtime even
+  // with the root config, plugin, and declaration all absent — otherwise a
+  // profile-only brain vanishes from the verdict while another proven runtime
+  // carries the box to PASS. Mirrors how Claude binds on store presence.
+  if (probe.profiles.length > 0 || !probe.profileScanComplete) {
+    boundSignals.push('Hermes profile tree present (~/.hermes/profiles)');
+  }
+  if (probe.nativeArtifacts.some((p) => p.kind !== 'absent')) {
+    boundSignals.push('native Hermes memory artifact evidence on disk');
+  }
   if (probe.declared) boundSignals.push('declared in memory.hostContract.runtimes');
 
   if (boundSignals.length === 0) {

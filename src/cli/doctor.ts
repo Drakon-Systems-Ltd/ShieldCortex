@@ -3500,7 +3500,13 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
         workspaces: ocWorkspaces.paths.map((ws) => ({
           path: ws,
           agentsMd: readTextProbe(path.join(ws, 'AGENTS.md')),
-          memoryMd: artifactProbe(path.join(ws, 'MEMORY.md')),
+          // Both spellings: OpenClaw bootstraps MEMORY.md AND memory.md
+          // (#393 SOL r2 B1). On a case-insensitive filesystem these stat the
+          // same file twice, which is harmless duplicate proof, not error.
+          memoryFiles: [
+            artifactProbe(path.join(ws, 'MEMORY.md')),
+            artifactProbe(path.join(ws, 'memory.md')),
+          ],
         })),
         workspaceScanComplete: ocWorkspaces.complete,
         declared: declared('openclaw'),

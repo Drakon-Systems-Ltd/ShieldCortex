@@ -444,6 +444,42 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/mystery \(no config\.yaml/);
   });
 
+  it('host contract fails a live lowercase memory.md under dual_legacy — bootstrap files defeat sc_only on every plane (SOL r2 B1)', async () => {
+    // The exact r2 false PASS: dual_legacy + sc_only + memorySearch off +
+    // wired hook + live native workspace memory file certified green.
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    const ws = path.join(tmpHome, '.openclaw', 'workspace');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(ws, 'memory.md'), '# lowercase brain\n'.repeat(10));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/memory\.md written within 7d/);
+    expect(r.message).toMatch(/bootstraps workspace memory files/);
+  });
+
+  it('host contract: a profile-only Hermes tree binds and is judged — it cannot ride another runtime to PASS (SOL r2 B2)', async () => {
+    // Green OpenClaw everywhere; the ONLY Hermes evidence is a live profile
+    // config. Root config.yaml, SC plugin, and declaration all absent.
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    const profDir = path.join(tmpHome, '.hermes', 'profiles', 'research');
+    fs.mkdirSync(profDir, { recursive: true });
+    fs.writeFileSync(path.join(profDir, 'config.yaml'), 'memory:\n  memory_enabled: true\n');
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/research: memory_enabled=true/);
+    expect(r.fix).toMatch(/mcp_sidecar_no_inject/);
+  });
+
   it('host contract fails sc_only on a Hermes-bound box even with the native switches off — sidecar is the honest posture', async () => {
     // The TARS shape after flipping Hermes' own switches: native proven off,
     // OpenClaw proven off and wired — still FAIL, because nothing delivers the

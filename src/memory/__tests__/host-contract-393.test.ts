@@ -37,7 +37,10 @@ function ws(over: Partial<OpenClawWorkspaceProbe> = {}): OpenClawWorkspaceProbe 
   return {
     path: '/home/x/.openclaw/workspace',
     agentsMd: { kind: 'absent' },
-    memoryMd: { kind: 'absent', path: '/home/x/.openclaw/workspace/MEMORY.md' },
+    memoryFiles: [
+      { kind: 'absent', path: '/home/x/.openclaw/workspace/MEMORY.md' },
+      { kind: 'absent', path: '/home/x/.openclaw/workspace/memory.md' },
+    ],
     ...over,
   };
 }
@@ -216,12 +219,46 @@ describe('OpenClaw evidence', () => {
     const e = resolveOpenClawEvidence(
       ocProbe({
         config: { kind: 'present', value: { agents: { defaults: { memorySearch: { enabled: false } } } } },
-        workspaces: [ws({ memoryMd: file('/home/x/.openclaw/workspace/MEMORY.md', 1, 4096) })],
+        workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/MEMORY.md', 1, 4096)] })],
       }),
       { ...CTX, plane: 'import_only' },
     );
     expect(e.nativeBus).toBe('on');
     expect(e.proof.join(' ')).toMatch(/MEMORY\.md written within 7d/);
+  });
+
+  it('turns native ON from a live bootstrap memory file under EVERY plane and both contracts — lowercase included, no AGENTS.md wording needed (SOL r2 B1)', () => {
+    const off = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
+    // The exact r2 false PASS: dual_legacy + sc_only + memorySearch off + live
+    // uppercase MEMORY.md used to prove off because the plane gate skipped it.
+    const dualUpper = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/MEMORY.md', 1, 4096)] })] }),
+      CTX,
+    );
+    expect(dualUpper.nativeBus).toBe('on');
+    expect(dualUpper.proof.join(' ')).toMatch(/bootstraps workspace memory files/);
+    // Lowercase memory.md escaped every plane before r2.
+    const dualLower = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/memory.md', 1, 2048)] })] }),
+      { ...CTX, contract: 'disable_native_inject' },
+    );
+    expect(dualLower.nativeBus).toBe('on');
+    expect(dualLower.proof.join(' ')).toMatch(/memory\.md written within 7d/);
+    // A quiet stale file is not a live brain — off-proof survives it.
+    const stale = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/memory.md', 40, 2048)] })] }),
+      CTX,
+    );
+    expect(stale.nativeBus).toBe('off_proven');
+    // Unreadable bootstrap evidence caps the proof at unknown under any plane.
+    const unreadable = resolveOpenClawEvidence(
+      ocProbe({
+        config: off,
+        workspaces: [ws({ memoryFiles: [{ kind: 'unreadable', path: '/home/x/.openclaw/workspace/memory.md', detail: 'EACCES' }] })],
+      }),
+      CTX,
+    );
+    expect(unreadable.nativeBus).toBe('unknown');
   });
 
   it('inspects configured custom and per-agent workspaces, not just the stock one (SOL H4)', () => {
@@ -237,7 +274,7 @@ describe('OpenClaw evidence', () => {
     const perAgentMemory = resolveOpenClawEvidence(
       ocProbe({
         config: off,
-        workspaces: [ws(), ws({ path: '/srv/agents/case-ws', memoryMd: file('/srv/agents/case-ws/MEMORY.md', 1, 4096) })],
+        workspaces: [ws(), ws({ path: '/srv/agents/case-ws', memoryFiles: [file('/srv/agents/case-ws/MEMORY.md', 1, 4096)] })],
       }),
       { ...CTX, plane: 'import_only' },
     );
@@ -257,7 +294,7 @@ describe('OpenClaw evidence', () => {
     const unreadableMemory = resolveOpenClawEvidence(
       ocProbe({
         config: off,
-        workspaces: [ws({ memoryMd: { kind: 'unreadable', path: '/home/x/.openclaw/workspace/MEMORY.md', detail: 'EACCES' } })],
+        workspaces: [ws({ memoryFiles: [{ kind: 'unreadable', path: '/home/x/.openclaw/workspace/MEMORY.md', detail: 'EACCES' }] })],
       }),
       { ...CTX, plane: 'import_only' },
     );
@@ -484,6 +521,52 @@ describe('Hermes evidence', () => {
     const e = resolveHermesEvidence(hermesProbe({ scPluginInstalled: true }), CTX);
     expect(e.scBus).toBe('not_wired');
     expect(e.proof.join(' ')).toMatch(/no automatic inject surface on Hermes/);
+  });
+
+  it('binds Hermes from a profile tree alone — a profile-only brain must never vanish from the verdict (SOL r2 B2)', () => {
+    // Root config absent, no SC plugin, no declaration: only a live profile
+    // config exists. Before r2 this box was unbound and could be omitted from
+    // an overall PASS carried by another runtime.
+    const profileOnly = resolveHermesEvidence(
+      hermesProbe({
+        profiles: [{ name: 'research', config: { kind: 'present', value: { memoryEnabled: true, userProfileEnabled: null, blockFound: true } } }],
+      }),
+      CTX,
+    );
+    expect(profileOnly.bound).toBe(true);
+    expect(profileOnly.nativeBus).toBe('on');
+    expect(profileOnly.proof.join(' ')).toMatch(/research: memory_enabled=true/);
+
+    // A profile whose switches are off still binds — and root-absent means
+    // the box can at best be unknown, never off_proven.
+    const profileOff = resolveHermesEvidence(
+      hermesProbe({
+        profiles: [{ name: 'work', config: { kind: 'present', value: { memoryEnabled: false, userProfileEnabled: false, blockFound: true } } }],
+      }),
+      CTX,
+    );
+    expect(profileOff.bound).toBe(true);
+    expect(profileOff.nativeBus).toBe('unknown');
+
+    // An unlistable profiles dir is presence evidence, not silence.
+    const unlistable = resolveHermesEvidence(hermesProbe({ profileScanComplete: false }), CTX);
+    expect(unlistable.bound).toBe(true);
+    expect(unlistable.nativeBus).toBe('unknown');
+  });
+
+  it('binds Hermes from native memory artifact evidence alone (SOL r2 B2)', () => {
+    const live = resolveHermesEvidence(
+      hermesProbe({ nativeArtifacts: [file('/home/x/.hermes/memories/MEMORY.md', 1, 2048)] }),
+      CTX,
+    );
+    expect(live.bound).toBe(true);
+    expect(live.nativeBus).toBe('on');
+    const unreadable = resolveHermesEvidence(
+      hermesProbe({ nativeArtifacts: [{ kind: 'unreadable', path: '/home/x/.hermes/memories/MEMORY.md', detail: 'EACCES' }] }),
+      CTX,
+    );
+    expect(unreadable.bound).toBe(true);
+    expect(unreadable.nativeBus).toBe('unknown');
   });
 
   it('turns Hermes native ON when any profile config enables memory, even with root false/false (SOL H6)', () => {
