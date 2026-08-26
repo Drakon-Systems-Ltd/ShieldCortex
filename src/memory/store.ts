@@ -60,6 +60,7 @@ import type { TripleProvenance } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
 import { resolveDispositionV2 } from '../defence/disposition.js';
 import { classifyContentForm } from '../defence/form-classifier.js';
+import { sweepClusterQuarantine } from '../defence/cluster-quarantine.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import {
   syncGraphDeleteForMemoryToCloud,
@@ -762,6 +763,26 @@ export function addMemory(
   })();
 
   const memory = getMemoryById(insertedId)!;
+
+  // #402 Class-B cross-row cluster quarantine. This row stored INERT
+  // (directive/mixed form) — mild on its own, but if >= 3 such fragments from
+  // the same source landed within the window, the whole cluster is a slow
+  // fragmentation-poison assembly and is pulled into quarantine (not just the
+  // newest row). SQL-simple sweep; failure is a no-op (never breaks the write).
+  if (disposition.action === 'store' && (disposition.contentForm === 'directive' || disposition.contentForm === 'mixed')) {
+    try {
+      const cluster = sweepClusterQuarantine(db, { source: sourceDetails.sourceValue ?? '' });
+      if (cluster.quarantined > 0) {
+        dispatchWebhook('memory_quarantined', {
+          id: null,
+          title: input.title,
+          reason: `class_b_cluster (${cluster.quarantined} rows)`,
+        });
+      }
+    } catch (e) {
+      console.error('[shieldcortex] Class-B cluster sweep failed:', e);
+    }
+  }
 
   // ONTOLOGY: Extract entities and triples FIRST so the memory_created
   // payload can carry entity_ids. The pulse layer (Living Constellation
