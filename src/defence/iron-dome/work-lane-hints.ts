@@ -7,6 +7,10 @@
  * reviewedScriptPaths (or omit the lane entirely).
  */
 
+/** Lane ids shipped in work-lane pack v1 (#401) — the denial→door matrix
+ *  test asserts each has a working hint path. */
+export const WORK_LANE_PACK_V1 = ['vita-ci', 'jotform', 'lan-diag'] as const;
+
 export interface WorkLaneHintInput {
   signals?: string[];
   cwd?: string | null;
@@ -27,8 +31,32 @@ function norm(s: unknown): string {
 }
 
 function findPin(paths: string[], frag: string): string | undefined {
-  return paths.find((p) => p.includes(frag));
+  return paths.find((p) => {
+    // Exact basename match ("lan-diag.sh") or a full directory segment
+    // ("/lan-diag/"). Substring inclusion would let "not-lan-diag.sh.backup"
+    // masquerade as the lane (SOL review).
+    const norm = p.replace(/\\/g, '/');
+    if (frag.startsWith('/') && frag.endsWith('/')) {
+      return norm.includes(frag);
+    }
+    const base = norm.slice(norm.lastIndexOf('/') + 1);
+    return base === frag;
+  });
 }
+
+/** cwd tokens that read as LAN/connectivity work (lowercased input).
+ *  Bounded so `plan` / `finland` / `planner` do not match `lan`. */
+const LAN_DIAG_CWD_WORDS = ['lan', 'diag', 'diagnostics', 'network', 'connectivity', 'wifi'];
+
+function cwdHasWord(cwd: string, word: string): boolean {
+  return new RegExp(`(^|[^a-z0-9])${word}([^a-z0-9]|$)`).test(cwd);
+}
+
+/** Network diagnostic programs whose denial should point at the lane. */
+const LAN_DIAG_TOOLS = new Set([
+  'ping', 'traceroute', 'tracepath', 'mtr', 'ip', 'ss', 'dig', 'nslookup',
+  'nmcli', 'iw', 'iwconfig', 'arp',
+]);
 
 /**
  * Suggest a reviewed work lane for a denial, or null if unknown.
@@ -64,6 +92,21 @@ export function suggestWorkLane(input: WorkLaneHintInput): WorkLaneHint | null {
       return {
         command: `python3 ${pin} --help`,
         reason: 'Jotform — use the pinned toolkit path, not freehand API/curl',
+      };
+    }
+  }
+
+  // LAN diagnostics (#401 — the Edith gap). Checked AFTER vita/jotform so it
+  // never steals their lanes. Pin required, plus a lan-shaped cwd or a network
+  // tool name — external-egress alone must not fire this on unrelated work.
+  const lanPin = findPin(paths, 'lan-diag.sh') ?? findPin(paths, '/lan-diag/');
+  if (lanPin) {
+    const cwdLooksLan = LAN_DIAG_CWD_WORDS.some((w) => cwdHasWord(cwd, w));
+    const toolIsLan = LAN_DIAG_TOOLS.has(norm(input.tool));
+    if (cwdLooksLan || toolIsLan) {
+      return {
+        command: `${lanPin} status`,
+        reason: 'LAN diagnostics — use the pinned script, not freehand curl/nmap',
       };
     }
   }
