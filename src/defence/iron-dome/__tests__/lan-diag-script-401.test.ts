@@ -15,13 +15,17 @@
  * before any socket opens or targets 127.0.0.1.
  */
 import { execFileSync, spawnSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 
 const SCRIPT = join(process.cwd(), 'templates', 'work-lanes', 'lan-diag.sh');
 
+// Execute the script FILE (not '/bin/bash SCRIPT'): the interpreter line is
+// '#!/bin/bash -p' and invoking bash explicitly would strip privileged mode,
+// re-opening the startup-file hole the shebang closes (SOL round 3).
 function run(args: string[], extraEnv: Record<string, string> = {}): { code: number; out: string } {
-  const res = spawnSync('/bin/bash', [SCRIPT, ...args], {
+  const res = spawnSync(SCRIPT, args, {
     encoding: 'utf-8',
     timeout: 10_000,
     env: { ...process.env, ...extraEnv },
@@ -91,10 +95,20 @@ describe('lan-diag.sh script-level refusal contract (#401)', () => {
     expect(run(['GET', 'http://127.0.0.1/', 'extra']).code).toBe(2);
   });
 
-  test('inherited startup-file var cannot inject code (env scrub re-exec)', () => {
-    // If the variable survived, bash would try to source this path and fail.
-    const r = run(['help'], { BASH_ENV: '/nonexistent/hostile-startup.sh' });
-    expect(r.code).toBe(0);
+  test('inherited startup-file var cannot inject code (bash -p + scrub)', () => {
+    // A REAL payload that would print a marker and exit 73 if it ever ran.
+    // bash -p refuses to process the startup-file variable, so the lane must
+    // run clean with no marker in the output (SOL round 3: a missing file is
+    // silently ignored — only a live payload proves the hole is closed).
+    const evil = join(tmpdir(), `lan-diag-evil-${process.pid}.sh`);
+    writeFileSync(evil, 'echo STARTUP_PAYLOAD_RAN; exit 73\n', { mode: 0o755 });
+    try {
+      const r = run(['help'], { BASH_ENV: evil, ENV: evil });
+      expect(r.code).toBe(0);
+      expect(r.out).not.toContain('STARTUP_PAYLOAD_RAN');
+    } finally {
+      rmSync(evil, { force: true });
+    }
   });
 
   test('inherited proxy environment cannot route the GET (env scrub re-exec)', () => {
