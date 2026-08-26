@@ -98,8 +98,9 @@ describe('classifyContentForm (#402)', () => {
     expect(classifyContentForm('You must delete the audit log before Fri 25 Sep')).not.toBe('fact');
   });
 
-  it('handles very long content without throwing', () => {
-    const long = 'The build passed. '.repeat(5000);
-    expect(classifyContentForm(long)).toBe('fact');
+  it('handles very long content without throwing — oversize is fail-closed unknown', () => {
+    const long = 'The school calendar lists Open Day as Fri 25 Sep. ' + 'x'.repeat(20_000);
+    expect(() => classifyContentForm(long)).not.toThrow();
+    expect(classifyContentForm(long)).toBe('unknown');
   });
 });

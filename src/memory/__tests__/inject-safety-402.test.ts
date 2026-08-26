@@ -106,13 +106,17 @@ describe('#402 inject-safety = 0 over a mixed DB', () => {
     // The pack is non-empty (genuine facts made it through both keys).
     expect(pack.items.length).toBeGreaterThan(0);
 
-    // Read-path invariant 1: every pack item is a fact-form (or pinned) row.
+    // Read-path invariant 1: every pack item is a fact-form row (stamp or
+    // live-reclassified). Pin alone is never a form escape (SOL #402).
     const byId = new Map(rows.map((r) => [String(r.id), r]));
     for (const item of pack.items) {
       const src = byId.get(String(item.id))!;
       expect(src).toBeTruthy();
-      const okForm = src.content_form === 'fact' || src.pinned === 1 || src.pinned === true;
+      const stamp = typeof src.content_form === 'string' ? src.content_form : '';
+      const okForm = stamp === 'fact' || item.content_form === 'fact';
       expect(okForm).toBe(true);
+      expect(stamp).not.toBe('directive');
+      expect(stamp).not.toBe('mixed');
     }
 
     // Read-path invariant 2: ZERO poison / credential content in the rendered text.

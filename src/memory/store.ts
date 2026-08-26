@@ -1130,6 +1130,11 @@ export function updateMemory(
   if (updates.content !== undefined) {
     fields.push('content_hash = ?');
     values.push(createContentHash(updates.content));
+    // #402 SOL review: content_form is a write-time stamp. A content replace
+    // that leaves a stale 'fact' stamp lets a directive ride into the inject
+    // pack. Recompute in the SAME UPDATE.
+    fields.push('content_form = ?');
+    values.push(classifyContentForm(updates.content));
   }
 
   if (fields.length === 0) return existing;
@@ -1319,6 +1324,7 @@ export function mergeMemories(
       UPDATE memories
       SET content = ?,
           content_hash = ?,
+          content_form = ?,
           tags = ?,
           salience = ?,
           project = ?,
@@ -1340,6 +1346,7 @@ export function mergeMemories(
     `).run(
       mergedContent,
       createContentHash(mergedContent),
+      classifyContentForm(mergedContent),
       JSON.stringify(mergedTags),
       mergedSalience,
       mergedProject,

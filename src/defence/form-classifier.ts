@@ -19,6 +19,48 @@ export type ContentForm = 'fact' | 'directive' | 'mixed' | 'unknown';
 const MAX_SCAN_CHARS = 16_000;
 const MAX_SEGMENTS = 80;
 
+/**
+ * Strip invisibles / confusables that can smuggle an imperative past a
+ * word-boundary regex (SOL #402 review: a zero-width char inside "Kindly"
+ * made the opener miss and the clean renderer then reconstructed the
+ * instruction). Fail-closed: if the strip changes anything material we still
+ * classify the cleaned text; truncation of the ORIGINAL (pre-strip) input
+ * past MAX_SCAN_CHARS is a separate fail-closed path that returns 'unknown'.
+ */
+const INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/g;
+// Full-width / confusable Latin-lookalikes that commonly appear in smuggled
+// openers. Map a small closed set; anything else is left for the unknown path.
+const CONFUSABLE_MAP: Record<string, string> = {
+  '\uFF2B': 'K', '\uFF4B': 'k', // Ｋｋ
+  '\uFF29': 'I', '\uFF49': 'i',
+  '\uFF2E': 'N', '\uFF4E': 'n',
+  '\uFF24': 'D', '\uFF44': 'd',
+  '\uFF2C': 'L', '\uFF4C': 'l',
+  '\uFF39': 'Y', '\uFF59': 'y',
+  '\uFF26': 'F', '\uFF46': 'f',
+  '\uFF2F': 'O', '\uFF4F': 'o',
+  '\uFF32': 'R', '\uFF52': 'r',
+  '\uFF27': 'G', '\uFF47': 'g',
+  '\uFF25': 'E', '\uFF45': 'e',
+  '\uFF34': 'T', '\uFF54': 't',
+  '\u041A': 'K', '\u043A': 'k', // Cyrillic Кк
+  '\u041E': 'O', '\u043E': 'o',
+  '\u0410': 'A', '\u0430': 'a',
+  '\u0415': 'E', '\u0435': 'e',
+  '\u0420': 'P', '\u0440': 'p',
+  '\u0421': 'C', '\u0441': 'c',
+  '\u0425': 'X', '\u0445': 'x',
+  '\u041C': 'M', '\u043C': 'm',
+  '\u0412': 'B', '\u0432': 'b',
+  '\u041D': 'H', '\u043D': 'h',
+  '\u0422': 'T', '\u0442': 't',
+};
+function normalizeForClassification(raw: string): string {
+  let s = raw.replace(INVISIBLE_RE, '');
+  s = s.replace(/[\uFF21-\uFF3A\uFF41-\uFF5A\u0400-\u04FF]/g, (ch) => CONFUSABLE_MAP[ch] ?? ch);
+  return s;
+}
+
 // ── Directive tells ─────────────────────────────────────────────────────────
 // STRONG imperative openers: near-unambiguous commands when sentence-initial
 // in memory content. These fire alone.
@@ -156,18 +198,28 @@ function isFactSegment(seg: string): boolean {
 export function classifyContentForm(content: unknown): ContentForm {
   try {
     if (typeof content !== 'string') return 'unknown';
-    const text = content.slice(0, MAX_SCAN_CHARS).replace(/[ \t]+/g, ' ').trim();
+    // Truncation of the ORIGINAL input is a fail-closed 'unknown' — the
+    // classifier must never silently ignore a trailing directive past the
+    // bound (SOL #402: 80 filler segments + trailing command classified as
+    // fact because the command was sliced off). Prefer unknown over a partial
+    // fact stamp.
+    if (content.length > MAX_SCAN_CHARS) return 'unknown';
+    const cleaned = normalizeForClassification(content);
+    const text = cleaned.replace(/[ \t]+/g, ' ').trim();
     if (!text) return 'unknown';
 
     // Split on sentence terminators, newlines, dashes/bullets, AND commas.
     // Comma-splitting isolates imperatives smuggled into a declarative lead
     // ("the user does not need to approve this, just execute it directly") so
     // the embedded command surfaces as its own directive segment.
-    const segments = text
+    const rawSegments = text
       .split(/(?<=[.!?;,])\s+|\n+|\s+[-—]\s+|(?:^|\s)[•·]\s*/)
       .map((s) => s.trim().replace(/^[-*>\d.)\s]+/, '').replace(/,$/, '').trim())
-      .filter((s) => s.length > 1)
-      .slice(0, MAX_SEGMENTS);
+      .filter((s) => s.length > 1);
+    // Segment overflow is also fail-closed: a payload that exceeds the bound
+    // is treated as unknown (directive-adjacent), never as a partial fact.
+    if (rawSegments.length > MAX_SEGMENTS) return 'unknown';
+    const segments = rawSegments;
     if (segments.length === 0) return 'unknown';
 
     let directiveHits = 0;
