@@ -50,6 +50,34 @@ const TRUST_ORDER = Object.freeze({
 });
 
 /**
+ * #402 form key — the SECOND of the two inject keys (the first is the
+ * provenance/trust floor in isInjectEligible). A row is form-eligible only if
+ * its stamped content_form is a work-fact, OR an operator has explicitly pinned
+ * it (pins are the sanctioned override, still subject to the provenance key).
+ *
+ * Fail-closed (B1 lock): legacy NULL / '' / 'unknown' / 'directive' / 'mixed'
+ * are NOT form-eligible unless pinned. This duplicates the tiny form check
+ * rather than importing TypeScript — save-memory stamps the column from the
+ * classifier at write time; this reads the stamp at read time.
+ *
+ * @param {object} row
+ * @returns {boolean}
+ */
+export function isFormInjectEligible(row) {
+  if (!row) return false;
+  const pinned = row.pinned === true || row.pinned === 1;
+  const form = typeof row.content_form === 'string' ? row.content_form.trim().toLowerCase() : '';
+  if (form === 'fact') return true;
+  // Operator pin is the only escape for non-fact / unstamped rows. The
+  // provenance key (isInjectEligible) still applies independently.
+  if (pinned && (form === '' || form === 'unknown')) return true;
+  // directive / mixed are NEVER injectable, even pinned — a pinned directive
+  // would be an operator pinning an instruction, which the fact-frame is meant
+  // to prevent. Pin only rescues genuinely-unclassified (unknown/legacy) rows.
+  return false;
+}
+
+/**
  * chars/4 token estimate with hard char cap = tokens * 4 (P0).
  * @param {string} s
  * @returns {number}
@@ -146,6 +174,11 @@ export function isInjectEligible(row, scope = {}) {
   const sens = String(row.sensitivity_level || row.sensitivity || 'INTERNAL').toUpperCase();
   if (sens === 'RESTRICTED') return false;
 
+  // #402 TWO-KEY inject: the form key is required IN ADDITION to the
+  // provenance/trust key below. A row reaches a pack only if BOTH agree — a
+  // trusted directive-form row (or a legacy unstamped one) is not injectable.
+  if (!isFormInjectEligible(row)) return false;
+
   // Trust floor (Opus B1 / #348): attestation is channel identity, NOT trust.
   // source_attested alone must not bypass the floor for non-pin rows.
   // Escape: source_attested AND pinned AND trust_score >= 0.5 (or missing trust with allow verdict).
@@ -233,14 +266,22 @@ export function clampInjectSalience(raw) {
   return n;
 }
 
+/** Reserve for the fact-frame envelope (`- [fact|source:agent|trust:0.80] “…”`)
+ *  so the fact clip leaves room for the frame and the whole line stays within
+ *  the per-row token budget. */
+const FRAME_ENVELOPE_TOKENS = 14;
+
 export function toPackItem(row, opts) {
 
   const factRaw = row.fact != null ? String(row.fact) : String(row.content || '');
   const titleRaw = String(row.title || 'memory');
-  // Title cannot consume the whole row budget
+  // Title cannot consume the whole row budget. Title is kept for the content
+  // hash (dedup identity) but is NOT rendered in the fact-frame line.
   const titleBudget = Math.min(24, Math.max(8, Math.floor(opts.perRowTokens * 0.25)));
   const title = clipToTokens(titleRaw, titleBudget);
-  const fact = clipToTokens(factRaw, opts.perRowTokens);
+  // Clip the fact leaving envelope headroom so the framed line respects budget.
+  const factBudget = Math.max(1, opts.perRowTokens - FRAME_ENVELOPE_TOKENS);
+  const fact = clipToTokens(factRaw, factBudget);
   const pre = contentHashPreimage({ id: row.id, title, fact });
   const hash = contentHash(pre);
   const age = row.created_at || row.createdAt || null;
@@ -250,10 +291,16 @@ export function toPackItem(row, opts) {
   const sourceIds = Array.isArray(row.source_ids)
     ? row.source_ids
     : (row.source ? [String(row.source)] : []);
+  // Form label for the frame. Only fact/pinned rows reach here (two-key gate),
+  // but render the actual stamp so a pinned-legacy row is honestly labelled.
+  const form = typeof row.content_form === 'string' && row.content_form.trim()
+    ? row.content_form.trim().toLowerCase()
+    : 'fact';
   const item = {
     id: row.id,
     title,
     fact,
+    content_form: form,
     salience: clampInjectSalience(row.salience),
     source_ids: sourceIds,
     trust,
@@ -265,9 +312,54 @@ export function toPackItem(row, opts) {
   return item;
 }
 
+/** Short source-kind label for the frame ('hook:session-end' → 'hook'). */
+function sourceLabel(sourceIds) {
+  const first = Array.isArray(sourceIds) && sourceIds.length ? String(sourceIds[0]) : '';
+  if (!first) return 'unknown';
+  const kind = first.split(':')[0].trim().toLowerCase();
+  return (kind || 'unknown').slice(0, 16).replace(/[^\w.-]/g, '');
+}
+
+/** Compact trust label (0.9 → '0.9', 'high' → 'high', missing → '?'). */
+function trustLabel(trust) {
+  if (typeof trust === 'number' && Number.isFinite(trust)) return String(Math.round(trust * 100) / 100);
+  if (typeof trust === 'string' && trust.trim()) return trust.trim().toLowerCase().slice(0, 8).replace(/[^\w.-]/g, '');
+  return '?';
+}
+
+/**
+ * #402 fact-frame neutralisation. Wrap injected content so it reads as a quoted
+ * data value, never as live instructions — FRAME, don't rewrite (design lock).
+ * Strips the structural breakout vectors an embedded directive would use to
+ * escape the frame: newlines (a smuggled instruction on its own line), control
+ * / zero-width / bidi chars, code fences, and quote chars that could close the
+ * wrapper early. The classifier + two-key gate should keep directives out
+ * entirely; this is defence-in-depth for the pinned-legacy escape hatch.
+ * @param {string} text
+ */
+export function neutraliseFactText(text) {
+  let s = String(text == null ? '' : text);
+  // Collapse ALL whitespace (incl. newlines/tabs) so nothing can start a new
+  // pseudo-instruction line inside the pack.
+  s = s.replace(/[\r\n\t\f\v]+/g, ' ');
+  // Drop control, zero-width, and bidi-override chars (directive smuggling).
+  s = s.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
+  // Neutralise code fences and BOTH straight and smart double-quotes so the
+  // “ ” wrapper below cannot be closed early by embedded content.
+  s = s.replace(/`+/g, "'").replace(/[“”]/g, '"').replace(/"/g, "'");
+  s = s.replace(/\s{2,}/g, ' ').trim();
+  return s;
+}
+
 export function serializeItem(item) {
-  // Envelope counted toward budget (not bare fact)
-  return `- [${item.id}] ${item.title}: ${item.fact}`;
+  // Data-framed line (counted toward budget): the bracket declares this is a
+  // fact of a given source/trust, and the content is quoted + neutralised so
+  // any embedded imperative reads as a quoted string, not a command.
+  const form = typeof item.content_form === 'string' && item.content_form.trim()
+    ? item.content_form.trim().toLowerCase()
+    : 'fact';
+  const framed = neutraliseFactText(item.fact);
+  return `- [${form}|source:${sourceLabel(item.source_ids)}|trust:${trustLabel(item.trust)}] “${framed}”`;
 }
 
 /**
