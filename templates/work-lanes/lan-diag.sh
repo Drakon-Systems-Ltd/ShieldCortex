@@ -110,10 +110,18 @@ resolve_private() {
 
 show_status() {
   echo "# interfaces"
-  ip -br addr 2>/dev/null || ip addr
+  if command -v ip >/dev/null 2>&1; then
+    ip -br addr 2>/dev/null || ip addr
+  else
+    ifconfig 2>/dev/null || true               # macOS / BSD hosts have no iproute2
+  fi
   echo
   echo "# routes"
-  ip route 2>/dev/null || true
+  if command -v ip >/dev/null 2>&1; then
+    ip route 2>/dev/null || true
+  else
+    netstat -rn 2>/dev/null || true
+  fi
 }
 
 do_ping() {
