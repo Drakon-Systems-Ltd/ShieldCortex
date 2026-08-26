@@ -385,6 +385,19 @@ describe('Claude Code evidence', () => {
     expect(e.scBus).toBe('unknown');
   });
 
+  it('treats a live CLAUDE.md preamble as native automatic memory on the bus (SOL r2 B5)', () => {
+    const e = resolveClaudeCodeEvidence(
+      ccProbe({
+        settings: { kind: 'present', value: WIRED_SETTINGS },
+        nativeStores: [file('/home/x/.claude/CLAUDE.md', 1)],
+      }),
+      CTX,
+    );
+    expect(e.nativeBus).toBe('on');
+    expect(e.proof.join(' ')).toMatch(/CLAUDE\.md preamble/);
+    expect(e.remediation).toMatch(/CLAUDE\.md preamble/);
+  });
+
   it('marks the SC bus not wired when SessionStart carries no shieldcortex command', () => {
     const e = resolveClaudeCodeEvidence(
       ccProbe({ settings: { kind: 'present', value: { hooks: { SessionStart: [{ hooks: [{ command: 'other' }] }] } } } }),

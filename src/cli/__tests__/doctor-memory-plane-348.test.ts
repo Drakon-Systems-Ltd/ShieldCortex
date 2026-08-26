@@ -368,6 +368,43 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/Claude Code: native ON/);
   });
 
+  it('host contract: a live ~/.claude/CLAUDE.md preamble is native ON — the automatic brain must stop under a bus contract (SOL r2 B5)', async () => {
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    // Wired cleanly, so the verdict isolates the preamble evidence rather
+    // than tripping the pack-delivery gate.
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), '# global preamble\n'.repeat(20));
+    const live = await runHost();
+    expect(live.status).toBe('fail');
+    expect(live.message).toMatch(/Claude Code: native ON/);
+    expect(live.message).toMatch(/CLAUDE\.md/);
+
+    // Stale preamble: present but quiet is unknown, never off_proven.
+    const old = (Date.now() - 40 * 24 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(path.join(claudeDir, 'CLAUDE.md'), old, old);
+    const stale = await runHost();
+    expect(stale.status).toBe('warn');
+    expect(stale.message).toMatch(/cannot determine/);
+  });
+
+  it('host contract: a live per-project CLAUDE.md within the bounded projects scan is native ON (SOL r2 B5)', async () => {
+    writeConfig(busContract());
+    const projDir = path.join(tmpHome, '.claude', 'projects', 'proj');
+    fs.mkdirSync(projDir, { recursive: true });
+    fs.writeFileSync(path.join(projDir, 'CLAUDE.md'), '# project preamble\n'.repeat(20));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/Claude Code: native ON/);
+    expect(r.message).toMatch(/proj\/CLAUDE\.md/);
+  });
+
   it('host contract: a truncated Claude store scan can never prove off (SOL H2)', async () => {
     writeConfig(busContract());
     const claudeDir = path.join(tmpHome, '.claude');

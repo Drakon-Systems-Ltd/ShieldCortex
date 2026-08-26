@@ -3293,13 +3293,16 @@ function artifactProbe(target: string): ArtifactProbe {
 }
 
 /**
- * Claude Code's native plane is the memory-tool store itself: `~/.claude/memory`
- * and the per-project `~/.claude/projects/<key>/memory` directories. Scans are
- * bounded, and BOTH failure shapes surface as scanComplete=false — a directory
- * we cannot list, and a listing that exceeds the cap (#393 SOL H2: a truncated
- * scan used to keep scanComplete=true, so a live store past the slice could
- * vanish from the verdict). "Could not look everywhere" must never read as
- * "nothing there".
+ * Claude Code's native plane is the memory-tool store PLUS the automatic
+ * preambles: `~/.claude/memory`, per-project `~/.claude/projects/<key>/memory`
+ * directories, `~/.claude/CLAUDE.md`, and per-project CLAUDE.md within the
+ * same bounded projects scan (#393 SOL r2 B5 — a preamble loaded into every
+ * session is native automatic durable context; the normative host law demands
+ * it stop under a bus contract). Scans are bounded, and BOTH failure shapes
+ * surface as scanComplete=false — a directory we cannot list, and a listing
+ * that exceeds the cap (#393 SOL H2: a truncated scan used to keep
+ * scanComplete=true, so a live store past the slice could vanish from the
+ * verdict). "Could not look everywhere" must never read as "nothing there".
  */
 const CLAUDE_STORE_FILE_CAP = 50;
 const CLAUDE_PROJECT_CAP = 200;
@@ -3327,6 +3330,8 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
   };
 
   collectDir(path.join(home, '.claude', 'memory'));
+  // The global automatic preamble (#393 SOL r2 B5).
+  stores.push(artifactProbe(path.join(home, '.claude', 'CLAUDE.md')));
 
   const projectsDir = path.join(home, '.claude', 'projects');
   const projectsProbe = probePath(projectsDir);
@@ -3336,6 +3341,7 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
       if (entries.length > CLAUDE_PROJECT_CAP) scanComplete = false;
       for (const entry of entries.slice(0, CLAUDE_PROJECT_CAP)) {
         collectDir(path.join(projectsDir, entry, 'memory'));
+        stores.push(artifactProbe(path.join(projectsDir, entry, 'CLAUDE.md')));
       }
     } catch {
       scanComplete = false;

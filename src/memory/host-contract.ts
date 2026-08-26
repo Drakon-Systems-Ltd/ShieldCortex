@@ -90,9 +90,10 @@ export const RUNTIME_CAPABILITY: Record<HostRuntimeId, RuntimeCapability> = {
     scInjectSurface: true,
   },
   claude_code: {
-    // Claude Code has no host switch for "native memory plane" — the plane is the
-    // memory-tool store itself. Off-proof is therefore artifact absence PLUS SC
-    // owning session-start; unreadable evidence still resolves to unknown.
+    // Claude Code has no host switch for "native memory plane" — the plane is
+    // the memory-tool store plus the automatic CLAUDE.md preambles (#393 SOL
+    // r2 B5). Off-proof is therefore artifact absence PLUS SC owning
+    // session-start; unreadable evidence still resolves to unknown.
     label: 'Claude Code',
     nativeOffSetting: null,
     scInjectSurface: true,
@@ -457,12 +458,13 @@ export function resolveClaudeCodeEvidence(
   const boundSignals: string[] = [];
   if (probe.settings.kind === 'present') boundSignals.push('~/.claude/settings.json present');
   if (probe.settings.kind === 'unreadable') boundSignals.push('~/.claude/settings.json present but unreadable');
-  // A native memory-tool store IS Claude Code on this box (SOL H2): store
-  // evidence binds the runtime even with no settings.json, and an unlistable
-  // ~/.claude path is still presence evidence — otherwise a live store could
-  // vanish from the verdict while another proven runtime carries it to PASS.
+  // A native memory artifact IS Claude Code on this box (SOL H2): store or
+  // preamble evidence binds the runtime even with no settings.json, and an
+  // unlistable ~/.claude path is still presence evidence — otherwise a live
+  // store could vanish from the verdict while another proven runtime carries
+  // it to PASS.
   if (probe.nativeStores.some((p) => p.kind !== 'absent') || !probe.storeScanComplete) {
-    boundSignals.push('native memory-tool store evidence on disk');
+    boundSignals.push('native memory artifact evidence on disk');
   }
   if (probe.declared) boundSignals.push('declared in memory.hostContract.runtimes');
 
@@ -517,11 +519,11 @@ export function resolveClaudeCodeEvidence(
   if (live.length > 0) {
     nativeBus = 'on';
     proof.push(
-      `native memory-tool store written within 7d: ${live
+      `native memory artifact written within 7d (memory-tool store or CLAUDE.md preamble): ${live
         .map((p) => `${shortPath(p.path)} (${p.size}B)`)
         .join(', ')}`,
     );
-    remediation = `${cap.label}: the native memory-tool store still owns durable context — archive those files, or drop the bus-law contract`;
+    remediation = `${cap.label}: native automatic memory (store files / CLAUDE.md preamble) still owns durable context — archive them, or drop the bus-law contract`;
   } else if (!probe.storeScanComplete || unreadableStore) {
     nativeBus = 'unknown';
     proof.push(
@@ -537,11 +539,11 @@ export function resolveClaudeCodeEvidence(
     // Present but quiet: not written this week, so it is not demonstrably the
     // live brain — and equally not proven off. Never PASS on a stale artifact.
     nativeBus = 'unknown';
-    proof.push('native memory-tool store present but not written in 7d — cannot prove the native plane is off the bus');
-    remediation = `${cap.label}: archive the native memory-tool store (or confirm it is retired) so the contract can be proven`;
+    proof.push('native memory artifact present but not written in 7d — cannot prove the native plane is off the bus');
+    remediation = `${cap.label}: archive the native memory artifacts (or confirm they are retired) so the contract can be proven`;
   } else {
     nativeBus = 'off_proven';
-    proof.push('no native memory-tool store present');
+    proof.push('no native memory-tool store or CLAUDE.md preamble present');
   }
 
   return {
