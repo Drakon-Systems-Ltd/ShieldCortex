@@ -144,7 +144,19 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/default-on|not proven off|Memory Search/i);
   });
 
-  it('host contract needs memorySearch.enabled === false AND the SC pack wired — the switch alone is half a contract', async () => {
+  // The installer's own artifact set (src/setup/openclaw.ts HOOK_FILES),
+  // copied byte-identical from the packaged source so hookFilesStale agrees.
+  // Jest runs from the repo root, so cwd-relative reaches the packaged source.
+  const HOOK_SOURCE_DIR = path.resolve('hooks', 'openclaw', 'cortex-memory');
+  function installRealHookArtifacts(): void {
+    const dest = path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory');
+    fs.mkdirSync(dest, { recursive: true });
+    for (const f of ['HOOK.md', 'handler.ts', 'runtime.mjs']) {
+      fs.copyFileSync(path.join(HOOK_SOURCE_DIR, f), path.join(dest, f));
+    }
+  }
+
+  it('host contract needs memorySearch.enabled === false AND the real SC artifact set — a switch or a bare directory is half a contract', async () => {
     writeConfig({
       memory: {
         plane: 'dual_legacy',
@@ -163,9 +175,56 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(half.message).toMatch(/not proven delivered/);
     expect(half.fix).toMatch(/shieldcortex install/);
 
+    // SOL H1: an EMPTY hook directory is not wiring either — this exact shape
+    // used to certify PASS.
     fs.mkdirSync(path.join(ocDir, 'hooks', 'cortex-memory'), { recursive: true });
+    const bareDir = await runHost();
+    expect(bareDir.status).toBe('fail');
+    expect(bareDir.message).toMatch(/not proven delivered/);
+
+    installRealHookArtifacts();
     const full = await runHost();
     expect(full.status).toBe('pass');
+    // Static proof only — the pass message must never read as a delivered receipt.
+    expect(full.message).toMatch(/runtime delivery not attested/);
+  });
+
+  it('host contract fails when the host config disables the installed hook (hooks.internal.entries)', async () => {
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        inject: { mode: 'start', nativeContract: 'sc_only', hostId: 'tars', agentId: 'h' },
+      },
+    });
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { entries: { 'cortex-memory': { enabled: false } } } },
+      }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/not proven delivered/);
+  });
+
+  it('host contract treats a stale hook copy as unknown delivery, never wired (SOL H1)', async () => {
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        inject: { mode: 'start', nativeContract: 'sc_only', hostId: 'tars', agentId: 'h' },
+      },
+    });
+    installRealHookArtifacts();
+    fs.appendFileSync(path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory', 'handler.ts'), '\n// drift\n');
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/SC pack delivery unknown/);
   });
 
   // ── T1 host runtime matrix (#393) ──
@@ -241,8 +300,9 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     // A directory at the config path is present-but-unreadable, deterministically
     // (chmod 000 proves nothing when the test runner is root).
     fs.mkdirSync(path.join(tmpHome, '.openclaw', 'openclaw.json'), { recursive: true });
-    // Pack wired, so the verdict isolates the unreadable native evidence.
-    fs.mkdirSync(path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
+    // Real artifact set on disk, so the verdict isolates the unreadable config
+    // (which blocks BOTH the native proof and the hook-enabled proof).
+    installRealHookArtifacts();
     const r = await runHost();
     expect(r.status).not.toBe('pass');
     expect(r.message).toMatch(/cannot determine/);
@@ -251,8 +311,8 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
 
   it('host contract passes when every bound runtime proves native off and carries the SC pack', async () => {
     writeConfig(busContract());
+    installRealHookArtifacts();
     const ocDir = path.join(tmpHome, '.openclaw');
-    fs.mkdirSync(path.join(ocDir, 'hooks', 'cortex-memory'), { recursive: true });
     fs.writeFileSync(
       path.join(ocDir, 'openclaw.json'),
       JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
@@ -262,14 +322,136 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/sc_only enforced/);
   });
 
+  it('host contract fails an illegal inject mode instead of green-washing it (SOL H5)', async () => {
+    // 'bogus' with disable_native_inject used to dodge the start-bus delivery
+    // requirement while the runtime normalized it to start and injected.
+    writeConfig({
+      memory: { plane: 'dual_legacy', inject: { mode: 'bogus', nativeContract: 'disable_native_inject' } },
+    });
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/illegal memory\.inject\.mode "bogus"/);
+  });
+
+  it('host contract treats a bare nativeContract as the start bus, never as "inject off" (emitter parity)', async () => {
+    // The emitter reads memory.nativeInjectContract and defaults mode=start —
+    // the old reading reported this exact shape as info "inject off".
+    writeConfig({ memory: { plane: 'dual_legacy', nativeInjectContract: 'sc_only' } });
+    const r = await runHost();
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/no bound host runtime found/);
+  });
+
+  it('host contract: a live Claude native store binds Claude even with no settings.json (SOL H2)', async () => {
+    writeConfig(busContract());
+    const memDir = path.join(tmpHome, '.claude', 'projects', 'proj', 'memory');
+    fs.mkdirSync(memDir, { recursive: true });
+    fs.writeFileSync(path.join(memDir, 'MEMORY.md'), '# claude brain\n'.repeat(30));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/paper contract/);
+    expect(r.message).toMatch(/Claude Code: native ON/);
+  });
+
+  it('host contract: a truncated Claude store scan can never prove off (SOL H2)', async () => {
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(path.join(claudeDir, 'memory'), { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'shieldcortex hook session-start' }] }] },
+      }),
+    );
+    // 55 entries exceed the 50-file scan cap; pre-fix the slice left
+    // scanComplete=true and this box proved off from a partial look.
+    for (let i = 0; i < 55; i++) {
+      fs.writeFileSync(path.join(claudeDir, 'memory', `note-${i}.txt`), 'x');
+    }
+    const r = await runHost();
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/scan could not complete/);
+  });
+
+  it('host contract inspects configured custom/per-agent OpenClaw workspaces (SOL H4)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    const wsB = path.join(tmpHome, 'agents', 'case-ws');
+    fs.mkdirSync(wsB, { recursive: true });
+    fs.writeFileSync(path.join(wsB, 'AGENTS.md'), 'Read MEMORY.md at the start of every session.');
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: {
+          defaults: { memorySearch: { enabled: false } },
+          list: [{ name: 'case', workspace: wsB }],
+        },
+      }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/case-ws\/AGENTS\.md/);
+  });
+
+  it('host contract demotes unreadable workspace evidence to cannot determine (SOL H4)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    // A directory at the AGENTS.md path reads as present-but-unreadable.
+    fs.mkdirSync(path.join(tmpHome, '.openclaw', 'workspace', 'AGENTS.md'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/workspace evidence unreadable/);
+  });
+
+  it('host contract: a Hermes profile with native memory on defeats root false/false (SOL H6)', async () => {
+    writeConfig(busContract());
+    writeHermes({ memoryEnabled: false, userProfile: false });
+    const profDir = path.join(tmpHome, '.hermes', 'profiles', 'research');
+    fs.mkdirSync(profDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(profDir, 'config.yaml'),
+      'memory:\n  memory_enabled: true\n  user_profile_enabled: false\n',
+    );
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/research: memory_enabled=true/);
+  });
+
+  it('host contract: a Hermes profile without a readable config.yaml can never prove off (SOL H6)', async () => {
+    // disable_native_inject on the turn bus needs no delivery proof, and a
+    // wired OpenClaw supplies the inject surface — so the verdict isolates the
+    // Hermes profile-switch gap.
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        inject: { mode: 'turn', nativeContract: 'disable_native_inject', hostId: 'tars', agentId: 'h' },
+      },
+    });
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    writeHermes({ memoryEnabled: false, userProfile: false });
+    fs.mkdirSync(path.join(tmpHome, '.hermes', 'profiles', 'mystery'), { recursive: true });
+    const r = await runHost();
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/cannot determine/);
+    expect(r.message).toMatch(/mystery \(no config\.yaml/);
+  });
+
   it('host contract fails sc_only on a Hermes-bound box even with the native switches off — sidecar is the honest posture', async () => {
     // The TARS shape after flipping Hermes' own switches: native proven off,
     // OpenClaw proven off and wired — still FAIL, because nothing delivers the
     // SC pack on the Hermes bus (no SC inject surface until Phase-2 ships).
     writeConfig(busContract());
     writeHermes({ memoryEnabled: false, userProfile: false });
+    installRealHookArtifacts();
     const ocDir = path.join(tmpHome, '.openclaw');
-    fs.mkdirSync(path.join(ocDir, 'hooks', 'cortex-memory'), { recursive: true });
     fs.writeFileSync(
       path.join(ocDir, 'openclaw.json'),
       JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
